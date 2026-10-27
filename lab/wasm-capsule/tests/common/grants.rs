@@ -16,15 +16,34 @@ pub const IMPORTING_MODULE: &[u8] = &[
     0x03, b'e', b'n', b'v', 0x01, b'f', 0x00, 0x00, // env.f, a function of type 0
 ];
 
+/// The one module builder: `IMPORTING_MODULE`'s shape with its one import
+/// named `module`.`name`, the same `() -> ()` function, under another name.
+/// `importing("env", "f")` is `IMPORTING_MODULE` byte for byte. Each length
+/// is one LEB128 byte, so the import section stays under 128 bytes.
+pub fn importing(module: &str, name: &str) -> Vec<u8> {
+    let mut import = vec![0x01]; // one import
+    for part in [module, name] {
+        assert!(part.len() < 0x80, "{part:?}: a length of one LEB128 byte");
+        import.push(part.len() as u8);
+        import.extend_from_slice(part.as_bytes());
+    }
+    import.extend_from_slice(&[0x00, 0x00]); // a function of type 0
+    assert!(
+        import.len() < 0x80,
+        "the import section size is one LEB128 byte"
+    );
+    let size = import.len() as u8;
+    let mut bytes = IMPORTING_MODULE[..14].to_vec(); // magic, version, type section
+    bytes.extend_from_slice(&[0x02, size]);
+    bytes.extend_from_slice(&import);
+    bytes
+}
+
 /// `IMPORTING_MODULE` with its one import renamed to `env.<name>`, a one-byte
 /// name: the same `() -> ()` function, under another name.
 pub fn importing_env(name: u8) -> Vec<u8> {
-    let mut module = IMPORTING_MODULE.to_vec();
-    // The import's one-byte name, before its kind and type index.
-    let at = module.len() - 3;
-    assert_eq!(module[at], b'f', "IMPORTING_MODULE's import name");
-    module[at] = name;
-    module
+    assert!(name.is_ascii(), "a one-byte name");
+    importing("env", &char::from(name).to_string())
 }
 
 /// The one import `IMPORTING_MODULE` has.

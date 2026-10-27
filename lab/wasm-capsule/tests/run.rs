@@ -31,7 +31,7 @@ mod common;
 use capsule::{FIXED_INPUT, FIXED_OUTPUT};
 use capsule_identity::{sign_bundle, LabCid, NameSignature};
 use common::build::{lane_dir, run_build, TempDir};
-use common::grants::{env_f, grants_file, importing_env, IMPORTING_MODULE};
+use common::grants::{env_f, grants_file, importing, importing_env, IMPORTING_MODULE};
 use common::wasm_shape;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
@@ -3595,5 +3595,321 @@ fn killed_run_leaves_nothing_under_the_scratch_root() {
             _ => panic!("{engine_kind}: not EngineFailed: {refusal}"),
         }
         assert_census_empty(&work, &format!("killed run on {engine_kind}"));
+    }
+}
+
+/// Task 041 (M1 A8 lab half): the variable naming the case folder the outer
+/// test gives its child, the inner test.
+const A8_CASE: &str = "WASM_CAPSULE_LAB_A8_CASE";
+
+/// The inner test the outer test starts in a child with the fixture `HOME`.
+const A8_INNER: &str = "host_secret_fixture_run_inside_the_child";
+
+/// One task 041 case folder, laid out once for the outer and the inner test.
+/// Nothing in it is inside the lane tree: it is a test temp dir.
+struct HostSecretCase {
+    root: PathBuf,
+}
+
+impl HostSecretCase {
+    /// The throwaway `HOME` the child gets.
+    fn home(&self) -> PathBuf {
+        self.root.join("home")
+    }
+
+    /// The host secret: `<home>/keys/host-secret`.
+    fn fixture(&self) -> PathBuf {
+        self.home().join("keys").join("host-secret")
+    }
+
+    /// The capsule `tools/build` made, built by the outer test.
+    fn capsule(&self) -> PathBuf {
+        self.root.join("out").join("capsule.wasm")
+    }
+
+    /// The recording shim in front of the real `engine`.
+    fn shim(&self, engine: Engine) -> PathBuf {
+        self.root.join("shims").join(engine.name())
+    }
+
+    /// What the shim of `engine` recorded as `what` (`argv` or `env`) when
+    /// started for `kind` (`version` or `run`).
+    fn record(&self, engine: Engine, kind: &str, what: &str) -> PathBuf {
+        self.root
+            .join("records")
+            .join(format!("{}.{kind}.{what}", engine.name()))
+    }
+
+    /// The work root of the run, apart from `HOME`, the shims and the records.
+    fn work(&self) -> PathBuf {
+        self.root.join("work")
+    }
+
+    /// The recorded `argv` or `env` lines of `engine`'s `kind` start.
+    fn recorded_lines(&self, engine: Engine, kind: &str, what: &str) -> Vec<String> {
+        let path = self.record(engine, kind, what);
+        fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+/// A recording shim for `engine` at `case.shim(engine)`: started for
+/// `--version` or for a module run, it writes its arguments, one per line, and
+/// the environment it was given (`/usr/bin/env`, which inherits the shim
+/// shell's exported environment, the one `exec` passes on) into the case's
+/// records, then `exec`s the real engine at the absolute path `real` with the
+/// same arguments. No engine runs inside an engine: the shim is replaced by it.
+fn host_secret_shim(case: &HostSecretCase, engine: Engine, real: &Path) -> PathBuf {
+    let records = |kind: &str, what: &str| case.record(engine, kind, what).display().to_string();
+    let script = format!(
+        concat!(
+            "#!/bin/sh\n",
+            "if [ \"$1\" = --version ]; then\n",
+            "printf '%s\\n' \"$@\" > '{version_argv}'\n",
+            "/usr/bin/env > '{version_env}'\n",
+            "else\n",
+            "printf '%s\\n' \"$@\" > '{run_argv}'\n",
+            "/usr/bin/env > '{run_env}'\n",
+            "fi\n",
+            "exec '{real}' \"$@\"\n",
+        ),
+        version_argv = records("version", "argv"),
+        version_env = records("version", "env"),
+        run_argv = records("run", "argv"),
+        run_env = records("run", "env"),
+        real = real.display(),
+    );
+    let shims = case.root.join("shims");
+    fs::create_dir_all(&shims).expect("create the shim folder");
+    stand_in(&shims, engine.name(), &script)
+}
+
+/// Task 041, M1 A8 lab half, the outer test: a throwaway `HOME` holding
+/// `keys/host-secret`, a marker made fresh from a fresh test key's DID, is
+/// given only to a child, this test binary run as `--exact` [`A8_INNER`], so
+/// no process-wide state changes here. The capsule is built first (cargo and
+/// rustup read `HOME`), and a recording shim is put in front of each real
+/// engine. The child's stdout and stderr are printed when it fails. If either
+/// real engine is not on PATH, it prints SKIPPED and starts no child.
+#[test]
+fn host_secret_fixture_never_reaches_either_real_engine() {
+    let Some(programs) = real_engines("the host-secret run") else {
+        return;
+    };
+    let tmp = TempDir::new("run41-a8");
+    let case = HostSecretCase {
+        root: canonical(&tmp),
+    };
+    built_capsule(&case.root);
+    fs::create_dir_all(case.fixture().parent().expect("the keys folder"))
+        .expect("create <home>/keys");
+    let marker = format!("host-secret-marker {}", did(&fresh_key()));
+    fs::write(case.fixture(), &marker).expect("write the host secret fixture");
+    fs::create_dir(case.root.join("records")).expect("create the records folder");
+    for (engine_kind, real) in ENGINES.into_iter().zip(&programs) {
+        host_secret_shim(&case, engine_kind, real);
+    }
+
+    let child = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", A8_INNER, "--ignored", "--nocapture"])
+        .env("HOME", case.home())
+        .env(A8_CASE, &case.root)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("start the child test");
+    let stdout = String::from_utf8_lossy(&child.stdout);
+    let stderr = String::from_utf8_lossy(&child.stderr);
+    assert!(
+        child.status.success() && stdout.contains("test result: ok. 1 passed;"),
+        "the child {A8_INNER} did not pass ({}):\n--- stdout\n{stdout}\n--- stderr\n{stderr}",
+        child.status
+    );
+    eprint!("{stderr}");
+    eprintln!("PASS: the host secret reached neither real engine nor either output");
+}
+
+/// Task 041, the inner test, run only by
+/// `host_secret_fixture_never_reaches_either_real_engine` in a child whose
+/// `HOME` is the fixture home; it fails at once under any other `HOME`. It
+/// signs the built capsule with a fresh key, reads an empty grants file and
+/// calls `run` with both recording shims. For each engine: the module run's
+/// argv has no preopen, env or network flag ([`argv_faults`]) and no argument
+/// holding the `HOME` folder; neither start's environment has `HOME` or a value
+/// holding the `HOME` folder or the marker; its stdout is `FIXED_OUTPUT` and a
+/// newline, holding neither.
+#[test]
+#[ignore = "run only as the child of host_secret_fixture_never_reaches_either_real_engine, which sets HOME to its fixture"]
+fn host_secret_fixture_run_inside_the_child() {
+    let root = std::env::var_os(A8_CASE).unwrap_or_else(|| {
+        panic!("{A8_CASE} is not set: run host_secret_fixture_never_reaches_either_real_engine")
+    });
+    let case = HostSecretCase {
+        root: PathBuf::from(root),
+    };
+    assert_eq!(
+        std::env::var_os("HOME"),
+        Some(case.home().into_os_string()),
+        "HOME is not the fixture home"
+    );
+    let marker = fs::read_to_string(case.fixture()).expect("read the fixture's marker");
+    assert!(!marker.is_empty(), "an empty marker proves nothing");
+    let home = case.home().display().to_string();
+    let fixture = case.fixture().display().to_string();
+    assert!(
+        !case.root.display().to_string().contains(' '),
+        "argv_faults splits on spaces, so the case folder must hold none"
+    );
+
+    let key = fresh_key();
+    let capsule = fs::read(case.capsule()).expect("read the built capsule");
+    let (bundle, sig) = signed_bundle(&case.root, "bundle", &capsule, &key);
+    let accepted = [did(&key)];
+    let grants = grants_file(&case.root, "grants.json", &[]);
+    let granted = read_grants(&grants).expect("read the empty grants file");
+    let work = work_root(&case.root, "work");
+    assert_eq!(work, case.work());
+    let passed = two_ran(run(&RunInput {
+        bundle: &bundle,
+        signature: Some(&sig),
+        accepted: &accepted,
+        granted: &granted,
+        wasmtime: &case.shim(Engine::Wasmtime),
+        wasmer: &case.shim(Engine::Wasmer),
+        work_root: &work,
+    }));
+
+    let expected = format!("{FIXED_OUTPUT}\n");
+    for engine_kind in ENGINES {
+        let module = work.join(engine_kind.name()).join("module.wasm");
+        let argv = case.recorded_lines(engine_kind, "run", "argv");
+        let faults = argv_faults(&argv.join(" "), &work, &module);
+        assert!(
+            faults.is_empty(),
+            "{engine_kind}: the module run's argv {argv:?}:\n{}",
+            faults.join("\n")
+        );
+        for arg in &argv {
+            assert!(
+                !arg.contains(&home),
+                "{engine_kind}: an argument holds the HOME folder {home}: {arg}"
+            );
+        }
+        assert_eq!(
+            case.recorded_lines(engine_kind, "version", "argv"),
+            ["--version"],
+            "{engine_kind}: the version query's argv"
+        );
+        for kind in ["version", "run"] {
+            let env = case.recorded_lines(engine_kind, kind, "env");
+            for line in &env {
+                assert!(
+                    !line.starts_with("HOME="),
+                    "{engine_kind} {kind}: the environment has HOME: {line}"
+                );
+                assert!(
+                    !line.contains(&home) && !line.contains(&fixture),
+                    "{engine_kind} {kind}: an environment value holds the HOME folder: {line}"
+                );
+                assert!(
+                    !line.contains(&marker),
+                    "{engine_kind} {kind}: an environment value holds the marker: {line}"
+                );
+            }
+            eprintln!("{engine_kind} {kind} environment: {env:?}");
+        }
+        let stdout = passed.stdout(engine_kind);
+        assert_eq!(stdout, expected.as_bytes(), "{engine_kind}: the stdout");
+        let stdout = String::from_utf8_lossy(stdout);
+        assert!(
+            !stdout.contains(&marker) && !stdout.contains(&fixture),
+            "{engine_kind}: the stdout holds the marker or the fixture path"
+        );
+        eprintln!(
+            "{engine_kind} ({}) module run argv: {argv:?}",
+            String::from_utf8_lossy(passed.version(engine_kind))
+        );
+    }
+    eprintln!("PASS: neither engine got the HOME folder, HOME or the marker");
+}
+
+/// The `wasi_snapshot_preview1` file and environment imports task 041 probes.
+const HOST_SECRET_PROBES: [&str; 5] = [
+    "path_open",
+    "fd_read",
+    "fd_prestat_get",
+    "environ_get",
+    "environ_sizes_get",
+];
+
+/// The module the probe imports come from.
+const WASI_PREVIEW1: &str = "wasi_snapshot_preview1";
+
+/// Task 041, M1 A8 lab half: a signed module importing each of
+/// [`HOST_SECRET_PROBES`] from `wasi_snapshot_preview1` is refused by `run`:
+/// with no grant as undeclared, with a `call` grant as an import with no typed
+/// lab operation, each by its exact text and variant. No run folder is made and
+/// no engine is asked anything, not even `--version`.
+#[test]
+fn host_secret_probe_imports_are_refused_before_any_engine_starts() {
+    let tmp = TempDir::new("run41-probes");
+    let root = canonical(&tmp);
+    assert_eq!(
+        importing("env", "f"),
+        IMPORTING_MODULE,
+        "the one module builder"
+    );
+
+    for name in HOST_SECRET_PROBES {
+        let module = importing(WASI_PREVIEW1, name);
+        let import = (WASI_PREVIEW1.to_owned(), name.to_owned());
+
+        let case = format!("{name}-not-granted");
+        let (result, ran) = run_with_grants(&root, &case, &module, &[]);
+        let refusal = two_refused(result);
+        assert_eq!(
+            refusal.to_string(),
+            format!("undeclared import {WASI_PREVIEW1}.{name}"),
+            "{case}"
+        );
+        match refusal {
+            TwoEngineRefusal::Verify(reason) => assert_eq!(
+                reason,
+                VerifyRefusal::Audit(AuditRefusal::Undeclared {
+                    module: import.0.clone(),
+                    name: import.1.clone(),
+                }),
+                "{case}"
+            ),
+            other => panic!("{case}: not a verifier refusal: {other}"),
+        }
+        assert!(names(&ran.work).is_empty(), "{case}: a run folder was made");
+        assert_engine_starts(&ran, 0, &case);
+
+        let case = format!("{name}-granted");
+        let (result, ran) =
+            run_with_grants(&root, &case, &module, &[(WASI_PREVIEW1, name, "call")]);
+        let refusal = two_refused(result);
+        assert_eq!(
+            refusal.to_string(),
+            format!("no typed lab operation for import {WASI_PREVIEW1}.{name}"),
+            "{case}"
+        );
+        match refusal {
+            TwoEngineRefusal::Verify(reason) => assert_eq!(
+                reason,
+                VerifyRefusal::UntypedImport {
+                    module: import.0,
+                    name: import.1,
+                },
+                "{case}"
+            ),
+            other => panic!("{case}: not a verifier refusal: {other}"),
+        }
+        assert!(names(&ran.work).is_empty(), "{case}: a run folder was made");
+        assert_engine_starts(&ran, 0, &case);
+        eprintln!("PASS: {WASI_PREVIEW1}.{name} refused, granted or not, before any engine");
     }
 }

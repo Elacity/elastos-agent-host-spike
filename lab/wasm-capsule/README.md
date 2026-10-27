@@ -1440,6 +1440,101 @@ Limits, not claimed:
 - The census is a snapshot taken after `run` or `run_engine` returned, on this
   one Mac.
 
+## Host secrets denied (M1 A8 lab half)
+
+Task 041. A host secret in the user's home folder does not reach a lab run on
+either pinned engine, and a module that asks for a file or the environment is
+refused before any engine is asked anything. No `tools/src/` code changed for
+this; the tests show what the runner already does.
+
+The fixture: a throwaway home folder `<tmp>/home` holding
+`keys/host-secret`, whose content is a marker made fresh in the test from a
+fresh test key's DID (`host-secret-marker did:key:...`). It is never a real
+key and is never written inside the lane tree.
+
+Why a child process: no test may change process-wide state, and every test
+in `tests/run.rs` shares one process. So `HOME` is never set in the test
+process. The outer test, `host_secret_fixture_never_reaches_either_real_engine`,
+builds the capsule first (cargo and rustup read `HOME`), writes the fixture
+and the shims, then starts this test binary itself (`current_exe()`, `--exact
+host_secret_fixture_run_inside_the_child --ignored --nocapture`) with `HOME`
+set to `<tmp>/home` and `WASM_CAPSULE_LAB_A8_CASE` naming the case folder. The
+inner test is `#[ignore]` with a reason naming the outer test, and fails at
+once if `HOME` is not the fixture home or the case variable is unset. The
+outer test passes only when the child exits 0 and its libtest line reads
+`test result: ok. 1 passed;`; otherwise it prints the child's stdout and
+stderr. If either real engine is not on PATH it prints `SKIPPED: ... (no
+result, not a PASS)` and starts no child.
+
+How the engines are seen: a recording shell shim stands in front of each real
+engine (`#!/bin/sh`: write `"$@"` one per line and `/usr/bin/env`'s output to
+files in the case folder, then `exec` the real engine by its absolute path
+with the same arguments). The shim is replaced by the engine, so there is no
+engine inside an engine. The `--version` query goes through the shim too, so
+the pin check (task 038) still reads the real engine's line.
+
+What each engine got, on this Mac (`/opt/homebrew/bin`, `wasmtime 45.0.1
+(83166ba31 2026-06-05)` and `wasmer 7.5.0`, as each printed it), with the
+inner test's `run` of the signed built capsule and an empty grants file:
+
+- wasmtime's module run argv: `run --invoke digest -W
+  max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y <work
+  root>/wasmtime/module.wasm 1592590337`.
+- wasmer's module run argv: `run --invoke digest <work
+  root>/wasmer/module.wasm 1592590337`.
+- Each `--version` query's argv: `--version` alone.
+- The environment, for both engines and both starts: `PWD=<the test's
+  working folder>`, `SHLVL=1` and `_=/usr/bin/env`. These three are the shim
+  shell's own (`/bin/sh` sets them even when started with an empty
+  environment); the runner starts every engine with an empty environment
+  (`engine_command`, held by `engine_starts_with_an_empty_environment`). No
+  `HOME`, and no value holding the home folder, the fixture path or the
+  marker.
+- Both stdouts: `FIXED_OUTPUT` and a newline, holding neither the marker nor
+  the fixture path.
+
+The inner test asserts each of these for each engine: the module run's argv
+passes task 040's `argv_faults` (no `--dir`, `--mapdir`, `--env`, `--net` or
+`-S` flag, no work-root path but the module, the module path once) and no
+argument holds the home folder; no recorded environment line starts with
+`HOME=` or holds the home folder, the fixture path or the marker; and the
+stdout is exactly `FIXED_OUTPUT` and a newline.
+
+The five probe imports (`host_secret_probe_imports_are_refused_before_any_engine_starts`),
+each a signed module with one `() -> ()` import from `wasi_snapshot_preview1`,
+built by the one module builder `importing(module, name)` in
+`tests/common/grants.rs` (`importing("env", "f")` is `IMPORTING_MODULE` byte
+for byte): `path_open`, `fd_read`, `fd_prestat_get`, `environ_get` and
+`environ_sizes_get`. Each goes through `run` (`run_with_grants`, counting
+stand-ins) twice:
+
+- with no grant, refused as `undeclared import wasi_snapshot_preview1.<name>`
+  (`VerifyRefusal::Audit(Undeclared)`);
+- with a `call` grant, refused as `no typed lab operation for import
+  wasi_snapshot_preview1.<name>` (`VerifyRefusal::UntypedImport`).
+
+Either way no run folder is made and neither engine is asked `--version` or
+started for a module run. This rule is the verifier's, already held by
+F-WC-B4-UNTYPED-LINKED and the audit's undeclared refusal (F-WC9-LINK-ALL), so
+it gets no new falsifier.
+
+Falsifier F-WC-A8-HOME-PREOPEN (runner-caught, "## Falsifiers"):
+`start_engine` adds `--dir=<HOME>` after the memory cap arguments, a preopen
+of the runner's home folder. The real wasmtime took it and ran; the inner test
+failed at its `argv_faults` assertion ("a preopen, env or network flag:
+--dir=<tmp>/home"), so the outer test failed at "the child ... did not pass".
+
+Limits, not claimed:
+
+- It covers this runner's argv and environment, and the verifier's import
+  refusal, on this one Mac. It does not cover what an engine reads for itself
+  outside the guest (for example a compile cache, or engine config under the
+  real home folder); the child's engines saw no `HOME` at all.
+- The environment is recorded by the shim's `/usr/bin/env`, the environment
+  the shim's `exec` passes on; the engine process's own environment is not
+  read from the kernel.
+- It is lab tooling, not the Runtime: no Runtime claim is made.
+
 ## Named tests
 
 `cargo test --manifest-path lab/wasm-capsule/Cargo.toml`:
@@ -1930,25 +2025,41 @@ prints `SKIPPED` and gives no result, never a PASS.
   held no preopen, env or network flag and no work-root path but the module
   file; `EngineFailed` stopped by signal 9; then the census is empty.
 
+Task 041, host secrets denied (`tests/run.rs`; README "Host secrets denied
+(M1 A8 lab half)"):
+
+- `host_secret_fixture_never_reaches_either_real_engine` — the outer test:
+  both real engines behind recording shims, a fixture home with
+  `keys/host-secret`, and a child test process with that `HOME`; it passes
+  only when the child passes (SKIPPED, no result, when an engine is missing).
+- `host_secret_fixture_run_inside_the_child` — `#[ignore]`, run only as that
+  child: per engine, the module run's argv passes `argv_faults` and holds no
+  home-folder path; no recorded environment has `HOME`, the home folder, the
+  fixture path or the marker; both stdouts are `FIXED_OUTPUT` and a newline.
+- `host_secret_probe_imports_are_refused_before_any_engine_starts` — five
+  `wasi_snapshot_preview1` file and environment imports, each refused by
+  `run` as undeclared with no grant and as untyped with a `call` grant (exact
+  text and variant), with no run folder and no engine start.
+
 ## Falsifiers
 
-`falsifiers.json` holds 174 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 175 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
 seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
 031, two task 032, one task 035, three task 036, five task 038, three task
-039 and one task 040.
+039, one task 040 and one task 041.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 110, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 111, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031, 032, 035, 036, 038, 039 and 040: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
-+ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1), each run by the canonical runner with its summary
+029, 031, 032, 035, 036, 038, 039, 040 and 041: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
++ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1), each run by the canonical runner with its summary
 line quoted.
 Hand-proven, pending R1: 64, the sections marked so (wc-001, tasks 010 and 009,
 wc-004 and wc-008: 9 + 7 + 23 + 21 + 4), each proved by the repo's break →
@@ -2548,4 +2659,20 @@ named test fails at its census assertion:
   found leftovers", naming `entry: <engine>.scratch`).
 
 Task 040 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before, and keeps its runner-caught label above.
+
+Task 041's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 041). Its anchor is `start_engine`'s `memory_cap_args` line in
+`tools/src/run.rs`, a recovery target (F-WC10-CAP-IGNORED anchors the same
+line; each falsifier is applied alone), and its named test fails at its
+assertion:
+
+- F-WC-A8-HOME-PREOPEN — `start_engine` adds `--dir=<HOME>` after the memory
+  cap arguments, a preopen of the runner's home folder
+  (`host_secret_fixture_never_reaches_either_real_engine`, at "the child
+  host_secret_fixture_run_inside_the_child did not pass"; the child failed at
+  its `argv_faults` assertion, "a preopen, env or network flag:
+  --dir=<tmp>/home", on wasmtime's module run).
+
+Task 041 also re-anchors F-WC-README-COUNT to the new total, the same bug as
 before, and keeps its runner-caught label above.
