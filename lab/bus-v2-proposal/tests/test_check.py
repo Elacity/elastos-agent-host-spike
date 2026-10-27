@@ -171,7 +171,20 @@ KIND_EDIT_NUMBER = 8188
 KIND_EDIT_SPAN = "examples/agent-host/src/lib.rs:8188"
 KIND_EDIT_QUOTE = '        ProposalKind::Edit => Some("edit"),'
 KIND_RUN_NUMBER = 8189
+KIND_RUN_SPAN = "examples/agent-host/src/lib.rs:8189"
 KIND_RUN_QUOTE = '        ProposalKind::Run => Some("run"),'
+KIND_HOSTED_NUMBER = 8191
+KIND_HOSTED_SPAN = "examples/agent-host/src/lib.rs:8191"
+KIND_HOSTED_QUOTE = '        ProposalKind::Hosted => Some("hosted"),'
+KIND_CHILD_NUMBER = 8192
+KIND_CHILD_SPAN = "examples/agent-host/src/lib.rs:8192"
+KIND_CHILD_QUOTE = '        ProposalKind::Child => Some("child"),'
+KIND_INIT_NUMBER = 8193
+KIND_INIT_SPAN = "examples/agent-host/src/lib.rs:8193"
+KIND_INIT_QUOTE = '        ProposalKind::Init => Some("init"),'
+KIND_APPEND_NUMBER = 8194
+KIND_APPEND_SPAN = "examples/agent-host/src/lib.rs:8194"
+KIND_APPEND_QUOTE = '        ProposalKind::JournalAppend => Some("journal-append"),'
 KIND_RESTORE_NUMBER = 8190
 KIND_RESTORE_SPAN = "examples/agent-host/src/lib.rs:8190"
 KIND_RESTORE_QUOTE = '        ProposalKind::Restore => Some("restore"),'
@@ -197,6 +210,27 @@ KIND_LINES = (
 )
 KIND_BLOCK_START = KIND_READ_NUMBER - 8
 KIND_BLOCK_END = KIND_BLOCK_START + len(KIND_LINES) - 1
+
+# The five one-line arms, their pinned lines and their index in the 8187 walk.
+KIND_LINE_ARMS = (
+    ("run", KIND_RUN_NUMBER, KIND_RUN_SPAN, KIND_RUN_QUOTE, 10),
+    ("hosted", KIND_HOSTED_NUMBER, KIND_HOSTED_SPAN, KIND_HOSTED_QUOTE, 12),
+    ("child", KIND_CHILD_NUMBER, KIND_CHILD_SPAN, KIND_CHILD_QUOTE, 13),
+    ("init", KIND_INIT_NUMBER, KIND_INIT_SPAN, KIND_INIT_QUOTE, 14),
+    ("append", KIND_APPEND_NUMBER, KIND_APPEND_SPAN, KIND_APPEND_QUOTE, 15),
+)
+
+# The order in which the quote decisions read their pinned lines.
+KIND_DECISION_ORDER = (
+    KIND_READ_NUMBER,
+    KIND_EDIT_NUMBER,
+    KIND_RUN_NUMBER,
+    KIND_RESTORE_NUMBER,
+    KIND_HOSTED_NUMBER,
+    KIND_CHILD_NUMBER,
+    KIND_INIT_NUMBER,
+    KIND_APPEND_NUMBER,
+)
 
 
 class CitationCheckTests(unittest.TestCase):
@@ -587,6 +621,11 @@ class CitationCheckTests(unittest.TestCase):
         read=KIND_READ_QUOTE,
         edit=KIND_EDIT_QUOTE,
         restore=KIND_RESTORE_QUOTE,
+        run=KIND_RUN_QUOTE,
+        hosted=KIND_HOSTED_QUOTE,
+        child=KIND_CHILD_QUOTE,
+        init=KIND_INIT_QUOTE,
+        append=KIND_APPEND_QUOTE,
         asks_third=ASKS_THIRD,
         launching_last=LAUNCHING_CONST,
         ask_count=20,
@@ -623,7 +662,12 @@ class CitationCheckTests(unittest.TestCase):
         kind = list(KIND_LINES)
         kind[8] = read
         kind[9] = edit
+        kind[10] = run
         kind[11] = restore
+        kind[12] = hosted
+        kind[13] = child
+        kind[14] = init
+        kind[15] = append
         rows += ["// filler"] * (KIND_BLOCK_START - 1 - len(rows))
         rows += kind[:kind_count]
         return ("\n".join(rows) + "\n").encode("utf-8")
@@ -634,6 +678,10 @@ class CitationCheckTests(unittest.TestCase):
         edit=KIND_EDIT_QUOTE,
         restore=KIND_RESTORE_QUOTE,
         run=KIND_RUN_QUOTE,
+        hosted=KIND_HOSTED_QUOTE,
+        child=KIND_CHILD_QUOTE,
+        init=KIND_INIT_QUOTE,
+        append=KIND_APPEND_QUOTE,
         first=KIND_LINES[0],
         last=KIND_LINES[-1],
         count=len(KIND_LINES),
@@ -646,6 +694,10 @@ class CitationCheckTests(unittest.TestCase):
         lines[9] = edit
         lines[10] = run
         lines[11] = restore
+        lines[12] = hosted
+        lines[13] = child
+        lines[14] = init
+        lines[15] = append
         lines[17] = last
         if prose is None:
             prose = (
@@ -660,6 +712,39 @@ class CitationCheckTests(unittest.TestCase):
         body = prose + "\n"
         body += "".join("    " + line + "\n" for line in lines[:count])
         return body + "\n"
+
+    def _kind_line_body(
+        self,
+        block=None,
+        run=KIND_RUN_QUOTE,
+        hosted=KIND_HOSTED_QUOTE,
+        child=KIND_CHILD_QUOTE,
+        init=KIND_INIT_QUOTE,
+        append=KIND_APPEND_QUOTE,
+        spans=None,
+        repeats=None,
+        indented=True,
+    ):
+        """A draft whose one-line arms each sit below their own cited span."""
+        body = self._kind_block() if block is None else block
+        quotes = {
+            KIND_RUN_SPAN: run,
+            KIND_HOSTED_SPAN: hosted,
+            KIND_CHILD_SPAN: child,
+            KIND_INIT_SPAN: init,
+            KIND_APPEND_SPAN: append,
+        }
+        repeats = repeats or {}
+        for span in spans if spans is not None else list(quotes):
+            marker = "`" + span + "`"
+            prose = marker + " is the match arm."
+            for _ in range(repeats.get(span, 1) - 1):
+                prose += " Again " + marker + "."
+            body += prose + "\n"
+            if indented:
+                body += "\n    " + quotes[span] + "\n"
+            body += "\n"
+        return body
 
     def _caught(self, global_name, planted, named_test, prefix, label):
         named_test()
@@ -2912,6 +2997,394 @@ class CitationCheckTests(unittest.TestCase):
             self.test_kind_restore_run_line_does_not_stand_for_line_8190,
             "refuse: quoted line does not match",
             "CAUGHT kind-restore-run-line",
+        )
+
+    def _arm(self, name):
+        for arm in KIND_LINE_ARMS:
+            if arm[0] == name:
+                return arm
+        raise AssertionError(name)
+
+    def _assert_arm_mismatch(self, name, quoted):
+        _, number, span, _, _ = self._arm(name)
+        expected = "refuse: quoted line does not match " + span
+        body = self._kind_line_body(**{name: quoted})
+        got, reads = self._pinned_reads(body, {KIND_REL: self._kind_source()})
+        self.assertEqual(got, [expected])
+        position = KIND_DECISION_ORDER.index(number)
+        self.assertEqual(reads, list(KIND_DECISION_ORDER[: position + 1]))
+        root = self._draft(body, {KIND_REL: self._kind_source()})
+        (root / KIND_REL).write_bytes(
+            self._kind_source(**{name: "// edited in the worktree"})
+        )
+        self.assertEqual(check.problems(root), [expected])
+
+    def _assert_block_arm_not_cited(self, name, index):
+        _, number, span, quote, _ = self._arm(name)
+        block = self._kind_block(**{name: quote + "x"})
+        got, reads = self._pinned_reads(
+            self._kind_line_body(block=block), {KIND_REL: self._kind_source()}
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, list(KIND_DECISION_ORDER))
+
+    def test_live_draft_kind_line_arms_match_their_pinned_lines(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        for name, number, span, quote, index in KIND_LINE_ARMS:
+            selector = getattr(check, "kind_" + name + "_quote")
+            self.assertEqual(selector(text), quote, span)
+            self.assertEqual(
+                len(check._remainders(text, "`" + span + "`")), 1, span
+            )
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        for name, number, span, quote, index in KIND_LINE_ARMS:
+            self.assertEqual(
+                check.pinned_line(root, sha, KIND_REL, number), quote, name
+            )
+        self.assertEqual(check.problems(root), [])
+
+    def test_kind_line_fixture_keeps_the_arms_on_their_pinned_lines(self):
+        root = self._draft(self._kind_line_body(), {KIND_REL: self._kind_source()})
+        self.assertEqual(check.problems(root), [])
+        sha = check.pin_sha(check.load_draft(root))
+        self.assertIsNotNone(sha)
+        for name, number, span, quote, index in KIND_LINE_ARMS:
+            self.assertEqual(
+                check.pinned_line(root, sha, KIND_REL, number), quote, name
+            )
+
+    def test_kind_line_quotes_are_absent_without_a_remainder(self):
+        for name, number, span, quote, index in KIND_LINE_ARMS:
+            selector = getattr(check, "kind_" + name + "_quote")
+            self.assertIsNone(
+                selector(self._kind_line_body(spans=[span], indented=False)), name
+            )
+            self.assertIsNone(selector("No kind span here.\n"), name)
+
+    def test_run_quoted_line_mismatch_is_refused(self):
+        self._assert_arm_mismatch("run", KIND_RUN_QUOTE + "x")
+
+    def test_run_block_arm_does_not_stand_for_line_8189(self):
+        self._assert_block_arm_not_cited("run", 10)
+
+    def test_hosted_quoted_line_mismatch_is_refused(self):
+        self._assert_arm_mismatch("hosted", KIND_HOSTED_QUOTE + "x")
+
+    def test_hosted_block_arm_does_not_stand_for_line_8191(self):
+        self._assert_block_arm_not_cited("hosted", 12)
+
+    def test_child_quoted_line_mismatch_is_refused(self):
+        self._assert_arm_mismatch("child", KIND_CHILD_QUOTE + "x")
+
+    def test_child_block_arm_does_not_stand_for_line_8192(self):
+        self._assert_block_arm_not_cited("child", 13)
+
+    def test_init_quoted_line_mismatch_is_refused(self):
+        self._assert_arm_mismatch("init", KIND_INIT_QUOTE + "x")
+
+    def test_init_block_arm_does_not_stand_for_line_8193(self):
+        self._assert_block_arm_not_cited("init", 14)
+
+    def test_append_quoted_line_mismatch_is_refused(self):
+        self._assert_arm_mismatch("append", KIND_APPEND_QUOTE + "x")
+
+    def test_append_block_arm_does_not_stand_for_line_8194(self):
+        self._assert_block_arm_not_cited("append", 15)
+
+    def test_kind_line_quote_match_ignores_the_worktree_file(self):
+        for name, number, span, quote, index in KIND_LINE_ARMS:
+            root = self._draft(
+                self._kind_line_body(), {KIND_REL: self._kind_source()}
+            )
+            self.assertEqual(check.problems(root), [], name)
+            (root / KIND_REL).write_bytes(
+                self._kind_source(**{name: "// edited in the worktree"})
+            )
+            self.assertEqual(check.problems(root), [], name)
+
+    def test_kind_line_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        for name, number, span, quote, index in KIND_LINE_ARMS:
+            expected = "refuse: quoted line is not in the pinned commit: " + span
+            got, reads = self._pinned_reads(
+                self._kind_line_body(),
+                {KIND_REL: self._kind_source(kind_count=index)},
+                {KIND_REL: self._kind_source()},
+            )
+            self.assertEqual(got, [expected], name)
+            position = KIND_DECISION_ORDER.index(number)
+            self.assertEqual(
+                reads, list(KIND_DECISION_ORDER[: position + 1]), name
+            )
+
+    def _arm_span(self, number):
+        for name, arm_number, span, quote, index in KIND_LINE_ARMS:
+            if arm_number == number:
+                return span
+        return {
+            KIND_READ_NUMBER: KIND_READ_SPAN,
+            KIND_EDIT_NUMBER: KIND_EDIT_SPAN,
+            KIND_RESTORE_NUMBER: KIND_RESTORE_SPAN,
+        }[number]
+
+    def _present_decisions(self, body):
+        """Return the decision numbers whose span the draft cites."""
+        return [
+            number
+            for number in KIND_DECISION_ORDER
+            if "`" + self._arm_span(number) + "`" in body
+        ]
+
+    def test_two_kind_line_spans_are_refused(self):
+        for name, number, span, quote, index in KIND_LINE_ARMS:
+            expected = "refuse: quoted line is not one line: " + span
+            body = self._kind_line_body(spans=[span], repeats={span: 2})
+            got, reads = self._pinned_reads(body, {KIND_REL: self._kind_source()})
+            self.assertEqual(got, [expected], name)
+            present = self._present_decisions(body)
+            self.assertEqual(reads, present[: present.index(number)], name)
+
+    def test_draft_without_a_kind_line_span_adds_no_refusal(self):
+        all_spans = [arm[2] for arm in KIND_LINE_ARMS]
+        for name, number, span, quote, index in KIND_LINE_ARMS:
+            body = self._kind_line_body(
+                spans=[other for other in all_spans if other != span]
+            )
+            got, reads = self._pinned_reads(body, {KIND_REL: self._kind_source()})
+            self.assertEqual(got, [], name)
+            self.assertEqual(
+                reads,
+                [other for other in KIND_DECISION_ORDER if other != number],
+                name,
+            )
+
+    def test_kind_line_span_without_an_indented_line_adds_no_refusal(self):
+        for name, number, span, quote, index in KIND_LINE_ARMS:
+            body = self._kind_line_body(spans=[span], indented=False)
+            got, reads = self._pinned_reads(body, {KIND_REL: self._kind_source()})
+            self.assertEqual(got, [], name)
+            present = self._present_decisions(body)
+            self.assertEqual(
+                reads, [other for other in present if other != number], name
+            )
+
+    def test_kind_edit_mismatch_stops_the_run_decision(self):
+        body = self._kind_line_body(
+            block=self._kind_block(edit=KIND_EDIT_QUOTE + "x"),
+            run=KIND_RUN_QUOTE + "y",
+        )
+        got, reads = self._pinned_reads(body, {KIND_REL: self._kind_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + KIND_EDIT_SPAN]
+        )
+        self.assertEqual(reads, [KIND_READ_NUMBER, KIND_EDIT_NUMBER])
+
+    def test_draft_without_the_kind_edit_span_still_refuses_the_run_arm(self):
+        prose = (
+            "`"
+            + KIND_READ_SPAN
+            + "` is the Read arm. `"
+            + KIND_RESTORE_SPAN
+            + "` is the Restore arm.\n"
+        )
+        body = self._kind_line_body(
+            block=self._kind_block(prose=prose), run=KIND_RUN_QUOTE + "y"
+        )
+        got, reads = self._pinned_reads(body, {KIND_REL: self._kind_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + KIND_RUN_SPAN]
+        )
+        self.assertEqual(reads, [KIND_READ_NUMBER, KIND_RUN_NUMBER])
+
+    def test_edit_mismatch_without_the_run_span_stays_the_edit_refusal(self):
+        body = self._kind_line_body(
+            block=self._kind_block(edit=KIND_EDIT_QUOTE + "x"),
+            spans=[arm[2] for arm in KIND_LINE_ARMS if arm[0] != "run"],
+        )
+        got, reads = self._pinned_reads(body, {KIND_REL: self._kind_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + KIND_EDIT_SPAN]
+        )
+        self.assertEqual(reads, [KIND_READ_NUMBER, KIND_EDIT_NUMBER])
+
+    def test_draft_without_the_run_span_keeps_the_restore_refusal(self):
+        body = self._kind_line_body(
+            block=self._kind_block(restore=KIND_RESTORE_QUOTE + "x"),
+            spans=[arm[2] for arm in KIND_LINE_ARMS if arm[0] != "run"],
+        )
+        got, reads = self._pinned_reads(body, {KIND_REL: self._kind_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + KIND_RESTORE_SPAN]
+        )
+        self.assertEqual(
+            reads, [KIND_READ_NUMBER, KIND_EDIT_NUMBER, KIND_RESTORE_NUMBER]
+        )
+
+    def test_draft_without_the_run_span_still_refuses_a_later_arm(self):
+        spans = [arm[2] for arm in KIND_LINE_ARMS if arm[0] != "run"]
+        for name, number, span, quote, index in KIND_LINE_ARMS:
+            if name == "run":
+                continue
+            body = self._kind_line_body(spans=spans, **{name: quote + "x"})
+            got, reads = self._pinned_reads(body, {KIND_REL: self._kind_source()})
+            self.assertEqual(
+                got, ["refuse: quoted line does not match " + span], name
+            )
+
+    def test_kind_restore_mismatch_stops_the_hosted_decision(self):
+        body = self._kind_line_body(
+            block=self._kind_block(restore=KIND_RESTORE_QUOTE + "x"),
+            hosted=KIND_HOSTED_QUOTE + "y",
+        )
+        got, reads = self._pinned_reads(body, {KIND_REL: self._kind_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + KIND_RESTORE_SPAN]
+        )
+        self.assertEqual(
+            reads,
+            [
+                KIND_READ_NUMBER,
+                KIND_EDIT_NUMBER,
+                KIND_RUN_NUMBER,
+                KIND_RESTORE_NUMBER,
+            ],
+        )
+
+    def test_launching_mismatch_stops_the_run_decision(self):
+        body = self._launching_body(LAUNCHING_CONST + "x") + self._kind_line_body(
+            run=KIND_RUN_QUOTE + "y"
+        )
+        got, reads = self._pinned_reads(body, {KIND_REL: self._kind_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + LAUNCHING_SPAN]
+        )
+        self.assertEqual(reads, [LAUNCHING_NUMBER])
+
+    def test_asks_mismatch_stops_the_run_decision(self):
+        body = self._asks_block(third=ASKS_THIRD + "x") + self._kind_line_body()
+        got, reads = self._pinned_reads(body, {KIND_REL: self._kind_source()})
+        self.assertEqual(got, ["refuse: quoted line does not match " + ASKS_SPAN])
+        self.assertEqual(reads, [ASKS_NUMBER])
+
+    def test_kind_line_quote_refusal_waits_for_a_known_pin(self):
+        body = self._kind_line_body(run=KIND_RUN_QUOTE + "x")
+        files = {KIND_REL: self._kind_source()}
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+        bad_pin = "Pinned commit: HEAD\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(bad_pin, files)),
+            ["refuse: pinned commit is not one 40-hex commit"],
+        )
+        unknown = "Pinned commit: " + "f" * 40 + "\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(unknown, files, commit=True)),
+            ["refuse: pinned commit is not a commit: " + "f" * 40],
+        )
+
+    def _caught_block_arm(self, selector, index, named_test, label):
+        def planted(text):
+            remainders = check._remainders(text, check.KIND_READ_MARKER)
+            if len(remainders) <= index:
+                return None
+            return remainders[index]
+
+        self._caught(
+            selector,
+            planted,
+            named_test,
+            "refuse: quoted line does not match",
+            label,
+        )
+
+    def test_falsifier_run_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_run_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT run-quoted-line",
+        )
+
+    def test_falsifier_run_block_arm_is_caught(self):
+        self._caught_block_arm(
+            "kind_run_quote",
+            10,
+            self.test_run_block_arm_does_not_stand_for_line_8189,
+            "CAUGHT run-block-arm",
+        )
+
+    def test_falsifier_hosted_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_hosted_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT hosted-quoted-line",
+        )
+
+    def test_falsifier_hosted_block_arm_is_caught(self):
+        self._caught_block_arm(
+            "kind_hosted_quote",
+            12,
+            self.test_hosted_block_arm_does_not_stand_for_line_8191,
+            "CAUGHT hosted-block-arm",
+        )
+
+    def test_falsifier_child_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_child_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT child-quoted-line",
+        )
+
+    def test_falsifier_child_block_arm_is_caught(self):
+        self._caught_block_arm(
+            "kind_child_quote",
+            13,
+            self.test_child_block_arm_does_not_stand_for_line_8192,
+            "CAUGHT child-block-arm",
+        )
+
+    def test_falsifier_init_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_init_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT init-quoted-line",
+        )
+
+    def test_falsifier_init_block_arm_is_caught(self):
+        self._caught_block_arm(
+            "kind_init_quote",
+            14,
+            self.test_init_block_arm_does_not_stand_for_line_8193,
+            "CAUGHT init-block-arm",
+        )
+
+    def test_falsifier_append_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_append_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT append-quoted-line",
+        )
+
+    def test_falsifier_append_block_arm_is_caught(self):
+        self._caught_block_arm(
+            "kind_append_quote",
+            15,
+            self.test_append_block_arm_does_not_stand_for_line_8194,
+            "CAUGHT append-block-arm",
         )
 
     def test_worktree_root_contains_checker(self):
