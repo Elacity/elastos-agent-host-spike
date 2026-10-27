@@ -1,0 +1,46 @@
+# From live qemu-console.txt of the full TCG boot at
+# /tmp/review-c9-296-r3-src HEAD 440354e76c38, nonce 7b87f87505a09f934e4edb4c536b8bf4
+# Captured before a later smoke timeout reused the evidence directory.
+
+tmp_mount=tmpfs+baked
+guest_nics=dummy0 eth0 lo
+helpers_visible=/tmp/review-c9-296-r3-src/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-c224bc819a663556/out
+LABEL=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+landlock_abi=7
+--- nonce isolation ---
+nonce_file_mode=400
+env_has_nonce=0
+evidence_nonce_during_run=0
+cat: can't open '/etc/lc-nonce': Permission denied
+tester_nonce_readable=0
+--- review r3 probes ---
+REVIEW_proc_cmdline=console=ttyAMA0 earlycon=pl011,0x09000000 panic=1
+REVIEW_cmdline_has_nonce=0
+REVIEW_init_environ_has_nonce=0
+REVIEW_init_environ_readable=1
+REVIEW_uid=1000
+REVIEW_console_w=0
+REVIEW_ttyAMA0_w=0
+crw-------    1 root     root        5,   1 Jan  1  1970 /dev/console
+crw-------    1 root     root      204,  64 Jan  1  1970 /dev/ttyAMA0
+REVIEW_tester_nonce_file=0
+REVIEW_tester_proc1_environ_r=0
+REVIEW_tester_proc1_cmdline_r=1
+REVIEW_tester_env_nonce=0
+REVIEW_tester_9p_nonce=0
+sh: can't create /dev/console: Permission denied
+REVIEW_console_echo=0
+sh: can't create /dev/ttyAMA0: Permission denied
+REVIEW_ttyAMA0_echo=0
+sh: can't create /proc/1/fd/1: Permission denied
+REVIEW_init_stdout_w=0
+/bin/sh /init
+REVIEW_tester_cmdline_nonce=0
+--- C9 suites ---
+uid=1000 gid=1000
+--- guest finished status=0 ---
+LC_MARK nonce=7b87f87505a09f934e4edb4c536b8bf4 suite=elf exit=0 passed=6 failed=0 ignored=0 status=PASS
+LC_MARK nonce=7b87f87505a09f934e4edb4c536b8bf4 suite=aarch64 exit=0 passed=2 failed=0 ignored=1 status=PASS
+LC_MARK nonce=7b87f87505a09f934e4edb4c536b8bf4 suite=confine exit=0 passed=25 failed=0 ignored=0 status=PASS
+LC_MARK nonce=7b87f87505a09f934e4edb4c536b8bf4 suite=providers exit=0 passed=4 failed=0 ignored=0 status=PASS
+LC_MARK nonce=7b87f87505a09f934e4edb4c536b8bf4 suite=guest exit=0 passed=0 failed=0 ignored=0 status=DONE
