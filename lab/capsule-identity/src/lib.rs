@@ -67,7 +67,16 @@
 //! refuses. A dot inside or at the end of a name (`a.b`, `x.`) is a plain
 //! name.
 //!
-//! No empty directory is emitted. Nothing else enters a block: no folder
+//! A folder that holds no file, at any depth (an empty folder, or one that
+//! holds only such folders), is refused with [`Refusal::EmptyFolder`].
+//! Kubo's import with the Runtime's flags (`--empty-dirs=false`) leaves out
+//! an empty folder but keeps a folder that holds only empty folders (task
+//! 052's hand run), so the lab names no folder without a file rather than
+//! print a name Kubo may not give. So no empty directory is ever encoded.
+//! Only the walk sees folders, so the check is in the walk, once; a caller of
+//! the encoder gives file paths, which hold no empty folder.
+//!
+//! Nothing else enters a block: no folder
 //! name, absolute path, mtime, mode, owner or symlink target. The CIDv1 bytes
 //! and the base32 text are one marked lab copy in this crate, so the lab adds
 //! no crate (the Runtime's `cid` crate lives only in server crates the lab
@@ -452,6 +461,13 @@ pub enum Refusal {
     /// Kubo's import with the Runtime's flags has no `--hidden`, so it leaves
     /// such a name out of the CID; the lab names every byte or refuses.
     HiddenName { path: String },
+    /// A folder below the bundle root holds no file at any depth: it is
+    /// empty, or holds only folders that hold no file. Kubo's import with the
+    /// Runtime's flags (`--empty-dirs=false`) leaves out an empty folder but
+    /// keeps a folder that holds only empty folders, so the lab refuses any
+    /// folder with no file rather than print a name Kubo may not give. Only
+    /// the walk sees folders; `path` is the folder's bundle path.
+    EmptyFolder { path: String },
     /// One path given to the encoder is both a file and a directory, as
     /// `a` and `a/b` would be. The walk never makes one.
     FileAndDirectory { path: String },
@@ -560,6 +576,10 @@ impl fmt::Display for Refusal {
             Refusal::HiddenName { path } => write!(
                 f,
                 "the path {path:?} has a part that starts with .: Kubo's import with the Runtime's flags (no --hidden) leaves a name starting with . out of the CID, and the lab names every byte or refuses"
+            ),
+            Refusal::EmptyFolder { path } => write!(
+                f,
+                "the folder {path:?} holds no file: Kubo's import with the Runtime's flags (--empty-dirs=false) leaves out an empty folder but keeps a folder that holds only empty folders, so the lab refuses any folder with no file rather than print a name Kubo may not give"
             ),
             Refusal::FileAndDirectory { path } => write!(
                 f,
@@ -1232,10 +1252,14 @@ struct Listed {
     file_type: FileType,
 }
 
-/// A folder the walk is in: its checked handle and the rest of its listing.
+/// A folder the walk is in: its checked handle, the rest of its listing, its
+/// bundle path (empty for the root) and how many files the walk had read
+/// when it opened the folder.
 struct Folder {
     handle: OwnedFd,
     listing: std::vec::IntoIter<Listed>,
+    path: String,
+    first_entry: usize,
 }
 
 /// Every regular file under `bundle`, each with its bundle-relative path.
@@ -1243,8 +1267,11 @@ struct Folder {
 /// The walk opens `bundle` once, as a folder. After that it reaches each
 /// entry through its folder's handle: it checks the listed type, opens the
 /// entry, checks the open handle, and only then reads or lists that handle.
-/// It goes depth first, so it holds one handle per folder level. The first
-/// refusal stops the walk. Listing order does not matter: the encoder sorts.
+/// It goes depth first, so it holds one handle per folder level. When a
+/// folder below the root is done and the walk read no file since it opened
+/// that folder, the folder holds no file at any depth and is refused. The
+/// first refusal stops the walk. Listing order does not matter: the encoder
+/// sorts.
 fn collect_entries(
     bundle: &Path,
     observe: &mut dyn FnMut(Moment, &str),
@@ -1254,6 +1281,8 @@ fn collect_entries(
     let mut folders = vec![Folder {
         handle: root,
         listing,
+        path: String::new(),
+        first_entry: 0,
     }];
     let mut entries = Vec::new();
     while let Some(folder) = folders.last_mut() {
@@ -1263,7 +1292,10 @@ fn collect_entries(
             file_type,
         }) = folder.listing.next()
         else {
-            folders.pop();
+            let done = folders.pop().expect("the loop holds a folder");
+            if !done.path.is_empty() && entries.len() == done.first_entry {
+                return Err(Refusal::EmptyFolder { path: done.path });
+            }
             continue;
         };
         let kind = match entry_kind(file_type) {
@@ -1275,7 +1307,12 @@ fn collect_entries(
         observe(Moment::AfterCheck, &path);
         if kind == EntryKind::Directory {
             let listing = list_folder(handle.as_fd(), &path)?;
-            folders.push(Folder { handle, listing });
+            folders.push(Folder {
+                handle,
+                listing,
+                path,
+                first_entry: entries.len(),
+            });
         } else {
             let content = read_file(handle, &path)?;
             entries.push(BundleEntry { path, content });

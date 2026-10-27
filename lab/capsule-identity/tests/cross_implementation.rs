@@ -12,9 +12,13 @@
 //! Kubo itself checks the pins in two ignored tests, run by hand (README,
 //! "Kubo cross-check"): an offline, hash-only import with the Runtime's
 //! profile flags must print every pin, and the same flags must print the
-//! model package CID the Runtime admitted on this Mac. A third (task 052)
-//! asks whether the same flags leave hidden names and empty folders out of
-//! the CID; on this Mac it fails for a folder holding only an empty folder.
+//! model package CID the Runtime admitted on this Mac. A third (task 054,
+//! `kubo_leaves_out_hidden_names_but_not_every_empty_folder`) checks four
+//! web-app copies: Kubo with the same flags prints web-app's pin for a root
+//! `.DS_Store`, a `.well-known/a.txt` and an empty folder `e`, and prints
+//! `KUBO_WEB_APP_WITH_F_HOLDING_EMPTY_G` (Kubo's value, not a pin) for a
+//! folder `f` holding only an empty `g`; `lab_cid` refuses all four, with
+//! `HiddenName` or `EmptyFolder`. It passes on this Mac (LOG.md, ci-54).
 mod common;
 
 use std::ffi::OsString;
@@ -615,53 +619,68 @@ fn kubo_hash_only_import_prints_every_lab_cid_pin() {
     assert_eq!(rows.len(), PINNED_BUNDLES, "checked {} bundles", rows.len());
 }
 
+/// Kubo's output, not a lab pin: the root Kubo v0.40.1 printed with
+/// [`KUBO_ADD_FLAGS`] for web-app plus a folder `f` that holds only an empty
+/// folder `g` (task 052's hand run). `--empty-dirs=false` keeps `f/g`, so
+/// this is not web-app's pin. The lab never prints it: it refuses `f/g`.
+const KUBO_WEB_APP_WITH_F_HOLDING_EMPTY_G: &str =
+    "bafybeiglww2fwp3lu757nlc6gpjufsoseelyrsj46rkvr7oouurrz4imsy";
+
 #[test]
 #[ignore = "run by hand: needs LAB_KUBO, the path of a Kubo v0.40.1"]
-fn kubo_leaves_out_hidden_names_and_empty_folders() {
+fn kubo_leaves_out_hidden_names_but_not_every_empty_folder() {
     // web-app with (a) a root `.DS_Store`, (b) a hidden folder holding a
-    // file, (c) an empty folder and a folder holding only an empty folder.
-    // Kubo with the Runtime's flags (no `--hidden`, `--empty-dirs=false`)
-    // must print web-app's pin for each. The lab refuses (a) and (b), since
-    // it never leaves bytes out of a name, and names (c) with the pin.
+    // file, (c1) an empty folder `e`, (c2) a folder `f` holding only an
+    // empty folder `g`. Kubo with the Runtime's flags (no `--hidden`,
+    // `--empty-dirs=false`) prints web-app's pin for (a), (b) and (c1), but
+    // keeps (c2)'s folders. The lab refuses all four: it never leaves bytes
+    // out of a name, and it names no folder that holds no file.
     let kubo = HashOnlyKubo::start();
-    let cases: [(&str, &dyn Fn(&Path), Option<&str>); 3] = [
+    let cases: [(&str, &dyn Fn(&Path), &str, Refusal); 4] = [
         (
             "(a) root .DS_Store",
             &|root| write_file(root, ".DS_Store", b"Bud1"),
-            Some(".DS_Store"),
+            WEB_APP_LAB_CID,
+            Refusal::HiddenName {
+                path: ".DS_Store".into(),
+            },
         ),
         (
             "(b) .well-known/a.txt",
             &|root| write_file(root, ".well-known/a.txt", b"a\n"),
-            Some(".well-known/a.txt"),
+            WEB_APP_LAB_CID,
+            Refusal::HiddenName {
+                path: ".well-known/a.txt".into(),
+            },
         ),
         (
-            "(c) empty folders e and f/g",
-            &|root| {
-                fs::create_dir(root.join("e")).expect("make e");
-                fs::create_dir_all(root.join("f/g")).expect("make f/g");
-            },
-            None,
+            "(c1) empty folder e",
+            &|root| fs::create_dir(root.join("e")).expect("make e"),
+            WEB_APP_LAB_CID,
+            Refusal::EmptyFolder { path: "e".into() },
+        ),
+        (
+            "(c2) f holding only an empty g",
+            &|root| fs::create_dir_all(root.join("f/g")).expect("make f/g"),
+            KUBO_WEB_APP_WITH_F_HOLDING_EMPTY_G,
+            Refusal::EmptyFolder { path: "f/g".into() },
         ),
     ];
     let mut differ = Vec::new();
-    for (what, add, hidden) in cases {
+    for (what, add, expected_root, refusal) in cases {
         let bundle = assemble(&WEB_APP);
         add(bundle.path());
         let root = kubo.root(bundle.path());
         let walked = lab_cid(bundle.path()).map(|cid| cid.to_string());
-        println!("{what}: kubo {root}, pin {WEB_APP_LAB_CID}, lab_cid {walked:?}");
-        let expected = match hidden {
-            Some(path) => Err(Refusal::HiddenName { path: path.into() }),
-            None => Ok(WEB_APP_LAB_CID.to_owned()),
-        };
-        if root != WEB_APP_LAB_CID || walked != expected {
-            differ.push((what, root, WEB_APP_LAB_CID, walked));
+        println!("{what}: kubo {root}, expected {expected_root}, lab_cid {walked:?}");
+        let refused = Err(refusal);
+        if root != expected_root || walked != refused {
+            differ.push((what, root, expected_root, walked));
         }
     }
     assert!(
         differ.is_empty(),
-        "(case, Kubo, pin, lab_cid) do not agree: {differ:#?}"
+        "(case, Kubo, expected, lab_cid) do not agree: {differ:#?}"
     );
 }
 
