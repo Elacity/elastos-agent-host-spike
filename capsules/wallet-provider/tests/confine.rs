@@ -4587,9 +4587,11 @@ fn standin_start_matches_the_oracle_on_the_permitted_and_denied_suite() {
 /// stand-in binds `STORAGE_ROOT` to `<root>/ElastOS/SystemServices/Wallet`, so
 /// its `init` cannot write `<root>/did` and the start is Refused. This test
 /// fails at the start and records no case. WP127 appends a write grant on
-/// `STORAGE_PARENT` to the stand-in's generated profile for did, so its sibling
-/// write answers `ok` while the committed profile refuses it, and this test
-/// fails naming that case.
+/// `STORAGE_PARENT` to the stand-in's generated profile for did, so the sibling
+/// write answers `ok`; the stand-in start's suite then fails at its `the
+/// sibling write must be denied` assertion, before the two starts' records are
+/// compared. The unrelated outside write passes before it, and the planted read
+/// runs after it and needs a read grant WP127 does not add.
 #[test]
 fn standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
