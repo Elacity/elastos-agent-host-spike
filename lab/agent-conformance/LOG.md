@@ -8126,3 +8126,108 @@ After the restores, `git diff --numstat -- lab/agent-conformance/standin-runtime
 | 8. Identity, admission and allowance stay separate? | Yes | `storage_for_home` reads no grant, no capsule list and no clock, at `:132-155`; admission stays in `admit_resident` and allowance unchanged. |
 
 The real A9 row stays blocked. `standin_storage_follows_the_selected_home` is the lab stand-in, and a PASS there gives the Runtime no A9 credit. `operator_storage_is_under_throwaway_home` stays `#[ignore = "blocked: AC-006-STORAGE"]` with its panic body, and `root-symlink-swap` and `host-hardlink` stay a later slice.
+
+## 057 — A9: stand-in refuses the two named storage cases
+
+057: `StandIn::confirm_storage` (`standin-runtime/mod.rs:163`) is the one new associated function. It calls `storage_for_home` (`:132`) and then `crate::harness::directories_only` (`src/harness.rs:37`) and creates nothing. The one link-count check is the private `one_link` (`standin-runtime/mod.rs:185`). `src/harness.rs` gains one word: `fn directories_only` becomes `pub(crate) fn directories_only`, and `git diff -U0` shows that one line only. `storage_for_home` keeps its body. `src/census.rs`, `tests/effects.rs`, `GAPS.md`, `Cargo.toml`, `Cargo.lock`, `probe/`, `falsify.py`, `falsifiers.json` and `lab/owned-storage` keep their bytes. `standin-runtime/mod.rs` is not a recovery target and gains no `falsifiers.json` id; the three plants below ran by hand and each was restored before the next.
+
+The two refused cases are `root-symlink-swap` and `host-hardlink`. Their case ids come from `15d337dc9:lab/review-a9-290/REVIEW.md`, read only; no other cell of those rows is quoted.
+
+### Refusals
+
+`confirm_storage(home, entry)` refuses with status 400 in this order. `storage_for_home`'s error passes through unchanged (`standin-runtime/mod.rs:168`). `directories_only(storage, home)` false reads `storage directory is a symbolic link` (`:169-171`). An empty entry returns that storage path (`:172-174`). Any other entry whose components are not exactly one `Component::Normal` reads `storage entry stays under the selected Home` (`:175-179`). `one_link` on the joined path (`:180-181`, `:185-203`) returns `Ok(())` when the path is absent and when it is a regular file whose link count is 1. A regular file whose link count is above 1 reads `storage file has more than one link`; any other file type, including a symbolic link, reads `storage file is not a single regular file`. The check uses `symlink_metadata` and `nlink`; it reads no file bytes and follows no link, and `confirm_storage` calls no `create_dir`, `create_dir_all` or file create.
+
+### Tests
+
+- `standin_storage_refuses_root_symlink_swap` (`standin-runtime/mod.rs:3339`): one `ThrowawayHome`. Before a link exists, `confirm_storage(home.home(), "")` is `Ok` and equals `storage_for_home(home.home())`, and that path does not exist. The test makes that path a symbolic link with `std::os::unix::fs::symlink`; the link's own name is the storage path. `confirm_storage(home.home(), "")` is status 400 with `storage directory is a symbolic link`, and `symlink_metadata` on that path still reports a symbolic link. `home.finish()` is `Ok`. The test reads no link target and no file.
+- `standin_storage_refuses_host_hardlink` (`:3374`): one `ThrowawayHome`. The test creates the storage directory, and `confirm_storage(home.home(), "absent.txt")` is `Ok` with the joined path. It creates one regular file `entry.txt`; `confirm_storage(home.home(), "entry.txt")` is `Ok` and equals that file. It adds a second name with `std::fs::hard_link`, so the link count is above 1. `confirm_storage` for `entry.txt` and for `second.txt` are each status 400 with `storage file has more than one link`. `confirm_storage(home.home(), "..")` and `confirm_storage(home.home(), "a/b")` are each status 400 with `storage entry stays under the selected Home`. `home.finish()` is `Ok`. The test reads no file.
+
+### Hand-run plants
+
+No `falsifiers.json` id. Each plant ran one at a time and was restored before the next. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::NAME -- --exact`. Each planted crate compiled (unused-item warnings only) and the named test failed on its assertion; after the restore the named test passed. Retained throwaway roots from the failed runs were removed. After the restores, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows no plant.
+
+F-standin-a9-link-stub. Named test `standin_storage_refuses_root_symlink_swap`.
+
+Old:
+
+```text
+        let storage = Self::storage_for_home(home)?;
+        if !crate::harness::directories_only(&storage, home) {
+```
+
+New:
+
+```text
+        let storage = Self::storage_for_home(home)?;
+        return Ok(storage);
+        if !crate::harness::directories_only(&storage, home) {
+```
+
+Planted exit 1, test result FAILED. Assertion: `src/../standin-runtime/mod.rs:3361:9`, `the stand-in did the work: it refuses a storage directory that is a symbolic link: Ok("target/home-.../home/Library/Application Support/elastos/storage")`. Restored, the named test passed.
+
+F-standin-a9-skip-link. Named test `standin_storage_refuses_root_symlink_swap`.
+
+Old:
+
+```text
+        let storage = Self::storage_for_home(home)?;
+        if !crate::harness::directories_only(&storage, home) {
+            return Err((400, LINK_REASON.to_owned()));
+        }
+        if entry.is_empty() {
+```
+
+New:
+
+```text
+        let storage = Self::storage_for_home(home)?;
+        if entry.is_empty() {
+```
+
+Planted exit 1, test result FAILED. Assertion: `src/../standin-runtime/mod.rs:3357:9`, `the stand-in did the work: it refuses a storage directory that is a symbolic link: Ok("target/home-.../home/Library/Application Support/elastos/storage")`. Restored, the named test passed.
+
+F-standin-a9-skip-nlink. Named test `standin_storage_refuses_host_hardlink`.
+
+Old:
+
+```text
+                if meta.nlink() > 1 {
+                    return Err((400, MANY_REASON.to_owned()));
+                }
+```
+
+New:
+
+```text
+                if meta.nlink() > 1 {
+                    return Ok(());
+                }
+```
+
+Planted exit 1, test result FAILED. Assertion: `src/../standin-runtime/mod.rs:3400:13`, `the stand-in did the work: it refuses the hard-linked file under name "entry.txt": Ok("target/home-.../home/Library/Application Support/elastos/storage/entry.txt")`. Restored, the named test passed.
+
+### Docs
+
+`standin-runtime/README.md:39` stops after the `AC-006-STORAGE` ignore sentence. `:41` is the new paragraph before `## Callers`: `confirm_storage` calls `storage_for_home` and `directories_only`, a symbolic link at the storage directory is refused and not followed, a regular file under it whose link count is above 1 is refused and not read, with the M1-R replacement sentence, no A9 credit and the `AC-006-STORAGE` ignore. The file keeps the RA-1 section and the resident RI-1 to RI-4 section as found. `RUNBOOK.md:719` is the new paragraph after the last stand-in paragraph: `standin_storage_refuses_root_symlink_swap` is this stand-in, and a PASS there gives the Runtime no A9 credit. Every other RUNBOOK paragraph keeps its bytes.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.12 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 308.98 seconds, inside the 600-second bound. 161 passed, 0 failed, 14 ignored across the targets. The lib target passed 46, including both new tests; the effects target passed 59 with 12 ignored. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `standin-runtime/mod.rs:163-182` joins a directory from the one Home rule and names no code or content by name or URL. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `standin-runtime/mod.rs:163-203` creates no directory, writes no file and reads no file bytes; the tests start no route. |
+| 3. A second path or a second copy of one rule? | No | `standin-runtime/mod.rs:168` calls the one `crate::harness::directories_only` (`src/harness.rs:37`); `one_link` is the one link-count check and copies no walk. |
+| 4. Runtime core grows? | No | The edits are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md`, `LOG.md` and the visibility word in `src/harness.rs`; `elastos/` is unchanged. |
+| 5. Refusals deny by default with a clear reason? | Yes | A storage symlink is 400 `storage directory is a symbolic link` (`:169-171`), an entry outside one normal component is 400 `storage entry stays under the selected Home` (`:175-179`), a linked file is 400 `storage file has more than one link`, and another file type is 400 `storage file is not a single regular file` (`:185-203`). |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The seam only checks a path under the selected Home; it imports no capsule, no `wasi:*` and no Bus route. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:3339` and `:3374` are the named tests; the three plants failed at `:3361`, `:3357` and `:3400`. |
+| 8. Identity, admission and allowance stay separate? | Yes | `confirm_storage` reads no grant, no capsule list and no clock at `:163-203`; admission stays in `admit_resident` and allowance unchanged. |
+
+The real A9 row stays blocked. `root-symlink-swap` and `host-hardlink` are refused by this lab stand-in, and a PASS gives the Runtime no A9 credit. `operator_storage_is_under_throwaway_home` stays `#[ignore = "blocked: AC-006-STORAGE"]` with its panic body.

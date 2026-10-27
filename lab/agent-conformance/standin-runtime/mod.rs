@@ -156,6 +156,55 @@ impl StandIn {
 
     /// Lab test seam, not a route.
     ///
+    /// The two named storage cases are refused here. A symbolic link at the
+    /// storage directory is refused and not followed. A regular file under it
+    /// whose link count is above 1 is refused and not read. This call creates
+    /// nothing.
+    pub fn confirm_storage(home: &Path, entry: &str) -> Result<PathBuf, (u16, String)> {
+        const LINK_REASON: &str = "storage directory is a symbolic link";
+        const ENTRY_REASON: &str = "storage entry stays under the selected Home";
+
+        let storage = Self::storage_for_home(home)?;
+        if !crate::harness::directories_only(&storage, home) {
+            return Err((400, LINK_REASON.to_owned()));
+        }
+        if entry.is_empty() {
+            return Ok(storage);
+        }
+        let mut parts = Path::new(entry).components();
+        match (parts.next(), parts.next()) {
+            (Some(Component::Normal(_)), None) => {}
+            _ => return Err((400, ENTRY_REASON.to_owned())),
+        }
+        let file = storage.join(entry);
+        Self::one_link(&file)?;
+        Ok(file)
+    }
+
+    /// One link-count check. It reads no file bytes and follows no link.
+    fn one_link(path: &Path) -> Result<(), (u16, String)> {
+        use std::os::unix::fs::MetadataExt;
+
+        const MANY_REASON: &str = "storage file has more than one link";
+        const REGULAR_REASON: &str = "storage file is not a single regular file";
+
+        match std::fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+                    return Err((400, REGULAR_REASON.to_owned()));
+                }
+                if meta.nlink() > 1 {
+                    return Err((400, MANY_REASON.to_owned()));
+                }
+                Ok(())
+            }
+            Err(_) => Err((400, REGULAR_REASON.to_owned())),
+        }
+    }
+
+    /// Lab test seam, not a route.
+    ///
     /// `granted_at` is the seeded value. This method reads no clock.
     pub fn seed_grant(
         &mut self,
@@ -3284,5 +3333,82 @@ mod tests {
             owner.is_ok(),
             "the stand-in authorises the owning client of that live grant: {owner:?}"
         );
+    }
+
+    #[test]
+    fn standin_storage_refuses_root_symlink_swap() {
+        use crate::harness::ThrowawayHome;
+        use std::os::unix::fs::symlink;
+
+        let home = ThrowawayHome::new().expect("a throwaway Home for the root symlink row");
+        let storage = StandIn::storage_for_home(home.home())
+            .expect("the stand-in returns the selected Home's storage path");
+        let accepted = StandIn::confirm_storage(home.home(), "");
+        assert_eq!(
+            accepted,
+            Ok(storage.clone()),
+            "the stand-in did the work: it returns the absent storage directory before a link"
+        );
+        assert!(
+            !storage.exists(),
+            "the stand-in did the work: it creates no storage directory"
+        );
+
+        symlink(home.root().join("swapped-root"), &storage)
+            .expect("the test makes the storage path a symbolic link");
+        let refused = StandIn::confirm_storage(home.home(), "");
+        assert!(
+            matches!(&refused, Err((400, reason)) if reason == "storage directory is a symbolic link"),
+            "the stand-in did the work: it refuses a storage directory that is a symbolic link: {refused:?}"
+        );
+        let meta =
+            std::fs::symlink_metadata(&storage).expect("the storage path is still a symbolic link");
+        assert!(
+            meta.file_type().is_symlink(),
+            "the stand-in did the work: it does not follow the storage link"
+        );
+        home.finish().expect("the throwaway Home finishes");
+    }
+
+    #[test]
+    fn standin_storage_refuses_host_hardlink() {
+        use crate::harness::ThrowawayHome;
+
+        let home = ThrowawayHome::new().expect("a throwaway Home for the hard link row");
+        let storage = StandIn::storage_for_home(home.home())
+            .expect("the stand-in returns the selected Home's storage path");
+        std::fs::create_dir(&storage).expect("the test creates the storage directory");
+        let absent = StandIn::confirm_storage(home.home(), "absent.txt");
+        assert_eq!(
+            absent,
+            Ok(storage.join("absent.txt")),
+            "the stand-in did the work: it returns a joined path that is absent"
+        );
+        let entry = storage.join("entry.txt");
+        std::fs::write(&entry, b"stand-in storage file").expect("the test writes one regular file");
+        let accepted = StandIn::confirm_storage(home.home(), "entry.txt");
+        assert_eq!(
+            accepted,
+            Ok(entry.clone()),
+            "the stand-in did the work: it returns one regular file whose link count is 1"
+        );
+
+        let second = storage.join("second.txt");
+        std::fs::hard_link(&entry, &second).expect("the test adds a second name for the same file");
+        for name in ["entry.txt", "second.txt"] {
+            let refused = StandIn::confirm_storage(home.home(), name);
+            assert!(
+                matches!(&refused, Err((400, reason)) if reason == "storage file has more than one link"),
+                "the stand-in did the work: it refuses the hard-linked file under name {name:?}: {refused:?}"
+            );
+        }
+        for name in ["..", "a/b"] {
+            let refused = StandIn::confirm_storage(home.home(), name);
+            assert!(
+                matches!(&refused, Err((400, reason)) if reason == "storage entry stays under the selected Home"),
+                "the stand-in did the work: it refuses entry {name:?} outside one normal component: {refused:?}"
+            );
+        }
+        home.finish().expect("the throwaway Home finishes");
     }
 }
