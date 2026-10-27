@@ -23,7 +23,7 @@ use capsule_identity::{
     checked_bundle, sign_bundle, verify_checked_signature, BundleEntry, NameSignature,
     Refusal as IdentityRefusal,
 };
-use common::build::{lane_dir, run_build, sha256_file, Receipt, TempDir};
+use common::build::{lane_dir, lane_paths, run_build, sha256_file, Receipt, TempDir};
 use common::grants::{env_f, grant, grants_file, write_grants, IMPORTING_MODULE};
 use common::PINNED_ARTIFACT_SHA256;
 use ed25519_dalek::SigningKey;
@@ -1220,29 +1220,9 @@ fn no_key_material_is_tracked_in_the_lane() {
         "the unreadable file has no path and cause: {gone:?}"
     );
 
+    // The one lister; a listed file that is gone is scanned, so reported.
     let lane = lane_dir();
-    let output = Command::new("git")
-        .args([
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ])
-        .current_dir(&lane)
-        .output()
-        .expect("run git ls-files in the lane");
-    assert!(
-        output.status.success(),
-        "git ls-files failed ({}): {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let listing = String::from_utf8(output.stdout).expect("git lists UTF-8 paths");
-    let listed: Vec<&str> = listing
-        .split('\0')
-        .filter(|path| !path.is_empty())
-        .collect();
+    let listed = lane_paths(&lane);
     assert!(!listed.is_empty(), "git listed no lane file");
     let findings: Vec<String> = listed
         .iter()
