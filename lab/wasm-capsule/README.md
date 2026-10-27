@@ -711,15 +711,14 @@ module run starts:
 **The receipt.** `render` gives `key: value` lines in the shape of wc-001's
 build receipt (`tools/build:82`), under its own schema line. Every value comes
 from the run. The real receipt from this Mac, from
-`real_receipt_names_both_installed_engines` on 26 Oct 2026, task 028 (the
+`real_receipt_names_both_installed_engines` on 27 Oct 2026, task 034 (the
 capsule `tools/build` makes, bundled, signed with a fresh test key, verified
 and run on Homebrew's `/opt/homebrew/bin/wasmtime` and `/opt/homebrew/bin/wasmer`;
-its `bundle` line re-pinned by task 032 on 27 Oct 2026: the test asserts
-`bundle: <bundle_identity of the run's bundle>`, which holds the same two files
-as `REFERENCE_LAB_CID`'s bundle; the other lines are task 028's):
+the test asserts `bundle: <bundle_identity of the run's bundle>`, which holds
+the same two files as `REFERENCE_LAB_CID`'s bundle):
 
 ```
-schema: wc-005.run-receipt/v2
+schema: wc-005.run-receipt/v3
 bundle: bafybeiebyzg55l4s6kb6daroty4prlkximwp6uvo32ovacfzdx7cahywqm
 function: digest
 argument: 1592590337
@@ -733,6 +732,8 @@ memory_mb: 64
 memory_cap_bytes: 67108864
 wasmtime_memory_cap: ENFORCED max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y
 wasmer_memory_cap: SKIPPED: no memory cap flag in wasmer run --help or wasmer --help (wc-010a)
+wasmtime_memory_maximum_bytes: 67108864
+wasmer_memory_maximum_bytes: 67108864
 ```
 
 `bundle` is the verified `cid()`'s Display form, treated as opaque; it is the
@@ -764,6 +765,26 @@ so a receipt cannot say ENFORCED for an argv without the cap, and the line
 never follows the engine's name or a constant. On this base `wasmtime` gets
 `max-memory-size=<bytes>,max-memories=1,trap-on-grow-failure=y` and `wasmer`
 gets none ("Memory cap (wc-010b)").
+
+**The module maximum lines (task 034; schema v3).** After the v2 lines,
+`render` adds, per engine, `wasmtime` then `wasmer`:
+
+- `<engine>_memory_maximum_bytes: <pages × 65536>`, the module memory maximum
+  that engine's run was checked against, or
+- `<engine>_memory_maximum_bytes: none (the module has no memory)` when that
+  run's check found no memory (the 8-byte `MODULE` fixture).
+
+The receipt's maximum lines come from `run`'s one `memories` check, per
+engine: each `run_engine` call keeps the maximum its own `check_module_memory`
+call returned (`EngineRun::memory_maximum`, in pages), `run` keeps both in
+`TwoEngineRun`, and `memory_maximum_bytes` turns pages into bytes by the same
+`page_bytes` function the check uses (no second page to bytes rule). No line is
+taken from the manifest, a constant or the engine's name, so a module maximum
+below the declared size is recorded as it is (16 pages under a declared 2 MB
+gives `1048576`), and both lines can be tested against the manifest. The
+`wasmer_memory_cap: SKIPPED` line still reports only that wasmer was given no
+cap flag; wasmer's cap is the module's own maximum, which its maximum line
+records.
 
 The receipt records no peak memory: `/usr/bin/time -l` gives the engine
 process's resident memory, not the capsule's linear memory (wc-010a); which
@@ -1342,8 +1363,8 @@ so `run` and `run_engine` check it, with no fallback:
   names the module, not an engine). A 64-bit or shared memory is not refused
   as such; its maximum is checked like any other.
 
-The check returns the checked maximum in pages; nothing records it yet (the
-receipt's maximum lines are task 034's). On a grow past the maximum, wasmer
+The check returns the checked maximum in pages; task 034 records it per engine
+in the run receipt ("The module maximum lines"). On a grow past the maximum, wasmer
 returns -1 and keeps running (`memory_grow_past_the_module_maximum_returns_minus_one_on_wasmer`);
 wasmtime traps, because task 027 gives it `trap-on-grow-failure=y`, so the
 runner refuses that run as `EngineFailed`. wasmtime's argv is unchanged. The
@@ -2118,7 +2139,7 @@ bundle signed by `signed_bundle_declaring` (the signing half of 027's
 `verified_bundle_declaring`, which now calls it):
 
 - `receipt_records_the_declared_memory_cap` — a bundle declaring `memory_mb: 2`
-  run through `run`: the receipt is the v2 schema, 14 lines, ending in
+  run through `run`: the receipt was the v2 schema, 14 lines, ending in
   `memory_mb: 2`, `memory_cap_bytes: 2097152`, `wasmtime_memory_cap: ENFORCED
   max-memory-size=2097152,max-memories=1,trap-on-grow-failure=y` and the
   `wasmer` SKIPPED line, exactly.
@@ -2130,6 +2151,7 @@ bundle signed by `signed_bundle_declaring` (the signing half of 027's
 
 `receipt_records_observed_engine_versions` and
 `real_receipt_names_both_installed_engines` were updated to the v2 text.
+Task 034 updated all three to the v3 text.
 
 Task 038, pinned engine versions and a rejected cap argument (`tests/run.rs`).
 Every stand-in the two-engine runner starts (`marked`, `recording`,
@@ -2278,30 +2300,49 @@ has one example per new `Reason` variant, each as `TwoEngineRefusal::Memory`,
 each with its own id and `engine: none`, plus a check that a memory reason
 from `run_engine` has the same id.
 
+Task 034, the receipt's module maximum lines (`tests/run.rs`; README "The
+module maximum lines"). Both new tests run a bundle signed by
+`signed_bundle_declaring` (one memory from `memory_module`) through `run` on
+`marked` stand-ins:
+
+- `receipt_memory_maximum_matches_the_bundle_manifest` — declared
+  `memory_mb: 2`, maximum 32 pages: the test reads the declared size from its
+  own `verify_bundle` call on the same bundle, not from the receipt or the run,
+  and requires `wasmtime_memory_maximum_bytes` and
+  `wasmer_memory_maximum_bytes` both present and equal to `memory_mb × 2^20`,
+  2097152.
+- `receipt_records_a_lower_module_maximum_as_it_is` — declared `memory_mb: 2`,
+  maximum 16 pages: both lines say `1048576`, not the declared 2097152.
+
+The v3 text in the three updated tests: the zero-memory `MODULE` gives the
+`none` line on both engines (`receipt_records_observed_engine_versions`,
+`receipt_records_the_declared_memory_cap`, now 16 lines), and the real capsule
+gives `67108864` on both (`real_receipt_names_both_installed_engines`).
+
 ## Falsifiers
 
-`falsifiers.json` holds 179 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 181 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
 seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
 031, two task 032, one task 035, three task 036, five task 038, three task
-039, one task 040, one task 041, two task 043, one task 044 and one task
-033.
+039, one task 040, one task 041, two task 043, one task 044, one task
+033 and two task 034.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 115, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 117, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044 and 033: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
-+ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1), each run by the canonical runner with its summary
+029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033 and 034: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
++ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2), each run by the canonical runner with its summary
 line quoted.
 Hand-proven, pending R1: 66, each counted once: the 64 entries of the sections
 marked so (wc-001, tasks 010 and 009, wc-004 and wc-008: 9 + 7 + 23 + 21 + 4),
-and two proofs with no `falsifiers.json` entry, outside the 179 (task 036's
+and two proofs with no `falsifiers.json` entry, outside the 181 (task 036's
 `/bin/bash` 3.2 guard in `tests/reproducible.rs` and task 042's killed-run
 stop in `tests/run.rs`; neither file is a recovery target, so a proof that
 edits one is a hand proof), each proved by the repo's break →
@@ -3016,3 +3057,24 @@ line between `verify_bundle` and the queries, and its planted edit moves the
 two queries above both; the same bug as before) and re-anchors
 F-WC-README-COUNT to the new total, the same bug as before. All four were re-run
 by the canonical runner and keep their runner-caught label above.
+
+Task 034's two, runner-caught (the canonical runner's summary line is in
+LOG.md, task 034). Each anchor is a new line of `tools/src/receipt.rs`, a
+recovery target, found exactly once, and its named test fails at its
+assertion:
+
+- F-WC10F-WASMER-MAX-MISSING — `render` writes the module maximum line for
+  `wasmtime` only, so `wasmer`'s run has no recorded maximum
+  (`receipt_memory_maximum_matches_the_bundle_manifest`, at its `wasmer` line:
+  `None`, not the declared 2097152).
+- F-WC10F-MAX-FROM-MANIFEST — `render` prints the declared bytes
+  (`memory_cap_bytes`) as every engine's maximum in place of the recorded one
+  (`receipt_records_a_lower_module_maximum_as_it_is`, at its `wasmtime` line:
+  2097152, not the module's 1048576).
+
+Task 034 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before. F-WC10-CAP-REJECTED-RETRY's planted `EngineRun` now also sets the new
+`memory_maximum: None`, so it builds again; the same bug, anchor unchanged.
+Both were re-run by the canonical runner and keep their runner-caught label
+above, as does every other entry that edits `tools/src/run.rs` or
+`tools/src/receipt.rs` (LOG.md, task 034).

@@ -1172,3 +1172,41 @@
   `tools/Cargo.toml`, `capsule/`, `tools/build`, `audit/`, lab CID or sha256 pin changed. Retired-label greps from the
   repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256'
   lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 034 (M1 C0 lab half: the receipt records each engine's module memory maximum). Base `f1d10bc59`.
+  `tools/src/run.rs`: `EngineRun` gets `memory_maximum: Option<u64>` (pages), set by `run_engine` from the value its one
+  `check_module_memory` call returns (no second `memories` call); `start_engine` leaves it `None` for `run_engine` to
+  set. `run` keeps both engines' values in `TwoEngineRun::memory_maximums`; `memory_maximum_bytes(engine)` turns pages
+  into bytes with the new `page_bytes` (pages × 65536, `u64`, saturating), which the check's above-declared comparison
+  now also uses, so there is one page-to-byte conversion. `tools/src/receipt.rs`: `RECEIPT_SCHEMA` is
+  `wc-005.run-receipt/v3`; after every v2 line, `render` adds per engine (wasmtime, then wasmer)
+  `<engine>_memory_maximum_bytes: <bytes>` or `<engine>_memory_maximum_bytes: none (the module has no memory)`
+  (`memory_maximum_line`). The `{engine}_memory_cap` lines, both engines' argv, 033's refusal rule and the refused-run
+  receipt are unchanged. Tests (`tests/run.rs`): `receipt_records_observed_engine_versions`,
+  `receipt_records_the_declared_memory_cap` (now 16 lines) and `real_receipt_names_both_installed_engines` updated to
+  the v3 text (zero-memory `MODULE`: `none` on both; the real capsule: `67108864` on both, real engines, not SKIPPED);
+  new `receipt_memory_maximum_matches_the_bundle_manifest` (declared 2 MB, maximum 32 pages; the declared size from the
+  test's own `verify_bundle` call; both lines must equal 2097152) and `receipt_records_a_lower_module_maximum_as_it_is`
+  (declared 2 MB, maximum 16 pages; both lines 1048576), sharing one helper `receipt_memory_maximums`, plus a
+  `MAXIMUM_16` limits constant. New falsifiers F-WC10F-WASMER-MAX-MISSING (the maximum line for wasmtime only) and
+  F-WC10F-MAX-FROM-MANIFEST (`Some(run.memory_cap_bytes())` in place of the recorded maximum). Re-anchored, the same
+  bug: F-WC-README-COUNT (181) and F-WC10-CAP-REJECTED-RETRY (its planted `EngineRun` gets `memory_maximum: None`; it
+  read BUILD FAILED without it). Canonical runner, from the repo root, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`:
+  `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC10F-WASMER-MAX-MISSING
+  F-WC10F-MAX-FROM-MANIFEST F-WC-README-COUNT` gave "baseline: 3 named tests pass without an edit, 0 do not", each
+  "CAUGHT", "summary: 3 CAUGHT of 3", exit 0. The other 76 entries that edit `tools/src/run.rs` or
+  `tools/src/receipt.rs` gave "baseline: 44 named tests pass without an edit, 0 do not", "summary: 1 BUILD FAILED, 75
+  CAUGHT of 76" (F-WC10-CAP-REJECTED-RETRY, fixed as above); after the fix, that entry alone gave "summary: 1 CAUGHT of
+  1", exit 0. No `*.falsify-original` left. By hand (the runner prints no panic), each new edit planted, its named test
+  run, then the file restored (sha256 `7b3b94ab...9c2a` before and after): F-WC10F-WASMER-MAX-MISSING failed at
+  `tests/run.rs:3366` (`left: None`, `right: Some("wasmer_memory_maximum_bytes: 2097152")`); F-WC10F-MAX-FROM-MANIFEST
+  at `tests/run.rs:3385` (`left: Some("wasmtime_memory_maximum_bytes: 2097152")`, `right:
+  Some("wasmtime_memory_maximum_bytes: 1048576")`). All 190 anchors in `falsifiers.json` are found exactly once (a
+  `str.count` = 1 loop). README: the real v3 receipt from this Mac, "The module maximum lines (task 034; schema v3)"
+  (the lines come from `run`'s one `memories` check, per engine; `wasmer_memory_cap: SKIPPED` still reports only the
+  missing flag; no peak memory, unchanged), 033's "nothing records it yet" sentence, named tests, totals 181 (two task
+  034) and 117 runner-caught, a task 034 section. ADOPTION's receipt line names the new lines; `run.rs` and
+  `receipt.rs` module docs. Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test
+  --locked` (126 passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check`
+  exit 0. No dependency, `Cargo.toml`, `Cargo.lock`, `tools/Cargo.toml`, `capsule/`, `tools/build`, `audit/`, lab CID
+  or pin changed. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and
+  `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.

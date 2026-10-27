@@ -148,7 +148,9 @@
 //! given and, per engine, the memory cap argument it was started with, read
 //! back from that process's own argv (the argument after `-W`), never from the
 //! engine's name or a constant; the receipt renders these too. `wasmer`'s is
-//! none.
+//! none. Task 034: and, per engine, the module memory maximum that engine's
+//! own [`run_engine`] call was checked against, from its one memory check
+//! (none for a module with no memory); the receipt renders it in bytes.
 //!
 //! The two-engine result is a behaviour proof on one core module on this
 //! machine, not the Component ABI. Both engines are test-only, not endorsed.
@@ -512,12 +514,17 @@ impl Error for Refusal {}
 /// wc-010c: also the declared `memory_mb` the run was given, and the memory
 /// cap argument the engine was started with: the argument after `-W` in the
 /// argv the process got, read back from that argv, or none.
+///
+/// Task 034: also the module memory maximum, in pages, that this run was
+/// checked against: the value [`check_module_memory`] returned in this
+/// [`run_engine`] call, or none for a module with no memory.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EngineRun {
     pub status: ExitStatus,
     pub stdout: Vec<u8>,
     pub memory_mb: u32,
     pub memory_cap: Option<String>,
+    pub memory_maximum: Option<u64>,
 }
 
 /// Run `engine`, the program at the absolute path `program`, once on
@@ -527,7 +534,8 @@ pub struct EngineRun {
 /// Task 033: then the module's memory is checked ([`check_module_memory`]),
 /// before any folder is made.
 /// The steps and their order are in the module docs; the first refusal is the
-/// answer. Success returns the engine's exit status and stdout.
+/// answer. Success returns the engine's exit status and stdout, and (task 034)
+/// the maximum that check returned.
 pub fn run_engine(
     bundle: &VerifiedBundle,
     engine: Engine,
@@ -536,12 +544,15 @@ pub fn run_engine(
     control: &RunControl,
 ) -> Result<EngineRun, Refusal> {
     check_budget(control, work_root)?;
-    check_module_memory(bundle)?;
+    let memory_maximum = check_module_memory(bundle)?;
     check_program(program)?;
     check_work_root(work_root)?;
     let run_dir = make_run_dir(work_root, engine)?;
     let outcome = write_and_start(bundle, engine, program, &run_dir, control);
-    finish_run(&run_dir, outcome)
+    finish_run(&run_dir, outcome).map(|run| EngineRun {
+        memory_maximum,
+        ..run
+    })
 }
 
 /// Task 043: a zero budget is refused, with `work_root` as its path, before
@@ -583,7 +594,7 @@ fn check_module_memory(bundle: &VerifiedBundle) -> Result<Option<u64>, Refusal> 
         .maximum
         .ok_or_else(|| refuse(Reason::MemoryMaximumMissing { minimum }))?;
     let memory_mb = bundle.memory_mb();
-    if maximum.saturating_mul(WASM_PAGE_BYTES) > memory_cap_bytes(memory_mb) {
+    if page_bytes(maximum) > memory_cap_bytes(memory_mb) {
         return Err(refuse(Reason::MemoryMaximumAboveDeclared {
             maximum,
             memory_mb,
@@ -672,6 +683,13 @@ fn remove_run_dir(run_dir: &Path, module_made: bool) -> Result<(), Refusal> {
 /// the cap argument and [`TwoEngineRun::memory_cap_bytes`] both use it.
 fn memory_cap_bytes(memory_mb: u32) -> u64 {
     u64::from(memory_mb) * BYTES_PER_MB
+}
+
+/// The bytes in `pages` Wasm pages: `pages × 65536`, in `u64`, saturating. The
+/// one page to bytes conversion: the memory check and
+/// [`TwoEngineRun::memory_maximum_bytes`] both use it (task 034).
+fn page_bytes(pages: u64) -> u64 {
+    pages.saturating_mul(WASM_PAGE_BYTES)
 }
 
 /// `engine`'s module-run arguments that cap its linear memory at the
@@ -810,6 +828,8 @@ fn start_engine(
         stdout: output.stdout,
         memory_mb,
         memory_cap: memory_cap_given(&command),
+        // Task 034: `run_engine` sets it from its one memory check.
+        memory_maximum: None,
     })
 }
 
@@ -1004,7 +1024,8 @@ pub struct RunInput<'a> {
 /// version and exit status, both stdouts, the linked imports and the unused
 /// grants; wc-010c: the declared `memory_mb` the module runs were given and
 /// each engine's memory cap argument, as its [`EngineRun`] read it back from
-/// the argv it was started with.
+/// the argv it was started with; task 034: each engine's module memory
+/// maximum, as its own [`run_engine`] call's memory check returned it.
 ///
 /// Its fields are private and it has no public constructor, so a value exists
 /// only as [`run`] made it. It is no admission or launch value.
@@ -1020,6 +1041,7 @@ pub struct TwoEngineRun {
     unused_grants: Vec<DeclaredImport>,
     memory_mb: u32,
     memory_caps: [Option<String>; 2],
+    memory_maximums: [Option<u64>; 2],
 }
 
 impl TwoEngineRun {
@@ -1094,6 +1116,19 @@ impl TwoEngineRun {
             Engine::Wasmer => self.memory_caps[1].as_deref(),
         }
     }
+
+    /// Task 034: the module memory maximum `engine`'s module run was checked
+    /// against, in bytes (pages × 65536, by the memory check's own
+    /// conversion), or `None` when the module has no memory. It is the value
+    /// that engine's own [`run_engine`] call recorded from its one memory
+    /// check, never the declared size or a constant.
+    pub fn memory_maximum_bytes(&self, engine: Engine) -> Option<u64> {
+        let pages = match engine {
+            Engine::Wasmtime => self.memory_maximums[0],
+            Engine::Wasmer => self.memory_maximums[1],
+        };
+        pages.map(page_bytes)
+    }
 }
 
 /// Why a two-engine run was refused. Each reason has its own variant and its
@@ -1163,6 +1198,7 @@ pub fn run(input: &RunInput) -> Result<TwoEngineRun, TwoEngineRefusal> {
     let statuses = [wasmtime.status, wasmer.status];
     let memory_mb = wasmtime.memory_mb;
     let memory_caps = [wasmtime.memory_cap, wasmer.memory_cap];
+    let memory_maximums = [wasmtime.memory_maximum, wasmer.memory_maximum];
     let (wasmtime, wasmer) = (wasmtime.stdout, wasmer.stdout);
     if wasmtime != wasmer {
         return Err(TwoEngineRefusal::OutputsDiffer { wasmtime, wasmer });
@@ -1178,5 +1214,6 @@ pub fn run(input: &RunInput) -> Result<TwoEngineRun, TwoEngineRefusal> {
         unused_grants: bundle.unused_grants().to_vec(),
         memory_mb,
         memory_caps,
+        memory_maximums,
     })
 }
