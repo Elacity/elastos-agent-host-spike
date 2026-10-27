@@ -8398,3 +8398,68 @@ Rerun after the revert:
 
 - `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0.
 - `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 262.51 seconds, inside the 600-second bound. 176 tests: 162 passed, 0 failed, 14 ignored. Lib 48, effects 59 passed with 12 ignored, report 23, runtime 10 with 2 ignored, harness 9, artifact 7, build 1, standin_contract 2, probe 3. `cleanup_census_refuses_each_leftover` passed this time; the census race remains open in the planner item above.
+
+## 059 — A12: stopped stand-in leaves no pending request
+
+059: `standin_a12_census` reads the shell live view through `grants::live_grant_state`, reads the shell capsule list, refuses `starting`, `running` and `stopping`, then for each capsule reads that entry's `session_id` and calls the one `get_capability_requests(Shell, Some(session_id))`. A missing session returns `capsule entry requires a session`, a route error returns that reason, a `pending` request returns `pending request leftover`, and any other status including `denied` continues. The physical `census::cleanup` still runs after the loop. `standin_stopped_run_leaves_no_live_grant` seeds `req-p1` and `req-p2` before the two stops, checks that the earlier census still returns `live grant leftover`, checks each stopped session's record is `denied` with `settled_by` `runtime` and the stop cause, and then requires `Ok(())`. A third run with no seed is stopped the same way, seeds `req-left` after the stops, and its census returns `pending request leftover`. No `StandIn` method, no second census function and no second request renderer were added. `standin-runtime/mod.rs`, `src/census.rs`, `tests/common/grants.rs` and `GAPS.md` are byte-identical to the branch base.
+
+The census sentence, read only at `35697329be0aad89eb68d0adf78aa94d24751317:lab/resident-instances/SPEC.md`:
+
+> No pending request comes from a journey session.
+
+This task takes that sentence only. The process-tree walk and `GET /api/health` stay with that harness. A passing row gives the real Runtime no A12 credit, and `run_leaves_no_live_grant` stays `#[ignore = "blocked: AC-021-GRANTS"]`.
+
+### Hand-run falsifiers
+
+Each plant ran alone and was restored before the next. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects standin_stopped_run_leaves_no_live_grant -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. Each planted crate compiled.
+
+F-standin-a12-skip-pending. Planted exit 101 in 2.53 seconds. Restored exit 0 in 1.88 seconds. Assertion: `tests/effects.rs:1378:5` `the stand-in refuses a pending request after both stops: Ok(())`.
+
+Old:
+
+```text
+            if request["status"] == "pending" {
+```
+
+New:
+
+```text
+            if false && request["status"] == "pending" {
+```
+
+F-standin-a12-denied-is-pending. Planted exit 101 in 1.39 seconds. Restored exit 0 in 2.09 seconds. Assertion: `tests/effects.rs:1328:5` `the stand-in leaves no live grant, live instance, pending request or physical leftover after both stops`.
+
+Old:
+
+```text
+            if request["status"] == "pending" {
+```
+
+New:
+
+```text
+            if request["status"] == "pending" || request["status"] == "denied" {
+```
+
+The two entries were appended after `F-standin-a12-skip-cleanup`; its `old` and `new` bytes, and those of `F-standin-a12-stub` and `F-standin-a12-skip-status`, are unchanged. Each new `old` occurs once in the formatted file. The three planted-run roots and the first gate's retained root were removed after this record.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.13 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`, first run: exit 101, real 247.99 seconds. The effects target reported 58 passed, 1 failed, 12 ignored in 194.33 seconds. The only failure was `attach_secret_stays_in_memory`, at `tests/effects.rs:497:5`, with `cleanup census: FAIL retained:target/home-36502-1793132017879378000-11; process leftover; processes:1 paths:["stderr-18"] API sockets:0 temp:0 paths:[]`. That is acceptance 6's allowed case: a named test and a process-leftover path matching `stderr-<digits>`.
+- Rerun, after no change: exit 0, real 270.46 seconds, inside the 600-second bound. Lib 48, report binary 1, artifact 7, build 1, effects 59 passed with 12 ignored, harness 9, report 23, runtime 10 with 2 ignored, standin_contract 2, probe 3. `standin_stopped_run_leaves_no_live_grant` passed. `run_leaves_no_live_grant` stayed ignored on `AC-021-GRANTS`.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The test reads request records by `session_id` at `tests/effects.rs:1147`; the seeded resource is a Public path, not a code or content identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | The change is test code on the lab stand-in; it opens one loopback port and one throwaway home. |
+| 3. A second path or a second copy of one rule? | No | `tests/effects.rs:1151` is the one `get_capability_requests` read, inside the one census function; `standin-runtime/mod.rs` keeps the one settlement rule. |
+| 4. Runtime core grows? | No | No `elastos/`, `capsules/` or `scripts/` edit. |
+| 5. Refusals deny by default with a clear reason? | Yes | `tests/effects.rs:1149`, `:1152` and `:1158` return `capsule entry requires a session`, the route reason, and `pending request leftover`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The test seeds the stand-in and adds no capsule import; the real capability call still returns the grant. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/effects.rs:1170` `standin_stopped_run_leaves_no_live_grant`; the two plants above fail it and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | `tests/effects.rs:1129` reads the grant view, `:1144` the instance list and `:1151` the request store as separate reads; the stop at `:1266` settles only that session's requests. |

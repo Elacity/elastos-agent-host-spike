@@ -1482,6 +1482,38 @@
       ]
     },
     {
+      "id": "F-standin-a12-skip-pending",
+      "title": "skip the pending comparison in the A12 census",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/tests/effects.rs",
+          "old": "            if request[\"status\"] == \"pending\" {",
+          "new": "            if false && request[\"status\"] == \"pending\" {"
+        }
+      ],
+      "tests": [
+        "standin_stopped_run_leaves_no_live_grant"
+      ]
+    },
+    {
+      "id": "F-standin-a12-denied-is-pending",
+      "title": "treat a denied request as pending in the A12 census",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/tests/effects.rs",
+          "old": "            if request[\"status\"] == \"pending\" {",
+          "new": "            if request[\"status\"] == \"pending\" || request[\"status\"] == \"denied\" {"
+        }
+      ],
+      "tests": [
+        "standin_stopped_run_leaves_no_live_grant"
+      ]
+    },
+    {
       "id": "F-net-undeclared",
       "title": "stage the declared manifest for the undeclared network refusal",
       "command": "agent-conformance",

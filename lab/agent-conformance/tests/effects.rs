@@ -1144,6 +1144,20 @@ fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Res
         if status == "starting" || status == "running" || status == "stopping" {
             return Err(format!("instance still live: {status}"));
         }
+        let session_id = capsule["session_id"]
+            .as_str()
+            .ok_or("capsule entry requires a session")?;
+        let pending = standin
+            .get_capability_requests(StandInCaller::Shell, Some(session_id))
+            .map_err(|(_, reason)| reason)?;
+        let requests = pending["requests"]
+            .as_array()
+            .ok_or("request list requires a request array")?;
+        for request in requests {
+            if request["status"] == "pending" {
+                return Err("pending request leftover".to_owned());
+            }
+        }
     }
     match census::cleanup(home, port) {
         Ok(line) if line.contains("root checks PASS") => Ok(()),
@@ -1202,6 +1216,17 @@ fn standin_stopped_run_leaves_no_live_grant() {
             Life::Live,
             false,
         );
+    }
+    for (request_id, session_id) in [("req-p1", "component-1"), ("req-p2", "component-2")] {
+        stopped_run
+            .seed_request(
+                request_id,
+                session_id,
+                "localhost://Public/resident-instances/shared.txt",
+                "read",
+                "read shared",
+            )
+            .expect("the stand-in stores the run's pending request");
     }
     let view = stopped_run
         .get_capability_list(StandInCaller::Shell, Some("all_sessions_live"))
@@ -1268,9 +1293,41 @@ fn standin_stopped_run_leaves_no_live_grant() {
             "the stand-in reports a stopped entry as not live"
         );
     }
+    for (request_id, session_id, decision_reason) in [
+        ("req-p1", "component-1", "stopped: stop one"),
+        ("req-p2", "component-2", "stopped: stop two"),
+    ] {
+        let pending = stopped_run
+            .get_capability_requests(StandInCaller::Shell, Some(session_id))
+            .expect("the stand-in returns the stopped session's requests");
+        let requests = pending["requests"]
+            .as_array()
+            .expect("the stand-in returns a request list");
+        assert_eq!(
+            requests.len(),
+            1,
+            "the stand-in keeps exactly one request for {session_id}"
+        );
+        assert_eq!(
+            requests[0]["request_id"], request_id,
+            "the stand-in keeps the seeded request id"
+        );
+        assert_eq!(
+            requests[0]["status"], "denied",
+            "the stand-in denies the stopped session's request"
+        );
+        assert_eq!(
+            requests[0]["settled_by"], "runtime",
+            "the stand-in settles the request as the runtime"
+        );
+        assert_eq!(
+            requests[0]["decision_reason"], decision_reason,
+            "the stand-in names the stop cause"
+        );
+    }
     assert!(
         standin_a12_census(&stopped_run, &home, port).is_ok(),
-        "the stand-in leaves no live grant, live instance or physical leftover after both stops"
+        "the stand-in leaves no live grant, live instance, pending request or physical leftover after both stops"
     );
     let leftover = home.temp().join("a12-temp-leftover");
     std::fs::write(&leftover, b"leftover").expect("the stand-in run plants one temp file");
@@ -1283,6 +1340,44 @@ fn standin_stopped_run_leaves_no_live_grant() {
     assert!(
         standin_a12_census(&stopped_run, &home, port).is_ok(),
         "the stand-in returns to a clean physical census after the temp file is removed"
+    );
+    let mut fresh_run = StandIn::new();
+    assert_eq!(
+        launch_two(&mut fresh_run),
+        vec!["component-1".to_owned(), "component-2".to_owned()],
+        "the stand-in numbers the third run's launches"
+    );
+    fresh_run
+        .delete_capsule(
+            StandInCaller::Shell,
+            "component-1",
+            &json!({"reason": "stop one"}),
+        )
+        .expect("the stand-in stops the third run's component-1");
+    fresh_run
+        .delete_capsule(
+            StandInCaller::Shell,
+            "component-2",
+            &json!({"reason": "stop two"}),
+        )
+        .expect("the stand-in stops the third run's component-2");
+    assert!(
+        standin_a12_census(&fresh_run, &home, port).is_ok(),
+        "the stand-in's third run leaves no request before the pending seed"
+    );
+    fresh_run
+        .seed_request(
+            "req-left",
+            "component-1",
+            "localhost://Public/resident-instances/shared.txt",
+            "read",
+            "read shared",
+        )
+        .expect("the stand-in stores the third run's pending request");
+    let census = standin_a12_census(&fresh_run, &home, port);
+    assert!(
+        matches!(&census, Err(reason) if reason.contains("pending request leftover")),
+        "the stand-in refuses a pending request after both stops: {census:?}"
     );
     home.finish()
         .expect("the stand-in run removes its throwaway home");
