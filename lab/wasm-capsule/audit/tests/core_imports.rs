@@ -566,3 +566,31 @@ fn memory_without_a_maximum_reports_none() {
         }])
     );
 }
+
+#[test]
+fn memory64_is_reported() {
+    let wasm = wat::parse_str("(module (memory i64 1 4))").unwrap();
+    assert_eq!(
+        memories(&wasm),
+        Ok(vec![MemoryLimits {
+            minimum: 1,
+            maximum: Some(4),
+            memory64: true,
+            shared: false,
+        }])
+    );
+}
+
+#[test]
+fn shared_memory_is_reported() {
+    let wasm = wat::parse_str("(module (memory 1 2 shared))").unwrap();
+    assert_eq!(
+        memories(&wasm),
+        Ok(vec![MemoryLimits {
+            minimum: 1,
+            maximum: Some(2),
+            memory64: false,
+            shared: true,
+        }])
+    );
+}
