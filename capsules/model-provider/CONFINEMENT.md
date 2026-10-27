@@ -479,7 +479,9 @@ macOS half only. `operations_section_cites_existing_tests` checks that each
 cited `model_` or `generated_` test name, and
 `allow_rules_trace_to_declared_rights`, is a function in
 `tests/confine/main.rs`. The check covers `model_` names, `generated_` names,
-and `allow_rules_trace_to_declared_rights`.
+and `allow_rules_trace_to_declared_rights`. The same test requires each Right
+cell to be an approved right id or `no named test shows this`, and each Linux
+cell to be `designed, not enforced`.
 
 | Operation | Inputs | Outputs | Right | Effect | macOS rule and test | Linux |
 | --- | --- | --- | --- | --- | --- | --- |
