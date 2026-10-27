@@ -11,6 +11,9 @@
 pub mod ledger;
 pub mod link;
 mod ops;
+// Placed here as this slice requires; rustfmt would sort it before `ledger`.
+#[rustfmt::skip]
+mod ask;
 
 #[cfg(test)]
 mod plant;

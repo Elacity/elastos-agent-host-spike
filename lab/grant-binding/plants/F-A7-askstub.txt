@@ -1,0 +1,7 @@
+id: F-A7-askstub
+file: src/ask.rs
+test: ask::model_admitted_ask_sets_the_ceiling
+--- old
+        self.admit(ask.amount);
+--- new
+--- end
