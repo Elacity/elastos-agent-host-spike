@@ -2263,6 +2263,31 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
     );
 }
 
+fn allow_form_closes(profile: &str) -> Result<(), String> {
+    for line in profile.lines() {
+        if line.starts_with(";;") {
+            continue;
+        }
+        let line = line.trim();
+        if !line.contains("(allow") {
+            continue;
+        }
+        let mut open = 0usize;
+        let mut close = 0usize;
+        for ch in line.chars() {
+            if ch == '(' {
+                open += 1;
+            } else if ch == ')' {
+                close += 1;
+            }
+        }
+        if open != close {
+            return Err(format!("allow form does not close: {line}"));
+        }
+    }
+    Ok(())
+}
+
 /// Every allow rule in `confine.sb` traces to exactly one approved declared
 /// right or one platform-baseline rule in the declared-rights fixture.
 ///
@@ -2352,6 +2377,25 @@ fn allow_rules_trace_to_declared_rights() {
     );
 
     let profile = fs::read_to_string(PROFILE_PATH).expect("the profile source");
+    let unclosed = [
+        "(allow file-read-data (literal \"/\"))",
+        "(allow",
+        "file-read* (literal \"/tmp/cc-unclosed\"))",
+        "(allow sysctl-read)",
+    ]
+    .join("\n");
+    let unclosed_message = allow_form_closes(&unclosed)
+        .expect_err("an allow form that does not close must fail before check 2");
+    assert!(
+        unclosed_message.contains("allow form does not close")
+            && unclosed_message.contains("(allow")
+            && !unclosed_message.contains("allow rule has no declared right")
+            && !unclosed_message.contains("startup-root-directory widened"),
+        "{unclosed_message}"
+    );
+    if let Err(reason) = allow_form_closes(&profile) {
+        panic!("{reason}");
+    }
     let allow_lines = collect_allow_lines(&profile);
     let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
     let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
@@ -2699,31 +2743,6 @@ fn platform_baseline_rules_stay_narrow() {
     // A trimmed line that contains `(allow` must close on that line. The
     // scan below keeps only a line that starts with `(allow `, so an unclosed
     // form would otherwise leave both pins in place.
-    fn allow_form_closes(profile: &str) -> Result<(), String> {
-        for line in profile.lines() {
-            if line.starts_with(";;") {
-                continue;
-            }
-            let line = line.trim();
-            if !line.contains("(allow") {
-                continue;
-            }
-            let mut open = 0usize;
-            let mut close = 0usize;
-            for ch in line.chars() {
-                if ch == '(' {
-                    open += 1;
-                } else if ch == ')' {
-                    close += 1;
-                }
-            }
-            if open != close {
-                return Err(format!("allow form does not close: {line}"));
-            }
-        }
-        Ok(())
-    }
-
     let unclosed = [
         "(allow file-read-data (literal \"/\"))",
         "(allow",

@@ -547,7 +547,9 @@ profile does not grant".
   after another form on the same line is taken from that `(allow `. A new
   grant fails check 2. `F-cc37a` writes that allow after `(deny network*)`.
   A same-line copy of a declared rule is kept, and check 3 fails with
-  `declared rule matches more than one allow line`.
+  `declared rule matches more than one allow line`. The trace calls
+  `allow_form_closes`. An allow form that contains `(allow` and does not
+  close fails with `allow form does not close`, before check 2.
 - `platform_baseline_rules_stay_narrow`: `startup-root-directory` stays
   `(allow file-read-data (literal "/"))` and `startup-sysctl` stays
   `(allow sysctl-read)`. Each pin is written in the test. A wider path or
