@@ -3,7 +3,7 @@
 use agent_conformance::build::repository;
 use agent_conformance::harness::{Completion, RunningInstances, ThrowawayHome};
 use agent_conformance::identity::Observation;
-use agent_conformance::report::{render_run, GitIdentity};
+use agent_conformance::report::{render_run, GitIdentity, INSTANCE_GRANTS_SCOPE};
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -411,10 +411,14 @@ impl Overlap {
     }
 
     fn line(&self) -> String {
-        format!("instance overlap: instance-1 instance-2 barriers:{} first:{:.6}s second:{:.6}s overlap:{:.6}s elapsed:{:.6}s; process-isolation lab half of A3, A6 and A9",
-            self.stage, self.waits.first().copied().unwrap_or_default().as_secs_f64(),
+        format!(
+            "instance overlap: instance-1 instance-2 barriers:{} first:{:.6}s second:{:.6}s overlap:{:.6}s elapsed:{:.6}s; {INSTANCE_GRANTS_SCOPE}",
+            self.stage,
+            self.waits.first().copied().unwrap_or_default().as_secs_f64(),
             self.waits.get(1).copied().unwrap_or_default().as_secs_f64(),
-            self.duration.as_secs_f64(), self.started.elapsed().as_secs_f64())
+            self.duration.as_secs_f64(),
+            self.started.elapsed().as_secs_f64()
+        )
     }
 }
 
@@ -465,6 +469,12 @@ pub struct AgentRecord {
 
 pub const GRANTED_READ_RESOURCE: &str = "localhost://Public/agent-conformance-grants/granted.txt";
 pub const SIBLING_READ_RESOURCE: &str = "localhost://Public/agent-conformance-grants/sibling.txt";
+pub const INSTANCE_A_AREA: &str = "localhost://Public/agent-conformance-grants/instance-a/";
+pub const INSTANCE_B_AREA: &str = "localhost://Public/agent-conformance-grants/instance-b/";
+pub const INSTANCE_A_FILE: &str = "localhost://Public/agent-conformance-grants/instance-a/own.txt";
+pub const INSTANCE_B_FILE: &str = "localhost://Public/agent-conformance-grants/instance-b/own.txt";
+pub const INSTANCE_A_SIBLING_FILE: &str =
+    "localhost://Public/agent-conformance-grants/instance-a/sibling.txt";
 
 impl Controller {
     pub fn attach(home: &ThrowawayHome, port: u16, fixture: Fixture) -> Result<Self> {
@@ -900,20 +910,33 @@ impl Controller {
         resource: &str,
         reason: &str,
     ) -> Result<SessionGrant> {
-        let response = self.exchange(
-            session.bearer_index,
-            "POST",
-            "/api/capability/request",
-            None,
-            &json!({
-                "resource": resource,
-                "action": "read",
-                "reason": reason
-            }),
-        )?;
-        let response = require_json(response)?;
+        self.open_session_grant(session, resource, "read", reason)
+    }
+
+    /// Request a write, grant it for this session only, and keep the token.
+    pub fn open_session_write(
+        &mut self,
+        session: &ClientSession,
+        resource: &str,
+        reason: &str,
+    ) -> Result<SessionGrant> {
+        self.open_session_grant(session, resource, "write", reason)
+    }
+
+    fn open_session_grant(
+        &mut self,
+        session: &ClientSession,
+        resource: &str,
+        action: &str,
+        reason: &str,
+    ) -> Result<SessionGrant> {
+        let response = self.request_capability(session, resource, action, reason)?;
         if response["status"] != "pending" {
-            return Err("client read request was not pending");
+            return Err(match action {
+                "read" => "client read request was not pending",
+                "write" => "client write request was not pending",
+                _ => "client capability request was not pending",
+            });
         }
         let request_id = field(&response, "request_id")?;
         if !request_id
@@ -950,6 +973,80 @@ impl Controller {
             session_id: pending_session,
             capability,
         })
+    }
+
+    fn request_capability(
+        &self,
+        session: &ClientSession,
+        resource: &str,
+        action: &str,
+        reason: &str,
+    ) -> Result<Value> {
+        let response = self.exchange(
+            session.bearer_index,
+            "POST",
+            "/api/capability/request",
+            None,
+            &json!({
+                "resource": resource,
+                "action": action,
+                "reason": reason
+            }),
+        )?;
+        require_json(response)
+    }
+
+    /// Write one file with the session grant. The resource is the granted path.
+    pub fn write_granted(
+        &self,
+        session: &ClientSession,
+        resource: &str,
+        grant: &SessionGrant,
+        content: &[u8],
+    ) -> Result<()> {
+        let response = self.exchange(
+            session.bearer_index,
+            "POST",
+            "/api/provider/localhost/write",
+            Some(grant.capability),
+            &json!({
+                "path": resource,
+                "content": content,
+                "append": false
+            }),
+        )?;
+        let body = require_json(response)?;
+        if body["status"] != "ok" {
+            return Err("granted write did not succeed");
+        }
+        let written = body["data"]["bytes_written"]
+            .as_u64()
+            .ok_or("granted write returned no size")?;
+        if written != content.len() as u64 {
+            return Err("granted write size differs from the owned file");
+        }
+        self.print_checked(&format!(
+            "owned root: write {resource} status:ok bytes:{written}"
+        ))
+    }
+
+    /// Ask the Runtime about a write under another session's area.
+    /// A pending request is denied here, before the caller reports the gap.
+    pub fn settle_sibling_root_request(
+        &mut self,
+        session: &ClientSession,
+        resource: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let response = self.request_capability(session, resource, "write", reason)?;
+        let status = field(&response, "status")?;
+        self.print_checked(&format!(
+            "owned root: sibling request {resource} status:{status}"
+        ))?;
+        if status == "pending" {
+            self.deny(&response, "fixture settlement: sibling storage root")?;
+        }
+        owned_root_refusal(status, response["reason"].as_str())
     }
 
     fn pending_session(&self, request_id: &str) -> Result<String> {
@@ -1198,6 +1295,18 @@ impl Controller {
             .all(|prefix| printed.lines().any(|line| line.starts_with(prefix)))
         {
             return Err("required session-grant evidence is missing");
+        }
+        if name == "instance_writes_only_under_own_storage_root" {
+            let writes = printed
+                .lines()
+                .filter(|line| line.starts_with("owned root: write "))
+                .count();
+            let sibling = printed
+                .lines()
+                .any(|line| line.starts_with("owned root: sibling request "));
+            if writes != 2 || !sibling {
+                return Err("required owned-root evidence is missing");
+            }
         }
         self.check_inventory(
             &report_inventory(name, observations, &printed, passed)?,
@@ -1722,6 +1831,17 @@ pub fn grant_names_verified_agent(
         return Err("grant record principal differs from the verified caller principal");
     }
     Ok(())
+}
+
+/// A sibling write is a Runtime refusal, or it is still pending for the shell.
+pub fn owned_root_refusal(status: &str, reason: Option<&str>) -> Result<()> {
+    let reason = reason.map(str::trim).filter(|text| !text.is_empty());
+    match status {
+        "denied" | "auto_denied" if reason.is_some() => Ok(()),
+        "denied" | "auto_denied" => Err("owned root refusal has no reason"),
+        "pending" => Err("Runtime left the sibling write pending for the shell"),
+        _ => Err("owned root request was not a Runtime refusal"),
+    }
 }
 
 /// Only a port is accepted; neither coordinates nor HTTP responses can select
@@ -3074,6 +3194,168 @@ mod tests {
             "credential checker must reject the in-memory canary"
         );
         assert!(!header_token("fixture\r\nheader"));
+    }
+
+    #[test]
+    fn overlap_line_says_process_isolation_not_a3() {
+        let line = Overlap::new().line();
+        assert!(line.contains(
+            "process isolation, not A3 (A3 needs resident instances in one Runtime); lab half of A6 and A9"
+        ));
+    }
+
+    #[test]
+    fn owned_files_stay_under_their_areas() {
+        assert!(INSTANCE_A_FILE.starts_with(INSTANCE_A_AREA));
+        assert!(INSTANCE_B_FILE.starts_with(INSTANCE_B_AREA));
+        assert!(INSTANCE_A_SIBLING_FILE.starts_with(INSTANCE_A_AREA));
+        assert!(!INSTANCE_A_SIBLING_FILE.starts_with(INSTANCE_B_AREA));
+        assert_ne!(INSTANCE_A_FILE, INSTANCE_A_SIBLING_FILE);
+    }
+
+    #[test]
+    fn owned_root_refusal_accepts_only_a_runtime_denial_with_a_reason() {
+        assert_eq!(owned_root_refusal("denied", Some("sibling root")), Ok(()));
+        assert_eq!(
+            owned_root_refusal("auto_denied", Some("sibling root")),
+            Ok(())
+        );
+        assert_eq!(
+            owned_root_refusal("denied", None),
+            Err("owned root refusal has no reason")
+        );
+        assert_eq!(
+            owned_root_refusal("auto_denied", Some("  ")),
+            Err("owned root refusal has no reason")
+        );
+        assert_eq!(
+            owned_root_refusal("pending", None),
+            Err("Runtime left the sibling write pending for the shell")
+        );
+        assert_eq!(
+            owned_root_refusal("granted", Some("sibling root")),
+            Err("owned root request was not a Runtime refusal")
+        );
+    }
+
+    fn client_b(controller: &mut Controller) -> ClientSession {
+        controller.credentials.push("client-bearer".into());
+        ClientSession {
+            bearer_index: controller.credentials.len() - 1,
+            session_id: "client-b".into(),
+        }
+    }
+
+    #[test]
+    fn pending_sibling_root_is_denied_before_it_fails() {
+        with_frames(
+            vec![
+                framed(
+                    "200 OK",
+                    r#"{"status":"pending","request_id":"req-sibling"}"#,
+                ),
+                framed("200 OK", r#"{"success":true}"#),
+            ],
+            |port| {
+                let mut controller = idle_controller(port);
+                let session = client_b(&mut controller);
+                assert_eq!(
+                    controller.settle_sibling_root_request(
+                        &session,
+                        INSTANCE_A_SIBLING_FILE,
+                        "agent conformance: sibling root",
+                    ),
+                    Err("Runtime left the sibling write pending for the shell")
+                );
+                assert_eq!(controller.decisions.denied, 1);
+            },
+        );
+    }
+
+    #[test]
+    fn runtime_root_refusal_makes_no_shell_decision() {
+        for status in ["denied", "auto_denied"] {
+            let body = format!(r#"{{"status":"{status}","reason":"sibling root"}}"#);
+            with_frames(vec![framed("200 OK", &body)], |port| {
+                let mut controller = idle_controller(port);
+                let session = client_b(&mut controller);
+                assert_eq!(
+                    controller.settle_sibling_root_request(
+                        &session,
+                        INSTANCE_A_SIBLING_FILE,
+                        "agent conformance: sibling root",
+                    ),
+                    Ok(())
+                );
+                assert_eq!(controller.decisions.denied, 0);
+            });
+        }
+        with_frames(vec![framed("200 OK", r#"{"status":"denied"}"#)], |port| {
+            let mut controller = idle_controller(port);
+            let session = client_b(&mut controller);
+            assert_eq!(
+                controller.settle_sibling_root_request(
+                    &session,
+                    INSTANCE_A_SIBLING_FILE,
+                    "agent conformance: sibling root",
+                ),
+                Err("owned root refusal has no reason")
+            );
+            assert_eq!(controller.decisions.denied, 0);
+        });
+    }
+
+    #[test]
+    fn owned_root_journey_requires_its_printed_evidence() {
+        let controller = idle_controller(0);
+        let natives = [
+            Observation::Native {
+                role: "elastos".into(),
+                sha256: "a".repeat(64),
+            },
+            Observation::Native {
+                role: "localhost-provider".into(),
+                sha256: "b".repeat(64),
+            },
+        ];
+        assert_eq!(
+            controller.check_journey(
+                "instance_writes_only_under_own_storage_root",
+                &natives,
+                false,
+            ),
+            Err("required owned-root evidence is missing")
+        );
+        controller
+            .print_checked(&format!(
+                "owned root: write {INSTANCE_A_FILE} status:ok bytes:10"
+            ))
+            .unwrap();
+        controller
+            .print_checked(&format!(
+                "owned root: write {INSTANCE_B_FILE} status:ok bytes:10"
+            ))
+            .unwrap();
+        assert_eq!(
+            controller.check_journey(
+                "instance_writes_only_under_own_storage_root",
+                &natives,
+                false,
+            ),
+            Err("required owned-root evidence is missing")
+        );
+        controller
+            .print_checked(&format!(
+                "owned root: sibling request {INSTANCE_A_SIBLING_FILE} status:pending"
+            ))
+            .unwrap();
+        controller
+            .check_journey(
+                "instance_writes_only_under_own_storage_root",
+                &natives,
+                false,
+            )
+            .unwrap();
     }
 }
 

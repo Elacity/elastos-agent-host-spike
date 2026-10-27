@@ -19,6 +19,9 @@ declared-rights file and the contract head, and
 `generated_did_and_wallet_profiles_match_their_committed_oracles` requires it
 to equal this oracle; the Runtime's own generator and its comparison are not
 built and stay in `elastos/`, outside this lane.
+The lab generator and writer are test code only, and
+`lab_generator_is_named_only_in_test_code` fails if a file outside test code
+names either, so the Runtime keeps one profile generator (P10).
 The one contract check, `check_profile_contract`, holds every oracle
 to these terms, and the generated profile meets them too: `(version 1)` first,
 `(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
