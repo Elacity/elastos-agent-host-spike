@@ -33,6 +33,13 @@ or names a parameter the launch does not bind, `sandbox-exec` exits before the
 provider starts and gives its reason on standard error; the Runtime then
 refuses the start with that reason and never starts the provider another way
 (P11).
+The lab writer `write_generated_profile` writes no did-provider profile when
+the declared-rights file names an id the shared contract does not name. The
+wallet crate's `generator_refuses_an_unnamed_right_and_the_start_is_refused`
+feeds did-provider's own declared-rights file with an unnamed id and shows
+the refusal and that no did-provider profile is written; it shows the start
+refusal under the unwritten path with the wallet binary only, because the did
+harness cannot run the generator. The Runtime's own refusal is not built.
 
 One generator covers `did-provider`, `wallet-provider` and `model-provider`,
 parameterized by the provider's approved declared rights and its storage root,

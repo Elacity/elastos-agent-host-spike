@@ -701,6 +701,59 @@ fn model_forged_instance_does_not_move_the_child_grant() {
 }
 
 #[test]
+fn model_forged_session_does_not_move_the_child_path() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(parent)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    let child = verifier
+        .create_child_journal(&call, &request, "UsersAI/agent-1/journal/page.md")
+        .expect("forged session does not move the child path");
+    assert_ne!(child, parent);
+    let child_decision = verifier
+        .use_grant(call, &guest(child))
+        .expect("child grant");
+    assert_eq!(child_decision.owned_root, "UsersAI/agent-1/journal/page.md");
+    assert_eq!(child_decision.identity, "agent-1");
+    assert_eq!(child_decision.session, "session-a");
+}
+
+#[test]
+fn model_reported_usage_does_not_widen_the_child_root() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(parent)
+    };
+    assert!(request.reported_usage > 0);
+    let refusal = verifier
+        .create_child_journal(&call, &request, "UsersAI/agent-1/other")
+        .expect_err("reported usage does not widen the child root");
+    assert_eq!(refusal, OperateRefuse::Binding(Refuse::OutsideRoot));
+    assert_eq!(refusal.to_string(), "use path leaves the owned root");
+}
+
+#[test]
 fn model_owned_root_needs_a_resource_segment() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");

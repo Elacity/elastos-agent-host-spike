@@ -6000,3 +6000,119 @@ Commands used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, 
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `probe/src/lib.rs:138` requests the capability and `:146` passes the grant to the provider. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/common/grants.rs:1840` fails when `poll` swallows the filter error. F-orphan-owner and F-orphan-match still fail when planted. |
 | 8. Identity, admission and allowance stay separate? | Yes | `src/report.rs:521` keeps the bundle CID, admission and the session grant separate. A settlement count grants nothing. |
+
+## 041 — Land reviewed A5 session rows
+
+041 lands the reviewed 038 tree for rows (a), (b) and (d) on the current base. `git merge-file` used base `6f0eb5a5cbb6cb14071effecd4b317351731bd87` (`git merge-base HEAD 0da4b9b3e3c52cb04b555e37f657a0e590ac5a14`) and other `0da4b9b3e3c52cb04b555e37f657a0e590ac5a14`. All seven files merged with exit 0 and no conflict markers: `GAPS.md`, `RUNBOOK.md`, `run.sh`, `src/report.rs`, `tests/common/grants.rs`, `tests/effects.rs`, `tests/report.rs`. `LOG.md` was not merged. `Cargo.toml`, `Cargo.lock` and `falsifiers.json` are unchanged. There is no new list id.
+
+The merge keeps, once each, `fn active_requests` (`tests/common/grants.rs:209`), `fn barrier_decision` (`:247`), the refusal `kill: overlap and quiet window are required` (`:647`), and the `capsule_named_by_hash` ID cell `AC-025-CID` (`GAPS.md:84`). `src/report.rs:234` still says `process-isolation lab half of A3, A6 and A9`. `client_session` (`tests/common/grants.rs:855`) and `grant_names_verified_agent` (`:1705`) are present. `run.sh:42` prints lines that start with `session grant`.
+
+Rows (a) and (b) are `grant_refused_from_another_session` and `grant_refused_from_a_new_session`. Both call `exercise_session_binding`. Row (d), `grant_record_names_agent_identity`, stays `#[ignore = "blocked: AC-038-GRANT-PRINCIPAL"]`. A permitted Public read remains the positive control and earns no A5 credit.
+
+### Hand-run falsifiers
+
+Commands used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`, and the shared heavy-build lease. The lease was free. Each old anchor occurred once. Each plant was restored before the next step. The volume had about 40 GiB free.
+
+#### F-a5-other-session
+
+The other-session arm presents the owner. The replaced line is `SessionBinding::OtherSession => other.as_ref().unwrap(),`, and the planted line is `SessionBinding::OtherSession => &owner,`.
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grant_refused_from_another_session --exact --nocapture --test-threads=2
+```
+
+Unmutated: exit 0, 14.260 seconds.
+
+```text
+test grant_refused_from_another_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 12.15s
+```
+
+Planted: exit 101, 14.118 seconds.
+
+```text
+thread 'grant_refused_from_another_session' (61106448) panicked at tests/effects.rs:932:10:
+another session cannot present the grant: "presenting session was not refused"
+test grant_refused_from_another_session ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 61 filtered out; finished in 11.49s
+```
+
+Restored: exit 0, 13.883 seconds.
+
+```text
+test grant_refused_from_another_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 11.91s
+```
+
+#### F-a5-new-session
+
+The new-session arm presents the owner. The replaced line is `SessionBinding::NewSession => renewed.as_ref().unwrap(),`, and the planted line is `SessionBinding::NewSession => &owner,`.
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grant_refused_from_a_new_session --exact --nocapture --test-threads=2
+```
+
+Unmutated: exit 0, 11.321 seconds.
+
+```text
+test grant_refused_from_a_new_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 11.18s
+```
+
+Planted: exit 101, 13.323 seconds.
+
+```text
+thread 'grant_refused_from_a_new_session' (61117523) panicked at tests/effects.rs:939:10:
+a new session cannot present the grant: "presenting session was not refused"
+test grant_refused_from_a_new_session ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 61 filtered out; finished in 11.19s
+```
+
+Restored: exit 0, 10.870 seconds.
+
+```text
+test grant_refused_from_a_new_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 9.43s
+```
+
+#### F-a5-gap-row
+
+The new `GAPS.md` ID cell changes from `AC-038-GRANT-PRINCIPAL` to `AC-038-GRANT-PRINCIPALX` on the `grant_record_names_agent_identity` row only. `./run.sh` from `lab/agent-conformance`:
+
+| Step | Exit | Seconds | Row |
+| --- | --- | --- | --- |
+| Unmutated | 0 | 297.287 | `grant_record_names_agent_identity \| BLOCKED (AC-038-GRANT-PRINCIPAL)` |
+| Planted | 1 | 282.639 | `grant_record_names_agent_identity \| FAIL \| GAPS.md: grant_record_names_agent_identity: missing blocker IDs: [AC-038-GRANT-PRINCIPAL]; extra blocker IDs: [AC-038-GRANT-PRINCIPALX]` |
+| Restored | 0 | 286.630 | `grant_record_names_agent_identity \| BLOCKED (AC-038-GRANT-PRINCIPAL)` |
+
+The planted run also printed `versions receipt failure:` with that same missing/extra ID text. On every run, rows (a) and (b) stayed PASS with the session-binding label. The ID cell is restored. The restored table has no FAIL row.
+
+### Acceptance run
+
+The restored `./run.sh` above is the acceptance run on this head: exit 0, 286.630 seconds. No FAIL row.
+
+```text
+grant_refused_from_another_session | PASS | session binding of a Runtime grant on the run client's route, lab client sessions (M1 A5 half); a Public read earns no A5 credit
+grant_refused_from_a_new_session | PASS | session binding of a Runtime grant on the run client's route, lab client sessions (M1 A5 half); a Public read earns no A5 credit
+grant_record_names_agent_identity | BLOCKED (AC-038-GRANT-PRINCIPAL)
+```
+
+### Gates
+
+The same environment and lease as the falsifiers. Both commands stayed inside 600 seconds. The locked suite passed on the first run, so there was no census rerun.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, 0.126 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, 359.885 seconds. 104 passed, 0 failed, 12 ignored. The effects target passed 51 tests, with 11 ignored, in 276.09 seconds.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `tests/effects.rs:820` records the Runtime SHA-256 for the session journey. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `tests/common/grants.rs:994` accepts a cross-session presentation only as the Runtime 403. |
+| 3. A second path or a second copy of one rule? | No | `tests/common/grants.rs:998` is the one provider read for the granted read and the presentation. |
+| 4. Runtime core grows? | No | `tests/common/grants.rs:1705` keeps the principal comparison in the lane harness. |
+| 5. Refusals deny by default with a clear reason? | Yes | `tests/common/grants.rs:1714` denies when verified caller evidence is unavailable. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `tests/common/grants.rs:1008` sends the provider read with the granted token. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/effects.rs:930` fails under F-a5-other-session. The planted gap cell fails in the report. |
+| 8. Identity, admission and allowance stay separate? | Yes | `tests/effects.rs:856` keeps the Public read off A5 credit. `:954` passes no verified caller. |
