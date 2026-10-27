@@ -8004,3 +8004,125 @@ Planted exit 1 in 1.33 seconds (`real`), test result FAILED. Assertion: `src/../
 | 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:254` `admit_resident` stores the path name and the `Start`; the launch at `:307` reads that row and the stop at `:344` changes only one instance's phase and cause. |
 
 The real A3 row stays blocked. `standin_two_agent_components_stay_resident` is the lab stand-in, and a PASS there gives the Runtime no A3 credit. `parallel_capsules_complete_independently` stays `#[ignore = "blocked: RT4"]`.
+
+## 056 — A9: stand-in storage follows the selected Home
+
+056: `StandIn::storage_for_home` (`standin-runtime/mod.rs:132`) is the one new associated function. It returns the selected Home's data directory plus `storage`, refuses the fixed shared temp path, and creates nothing. The data directory comes from `crate::harness::data_dir` (`src/harness.rs:16`) through the call at `standin-runtime/mod.rs:149`; the function does not call `dirs::data_dir` and does not copy `inside` or `directories_only`. `src/harness.rs`, `src/census.rs`, `tests/effects.rs`, `GAPS.md`, `Cargo.toml`, `Cargo.lock`, `probe/`, `falsify.py` and `falsifiers.json` keep their bytes. `standin-runtime/mod.rs` is not a recovery target and gains no `falsifiers.json` id; the three plants below ran by hand.
+
+### Quote from the ask (read only, `513988ebd:lab/runtime-asks/03-launcher-storage-under-home.md`)
+
+> ## Smallest change
+>
+> In `run_cmd.rs`, replace the three calls (`:62`, `:70`, `:236`) with
+>
+> ```rust
+> let runtime = crate::create_runtime(crate::default_data_dir().join("storage")).await?;
+> ```
+>
+> This is the expression `capsule_cmd.rs:149` already uses. One file, three
+> lines, no new flag.
+
+> - **Per-Home, not per-instance.** Two `run` clients of one Home now share
+>   `<data dir>/storage`. They shared `/tmp/elastos/storage` before. The two
+>   labs reach separate directories by giving each client its own Home. agent-
+>   conformance already does this for its two-instance journeys.
+
+The stand-in applies that path join and the one Mac rule; `elastos/` keeps its bytes.
+
+### Refusals
+
+The function refuses with status 400 in this order. An empty Home, a relative Home, or a Home whose components include `.` or `..` reads `storage needs a selected Home` (`:138-145`). A Home equal to `/tmp/elastos/storage` reads `shared temp directory is not agent storage`, before `data_dir` runs (`:146-148`). Any other Home is `data_dir(home)` joined with `storage` (`:149-150`). A `data_dir` error is status 400 with that function's text (`:149`). A joined path equal to `/tmp/elastos/storage` reads the shared reason (`:151-153`).
+
+### Tests
+
+- `standin_storage_follows_the_selected_home` (`standin-runtime/mod.rs:3195`) takes two `ThrowawayHome::new` values. Each `storage_for_home(home.home())` is `Ok` and equals `home.data().join("storage")`; that path does not exist; the two paths differ; a second call with the first Home returns the same path; both `finish()` are `Ok`. The three refused Homes are `` "", "standin-a9" and `/var/standin-a9/../other`, each status 400 with `storage needs a selected Home`.
+- `standin_shared_temp_storage_is_refused` (`:3242`) refuses `/tmp/elastos/storage` with status 400 and `shared temp directory is not agent storage`, and asserts that the path's existence is unchanged. It deletes nothing and reads no contents.
+
+### Hand-run plants
+
+No `falsifiers.json` id. Each plant ran one at a time and was restored before the next. The command was `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::NAME -- --exact`. Each planted crate compiled and the named test failed on its assertion; after the restore the named test passed. Retained throwaway roots from the failed runs were removed.
+
+F-standin-a9-stub. Named test `standin_storage_follows_the_selected_home`.
+
+Old:
+
+```text
+        const SHARED_REASON: &str = "shared temp directory is not agent storage";
+
+        let refused = |reason: &str| Err((400, reason.to_owned()));
+```
+
+New:
+
+```text
+        const SHARED_REASON: &str = "shared temp directory is not agent storage";
+
+        return Ok(PathBuf::from(SHARED_TEMP));
+        let refused = |reason: &str| Err((400, reason.to_owned()));
+```
+
+Planted exit 1 in 3.14 seconds (`real`), test result FAILED. Assertion: `src/../standin-runtime/mod.rs:3205:13` (one line added above the restored `assert_eq!` at `:3204`), `the stand-in returns the selected Home's data directory plus storage`; left `"/tmp/elastos/storage"`, right `target/home-.../home/Library/Application Support/elastos/storage`. Restored, the named test passed.
+
+F-standin-a9-skip-rule. Named test `standin_storage_follows_the_selected_home`.
+
+Old:
+
+```text
+        let data = crate::harness::data_dir(home).map_err(|reason| (400, reason.to_owned()))?;
+        let storage = data.join("storage");
+```
+
+New:
+
+```text
+        let storage = home.join("storage");
+```
+
+Planted exit 1 in 2.81 seconds (`real`), test result FAILED. Assertion: `src/../standin-runtime/mod.rs:3203:13` (one line removed above the restored `assert_eq!` at `:3204`), `the stand-in returns the selected Home's data directory plus storage`; left `target/home-.../home/storage`, right `target/home-.../home/Library/Application Support/elastos/storage`. Restored, the named test passed.
+
+F-standin-a9-shared-temp. Named test `standin_shared_temp_storage_is_refused`.
+
+Old:
+
+```text
+        if home == Path::new(SHARED_TEMP) {
+            return refused(SHARED_REASON);
+        }
+        let data = crate::harness::data_dir(home).map_err(|reason| (400, reason.to_owned()))?;
+```
+
+New:
+
+```text
+        let data = crate::harness::data_dir(home).map_err(|reason| (400, reason.to_owned()))?;
+```
+
+Planted exit 1 in 1.94 seconds (`real`), test result FAILED. Assertion: `src/../standin-runtime/mod.rs:3243:9` (three lines removed above the restored `assert!` at `:3246`), `the stand-in refuses the fixed shared temp path before the Home rule: Ok("/tmp/elastos/storage/Library/Application Support/elastos/storage")`. Restored, the named test passed.
+
+After the restores, `git diff --numstat -- lab/agent-conformance/standin-runtime/mod.rs` is `94 0`: the path import, `storage_for_home`, its doc comment and the two tests.
+
+### Docs
+
+`standin-runtime/README.md:39` is the new paragraph before `## Callers`. The file keeps the RA-1 field-lock sentence and the resident RI-1 to RI-4 material as found. The paragraph states that launcher storage is the selected Home's data directory plus `storage`, that the data directory comes from `harness::data_dir`, that `/tmp/elastos/storage` is refused and is not created, and that one Home has one directory; it gives the M1-R replacement sentence, no A9 credit, the `AC-006-STORAGE` ignore and the later `root-symlink-swap` and `host-hardlink` slice. `RUNBOOK.md:717` is the new paragraph after the last stand-in paragraph; every other RUNBOOK paragraph keeps its bytes.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.20 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 363.63 seconds, inside the 600-second bound. 159 passed, 0 failed, 14 ignored across 12 targets. The lib target passed 44, including both new tests; the effects target passed 59 with 12 ignored. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `standin-runtime/mod.rs:132` joins a directory from the one Home rule and names no code or content by name or URL. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `standin-runtime/mod.rs:132-155` creates no directory and opens no file; the test writes no grant and starts no route. |
+| 3. A second path or a second copy of one rule? | No | `standin-runtime/mod.rs:149` calls `crate::harness::data_dir` (`src/harness.rs:16`); it calls no `dirs::data_dir`, copies neither `inside` nor `directories_only`, and adds no storage type. |
+| 4. Runtime core grows? | No | The edit is `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and `LOG.md`; `elastos/` is unchanged. |
+| 5. Refusals deny by default with a clear reason? | Yes | A missing or dotted Home is 400 `storage needs a selected Home` (`:138`), the fixed shared path is 400 `shared temp directory is not agent storage` (`:146`), a `data_dir` error is 400 with its text (`:149`), and a joined shared path is 400 with the shared reason (`:151`). |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The seam only joins a path; it imports no capsule, no `wasi:*` and no Bus route. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:3195` and `:3242` are the named tests; the three plants failed at `:3205`, `:3203` and `:3243`. |
+| 8. Identity, admission and allowance stay separate? | Yes | `storage_for_home` reads no grant, no capsule list and no clock, at `:132-155`; admission stays in `admit_resident` and allowance unchanged. |
+
+The real A9 row stays blocked. `standin_storage_follows_the_selected_home` is the lab stand-in, and a PASS there gives the Runtime no A9 credit. `operator_storage_is_under_throwaway_home` stays `#[ignore = "blocked: AC-006-STORAGE"]` with its panic body, and `root-symlink-swap` and `host-hardlink` stay a later slice.

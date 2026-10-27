@@ -17,6 +17,7 @@
 //! cause; a failed start leaves them pending.
 
 use serde_json::{json, Map, Value};
+use std::path::{Component, Path, PathBuf};
 
 const LIVE_SCOPE: &str = "all_sessions_live";
 const RESIDENT_WORLD: &str = "resident-capsule";
@@ -121,6 +122,36 @@ impl StandIn {
             next_id: 1,
             instant: 0,
         }
+    }
+
+    /// Lab test seam, not a route.
+    ///
+    /// The `run` launcher's storage directory follows the selected Home: it is
+    /// `harness::data_dir(home)` joined with `storage`. The fixed shared temp
+    /// path is refused before that rule runs on it. This call creates nothing.
+    pub fn storage_for_home(home: &Path) -> Result<PathBuf, (u16, String)> {
+        const SHARED_TEMP: &str = "/tmp/elastos/storage";
+        const NEEDS_HOME: &str = "storage needs a selected Home";
+        const SHARED_REASON: &str = "shared temp directory is not agent storage";
+
+        let refused = |reason: &str| Err((400, reason.to_owned()));
+        if home.as_os_str().is_empty()
+            || !home.is_absolute()
+            || home
+                .components()
+                .any(|part| matches!(part, Component::CurDir | Component::ParentDir))
+        {
+            return refused(NEEDS_HOME);
+        }
+        if home == Path::new(SHARED_TEMP) {
+            return refused(SHARED_REASON);
+        }
+        let data = crate::harness::data_dir(home).map_err(|reason| (400, reason.to_owned()))?;
+        let storage = data.join("storage");
+        if storage == Path::new(SHARED_TEMP) {
+            return refused(SHARED_REASON);
+        }
+        Ok(storage)
     }
 
     /// Lab test seam, not a route.
@@ -3158,6 +3189,69 @@ mod tests {
                 "the stand-in leaves a {life_name} grant unchanged"
             );
         }
+    }
+
+    #[test]
+    fn standin_storage_follows_the_selected_home() {
+        use crate::harness::ThrowawayHome;
+
+        let first = ThrowawayHome::new().expect("a throwaway Home for the first storage row");
+        let second = ThrowawayHome::new().expect("a throwaway Home for the second storage row");
+        let mut paths = Vec::new();
+        for home in [&first, &second] {
+            let storage = StandIn::storage_for_home(home.home())
+                .expect("the stand-in follows the selected Home's data directory");
+            assert_eq!(
+                storage,
+                home.data().join("storage"),
+                "the stand-in returns the selected Home's data directory plus storage"
+            );
+            assert!(
+                !storage.exists(),
+                "the stand-in returns that path and creates no storage directory"
+            );
+            paths.push(storage);
+        }
+        assert_ne!(
+            paths[0], paths[1],
+            "the stand-in gives two selected Homes two storage directories"
+        );
+        let again = StandIn::storage_for_home(first.home())
+            .expect("the stand-in follows a selected Home on a second call");
+        assert_eq!(
+            again, paths[0],
+            "the stand-in returns one directory for one selected Home"
+        );
+        first.finish().expect("the first throwaway Home finishes");
+        second.finish().expect("the second throwaway Home finishes");
+
+        for (home, text) in [
+            ("", "an empty Home"),
+            ("standin-a9", "a relative Home"),
+            ("/var/standin-a9/../other", "a Home with a parent component"),
+        ] {
+            let refused = StandIn::storage_for_home(Path::new(home));
+            assert!(
+                matches!(&refused, Err((400, reason)) if reason == "storage needs a selected Home"),
+                "the stand-in refuses {text} and names the missing selected Home: {refused:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn standin_shared_temp_storage_is_refused() {
+        let shared = Path::new("/tmp/elastos/storage");
+        let existed = shared.exists();
+        let refused = StandIn::storage_for_home(shared);
+        assert!(
+            matches!(&refused, Err((400, reason)) if reason == "shared temp directory is not agent storage"),
+            "the stand-in refuses the fixed shared temp path before the Home rule: {refused:?}"
+        );
+        assert_eq!(
+            shared.exists(),
+            existed,
+            "the stand-in creates nothing at the shared temp path"
+        );
     }
 
     #[test]

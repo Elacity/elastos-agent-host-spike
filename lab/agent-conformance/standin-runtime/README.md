@@ -36,6 +36,8 @@ This value is the lab stand-in and the real route can replace it later because t
 
 `agent-a` and `agent-b` are two admitted components on one `StandIn`. One launch of each path gives `component-1` and `component-2`; one list shows both `running` with distinct `id` and `session_id`, and the test instant 60 still shows both. `standin_two_agent_components_stay_resident` proves that pair. This value is the lab stand-in and the real route can replace it later because the list JSON matches (M1-R). A PASS gives the Runtime no A3 credit. `parallel_capsules_complete_independently` stays `#[ignore = "blocked: RT4"]`. Two launches of one path stay the 045 row, `standin_two_launches_are_two_instances`.
 
+`StandIn::storage_for_home` is the launcher storage rule. It returns the selected Home's data directory plus `storage`, and that data directory comes from `harness::data_dir`. One Home has one directory. An empty, relative or dotted Home is status 400 with the reason `storage needs a selected Home`. It refuses `/tmp/elastos/storage` with status 400 and the reason `shared temp directory is not agent storage`, before the data-directory rule runs, and it creates nothing there. `standin_storage_follows_the_selected_home` and `standin_shared_temp_storage_is_refused` prove that pair. This value is the lab stand-in and the real route can replace it later because the path matches (M1-R). A PASS gives the Runtime no A9 credit. `operator_storage_is_under_throwaway_home` stays `#[ignore = "blocked: AC-006-STORAGE"]`, and `root-symlink-swap` and `host-hardlink` stay a later slice.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.
