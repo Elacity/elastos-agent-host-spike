@@ -1,0 +1,12 @@
+id: M-A12-NO-HOME-WATCH
+file: src/a12.rs
+test: tests::a12_rename_watched_to_unwatched_dest_is_found
+--- old
+        for root in inotify_only_roots() {
+            if root.exists() {
+                watch.add(&root)?;
+            }
+        }
+--- new
+        let _ = inotify_only_roots();
+--- end

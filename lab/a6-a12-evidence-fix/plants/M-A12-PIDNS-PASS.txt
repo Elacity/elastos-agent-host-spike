@@ -1,0 +1,14 @@
+id: M-A12-PIDNS-PASS
+file: src/a12.rs
+test: tests::a12_pid_namespace_is_not_run
+--- old
+        Ok(out) => HostPart::NotRun(format!(
+            "unshare -p refused ({}); pid-namespace leftover is NOT RUN, never PASS",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+--- new
+        Ok(out) => HostPart::Pass(format!(
+            "unshare -p skipped; pid-namespace leftover PASS ({})",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+--- end

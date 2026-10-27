@@ -1,0 +1,12 @@
+id: M-A12-BIND-PASS
+file: src/a12.rs
+test: tests::a12_bind_mount_is_not_run
+--- old
+        HostPart::NotRun(
+            "mount --bind and unshare -m refused; bind leftover is NOT RUN, never PASS".into(),
+        )
+--- new
+        HostPart::Pass(
+            "mount --bind skipped; bind leftover PASS".into(),
+        )
+--- end

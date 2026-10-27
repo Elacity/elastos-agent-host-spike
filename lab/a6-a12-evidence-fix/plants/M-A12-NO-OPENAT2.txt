@@ -1,0 +1,8 @@
+id: M-A12-NO-OPENAT2
+file: src/a12.rs
+test: tests::a12_write_uses_openat2_beneath_no_symlinks
+--- old
+        resolve: RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS,
+--- new
+        resolve: 0,
+--- end

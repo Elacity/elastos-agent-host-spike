@@ -1,0 +1,11 @@
+id: M-A12-NO-RECURSE-WATCH
+file: src/a12.rs
+test: tests::a12_subdir_create_then_delete_is_found
+test: tests::a12_preopen_dirfd_create_then_delete_is_found
+test: tests::a12_otmpfile_linkat_unlink_in_subdir_is_found
+--- old
+                watch.add(&root)?;
+                add_dir_watches_recursive(&mut watch, &root, 0)?;
+--- new
+                watch.add(&root)?;
+--- end

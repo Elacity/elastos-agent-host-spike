@@ -1,0 +1,12 @@
+id: M-A12-IGNORE-OVERFLOW
+file: src/a12.rs
+test: tests::a12_inotify_overflow_check_is_pinned
+--- old
+                if ev.mask & libc::IN_Q_OVERFLOW != 0 {
+                    return Err("inotify queue overflow; leftover watch fail closed".into());
+                }
+--- new
+                if false && ev.mask & libc::IN_Q_OVERFLOW != 0 {
+                    return Err("inotify queue overflow; leftover watch fail closed".into());
+                }
+--- end

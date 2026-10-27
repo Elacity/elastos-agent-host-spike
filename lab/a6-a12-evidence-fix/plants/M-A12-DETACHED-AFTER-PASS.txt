@@ -1,0 +1,13 @@
+id: M-A12-DETACHED-AFTER-PASS
+file: src/a12.rs
+test: tests::a12_detached_after_return_is_not_run
+--- old
+    HostPart::NotRun(
+        "leftovers_in_run_window returns before a setsid/double-fork child writes; detached write after return is NOT RUN, never a clean-window PASS"
+            .into(),
+    )
+--- new
+    HostPart::Pass(
+        "leftovers_in_run_window empty Ok is a closed window".into(),
+    )
+--- end

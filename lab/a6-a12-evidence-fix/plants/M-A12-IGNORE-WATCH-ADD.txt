@@ -1,0 +1,10 @@
+id: M-A12-IGNORE-WATCH-ADD
+file: src/a12.rs
+test: tests::a12_watch_add_failures_fail_closed
+--- old
+            watch.add(&path)?;
+            add_dir_watches_recursive(watch, &path, depth + 1)?;
+--- new
+            let _ = watch.add(&path);
+            add_dir_watches_recursive(watch, &path, depth + 1)?;
+--- end

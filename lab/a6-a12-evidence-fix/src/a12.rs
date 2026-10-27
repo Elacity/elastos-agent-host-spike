@@ -16,10 +16,16 @@
 //! The census snapshot is taken before the Runtime starts. If the Runtime
 //! already wrote, the snapshot fails. The run-window watch snapshots
 //! isolation plus every writable temp root (`/tmp`, `/var/tmp`, `/dev/shm`,
-//! `$TMPDIR`), XDG cache/data/state/runtime dirs, and
-//! `~/Library/Caches` / `~/Library/Application Support` (Mac). An inotify
-//! watch on those roots records create-then-delete between the two
-//! snapshots.
+//! `$TMPDIR`), XDG cache/data/state/runtime dirs, `$HOME/.cache` even when
+//! `XDG_CACHE_HOME` is set, `/run/user/$UID` when that dir exists, and
+//! `~/Library/Caches` / `~/Library/Application Support` (Mac). Live watches
+//! recurse into those trees. `watch.add` failures fail closed. An inotify
+//! watch records create-then-delete, including in a subdirectory. Vanished
+//! inodes are followed by file handle / `(dev,ino)` so a hardlink or rename
+//! out of the watch still lists the dest leftover. Bind mount, pid
+//! namespace, `/run/user/$UID` when absent, watch sysctl write, and a
+//! setsid write after the census returns are HostPart::NotRun, never a
+//! clean-window PASS.
 //!
 //! `ELASTOS_TMP_ROOT` is guarded: canonicalize (realpath) first. `/`, empty,
 //! `$HOME`, a `..` component, a symlink anywhere at or under isolation, a
@@ -721,13 +727,15 @@ fn runtime_wrote_under(watch: &Path) -> bool {
     has_any_files(&watch.join("storage")) || has_any_files(&watch.join("elastos"))
 }
 
-/// `$TMPDIR`, XDG cache/data/state/runtime, and Mac Library dirs.
+/// `$HOME/.cache` even when `XDG_CACHE_HOME` is set, plus `$TMPDIR`,
+/// XDG cache/data/state/runtime, `/run/user/$UID`, and Mac Library dirs.
 pub fn extra_watch_roots() -> Vec<PathBuf> {
     let mut roots = vec![std::env::temp_dir()];
     let home = std::env::var("HOME")
         .ok()
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
+    let uid = unsafe { libc::getuid() };
     for (var, fallback) in [
         ("XDG_CACHE_HOME", home.as_ref().map(|h| h.join(".cache"))),
         (
@@ -738,21 +746,42 @@ pub fn extra_watch_roots() -> Vec<PathBuf> {
             "XDG_STATE_HOME",
             home.as_ref().map(|h| h.join(".local/state")),
         ),
-        ("XDG_RUNTIME_DIR", None),
+        ("XDG_RUNTIME_DIR", Some(run_user_uid_path(uid))),
     ] {
         if let Ok(value) = std::env::var(var) {
             if !value.is_empty() {
                 roots.push(PathBuf::from(value));
-                continue;
             }
         }
         if let Some(path) = fallback {
-            roots.push(path);
+            if !roots.iter().any(|root| root == &path) {
+                roots.push(path);
+            }
         }
     }
     if let Some(h) = home {
         roots.push(h.join("Library/Caches"));
         roots.push(h.join("Library/Application Support"));
+    }
+    roots
+}
+
+/// `/run/user/$UID`. Absent on this host; leftover proof is NOT RUN.
+pub fn run_user_uid_path(uid: u32) -> PathBuf {
+    PathBuf::from(format!("/run/user/{uid}"))
+}
+
+/// `$HOME` itself, inotify only. A rename dest at the home top is seen
+/// without snapshot-walking the whole tree.
+pub fn inotify_only_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            let path = PathBuf::from(home);
+            if path.is_absolute() {
+                roots.push(path);
+            }
+        }
     }
     roots
 }
@@ -801,7 +830,13 @@ impl LiveWatch {
         add_dir_watches_recursive(&mut watch, &isolation_root(), 0)?;
         for root in writable_temp_roots() {
             if root.exists() {
-                let _ = watch.add(&root);
+                watch.add(&root)?;
+                add_dir_watches_recursive(&mut watch, &root, 0)?;
+            }
+        }
+        for root in inotify_only_roots() {
+            if root.exists() {
+                watch.add(&root)?;
             }
         }
         Ok(watch)
@@ -835,6 +870,7 @@ impl LiveWatch {
 
     fn drain(&mut self) -> Result<Vec<PathBuf>, String> {
         let mut seen = BTreeSet::new();
+        let mut pending_dirs = Vec::new();
         let mut buf = [0u8; 4096];
         loop {
             let n = unsafe { libc::read(self.fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
@@ -873,10 +909,17 @@ impl LiveWatch {
                         Some(name) if !name.is_empty() => dir.join(name),
                         _ => dir.clone(),
                     };
+                    if ev.mask & libc::IN_ISDIR != 0 && ev.mask & libc::IN_CREATE != 0 {
+                        pending_dirs.push(path.clone());
+                    }
                     seen.insert(path);
                 }
                 offset += header + ev.len as usize;
             }
+        }
+        for dir in pending_dirs {
+            self.add(&dir)?;
+            add_dir_watches_recursive(self, &dir, 0)?;
         }
         Ok(seen.into_iter().collect())
     }
@@ -888,7 +931,10 @@ fn add_dir_watches_recursive(watch: &mut LiveWatch, root: &Path, depth: u32) -> 
     }
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
-        Err(_) => return Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(format!("inotify recurse refused {}: {err}", root.display()));
+        }
     };
     for entry in entries.flatten() {
         let path = entry.path();
@@ -897,7 +943,7 @@ fn add_dir_watches_recursive(watch: &mut LiveWatch, root: &Path, depth: u32) -> 
                 .symlink_metadata()
                 .is_ok_and(|m| m.file_type().is_symlink())
         {
-            let _ = watch.add(&path);
+            watch.add(&path)?;
             add_dir_watches_recursive(watch, &path, depth + 1)?;
         }
     }
@@ -1041,6 +1087,9 @@ pub fn leftovers_created(before: &FsSnapshot, watch: &Path) -> Result<Vec<PathBu
 
 /// Leftovers created in the run window across isolation and extra watch roots.
 /// Includes files that existed only between the two snapshots (inotify).
+/// Vanished inodes still reachable by handle or `(dev,ino)` are leftovers.
+/// A short quiesce catches writers that land before return. A setsid write
+/// after this function returns is HostPart::NotRun, never a closed PASS.
 pub fn leftovers_in_run_window(before: &FsSnapshot) -> Result<Vec<PathBuf>, String> {
     let after = snapshot_run_window_unchecked()?;
     let mut found = collect_created(before, &after)?;
@@ -1049,8 +1098,178 @@ pub fn leftovers_in_run_window(before: &FsSnapshot) -> Result<Vec<PathBuf>, Stri
             found.push(path);
         }
     }
+    follow_vanished_handles(before, &after, &mut found)?;
+    quiesce_run_window(before, &mut found)?;
     found.sort();
     Ok(found)
+}
+
+/// True when `open_by_handle_at` can still open the stored handle.
+/// This host has no CAP_DAC_READ_SEARCH, so the call is usually EPERM;
+/// the leftover dest is then found by `(dev,ino)` search.
+pub fn handle_still_opens(handle: &[u8]) -> bool {
+    match open_stored_handle(handle) {
+        Ok(fd) => {
+            unsafe { libc::close(fd) };
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn open_stored_handle(handle: &[u8]) -> Result<i32, String> {
+    if handle.len() < 8 {
+        return Err("stored file handle too short; FileId NOT RUN".into());
+    }
+    let handle_type = i32::from_ne_bytes(handle[4..8].try_into().expect("handle type"));
+    let body = &handle[8..];
+    if body.is_empty() {
+        return Err("stored file handle empty; FileId NOT RUN".into());
+    }
+    let mut raw = RawFileHandle {
+        handle_bytes: body.len() as u32,
+        handle_type,
+        f_handle: [0; 128],
+    };
+    if body.len() > raw.f_handle.len() {
+        return Err("stored file handle too large; FileId NOT RUN".into());
+    }
+    raw.f_handle[..body.len()].copy_from_slice(body);
+    let mount = fs::File::open("/").map_err(|err| format!("open / for handle: {err}"))?;
+    let fd = unsafe {
+        libc::open_by_handle_at(
+            mount.as_raw_fd(),
+            (&mut raw as *mut RawFileHandle).cast(),
+            libc::O_RDONLY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "open_by_handle_at: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(fd)
+}
+
+fn path_from_fd(fd: i32) -> Option<PathBuf> {
+    let link = PathBuf::from(format!("/proc/self/fd/{fd}"));
+    fs::read_link(link).ok().filter(|path| {
+        let bytes = path.as_os_str().as_bytes();
+        !bytes.ends_with(b" (deleted)")
+    })
+}
+
+fn follow_vanished_handles(
+    before: &FsSnapshot,
+    after: &FsSnapshot,
+    found: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let mut wanted = BTreeSet::new();
+    for (path, old) in &before.ids {
+        let vanished = !path.exists() || !after.paths.contains(path);
+        if !vanished {
+            continue;
+        }
+        wanted.insert((old.dev, old.ino));
+        if handle_still_opens(&old.file_handle) {
+            if let Ok(fd) = open_stored_handle(&old.file_handle) {
+                if let Some(dest) = path_from_fd(fd) {
+                    if !found.iter().any(|seen| seen == &dest) {
+                        found.push(dest);
+                    }
+                } else if !found.iter().any(|seen| seen == path) {
+                    found.push(path.clone());
+                }
+                unsafe { libc::close(fd) };
+            } else if !found.iter().any(|seen| seen == path) {
+                found.push(path.clone());
+            }
+        }
+    }
+    for dest in find_inode_paths(&wanted)? {
+        if !found.iter().any(|seen| seen == &dest) {
+            found.push(dest);
+        }
+    }
+    Ok(())
+}
+
+fn find_inode_paths(wanted: &BTreeSet<(u64, u64)>) -> Result<Vec<PathBuf>, String> {
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut found = Vec::new();
+    let mut roots = vec![
+        PathBuf::from("/tmp"),
+        PathBuf::from("/var/tmp"),
+        PathBuf::from("/dev/shm"),
+    ];
+    roots.extend(inotify_only_roots());
+    roots.sort();
+    roots.dedup();
+    for root in roots {
+        if root.exists() {
+            search_inodes(&root, wanted, &mut found, 0)?;
+        }
+    }
+    Ok(found)
+}
+
+fn search_inodes(
+    root: &Path,
+    wanted: &BTreeSet<(u64, u64)>,
+    found: &mut Vec<PathBuf>,
+    depth: u32,
+) -> Result<(), String> {
+    if depth > 8 || wanted.is_empty() {
+        return Ok(());
+    }
+    let meta = match fs::symlink_metadata(root) {
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Ok(()),
+        Ok(meta) => meta,
+    };
+    if wanted.contains(&inode_of(&meta)) && !found.iter().any(|seen| seen == root) {
+        found.push(root.to_path_buf());
+    }
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Ok(());
+    }
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.flatten() {
+        search_inodes(&entry.path(), wanted, found, depth + 1)?;
+    }
+    Ok(())
+}
+
+fn quiesce_run_window(before: &FsSnapshot, found: &mut Vec<PathBuf>) -> Result<(), String> {
+    for _ in 0..2 {
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        let after = snapshot_run_window_unchecked()?;
+        let more = collect_created(before, &after)?;
+        let mut grew = false;
+        for path in more {
+            if !found.iter().any(|seen| seen == &path) {
+                found.push(path);
+                grew = true;
+            }
+        }
+        for path in drain_live_watch()? {
+            if !found.iter().any(|seen| seen == &path) {
+                found.push(path);
+                grew = true;
+            }
+        }
+        follow_vanished_handles(before, &after, found)?;
+        if !grew {
+            break;
+        }
+    }
+    Ok(())
 }
 
 pub fn leftovers_under(roots: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
@@ -1151,6 +1370,90 @@ pub enum HostPart {
     Pass(String),
     Fail(String),
     NotRun(String),
+}
+
+/// A setsid / double-fork write after `leftovers_in_run_window` returns
+/// is outside the census. Name the limit. Never PASS as a closed window.
+pub fn detached_child_after_return_host_part() -> HostPart {
+    HostPart::NotRun(
+        "leftovers_in_run_window returns before a setsid/double-fork child writes; detached write after return is NOT RUN, never a clean-window PASS"
+            .into(),
+    )
+}
+
+/// `mount --bind` / `unshare -m` leftover. This host refuses both.
+pub fn bind_mount_host_part() -> HostPart {
+    let mount = Command::new("mount")
+        .args(["--bind", "/tmp", "/tmp"])
+        .output();
+    let unshare = Command::new("unshare").args(["-m", "--", "true"]).output();
+    let mount_ok = mount
+        .as_ref()
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+    let unshare_ok = unshare
+        .as_ref()
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+    if mount_ok || unshare_ok {
+        HostPart::NotRun(
+            "bind mount or unshare -m succeeded; bind leftover proof is NOT RUN, never PASS".into(),
+        )
+    } else {
+        HostPart::NotRun(
+            "mount --bind and unshare -m refused; bind leftover is NOT RUN, never PASS".into(),
+        )
+    }
+}
+
+/// Pid-namespace reuse. This host refuses `unshare -p`.
+pub fn pid_namespace_host_part() -> HostPart {
+    match Command::new("unshare")
+        .args(["-p", "-f", "--mount-proc", "true"])
+        .output()
+    {
+        Ok(out) if out.status.success() => HostPart::NotRun(
+            "unshare -p succeeded; pid-namespace leftover proof is NOT RUN, never PASS".into(),
+        ),
+        Ok(out) => HostPart::NotRun(format!(
+            "unshare -p refused ({}); pid-namespace leftover is NOT RUN, never PASS",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        Err(err) => HostPart::NotRun(format!(
+            "unshare missing ({err}); pid-namespace leftover is NOT RUN, never PASS"
+        )),
+    }
+}
+
+/// `/run/user/$UID` leftover. Absent here; never a clean-window PASS.
+pub fn run_user_uid_host_part() -> HostPart {
+    let uid = unsafe { libc::getuid() };
+    let path = run_user_uid_path(uid);
+    if path.is_dir() {
+        HostPart::NotRun(format!(
+            "{} exists but this lab has no planted leftover proof there; /run/user leftover is NOT RUN, never PASS",
+            path.display()
+        ))
+    } else {
+        HostPart::NotRun(format!(
+            "{} is absent; /run/user leftover is NOT RUN, never PASS",
+            path.display()
+        ))
+    }
+}
+
+/// Writing `max_user_watches`. This user cannot change the sysctl.
+pub fn watch_sysctl_host_part() -> HostPart {
+    let path = Path::new("/proc/sys/fs/inotify/max_user_watches");
+    match fs::OpenOptions::new().write(true).open(path) {
+        Ok(_file) => HostPart::NotRun(
+            "max_user_watches is writable; watch-sysctl leftover proof is NOT RUN, never PASS"
+                .into(),
+        ),
+        Err(err) => HostPart::NotRun(format!(
+            "max_user_watches write refused ({err}); watch sysctl is NOT RUN, never PASS"
+        )),
+    }
 }
 
 /// Call the owner `ThrowawayHome` + `census::cleanup` path.
