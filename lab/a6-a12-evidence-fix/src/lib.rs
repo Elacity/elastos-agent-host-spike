@@ -698,7 +698,7 @@ mod tests {
             .arg(&path)
             .arg(&stamp)
             .status();
-        let mut second = vec![b'B'; 65 * 1024];
+        let mut second = first.clone();
         let last = second.len() - 1;
         second[last] = b'Z';
         fs::write(&path, &second).unwrap();
