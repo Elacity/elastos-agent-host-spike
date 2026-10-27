@@ -808,7 +808,11 @@ impl Controller {
                 self.decisions.granted += 1;
                 self.print_checked("fixture controller: matched, granted")?;
             } else {
-                let reason = self.fixture.deny_reason.clone();
+                let reason = if field(request, "resource")? == "elastos://net/stream" {
+                    "fixture denies unlisted elastos://net/stream".to_owned()
+                } else {
+                    self.fixture.deny_reason.clone()
+                };
                 self.deny(request, &reason)?;
             }
         }

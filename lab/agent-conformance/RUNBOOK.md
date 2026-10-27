@@ -144,7 +144,8 @@ the retained-root marker. Their exact edits and named tests are in
 Task 003 adds these rows to the same table:
 
 - `ungranted_effect_is_refused`: runs the read build against the ready fixture operator. Requires a nonzero exit and the lifecycle error `Internal("capsule manifest does not declare authority for localhost://Public/agent-conformance-ungranted/outside-fixture.txt")` inside the Runtime's component-failure wrapper.
-- `ungranted_network_is_refused`: the manifest declares `elastos://net/stream`. The request is pending, and the fixture denies it with `fixture denies unlisted read`. Provider execution stays outside this row.
+- `ungranted_network_is_refused`: the manifest declares `elastos://net/stream`. The request is pending, and the fixture denies it with `fixture denies unlisted elastos://net/stream`. Provider execution stays outside this row.
+- `undeclared_network_manifest_is_refused`: stages the same probe bundle with a manifest whose capabilities omit `elastos://net/stream`. The manifest refuses the request, and its reason names that resource: `Internal("capsule manifest does not declare authority for elastos://net/stream")`. No fixture denial and no grant are involved.
 - `default_activation_refuses_without_selector`: runs the default build and requires the AC-002-ARGS unavailable reason through the guest lifecycle.
 - `ungranted_model_call_is_refused`: BLOCKED (RT3), with the Runtime change in GAPS.md.
 - `operator_storage_is_under_throwaway_home`: BLOCKED (AC-006-STORAGE), with the Runtime change in GAPS.md. The lane performs no reads through that Runtime-owned path.
@@ -289,8 +290,10 @@ once with scope `shell` at the operator's loopback port, then services pending
 requests during the existing process collection loop. Resource, action and
 reason must match an entry in `fixtures/grants.json` exactly. The entry supplies
 `once` or `session`; this fixture selects `once`. Every other request receives
-`fixture denies unlisted read`. An ambiguous match denies the whole pending
-snapshot with a reason. A consumed entry also refuses a later matching request.
+`fixture denies unlisted read`; a pending `elastos://net/stream` request
+receives `fixture denies unlisted elastos://net/stream`. An ambiguous match
+denies the whole pending snapshot with a reason. A consumed entry also refuses
+a later matching request.
 
 - `granted_read_succeeds`: seeds `Public/agent-conformance-grants/granted.txt`,
   observes exactly one matching request and grant, and requires exit 0 after

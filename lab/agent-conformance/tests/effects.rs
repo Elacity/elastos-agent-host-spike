@@ -37,12 +37,24 @@ fn stage_probe(home: &ThrowawayHome, bytes: &[u8], effect: Effect) -> StagedProb
         .expect("name the exact staged probe bundle")
 }
 
-fn assert_refusal(effect: Effect, bus_error: &str) {
+fn assert_refusal(effect: Effect, manifest: &[u8], bus_error: &str) -> std::process::Output {
+    assert_refusal_as(effect, effect.name(), manifest, bus_error)
+}
+
+// The label names the staged bundle in the version identity record. A staged
+// manifest other than MANIFEST is a distinct bundle with its own label.
+fn assert_refusal_as(
+    effect: Effect,
+    label: &str,
+    manifest: &[u8],
+    bus_error: &str,
+) -> std::process::Output {
     let _serial = EFFECT_RUN.lock().unwrap_or_else(|error| error.into_inner());
     let bytes = build_probe(effect, 1);
     let runtime = runtime_under_test().unwrap_or_else(|reason| probe::skipped(reason));
     let home = ThrowawayHome::new().unwrap();
-    let capsule = stage_probe(&home, &bytes, effect);
+    let capsule = agent_conformance::identity::stage_probe(&home, &bytes, manifest, label)
+        .expect("name the exact staged probe bundle");
 
     let mut operator = common::operator::Operator::start(&home)
         .unwrap_or_else(|reason| probe::skipped(&format!("operator prerequisite: {reason}")));
@@ -53,7 +65,10 @@ fn assert_refusal(effect: Effect, bus_error: &str) {
         .launch(
             &runtime.binary,
             &["run", capsule.path.to_str().unwrap()],
-            Duration::from_secs(10),
+            // A refusal returns at once. The bound passes the probe's own
+            // 30-second pending wait, so a declared request still reports its
+            // refusal reason instead of the harness bound.
+            Duration::from_secs(40),
         )
         .expect("bounded probe launch through the existing primitive");
     Observation::Launched {
@@ -68,6 +83,7 @@ fn assert_refusal(effect: Effect, bus_error: &str) {
     );
     assert_output_refusal(&output, effect, bus_error);
     home.finish().unwrap();
+    output
 }
 
 fn refusal_evidence(
@@ -102,6 +118,7 @@ fn ungranted_effect_is_refused() {
     let resource = include_str!("../fixtures/ungranted-read.txt").trim();
     assert_refusal(
         Effect::Read,
+        MANIFEST,
         &format!("Internal(\"capsule manifest does not declare authority for {resource}\")"),
     );
 }
@@ -112,9 +129,39 @@ fn ungranted_network_is_refused() {
 }
 
 #[test]
+fn undeclared_network_manifest_is_refused() {
+    // The same probe bundle, with the network capability removed from its
+    // manifest. The public read capability stays.
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(MANIFEST).expect("probe manifest is JSON");
+    let capabilities = manifest["capabilities"]
+        .as_array_mut()
+        .expect("probe manifest lists capabilities");
+    capabilities.retain(|capability| capability.as_str() != Some("elastos://net/stream"));
+    assert_eq!(capabilities.len(), 1, "the public read capability stays");
+    let output = assert_refusal_as(
+        Effect::Network,
+        "undeclared-network",
+        &serde_json::to_vec(&manifest).expect("stripped manifest is JSON"),
+        "Internal(\"capsule manifest does not declare authority for elastos://net/stream\")",
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "the manifest refusal exits 1"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("Runtime stderr is UTF-8");
+    assert!(
+        !stderr.contains("fixture denies"),
+        "the manifest refusal involves no fixture denial"
+    );
+}
+
+#[test]
 fn default_activation_refuses_without_selector() {
     assert_refusal(
         Effect::Default,
+        MANIFEST,
         "Unavailable(\"probe launch arguments are unavailable in elastos:bus@v1\")",
     );
 }
@@ -540,11 +587,19 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
             !stderr.contains("capsule manifest does not declare authority"),
             "the pending request is refused by the fixture"
         );
-        assert_output_refusal(
-            output,
-            effect,
-            &format!("Denied(\"{}\")", controller.deny_reason()),
-        );
+        // The declared network row is denied by the fixture, and its reason
+        // names that request. Read rows keep the fixture's read reason.
+        let reason = match effect {
+            Effect::Network => "fixture denies unlisted elastos://net/stream",
+            _ => controller.deny_reason(),
+        };
+        if matches!(effect, Effect::Network) {
+            assert!(
+                !stderr.contains("fixture denies unlisted read"),
+                "the network denial names the network resource"
+            );
+        }
+        assert_output_refusal(output, effect, &format!("Denied(\"{reason}\")"));
     }
     let seeded = std::str::from_utf8(include_bytes!("../fixtures/granted-bytes.txt")).unwrap();
     assert!(
@@ -695,6 +750,7 @@ fn no_policy_file_does_not_mean_allow() {
 fn agent_cannot_read_human_space_without_grant() {
     assert_refusal(
         Effect::HumanRead,
+        MANIFEST,
         "Internal(\"localhost://Users/self requires a principal-scoped launch context\")",
     );
 }
@@ -704,6 +760,7 @@ fn ungranted_memory_write_is_refused() {
     let resource = include_str!("../fixtures/memory-write.txt").trim();
     assert_refusal(
         Effect::MemoryWrite,
+        MANIFEST,
         &format!("Internal(\"capsule manifest does not declare authority for {resource}\")"),
     );
 }

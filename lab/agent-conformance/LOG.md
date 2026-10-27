@@ -7825,3 +7825,76 @@ Planted exit 101 in 1.36 seconds. The planted crate compiled. Assertion: `tests/
 ### Gates
 
 `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` passed. `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` passed with exit 0 in 296.67 seconds (`real`): 155 passed, 0 failed, 14 ignored across 12 targets, including both contract tests in `tests/standin_contract.rs`. `Cargo.toml` and `Cargo.lock` keep their bytes. No census leftover appeared, so the single rerun rule did not apply.
+
+## 054 — Undeclared network stays refused and the denial names it
+
+054: `assert_refusal` takes the staged manifest bytes, and `undeclared_network_manifest_is_refused` stages `MANIFEST` with `elastos://net/stream` removed and requires the manifest refusal to name that resource. The one fixture reason assignment names a pending `elastos://net/stream` denial; read denials keep `fixture denies unlisted read`. `F-net-undeclared` and `F-net-reason` join `falsifiers.json`. `probe/capsule.json`, `probe/src/lib.rs`, `fixtures/grants.json`, `fixtures/instance-grants.json`, `standin-runtime/`, `src/`, `Cargo.toml` and `Cargo.lock` are unchanged.
+
+### The two network rows
+
+`assert_refusal` (`tests/effects.rs:40`) now takes the manifest bytes and passes them to `identity::stage_probe` at `tests/effects.rs:56`. The four earlier callers pass `MANIFEST`. The body lives in `assert_refusal_as` (`tests/effects.rs:46`) so the stripped bundle carries its own version identity label: a manifest copy that differs from `MANIFEST` is a different bundle, and its lab CID differs. The label `undeclared-network` keeps the report's one identity per effect name, so the declared row and the undeclared row each report their own bundle. The launch bound is 40 seconds because the probe's own pending wait is 30 seconds; a declared request under a plant reports its Bus reason instead of the harness bound.
+
+`undeclared_network_manifest_is_refused` (`tests/effects.rs:132`) sits immediately after `ungranted_network_is_refused` (`:127`). It builds `Effect::Network`, removes only `elastos://net/stream` from the manifest capabilities, keeps the Public read capability, and requires exit 1 with `Component capsule denied: BusError::Internal("capsule manifest does not declare authority for elastos://net/stream")`. It starts no fixture controller and grants nothing. Stderr carries no `fixture denies` text.
+
+The one reason assignment at `tests/common/grants.rs:811` denies a pending request whose `resource` is `elastos://net/stream` with `fixture denies unlisted elastos://net/stream`. Every other non-matching request keeps `self.fixture.deny_reason`. `exercise_read` (`tests/effects.rs:593`) expects that network reason; sibling and other read denials still expect `controller.deny_reason()`. The network row printed `fixture read: exit:Some(1) matched:0 granted:0 denied:1 content_error:false` and `probe refusal effect:network exit:Some(1) reason_present:true`.
+
+Baseline from the one `./run.sh`: `undeclared_network_manifest_is_refused | PASS` and `ungranted_network_is_refused | PASS`. The undeclared bundle reported `{"effect":"undeclared-network","component_sha256":"67d2826de27d33930f60f5a26228fe1bb45946e8be8e4e462adac25103abfc3e","bundle_lab_cid":"bafybeiauhszbqfxoeg7ix4kerbt2jwk4ag234i3jllg5eudw245tqza6qi"}`; the declared row reported its own CID `bafybeiepnu6etnumpqea7vly37hhy55vvdxbbb4r4fpeipsqymubys3jdy`.
+
+Docs: `RUNBOOK.md:147` and `GAPS.md:528` name the declared row's fixture reason; `RUNBOOK.md:148` is the new undeclared bullet; `RUNBOOK.md:293-294` and `GAPS.md:414-415` record the one network exception. Read-row sentences keep `fixture denies unlisted read`.
+
+### Hand-run falsifiers
+
+Both entries are appended after `F-standin-a12-skip-cleanup` in `falsifiers.json` (`F-net-undeclared` at `:1485`, `F-net-reason` at `:1501`). Each `old` occurs once in its file after `cargo fmt`. Each plant was restored before the next; `diff` against the recovered pre-plant bytes was empty after each restore. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects TEST -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. Each planted crate compiled and ran the named test.
+
+F-net-undeclared. Named test `undeclared_network_manifest_is_refused`. Planted exit 101 in 36.98 seconds, test result 1 failed. Assertion: `tests/effects.rs:110:5` `expected nonzero exit and lifecycle refusal Internal("capsule manifest does not declare authority for elastos://net/stream")`; the declared manifest left the request pending, so `reason_present:false`. Restored exit 0 in 9.77 seconds.
+
+Old:
+
+```text
+agent_conformance::identity::stage_probe(&home, &bytes, manifest, label)
+```
+
+New:
+
+```text
+agent_conformance::identity::stage_probe(&home, &bytes, MANIFEST, label)
+```
+
+F-net-reason. Named test `ungranted_network_is_refused`. Planted exit 101 in 15.19 seconds, test result 1 failed. Assertion: `tests/effects.rs:597:13` `the network denial names the network resource`. Restored exit 0 in 10.54 seconds.
+
+Old:
+
+```text
+                let reason = if field(request, "resource")? == "elastos://net/stream" {
+                    "fixture denies unlisted elastos://net/stream".to_owned()
+                } else {
+                    self.fixture.deny_reason.clone()
+                };
+```
+
+New:
+
+```text
+                let reason = self.fixture.deny_reason.clone();
+```
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged. No census line failed, so no rerun was needed.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.139 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 261.107 seconds, inside the 600-second bound. 156 passed, 0 failed, 14 ignored across 12 targets; effects passed 59 with 12 ignored.
+- One `./lab/agent-conformance/run.sh`: exit 0, real 261.427 seconds. Both network rows are PASS and no row is FAIL.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `tests/effects.rs:132` stages a bundle whose identity stays the `capsule_identity::checked_bundle` lab CID; the new test names the Bus resource, not code or content by URL. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `tests/effects.rs:132` starts no fixture controller and grants nothing. `probe/src/lib.rs` is unchanged. |
+| 3. A second path or a second copy of one rule? | No | One staging call at `tests/effects.rs:56`, one reason assignment at `tests/common/grants.rs:811` and one `deny` at `:841`. `assert_refusal` delegates to `assert_refusal_as`. |
+| 4. Runtime core grows? | No | The edit is `tests/effects.rs`, `tests/common/grants.rs`, `falsifiers.json`, `RUNBOOK.md`, `GAPS.md` and `LOG.md`. `elastos/` is unchanged. |
+| 5. Refusals deny by default with a clear reason? | Yes | `tests/effects.rs:593` requires `Denied("fixture denies unlisted elastos://net/stream")`; the undeclared row requires `Internal("capsule manifest does not declare authority for elastos://net/stream")`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The probe still requests through `capabilities::request` and returns on refusal, with no provider invoke. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/effects.rs:132` is the new named test; `F-net-undeclared` failed at `:110` and `F-net-reason` failed at `:597`. |
+| 8. Identity, admission and allowance stay separate? | Yes | The undeclared row exercises admission (manifest declaration) alone and creates no grant; the declared row exercises the separate fixture denial. |
