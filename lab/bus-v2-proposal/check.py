@@ -128,6 +128,22 @@ REQUEST_MARKER = "`" + REQUEST_SPAN + "`"
 IS_WRITE_SPAN = "examples/agent-host/src/lib.rs:3290"
 IS_WRITE_MARKER = "`" + IS_WRITE_SPAN + "`"
 
+# Its quotation is remainder 8 after the scheme span, source line 123.
+SCHEME_SPAN = "elastos/crates/elastos-server/src/provider_resource.rs:123"
+SCHEME_MARKER = "`" + SCHEME_SPAN + "`"
+
+# Its quotation is the one remainder after the read-action span, source line 189.
+READ_ACTION_SPAN = "elastos/crates/elastos-server/src/provider_resource.rs:189"
+READ_ACTION_MARKER = "`" + READ_ACTION_SPAN + "`"
+
+# Its quotation is remainder 3 after the write-action span, source line 190.
+WRITE_ACTION_SPAN = "elastos/crates/elastos-server/src/provider_resource.rs:190"
+WRITE_ACTION_MARKER = "`" + WRITE_ACTION_SPAN + "`"
+
+# Its quotation is remainder 5 after the write-action walk, source line 192.
+DEFAULT_ACTION_SPAN = "elastos/crates/elastos-server/src/provider_resource.rs:192"
+DEFAULT_ACTION_MARKER = "`" + DEFAULT_ACTION_SPAN + "`"
+
 # The draft indents a quotation by exactly four spaces.
 DRAFT_INDENT = "    "
 
@@ -495,6 +511,38 @@ def is_write_quote(text):
     if len(remainders) <= 2:
         return None
     return remainders[2]
+
+
+def scheme_quote(text):
+    """Return remainder 8 after the scheme span, or None when it is absent."""
+    remainders = _remainders(text, SCHEME_MARKER)
+    if len(remainders) <= 8:
+        return None
+    return remainders[8]
+
+
+def read_action_quote(text):
+    """Return remainder 0 after the read-action span, or None when absent."""
+    remainders = _remainders(text, READ_ACTION_MARKER)
+    if not remainders:
+        return None
+    return remainders[0]
+
+
+def write_action_quote(text):
+    """Return remainder 3 after the write-action span, or None when absent."""
+    remainders = _remainders(text, WRITE_ACTION_MARKER)
+    if len(remainders) <= 3:
+        return None
+    return remainders[3]
+
+
+def default_action_quote(text):
+    """Return remainder 5 after the default-action span, or None when absent."""
+    remainders = _remainders(text, DEFAULT_ACTION_MARKER)
+    if len(remainders) <= 5:
+        return None
+    return remainders[5]
 
 
 def quoted_line_matches(quoted, source):
@@ -930,8 +978,72 @@ def _cover_quote_refusal(root, text, sha):
     return None
 
 
+def _scheme_quote_refusal(root, text, sha):
+    """Return the 123 refusal, or None when that quote is absent or matches."""
+    if text.count(SCHEME_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + SCHEME_SPAN
+    quoted = scheme_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(SCHEME_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + SCHEME_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + SCHEME_SPAN
+    return None
+
+
+def _read_action_quote_refusal(root, text, sha):
+    """Return the 189 refusal, or None when that quote is absent or matches."""
+    if text.count(READ_ACTION_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + READ_ACTION_SPAN
+    quoted = read_action_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(READ_ACTION_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + READ_ACTION_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + READ_ACTION_SPAN
+    return None
+
+
+def _write_action_quote_refusal(root, text, sha):
+    """Return the 190 refusal, or None when that quote is absent or matches."""
+    if text.count(WRITE_ACTION_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + WRITE_ACTION_SPAN
+    quoted = write_action_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(WRITE_ACTION_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + WRITE_ACTION_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + WRITE_ACTION_SPAN
+    return None
+
+
+def _default_action_quote_refusal(root, text, sha):
+    """Return the 192 refusal, or None when that quote is absent or matches."""
+    if text.count(DEFAULT_ACTION_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + DEFAULT_ACTION_SPAN
+    quoted = default_action_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(DEFAULT_ACTION_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + DEFAULT_ACTION_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + DEFAULT_ACTION_SPAN
+    return None
+
+
 def _quote_refusals(root, text, sha):
-    """Return the quote refusals in source order: 2067, 2421, 2422, 2720, 2741, 2749, 3290, 3308, 3526, 3549, 3754, 3755, 3757, 3767, 3849, 3850, 8149, 8162, 8168, 8187, 8188, 8189, 8190, 8191, 8192, 8193, 8194, then 8488."""
+    """Return the quote refusals in source order: 2067, 2421, 2422, 2720, 2741, 2749, 3290, 3308, 3526, 3549, 3754, 3755, 3757, 3767, 3849, 3850, 8149, 8162, 8168, 8187, 8188, 8189, 8190, 8191, 8192, 8193, 8194, 8488, then 123, 189, 190, 192."""
     observe = _observe_quote_refusal(root, text, sha)
     if observe is not None:
         return [observe]
@@ -1021,9 +1133,21 @@ def _quote_refusals(root, text, sha):
     if kind_append is not None:
         return [kind_append]
     cover = _cover_quote_refusal(root, text, sha)
-    if cover is None:
+    if cover is not None:
+        return [cover]
+    scheme = _scheme_quote_refusal(root, text, sha)
+    if scheme is not None:
+        return [scheme]
+    read_action = _read_action_quote_refusal(root, text, sha)
+    if read_action is not None:
+        return [read_action]
+    write_action = _write_action_quote_refusal(root, text, sha)
+    if write_action is not None:
+        return [write_action]
+    default_action = _default_action_quote_refusal(root, text, sha)
+    if default_action is None:
         return []
-    return [cover]
+    return [default_action]
 
 
 def _past_end(number, rel, count):
