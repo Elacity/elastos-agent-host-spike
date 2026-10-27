@@ -493,6 +493,7 @@ cell to be `designed, not enforced`.
 | runs_get | `op`, `run_id`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`). error: `status`, `code`, `message`. | storage | reads inside `STORAGE_ROOT`. refuses that read once the record is outside it. The hosted test settles by reading this op until the run is terminal. | `model_outside_read_denied` shows the read inside `STORAGE_ROOT` and `journal_corrupt` once the record is outside it. A `STORAGE_ROOT` read under `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`. The outside read is refused under the fixture profile `READ_FIXTURE_RULE`. That refusal is a denial, not a grant. `model_hosted_run_fails_closed_under_profile` sends `runs_create`, then `runs_get` until the run is terminal, and the hosted Runtime socket stand-in counts zero connections. The run's `status` is `failed` and `terminal.error.code` is `transport_interrupted`. The profile rule is `(deny network*)`. The profile denies the hosted Runtime socket with `(deny network*)`. That denial is not a grant. The test does not show which call connects. | designed, not enforced |
 | runs_events | `op`, `run_id`, `after_sequence`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `next_cursor`, `has_more`, `events` from `RunEventsPage`). error: `status`, `code`, `message`. | storage | reads the stored terminal run and does not write. | `model_terminal_run_page_and_cancel_read_under_profile` shows `schema` `elastos.model.run-events/v1`, `run_id` equal to the create data's `run_id`, `has_more` false, and a last event whose `kind` is `failed`. The storage snapshot after both calls equals the snapshot after create. A live cancel is not shown. The same journey runs under the stand-in file, which has no `;;` line. | designed, not enforced |
 | runs_cancel | `op`, `run_id`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`). error: `status`, `code`, `message`. | storage | reads the stored terminal run and does not write. | `model_terminal_run_page_and_cancel_read_under_profile` shows the data equals the create data. The storage snapshot after both calls equals the snapshot after create. A live cancel is not shown. The same journey runs under the stand-in file, which has no `;;` line. | designed, not enforced |
+| unsupported | `op` | error: `status`, `code`, `message`. | no named test shows this | the storage tree after `init` is unchanged | `model_unknown_op_is_refused_under_profile` sends the request `op` `not_an_op` and shows `code` `unsupported_operation` and the message `unsupported model provider operation`. The storage tree after `init` is unchanged, and no named test shows a read inside `STORAGE_ROOT` or a socket. The same journey runs under the stand-in file, which has no `;;` line. | designed, not enforced |
 
 ## Host-OS status
 
@@ -530,6 +531,17 @@ profile does not grant".
   `STORAGE_ROOT` does not. The test drives `init`, `status` and `offers_list`,
   checks each answer, and checks that `init` created `runs/` under
   `STORAGE_ROOT`. It then shuts the provider down and requires a clean exit.
+- `model_unknown_op_is_refused_under_profile`: after a hosted `init` that
+  passes `assert_serving` and creates `runs/`, the request
+  `{"op":"not_an_op"}` answers `status` `error`, `code`
+  `unsupported_operation`, and message `unsupported model provider
+  operation`. `tree_snapshot` of `STORAGE_ROOT` is unchanged. The oracle
+  case uses `Launch::Confined` with label `unknown-op`. The stand-in case
+  calls `standin_profile` once, writes the file with
+  `write_standin_profile` under `unknown-op-standin`, and starts with
+  `Launch::Profile` and `canonical_bindings`. The written file has no `;;`
+  line, and its sorted allow lines equal the oracle's. Both cases call
+  `shutdown`.
 - `model_outside_write_denied`: the same journey runs under the oracle
   (`Launch::Confined`) and under the generated stand-in file. Each case
   prepares its own redirect fixture. The generated case reads the declared
