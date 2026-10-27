@@ -83,6 +83,19 @@ Path(path).write_text(
 print(run_id)
 PY
 )"
+# Pin the host ledger to a fixed /var/tmp path. Do not follow the user runtime dir.
+# Record the minted nonce before qemu so a timeout or early exit cannot
+# leave an unused nonce for a later forged PASS.
+BOOT_ID="$(tr -d '-' < /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)"
+export LC_USED_NONCES="/var/tmp/linux-confine/used-nonces-${BOOT_ID}.txt"
+mkdir -m 700 -p /var/tmp/linux-confine
+python3 "$LAB/guest/check-guest-results.py" --mint-nonce "$LC_USED_NONCES" "$NONCE" "$RUN_ID"
+consume_minted_run() {
+    if [ -n "${LC_USED_NONCES:-}" ] && [ -n "${RUN_ID:-}" ]; then
+        python3 "$LAB/guest/check-guest-results.py" --consume-run "$LC_USED_NONCES" "$RUN_ID" || true
+    fi
+}
+trap consume_minted_run EXIT
 echo "$LABEL" > "$EVIDENCE/LABEL.txt"
 # Nonce stays off the 9p share until qemu has exited. The guest test uid
 # must not be able to read it from evidence/ or from /etc/lc-guest.env.

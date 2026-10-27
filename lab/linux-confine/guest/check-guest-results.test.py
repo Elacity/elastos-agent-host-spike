@@ -284,8 +284,22 @@ def apply_mutant(src: str, mutant_id: str) -> str:
         old = '    if ".." in preboot.parts:\n        problems.append("pre-boot path contains ..")\n        return problems'
         new = '    if False and ".." in preboot.parts:\n        problems.append("pre-boot path contains ..")\n        return problems'
     elif mutant_id == "M14":
-        old = "    if digest is not None and work_real is not None and not bind_problems:\n        used_problem = nonce_already_recorded(work_real, digest)\n        if used_problem:\n            problems.append(used_problem)"
-        new = "    if False and digest is not None and work_real is not None and not bind_problems:\n        used_problem = nonce_already_recorded(work_real, digest)\n        if used_problem:\n            problems.append(used_problem)"
+        old = (
+            "    if digest is not None and work_real is not None and not bind_problems:\n"
+            "        used_problem = nonce_already_recorded(\n"
+            "            work_real, digest, run_id=run_id, evidence_real=evidence_real\n"
+            "        )\n"
+            "        if used_problem:\n"
+            "            problems.append(used_problem)"
+        )
+        new = (
+            "    if False and digest is not None and work_real is not None and not bind_problems:\n"
+            "        used_problem = nonce_already_recorded(\n"
+            "            work_real, digest, run_id=run_id, evidence_real=evidence_real\n"
+            "        )\n"
+            "        if used_problem:\n"
+            "            problems.append(used_problem)"
+        )
     elif mutant_id == "M15":
         old = "            elif mtime > now + MTIME_SKEW_SEC:\n                problems.append(f\"{child.name}: evidence file mtime is in the future\")"
         new = "            elif False and mtime > now + MTIME_SKEW_SEC:\n                problems.append(f\"{child.name}: evidence file mtime is in the future\")"
@@ -1223,6 +1237,17 @@ class MutantsAreCaught(unittest.TestCase):
             alias = ev / "used-nonces-hardlink"
             os.link(ledger, alias)
             alias.write_text("")
+            # Isolate the nlink/alias check. Sidecar leftovers are a
+            # different plant (R6-delete-host-ledger).
+            for extra in (
+                ledger.with_name(ledger.name + ".minted"),
+                ledger.with_name(ledger.name + ".checked"),
+            ):
+                if extra.is_file():
+                    extra.unlink()
+            slots = ledger.with_name(ledger.name + ".d")
+            if slots.is_dir():
+                shutil.rmtree(slots)
             now = int(time.time())
             for child in ev.iterdir():
                 if child.is_file() and child.name != "RESULTS.txt":
@@ -1255,6 +1280,10 @@ class HostScriptNonceIsolation(unittest.TestCase):
         self.assertIn("run_start=", before)
         self.assertIn("run_id=", before)
         self.assertIn("work=", before)
+        self.assertIn('export LC_USED_NONCES="/var/tmp/linux-confine/used-nonces-', before)
+        self.assertNotIn("XDG_RUNTIME_DIR", before)
+        self.assertIn("--mint-nonce", before)
+        self.assertIn("trap consume_minted_run EXIT", before)
         self.assertNotIn('echo "$NONCE" > "$WORK/host-preboot.txt"', before)
         self.assertIn('"$WORK/host-preboot.txt"', after)
         self.assertIn('echo "run_id=$RUN_ID"', after)

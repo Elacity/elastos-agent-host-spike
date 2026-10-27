@@ -13,12 +13,16 @@ proved the test uid could not read the nonce. A symlink, hardlink, or
 '..' PREBOOT path, a reused nonce on this host boot, a future mtime, an
 unparseable or unexpected mark, a guest_exit line without exactly one
 trailing LF, a colliding extra fail, a preboot from another $WORK, or a
-future run_start is a failure. Used nonces live in a host-side ledger
-outside $WORK and 9p.
+run_start ahead of the host clock is a failure. Used nonces live in a
+host-side ledger at a fixed /var/tmp path (not XDG_RUNTIME_DIR). The
+live wrapper records the mint before qemu and keeps a sidecar marker so
+a missing or unlinked ledger after the first mint is refused. A leftover
+symlink at the ledger path is a named refusal.
 """
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -60,6 +64,10 @@ def run_start_is_implausible(run_start: int, now: int) -> bool:
     return run_start > now
 
 
+HOST_LEDGER_DIR = pathlib.Path("/var/tmp/linux-confine")
+_DIGEST_CHARS = frozenset("0123456789abcdef")
+
+
 def host_boot_id() -> str:
     boot = pathlib.Path("/proc/sys/kernel/random/boot_id")
     try:
@@ -72,17 +80,30 @@ def host_boot_id() -> str:
 
 
 def used_nonce_path(work_real: pathlib.Path) -> pathlib.Path:
-    # Host-side ledger. Guest 9p and a fresh $WORK cannot reset it.
-    # LC_USED_NONCES isolates one test or plant from the boot ledger.
+    # Host-side ledger. Guest 9p, a fresh $WORK, and XDG_RUNTIME_DIR
+    # cannot reset it. LC_USED_NONCES isolates one test or plant.
     override = os.environ.get("LC_USED_NONCES")
     if override:
         return pathlib.Path(override)
-    runtime = pathlib.Path(os.environ.get("XDG_RUNTIME_DIR") or "/var/tmp")
-    return runtime / "linux-confine" / f"used-nonces-{host_boot_id()}.txt"
+    return HOST_LEDGER_DIR / f"used-nonces-{host_boot_id()}.txt"
+
+
+def minted_marker_path(used: pathlib.Path) -> pathlib.Path:
+    return used.with_name(used.name + ".minted")
+
+
+def checked_runs_path(used: pathlib.Path) -> pathlib.Path:
+    return used.with_name(used.name + ".checked")
+
+
+def used_nonce_slot_dir(used: pathlib.Path) -> pathlib.Path:
+    return used.with_name(used.name + ".d")
 
 
 def path_is_alias(path: pathlib.Path) -> bool:
-    if path.is_symlink():
+    # File and its parent only. Walking to / would false-FAIL a host whose
+    # /var/tmp is a symlink.
+    if path.is_symlink() or path.parent.is_symlink():
         return True
     try:
         return path.exists() and path.stat().st_nlink > 1
@@ -95,41 +116,172 @@ def ledger_digests(text: str) -> list[str]:
     for line in text.splitlines():
         if not line:
             continue
-        digests.append(line.split()[0])
+        token = line.split()[0]
+        if len(token) == 64 and set(token) <= _DIGEST_CHARS:
+            digests.append(token)
     return digests
 
 
-def nonce_already_recorded(work_real: pathlib.Path, digest: str) -> str | None:
-    used = used_nonce_path(work_real)
+def _ledger_run_ids(text: str) -> dict[str, str]:
+    found: dict[str, str] = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        token = parts[0]
+        if len(token) == 64 and set(token) <= _DIGEST_CHARS:
+            found[token] = parts[1]
+    return found
+
+
+def _read_locked_text(path: pathlib.Path) -> str:
+    if not path.is_file() or path.is_symlink():
+        return ""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)
+        os.lseek(fd, 0, os.SEEK_SET)
+        return os.read(fd, 1 << 20).decode(errors="replace")
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
+
+
+def _append_locked_line(path: pathlib.Path, line: str) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    flags = os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        st = os.fstat(fd)
+        if st.st_nlink > 1:
+            return
+        os.lseek(fd, 0, os.SEEK_SET)
+        data = os.read(fd, 1 << 20).decode(errors="replace")
+        token = line.split()[0] if line.split() else ""
+        if token and token in {ln.split()[0] for ln in data.splitlines() if ln}:
+            return
+        os.write(fd, (line if line.endswith("\n") else line + "\n").encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _write_slot(used: pathlib.Path, digest: str) -> None:
+    slots = used_nonce_slot_dir(used)
+    try:
+        slots.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(slots / digest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(fd)
+    except FileExistsError:
+        return
+    except OSError:
+        return
+
+
+def consume_run_id(used: pathlib.Path, run_id: str) -> None:
+    if not run_id:
+        return
+    _append_locked_line(checked_runs_path(used), run_id)
+
+
+def run_id_is_checked(used: pathlib.Path, run_id: str) -> bool:
+    if not run_id:
+        return False
+    text = _read_locked_text(checked_runs_path(used))
+    return run_id in {ln.strip() for ln in text.splitlines() if ln.strip()}
+
+
+def _marker_has_started(used: pathlib.Path) -> bool:
+    marker = minted_marker_path(used)
+    return marker.is_file() and not marker.is_symlink()
+
+
+def _complete_digest_count(text: str) -> int:
+    return len(ledger_digests(text))
+
+
+def _ledger_problem(
+    used: pathlib.Path, evidence_real: pathlib.Path | None
+) -> str | None:
+    if used.is_symlink():
+        return "used-nonces path is a leftover symlink"
     if path_is_alias(used):
         return "used-nonces path is a symlink or hardlink"
-    if not used.is_file():
-        return None
-    seen = ledger_digests(used.read_text(errors="replace"))
-    if digest in seen:
-        return "nonce was already recorded for this host boot"
+    if used.parent.is_symlink():
+        return "used-nonces path is a symlink or hardlink"
+    if evidence_real is not None:
+        try:
+            used.resolve().relative_to(evidence_real)
+        except (ValueError, OSError):
+            pass
+        else:
+            return "used-nonces ledger is inside the guest-writable evidence dir"
     return None
+
+
+def nonce_already_recorded(
+    work_real: pathlib.Path,
+    digest: str,
+    run_id: str | None = None,
+    evidence_real: pathlib.Path | None = None,
+) -> str | None:
+    used = used_nonce_path(work_real)
+    path_problem = _ledger_problem(used, evidence_real)
+    if path_problem:
+        return path_problem
+    marker = minted_marker_path(used)
+    marker_text = _read_locked_text(marker) if _marker_has_started(used) else ""
+    ledger_text = _read_locked_text(used) if used.is_file() and not used.is_symlink() else ""
+    if _marker_has_started(used) and (
+        not used.is_file()
+        or used.is_symlink()
+        or _complete_digest_count(ledger_text) == 0
+    ):
+        return "used-nonces ledger missing after first mint"
+    seen = set(ledger_digests(ledger_text))
+    seen.update(ledger_digests(marker_text))
+    slot = used_nonce_slot_dir(used) / digest
+    if slot.is_file() and not slot.is_symlink():
+        seen.add(digest)
+    if digest not in seen:
+        return None
+    recorded_run = _ledger_run_ids(ledger_text).get(digest)
+    if run_id and not run_id_is_checked(used, run_id):
+        if recorded_run is None or recorded_run == run_id:
+            consume_run_id(used, run_id)
+            return None
+    return "nonce was already recorded for this host boot"
+
+
+def record_minted_nonce(
+    work_real: pathlib.Path, digest: str, run_id: str | None = None
+) -> None:
+    used = used_nonce_path(work_real)
+    if used.is_symlink() or path_is_alias(used):
+        return
+    used.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    boot = host_boot_id()
+    token = f"{digest} {run_id or '-'} {boot}"
+    _append_locked_line(used, token)
+    _append_locked_line(minted_marker_path(used), token)
+    _write_slot(used, digest)
 
 
 def record_used_nonce(
     work_real: pathlib.Path, digest: str, run_id: str | None = None
 ) -> None:
-    used = used_nonce_path(work_real)
-    if path_is_alias(used):
-        return
-    used.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    seen_lines = []
-    if used.is_file():
-        seen_lines = [line for line in used.read_text(errors="replace").splitlines() if line]
-    if digest in ledger_digests("\n".join(seen_lines)):
-        return
-    boot = host_boot_id()
-    token = f"{digest} {run_id or '-'} {boot}"
-    used.write_text("\n".join(seen_lines + [token]) + "\n")
-    try:
-        used.chmod(0o600)
-    except OSError:
-        pass
+    record_minted_nonce(work_real, digest, run_id)
+    if run_id:
+        consume_run_id(used_nonce_path(work_real), run_id)
 
 
 def work_binding_problems(
@@ -319,7 +471,7 @@ def collect_preboot_problems(
     if run_start is None:
         problems.append("pre-boot run_start missing")
     elif run_start_is_implausible(run_start, now):
-        problems.append("pre-boot run_start is implausible")
+        problems.append("pre-boot run_start is implausible (ahead of the host clock)")
         run_start = None
     work_real = None
     if work_text is None:
@@ -347,7 +499,9 @@ def collect_preboot_problems(
     elif run_id != host_run_id:
         problems.append("pre-boot run_id does not match host-context")
     if digest is not None and work_real is not None and not bind_problems:
-        used_problem = nonce_already_recorded(work_real, digest)
+        used_problem = nonce_already_recorded(
+            work_real, digest, run_id=run_id, evidence_real=evidence_real
+        )
         if used_problem:
             problems.append(used_problem)
     if run_start is not None:
@@ -562,5 +716,35 @@ def main() -> int:
     return 0
 
 
+def _cli_mint(argv: list[str]) -> int:
+    if len(argv) != 4:
+        print(
+            "usage: check-guest-results.py --mint-nonce LEDGER NONCE RUN_ID",
+            file=sys.stderr,
+        )
+        return 2
+    os.environ["LC_USED_NONCES"] = argv[1]
+    digest = hashlib.sha256(argv[2].encode()).hexdigest()
+    work = pathlib.Path(argv[1]).resolve().parent
+    record_minted_nonce(work, digest, argv[3])
+    print(argv[1])
+    return 0
+
+
+def _cli_consume(argv: list[str]) -> int:
+    if len(argv) != 3:
+        print(
+            "usage: check-guest-results.py --consume-run LEDGER RUN_ID",
+            file=sys.stderr,
+        )
+        return 2
+    consume_run_id(pathlib.Path(argv[1]), argv[2])
+    return 0
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--mint-nonce":
+        sys.exit(_cli_mint(sys.argv[1:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "--consume-run":
+        sys.exit(_cli_consume(sys.argv[1:]))
     sys.exit(main())
