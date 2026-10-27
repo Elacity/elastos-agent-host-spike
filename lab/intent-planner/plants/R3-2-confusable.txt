@@ -1,0 +1,19 @@
+id: R3-2
+file: src/lib.rs
+test: cyrillic_confusable_principal_is_a_different_plan
+--- old
+fn push_field(out: &mut String, field: &str) {
+    out.push_str(&field.len().to_string());
+    out.push(':');
+    out.push_str(field);
+    out.push('\n');
+}
+--- new
+fn push_field(out: &mut String, field: &str) {
+    let field = field.replace('\u{430}', "a");
+    out.push_str(&field.len().to_string());
+    out.push(':');
+    out.push_str(&field);
+    out.push('\n');
+}
+--- end

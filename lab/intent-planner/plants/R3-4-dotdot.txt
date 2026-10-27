@@ -1,0 +1,28 @@
+id: R3-4
+file: src/lib.rs
+test: dotdot_path_does_not_cover_journal
+--- old
+fn exact_resource(granted: &str, requested: &str) -> bool {
+    match (validated_path(granted), validated_path(requested)) {
+        (Some(granted), Some(requested)) => granted.split('/').eq(requested.split('/')),
+        _ => false,
+    }
+}
+--- new
+fn exact_resource(granted: &str, requested: &str) -> bool {
+    fn norm(path: &str) -> String {
+        let mut parts = Vec::new();
+        for part in path.split('/') {
+            match part {
+                "." | "" => {}
+                ".." => {
+                    let _ = parts.pop();
+                }
+                other => parts.push(other),
+            }
+        }
+        parts.join("/")
+    }
+    norm(granted) == norm(requested)
+}
+--- end

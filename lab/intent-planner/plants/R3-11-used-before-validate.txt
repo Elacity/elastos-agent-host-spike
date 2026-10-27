@@ -1,0 +1,24 @@
+id: R3-11
+file: src/lib.rs
+test: failed_execute_does_not_spend_the_grant
+--- old
+        for grant in &spent {
+            let agent = plan_agent(&grant.resource);
+            self.grants
+                .validate_journal_write(&grant.token, &runtime_bridge::scoped_journal(agent))
+                .map_err(|_| Refuse::Bridge)?;
+        }
+        self.effects.extend(recorded);
+        self.used
+            .extend(spent.iter().map(|grant| grant.token.clone()));
+--- new
+        self.used
+            .extend(spent.iter().map(|grant| grant.token.clone()));
+        for grant in &spent {
+            let agent = plan_agent(&grant.resource);
+            self.grants
+                .validate_journal_write(&grant.token, &runtime_bridge::scoped_journal(agent))
+                .map_err(|_| Refuse::Bridge)?;
+        }
+        self.effects.extend(recorded);
+--- end

@@ -154,13 +154,22 @@ fn take_forced_invoke() -> Option<ForcedInvoke> {
 }
 
 pub fn classify(reply: &BridgeReply) -> BridgeClass {
-    if reply.code == STORAGE_BRIDGE_CODE && reply.message == STORAGE_BRIDGE_GAP {
+    let token = reply_token(&reply.code, &reply.message);
+    if token == reply_token(STORAGE_BRIDGE_CODE, STORAGE_BRIDGE_GAP) {
         BridgeClass::StorageBlocked
-    } else if reply.code == MISSING_TOKEN_CODE && reply.message == MISSING_TOKEN_MESSAGE {
+    } else if token == reply_token(MISSING_TOKEN_CODE, MISSING_TOKEN_MESSAGE) {
         BridgeClass::Unapproved
     } else {
         BridgeClass::Other
     }
+}
+
+fn reply_token(code: &str, message: &str) -> String {
+    let mut token = String::with_capacity(code.len() + 1 + message.len());
+    token.push_str(code);
+    token.push('\n');
+    token.push_str(message);
+    token
 }
 
 /// Audit records left by one in-process `handle_remote_request_with_audit_dir`

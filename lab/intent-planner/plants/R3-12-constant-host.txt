@@ -1,0 +1,9 @@
+id: R3-12
+file: src/lib.rs
+test: unused_review_does_not_run_on_a_second_host
+--- old
+    format!("host-{}", NEXT.fetch_add(1, Ordering::Relaxed))
+--- new
+    let _ = NEXT.fetch_add(1, Ordering::Relaxed);
+    "host-1".to_owned()
+--- end

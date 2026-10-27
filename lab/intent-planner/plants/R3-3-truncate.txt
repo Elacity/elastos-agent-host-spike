@@ -1,0 +1,20 @@
+id: R3-3
+file: src/lib.rs
+test: over_length_field_is_not_truncated
+--- old
+fn push_field(out: &mut String, field: &str) {
+    out.push_str(&field.len().to_string());
+    out.push(':');
+    out.push_str(field);
+    out.push('\n');
+}
+--- new
+fn push_field(out: &mut String, field: &str) {
+    let n = field.len().min(255);
+    let field = &field[..n];
+    out.push_str(&n.to_string());
+    out.push(':');
+    out.push_str(field);
+    out.push('\n');
+}
+--- end

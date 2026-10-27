@@ -12,10 +12,13 @@
 //! A rejected plan, a plan whose bytes changed after approval, a constructed
 //! plan whose length-prefixed bytes collide only if the prefix is dropped, a
 //! run list that is not the approved ordered list, a review from another Host
-//! (`host-1` is not `host-10`), and a second use of the same grant all stop
-//! before a grant is spent. A failed execute does not spend. A step the
-//! Runtime cannot express is BLOCKED with the missing capability. The public
-//! entry does not store a journal. A `stored` bus reply fails the run.
+//! (`host-1` is not `host-10`), an empty or NUL `host_id`, and a second use
+//! of the same grant all stop before a grant is spent. Names and paths are
+//! checked against a grammar before any compare and refused, never folded or
+//! truncated. `canonical()` keeps the plan step order. A failed execute does
+//! not spend. A step the Runtime cannot express is BLOCKED with the missing
+//! capability. The public entry does not store a journal. A `stored` bus
+//! reply, or any reply other than the exact BLOCKED token, fails the run.
 
 #[cfg(test)]
 mod plant;
@@ -76,7 +79,10 @@ pub struct Plan {
 
 impl Plan {
     /// The exact bytes approval binds. Each field is length-prefixed, so a
-    /// later edit cannot keep the same binding by moving a separator.
+    /// later edit cannot keep the same binding by moving a separator. Steps
+    /// stay in plan order: approving `[notes, journal]` never binds
+    /// `[journal, notes]`. Fields are the bytes as given. Nothing is folded,
+    /// case-mapped, or truncated.
     pub fn canonical(&self) -> String {
         let mut out = String::new();
         push_field(&mut out, &self.principal);
@@ -273,6 +279,15 @@ impl Host {
     /// unchanged.
     pub fn execute(&mut self, review: &Review, plan: &Plan, steps: &[Step]) -> Result<(), Refuse> {
         let allowed = self.approval_check(review, plan, steps)?;
+        if validated_name(&plan.principal).is_none() {
+            return Err(Refuse::BadPrincipal);
+        }
+        if steps
+            .iter()
+            .any(|step| validated_path(&step.resource).is_none())
+        {
+            return Err(Refuse::OutsidePlan);
+        }
         let mut recorded = Vec::new();
         let mut spent = Vec::new();
         for step in steps {
@@ -345,6 +360,9 @@ impl Host {
         plan: &Plan,
         steps: &[Step],
     ) -> Result<Vec<Grant>, Refuse> {
+        if validated_name(&review.host_id).is_none() {
+            return Err(Refuse::ForeignHost);
+        }
         if review.host_id != self.id {
             return Err(Refuse::ForeignHost);
         }
@@ -378,8 +396,71 @@ fn new_host_id() -> String {
     format!("host-{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
+const NAME_MAX: usize = 64;
+const RESOURCE_MAX: usize = 255;
+
+/// A name is one grammar segment: ASCII `[a-z0-9._-]`, no empty value, no
+/// `.` or `..`, no `%`, no NUL, no uppercase. Over-length is refused.
+fn validated_name(raw: &str) -> Option<&str> {
+    if raw.is_empty()
+        || raw.len() > NAME_MAX
+        || raw.contains('\0')
+        || raw.contains('%')
+        || raw == "."
+        || raw == ".."
+    {
+        return None;
+    }
+    if raw.bytes().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+    }) {
+        Some(raw)
+    } else {
+        None
+    }
+}
+
+/// A resource path is refused (not normalised) when it fails the grammar.
+/// The Runtime guest URI keeps its existing `localhost://Users/...` alphabet
+/// (ASCII letters in either case). Segments are `[A-Za-z0-9._-]`, `/`
+/// separated, with no empty, `.`, or `..` segment, no trailing slash, no
+/// `%`, no NUL. Over-length is refused. The value returned is the original
+/// bytes. Nothing is folded, decoded, or truncated.
+fn validated_path(raw: &str) -> Option<&str> {
+    if raw.is_empty()
+        || raw.len() > RESOURCE_MAX
+        || !raw.is_ascii()
+        || raw.contains('\0')
+        || raw.contains('%')
+        || raw.ends_with('/')
+    {
+        return None;
+    }
+    let path = raw.strip_prefix("localhost://").unwrap_or(raw);
+    if path.is_empty() {
+        return None;
+    }
+    if path.split('/').all(valid_path_segment) {
+        Some(raw)
+    } else {
+        None
+    }
+}
+
+fn valid_path_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
 fn exact_resource(granted: &str, requested: &str) -> bool {
-    granted.split('/').eq(requested.split('/'))
+    match (validated_path(granted), validated_path(requested)) {
+        (Some(granted), Some(requested)) => granted.split('/').eq(requested.split('/')),
+        _ => false,
+    }
 }
 
 fn grant_that_covers<'a>(grants: &'a [Grant], step: &Step) -> Result<&'a Grant, Refuse> {
@@ -496,14 +577,11 @@ pub fn preview(plan: &Plan) -> String {
 /// Agent id rule used for a task id: 1 to 64 bytes, `[a-z0-9][a-z0-9._-]*`,
 /// and it does not end in `.`.
 fn plain_principal(name: &str) -> bool {
-    name.len() <= 64
+    validated_name(name).is_some()
         && name
             .bytes()
             .next()
             .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && name.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
-        })
         && !name.ends_with('.')
 }
 
@@ -1055,6 +1133,234 @@ fn failed_execute_does_not_spend_the_grant() {
         .expect_err("retry after failed execute");
     assert_eq!(again, Refuse::Bridge);
     assert_ne!(again, Refuse::GrantSpent);
+}
+
+#[test]
+fn nfc_nfd_principals_do_not_collide() {
+    let mut nfc = sample();
+    nfc.principal = "caf\u{e9}".to_owned();
+    let mut nfd = nfc.clone();
+    nfd.principal = "cafe\u{301}".to_owned();
+    assert_ne!(nfc.canonical(), nfd.canonical());
+    let mut host = Host::new();
+    let review = host.review(&nfc, Choice::Approve);
+    let error = host
+        .execute(&review, &nfd, &nfd.steps)
+        .expect_err("nfc/nfd");
+    assert_eq!(error, Refuse::PlanAltered);
+    assert_eq!(error.to_string(), "the plan was altered after approval");
+    assert!(host.effects().is_empty());
+}
+
+#[test]
+fn cyrillic_confusable_principal_is_a_different_plan() {
+    let mut latin = sample();
+    latin.principal = "ada".to_owned();
+    let mut cyrillic = latin.clone();
+    cyrillic.principal = "\u{430}da".to_owned();
+    assert_ne!(latin.canonical(), cyrillic.canonical());
+    let mut host = Host::new();
+    let review = host.review(&latin, Choice::Approve);
+    let error = host
+        .execute(&review, &cyrillic, &cyrillic.steps)
+        .expect_err("confusable");
+    assert_eq!(error, Refuse::PlanAltered);
+    assert_eq!(error.to_string(), "the plan was altered after approval");
+    assert!(host.effects().is_empty());
+}
+
+#[test]
+fn over_length_field_is_not_truncated() {
+    let head = "a".repeat(255);
+    let mut left = sample();
+    left.principal = format!("{head}b");
+    let mut right = sample();
+    right.principal = format!("{head}c");
+    assert!(left.canonical().starts_with("256:"));
+    assert!(right.canonical().starts_with("256:"));
+    assert_ne!(left.canonical(), right.canonical());
+    let mut host = Host::new();
+    let review = host.review(&left, Choice::Approve);
+    let error = host
+        .execute(&review, &right, &right.steps)
+        .expect_err("over-length");
+    assert_eq!(error, Refuse::PlanAltered);
+    assert_eq!(error.to_string(), "the plan was altered after approval");
+    assert!(host.effects().is_empty());
+    let same = host
+        .execute(&review, &left, &left.steps)
+        .expect_err("over-length same plan");
+    assert_eq!(same, Refuse::BadPrincipal);
+    assert!(host.effects().is_empty());
+}
+
+#[test]
+fn dotdot_path_does_not_cover_journal() {
+    let plan = Plan {
+        principal: "ada".to_owned(),
+        intent: INTENT.to_owned(),
+        steps: vec![journal_write_step(1, "ada")],
+    };
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    let mut walk = plan.steps[0].clone();
+    walk.resource.push_str("/foo/..");
+    assert!(
+        !review.grants()[0].covers(&walk),
+        "a .. segment must not cover the journal"
+    );
+    assert!(review.grants()[0].covers(&plan.steps[0]));
+}
+
+#[test]
+fn trailing_slash_path_does_not_cover_journal() {
+    let plan = Plan {
+        principal: "ada".to_owned(),
+        intent: INTENT.to_owned(),
+        steps: vec![journal_write_step(1, "ada")],
+    };
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    let mut slashed = plan.steps[0].clone();
+    slashed.resource.push('/');
+    assert!(
+        !review.grants()[0].covers(&slashed),
+        "a trailing slash must not cover the journal"
+    );
+    assert!(review.grants()[0].covers(&plan.steps[0]));
+}
+
+#[test]
+fn ascii_case_path_does_not_cover_journal() {
+    let plan = Plan {
+        principal: "ada".to_owned(),
+        intent: INTENT.to_owned(),
+        steps: vec![journal_write_step(1, "ada")],
+    };
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    let mut folded = plan.steps[0].clone();
+    folded.resource = folded.resource.replacen("/ada/", "/Ada/", 1);
+    assert_ne!(folded.resource, plan.steps[0].resource);
+    assert!(
+        !review.grants()[0].covers(&folded),
+        "ASCII case must not cover the journal"
+    );
+    assert!(review.grants()[0].covers(&plan.steps[0]));
+}
+
+#[test]
+fn blocked_reply_is_a_whole_token() {
+    let plan = sample();
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    runtime_bridge::force_next_journal_reply(runtime_bridge::BridgeReply {
+        code: format!("{} ", runtime_bridge::STORAGE_BRIDGE_CODE),
+        message: format!("{} trailing", runtime_bridge::STORAGE_BRIDGE_GAP),
+    });
+    let error = host
+        .execute(&review, &plan, &plan.steps)
+        .expect_err("trimmed blocked reply");
+    assert_eq!(error, Refuse::Bridge);
+    assert_eq!(error.to_string(), "the bus bridge did not answer");
+    assert!(host.effects().is_empty());
+
+    runtime_bridge::force_next_journal_reply(runtime_bridge::BridgeReply {
+        code: runtime_bridge::STORAGE_BRIDGE_CODE.to_ascii_uppercase(),
+        message: runtime_bridge::STORAGE_BRIDGE_GAP.to_owned(),
+    });
+    let error = host
+        .execute(&review, &plan, &plan.steps)
+        .expect_err("case-folded blocked reply");
+    assert_eq!(error, Refuse::Bridge);
+    assert!(host.effects().is_empty());
+
+    runtime_bridge::force_next_journal_reply(runtime_bridge::BridgeReply {
+        code: runtime_bridge::STORAGE_BRIDGE_CODE.to_owned(),
+        message: format!("{} extra", runtime_bridge::STORAGE_BRIDGE_GAP),
+    });
+    let error = host
+        .execute(&review, &plan, &plan.steps)
+        .expect_err("prefix blocked reply");
+    assert_eq!(error, Refuse::Bridge);
+    assert!(host.effects().is_empty());
+
+    host.execute(&review, &plan, &plan.steps)
+        .expect("exact blocked token still runs");
+    assert_eq!(host.effects().len(), plan.steps.len());
+}
+
+#[test]
+fn empty_or_nul_host_id_is_foreign() {
+    let plan = sample();
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+
+    let mut empty = review.clone();
+    empty.host_id.clear();
+    let error = host
+        .execute(&empty, &plan, &plan.steps)
+        .expect_err("empty host id");
+    assert_eq!(error, Refuse::ForeignHost);
+    assert_eq!(error.to_string(), "the review was minted by another host");
+    assert!(host.effects().is_empty());
+    assert!(runtime_bridge::component_invoke_audit(host.audit_dir()).is_empty());
+
+    let mut nulled = review.clone();
+    nulled.host_id = format!("{}\0", host.id);
+    let error = host
+        .execute(&nulled, &plan, &plan.steps)
+        .expect_err("nul host id");
+    assert_eq!(error, Refuse::ForeignHost);
+    assert!(host.effects().is_empty());
+    assert!(runtime_bridge::component_invoke_audit(host.audit_dir()).is_empty());
+
+    let mut other = Host::new();
+    other.id = "host-99".to_owned();
+    let mut blank = review.clone();
+    blank.host_id.clear();
+    let error = other
+        .execute(&blank, &plan, &plan.steps)
+        .expect_err("empty vs host-99");
+    assert_eq!(error, Refuse::ForeignHost);
+    assert!(other.effects().is_empty());
+    assert!(runtime_bridge::component_invoke_audit(other.audit_dir()).is_empty());
+}
+
+#[test]
+fn approved_step_order_is_bound() {
+    let plan = sample();
+    assert_eq!(plan.steps[0].resource, runtime_bridge::guest_notes("ada"));
+    assert_eq!(plan.steps[1].resource, runtime_bridge::guest_journal("ada"));
+    let mut swapped = plan.clone();
+    swapped.steps.swap(0, 1);
+    assert_ne!(plan.canonical(), swapped.canonical());
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    let error = host
+        .execute(&review, &swapped, &swapped.steps)
+        .expect_err("swapped plan object");
+    assert_eq!(error, Refuse::PlanAltered);
+    assert_eq!(error.to_string(), "the plan was altered after approval");
+    assert!(host.effects().is_empty());
+}
+
+#[test]
+fn percent_encoded_path_does_not_cover_journal() {
+    let plan = Plan {
+        principal: "ada".to_owned(),
+        intent: INTENT.to_owned(),
+        steps: vec![journal_write_step(1, "ada")],
+    };
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    let mut encoded = plan.steps[0].clone();
+    encoded.resource = encoded.resource.replacen("journal", "journa%6c", 1);
+    assert!(
+        !review.grants()[0].covers(&encoded),
+        "percent-encoding must not cover the journal"
+    );
+    assert!(review.grants()[0].covers(&plan.steps[0]));
 }
 
 #[cfg(test)]

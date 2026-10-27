@@ -1,0 +1,19 @@
+id: R3-1
+file: src/lib.rs
+test: nfc_nfd_principals_do_not_collide
+--- old
+fn push_field(out: &mut String, field: &str) {
+    out.push_str(&field.len().to_string());
+    out.push(':');
+    out.push_str(field);
+    out.push('\n');
+}
+--- new
+fn push_field(out: &mut String, field: &str) {
+    let field = field.replace("e\u{301}", "\u{e9}");
+    out.push_str(&field.len().to_string());
+    out.push(':');
+    out.push_str(&field);
+    out.push('\n');
+}
+--- end

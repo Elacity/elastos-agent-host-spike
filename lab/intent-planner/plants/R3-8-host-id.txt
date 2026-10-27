@@ -1,0 +1,16 @@
+id: R3-8
+file: src/lib.rs
+test: empty_or_nul_host_id_is_foreign
+--- old
+        if validated_name(&review.host_id).is_none() {
+            return Err(Refuse::ForeignHost);
+        }
+        if review.host_id != self.id {
+            return Err(Refuse::ForeignHost);
+        }
+--- new
+        let host_id = review.host_id.replace('\0', "");
+        if !host_id.is_empty() && host_id != self.id {
+            return Err(Refuse::ForeignHost);
+        }
+--- end

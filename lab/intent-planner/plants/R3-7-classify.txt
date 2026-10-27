@@ -1,0 +1,29 @@
+id: R3-7
+file: src/runtime_bridge.rs
+test: blocked_reply_is_a_whole_token
+--- old
+pub fn classify(reply: &BridgeReply) -> BridgeClass {
+    let token = reply_token(&reply.code, &reply.message);
+    if token == reply_token(STORAGE_BRIDGE_CODE, STORAGE_BRIDGE_GAP) {
+        BridgeClass::StorageBlocked
+    } else if token == reply_token(MISSING_TOKEN_CODE, MISSING_TOKEN_MESSAGE) {
+        BridgeClass::Unapproved
+    } else {
+        BridgeClass::Other
+    }
+}
+--- new
+pub fn classify(reply: &BridgeReply) -> BridgeClass {
+    let code = reply.code.trim().to_ascii_lowercase();
+    let message = reply.message.trim().to_ascii_lowercase();
+    let blocked_code = STORAGE_BRIDGE_CODE.to_ascii_lowercase();
+    let blocked_msg = STORAGE_BRIDGE_GAP.to_ascii_lowercase();
+    if code.starts_with(&blocked_code) && message.contains(&blocked_msg) {
+        BridgeClass::StorageBlocked
+    } else if code.starts_with(&MISSING_TOKEN_CODE.to_ascii_lowercase()) {
+        BridgeClass::Unapproved
+    } else {
+        BridgeClass::Other
+    }
+}
+--- end

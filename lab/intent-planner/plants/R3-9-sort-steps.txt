@@ -1,0 +1,20 @@
+id: R3-9
+file: src/lib.rs
+test: approved_step_order_is_bound
+--- old
+        for step in &self.steps {
+            push_field(&mut out, &step.id.to_string());
+            push_field(&mut out, step.capability.action.as_str());
+            push_field(&mut out, &step.capability.operation);
+            push_field(&mut out, &step.resource);
+        }
+--- new
+        let mut steps = self.steps.clone();
+        steps.sort_by(|left, right| left.resource.cmp(&right.resource));
+        for step in &steps {
+            push_field(&mut out, &step.id.to_string());
+            push_field(&mut out, step.capability.action.as_str());
+            push_field(&mut out, &step.capability.operation);
+            push_field(&mut out, &step.resource);
+        }
+--- end

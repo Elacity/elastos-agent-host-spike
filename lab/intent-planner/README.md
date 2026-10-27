@@ -57,10 +57,15 @@ Running the same approval a second time returns
 
 A constructed plan `principal="a\nb"` / `intent="c"` does not execute as
 `principal="a"` / `intent="b\nc"`. `ada` and `ada ` are different plans.
-A grant for `.../Agents/ada/tasks` does not cover the child journal.
-A Review from `host-1` does not run on `host-10`.
-A bus reply `stored`, or any reply other than the explicit storage BLOCKED
-text, returns `the bus bridge did not answer` and does not spend the grant.
+NFC `café` and NFD `cafe\u{301}` are different plans. Latin `ada` and
+Cyrillic `аda` are different plans. A 256-byte field is refused, never
+truncated. Approving `[notes, journal]` does not execute `[journal, notes]`.
+A grant for `.../journal` does not cover `.../journal/foo/..`,
+`.../journal/`, `.../Agents/Ada/...`, or `.../journa%6c`.
+A Review from `host-1` does not run on `host-10`. An empty or NUL `host_id`
+is `ForeignHost` before any bus call.
+A bus reply `stored`, or any reply other than the exact storage BLOCKED
+token, returns `the bus bridge did not answer` and does not spend the grant.
 A failed execute leaves the grant unused, so a retry is not `GrantSpent`.
 
 ## Rows
@@ -87,16 +92,20 @@ bus is NEEDS RUNTIME. See `RUNTIME-ASK.md`.
 ## What stays in this lab
 
 The planner table, the preview text, and the approval gate stay here. The gate
-is the plan binding: the Host that minted the Review, length-prefixed
-canonical bytes (including the principal, compared as exact bytes), the
-exact ordered step list, `covers` by exact path components, `validate_journal_write`
-on that Host's manager after the in-process library call confirms the
-explicit BLOCKED reply, and one use of the recorded token. A parent path
-does not cover a child journal. `host-1` does not match `host-10`. A
-`stored` bus reply, or any reply other than the explicit storage BLOCKED
-text, fails the run and does not spend the grant. The Runtime has no plan
-object. `UsersAI` notes stay BLOCKED (RA-5). A stored journal stays BLOCKED
-(RA-4). Session grants and standing mandates stay outside this check.
+is the plan binding: the Host that minted the Review, a grammar check of
+names and paths before any compare (refuse, never fold or truncate),
+length-prefixed canonical bytes in plan step order (including the principal,
+compared as exact bytes), the exact ordered step list, `covers` by exact
+path components on validated forms, `validate_journal_write` on that Host's
+manager after the in-process library call confirms the exact BLOCKED token,
+and one use of the recorded token. A parent path, a `..` segment, a trailing
+slash, ASCII case, or percent-encoding does not cover a child journal.
+`host-1` does not match `host-10`. Empty and NUL `host_id` are
+`ForeignHost` before invoke. A `stored` bus reply, or any reply other than
+the exact storage BLOCKED token, fails the run and does not spend the grant.
+The Runtime has no plan object. `UsersAI` notes stay BLOCKED (RA-5). A
+stored journal stays BLOCKED (RA-4). Session grants and standing mandates
+stay outside this check.
 
 `Grants::mint_journal_write` and `invoke_journal` stay callable as test
 helpers. They skip preview and `Host::execute`.
@@ -105,8 +114,9 @@ helpers. They skip preview and `Host::execute`.
 
 `plants/F-A15-approval.txt` replaces `approval_check` with a body that returns
 a fresh grant for every presented step. `plants/M1-approve-check.txt` through
-`plants/M8-principal.txt` and `plants/N1-length-prefix.txt` through
-`plants/N10-used-before-bus.txt` each remove one guard.
+`plants/M8-principal.txt`, `plants/N1-length-prefix.txt` through
+`plants/N10-used-before-bus.txt`, and `plants/R3-1-nfc.txt` through
+`plants/R3-12-constant-host.txt` each remove one guard.
 `model_planted_bugs_are_caught` requires every named test to fail, then
 restores the planted file:
 
@@ -132,6 +142,18 @@ restores the planted file:
 | N8 | mint with `max_uses: None` | `execute_spends_the_allow_once_grant_at_the_lab_manager` |
 | N9 | validate the guest URI | `execute_spends_the_allow_once_grant_at_the_lab_manager` |
 | N10 | mark `used` before the bus | `failed_execute_does_not_spend_the_grant` |
+| R3-1 | NFC/NFD fold in `push_field` | `nfc_nfd_principals_do_not_collide` |
+| R3-2 | Cyrillic `а` folded to `a` | `cyrillic_confusable_principal_is_a_different_plan` |
+| R3-3 | length prefix `min(255)` truncate | `over_length_field_is_not_truncated` |
+| R3-4 | `covers` resolves `.` and `..` | `dotdot_path_does_not_cover_journal` |
+| R3-5 | `covers` strips a trailing `/` | `trailing_slash_path_does_not_cover_journal` |
+| R3-6 | `covers` is ASCII case-insensitive | `ascii_case_path_does_not_cover_journal` |
+| R3-7 | `classify` trims, case-folds, prefix-matches | `blocked_reply_is_a_whole_token` |
+| R3-8 | empty or NUL `host_id` skipped | `empty_or_nul_host_id_is_foreign` |
+| R3-9 | `canonical()` sorts steps by resource | `approved_step_order_is_bound` |
+| R3-10 | `covers` percent-decodes | `percent_encoded_path_does_not_cover_journal` |
+| R3-11 | mark `used` before `validate` | `failed_execute_does_not_spend_the_grant` |
+| R3-12 | `new_host_id` always `host-1` | `unused_review_does_not_run_on_a_second_host` |
 
 ## Checks
 
