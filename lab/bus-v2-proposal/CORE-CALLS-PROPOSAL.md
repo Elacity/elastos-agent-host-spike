@@ -1735,7 +1735,7 @@ Section 1 shows the guest names `Users/self`. local_person_principal_id builds `
         instance
     }
 
-`lab/grant-binding/src/lib.rs::resource_name` is the name check. `lab/grant-binding/src/lib.rs:277` is the guard `if parts.len() < 3 || parts[0] != "UsersAI" || parts[1] != agent`. The body returns OutsidePrincipal when that guard is true.
+`lab/grant-binding/src/lib.rs::resource_name` is the name check. `lab/grant-binding/src/lib.rs:280` is the guard `if parts.len() < 3 || parts[0] != "UsersAI" || parts[1] != agent`. The body returns OutsidePrincipal when that guard is true.
 
     fn resource_name(agent: &str, name: &str, owned_root: Option<&str>) -> Result<String, Refuse> {
         if name.contains('\\') || name.starts_with('/') {
@@ -1775,13 +1775,13 @@ Is the agent DID the person principal (person:local:), or a separate DID? Does t
 
 Section 3 shows the cited functions return the token string as the grant id. grant-id is a string. Those functions do not show a separate handle table.
 
-`lab/grant-binding/src/lib.rs:20` says an opaque grant handle. The guest holds only this. `lab/grant-binding/src/lib.rs:22` is the struct. Handle is an opaque value and the guest holds only that.
+`lab/grant-binding/src/lib.rs:23` says an opaque grant handle. The guest holds only this. `lab/grant-binding/src/lib.rs:25` is the struct. Handle is an opaque value and the guest holds only that.
 
     /// An opaque grant handle. The guest holds only this.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct Handle(u64);
 
-`lab/grant-binding/src/lib.rs::bind_grant` binds the instance's identity and session, the owned root, and the rights to a fresh handle. `lab/grant-binding/src/lib.rs:159` is the doc line for that binding. The body loads the instance record, asks resource_name for the owned root, and stores the identity, the session, the instance, the owned root, and the rights on a new handle.
+`lab/grant-binding/src/lib.rs::bind_grant` binds the instance's identity and session, the owned root, and the rights to a fresh handle. `lab/grant-binding/src/lib.rs:162` is the doc line for that binding. The body loads the instance record, asks resource_name for the owned root, and stores the identity, the session, the instance, the owned root, and the rights on a new handle.
 
     /// Binds the instance's identity and session, the owned root and the rights
     /// to a fresh handle.
@@ -1811,7 +1811,7 @@ Section 3 shows the cited functions return the token string as the grant id. gra
         Ok(handle)
     }
 
-`lab/grant-binding/src/lib.rs::use_grant` uses the handle. The guest's claims are not read. `lab/grant-binding/src/lib.rs:241` says the call uses a grant and the guest's claims are not read. The body resolves the handle and returns the stored identity, session, instance, owned root, and rights.
+`lab/grant-binding/src/lib.rs::use_grant` uses the handle. The guest's claims are not read. `lab/grant-binding/src/lib.rs:244` says the call uses a grant and the guest's claims are not read. The body resolves the handle and returns the stored identity, session, instance, owned root, and rights.
 
     /// Uses a grant. The guest's claims are not read.
     pub fn use_grant(&self, call: Call, request: &GuestRequest) -> Result<Decision, Refuse> {
@@ -1833,7 +1833,7 @@ Which path does the model operation use: the hosted-effect socket, or the five m
 
 Section 5 shows the guest writes zeros, the journal check is room for history, the concurrency check counts non-terminal runs, the slot stores a time, and the usage function refuses an empty report. Section 5 states the account A7 asks for and cites no lab/grant-binding test.
 
-`lab/grant-binding/src/ledger.rs::reserve` holds an amount when the outstanding total plus the amount stays at or under the ceiling. `lab/grant-binding/src/ledger.rs:144` is the line that states that hold. The comparison is `total <= ledger.ceiling`.
+`lab/grant-binding/src/ledger.rs::reserve` holds an amount when the outstanding total plus the amount stays at or under the ceiling. `lab/grant-binding/src/ledger.rs:167` is the line that states that hold. The comparison is `total <= ledger.ceiling`.
 
     /// Holds `amount` on the ledger when the outstanding total plus `amount`
     /// stays at or under the ceiling. A binding refusal records nothing, a sum
@@ -1918,7 +1918,7 @@ reserve, model_reserve_over_the_ceiling_is_refused, and model_reported_usage_doe
 
 What unit does the Runtime reserve before each dispatch, and does a cancellation or an uncertain outcome release that hold?
 
-`lab/grant-binding/src/ledger.rs::settle` resolves the call first, then charges the measured figure. A known SettleOutcome uses that measured figure as the charge. `lab/grant-binding/src/ledger.rs:226` contains `let charge = measured;`. `lab/grant-binding/src/ledger.rs::model_settle_known_outcome_charges_the_measured_figure` expects that charge to equal the measured figure, the charged total to gain it, and the held total to return to zero. `lab/grant-binding/src/ledger.rs::model_reported_usage_does_not_lower_the_settled_charge` sets reported_usage to 1 and still expects the charge to equal the measured figure. The unknown arm of settle returns before it changes the held total or the charged total. `lab/grant-binding/src/ledger.rs:211` contains `return Err(SettleRefuse::UnknownOutcome);`. `lab/grant-binding/src/ledger.rs::model_unknown_outcome_keeps_the_hold` expects that refusal, with `expect_err("unknown outcome")` and `unknown outcome keeps the hold`. The held total stays at the reserved amount. `lab/grant-binding/src/ledger.rs::release` resolves the call first, removes the open hold, and subtracts the stored amount from the held total. It does not change the charged total. `lab/grant-binding/src/ledger.rs:261` contains `ledger.held -= amount;`. `lab/grant-binding/src/ledger.rs::model_release_returns_the_unused_hold` expects `Ok(())`, a held total of zero, and a charged total of zero. This citation is design input for A7. These settle and release functions are the lab reference model, and the lab model is not the Runtime. An unknown outcome in this lab model keeps the hold. Release in this lab model returns the unused hold and charges nothing. This paragraph does not answer the question above. A7 stays open.
+`lab/grant-binding/src/ledger.rs::settle` resolves the call first, then charges the measured figure. A known SettleOutcome uses that measured figure as the charge. `lab/grant-binding/src/ledger.rs:249` contains `let charge = measured;`. `lab/grant-binding/src/ledger.rs::model_settle_known_outcome_charges_the_measured_figure` expects that charge to equal the measured figure, the charged total to gain it, and the held total to return to zero. `lab/grant-binding/src/ledger.rs::model_reported_usage_does_not_lower_the_settled_charge` sets reported_usage to 1 and still expects the charge to equal the measured figure. The unknown arm of settle returns before it changes the held total or the charged total. `lab/grant-binding/src/ledger.rs:234` contains `return Err(SettleRefuse::UnknownOutcome);`. `lab/grant-binding/src/ledger.rs::model_unknown_outcome_keeps_the_hold` expects that refusal, with `expect_err("unknown outcome")` and `unknown outcome keeps the hold`. The held total stays at the reserved amount. `lab/grant-binding/src/ledger.rs::release` resolves the call first, removes the open hold, and subtracts the stored amount from the held total. It does not change the charged total. `lab/grant-binding/src/ledger.rs:295` contains `ledger.held -= amount;`. `lab/grant-binding/src/ledger.rs::model_release_returns_the_unused_hold` expects `Ok(())`, a held total of zero, and a charged total of zero. This citation is design input for A7. These settle and release functions are the lab reference model, and the lab model is not the Runtime. An unknown outcome in this lab model keeps the hold. Release in this lab model returns the unused hold and charges nothing. This paragraph does not answer the question above. A7 stays open.
 
 `lab/grant-binding/src/ledger.rs::admit` sets the ledger ceiling and leaves outstanding holds as they are. The fn line is `pub fn admit(&self, ceiling: u64) {`. The doc line is `Sets the allowance ceiling. Outstanding holds stay as they are.` The assignment is `.ceiling = ceiling`. The function returns no refusal. `lab/grant-binding/src/ledger.rs::model_reserve_before_admit_is_refused` reserves 1 before any admit. The fn line is `fn model_reserve_before_admit_is_refused() {`. The expect_err line is `expect_err("reserve before admit")`. The refusal is OverCeiling with ceiling 0, held 0, and asked 1. The fields are `ReserveRefuse::OverCeiling { ceiling: 0, held: 0, asked: 1 }`. The text is `reservation exceeds the ceiling`. The held total stays 0 and the open set stays empty. The assert is `assert!(after_refusal.open.is_empty());`. admit of 1 then lets a reserve of 1 succeed, and the held total is 1. The admit line is `verifier.admit(1);`. The expect line is `expect("admit opens the ceiling")`. The held assert is `assert_eq!(books(&verifier).held, 1);`. `lab/grant-binding/src/ledger.rs::model_lower_ceiling_leaves_the_hold` admits 10, reserves 8, then admits 4. The fn line is `fn model_lower_ceiling_leaves_the_hold() {`. The admit line is `verifier.admit(10);`. The reserve of 8 is `verifier.reserve(&call, &guest(handle), 8).expect("reserve");`. The later admit is `verifier.admit(4);`. The held total stays 8. The assert is `assert_eq!(after.held, 8);`. A further reserve of 1 is refused with OverCeiling ceiling 4, held 8, and asked 1, and the held total stays 8. The expect_err line is `expect_err("lower ceiling")`. The fields are `ReserveRefuse::OverCeiling { ceiling: 4, held: 8, asked: 1 }`. The text is `reservation exceeds the ceiling`. This citation is design input for A7. These admit functions are the lab reference model, and the lab model is not the Runtime. A reserve before admit meets a ceiling of zero. A later admit leaves an outstanding hold in place. This paragraph does not answer the budget question. A7 stays open.
 
