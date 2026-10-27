@@ -560,12 +560,12 @@ impl Kernel for RealKernel {
         self.fault_found
     }
 
-    fn install_no_exec_filter(&mut self, _plan: &Plan) -> Result<(), Errno> {
-        let ip = crate::seccomp::first_exec_ip();
-        if ip == 0 {
+    fn install_no_exec_filter(&mut self, plan: &Plan) -> Result<(), Errno> {
+        let path = plan.executable().as_ptr() as usize as u64;
+        if path == 0 {
             return Err(libc::EINVAL);
         }
-        self.install_seccomp_filter(&crate::seccomp::no_exec_filter(ip))
+        self.install_seccomp_filter(&crate::seccomp::no_exec_filter(path))
     }
 
     fn enforcement_self_test(&mut self, plan: &Plan) -> Result<(), Errno> {
@@ -616,16 +616,14 @@ impl Kernel for RealKernel {
             close_fault_write(self);
             unsafe { libc::_exit(0) };
         }
-        // The no-exec filter is already stacked. Only `first_exec_syscall`
-        // may issue this execve. After the image is replaced, every later
+        // The no-exec filter is already stacked. It allows only this
+        // pathname pointer. After the image is replaced, every later
         // execve and execveat returns EPERM.
         // SAFETY: the path, argv and envp come from `plan`, which keeps every
         // pointed-to string alive and NULL-terminates both vectors. The write
         // end is O_CLOEXEC, so a successful execve closes it and the parent
         // sees EOF. Any bytes written before execve are a fault.
-        let _ = unsafe {
-            crate::seccomp::execve_once(plan.executable().as_ptr(), plan.argv(), plan.envp())
-        };
+        unsafe { libc::execve(plan.executable().as_ptr(), plan.argv(), plan.envp()) };
         Err(errno())
     }
 

@@ -19,7 +19,7 @@ step stops it.
 | pid-namespace | `unshare_pid` | `unshare(CLONE_NEWPID)`. The caller stays in the old PID namespace. A later fork puts the provider in the new one. A failed unshare refuses: `the PID namespace cannot be created` |
 | capabilities | `cap_last_cap`, `bounding_set`, `ambient_set`, `capset` | `PR_CAPBSET_DROP` for every capability up to `/proc/sys/kernel/cap_last_cap`, `PR_CAP_AMBIENT_CLEAR_ALL`, then `capset` to all zero |
 | no_new_privs | `set_no_new_privs` | `prctl(PR_SET_NO_NEW_PRIVS, 1)` |
-| seccomp | `install_filter`, `install_no_exec` | first `seccomp(SECCOMP_SET_MODE_FILTER)` with the deny-list in `src/seccomp.rs`. After confine, a second filter returns EPERM for every `execveat` and for every `execve` except the helper's one-shot trampoline. That trampoline is the confined program's own initial exec of the granted path. After that image starts, pathname re-exec of the granted binary and `execve("/proc/self/fd/N")` of a memfd both return EPERM. A failed second install refuses and names `install_no_exec`. |
+| seccomp | `install_filter`, `install_no_exec` | first `seccomp(SECCOMP_SET_MODE_FILTER)` with the deny-list in `src/seccomp.rs`. After confine, a second filter returns EPERM for every `execveat` and for every `execve` except the helper's granted-path pointer. That one `execve` is the confined program's own initial exec. After that image starts, pathname re-exec of the granted binary and `execve("/proc/self/fd/N")` of a memfd both return EPERM. A failed second install refuses and names `install_no_exec`. |
 | landlock | `abi_probe`, `abi_floor`, `right_probe`, `create_ruleset`, `storage_root_rule`, `executable_rule`, `restrict_self`, `enforce_self` | probes the kernel ABI, then requires every right the shared file profile needs (`truncate` at ABI 3, `ioctl_dev` at ABI 5). A missing right refuses and names the right and the ABI that first expresses it. Then it try-creates a ruleset for each needed right; `EINVAL` is a named `right_probe` refusal so a lying ABI number cannot hide a missing bit. After `restrict_self` a throwaway child tries write-outside, truncate, ioctl, `execveat` of a memfd, `REFER` (rename across two storage dirs), and `make_*` (fifo, symlink, char, block, sock). Any success is a refusal. TCP bind/connect and `LANDLOCK_SCOPE_SIGNAL` are NOT COVERED here: seccomp denies `socket` before a net probe can run, and the self-test child shares the provider's PID namespace. The ruleset handles only bits that ABI knows. The storage grant is the eight-right mask (no `REFER`, no `ioctl_dev`, no special-file create). ABI 6 also sets `LANDLOCK_SCOPE_SIGNAL`. |
 | launch | `sanitize_stdio`, `close_fds` | before restrict, if fd 0, 1 or 2 is a terminal or a socket (`S_ISSOCK`) it is replaced with `/dev/null`. A failed replace refuses and names the fd. Before exec, close every fd except stdin, stdout, stderr and the fault pipe (`close_range`, or `/proc/self/fd` if that syscall is missing). The identity pipe stays close-on-exec. A pre-confine pty or Unix socket cannot be inherited on stdin, so `SCM_RIGHTS` cannot import a host fd. |
 
@@ -337,10 +337,10 @@ inherited stdin socket and a later `execve` after start.
   binary. Closing the pipe without `execve` is a refusal. A static
   binary that writes nothing is a start only when that identity matches.
 - Second image after start: `execve` and `execveat` return EPERM. The
-  helper's one-shot trampoline is the only allowed `execve`, and it runs
-  before the granted image starts. Pathname re-exec of the granted
-  binary and `execve("/proc/self/fd/N")` of a memfd made without
-  `MFD_EXEC` are denied. Network Landlock rights and
+  helper's granted-path pointer is the only allowed `execve`, and that
+  call is the confined program's own initial exec. Pathname re-exec of
+  the granted binary and `execve("/proc/self/fd/N")` of a memfd made
+  without `MFD_EXEC` are denied. Network Landlock rights and
   `LANDLOCK_SCOPE_SIGNAL` are NOT COVERED by the self-test (seccomp
   denies `socket`; the self-test child is in the same PID namespace as
   the provider).

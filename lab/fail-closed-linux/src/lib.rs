@@ -18,9 +18,9 @@
 //! or a socket on fd 0, 1 or 2 is replaced with `/dev/null`; a failed
 //! replace refuses and names the fd. After confine the guard installs a
 //! second seccomp filter that returns EPERM for every `execveat` and for
-//! every `execve` except the helper's one-shot trampoline. That trampoline
-//! is the confined program's own initial exec of the granted path. After
-//! that image starts, pathname re-exec of the granted binary and
+//! every `execve` except the helper's granted-path pointer. That one
+//! `execve` is the confined program's own initial exec. After that image
+//! starts, pathname re-exec of the granted binary and
 //! `execve("/proc/self/fd/N")` of a memfd both return EPERM. If the
 //! install fails, launch refuses (`install_no_exec`). Before exec the
 //! guard closes every fd except stdin, stdout, stderr and the fault pipe.
@@ -948,7 +948,7 @@ pub trait Kernel {
         Ok(())
     }
     /// Second seccomp filter: `execveat` always EPERM; `execve` EPERM except
-    /// the helper's one-shot trampoline. A failed install refuses the launch.
+    /// the helper's granted-path pointer. A failed install refuses the launch.
     fn install_no_exec_filter(&mut self, plan: &Plan) -> Result<(), Errno> {
         let _ = (self, plan);
         Ok(())

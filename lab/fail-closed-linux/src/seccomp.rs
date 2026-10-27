@@ -11,7 +11,6 @@ use libc::{
     sock_filter, BPF_ABS, BPF_JEQ, BPF_JMP, BPF_JSET, BPF_K, BPF_LD, BPF_RET, BPF_W,
     SECCOMP_RET_ALLOW, SECCOMP_RET_ERRNO, SECCOMP_RET_KILL_PROCESS,
 };
-use std::os::raw::c_char;
 
 #[cfg(target_arch = "x86_64")]
 pub const AUDIT_ARCH: u32 = 0xC000_003E;
@@ -22,13 +21,11 @@ pub const AUDIT_ARCH: u32 = 0xC000_00B7;
 const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 
 /// Offsets into `struct seccomp_data`. The low half of `args[0]` is at 16 on
-/// little-endian targets, which both supported targets are. `args[1]` is at 24.
-/// `instruction_pointer` is the 64-bit field at offset 8.
+/// little-endian targets, which both supported targets are.
 const DATA_NR: u32 = 0;
 const DATA_ARCH: u32 = 4;
-const DATA_IP_LOW: u32 = 8;
-const DATA_IP_HIGH: u32 = 12;
 const DATA_ARG0_LOW: u32 = 16;
+const DATA_ARG0_HIGH: u32 = 20;
 
 pub const DENIED: &[libc::c_long] = &[
     libc::SYS_socket,
@@ -125,95 +122,18 @@ pub fn filter() -> Vec<sock_filter> {
     prog
 }
 
-/// Address of the one `syscall`/`svc` that may `execve` the granted image.
-/// After that image replaces this helper, the address is gone.
-pub fn first_exec_ip() -> u64 {
-    first_exec_syscall as usize as u64
-}
-
-/// The only instruction the no-exec filter allows to issue `execve`.
+/// Second filter, installed after confine and before the helper's `execve`.
 ///
-/// The filter compares `seccomp_data.instruction_pointer` to this symbol.
-/// The syscall must be the first instruction so the IP matches.
-///
-/// # Safety
-///
-/// The caller must put the `execve` number and arguments in the syscall
-/// registers before entering this gadget.
-#[cfg(target_arch = "x86_64")]
-#[unsafe(naked)]
-pub unsafe extern "C" fn first_exec_syscall() {
-    core::arch::naked_asm!("syscall", "ret")
-}
-
-/// The only instruction the no-exec filter allows to issue `execve`.
-///
-/// # Safety
-///
-/// The caller must put the `execve` number and arguments in the syscall
-/// registers before entering this gadget.
-#[cfg(target_arch = "aarch64")]
-#[unsafe(naked)]
-pub unsafe extern "C" fn first_exec_syscall() {
-    core::arch::naked_asm!("svc #0", "ret")
-}
-
-/// Issues the confined program's own initial `execve` from `first_exec_syscall`.
-///
-/// The no-exec filter must already be installed. Any later `execve` comes
-/// from another IP and returns EPERM.
-///
-/// # Safety
-///
-/// `pathname`, `argv` and `envp` must be valid NULL-terminated C strings
-/// for the duration of the call, matching `execve(2)`.
-pub unsafe fn execve_once(
-    pathname: *const c_char,
-    argv: *const *const c_char,
-    envp: *const *const c_char,
-) -> isize {
-    let ret: isize;
-    #[cfg(target_arch = "x86_64")]
-    {
-        core::arch::asm!(
-            "call {gadget}",
-            gadget = sym first_exec_syscall,
-            in("rax") libc::SYS_execve,
-            in("rdi") pathname,
-            in("rsi") argv,
-            in("rdx") envp,
-            lateout("rax") ret,
-            clobber_abi("C"),
-        );
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        core::arch::asm!(
-            "blr x9",
-            in("x9") first_exec_syscall as usize,
-            in("x8") libc::SYS_execve,
-            in("x0") pathname,
-            in("x1") argv,
-            in("x2") envp,
-            lateout("x0") ret,
-            clobber_abi("C"),
-        );
-    }
-    ret
-}
-
-/// Second filter, installed after confine and before the one-shot trampoline.
-///
-/// `execveat` returns EPERM. `execve` returns EPERM unless the instruction
-/// pointer is `first_exec_ip()`, which is the helper's own initial exec of
-/// the granted path. After that exec the trampoline is gone, so a later
-/// pathname exec of the granted binary and `execve("/proc/self/fd/N")` of a
-/// memfd both return EPERM. Stacked on the deny-list: if this install fails,
-/// launch refuses.
-pub fn no_exec_filter(first_exec_ip: u64) -> Vec<sock_filter> {
+/// `execveat` returns EPERM. `execve` returns EPERM unless `argv[0]` / the
+/// pathname pointer is the granted path the helper already holds. That one
+/// call is the confined program's own initial exec. After the image is
+/// replaced the pointer is gone, so a later pathname exec of the granted
+/// binary and `execve("/proc/self/fd/N")` of a memfd both return EPERM.
+/// Stacked on the deny-list: if this install fails, launch refuses.
+pub fn no_exec_filter(granted_path: u64) -> Vec<sock_filter> {
     let eperm = SECCOMP_RET_ERRNO | libc::EPERM as u32;
-    let ip_lo = first_exec_ip as u32;
-    let ip_hi = (first_exec_ip >> 32) as u32;
+    let path_lo = granted_path as u32;
+    let path_hi = (granted_path >> 32) as u32;
     let mut prog = vec![
         stmt(BPF_LD | BPF_W | BPF_ABS, DATA_ARCH),
         jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH, 1, 0),
@@ -232,24 +152,24 @@ pub fn no_exec_filter(first_exec_ip: u64) -> Vec<sock_filter> {
         1,
     ));
     prog.push(stmt(BPF_RET | BPF_K, eperm));
-    // execve: allow only the trampoline IP, then ALLOW. Any other IP is EPERM.
-    // 0: JEQ execve, 0, 5  -> not execve jumps to ALLOW
-    // 1: LD IP_LOW
-    // 2: JEQ ip_lo, 0, 3   -> mismatch jumps to EPERM
-    // 3: LD IP_HIGH
-    // 4: JEQ ip_hi, 0, 1   -> mismatch jumps to EPERM
+    // execve: allow only the helper's granted-path pointer, then ALLOW.
+    // 0: JEQ execve, 0, 4  -> not execve jumps to ALLOW
+    // 1: LD ARG0_LOW
+    // 2: JEQ path_lo, 0, 3 -> mismatch jumps to EPERM
+    // 3: LD ARG0_HIGH
+    // 4: JEQ path_hi, 0, 1 -> mismatch jumps to EPERM
     // 5: RET ALLOW
     // 6: RET EPERM
     prog.push(jump(
         BPF_JMP | BPF_JEQ | BPF_K,
         libc::SYS_execve as u32,
         0,
-        5,
+        4,
     ));
-    prog.push(stmt(BPF_LD | BPF_W | BPF_ABS, DATA_IP_LOW));
-    prog.push(jump(BPF_JMP | BPF_JEQ | BPF_K, ip_lo, 0, 3));
-    prog.push(stmt(BPF_LD | BPF_W | BPF_ABS, DATA_IP_HIGH));
-    prog.push(jump(BPF_JMP | BPF_JEQ | BPF_K, ip_hi, 0, 1));
+    prog.push(stmt(BPF_LD | BPF_W | BPF_ABS, DATA_ARG0_LOW));
+    prog.push(jump(BPF_JMP | BPF_JEQ | BPF_K, path_lo, 0, 3));
+    prog.push(stmt(BPF_LD | BPF_W | BPF_ABS, DATA_ARG0_HIGH));
+    prog.push(jump(BPF_JMP | BPF_JEQ | BPF_K, path_hi, 0, 1));
     prog.push(stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
     prog.push(stmt(BPF_RET | BPF_K, eperm));
     prog
