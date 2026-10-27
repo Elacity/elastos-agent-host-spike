@@ -18,9 +18,18 @@ can recycle inode+ctime; the file handle still moves. The snapshot is
 taken before the Runtime starts; if the Runtime already wrote under the
 watch or under `/tmp/elastos`, that snapshot fails. The run-window watch
 snapshots `/tmp`, `/var/tmp`, `/dev/shm`, `$TMPDIR`, XDG
-cache/data/state/runtime dirs, and `~/Library/Caches` /
-`~/Library/Application Support`. An inotify watch records
-create-then-delete between the two snapshots. `run.sh` sets
+cache/data/state/runtime dirs, `$HOME/.cache` even when
+`XDG_CACHE_HOME` is set, `/run/user/$UID` when that dir exists, and
+`~/Library/Caches` / `~/Library/Application Support`. Live watches
+recurse those trees; `watch.add` failures fail closed. The overflow pin
+keeps the `IN_Q_OVERFLOW` if and the fail-closed `return Err`. Watch
+roots freeze at the first snapshot. A leftover FIFO, socket, or device
+is reported; hashing skips non-regular files. An inotify watch
+records create-then-delete, including in a subdirectory. Vanished inodes
+are followed by file handle / `(dev,ino)`, so a hardlink or rename out
+of the watch still lists the dest leftover. Bind mount, pid namespace,
+absent `/run/user/$UID`, watch sysctl write, and a setsid write after
+the census returns are HostPart::NotRun, never a clean-window PASS. `run.sh` sets
 `ELASTOS_TMP_ROOT` to a fresh mktemp folder. The guard canonicalizes
 (realpath) first and refuses `/`, empty, `$HOME`, a `..` component, a
 symlink at or under isolation, a reachable live Home, `/var/tmp` as a
@@ -75,11 +84,18 @@ No. Skip neither check.
   handle), not a name prefix, lab marker, birth time, or size+mtime. An
   empty handle is FileId NOT RUN. The snapshot fails if the Runtime
   already wrote under the watch or `/tmp/elastos`. The run-window watch
-  includes `/tmp`, `/var/tmp`, `/dev/shm`, `$TMPDIR`, XDG dirs, and Mac
-  Library dirs, plus inotify for create-then-delete. Writes re-check
-  then `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`. Symlink roots
-  are resolved; a symlink loop is refused. `ThrowawayHome::new` +
-  `census::cleanup` are invoked; Linux is NOT RUN.
+  includes `/tmp`, `/var/tmp`, `/dev/shm`, `$TMPDIR`, XDG dirs,
+  `$HOME/.cache` even when `XDG_CACHE_HOME` is set, `/run/user/$UID`
+  when present, and Mac Library dirs. Live watches recurse; add
+  failures and `IN_Q_OVERFLOW` fail closed (if and `return Err` both
+  pinned). Watch roots freeze at the first snapshot. A leftover FIFO,
+  socket, or device is reported; hashing skips non-regular files.
+  Vanished inodes are followed by handle / `(dev,ino)`. Writes re-check
+  then `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` (source-pinned).
+  Symlink roots are resolved; a symlink loop is refused.
+  `ThrowawayHome::new` + `census::cleanup` are invoked; Linux is NOT
+  RUN. Bind mount, pid namespace, absent `/run/user/$UID`, and watch
+  sysctl write are HostPart::NotRun.
 
 ## Linux vs resident instances
 
@@ -92,16 +108,19 @@ Anders's A6 bookability rule still needs RA-6.
 
 Command: `./lab/a6-a12-evidence-fix/run.sh`
 
-Result: `test result: ok. 57 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 95.66s`.
-`--list` names those 57 tests (the previous 49 plus eight r5 tests).
-`planted_bugs_are_caught` printed **39 CAUGHT lines** from **34 plants**
-(the previous 25 plus M-A12-NO-SYSTEM-TEMPS, M-A12-NO-LIVE-WATCH,
-M-A12-HASH-CAP-64K, M-A12-SPARSE-READ, M-A12-NO-RECHECK,
-M-A12-HANDLE-EMPTY-OK, M-A6-CLAIMED-NO-RA6, M-A6-PROVE-ALWAYS-OK,
-M-A6-INSPECT-ALWAYS-SOME; F-A12-DROP-ROOTS, M-A12-TMP-DOTDOT,
-M-A12-TOCTOU-FOLLOW, M-A6-COMMENT-STEP4, and M-A6-PROVE-ALWAYS-OK
-each name two tests). After the suite, `ls /tmp/elastos` was `No such
-file or directory`. Runtime `manager.rs` sha256 stayed
+Result: two full `./lab/a6-a12-evidence-fix/run.sh` runs on
+`4117b853` were each `test result: ok. 74 passed; 0 failed` (252.44s,
+253.82s). `--list` names 74 tests (the previous 71 plus 3 r7 tests).
+Two earlier full runs on `a46a5015` were each `73 passed; 1 failed`:
+plant `M-A12-DROP-FROZEN-TMPDIR` used `Vec::new()` and did not
+compile, so that plant was not CAUGHT. The typed plant is on this
+head. Inode reuse prints NOT RUN when this ext4 host does not
+recycle; that is not a panic and not a FileId PASS.
+`planted_bugs_are_caught` printed **57 CAUGHT lines** from **50
+plants** (the previous 46 / 53 plus 4 r7 plants / 4 CAUGHT lines)
+on every passing run: **57 CAUGHT out of 57**. After each suite,
+`ls /tmp/elastos` was `No such file or directory`. Runtime
+`manager.rs` sha256 stayed
 `cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a`.
 r3 `lab/review-a6-a12-343-r3/run.sh` still pins `87b974a1` and refuses
 this head. That pin is honest for the head r3 reviewed. This folder
@@ -119,7 +138,11 @@ does not edit the r3 runner.
 | A12 slash / unset / HOME / `..` / live-Home symlink / `/var/tmp` | **PASS** | refused after realpath |
 | A12 snapshot after Runtime wrote | **PASS** | watch leftover and live `/tmp/elastos` fail the snapshot |
 | A12 TOCTOU symlink / parent swap after check | **PASS** | write refused; nothing landed outside |
-| A12 run-window TMPDIR / XDG / Library /var/tmp /dev/shm | **PASS** | new entries and create-then-delete found |
+| A12 run-window TMPDIR / XDG / `$HOME/.cache` / Library /var/tmp /dev/shm / subdir | **PASS** | new entries, create-then-delete, hardlink dest, rename dest, O_TMPFILE unlink found |
+| A12 openat2 flags / IN_Q_OVERFLOW / watch.add | **PASS** | source-pinned; if and return Err both CAUGHT |
+| A12 FIFO leftover in bounded time | **PASS** | leftover reported; hash skip plant CAUGHT |
+| A12 TMPDIR mid-run freeze | **PASS** | preexisting in new TMPDIR is not a leftover; original TMPDIR leftover still found |
+| A12 bind / pid-ns / `/run/user` / watch sysctl / detached after return | **NOT RUN** | HostPart::NotRun; never a clean-window PASS |
 | A12 symlink loop | **PASS** | fail closed |
 | A12 in-root `census::cleanup` | **NOT RUN** | `ThrowawayHome::new` refused on Linux |
 | Existing A6/A12 gap pins | **PASS** | owner files still have the #294 holes |
@@ -162,6 +185,22 @@ does not edit the r3 runner.
 | M-A6-CLAIMED-NO-RA6 | claimed pair skips RA-6 host proof | `tests::a6_two_other_live_pids_are_blocked` |
 | M-A6-PROVE-ALWAYS-OK | `prove` returns `Ok` | `tests::a6_this_process_and_pid1_cannot_pass`, `tests::a6_sleep_child_is_not_proven_resident` |
 | M-A6-INSPECT-ALWAYS-SOME | inspect returns `Some(())` | `tests::a6_sleep_child_is_not_proven_resident` |
+| M-A12-NO-OPENAT2 | `resolve: 0` | `tests::a12_write_uses_openat2_beneath_no_symlinks` |
+| M-A12-DETACHED-AFTER-PASS | detached-after-return becomes PASS | `tests::a12_detached_after_return_is_not_run` |
+| M-A12-NO-HANDLE-FOLLOW | drop handle / inode follow | `tests::a12_hardlink_out_then_delete_dest_is_found` |
+| M-A12-NO-HOME-WATCH | drop `$HOME` inotify | `tests::a12_rename_watched_to_unwatched_dest_is_found` |
+| M-A12-SKIP-HOME-CACHE | skip `$HOME/.cache` when XDG is set | `tests::a12_home_cache_watched_when_xdg_cache_set` |
+| M-A12-NO-RECURSE-WATCH | do not recurse writable temps | `tests::a12_subdir_create_then_delete_is_found`, `tests::a12_preopen_dirfd_create_then_delete_is_found`, `tests::a12_otmpfile_linkat_unlink_in_subdir_is_found` |
+| M-A12-IGNORE-WATCH-ADD | `let _ = watch.add` | `tests::a12_watch_add_failures_fail_closed` |
+| M-A12-IGNORE-OVERFLOW | drop `IN_Q_OVERFLOW` | `tests::a12_inotify_overflow_check_is_pinned` |
+| M-A12-BIND-PASS | bind HostPart becomes PASS | `tests::a12_bind_mount_is_not_run` |
+| M-A12-PIDNS-PASS | pid-ns HostPart becomes PASS | `tests::a12_pid_namespace_is_not_run` |
+| M-A12-RUN-USER-PASS | `/run/user` HostPart becomes PASS | `tests::a12_run_user_uid_is_not_run` |
+| M-A12-WATCH-SYSCTL-PASS | watch sysctl HostPart becomes PASS | `tests::a12_watch_sysctl_is_not_run` |
+| M-A12-HASH-FIFO | drop the non-regular skip before `File::open` | `tests::a12_fifo_leftover_is_found_in_bounded_time` |
+| M-A12-OVERFLOW-NO-RETURN | keep the `IN_Q_OVERFLOW` if, drop `return Err` | `tests::a12_inotify_overflow_check_is_pinned` |
+| M-A12-NO-FREEZE-ROOTS | after-snapshot re-reads live `writable_temp_roots` | `tests::a12_tmpdir_change_mid_run_is_not_false_fail` |
+| M-A12-DROP-FROZEN-TMPDIR | freeze an empty extra-root list | `tests::a12_new_file_under_original_tmpdir_is_found` |
 
 ## Plants table (r3)
 
@@ -201,6 +240,22 @@ does not edit the r3 runner.
 | M-A6-CLAIMED-NO-RA6 | **CAUGHT** |
 | M-A6-PROVE-ALWAYS-OK | **CAUGHT** (self+pid1 + sleep prove) |
 | M-A6-INSPECT-ALWAYS-SOME | **CAUGHT** |
+| M-A12-NO-OPENAT2 | **CAUGHT** |
+| M-A12-DETACHED-AFTER-PASS | **CAUGHT** |
+| M-A12-NO-HANDLE-FOLLOW | **CAUGHT** |
+| M-A12-NO-HOME-WATCH | **CAUGHT** |
+| M-A12-SKIP-HOME-CACHE | **CAUGHT** |
+| M-A12-NO-RECURSE-WATCH | **CAUGHT** (subdir + dirfd + O_TMPFILE unlink) |
+| M-A12-IGNORE-WATCH-ADD | **CAUGHT** |
+| M-A12-IGNORE-OVERFLOW | **CAUGHT** |
+| M-A12-BIND-PASS | **CAUGHT** |
+| M-A12-PIDNS-PASS | **CAUGHT** |
+| M-A12-RUN-USER-PASS | **CAUGHT** |
+| M-A12-WATCH-SYSCTL-PASS | **CAUGHT** |
+| M-A12-HASH-FIFO | **CAUGHT** |
+| M-A12-OVERFLOW-NO-RETURN | **CAUGHT** |
+| M-A12-NO-FREEZE-ROOTS | **CAUGHT** |
+| M-A12-DROP-FROZEN-TMPDIR | **CAUGHT** |
 
 ## Still BLOCKED
 
@@ -219,11 +274,16 @@ A6 and A12 stay in-flight for Anders's resident-instance rule.
 These remain uncovered on this host. They are not claimed as PASS.
 
 - `ThrowawayHome` + `census::cleanup` (NOT RUN; needs macOS)
-- a detached child write after the first census returns
-- a bind mount into the watch (this host refuses `mount --bind`)
-- a hardlink copied out of the watch, then the watch copy deleted
-- `$HOME/.cache` while `XDG_CACHE_HOME` is set (`extra_watch_roots`
-  uses the XDG var)
+- a detached child write after `leftovers_in_run_window` returns
+  (named HostPart::NotRun; the function cannot see a write after it
+  returns)
+- a bind mount into the watch (HostPart::NotRun; this host refuses
+  `mount --bind` and `unshare -m`)
+- pid reuse in a new pid namespace (HostPart::NotRun; `unshare -p`
+  refused)
+- `/run/user/$UID` leftover (HostPart::NotRun; the dir is absent)
+- writing `max_user_watches` (HostPart::NotRun; this user cannot
+  write the sysctl). Exhausted watches fail closed on `watch.add`.
 - pid reuse after a proven inspect (INCONCLUSIVE: user+pid namespace
   cannot write `pid_max` or `ns_last_pid` here; 400 spawns did not
   recycle)

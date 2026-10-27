@@ -1,0 +1,12 @@
+id: M-A12-WATCH-SYSCTL-PASS
+file: src/a12.rs
+test: tests::a12_watch_sysctl_is_not_run
+--- old
+        Err(err) => HostPart::NotRun(format!(
+            "max_user_watches write refused ({err}); watch sysctl is NOT RUN, never PASS"
+        )),
+--- new
+        Err(err) => HostPart::Pass(format!(
+            "max_user_watches write refused ({err}); watch sysctl PASS"
+        )),
+--- end

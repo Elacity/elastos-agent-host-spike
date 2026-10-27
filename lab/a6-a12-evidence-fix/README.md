@@ -32,8 +32,16 @@ This folder calls Runtime `CapabilityManager::grant` / `validate` and owner
   the Runtime starts; if the Runtime already wrote under the watch or
   under `/tmp/elastos`, it fails. The run-window watch also covers
   `/tmp`, `/var/tmp`, `/dev/shm`, `$TMPDIR`, XDG
-  cache/data/state/runtime dirs, and `~/Library/Caches` /
-  `~/Library/Application Support`, plus inotify for create-then-delete.
+  cache/data/state/runtime dirs, `$HOME/.cache` even when
+  `XDG_CACHE_HOME` is set, `/run/user/$UID` when present, and
+  `~/Library/Caches` / `~/Library/Application Support`.   Live watches
+  recurse; `watch.add` and `IN_Q_OVERFLOW` fail closed. The fail-closed
+  `return Err` on overflow is pinned. Watch roots freeze at the first
+  snapshot. A leftover FIFO, socket, or device is reported; hashing
+  skips non-regular files so the census does not block. Vanished
+  inodes are followed by handle / `(dev,ino)`. Bind mount, pid
+  namespace, absent `/run/user/$UID`, watch sysctl write, and a
+  setsid write after the census returns are HostPart::NotRun.
   `ELASTOS_TMP_ROOT` is guarded after realpath: `/`, empty, `$HOME`, a
   `..` component, a symlink at or under isolation, a reachable live Home,
   and anything whose canonical path is not under the pack mktemp are
@@ -64,7 +72,10 @@ each named test to print `FAILED`.
 
 ## NOT RUN on Linux
 
-Resident instances and throwaway Homes need macOS. The commands set the
+Resident instances and throwaway Homes need macOS. Bind mount, pid
+namespace, `/run/user/$UID`, watch sysctl write, and a detached write
+after the census returns are HostPart::NotRun on this host. Those
+rows are never a clean-window PASS. The commands set the
 isolated temp root:
 
 ```sh

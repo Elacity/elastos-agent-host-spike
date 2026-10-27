@@ -12,6 +12,8 @@ mod plant;
 mod tests {
     use super::*;
     use std::fs;
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
 
     #[test]
@@ -628,11 +630,14 @@ mod tests {
             fs::write(&path, b"second-final\n").unwrap();
         }
         let leftovers = a12::leftovers_created(&before, &parent).expect("created-set");
+        if !reused {
+            println!(
+                "NOT RUN: same-path inode reuse did not happen; FileId reuse is not proven on this host"
+            );
+            a12::remove_isolated(&parent);
+            return;
+        }
         a12::remove_isolated(&parent);
-        assert!(
-            reused,
-            "same-path inode reuse did not happen; identity check would not be decisive"
-        );
         assert!(
             leftovers.iter().any(|p| p == &path),
             "same-path delete+recreate must be found even if the inode is reused: {leftovers:?}"
@@ -669,11 +674,14 @@ mod tests {
             fs::write(&path, b"same-bytes\n").unwrap();
         }
         let leftovers = a12::leftovers_created(&before, &parent).expect("created-set");
+        if !reused {
+            println!(
+                "NOT RUN: same-path inode reuse did not happen; FileId reuse is not proven on this host"
+            );
+            a12::remove_isolated(&parent);
+            return;
+        }
         a12::remove_isolated(&parent);
-        assert!(
-            reused,
-            "same-bytes inode reuse did not happen; identity check would not be decisive"
-        );
         assert!(
             leftovers.iter().any(|p| p == &path),
             "same-path same-bytes inode reuse must be found: {leftovers:?}"
@@ -977,6 +985,502 @@ mod tests {
             "empty file handle must fail closed as NOT RUN: {err}"
         );
         println!("A12 empty file handle is NOT RUN: {err}");
+    }
+
+    #[test]
+    fn a12_write_uses_openat2_beneath_no_symlinks() {
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/a12.rs"));
+        let start = source.find("fn openat2_beneath").expect("openat2_beneath");
+        let body = &source[start..];
+        assert!(
+            body.contains("RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS"),
+            "openat2 dropped RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS"
+        );
+        println!("A12 openat2 still pins RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS");
+    }
+
+    #[test]
+    fn a12_detached_after_return_is_not_run() {
+        match a12::detached_child_after_return_host_part() {
+            a12::HostPart::NotRun(reason) => {
+                assert!(
+                    reason.contains("after return") || reason.contains("setsid"),
+                    "{reason}"
+                );
+                println!("NOT RUN: {reason}");
+            }
+            a12::HostPart::Pass(line) => {
+                panic!("detached write after return must be NOT RUN, not PASS: {line}")
+            }
+            a12::HostPart::Fail(line) => {
+                panic!("detached write after return must be NOT RUN, not FAIL: {line}")
+            }
+        }
+    }
+
+    #[test]
+    fn a12_hardlink_out_then_delete_dest_is_found() {
+        let _lock = a12::lock_real_root();
+        let pid = std::process::id();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/ubuntu".into());
+        let watch_dir = Path::new("/var/tmp").join(format!("a12-hl-watch-{pid}-{stamp}"));
+        let out_dir = Path::new(&home).join(format!("a12-hl-out-{pid}-{stamp}"));
+        let _ = fs::create_dir_all(&watch_dir);
+        let _ = fs::create_dir_all(&out_dir);
+        let src = watch_dir.join("keep.txt");
+        let dest = out_dir.join("keep.txt");
+        struct Cleanup {
+            src: std::path::PathBuf,
+            dest: std::path::PathBuf,
+            watch: std::path::PathBuf,
+            out: std::path::PathBuf,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.src);
+                let _ = fs::remove_file(&self.dest);
+                let _ = fs::remove_dir(&self.watch);
+                let _ = fs::remove_dir(&self.out);
+            }
+        }
+        let _cleanup = Cleanup {
+            src: src.clone(),
+            dest: dest.clone(),
+            watch: watch_dir.clone(),
+            out: out_dir.clone(),
+        };
+        fs::write(&src, b"hardlink leftover\n").unwrap();
+        fs::hard_link(&src, &dest).unwrap();
+        let before = a12::snapshot_run_window().expect("run-window snapshot");
+        fs::remove_file(&src).unwrap();
+        let leftovers = a12::leftovers_in_run_window(&before).expect("run-window leftovers");
+        assert!(
+            leftovers.iter().any(|path| path == &dest),
+            "hardlink dest leftover must be found after the watch copy is deleted: dest={} leftovers={leftovers:?}",
+            dest.display()
+        );
+        println!("A12 hardlink-out dest leftover found at {}", dest.display());
+    }
+
+    #[test]
+    fn a12_preopen_dirfd_create_then_delete_is_found() {
+        let _lock = a12::lock_real_root();
+        let pid = std::process::id();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = Path::new("/var/tmp").join(format!("a12-preopen-dir-{pid}-{stamp}"));
+        let _ = fs::create_dir_all(&dir);
+        let c_dir = std::ffi::CString::new(dir.as_os_str().as_bytes()).unwrap();
+        let dirfd = unsafe {
+            libc::open(
+                c_dir.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        assert!(dirfd >= 0, "pre-open dirfd");
+        let before = a12::snapshot_run_window().expect("run-window snapshot");
+        let name = std::ffi::CString::new("gone.txt").unwrap();
+        let fd = unsafe {
+            libc::openat(
+                dirfd,
+                name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC,
+                0o644,
+            )
+        };
+        if fd >= 0 {
+            let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+            use std::io::Write;
+            let _ = file.write_all(b"existed only via preopened dirfd\n");
+        }
+        let _ = unsafe { libc::unlinkat(dirfd, name.as_ptr(), 0) };
+        unsafe { libc::close(dirfd) };
+        let leftovers = a12::leftovers_in_run_window(&before).expect("run-window leftovers");
+        let ghost = dir.join("gone.txt");
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            leftovers.iter().any(|path| path == &ghost),
+            "create-then-delete via pre-opened dirfd must be found: {leftovers:?}"
+        );
+        println!(
+            "A12 preopen-dirfd create-then-delete leftover found at {}",
+            ghost.display()
+        );
+    }
+
+    #[test]
+    fn a12_home_cache_watched_when_xdg_cache_set() {
+        let _lock = a12::lock_real_root();
+        let pid = std::process::id();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/ubuntu".into());
+        let sandbox = Path::new(&home).join(format!("a12-home-cache-{pid}-{stamp}"));
+        let xdg = sandbox.join("xdg-cache");
+        let home_cache = sandbox.join(".cache");
+        fs::create_dir_all(&xdg).unwrap();
+        fs::create_dir_all(&home_cache).unwrap();
+        let prev_home = std::env::var_os("HOME");
+        let prev_cache = std::env::var_os("XDG_CACHE_HOME");
+        std::env::set_var("HOME", &sandbox);
+        std::env::set_var("XDG_CACHE_HOME", &xdg);
+        let roots = a12::extra_watch_roots();
+        let watches_home_cache = roots.iter().any(|root| root == &home_cache);
+        let before = a12::snapshot_run_window().expect("run-window snapshot");
+        let leftover = home_cache.join("secret.txt");
+        fs::write(&leftover, b"home-cache leftover\n").unwrap();
+        let leftovers = a12::leftovers_in_run_window(&before).expect("run-window leftovers");
+        restore_env("HOME", prev_home);
+        restore_env("XDG_CACHE_HOME", prev_cache);
+        let _ = fs::remove_dir_all(&sandbox);
+        assert!(
+            watches_home_cache,
+            "extra_watch_roots must keep $HOME/.cache when XDG_CACHE_HOME is set: {roots:?}"
+        );
+        assert!(
+            leftovers.iter().any(|path| path == &leftover),
+            "run window must see $HOME/.cache leftover while XDG_CACHE_HOME is set: {leftovers:?}"
+        );
+        println!("A12 $HOME/.cache leftover found while XDG_CACHE_HOME was set");
+    }
+
+    #[test]
+    fn a12_subdir_create_then_delete_is_found() {
+        let _lock = a12::lock_real_root();
+        let pid = std::process::id();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = Path::new("/var/tmp").join(format!("a12-subwatch-{pid}-{stamp}"));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("gone.txt");
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+        let before = a12::snapshot_run_window().expect("run-window snapshot");
+        fs::write(&path, b"existed only in a /var/tmp subdir\n").unwrap();
+        fs::remove_file(&path).unwrap();
+        let leftovers = a12::leftovers_in_run_window(&before).expect("run-window leftovers");
+        assert!(
+            leftovers.iter().any(|p| p == &path),
+            "create-then-delete inside /var/tmp/<dir>/ must be found: {leftovers:?}"
+        );
+        println!(
+            "A12 subdir create-then-delete leftover found at {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn a12_watch_add_failures_fail_closed() {
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/a12.rs"));
+        assert!(
+            !source.contains("let _ = watch.add"),
+            "watch.add failures must fail closed; found let _ = watch.add"
+        );
+        assert!(
+            source.contains("watch.add(&path)?") && source.contains("watch.add(&root)?"),
+            "LiveWatch must propagate watch.add errors"
+        );
+        println!("A12 watch.add failures fail closed");
+    }
+
+    #[test]
+    fn a12_inotify_overflow_check_is_pinned() {
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/a12.rs"));
+        let start = source.find("fn drain(").expect("LiveWatch::drain");
+        let body = &source[start..];
+        assert!(
+            body.contains("if ev.mask & libc::IN_Q_OVERFLOW != 0")
+                && body.contains(
+                    "return Err(\"inotify queue overflow; leftover watch fail closed\".into())"
+                ),
+            "dropping the IN_Q_OVERFLOW fail-closed return must be CAUGHT"
+        );
+        println!("A12 inotify drain still fails closed on IN_Q_OVERFLOW");
+    }
+
+    fn run_bounded<T: Send + 'static>(
+        limit: std::time::Duration,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("a12-bounded".into())
+            .spawn(move || {
+                let _ = tx.send(work());
+            })
+            .expect("spawn bounded census");
+        rx.recv_timeout(limit)
+            .expect("FIFO leftover census exceeded bounded time")
+    }
+
+    #[test]
+    fn a12_fifo_leftover_is_found_in_bounded_time() {
+        let _lock = a12::lock_real_root();
+        let pid = std::process::id();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = a12::isolated_dir("fifo-left");
+        let fifo = dir.join(format!("leftover-{pid}-{stamp}.fifo"));
+        let sock = dir.join(format!("leftover-{pid}-{stamp}.sock"));
+        struct Cleanup {
+            fifo: std::path::PathBuf,
+            sock: std::path::PathBuf,
+            dir: std::path::PathBuf,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.fifo);
+                let _ = fs::remove_file(&self.sock);
+                a12::remove_isolated(&self.dir);
+            }
+        }
+        let _cleanup = Cleanup {
+            fifo: fifo.clone(),
+            sock: sock.clone(),
+            dir: dir.clone(),
+        };
+        let before = a12::snapshot_run_window().expect("run-window snapshot");
+        let c_fifo = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        let rc = unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "mkfifo: {}", std::io::Error::last_os_error());
+        let _listener =
+            std::os::unix::net::UnixListener::bind(&sock).expect("unix socket leftover");
+        let leftovers = run_bounded(std::time::Duration::from_secs(20), move || {
+            a12::leftovers_in_run_window(&before)
+        })
+        .expect("census must return for a FIFO leftover");
+        assert!(
+            leftovers.iter().any(|path| path == &fifo),
+            "FIFO leftover must be reported, not skipped: fifo={} leftovers={leftovers:?}",
+            fifo.display()
+        );
+        assert!(
+            leftovers.iter().any(|path| path == &sock),
+            "socket leftover must be reported, not skipped: sock={} leftovers={leftovers:?}",
+            sock.display()
+        );
+        println!(
+            "A12 FIFO leftover found in bounded time at {}",
+            fifo.display()
+        );
+    }
+
+    #[test]
+    fn a12_tmpdir_change_mid_run_is_not_false_fail() {
+        let _lock = a12::lock_real_root();
+        let pid = std::process::id();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/ubuntu".into());
+        let old_tmp = Path::new(&home).join(format!("a12-old-tmpdir-{pid}-{stamp}"));
+        let new_tmp = Path::new(&home).join(format!("a12-new-tmpdir-{pid}-{stamp}"));
+        fs::create_dir_all(&old_tmp).unwrap();
+        fs::create_dir_all(&new_tmp).unwrap();
+        let preexisting = new_tmp.join("preexisting.txt");
+        fs::write(&preexisting, b"already there before TMPDIR pointed here\n").unwrap();
+        struct Cleanup(std::path::PathBuf, std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+                let _ = fs::remove_dir_all(&self.1);
+            }
+        }
+        let _cleanup = Cleanup(old_tmp.clone(), new_tmp.clone());
+        let prev_tmpdir = std::env::var_os("TMPDIR");
+        std::env::set_var("TMPDIR", &old_tmp);
+        let before = a12::snapshot_run_window().expect("run-window snapshot");
+        std::env::set_var("TMPDIR", &new_tmp);
+        let leftovers = a12::leftovers_in_run_window(&before).expect("run-window leftovers");
+        restore_env("TMPDIR", prev_tmpdir);
+        assert!(
+            leftovers.iter().all(|path| path != &preexisting),
+            "pre-existing file in a mid-run TMPDIR must not be a leftover: {leftovers:?}"
+        );
+        println!("A12 TMPDIR mid-run preexisting file is not a leftover");
+    }
+
+    #[test]
+    fn a12_new_file_under_original_tmpdir_is_found() {
+        let _lock = a12::lock_real_root();
+        let pid = std::process::id();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/ubuntu".into());
+        let old_tmp = Path::new(&home).join(format!("a12-orig-tmpdir-{pid}-{stamp}"));
+        let new_tmp = Path::new(&home).join(format!("a12-later-tmpdir-{pid}-{stamp}"));
+        fs::create_dir_all(&old_tmp).unwrap();
+        fs::create_dir_all(&new_tmp).unwrap();
+        struct Cleanup(std::path::PathBuf, std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+                let _ = fs::remove_dir_all(&self.1);
+            }
+        }
+        let _cleanup = Cleanup(old_tmp.clone(), new_tmp.clone());
+        let prev_tmpdir = std::env::var_os("TMPDIR");
+        std::env::set_var("TMPDIR", &old_tmp);
+        let before = a12::snapshot_run_window().expect("run-window snapshot");
+        let leftover = old_tmp.join("genuine.txt");
+        fs::write(&leftover, b"genuine leftover under original TMPDIR\n").unwrap();
+        std::env::set_var("TMPDIR", &new_tmp);
+        let leftovers = a12::leftovers_in_run_window(&before).expect("run-window leftovers");
+        restore_env("TMPDIR", prev_tmpdir);
+        assert!(
+            leftovers.iter().any(|path| path == &leftover),
+            "genuine new file under the original TMPDIR must still be found: leftover={} leftovers={leftovers:?}",
+            leftover.display()
+        );
+        println!(
+            "A12 genuine leftover under original TMPDIR found at {}",
+            leftover.display()
+        );
+    }
+
+    #[test]
+    fn a12_rename_watched_to_unwatched_dest_is_found() {
+        let _lock = a12::lock_real_root();
+        let pid = std::process::id();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/ubuntu".into());
+        let src = Path::new("/var/tmp").join(format!("a12-ren-src-{pid}-{stamp}.txt"));
+        let dest = Path::new(&home).join(format!("a12-ren-dest-{pid}-{stamp}.txt"));
+        struct Cleanup(std::path::PathBuf, std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+                let _ = fs::remove_file(&self.1);
+            }
+        }
+        let _cleanup = Cleanup(src.clone(), dest.clone());
+        let before = a12::snapshot_run_window().expect("run-window snapshot");
+        fs::write(&src, b"rename leftover\n").unwrap();
+        fs::rename(&src, &dest).unwrap();
+        let leftovers = a12::leftovers_in_run_window(&before).expect("run-window leftovers");
+        assert!(
+            leftovers.iter().any(|path| path == &dest),
+            "rename dest leftover must be found: dest={} leftovers={leftovers:?}",
+            dest.display()
+        );
+        println!(
+            "A12 rename-to-unwatched dest leftover found at {}",
+            dest.display()
+        );
+    }
+
+    #[test]
+    fn a12_otmpfile_linkat_unlink_in_subdir_is_found() {
+        let _lock = a12::lock_real_root();
+        let pid = std::process::id();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = Path::new("/var/tmp").join(format!("a12-otmp-sub-{pid}-{stamp}"));
+        let _ = fs::create_dir_all(&dir);
+        let dest = dir.join("gone.txt");
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+        let before = a12::snapshot_run_window().expect("run-window snapshot");
+        let parent = std::ffi::CString::new(dir.as_os_str().as_bytes()).unwrap();
+        let fd = unsafe {
+            libc::open(
+                parent.as_ptr(),
+                libc::O_RDWR | libc::O_TMPFILE | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        assert!(fd >= 0, "O_TMPFILE: {}", std::io::Error::last_os_error());
+        let dest_c = std::ffi::CString::new(dest.as_os_str().as_bytes()).unwrap();
+        let rc = unsafe {
+            libc::linkat(
+                fd,
+                std::ffi::CString::new("").unwrap().as_ptr(),
+                libc::AT_FDCWD,
+                dest_c.as_ptr(),
+                libc::AT_EMPTY_PATH,
+            )
+        };
+        unsafe { libc::close(fd) };
+        assert_eq!(
+            rc,
+            0,
+            "linkat AT_EMPTY_PATH: {}",
+            std::io::Error::last_os_error()
+        );
+        fs::remove_file(&dest).unwrap();
+        let leftovers = a12::leftovers_in_run_window(&before).expect("run-window leftovers");
+        assert!(
+            leftovers.iter().any(|path| path == &dest),
+            "O_TMPFILE+linkat then unlink in a /var/tmp subdir must be found: {leftovers:?}"
+        );
+        println!(
+            "A12 O_TMPFILE+linkat unlink leftover found at {}",
+            dest.display()
+        );
+    }
+
+    fn host_part_is_not_run(part: a12::HostPart, label: &str) {
+        match part {
+            a12::HostPart::NotRun(reason) => {
+                assert!(
+                    reason.contains("NOT RUN") || reason.contains("never PASS"),
+                    "{label}: {reason}"
+                );
+                println!("NOT RUN: {reason}");
+            }
+            a12::HostPart::Pass(line) => panic!("{label} must be NOT RUN, not PASS: {line}"),
+            a12::HostPart::Fail(line) => panic!("{label} must be NOT RUN, not FAIL: {line}"),
+        }
+    }
+
+    #[test]
+    fn a12_bind_mount_is_not_run() {
+        host_part_is_not_run(a12::bind_mount_host_part(), "bind mount");
+    }
+
+    #[test]
+    fn a12_pid_namespace_is_not_run() {
+        host_part_is_not_run(a12::pid_namespace_host_part(), "pid namespace");
+    }
+
+    #[test]
+    fn a12_run_user_uid_is_not_run() {
+        host_part_is_not_run(a12::run_user_uid_host_part(), "/run/user/$UID");
+    }
+
+    #[test]
+    fn a12_watch_sysctl_is_not_run() {
+        host_part_is_not_run(a12::watch_sysctl_host_part(), "watch sysctl");
     }
 
     #[test]

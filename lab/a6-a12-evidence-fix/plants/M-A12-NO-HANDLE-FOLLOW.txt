@@ -1,0 +1,9 @@
+id: M-A12-NO-HANDLE-FOLLOW
+file: src/a12.rs
+test: tests::a12_hardlink_out_then_delete_dest_is_found
+--- old
+    follow_vanished_handles(before, &after, &mut found)?;
+    quiesce_run_window(before, &mut found)?;
+--- new
+    let _ = (before, after);
+--- end
