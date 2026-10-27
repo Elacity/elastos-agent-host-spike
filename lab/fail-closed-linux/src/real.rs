@@ -1008,17 +1008,18 @@ fn resume_traced_stop(pid: libc::pid_t) -> bool {
 }
 
 fn resume_exec_stop(pid: libc::pid_t) {
-    if EXEC_RESUMED.load(Ordering::Relaxed) {
-        return;
-    }
     // The parent can ack once `/proc/<pid>/exe` matches, before waitpid
-    // reports TRACEEXEC. Spin until that exec stop is CONTed so a later
-    // waitpid(-1) plant cannot leave the provider stopped.
+    // reports TRACEEXEC. A SIGTRAP can follow that event. Drain both so a
+    // later waitpid(-1) plant cannot leave the provider stopped.
     for _ in 0..200 {
         resume_traced_stop(pid);
         if EXEC_RESUMED.load(Ordering::Relaxed) {
-            return;
+            break;
         }
+        unsafe { libc::usleep(1000) };
+    }
+    for _ in 0..50 {
+        while resume_traced_stop(pid) {}
         unsafe { libc::usleep(1000) };
     }
 }
