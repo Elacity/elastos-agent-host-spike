@@ -1,0 +1,103 @@
+   Compiling version_check v0.9.5
+   Compiling serde_core v1.0.229
+   Compiling typenum v1.20.1
+   Compiling foldhash v0.2.0
+   Compiling serde v1.0.229
+   Compiling generic-array v0.14.7
+   Compiling zmij v1.0.23
+   Compiling serde_json v1.0.154
+   Compiling equivalent v1.0.3
+   Compiling cfg-if v1.0.5
+   Compiling memchr v2.8.3
+   Compiling cpufeatures v0.2.17
+   Compiling itoa v1.0.18
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling bitflags v2.13.2
+   Compiling digest v0.10.7
+   Compiling semver v1.0.28
+   Compiling sha2 v0.10.9
+   Compiling hashbrown v0.17.1
+   Compiling indexmap v2.14.2
+   Compiling wasmparser v0.247.0
+   Compiling a1-a8-hardening v0.1.0 (/workspace/lab/a1-a8-hardening)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.79s
+     Running unittests src/lib.rs (lab/a1-a8-hardening/target/host-build/debug/deps/a1_a8_hardening-5f2fb64896a4aaf5)
+
+running 8 tests
+test tests::complete_bind_has_no_gaps ... ok
+test tests::follow_sentence_is_not_host_sequence ... ok
+test tests::foreign_capsule_id_is_a_fail ... ok
+test tests::guest_function_is_required_and_must_be_journal_grants ... ok
+test tests::missing_assigned_is_not_a_match ... ok
+test tests::session_id_comes_from_run_lines_only ... ok
+test tests::hash_aliases_are_not_module_hash ... ok
+test tests::session_must_equal_this_launch ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/a1_wasi_import.rs (lab/a1-a8-hardening/target/host-build/debug/deps/a1_wasi_import-9ba047f05af80252)
+
+running 1 test
+test wasi_import_is_refused_at_admission has been running for over 60 seconds
+a1 runtime: elastos sha256 e027209ca94cdaf39e6758219f7737c99f5b3cc4f8e6ded9d5d1cb12f4f0d0d3
+a1 wasi build: sha256 a6aa5328127a6c08cd2aee4aae4ef58cf5bb0ca0047e9e3089dedd0b4a33d884 imports ["wasi:cli/environment@0.2.0", "elastos:bus/types@1.0.0"]
+a1 control build: sha256 b2eaaf6f054837ca0880218909766100214706fbaa9a098aba4fca72e06f6c4f imports ["elastos:bus/types@1.0.0"]
+a1 refused run: exit:Some(1) refusal_line:Some("Error: Component capsule failed: Invalid manifest: component import \"wasi:cli/environment@0.2.0\" is not allowed; allowed imports: elastos:bus/types@1.0.0, elastos:bus/runtime@1.0.0, elastos:bus/identity@1.0.0, elastos:bus/capabilities@1.0.0, elastos:bus/providers@1.0.0")
+a1 control run: exit:Some(0) admitted_line:Some("[run] Component capsule 'a1-wasi-guest' exited")
+test wasi_import_is_refused_at_admission ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 395.48s
+
+     Running tests/a8_agent_host_host_key.rs (lab/a1-a8-hardening/target/host-build/debug/deps/a8_agent_host_host_key-a6a21176feb3add7)
+
+running 3 tests
+test shipped_agent_host_bytes_read_host_key ... ignored, blocked: AC-002-ARGS; the shipped agent-host names only its own journal
+test shipped_wasm_bus_prints_internal_sentence ... ignored, needs runtime: WasmBus maps BusError::Internal to BusFailure::Other, so the path-specific Internal sentence is not visible
+a8 runtime: elastos sha256 e027209ca94cdaf39e6758219f7737c99f5b3cc4f8e6ded9d5d1cb12f4f0d0d3
+a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+a8 injected agent-host: sha256 f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737 imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+a8 receipt cursor: size:0 inode:None path:/tmp/a8-home.I4fO9Q/home/.local/share/elastos/runtime/capability-requests.jsonl
+a8 host key read: exit:Some(1) assigned:None session:None guest_hash:f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737 host_records:[CapabilityRequestRecord { action: "write", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied", capsule_id: Some("component-22014035-266a-48e4-9662-4686438398f7"), principal_id: None, session_id: None, module_hash: None, guest_function: None, seq: None }, CapabilityRequestRecord { action: "read", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied", capsule_id: Some("component-22014035-266a-48e4-9662-4686438398f7"), principal_id: None, session_id: None, module_hash: None, guest_function: None, seq: None }] marker_absent:true unchanged:true
+a8 authorship: needs runtime: capability-requests.jsonl omits component id from Runtime [run] output or API, session id, guest module hash, guest function, receipt seq
+
+thread 'agent_host_host_key_read_is_refused' (20168) panicked at tests/a8_agent_host_host_key.rs:254:9:
+needs runtime: capability-requests.jsonl omits component id from Runtime [run] output or API, session id, guest module hash, guest function, receipt seq; honest sequence requires request_journal_grants on host receipts; cargo test refuses PASS while Runtime-ask fields are missing
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test agent_host_host_key_read_is_refused ... FAILED
+
+failures:
+
+failures:
+    agent_host_host_key_read_is_refused
+
+test result: FAILED. 0 passed; 1 failed; 2 ignored; 0 measured; 0 filtered out; finished in 39.95s
+
+error: test failed, to rerun pass `--test a8_agent_host_host_key`
+     Running tests/authorship_lock.rs (lab/a1-a8-hardening/target/host-build/debug/deps/authorship_lock-00123306251f7bc7)
+
+running 8 tests
+test capsule_id_whitespace_fails ... ok
+test duplicate_json_keys_fail ... ok
+test executed_hash_is_of_staged_bytes ... ok
+test predictable_session_1_is_refused ... ok
+test receipt_seq_must_be_strictly_increasing ... ok
+test rewrite_after_seal_fails ... ok
+test session_id_must_not_alias_capsule_id ... ok
+
+thread 'same_inode_shrink_fails' (21858) panicked at src/lib.rs:554:17:
+capability-requests.jsonl shrank after launch (was 393, now 196)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test same_inode_shrink_fails ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests a1_a8_hardening
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: 1 target failed:
+    `--test a8_agent_host_host_key`

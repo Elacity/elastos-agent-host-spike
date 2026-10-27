@@ -1,0 +1,22 @@
+H-bom: SURVIVED BOM dropped the first line; remaining complete line later_pass=true records=1
+H-crlf: CAUGHT HONEST records=2 later_pass=true; CRLF is valid JSONL, not a false PASS
+H-mmap-swap: CAUGHT hash is of a Vec snapshot (2b5690679d91d644d4397206f692a648d30e2fdfad1fea109892e1d5a801612c); later file bytes sha256 9d980115bd621c8ea04f0ab98cd00ffb92ed6a28175da8007a65cb4ab098569f
+H-nan-large:nan parse=Err("expected value at line 1 column 306") later_pass=false
+H-nan-large:u64-plus parse=Err("receipt seq must be an unsigned integer") later_pass=false
+H-nan-large:neg parse=Err("receipt seq must be an unsigned integer") later_pass=false
+H-nan-large:float parse=Err("receipt seq must be an unsigned integer") later_pass=false
+H-nan-large-numbers: CAUGHT NaN/u64+/neg/1.5
+H-hardlink-journal: CAUGHT exists() sees the hardlink; pre-exist CAUGHT
+H-seal-before-flush: CAUGHT early seal then append: capability-requests.jsonl rewritten after run; host receipts are the sealed copy
+H-seq-gaps: CAUGHT receipt seq must be strictly increasing without gaps or repeats; host records: [CapabilityRequestRecord { action: "write", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied", capsule_id: Some("component-341af27a-6b9c-4892-a618-808f0b687a9d"), principal_id: None, session_id: Some("0123456789abcdef0123456789abcdef"), module_hash: Some("f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737"), guest_function: Some("request_journal_grants"), seq: Some(1) }, CapabilityRequestRecord { action: "read", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied", capsule_id: Some("component-341af27a-6b9c-4892-a618-808f0b687a9d"), principal_id: None, session_id: Some("0123456789abcdef0123456789abcdef"), module_hash: Some("f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737"), guest_function: Some("request_journal_grants"), seq: Some(3) }]
+H-seal-guest-writable: CAUGHT seal lives in ReceiptSeal memory; no sibling file
+H-session-all-zeros: SURVIVED is_session_id(00000000000000000000000000000000) later_pass=true
+H-session-from-pid: SURVIVED is_session_id(000000000000000000000000000038f2) later_pass=true
+H-session-from-time: SURVIVED is_session_id(000000000000000018e23f64c6601327) later_pass=true
+H-session-reused: SURVIVED first=true second=true; no used-session set
+H-symlink-journal: SURVIVED dangling symlink treated as absent; records=2 later_pass=true
+H-seq-overflow-wrap: SURVIVED debug overflow panic (release wrap would bind): attempt to add with overflow
+H-toctou-rename: SURVIVED hash, rename-swap, load, rename-back: both hashes match honest; load saw swap
+H-truncated-final-line: SURVIVED truncated read dropped; remaining complete write later_pass=true records=1
+H-unicode-lookalike-keys: CAUGHT parse=Ok(CapabilityRequestRecord { action: "write", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied", capsule_id: None, principal_id: None, session_id: Some("0123456789abcdef0123456789abcdef"), module_hash: Some("f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737"), guest_function: Some("request_journal_grants"), seq: Some(1) }) later_pass=false
+H-tmpfs-remount: NOT RUN mount_ok=false inode_before=528307 inode_after=Some(528307) stderr=mount: /tmp/r5-tmpfs-14578-1793065303705484078: must be superuser to use mount.

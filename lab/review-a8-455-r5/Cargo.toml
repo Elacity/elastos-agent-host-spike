@@ -1,0 +1,11 @@
+[package]
+name = "review-a8-455-r5"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[dependencies]
+a1-a8-hardening = { path = "../a1-a8-hardening" }
