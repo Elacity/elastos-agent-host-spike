@@ -9,16 +9,19 @@ LF line, the nonce matches the host pre-boot hash and has not been
 recorded for this work dir, evidence files sit in [run_start, now+skew],
 the pre-boot path is the regular file $WORK/host-preboot.txt bound to
 this run, LC_MARK names are exactly the expected set, and the guest
-proved the test uid could not read the nonce. A symlink or '..' PREBOOT
-path, a reused nonce, a future mtime, an unexpected mark, CR/CRLF in
-guest_exit, a colliding extra fail, a preboot from another $WORK, or an
-implausible run_start is a failure.
+proved the test uid could not read the nonce. A symlink, hardlink, or
+'..' PREBOOT path, a reused nonce on this host boot, a future mtime, an
+unparseable or unexpected mark, a guest_exit line without exactly one
+trailing LF, a colliding extra fail, a preboot from another $WORK, or a
+future run_start is a failure. Used nonces live in a host-side ledger
+outside $WORK and 9p.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import re
 import sys
@@ -27,10 +30,12 @@ import time
 RESULT_LINE = re.compile(
     r"test result:\s+\S+\.\s+(\d+) passed;\s+(\d+) failed;\s+(\d+) ignored"
 )
+# Byte-exact ASCII grammar. One space between fields. No NBSP, ZWSP, or
+# double spaces. A line that contains LC_MARK and misses this shape fails.
 MARK_LINE = re.compile(
-    r"LC_MARK nonce=(?P<nonce>\S+) suite=(?P<suite>\S+) exit=(?P<exit>-?\d+) "
-    r"passed=(?P<passed>\d+) failed=(?P<failed>\d+) ignored=(?P<ignored>\d+) "
-    r"status=(?P<status>\S+)"
+    r"^LC_MARK nonce=(?P<nonce>[0-9A-Za-z._-]+) suite=(?P<suite>[0-9A-Za-z._-]+) "
+    r"exit=(?P<exit>-?[0-9]+) passed=(?P<passed>[0-9]+) failed=(?P<failed>[0-9]+) "
+    r"ignored=(?P<ignored>[0-9]+) status=(?P<status>[0-9A-Za-z._-]+)$"
 )
 GUEST_EXIT_LINE = re.compile(r"^guest_exit=(0|[1-9][0-9]*)$")
 PREBOOT_HASH_LINE = re.compile(r"^nonce_sha256=([0-9a-f]{64})$")
@@ -50,35 +55,81 @@ def last_field(text: str, key: str) -> str | None:
 
 
 def run_start_is_implausible(run_start: int, now: int) -> bool:
-    # 0 is refused by PREBOOT_START_LINE. This catches a future stamp.
-    return run_start > now + MTIME_SKEW_SEC
+    # 0 is refused by PREBOOT_START_LINE. Evidence mtimes keep +2s skew.
+    # run_start itself must not be in the future.
+    return run_start > now
+
+
+def host_boot_id() -> str:
+    boot = pathlib.Path("/proc/sys/kernel/random/boot_id")
+    try:
+        text = boot.read_text().strip()
+    except OSError:
+        text = ""
+    if text:
+        return text.replace("-", "")
+    return "unknown"
 
 
 def used_nonce_path(work_real: pathlib.Path) -> pathlib.Path:
-    return work_real / "used-nonces.txt"
+    # Host-side ledger. Guest 9p and a fresh $WORK cannot reset it.
+    # LC_USED_NONCES isolates one test or plant from the boot ledger.
+    override = os.environ.get("LC_USED_NONCES")
+    if override:
+        return pathlib.Path(override)
+    runtime = pathlib.Path(os.environ.get("XDG_RUNTIME_DIR") or "/var/tmp")
+    return runtime / "linux-confine" / f"used-nonces-{host_boot_id()}.txt"
+
+
+def path_is_alias(path: pathlib.Path) -> bool:
+    if path.is_symlink():
+        return True
+    try:
+        return path.exists() and path.stat().st_nlink > 1
+    except OSError:
+        return True
+
+
+def ledger_digests(text: str) -> list[str]:
+    digests = []
+    for line in text.splitlines():
+        if not line:
+            continue
+        digests.append(line.split()[0])
+    return digests
 
 
 def nonce_already_recorded(work_real: pathlib.Path, digest: str) -> str | None:
     used = used_nonce_path(work_real)
-    if used.is_symlink():
-        return "used-nonces path is a symlink"
+    if path_is_alias(used):
+        return "used-nonces path is a symlink or hardlink"
     if not used.is_file():
         return None
-    seen = [line for line in used.read_text(errors="replace").splitlines() if line]
+    seen = ledger_digests(used.read_text(errors="replace"))
     if digest in seen:
-        return "nonce was already recorded for this work dir"
+        return "nonce was already recorded for this host boot"
     return None
 
 
-def record_used_nonce(work_real: pathlib.Path, digest: str) -> None:
+def record_used_nonce(
+    work_real: pathlib.Path, digest: str, run_id: str | None = None
+) -> None:
     used = used_nonce_path(work_real)
-    if used.is_symlink():
+    if path_is_alias(used):
         return
-    seen = []
+    used.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    seen_lines = []
     if used.is_file():
-        seen = [line for line in used.read_text(errors="replace").splitlines() if line]
-    if digest not in seen:
-        used.write_text("\n".join(seen + [digest]) + "\n")
+        seen_lines = [line for line in used.read_text(errors="replace").splitlines() if line]
+    if digest in ledger_digests("\n".join(seen_lines)):
+        return
+    boot = host_boot_id()
+    token = f"{digest} {run_id or '-'} {boot}"
+    used.write_text("\n".join(seen_lines + [token]) + "\n")
+    try:
+        used.chmod(0o600)
+    except OSError:
+        pass
 
 
 def work_binding_problems(
@@ -187,7 +238,13 @@ def collect_nonce_problems(nonce: str, guest_results: str, console: str, marks: 
 def collect_marks(console: str) -> tuple[dict, list[str]]:
     marks = {}
     problems = []
-    for match in MARK_LINE.finditer(console):
+    for raw in console.splitlines():
+        if "LC_MARK" not in raw:
+            continue
+        match = MARK_LINE.fullmatch(raw)
+        if match is None:
+            problems.append(f"unparseable LC_MARK line: {raw!r}")
+            continue
         name = match.group("suite")
         if name in marks:
             problems.append(f"{name}: duplicate LC_MARK serial line")
@@ -198,10 +255,9 @@ def collect_marks(console: str) -> tuple[dict, list[str]]:
 def parse_guest_exit(text: str):
     if "\r" in text or "\0" in text:
         return None
-    lines = text.splitlines()
-    if len(lines) != 1:
+    if not text.endswith("\n") or text.count("\n") != 1:
         return None
-    match = GUEST_EXIT_LINE.fullmatch(lines[0])
+    match = GUEST_EXIT_LINE.fullmatch(text[:-1])
     if match is None:
         return None
     return int(match.group(1))
@@ -225,6 +281,9 @@ def collect_preboot_problems(
         return problems
     if not preboot.is_file():
         problems.append("pre-boot nonce record missing")
+        return problems
+    if preboot.stat().st_nlink > 1:
+        problems.append("pre-boot nonce record is a hardlink")
         return problems
     evidence_real = evidence.resolve()
     preboot_real = preboot.resolve()
@@ -301,7 +360,7 @@ def collect_preboot_problems(
             elif mtime > now + MTIME_SKEW_SEC:
                 problems.append(f"{child.name}: evidence file mtime is in the future")
     if digest is not None and work_real is not None and not problems:
-        record_used_nonce(work_real, digest)
+        record_used_nonce(work_real, digest, run_id)
     return problems
 
 

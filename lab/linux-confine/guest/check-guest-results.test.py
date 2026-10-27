@@ -10,6 +10,7 @@ file fails.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -201,13 +202,23 @@ def run_check(
     preboot: pathlib.Path | None = None,
     *,
     sync_host: bool = True,
+    ledger: pathlib.Path | None = None,
 ) -> int:
     cleanup = None
+    isolated = None
+    env = os.environ.copy()
     if preboot is None:
         work = pathlib.Path(tempfile.mkdtemp(prefix="lc-host-work-"))
         cleanup = work
         preboot = work / "host-preboot.txt"
         write_preboot(preboot, nonce, work=work)
+    if ledger is not None:
+        env["LC_USED_NONCES"] = str(ledger)
+    elif "LC_USED_NONCES" not in env:
+        handle, name = tempfile.mkstemp(prefix="lc-used-nonces-")
+        os.close(handle)
+        isolated = name
+        env["LC_USED_NONCES"] = name
     if sync_host:
         _sync_host_from_preboot(ev, preboot)
     try:
@@ -224,10 +235,13 @@ def run_check(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
+            env=env,
         ).returncode
     finally:
         if cleanup is not None:
             shutil.rmtree(cleanup, ignore_errors=True)
+        if isolated is not None:
+            pathlib.Path(isolated).unlink(missing_ok=True)
 
 
 def apply_mutant(src: str, mutant_id: str) -> str:
@@ -251,7 +265,14 @@ def apply_mutant(src: str, mutant_id: str) -> str:
         old = '        if name in marks:\n            problems.append(f"{name}: duplicate LC_MARK serial line")'
         new = '        if False and name in marks:\n            problems.append(f"{name}: duplicate LC_MARK serial line")'
     elif mutant_id == "M10":
-        old = "    lines = text.splitlines()\n    if len(lines) != 1:\n        return None\n    match = GUEST_EXIT_LINE.fullmatch(lines[0])\n    if match is None:\n        return None\n    return int(match.group(1))"
+        old = (
+            "    if not text.endswith(\"\\n\") or text.count(\"\\n\") != 1:\n"
+            "        return None\n"
+            "    match = GUEST_EXIT_LINE.fullmatch(text[:-1])\n"
+            "    if match is None:\n"
+            "        return None\n"
+            "    return int(match.group(1))"
+        )
         new = '    if "guest_exit=0" in text:\n        return 0\n    return None'
     elif mutant_id == "M11":
         old = "    problems.extend(collect_preboot_problems(evidence, nonce, preboot, host_context))"
@@ -272,8 +293,17 @@ def apply_mutant(src: str, mutant_id: str) -> str:
         old = "    problems.extend(collect_unexpected_mark_problems(marks, expected))"
         new = "    problems.extend([])"
     elif mutant_id == "M17":
-        old = '    if "\\r" in text or "\\0" in text:\n        return None\n    lines = text.splitlines()'
-        new = "    lines = text.splitlines()"
+        old = (
+            '    if "\\r" in text or "\\0" in text:\n'
+            "        return None\n"
+            "    if not text.endswith(\"\\n\") or text.count(\"\\n\") != 1:\n"
+            "        return None\n"
+            "    match = GUEST_EXIT_LINE.fullmatch(text[:-1])"
+        )
+        new = (
+            "    match = GUEST_EXIT_LINE.fullmatch("
+            "text.splitlines()[0] if text.splitlines() else \"\")"
+        )
     elif mutant_id == "M18":
         old = "    problems.extend(collect_unexpected_status_problems(evidence, expected))"
         new = "    problems.extend([])"
@@ -283,6 +313,48 @@ def apply_mutant(src: str, mutant_id: str) -> str:
     elif mutant_id == "M20":
         old = 'PREBOOT_START_LINE = re.compile(r"^run_start=([1-9][0-9]*)$")'
         new = 'PREBOOT_START_LINE = re.compile(r"^run_start=(0|[1-9][0-9]*)$")'
+    elif mutant_id == "M21":
+        old = (
+            "        if match is None:\n"
+            "            problems.append(f\"unparseable LC_MARK line: {raw!r}\")\n"
+            "            continue"
+        )
+        new = "        if match is None:\n            continue"
+    elif mutant_id == "M22":
+        old = (
+            "    if not text.endswith(\"\\n\") or text.count(\"\\n\") != 1:\n"
+            "        return None\n"
+            "    match = GUEST_EXIT_LINE.fullmatch(text[:-1])"
+        )
+        new = (
+            "    lines = text.splitlines()\n"
+            "    if len(lines) != 1:\n"
+            "        return None\n"
+            "    match = GUEST_EXIT_LINE.fullmatch(lines[0])"
+        )
+    elif mutant_id == "M23":
+        old = "    return run_start > now"
+        new = "    return run_start > now + MTIME_SKEW_SEC"
+    elif mutant_id == "M24":
+        old = (
+            "    if preboot.stat().st_nlink > 1:\n"
+            "        problems.append(\"pre-boot nonce record is a hardlink\")\n"
+            "        return problems"
+        )
+        new = (
+            "    if False and preboot.stat().st_nlink > 1:\n"
+            "        problems.append(\"pre-boot nonce record is a hardlink\")\n"
+            "        return problems"
+        )
+    elif mutant_id == "M25":
+        old = (
+            "    if path_is_alias(used):\n"
+            "        return \"used-nonces path is a symlink or hardlink\""
+        )
+        new = (
+            "    if False and path_is_alias(used):\n"
+            "        return \"used-nonces path is a symlink or hardlink\""
+        )
     elif mutant_id == "M6":
         old = "    passed, failed, ignored = (int(x) for x in matches[-1])"
         new = "    passed, failed, ignored = (int(x) for x in matches[0])"
@@ -528,15 +600,22 @@ class CheckGuestResults(unittest.TestCase):
             ev.mkdir()
             work = root / "work"
             work.mkdir()
+            ledger = root / "host-used-nonces.txt"
             populate(ev, NONCE)
             write_preboot(work / "host-preboot.txt", NONCE, work=work, run_id="a" * 16)
-            self.assertEqual(run_check(ev, NONCE, preboot=work / "host-preboot.txt"), 0)
+            self.assertEqual(
+                run_check(ev, NONCE, preboot=work / "host-preboot.txt", ledger=ledger),
+                0,
+            )
             now = int(time.time())
             for child in ev.iterdir():
                 if child.is_file() and child.name != "RESULTS.txt":
                     os.utime(child, (now, now))
             write_preboot(work / "host-preboot.txt", NONCE, work=work, run_id="b" * 16)
-            self.assertEqual(run_check(ev, NONCE, preboot=work / "host-preboot.txt"), 1)
+            self.assertEqual(
+                run_check(ev, NONCE, preboot=work / "host-preboot.txt", ledger=ledger),
+                1,
+            )
 
     def test_r4_3_future_mtime_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -613,6 +692,160 @@ class CheckGuestResults(unittest.TestCase):
                     os.utime(child, (now, now))
             write_preboot(work / "host-preboot.txt", NONCE, run_start=0, work=work)
             self.assertEqual(run_check(ev, NONCE, preboot=work / "host-preboot.txt"), 1)
+
+    def test_r5_skew_plus_1s_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = pathlib.Path(tmp)
+            populate(ev, NONCE)
+            now = int(time.time()) + 1
+            for child in ev.iterdir():
+                if child.is_file():
+                    os.utime(child, (now, now))
+            self.assertEqual(run_check(ev, NONCE), 0)
+
+    def test_r5_1_nonce_new_work_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev1 = root / "ev1"
+            ev2 = root / "ev2"
+            work1 = root / "work1"
+            work2 = root / "work2"
+            ev1.mkdir()
+            work1.mkdir()
+            work2.mkdir()
+            ledger = root / "host-used-nonces.txt"
+            populate(ev1, NONCE)
+            write_preboot(work1 / "host-preboot.txt", NONCE, work=work1, run_id="a" * 16)
+            self.assertEqual(
+                run_check(ev1, NONCE, preboot=work1 / "host-preboot.txt", ledger=ledger),
+                0,
+            )
+            shutil.copytree(ev1, ev2)
+            write_preboot(work2 / "host-preboot.txt", NONCE, work=work2, run_id="b" * 16)
+            now = int(time.time())
+            for child in ev2.iterdir():
+                if child.is_file() and child.name != "RESULTS.txt":
+                    os.utime(child, (now, now))
+            self.assertEqual(
+                run_check(ev2, NONCE, preboot=work2 / "host-preboot.txt", ledger=ledger),
+                1,
+            )
+
+    def test_r5_1_wipe_used_nonces_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            work = root / "work"
+            ev.mkdir()
+            work.mkdir()
+            ledger = root / "host-used-nonces.txt"
+            populate(ev, NONCE)
+            write_preboot(work / "host-preboot.txt", NONCE, work=work, run_id="a" * 16)
+            self.assertEqual(
+                run_check(ev, NONCE, preboot=work / "host-preboot.txt", ledger=ledger),
+                0,
+            )
+            stale = work / "used-nonces.txt"
+            if stale.is_file():
+                stale.unlink()
+            now = int(time.time())
+            for child in ev.iterdir():
+                if child.is_file() and child.name != "RESULTS.txt":
+                    os.utime(child, (now, now))
+            self.assertEqual(
+                run_check(ev, NONCE, preboot=work / "host-preboot.txt", ledger=ledger),
+                1,
+            )
+
+    def test_r5_2_hardlink_wipe_ledger_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            work = root / "work"
+            ev.mkdir()
+            work.mkdir()
+            ledger = root / "host-used-nonces.txt"
+            populate(ev, NONCE)
+            write_preboot(work / "host-preboot.txt", NONCE, work=work, run_id="a" * 16)
+            self.assertEqual(
+                run_check(ev, NONCE, preboot=work / "host-preboot.txt", ledger=ledger),
+                0,
+            )
+            alias = ev / "used-nonces-hardlink"
+            os.link(ledger, alias)
+            alias.write_text("")
+            now = int(time.time())
+            for child in ev.iterdir():
+                if child.is_file() and child.name != "RESULTS.txt":
+                    os.utime(child, (now, now))
+            self.assertEqual(
+                run_check(ev, NONCE, preboot=work / "host-preboot.txt", ledger=ledger),
+                1,
+            )
+
+    def test_r5_5_nbsp_suite_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = pathlib.Path(tmp)
+            populate(ev, NONCE)
+            console = (ev / "qemu-console.txt").read_text().rstrip()
+            console += "\n" + mark_line(NONCE, "confine\u00a0", 25, 0, 0) + "\n"
+            (ev / "qemu-console.txt").write_text(console)
+            self.assertEqual(run_check(ev, NONCE), 1)
+
+    def test_r5_5_double_space_mark_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = pathlib.Path(tmp)
+            populate(ev, NONCE)
+            console = (ev / "qemu-console.txt").read_text().rstrip()
+            console += (
+                f"\nLC_MARK nonce={NONCE} suite=elf  exit=0 passed=6 "
+                "failed=0 ignored=0 status=PASS\n"
+            )
+            (ev / "qemu-console.txt").write_text(console)
+            self.assertEqual(run_check(ev, NONCE), 1)
+
+    def test_r5_6_run_start_plus_1_aligned_fails(self):
+        spec = importlib.util.spec_from_file_location("cgr", CHECK)
+        cgr = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cgr)
+        now = 1_700_000_000
+        self.assertTrue(cgr.run_start_is_implausible(now + 1, now))
+        self.assertFalse(cgr.run_start_is_implausible(now, now))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            work = root / "work"
+            ev.mkdir()
+            work.mkdir()
+            populate(ev, NONCE)
+            future = int(time.time()) + 1
+            write_preboot(work / "host-preboot.txt", NONCE, run_start=future, work=work)
+            _sync_host_from_preboot(ev, work / "host-preboot.txt")
+            for child in ev.iterdir():
+                if child.is_file():
+                    os.utime(child, (future, future))
+            rc = run_check(
+                ev, NONCE, preboot=work / "host-preboot.txt", sync_host=False
+            )
+            if rc == 0:
+                future = int(time.time()) + 1
+                write_preboot(
+                    work / "host-preboot.txt", NONCE, run_start=future, work=work
+                )
+                _sync_host_from_preboot(ev, work / "host-preboot.txt")
+                for child in ev.iterdir():
+                    if child.is_file():
+                        os.utime(child, (future, future))
+                rc = run_check(
+                    ev, NONCE, preboot=work / "host-preboot.txt", sync_host=False
+                )
+            self.assertEqual(rc, 1)
+
+    def test_r5_7_guest_exit_no_nl_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = pathlib.Path(tmp)
+            populate(ev, NONCE, guest_exit="guest_exit=0")
+            self.assertEqual(run_check(ev, NONCE), 1)
 
 
 class MutantsAreCaught(unittest.TestCase):
@@ -785,17 +1018,29 @@ class MutantsAreCaught(unittest.TestCase):
             ev.mkdir()
             work = root / "work"
             work.mkdir()
+            ledger = root / "host-used-nonces.txt"
             populate(ev, NONCE)
             write_preboot(work / "host-preboot.txt", NONCE, work=work, run_id="a" * 16)
-            self.assertEqual(run_check(ev, NONCE, preboot=work / "host-preboot.txt"), 0)
+            self.assertEqual(
+                run_check(ev, NONCE, preboot=work / "host-preboot.txt", ledger=ledger),
+                0,
+            )
             now = int(time.time())
             for child in ev.iterdir():
                 if child.is_file() and child.name != "RESULTS.txt":
                     os.utime(child, (now, now))
             write_preboot(work / "host-preboot.txt", NONCE, work=work, run_id="b" * 16)
             mutant = self._mutant_checker(root, "M14")
-            self.assertEqual(run_check(ev, NONCE, preboot=work / "host-preboot.txt"), 1)
-            self.assertEqual(run_check(ev, NONCE, mutant, preboot=work / "host-preboot.txt"), 0)
+            self.assertEqual(
+                run_check(ev, NONCE, preboot=work / "host-preboot.txt", ledger=ledger),
+                1,
+            )
+            self.assertEqual(
+                run_check(
+                    ev, NONCE, mutant, preboot=work / "host-preboot.txt", ledger=ledger
+                ),
+                0,
+            )
 
     def test_m15_skip_future_mtime(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -889,6 +1134,110 @@ class MutantsAreCaught(unittest.TestCase):
             mutant = self._mutant_checker(root, "M20")
             self.assertEqual(run_check(ev, NONCE, preboot=work / "host-preboot.txt"), 1)
             self.assertEqual(run_check(ev, NONCE, mutant, preboot=work / "host-preboot.txt"), 0)
+
+    def test_m21_skip_unparseable_mark(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = pathlib.Path(tmp) / "ev"
+            ev.mkdir()
+            populate(ev, NONCE)
+            console = (ev / "qemu-console.txt").read_text().rstrip()
+            console += (
+                f"\nLC_MARK nonce={NONCE} suite=elf  exit=0 passed=6 "
+                "failed=0 ignored=0 status=PASS\n"
+            )
+            (ev / "qemu-console.txt").write_text(console)
+            mutant = self._mutant_checker(pathlib.Path(tmp), "M21")
+            self.assertEqual(run_check(ev, NONCE), 1)
+            self.assertEqual(run_check(ev, NONCE, mutant), 0)
+
+    def test_m22_skip_guest_exit_lf(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = pathlib.Path(tmp) / "ev"
+            ev.mkdir()
+            populate(ev, NONCE, guest_exit="guest_exit=0")
+            mutant = self._mutant_checker(pathlib.Path(tmp), "M22")
+            self.assertEqual(run_check(ev, NONCE), 1)
+            self.assertEqual(run_check(ev, NONCE, mutant), 0)
+
+    def test_m23_allow_run_start_plus_1(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            work = root / "work"
+            ev.mkdir()
+            work.mkdir()
+            populate(ev, NONCE)
+            mutant = self._mutant_checker(root, "M23")
+
+            def _stamp_and_check(checker):
+                stamp = int(time.time()) + 1
+                write_preboot(
+                    work / "host-preboot.txt", NONCE, run_start=stamp, work=work
+                )
+                _sync_host_from_preboot(ev, work / "host-preboot.txt")
+                for child in ev.iterdir():
+                    if child.is_file():
+                        os.utime(child, (stamp, stamp))
+                return run_check(
+                    ev, NONCE, checker, preboot=work / "host-preboot.txt", sync_host=False
+                )
+
+            live_rc = _stamp_and_check(CHECK)
+            if live_rc == 0:
+                live_rc = _stamp_and_check(CHECK)
+            self.assertEqual(live_rc, 1)
+            self.assertEqual(_stamp_and_check(mutant), 0)
+
+    def test_m24_skip_preboot_hardlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            work = root / "work"
+            ev.mkdir()
+            work.mkdir()
+            populate(ev, NONCE)
+            write_preboot(work / "host-preboot.txt", NONCE, work=work)
+            alias = work / "host-preboot-alias.txt"
+            os.link(work / "host-preboot.txt", alias)
+            # Pass the original path; nlink is 2 on both names.
+            mutant = self._mutant_checker(root, "M24")
+            self.assertEqual(run_check(ev, NONCE, preboot=work / "host-preboot.txt"), 1)
+            self.assertEqual(
+                run_check(ev, NONCE, mutant, preboot=work / "host-preboot.txt"), 0
+            )
+
+    def test_m25_skip_ledger_hardlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            work = root / "work"
+            ev.mkdir()
+            work.mkdir()
+            ledger = root / "host-used-nonces.txt"
+            populate(ev, NONCE)
+            write_preboot(work / "host-preboot.txt", NONCE, work=work, run_id="a" * 16)
+            self.assertEqual(
+                run_check(ev, NONCE, preboot=work / "host-preboot.txt", ledger=ledger),
+                0,
+            )
+            alias = ev / "used-nonces-hardlink"
+            os.link(ledger, alias)
+            alias.write_text("")
+            now = int(time.time())
+            for child in ev.iterdir():
+                if child.is_file() and child.name != "RESULTS.txt":
+                    os.utime(child, (now, now))
+            mutant = self._mutant_checker(root, "M25")
+            self.assertEqual(
+                run_check(ev, NONCE, preboot=work / "host-preboot.txt", ledger=ledger),
+                1,
+            )
+            self.assertEqual(
+                run_check(
+                    ev, NONCE, mutant, preboot=work / "host-preboot.txt", ledger=ledger
+                ),
+                0,
+            )
 
 
 class HostScriptNonceIsolation(unittest.TestCase):
