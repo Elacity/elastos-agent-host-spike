@@ -157,6 +157,16 @@ This test has no unconfined control. F-cc1c (see Falsifiers) is the evidence
 that the profile refuses the read: with the `STORAGE_PARENT` read widened to
 its subtree, the same `runs_get` returns the run.
 
+The outside content open is refused under the oracle and under the stand-in
+file plus the one metadata rule. The sequence above is the oracle. After its
+shutdown, a fresh storage stores one run and reads it back under
+`Launch::Profile` on the file `standin_profile` writes.
+`write_standin_profile` puts that file under the case's `storage.base`, and
+the one fixture writer appends `READ_FIXTURE_RULE`. `Launch::Fixture` applies
+that file. The launched stand-in profile contains the rule and has no line
+that starts with `;;`. The in-root create's message is
+`Hosted external HTTPS is paused.` This evidence is for the lab launcher.
+
 ## Writes outside the storage root
 
 The profile grants writes only under `STORAGE_ROOT`. Two confined tests send
@@ -515,7 +525,10 @@ profile does not grant".
   and create the journal (`outside/inner/runs`) under the outside sibling.
 - `model_outside_read_denied`: a stored run reads back from `STORAGE_ROOT`,
   and the same `runs_get` is refused once the record lives in a sibling of the
-  root. See "Reads outside the storage root".
+  root. The outside content open is refused under the oracle and under the
+  stand-in file plus the one metadata rule. The launched stand-in profile has
+  no `;;` line. This evidence is for the lab launcher. See "Reads outside the
+  storage root".
 - `model_outside_create_reports_access_denied`: the same redirected `init`
   under a test-time copy of `confine.sb` that adds only a metadata read of the
   outside journal root. The sandbox refuses the journal create, and the
