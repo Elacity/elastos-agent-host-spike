@@ -1,0 +1,12 @@
+id: F-A5-publicx
+file: src/lib.rs
+test: model_public_prefix_is_not_a_public_read
+--- old
+    if parts.first() == Some(&"Public") {
+        return Err(Refuse::PublicRead);
+    }
+--- new
+    if parts.first().is_some_and(|part| part.starts_with("Public")) {
+        return Err(Refuse::PublicRead);
+    }
+--- end
