@@ -1724,12 +1724,9 @@ Limits, not claimed:
 - `the_receipt_names_the_exact_toolchain` — receipt rustc/target match the build.
 - `receipt_hashes_match_artifact_and_lockfile` — receipt hashes match the files.
 - `built_capsule_has_the_required_wasm_shape` — core Wasm, zero imports, digest sig.
-- plus crafted-byte coverage of the shape reader. Task 032 adds three, in
-  `tests/wasm_shape.rs`: `reads_a_memory_maximum_from_a_crafted_module`
-  (flag 0x01: minimum 16, maximum 1024 pages),
-  `reads_a_memory_with_no_maximum_from_a_crafted_module` (flag 0x00: minimum
-  16, maximum none) and `fails_closed_on_a_truncated_memory_section` (flag 0x01
-  with no maximum: exactly `memory section: unexpected end of module`).
+- plus crafted-byte coverage of the shape reader. Task 037 removed task 032's
+  three memory tests with the shape reader's memory parse: the shape reader
+  reads no memory.
 
 The lab name, in `tests/lab_cid.rs` (through `wasm_capsule_tools::bundle_identity`):
 
@@ -2129,10 +2126,12 @@ Task 032's one, in `tests/run.rs`:
 
 - `built_capsule_declares_the_manifest_memory_as_its_maximum` — the
   `tools/build` capsule, signed and verified: its module, from
-  `entrypoint()`, read by the test-only shape reader, imports nothing (no
-  memory either) and defines exactly one memory, with minimum 16 pages and a
-  maximum whose bytes (pages × 65536) equal `memory_mb()` × 2^20 from the
-  verifier's one manifest read: 1024 pages for 64.
+  `entrypoint()`, read through `wasm_capsule_audit::memories`, the lab's one
+  module reader (task 037; the shape reader reads no memory), imports nothing
+  (`audit`, so no memory either) and defines exactly one memory, with minimum
+  16 pages and a maximum whose bytes (pages × 65536) equal `memory_mb()` × 2^20
+  from the verifier's one manifest read: 1024 pages for 64, 32-bit and not
+  shared.
 
 wc-010c's two (task 028), in `tests/run.rs`, on stand-in engines, with a
 bundle signed by `signed_bundle_declaring` (the signing half of 027's
