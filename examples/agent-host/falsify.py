@@ -279,11 +279,13 @@ def load(path=DATA):
 # - capsules/model-provider/falsifiers.json: the model provider's
 #   src/local_memory.rs, src/journal.rs, src/contract.rs, src/state.rs,
 #   tests/process.rs, src/local_llama.rs and src/adapters.rs.
-#   tests/process.rs is named here because the model list's MP30-MP34 edit
+#   tests/process.rs is named here because the model list's MP30-MP37 edit
 #   it: MP30, MP31 and MP34 change the relay request, MP33 sends it a second
-#   time, and MP32 changes the record of a closed provider socket. The model
-#   list's `selftest` entries edit falsify.py, which recovery finds under
-#   examples/agent-host.
+#   time, MP32 changes the record of a closed provider socket, MP35 drops the
+#   grant check in the granting stand-in, MP36 answers from a canned stream
+#   instead of relaying, and MP37 leaves a used once grant in the RA-1 live
+#   view. The model list's `selftest` entries edit falsify.py, which recovery
+#   finds under examples/agent-host.
 # - capsules/model-provider/confine-falsifiers.json: the model `confine.sb`
 #   and tests/confine/main.rs.
 # - capsules/did-provider/falsifiers.json: did's src/main.rs, did's
