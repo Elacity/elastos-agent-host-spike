@@ -670,22 +670,10 @@ class SemProbe(unittest.TestCase):
                 self.assertEqual(deleted.count("(allow ipc-posix-sem)"), 0)
                 self.assertNotIn("(allow default)", deleted)
                 removed = write_copy(directory, "wallet-deleted", deleted)
-                finding = type(self).recorded_allows.get("wallet")
-                try:
-                    denied = require_denied(removed)
-                except NotDenied as caught:
-                    if not finding:
-                        raise
-                    method = getattr(type(self), "test_wallet_sem_open_is_denied")
-                    self.assertTrue(
-                        getattr(method, "__unittest_expecting_failure__", False)
-                    )
-                    self.assertIn(finding, method.__doc__ or "")
-                    self.assertIn("ALLOW", str(caught))
-                else:
-                    self.assertEqual(denied.stdout, DENY_STDOUT)
-                    self.assertEqual(denied.stderr, "")
-                    self.assertEqual(denied.exit_code, 0)
+                denied = require_denied(removed)
+                self.assertEqual(denied.stdout, DENY_STDOUT)
+                self.assertEqual(denied.stderr, "")
+                self.assertEqual(denied.exit_code, 0)
 
             with self.subTest(profile="wallet-shm"):
                 wallet = PROFILES[0]
@@ -1680,6 +1668,77 @@ class SemRules(unittest.TestCase):
                         for rel in set(FINDINGS.values()):
                             self.assertFalse((repo / rel).exists())
                 self.launch_guard.assert_not_called()
+
+    def test_wallet_controls_reject_allow_with_or_without_finding(self):
+        """Each wallet control fails on an allow, even with a recorded finding."""
+        for recorded in (False, True):
+            for control in ("wallet-deleted", "wallet-shm"):
+                with self.subTest(recorded=recorded, control=control), tempfile.TemporaryDirectory(
+                    prefix="ccrt-sem-control-"
+                ) as tmp:
+                    profiles = []
+                    for original in PROFILES:
+                        profile = dict(original)
+                        profile["path"] = Path(tmp) / f"{profile['name']}.sb"
+                        text = "(version 1)\n(deny default)\n"
+                        if recorded and profile["name"] == "wallet":
+                            text = with_sem_allow(text)
+                        profile["path"].write_text(text, encoding="utf-8")
+                        profiles.append(profile)
+
+                    class Control(SemProbe):
+                        skip_reason = None
+                        recorded_allows = {}
+
+                    if recorded:
+                        finding = FINDINGS["wallet"]
+                        Control.recorded_allows["wallet"] = finding
+                        mark_expected(Control, "test_wallet_sem_open_is_denied", finding)
+                        method = Control.test_wallet_sem_open_is_denied
+                        self.assertTrue(
+                            getattr(method, "__unittest_expecting_failure__", False)
+                        )
+                        self.assertIn(finding, method.__doc__ or "")
+
+                    opened = []
+
+                    def injected_open(profile):
+                        path = Path(profile)
+                        opened.append(path.name)
+                        text = path.read_text(encoding="utf-8")
+                        allow = path.stem == control or ALLOW_IPC in text
+                        return sbx.Result(
+                            exit_code=0,
+                            stdout=ALLOW_STDOUT if allow else DENY_STDOUT,
+                            stderr="",
+                            argv=[sbx.SANDBOX_EXEC, "-f", os.fspath(path)],
+                        )
+
+                    result = unittest.TestResult()
+                    try:
+                        with patch(__name__ + ".PROFILES", tuple(profiles)), patch(
+                            __name__ + ".open_under", side_effect=injected_open
+                        ):
+                            Control("test_falsifier_allow_ipc_posix_sem_is_caught").run(result)
+                    finally:
+                        Control.doClassCleanups()
+                    self.assertEqual(result.testsRun, 1)
+                    self.assertEqual(result.errors, [])
+                    self.assertEqual(result.skipped, [])
+                    self.assertEqual(result.expectedFailures, [])
+                    self.assertEqual(result.unexpectedSuccesses, [])
+                    self.assertEqual(len(result.failures), 1)
+                    failed, caught = result.failures[0]
+                    self.assertEqual(failed.params["profile"], control)
+                    self.assertIn("NotDenied", caught)
+                    self.assertIn("ALLOW", str(caught))
+                    self.assertIn(control + ".sb", caught)
+                    self.assertFalse(result.wasSuccessful())
+                    self.assertEqual(opened, [
+                        "wallet-allow.sb", "did-allow.sb", "model-allow.sb",
+                        "wallet-deleted.sb", "wallet-shm.sb",
+                    ])
+        self.launch_guard.assert_not_called()
 
     def test_harness_error_stays_error(self):
         """An injected harness error stays an error. It is not a deny, an allow, or a skip."""
