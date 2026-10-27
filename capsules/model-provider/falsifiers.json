@@ -2630,6 +2630,22 @@
       "tests": [
         "a_model_turn_is_reached_only_through_an_ra1_grant"
       ]
+    },
+    {
+      "id": "MP38",
+      "title": "the session tie is dropped, so the session:other grant admits run C, which completes instead of being refused; the test prints assertion `left == right` failed: a turn whose grant is for another session must fail: status \"completed\", error code null",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/tests/process.rs",
+          "old": "            // The same check's session tie: the live entry it found must be for\n            // the session this stand-in serves, or the effect is refused with a\n            // reason that names both sessions.\n            if let Some(reason) =\n                shell_view_grant_for_another_session(&grants, &request_id, &served_session)\n            {\n                refusals.lock().unwrap().push(reason);\n                let _ = (&stream).write_all(RUNTIME_HOSTED_REFUSAL);\n                return;\n            }",
+          "new": "            // MP38 drops the session tie, so a live grant for another session reaches the model."
+        }
+      ],
+      "tests": [
+        "an_ra1_grant_for_another_session_does_not_reach_the_model"
+      ]
     }
   ]
 }
