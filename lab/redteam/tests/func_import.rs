@@ -28,6 +28,7 @@ const LAUNCH_ERROR: &str = "launch failed";
 const TIMEOUT_ERROR: &str = "timeout";
 const PLANT_TIMEOUT: Duration = Duration::from_secs(360);
 const OUTPUT_LIMIT: usize = 1024 * 1024;
+const TAIL_BYTES: usize = 4000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Plant {
@@ -161,8 +162,8 @@ fn finding_uses_live_head_and_bytes() {
 
 #[test]
 fn frozen_attribution_helpers_are_caught() {
-    let dir = isolated_temp("frozen-attribution");
-    let _hold = TempCopy { dir: dir.clone() };
+    let _hold = isolated_temp("frozen-attribution");
+    let dir = _hold.dir.clone();
     let lane = Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifest = fs::read_to_string(lane.join("Cargo.toml"))
         .expect("lane manifest")
@@ -214,7 +215,8 @@ fn frozen_attribution_helpers_are_caught() {
 
 #[test]
 fn clean_run_writes_no_finding() {
-    let dir = isolated_temp("finding");
+    let _hold = isolated_temp("finding");
+    let dir = _hold.dir.clone();
     let finding = dir.join(FINDING_FILE);
     record_outcome(false, &finding, &read_live_attribution()).expect("record refusal");
     assert_no_finding(&finding);
@@ -273,10 +275,38 @@ fn plant_harness_errors_are_errors() {
 }
 
 #[test]
+fn classify_test_reports_split_utf8_as_a_harness_error() {
+    let output = "€".repeat(1334);
+    let naive = output.len().saturating_sub(TAIL_BYTES);
+    assert!(
+        !output.is_char_boundary(naive),
+        "the last {TAIL_BYTES} bytes must start inside a character"
+    );
+    let result = classify_test(&CommandOutput {
+        exit_code: Some(1),
+        output: output.clone(),
+        timed_out: false,
+        spawn_error: false,
+    });
+    assert_eq!(
+        result,
+        Err(format!("the plant was not caught\nexit: Some(1)\n{output}"))
+    );
+    let split = catch_unwind(AssertUnwindSafe(|| {
+        falsifier_tail_splits_a_character(&output)
+    }));
+    assert!(
+        split.is_err(),
+        "a tail that starts inside a character was not caught"
+    );
+}
+
+#[test]
 fn plant_cleanup_and_source_guard_are_enforced() {
     let same = b"live-bytes";
     for body in [Ok(()), Err("launch failed".to_string())] {
-        let dir = isolated_temp("guard");
+        let _hold = isolated_temp("guard");
+        let dir = _hold.dir.clone();
         fs::write(dir.join("marker"), b"x").expect("marker");
         let expect_body = body.clone();
         let result = apply_guard(&dir, same, same, body);
@@ -284,14 +314,16 @@ fn plant_cleanup_and_source_guard_are_enforced() {
         assert_eq!(result, expect_body);
     }
     for body in [Ok(()), Err("launch failed".to_string())] {
-        let dir = isolated_temp("changed");
+        let _hold = isolated_temp("changed");
+        let dir = _hold.dir.clone();
         fs::write(dir.join("marker"), b"x").expect("marker");
         let result = apply_guard(&dir, b"before", b"after", body);
         assert!(!dir.exists(), "temp directory remains");
         assert_byte_change_is_error(&result);
     }
     for body in [Ok(()), Err("launch failed".to_string())] {
-        let dir = isolated_temp("leak");
+        let _hold = isolated_temp("leak");
+        let dir = _hold.dir.clone();
         fs::write(dir.join("marker"), b"x").expect("marker");
         let leaked = apply_guard_omit_cleanup(&dir, same, same, body);
         let caught = catch_unwind(AssertUnwindSafe(|| {
@@ -302,11 +334,41 @@ fn plant_cleanup_and_source_guard_are_enforced() {
         let _ = fs::remove_dir_all(&dir);
     }
     for body in [Ok(()), Err("launch failed".to_string())] {
-        let dir = isolated_temp("bypass");
+        let _hold = isolated_temp("bypass");
+        let dir = _hold.dir.clone();
         let bypass = apply_guard_bypass_bytes(&dir, b"before", b"after", body);
         let caught = catch_unwind(AssertUnwindSafe(|| assert_byte_change_is_error(&bypass)));
         assert!(caught.is_err(), "bypassed byte comparison was not caught");
     }
+    // Checked while the guard is still held, so a refusal that created the
+    // directory cannot pass by dropping it afterwards.
+    let parent = isolated_temp("init-parent");
+    let parent_dir = parent.dir.clone();
+    let (created_hold, created) = open_owned(&parent_dir, "plant");
+    assert_eq!(created, Ok(()));
+    assert!(
+        created_hold.dir.exists(),
+        "initialization did not create a directory"
+    );
+    drop(created_hold);
+    let manifest = parent_dir.join("Cargo.toml");
+    fs::write(&manifest, b"").expect("parent manifest");
+    let reason = format!("parent has Cargo.toml: {}", manifest.display());
+    let (hold, refused) = open_owned(&parent_dir, "plant");
+    assert_eq!(refused, Err(reason.clone()));
+    assert!(!hold.dir.exists(), "initialization left a directory");
+    drop(hold);
+    let leaked_child = parent_dir.join("redteam-func-plant-init-leak");
+    let leaked = falsifier_create_isolated_dir(&leaked_child);
+    assert_eq!(leaked, Err(reason));
+    let caught = catch_unwind(AssertUnwindSafe(|| {
+        assert!(!leaked_child.exists(), "temp directory remains");
+    }));
+    assert!(
+        caught.is_err(),
+        "initialization that creates before the parent check was not caught"
+    );
+    let _ = fs::remove_dir_all(&leaked_child);
 }
 
 #[test]
@@ -325,8 +387,13 @@ fn skipped_func_import_is_caught() {
 }
 
 fn run_skipped_plant(live: &Path, before: &[u8]) -> (PathBuf, Result<(), String>) {
-    let dir = plant_dir();
-    let _hold = TempCopy { dir: dir.clone() };
+    // The guard is held before creation. A parent-manifest refusal returns
+    // here, and Drop removes a directory if one was created.
+    let (hold, created) = open_owned(&std::env::temp_dir(), "plant");
+    let dir = hold.dir.clone();
+    if let Err(reason) = created {
+        return (dir, Err(reason));
+    }
     let body = plant_body(&dir, before);
     let after = match fs::read(live) {
         Ok(bytes) => bytes,
@@ -606,8 +673,8 @@ fn assert_byte_change_is_error(result: &Result<(), String>) {
 }
 
 fn real_lockfile_failure() -> Step {
-    let dir = isolated_temp("lockfile");
-    let _hold = TempCopy { dir: dir.clone() };
+    let _hold = isolated_temp("lockfile");
+    let dir = _hold.dir.clone();
     let manifest = dir.join("Cargo.toml");
     let output = run_cargo(
         &lockfile_args(&manifest),
@@ -621,8 +688,8 @@ fn real_lockfile_failure() -> Step {
 }
 
 fn real_compile_failure() -> Step {
-    let dir = isolated_temp("compile");
-    let _hold = TempCopy { dir: dir.clone() };
+    let _hold = isolated_temp("compile");
+    let dir = _hold.dir.clone();
     fs::write(
         dir.join("Cargo.toml"),
         "[package]\nname = \"redteam-compile-fault\"\nversion = \"0.0.0\"\nedition = \"2021\"\npublish = false\n",
@@ -678,8 +745,8 @@ fn command_timeout_bounds_descendants_and_cleanup() {
         "sleep 2 &",
         "sleep 2 & echo $! > child.pid; wait",
     ] {
-        let dir = isolated_temp("descendant-timeout");
-        let _hold = TempCopy { dir: dir.clone() };
+        let _hold = isolated_temp("descendant-timeout");
+        let dir = _hold.dir.clone();
         let mut command = Command::new("/bin/sh");
         command.args(["-c", script]).current_dir(&dir);
         let started = Instant::now();
@@ -916,7 +983,14 @@ fn combine(stdout: &[u8], stderr: &[u8]) -> String {
 }
 
 fn tail(text: &str) -> String {
-    let start = text.len().saturating_sub(4000);
+    // The window is counted in bytes. It has to start on a character, or the
+    // harness error panics instead of returning its reason.
+    let start = text.floor_char_boundary(text.len().saturating_sub(TAIL_BYTES));
+    text[start..].to_string()
+}
+
+fn falsifier_tail_splits_a_character(text: &str) -> String {
+    let start = text.len().saturating_sub(TAIL_BYTES);
     text[start..].to_string()
 }
 
@@ -983,38 +1057,63 @@ impl Drop for TempCopy {
     }
 }
 
-fn plant_dir() -> PathBuf {
-    let dir = isolated_temp("plant");
-    assert_parents_have_no_manifest(&dir);
-    dir
+fn isolated_temp(label: &str) -> TempCopy {
+    match open_owned(&std::env::temp_dir(), label) {
+        (hold, Ok(())) => hold,
+        (_hold, Err(reason)) => panic!("{reason}"),
+    }
 }
 
-fn isolated_temp(label: &str) -> PathBuf {
+fn open_owned(root: &Path, label: &str) -> (TempCopy, Result<(), String>) {
+    let dir = temp_candidate(root, label);
+    // Own the path before creation so a refusal cannot leave the directory.
+    let hold = TempCopy { dir: dir.clone() };
+    (hold, create_isolated_dir(&dir))
+}
+
+fn create_isolated_dir(dir: &Path) -> Result<(), String> {
+    if let Some(manifest) = parent_manifest(dir) {
+        return Err(format!("parent has Cargo.toml: {}", manifest.display()));
+    }
+    fs::create_dir_all(dir).map_err(|err| format!("temp dir: {err}"))
+}
+
+fn falsifier_create_isolated_dir(dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|err| format!("temp dir: {err}"))?;
+    if let Some(manifest) = parent_manifest(dir) {
+        return Err(format!("parent has Cargo.toml: {}", manifest.display()));
+    }
+    Ok(())
+}
+
+fn temp_candidate(root: &Path, label: &str) -> PathBuf {
     static COUNT: AtomicU64 = AtomicU64::new(0);
     let n = COUNT.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock")
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
+    root.join(format!(
         "redteam-func-{label}-{}-{nanos}-{n}",
         std::process::id()
-    ));
-    fs::create_dir_all(&dir).expect("temp dir");
-    assert_parents_have_no_manifest(&dir);
-    dir
+    ))
+}
+
+fn parent_manifest(dir: &Path) -> Option<PathBuf> {
+    let mut parent = dir.parent();
+    while let Some(current) = parent {
+        let manifest = current.join("Cargo.toml");
+        if manifest.exists() {
+            return Some(manifest);
+        }
+        parent = current.parent();
+    }
+    None
 }
 
 fn assert_parents_have_no_manifest(dir: &Path) {
-    let mut parent = dir.parent();
-    while let Some(dir) = parent {
-        let manifest = dir.join("Cargo.toml");
-        assert!(
-            !manifest.exists(),
-            "parent has Cargo.toml: {}",
-            manifest.display()
-        );
-        parent = dir.parent();
+    if let Some(manifest) = parent_manifest(dir) {
+        panic!("parent has Cargo.toml: {}", manifest.display());
     }
 }
 
