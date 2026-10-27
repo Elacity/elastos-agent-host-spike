@@ -272,6 +272,8 @@
         "evm_proofs_and_link_persist_under_storage_root",
         "bitcoin_proofs_persist_under_storage_root",
         "managed_approvals_persist_under_storage_root",
+        "connector_handoff_and_chain_outcome_persist_under_storage_root",
+        "protected_content_rights_request_persists_under_storage_root",
         "confined_outside_write_is_denied",
         "account_operations_beneath_storage_parent_are_refused",
         "both_file_profiles_bind_one_storage_parameter_contract"
