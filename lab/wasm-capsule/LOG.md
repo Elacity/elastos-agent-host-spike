@@ -1123,3 +1123,52 @@
   passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0. No
   dependency, `Cargo.toml`, `Cargo.lock`, lab CID or pin changed. Retired-label greps from the repo root: both empty,
   exit 1.
+- 27 Oct, task 033 (M1 C0 lab half, step iii: run refuses a module whose memory maximum is missing or too big). Base
+  `6b0df3acd`; precondition held (`audit/src/lib.rs:86` `pub struct MemoryLimits`, `:93` `pub fn memories(`; no
+  `memories` call in `tools/src/run.rs`). `tools/src/run.rs`: one private `check_module_memory(&VerifiedBundle) ->
+  Result<Option<u64>, Refusal>` reads the entrypoint's limits only through `wasm_capsule_audit::memories` (the one new
+  import, `use wasm_capsule_audit::{memories, Refusal as AuditRefusal};`); no memory passes with none; more than one
+  memory → `MemoryCountAboveOne`; no maximum → `MemoryMaximumMissing`; maximum × 65536 (u64, saturating) above
+  `memory_cap_bytes(memory_mb)` → `MemoryMaximumAboveDeclared`; a `memories` refusal → `MemoryNotRead`, unchanged.
+  Path: the entrypoint's path in the bundle, `capsule.wasm`. `run_engine` calls it right after `check_budget`, before
+  `check_program`; `run` calls it once right after `verify_bundle`, before both `--version` queries, and returns its
+  refusal as the new `TwoEngineRefusal::Memory`, printing the `Refusal` unchanged. Returns the checked maximum; nothing
+  new in `EngineRun`, `TwoEngineRun` or `render` (034's). wasmtime's argv, 027's cap, 043's budget and 038's pins are
+  unchanged. `tools/src/receipt.rs`: four ids in `refusal_reason` (`memory_not_read`, `memory_count_above_one`,
+  `memory_maximum_missing`, `memory_maximum_above_declared`, engine none); `TwoEngineRefusal::Memory` takes its
+  reason's id, as `Version` does, so each `Reason` keeps one id. Tests (`tests/run.rs`): `grow_module` now declares a
+  1024-page maximum (via a new `memory_module(limits, delta)`), `TWO_MEMORY_MODULE` two 32-page maxima;
+  `second_memory_cannot_double_the_declared_cap_on_wasmtime` removed (its module can no longer reach wasmtime); new
+  `run_refuses_a_module_memory_with_no_maximum_on_both_engines`,
+  `run_refuses_a_memory_maximum_above_the_declared_size_on_both_engines` (33 pages under 2 MB; 1025 under the default
+  64 MB), `run_refuses_a_second_memory_before_any_engine_start`, `run_starts_a_module_whose_maximum_fits_the_declared_size`
+  (each through `run_engine` on both engines and through `run`: exact reason and text, no run folder, no module start, no
+  `--version` query), and real-engine `capsule_grows_within_its_module_maximum_on_wasmer` (prints `1`) and
+  `memory_grow_past_the_module_maximum_returns_minus_one_on_wasmer` (prints `-1`, exit 0); both passed here, not
+  SKIPPED. `memory_grow_past_the_declared_cap_traps_on_wasmtime` still traps on the 1024-page `grow_module`, and its
+  stderr still holds `forcing trap when growing memory to 67174400 bytes`, so its asserted text is unchanged.
+  `refusal_receipt_ids_are_distinct_and_named`: 28 `Reason` examples (four new, each as `TwoEngineRefusal::Memory`),
+  plus a check that a memory reason as `TwoEngineRefusal::Engine` has the same id. `runner_uses_only_explicit_inputs`:
+  the blanket ban on naming the audit crate is narrowed to exactly the one `memories` import and one `memories(` call,
+  with `audit(` and `audit_component` still banned, and `.entrypoint()` is counted 2 (the write and the check). The
+  `memory_cap_on_wasmer_is_skipped` reason now says wasmer's cap is the module's own maximum, checked by `run`. New
+  falsifier F-WC10E-CAP-CHECK-DROPPED (`return Ok(None);` after `check_module_memory`'s signature line). Removed test's
+  name dropped from F-WC10-CAP-IGNORED and F-WC10-TWO-MEMORIES (same bug, same anchor). Re-anchored, the same bug:
+  F-WC5-QUERY-BEFORE-VERIFY and F-WC5a (their anchors now hold the check line after `verify_bundle`; F-WC5a would not
+  build otherwise) and F-WC-README-COUNT (179). Canonical runner, from the repo root, with `RUST_TEST_THREADS=2
+  CARGO_INCREMENTAL=0`: `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json
+  F-WC10E-CAP-CHECK-DROPPED F-WC10-CAP-IGNORED F-WC10-TWO-MEMORIES F-WC5-QUERY-BEFORE-VERIFY F-WC5a F-WC-README-COUNT`
+  gave "baseline: 10 named tests pass without an edit, 0 do not", each "CAUGHT", "summary: 6 CAUGHT of 6", exit 0;
+  then the other 71 entries that edit `tools/src/run.rs` or `tools/src/receipt.rs` gave "baseline: 40 named tests pass
+  without an edit, 0 do not", "summary: 71 CAUGHT of 71", exit 0; no `*.falsify-original` left. By hand (the runner
+  prints no panic), with F-WC10E's edit planted, all three named tests failed at `tests/run.rs:223` with `the runner
+  ran, stdout "same\n", not a refusal`; reverted, `run.rs` sha256 equal to before. Every one of the 188 anchors in
+  `falsifiers.json` is found exactly once (a `str.count` = 1 loop). README: step lists of both runners, "Memory cap
+  (wc-010b)" (claim scope and wasmer line), 032's paragraph (`run` now checks the maximum), new "The runner checks the
+  module's maximum (task 033)" part (wasmer -1, wasmtime traps by 027's flag), named tests, totals 179 (one task 033)
+  and 115 runner-caught, a task 033 section. ADOPTION's memory lines; `run.rs` module docs. Gates in `lab/wasm-capsule/`,
+  with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (124 passed, 3 ignored, 0 failed), `cargo fmt --
+  --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0. No dependency, `Cargo.toml`, `Cargo.lock`,
+  `tools/Cargo.toml`, `capsule/`, `tools/build`, `audit/`, lab CID or sha256 pin changed. Retired-label greps from the
+  repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256'
+  lab/wasm-capsule/`): both empty, exit 1.
