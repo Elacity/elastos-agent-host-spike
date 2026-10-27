@@ -1369,7 +1369,8 @@ fn hosted_effect_offer() -> Value {
 }
 
 /// The `init` request every hosted test sends: the shared offer and the
-/// stand-in's socket, with the fixture root as the journal path.
+/// stand-in's socket, with the fixture root as `base_path` and its `journal`
+/// folder as `journal_dir`.
 fn hosted_effect_init(root: &Path, stand_in: &HostedEffectStandIn) -> Value {
     json!({"op": "init", "config": {
         "base_path": root, "allowed_paths": [], "read_only": false, "encryption_key": "",
@@ -1379,8 +1380,8 @@ fn hosted_effect_init(root: &Path, stand_in: &HostedEffectStandIn) -> Value {
 }
 
 /// A retry of an open hosted run is a replay, not a second send. The stored
-/// run owns its result (`src/state.rs:515-530`): the retry returns the same run
-/// before any dispatch (`src/state.rs:623`), and the third request returns the
+/// run owns its result (`src/state.rs:518-531`): the retry returns the same run
+/// before any dispatch (`:530`), and the third request returns the
 /// settled result. The held stand-in keeps the first effect open, so the test
 /// can count connections and requests while the run is still running and after
 /// it settles. A second send here would give the Runtime two hosted effects for
@@ -1834,6 +1835,208 @@ fn hosted_cancel_while_the_answer_is_held_settles_unknown_and_sends_nothing_more
         None,
         "a hosted run must carry no bearer key"
     );
+
+    provider.shutdown();
+}
+
+/// A second hosted run that meets the offer's ceiling is refused before it
+/// sends anything. The provider stores the prepared run, reads the offer's open
+/// journal rows (`src/state.rs:606`, `:608`) and compares that count with
+/// `concurrency_limit` (`:609`). A count above it fails the new run with
+/// `rate_limited`/`model_busy` (`:610-620`) and returns its view (`:621`)
+/// before `self.adapters.dispatch` (`:623`), so the Runtime socket sees no
+/// effect for the refused run. The run is hosted and carries no report, so its
+/// terminal stores `BackendReport::unknown()` (`src/state.rs:1352-1354`, the
+/// arm at `:1354`), which makes `resolved_model`, `usage` and `cost` all
+/// `unknown` (`src/contract.rs:212-219`). A sent run with no report records the
+/// same value, so a Runtime reading only `usage` cannot tell "not sent" from
+/// "sent, not reported". The third run is created after the held run settles,
+/// so its admission shows the ceiling counts open runs, not every run.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted second concurrent run: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-second-concurrent");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind("hosted-second-concurrent");
+    stand_in.hold_answer();
+    let init = hosted_effect_init(&root, &stand_in);
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "a second hosted run at the offer ceiling"
+    });
+    let create_a = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": "session:test",
+            "capsule_id": "assistant",
+            "grant_id": "grant:test",
+            "request_id": test_support::fixture_model_request_id(
+                "request:hosted-second-concurrent-a"
+            ),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": model_input_hash(&input).unwrap()
+        }
+    });
+    let mut create_b = create_a.clone();
+    create_b["runtime_binding"]["request_id"] = json!(test_support::fixture_model_request_id(
+        "request:hosted-second-concurrent-b"
+    ));
+    let mut create_c = create_a.clone();
+    create_c["runtime_binding"]["request_id"] = json!(test_support::fixture_model_request_id(
+        "request:hosted-second-concurrent-c"
+    ));
+
+    let binding_a: RuntimeCreateBinding =
+        serde_json::from_value(create_a["runtime_binding"].clone()).unwrap();
+    let binding_b: RuntimeCreateBinding =
+        serde_json::from_value(create_b["runtime_binding"].clone()).unwrap();
+    let binding_c: RuntimeCreateBinding =
+        serde_json::from_value(create_c["runtime_binding"].clone()).unwrap();
+    let run_a = model_run_id(&binding_a);
+    let run_b = model_run_id(&binding_b);
+    let run_c = model_run_id(&binding_c);
+    assert_ne!(run_a, run_b, "each request id must name its own run");
+
+    let created_a = provider.request(create_a.clone());
+    assert_eq!(
+        created_a["status"], "ok",
+        "unexpected create response: {created_a}"
+    );
+    assert_eq!(
+        created_a["data"]["run_id"], run_a,
+        "runs_create must return the contract run id"
+    );
+    assert!(
+        matches!(
+            created_a["data"]["status"].as_str(),
+            Some("prepared" | "running")
+        ),
+        "the first hosted run must report an open status: {created_a}"
+    );
+    stand_in.wait_for_connections(1);
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "the first hosted run must open exactly one connection to the Runtime socket"
+    );
+
+    let created_b = provider.request(create_b.clone());
+    assert_eq!(
+        created_b["status"], "ok",
+        "unexpected create response: {created_b}"
+    );
+    assert_eq!(
+        created_b["data"]["run_id"], run_b,
+        "runs_create must return the contract run id"
+    );
+    // The open-run count above the offer ceiling fails the new run with
+    // `rate_limited`/`model_busy` (`src/state.rs:610-620`) and returns before
+    // any dispatch (`:621`, dispatch at `:623`).
+    assert_eq!(
+        created_b["data"]["status"], "failed",
+        "a run above the offer ceiling must fail at once: {created_b}"
+    );
+    assert_eq!(
+        created_b["data"]["terminal"]["error"]["code"], "model_busy",
+        "a run above the offer ceiling must carry the busy reason: {created_b}"
+    );
+    assert!(
+        created_b["data"]["terminal"]["output"].is_null(),
+        "a refused run must carry no output: {created_b}"
+    );
+    // A hosted terminal transition with no report records
+    // `BackendReport::unknown()` (`src/state.rs:1352-1354`).
+    assert_eq!(
+        created_b["data"]["terminal"]["backend_report"],
+        json!({
+            "schema": BACKEND_REPORT_SCHEMA,
+            "resolved_model": {"status": "unknown"},
+            "usage": {"status": "unknown"},
+            "cost": {"status": "unknown"},
+        }),
+        "a refused hosted run must record resolved_model, usage and cost as unknown: {created_b}"
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "the refused run must send nothing to the Runtime socket: {created_b}"
+    );
+
+    stand_in.release_answer();
+    let settled_a = wait_for_run_terminal(&mut provider, &run_a, &access_binding(&create_a));
+    assert_eq!(
+        settled_a["data"]["status"], "failed",
+        "the held run must settle on the stand-in's refusal: {settled_a}"
+    );
+    assert_eq!(
+        settled_a["data"]["terminal"]["error"]["code"], "hosted_effect_refused",
+        "the held run must settle with the Runtime's reason: {settled_a}"
+    );
+
+    let created_c = provider.request(create_c.clone());
+    assert_eq!(
+        created_c["status"], "ok",
+        "unexpected create response: {created_c}"
+    );
+    assert_eq!(
+        created_c["data"]["run_id"], run_c,
+        "runs_create must return the contract run id"
+    );
+    let settled_c = wait_for_run_terminal(&mut provider, &run_c, &access_binding(&create_c));
+    assert_eq!(
+        settled_c["data"]["terminal"]["error"]["code"], "hosted_effect_refused",
+        "the ceiling counts open runs, so a run after the first settles must be \
+         admitted and reach the Runtime socket: {settled_c}"
+    );
+    stand_in.wait_for_connections(2);
+    assert_eq!(
+        stand_in.connection_count(),
+        2,
+        "the admitted run must add exactly one connection to the Runtime socket"
+    );
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 2,
+        "only the two admitted runs may open a connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        2,
+        "only the two admitted runs may send a hosted request"
+    );
+    for recorded in &requests {
+        assert_eq!(recorded.request_line, "POST /v1/hosted-effect HTTP/1.1");
+        assert_eq!(
+            recorded.value("authorization"),
+            None,
+            "a hosted run must carry no bearer key"
+        );
+    }
 
     provider.shutdown();
 }
