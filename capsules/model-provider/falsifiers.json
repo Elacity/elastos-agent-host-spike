@@ -2601,14 +2601,14 @@
     },
     {
       "id": "MP35",
-      "title": "the no-live-grant refusal is dropped, so run A is refused only by the shared authorise, with its unknown-grant reason instead of the named one",
+      "title": "the shared authorise result is ignored, so run A completes instead of being refused; the test prints assertion `left == right` failed: a turn with no live grant must fail: status \"completed\", error code null",
       "command": "provider",
       "expect": "caught",
       "edits": [
         {
           "file": "../../capsules/model-provider/tests/process.rs",
-          "old": "            if !shell_view_lists_live_grant(&grants, &request_id) {\n                // The refusal reaches the run as `hosted_effect_refused` with\n                // class `access_refused` (`src/adapters.rs:2799-2829`), and no\n                // backend sees the effect.\n                refusals\n                    .lock()\n                    .unwrap()\n                    .push(format!(\"no live grant for request {request_id}\"));\n                let _ = (&stream).write_all(RUNTIME_HOSTED_REFUSAL);\n                return;\n            }",
-          "new": "            // MP35 drops the no-live-grant refusal, so only the shared authorise refuses."
+          "old": "            if let Err((_, reason)) = grants.lock().unwrap().authorise(\n                Caller::Client {\n                    session_id: &served_session,\n                },\n                &request_id,\n            ) {\n                // The refusal reaches the run as `hosted_effect_refused` with\n                // class `access_refused` (`src/adapters.rs:2799-2829`), and no\n                // backend sees the effect.\n                refusals.lock().unwrap().push(reason);\n                let _ = (&stream).write_all(RUNTIME_HOSTED_REFUSAL);\n                return;\n            }",
+          "new": "            // MP35 ignores the shared authorise result, so a run with no grant reaches the model."
         }
       ],
       "tests": [
@@ -2633,18 +2633,34 @@
     },
     {
       "id": "MP38",
-      "title": "the session tie is dropped, so the session:other grant admits run C, which completes instead of being refused; the test prints assertion `left == right` failed: a turn whose grant is for another session must fail: status \"completed\", error code null",
+      "title": "the hosted check passes authorise the session the shell view lists for that request instead of the session it serves, so the session:other grant admits run C, which completes instead of being refused; the test prints assertion `left == right` failed: a turn whose grant is for another session must fail: status \"completed\", error code null",
       "command": "provider",
       "expect": "caught",
       "edits": [
         {
           "file": "../../capsules/model-provider/tests/process.rs",
-          "old": "            if let Err((_, reason)) = grants.lock().unwrap().authorise(\n                Caller::Client {\n                    session_id: &served_session,\n                },\n                &request_id,\n            ) {\n                refusals.lock().unwrap().push(reason);\n                let _ = (&stream).write_all(RUNTIME_HOSTED_REFUSAL);\n                return;\n            }",
-          "new": "            // MP38 drops the shared authorise call, so a live grant for another session reaches the model."
+          "old": "                Caller::Client {\n                    session_id: &served_session,\n                },\n                &request_id,",
+          "new": "                Caller::Client {\n                    session_id: shell_live_grant_view(&grants)[\"capabilities\"]\n                        .as_array()\n                        .expect(\"the shared stand-in shell view lists capabilities\")\n                        .iter()\n                        .find(|entry| entry[\"request_id\"].as_str() == Some(request_id.as_str()))\n                        .and_then(|entry| entry[\"session_id\"].as_str())\n                        .unwrap_or(&served_session),\n                },\n                &request_id,"
         }
       ],
       "tests": [
         "an_ra1_grant_for_another_session_does_not_reach_the_model"
+      ]
+    },
+    {
+      "id": "MP39",
+      "title": "the hosted check passes authorise the request id of the first live entry in the shell view instead of the effect's, so a run whose own request id has no grant is admitted; the test prints assertion `left == right` failed: a turn whose own request id has no grant must fail: status \"completed\", error code null",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/tests/process.rs",
+          "old": "                Caller::Client {\n                    session_id: &served_session,\n                },\n                &request_id,\n            ) {",
+          "new": "                Caller::Client {\n                    session_id: &served_session,\n                },\n                shell_live_grant_view(&grants)[\"capabilities\"]\n                    .as_array()\n                    .expect(\"the shared stand-in shell view lists capabilities\")\n                    .first()\n                    .and_then(|entry| entry[\"request_id\"].as_str())\n                    .unwrap_or(&request_id),\n            ) {"
+        }
+      ],
+      "tests": [
+        "an_ra1_grant_for_another_request_does_not_reach_the_model"
       ]
     }
   ]
