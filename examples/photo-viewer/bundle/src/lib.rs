@@ -27,7 +27,10 @@ pub mod testing;
 
 pub use admit::{admit, load, resolve_requires, Admitted, Installed, Loaded};
 // This test code stands in for the Runtime's launch by CID, which does not exist yet.
-pub use admit::{validate_content_stand_in, StandInResolveManifest};
+pub use admit::{
+    admit_staged_for_stand_in, bind_content_stand_in, select_stand_in_dependencies,
+    validate_content_stand_in, StandInDependencies, StandInResolveManifest,
+};
 pub use cid::cid_v1_raw_sha256;
 pub use claim::{Claim, SignedClaim, CLAIM_SCHEMA};
 pub use listing::{
@@ -124,6 +127,22 @@ pub enum Refusal {
         installed: String,
         offered: String,
     },
+    /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    /// The content CID is absent from the staged store.
+    StagedMissing { cid: String },
+    /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    /// The staged content has no detached admission claim.
+    ClaimMissing { cid: String },
+    /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    /// The content pins a different viewer from the launch selection.
+    ViewerMismatch {
+        cid: String,
+        actual: String,
+        expected: String,
+    },
+    /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    /// A resolved dependency differs from the selected CID, role or execution.
+    LaunchBindingInvalid { cid: String, role: String },
     /// The staged copy does not hash to its CID.
     StagedMismatch { cid: String, computed: String },
     /// The staged copy has a writable file or directory.
@@ -185,6 +204,10 @@ impl Refusal {
             Refusal::CidRevoked(_) => "cid_revoked",
             Refusal::VersionDowngrade { .. } => "version_downgrade",
             Refusal::VersionConflict { .. } => "version_conflict",
+            Refusal::StagedMissing { .. } => "staged_missing",
+            Refusal::ClaimMissing { .. } => "claim_missing",
+            Refusal::ViewerMismatch { .. } => "viewer_mismatch",
+            Refusal::LaunchBindingInvalid { .. } => "launch_binding_invalid",
             Refusal::StagedMismatch { .. } => "staged_mismatch",
             Refusal::StagedNotReadOnly(_) => "staged_not_read_only",
             Refusal::CoreUnpinned(_) => "core_unpinned",
@@ -205,6 +228,14 @@ impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             // This test code stands in for the Runtime's launch by CID, which does not exist yet.
+            Refusal::StagedMissing { cid } => write!(f,
+                "staged_missing: Content CID {cid} is absent from the staged store; admit that exact capsule first."),
+            Refusal::ClaimMissing { cid } => write!(f,
+                "claim_missing: Content {cid} has no admission claim; admit the signed capsule first."),
+            Refusal::ViewerMismatch { cid, actual, expected } => write!(f,
+                "viewer_mismatch: Content {cid} requires viewer {actual}; this launch selected {expected}."),
+            Refusal::LaunchBindingInvalid { cid, role } => write!(f,
+                "launch_binding_invalid: Resolved {cid} does not match the selected {role} for this stand-in launch."),
             Refusal::ContentCoreUnpinned(cid) => write!(f,
                 "core_unpinned: Content {cid} must pin its viewer with viewer.cid; a name alone cannot select it."),
             Refusal::ContentBindingInvalid { cid, detail } => write!(f,

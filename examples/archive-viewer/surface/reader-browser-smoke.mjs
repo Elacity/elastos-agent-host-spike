@@ -52,7 +52,7 @@ const VIEW = {
 const { base, requests, close } = await standIn({
   app: "archive-reader",
   browserRoot,
-  files: ["index.html", "main.js", "reader.js", "docs-render.js", "reader.css"],
+  files: ["index.html", "main.js", "reader.js", "docs-render.js", "page-client.js", "reader.css"],
   routes(method, path) {
     if (method === "GET" && path === "/api/viewers/archive-reader/view") {
       return { type: "application/json", body: JSON.stringify(VIEW) };
