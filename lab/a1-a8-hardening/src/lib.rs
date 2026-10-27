@@ -1165,18 +1165,18 @@ pub fn records_from_sealed_receipts(
             meta.len()
         ));
     }
+    if seal.bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return Err("capability-requests.jsonl must not start with a BOM".into());
+    }
+    if !seal.bytes.is_empty() && !seal.bytes.ends_with(b"\n") {
+        return Err("capability-requests.jsonl truncated final line".into());
+    }
     let current = fs::read(path).map_err(|error| error.to_string())?;
     if meta.len() != seal.size || sha256(&current) != seal.hash {
         return Err(
             "capability-requests.jsonl rewritten after run; host receipts are the sealed copy"
                 .to_string(),
         );
-    }
-    if current.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        return Err("capability-requests.jsonl must not start with a BOM".into());
-    }
-    if !current.is_empty() && !current.ends_with(b"\n") {
-        return Err("capability-requests.jsonl truncated final line".into());
     }
     let cursor = ReceiptCursor {
         path: path.to_path_buf(),
