@@ -18,14 +18,14 @@
     "rules": [
       {
         "id": "startup-root-directory",
-        "justification": "macOS model-provider executable bound as PROVIDER_EXECUTABLE: file-read-data of literal / is the startup root-directory read.",
+        "justification": "macOS model-provider executable bound as PROVIDER_EXECUTABLE: Process startup reads the root directory before main runs",
         "rules": [
           "(allow file-read-data (literal \"/\"))"
         ]
       },
       {
         "id": "startup-sysctl",
-        "justification": "macOS model-provider executable bound as PROVIDER_EXECUTABLE: sysctl-read is the startup page-size read, with no write and no added sysctl name.",
+        "justification": "macOS model-provider executable bound as PROVIDER_EXECUTABLE: At startup the Rust runtime reads the page size to place its stack guard page.",
         "rules": [
           "(allow sysctl-read)"
         ]
