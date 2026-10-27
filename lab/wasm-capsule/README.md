@@ -2858,10 +2858,11 @@ entry's one named test fails at its assertion:
 Task 026 also re-anchored F-WC-README-COUNT to the new total, the same bug as
 before.
 
-Task 026's three planted bugs in `ADOPTION.md`, each hand-proven, pending R1
+Task 026's two planted bugs in `tools/src/run.rs` are runner-caught since task
+052; they are listed under "Task 052's three, runner-caught" below. Task 026's
+three planted bugs in `ADOPTION.md`, each hand-proven, pending R1
 (`ADOPTION.md` is not a recovery target, so they have no `falsifiers.json`
-entry and are outside every count above; LOG.md, task 026). Task 026's two
-planted bugs in `tools/src/run.rs` are runner-caught since task 052 (below):
+entry and are outside every count above; LOG.md, task 026):
 
 - F-WC-ENGINE-ADOPTION — ADOPTION loses the engine ruling
   (`engines_are_labelled_test_only_not_endorsed`, which says "not endorsed",

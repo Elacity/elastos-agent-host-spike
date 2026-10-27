@@ -154,14 +154,13 @@ use std::process::Command;
 /// `generate_profile` in wallet-provider's `src/main.rs`, and WP111 names it
 /// in did-provider's, so `lab_generator_is_named_only_in_test_code` fails
 /// because its walk reads the provider's non-test file and the refusal names
-/// that path. Task 094's WP112 starts the binary bare in the stand-in's OS
+/// that path. Task 094's WP112 starts the binary bare in the stand-in's host
 /// refusal, WP113 starts it bare after a failed `init`, and WP115 ignores the
 /// writer's refusal and starts under the committed `confine.sb`, so
-/// `standin_launcher_refuses_a_start_it_cannot_confine` fails on cases (a),
-/// (b), (e) and (d); WP114 replaces the stand-in's generated-profile start
-/// with a bare start, so
-/// `standin_launcher_starts_wallet_confined_under_the_generated_profile` fails
-/// at its outside `init`. Task 095's WP116 binds the stand-in's `STORAGE_ROOT`
+/// `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` fails
+/// on cases (a), (e) and (d); WP114 replaces the stand-in's generated-profile
+/// start with a bare start, so the same test fails at its outside `init`.
+/// Task 095's WP116 binds the stand-in's `STORAGE_ROOT`
 /// to the base instead of the wallet directory, so
 /// `standin_start_matches_the_oracle_on_the_permitted_and_denied_suite` fails
 /// on a denied case the widened grant permits, and WP117 writes the generated
@@ -196,8 +195,14 @@ use std::process::Command;
 /// refusal comes. Task 103's WP130 disables the kind check in
 /// `did_binary_executable`, so
 /// `did_binary_is_the_executable_the_build_reports` fails because the non-bin
-/// artifact's executable is read first.
-const EXPECTED_FALSIFIERS: usize = 128;
+/// artifact's executable is read first. Task 104 folds the three stand-in
+/// launcher tests into
+/// `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` and
+/// re-anchors WP112 on the host refusal; WP131 starts the binary bare on a
+/// simulated Linux host with a missing primitive, so the journey fails at did's
+/// Landlock row, and WP132 returns one fixed reason that names no primitive, so
+/// the journey fails on that row's words.
+const EXPECTED_FALSIFIERS: usize = 130;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

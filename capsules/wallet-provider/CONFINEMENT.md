@@ -128,8 +128,13 @@ provider.
 
 The stand-in refuses in the order of these steps:
 
-1. An `os` outside `DECLARED_CONFINED_OS` is refused with one reason that
-   names that OS and the list where the stand-in applies confinement.
+1. A host report that `standin_host_refusal` refuses is refused with that one
+   reason, before any tool, binary or profile check, so a refused host writes
+   no profile and creates no storage root. The report holds the OS name and,
+   for a simulated Linux host, which of Landlock, user namespaces or the
+   seccomp filter it reports unavailable. The reason starts
+   `{name} start on {os} is refused:` and carries only its own case's words,
+   as the journey paragraph below states.
 2. An absent `sandbox-exec` is refused with a reason that names the OS and the
    path.
 3. A present confinement tool that is not `SANDBOX_EXEC` is refused with a
@@ -153,15 +158,26 @@ Both file-profile providers start through this one stand-in:
 `wallet-provider` here and `did-provider` in the same test file, each with its
 own committed declared-rights file, binary and storage-root layout. did's
 start binds `<base>/did` as `STORAGE_ROOT` and `<base>` as `STORAGE_PARENT`.
-`standin_launcher_starts_did_confined_under_the_generated_profile` holds the
-did journey, and
 `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
 compares did's suite on the committed `confine.sb` and on a stand-in start,
 through the same record type and comparison as the wallet suite.
 
-`standin_launcher_refuses_a_start_it_cannot_confine` holds the refusals, and
-`standin_launcher_starts_wallet_confined_under_the_generated_profile` holds
-the full wallet journey through the stand-in.
+`standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` holds the
+one C0 journey for did first and then wallet: the macOS start through the
+stand-in, one outside write refused with nothing created, the root still
+answering, and `shutdown` exiting 0; then every host and process refusal the
+stand-in must make. The stand-in's input is one host report, not a bare OS
+name: an OS with no confinement design, a simulated Linux host that names one
+of Landlock, user namespaces or the seccomp filter as unavailable, or a
+simulated Linux host that reports nothing missing. Each refusal starts
+`{name} start on {os} is refused:` and carries only its own case's words: an OS
+with no confinement design names that OS and the list where the stand-in
+applies confinement; a simulated Linux host with a missing primitive carries
+the design's exact words for it from `CONFINEMENT-LINUX.md`; and a simulated
+Linux host that reports nothing missing says Linux is designed, not enforced,
+in this lab, so `linux` is not in `DECLARED_CONFINED_OS`. The Linux rows are
+simulated host reports and not a Linux run, so no test here probes a kernel or
+claims Linux enforcement.
 `standin_start_matches_the_oracle_on_the_permitted_and_denied_suite` runs one
 suite of permitted and denied cases on a provider started under the committed
 `confine.sb` and on one Started by the stand-in. Each case is pushed with its
@@ -897,17 +913,16 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Name `generate_profile` in `capsules/did-provider/src/main.rs` (WP111): the
   same test fails because the walk reaches the other crate and its refusal
   names that path.
-- Start the binary bare in the stand-in's OS refusal (WP112):
-  `standin_launcher_refuses_a_start_it_cannot_confine` fails on cases (a) and
-  (b), which return Started instead of their reasons.
+- Start the binary bare in the stand-in's host refusal (WP112):
+  `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` fails
+  on case (a), which returns Started instead of its reason.
 - Start the binary bare after a failed `init` (WP113): the same test fails on
   case (e), which returns Started instead of the reason.
-- Replace the stand-in's generated-profile start with a bare start (WP114):
-  `standin_launcher_starts_wallet_confined_under_the_generated_profile` fails
-  at the outside `init`, which then succeeds.
+- Replace the stand-in's generated-profile start with a bare start (WP114): the
+  same test fails at the outside `init`, which then succeeds.
 - Ignore the lab writer's refusal and start under the committed `confine.sb`
-  (WP115): `standin_launcher_refuses_a_start_it_cannot_confine` fails on case
-  (d), which returns Started instead of the unnamed-id reason.
+  (WP115): the same test fails on case (d), which returns Started instead of
+  the unnamed-id reason.
 - Bind the stand-in's `STORAGE_ROOT` to the base instead of the wallet
   directory (WP116):
   `standin_start_matches_the_oracle_on_the_permitted_and_denied_suite` fails
@@ -917,8 +932,8 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   (WP117): `standin_start_runs_under_the_generated_profile_not_the_committed_file`
   fails because the start is then Started instead of refused.
 - Remove the stand-in's check that the confinement tool is `SANDBOX_EXEC`
-  (WP118): `standin_launcher_refuses_a_start_it_cannot_confine` fails on case
-  (c2), which runs the real `sandbox-exec` and returns Started.
+  (WP118): `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host`
+  fails on case (c2), which runs the real `sandbox-exec` and returns Started.
 - Remove the stand-in's binary-file check (WP119): the same test fails on case
   (c3), which panics in `resolved` with "wallet directory must resolve".
 - Return `Ok(provider)` for an `init` answer that is not `ok` (WP120): the same
@@ -937,8 +952,8 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
   fails because the did start is refused at its first `init`.
 - Make the stand-in's absent-tool check never fire (WP125):
-  `standin_launcher_refuses_a_start_it_cannot_confine` fails on case (c),
-  which then reads the wrong-tool reason and lacks `is absent`.
+  `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` fails
+  on case (c), which then reads the wrong-tool reason and lacks `is absent`.
 - Drop the OS from the stand-in's wrong-tool reason (WP126): the same test
   fails on case (c2), whose reason then lacks `on macos`.
 - Append a write grant on `STORAGE_PARENT` to the stand-in's generated profile
@@ -963,6 +978,13 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `did_binary_is_the_executable_the_build_reports` fails because the reader
   returns the non-bin artifact's executable, which comes before the bin
   artifact.
+- Start the binary bare on a simulated Linux host that reports a missing
+  primitive (WP131):
+  `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` fails
+  at did's Landlock row, which returns Started instead of the design's words.
+- Return one fixed reason that names no primitive from the missing-primitive
+  refusal (WP132): the same test fails on did's Landlock row, whose reason then
+  loses the design's exact words for that primitive.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
