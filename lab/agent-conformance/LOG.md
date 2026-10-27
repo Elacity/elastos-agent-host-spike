@@ -6733,3 +6733,71 @@ The first three are CAUGHT. `F-agent-host-p7` is NOT RUN with `did not run witho
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `tests/effects.rs:275` calls `poll` only when `apply_policy` is true. This change adds no capsule import. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `falsifiers.json:763` names `no_policy_file_does_not_mean_allow`. The runner reported `F-ac2c` CAUGHT. |
 | 8. Identity, admission and allowance stay separate? | Yes | `tests/common/grants.rs:39` treats a missing file as zero entries. A grant still requires the flag at `tests/effects.rs:275`. |
+
+## 043 — Declared network request is denied until a grant
+
+043: The one probe manifest declares `localhost://Public/agent-conformance-grants/*` and `elastos://net/stream`. `ungranted_network_is_refused` uses the existing `exercise_read` controller. The pending request is denied with `fixture denies unlisted read`. The network arm still returns `Ok(())` on a grant and does not call `providers::invoke`. `F-ac8a` keeps its command, path, id, title, expect and tests; only its capabilities `old` and `new` change. `F-net-grant` has no list id. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Baseline row, before the plant: `fixture read: exit:Some(1) matched:0 granted:0 denied:1 content_error:false` and `probe refusal effect:network exit:Some(1) reason_present:true`. Stderr carries `BusError::Denied("fixture denies unlisted read")` and does not carry `capsule manifest does not declare authority`.
+
+`F-net-grant`, hand-run, three steps. Original `fixtures/grants.json` sha256 `3009a4dd9f0820ad07a60f4ecf2f15709161653ba598753d34f6ccd8ead1396b`:
+
+```json
+{
+  "deny_reason": "fixture denies unlisted read",
+  "grants": [
+    {
+      "resource": "localhost://Public/agent-conformance-grants/granted.txt",
+      "action": "read",
+      "reason": "agent conformance: fixture read",
+      "duration": "once"
+    }
+  ]
+}
+```
+
+Planted bytes, sha256 `a6c057ce4c56e49aeae31b27b7e2ff151b0af4edff922279531d0e6cc574c780`:
+
+```json
+{
+  "deny_reason": "fixture denies unlisted read",
+  "grants": [
+    {
+      "resource": "localhost://Public/agent-conformance-grants/granted.txt",
+      "action": "read",
+      "reason": "agent conformance: fixture read",
+      "duration": "once"
+    },
+    {
+      "resource": "elastos://net/stream",
+      "action": "execute",
+      "reason": "agent conformance: ungranted effect",
+      "duration": "once"
+    }
+  ]
+}
+```
+
+Planted `ungranted_network_is_refused` exited 101 in 19.210 seconds. The row saw `fixture read: exit:Some(0) matched:1 granted:1 denied:0 content_error:false` and failed `Some(0) == Some(1)`. Restored bytes matched the original. The same test then exited 0 in 25.007 seconds with `matched:0 granted:0 denied:1`.
+
+`./lab/agent-conformance/run.sh` exited 0 in 254.783 seconds. Its table has `ungranted_network_is_refused | PASS` and no ` | FAIL` row.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`.
+
+- Cold `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 864.932 seconds. The Runtime build inside the preceding network row was 256.80 seconds and the artifact tests were 575.17 seconds, so this command was outside the 600-second bound. 127 passed, 0 failed, 14 ignored.
+- Warm gate, same environment, after those builds: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.143 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` exit 0, real 272.013 seconds. 127 passed, 0 failed, 14 ignored. This pair is inside the 600-second bound. The census pair named in the task did not fail, so there was no census rerun.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `probe/capsule.json:15` adds the Bus resource `elastos://net/stream`. The launched probe stays the staged bundle hash. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `tests/effects.rs:533` requires `granted:0` and line 534 requires `denied:1`. The probe does not open a stream. |
+| 3. A second path or a second copy of one rule? | No | `tests/effects.rs:107` calls the one `exercise_read` controller. |
+| 4. Runtime core grows? | No | The edit is the probe manifest, `tests/effects.rs`, `tests/artifact.rs`, `falsifiers.json`, `RUNBOOK.md`, `GAPS.md` and `LOG.md`. |
+| 5. Refusals deny by default with a clear reason? | Yes | `tests/effects.rs:541` requires `BusError::Denied` with the fixture reason. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `probe/src/lib.rs:260` returns `Ok(())` from `capabilities::request` and does not call `providers::invoke`. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/effects.rs:106` is `ungranted_network_is_refused`. Hand-run `F-net-grant` exited 101 planted and 0 restored. |
+| 8. Identity, admission and allowance stay separate? | Yes | `probe/capsule.json:15` lets the request become pending. `tests/effects.rs:534` still requires a separate deny. |
