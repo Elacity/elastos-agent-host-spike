@@ -27,6 +27,13 @@ CACHE_ACTION = WORKFLOW.parents[1] / "actions/rust-compile-cache/action.yml"
 LOCAL_CACHE_ACTION = "./.github/actions/rust-compile-cache"
 UNIT_CACHE_JOBS = {"lint", "test-elastos", "test-capsules"}
 SOURCE_HOME_CACHE_JOBS = {"source-home-linux", "source-home-linux-arm64", "source-home-macos", "update-hop-linux"}
+# Jobs whose guard skips a spark/* pull request. Quick checks are the rest.
+FULL_PROOF_JOBS = {
+    "engine-llama-amd64", "engine-llama-arm64", "test-elastos", "test-capsules",
+    "custody-harness-smoke", "release-upstream-paths", "release-upstream-assets",
+    "source-home-linux", "source-home-linux-arm64", "source-home-macos", "update-hop-linux",
+}
+SPARK_SKIP = "!(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))"
 # Read the fixed job/step indentation used here; actionlint checks YAML syntax.
 def jobs(source):
     return dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)",
@@ -65,6 +72,7 @@ def steps(job, workflow_jobs=JOBS):
 
 def evaluate(expression, context):
     # Evaluate only this repository's workflow/action expressions, never external input.
+    # startsWith is GitHub's prefix function; str.startswith is the same check.
     expression = expression.removeprefix("${{").removesuffix("}}").strip()
     expression = expression.replace("&&", " and ").replace("||", " or ")
     expression = re.sub(r"!(?!=)", " not ", expression)
@@ -72,6 +80,26 @@ def evaluate(expression, context):
                         lambda match: repr(context[match[0]]), expression)
     return eval(expression, {"__builtins__": {}},
                 {"startsWith": str.startswith, "true": True, "false": False})
+
+
+def event_context(event, ref, ref_type="", override="", head_ref=None, **extra):
+    """One simulated GitHub context.
+
+    github.head_ref is the pull request head branch. GitHub leaves it empty on
+    every other event. A pull_request case that omits the branch is an ordinary
+    non-spark branch, which is what the historical cases are.
+    """
+    if head_ref is None:
+        head_ref = "feature" if event == "pull_request" else ""
+    context = {
+        "github.event_name": event,
+        "github.ref": ref,
+        "github.ref_type": ref_type,
+        "inputs.ref": override,
+        "github.head_ref": head_ref,
+    }
+    context.update(extra)
+    return context
 
 
 def validate_action_pins(source, cache_action):
@@ -360,9 +388,7 @@ def validate_cache_guards(source):
             for event, ref, ref_type, override, cached in CASES:
                 if cached:
                     continue
-                context = {"github.event_name": event, "github.ref": ref,
-                           "github.ref_type": ref_type, "inputs.ref": override,
-                           **NO_CACHE_HIT}
+                context = event_context(event, ref, ref_type, override, **NO_CACHE_HIT)
                 for name in ("CI_USE_CACHE", "CI_SAVE_CACHE"):
                     context["env." + name] = str(evaluate(field(source, name), context)).lower()
                 context["steps.should-run.outputs.run"] = str(custody_should_run(source, context, "true")).lower()
@@ -416,12 +442,12 @@ def validate_cache_writers(source):
     if not writers:
         raise AssertionError("missing cache writers")
     for event, ref, ref_type, override, _ in [*CASES, ("push", "refs/heads/feature", "branch", "", True)]:
-        context = {"github.event_name": event, "github.ref": ref,
-                   "github.ref_type": ref_type, "inputs.ref": override,
-                   "env.CI_USE_CACHE": "true", "steps.should-run.outputs.run": "true",
-                   "steps.engine-cache.outputs.cache-hit": "false", "steps.kubo-cache.outputs.cache-hit": "false",
-                   "steps.previous-release-cache.outputs.cache-hit": "false",
-                   "steps.apt-prerequisites.outputs.changed": "true"}
+        context = event_context(
+            event, ref, ref_type, override,
+            **{"env.CI_USE_CACHE": "true", "steps.should-run.outputs.run": "true",
+               "steps.engine-cache.outputs.cache-hit": "false", "steps.kubo-cache.outputs.cache-hit": "false",
+               "steps.previous-release-cache.outputs.cache-hit": "false",
+               "steps.apt-prerequisites.outputs.changed": "true"})
         context["env.CI_SAVE_CACHE"] = str(evaluate(field(source, "CI_SAVE_CACHE"), context)).lower()
         trusted = event == "push" and ref == CACHE_SAVING_REF
         if (context["env.CI_SAVE_CACHE"] == "true") != trusted:
@@ -487,8 +513,7 @@ def validate_jetson_package_lifecycle(source):
         raise AssertionError("release package builds require --locked")
     for event, ref, ref_type, override, _ in CASES:
         for runner in ("ubuntu-24.04", "ubuntu-22.04-arm"):
-            context = {"github.event_name": event, "github.ref": ref,
-                       "github.ref_type": ref_type, "inputs.ref": override, "matrix.os": runner}
+            context = event_context(event, ref, ref_type, override, **{"matrix.os": runner})
             if evaluate(field(verify, "if"), context) and not evaluate(field(package, "if"), context):
                 raise AssertionError(f"Jetson verification lacks its package on {event} {runner}")
 
@@ -593,8 +618,7 @@ def validate_journey_builds(source, release_source):
             if f'echo "{key}={value}" >> "$GITHUB_ENV"' not in profile or step_source.count(key) != 1:
                 raise AssertionError(f"missing journey profile setting: {job} {key}")
         for event, ref, ref_type, override, _ in CASES:
-            context = {"github.event_name": event, "github.ref": ref,
-                       "github.ref_type": ref_type, "inputs.ref": override}
+            context = event_context(event, ref, ref_type, override)
             expected = event in ("pull_request", "merge_group") or (event == "push" and ref == "refs/heads/develop")
             if evaluate(field(profile, "if"), context) != expected:
                 raise AssertionError(f"journey profile changes shipped build: {job} {event} {ref}")
@@ -754,7 +778,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertIn("\n  merge_group:\n    types: [checks_requested]\n", triggers)
         self.assertIn("\n  pull_request:\n", triggers)
         self.assertIn("branches: [main, develop]", triggers)
-        context = {"github.event_name": "merge_group", "github.ref": "refs/heads/gh-readonly-queue/develop/pr-1"}
+        context = event_context("merge_group", "refs/heads/gh-readonly-queue/develop/pr-1")
         for job in JOBS:
             if job == "cancel-on-failure":
                 continue
@@ -767,8 +791,7 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertEqual(field(checkout, "ref"),
                              "${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}")
         for event, ref, ref_type, override, _ in CASES:
-            context = {"github.event_name": event, "github.ref": ref,
-                       "github.ref_type": ref_type, "inputs.ref": override}
+            context = event_context(event, ref, ref_type, override)
             context["env.CI_SAVE_CACHE"] = str(evaluate(field(SOURCE, "CI_SAVE_CACHE"), context)).lower()
             expected_job = event in ("merge_group", "workflow_dispatch", "pull_request") or \
                 (event == "push" and ref in SAVING_REFS)
@@ -781,6 +804,74 @@ class ReleasePolicyTests(unittest.TestCase):
                     filtered = paths if event == "pull_request" else ""
                     self.assertEqual(upstream_assets_run(SOURCE, context, filtered),
                                      event in ("merge_group", "workflow_dispatch") or filtered == "true")
+
+    def test_spark_pull_requests_skip_full_jobs_and_other_runs_keep_them(self):
+        def job_level_if(job):
+            guard = re.search(r"(?m)^    if: (.*)$", JOBS[job])
+            return guard[1] if guard else ""
+
+        self.assertEqual({job for job in JOBS if SPARK_SKIP in job_level_if(job)}, FULL_PROOF_JOBS)
+        only_spark = "${{ " + SPARK_SKIP + " }}"
+        for job in FULL_PROOF_JOBS - {"custody-harness-smoke", "release-upstream-assets"}:
+            self.assertEqual(job_level_if(job), only_spark, job)
+        self.assertEqual(
+            job_level_if("custody-harness-smoke"),
+            "(github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || "
+            "github.event_name == 'merge_group' || (github.event_name == 'push' && "
+            "(github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'))) && " + SPARK_SKIP)
+        self.assertEqual(
+            job_level_if("release-upstream-assets"),
+            "(needs.release-upstream-paths.outputs.run == 'true') && " + SPARK_SKIP)
+        for job in ("source-gate", "test-behaviour", "cargo-audit", "lint"):
+            self.assertEqual(job_level_if(job), "", job)
+        self.assertNotIn(SPARK_SKIP, job_level_if("cancel-on-failure"))
+
+        def run(event, ref, head_ref):
+            return event_context(event, ref, "branch", "", head_ref)
+
+        spark = run("pull_request", "refs/pull/9/merge", "spark/lane")
+        nested = run("pull_request", "refs/pull/9/merge", "spark/lane/child")
+        ordinary = run("pull_request", "refs/pull/9/merge", "feature/ordinary")
+        batch = run("pull_request", "refs/pull/9/merge", "batch/20261027")
+        # The guard is the prefix spark/, not the substring spark.
+        bare = run("pull_request", "refs/pull/9/merge", "spark")
+        sparked = run("pull_request", "refs/pull/9/merge", "sparked/lane")
+        develop = run("push", "refs/heads/develop", "")
+        merge = run("merge_group", "refs/heads/gh-readonly-queue/develop/pr-1", "")
+        side_push = run("push", "refs/heads/v-work", "")
+        manual = run("workflow_dispatch", "refs/heads/main", "")
+        tag = event_context("push", "refs/tags/v0.7.1", "tag", "", "")
+        kept = (ordinary, batch, bare, sparked, develop, merge, side_push, manual, tag)
+        always = FULL_PROOF_JOBS - {"custody-harness-smoke", "release-upstream-assets"}
+        for job in always:
+            self.assertFalse(job_runs(job, spark), job)
+            self.assertFalse(job_runs(job, nested), job)
+            for context in kept:
+                self.assertTrue(
+                    job_runs(job, context),
+                    (job, context["github.event_name"], context["github.ref"], context["github.head_ref"]))
+        for context in (spark, nested):
+            self.assertFalse(job_runs("custody-harness-smoke", context), context["github.head_ref"])
+            self.assertFalse(upstream_assets_run(SOURCE, context, "true"), context["github.head_ref"])
+        for context in (ordinary, batch, bare, sparked):
+            self.assertTrue(job_runs("custody-harness-smoke", context), context["github.head_ref"])
+            self.assertTrue(upstream_assets_run(SOURCE, context, "true"), context["github.head_ref"])
+            self.assertFalse(upstream_assets_run(SOURCE, context, "false"), context["github.head_ref"])
+        for context in (develop, merge, manual):
+            self.assertTrue(job_runs("custody-harness-smoke", context), context["github.event_name"])
+        self.assertFalse(job_runs("custody-harness-smoke", side_push))
+        self.assertFalse(job_runs("custody-harness-smoke", tag))
+        self.assertTrue(upstream_assets_run(SOURCE, merge, ""))
+        self.assertTrue(upstream_assets_run(SOURCE, manual, ""))
+        self.assertFalse(upstream_assets_run(SOURCE, develop, ""))
+        self.assertTrue(upstream_assets_run(SOURCE, develop, "true"))
+        for job in ("source-gate", "test-behaviour", "cargo-audit", "lint"):
+            self.assertTrue(job_runs(job, spark), job)
+        same_repo = event_context(
+            "pull_request", "refs/pull/9/merge", "branch", "", "spark/lane",
+            **{"github.repository": "Elacity/elastos-runtime",
+               "github.event.pull_request.head.repo.full_name": "Elacity/elastos-runtime"})
+        self.assertTrue(job_runs("cancel-on-failure", same_repo))
 
     def test_sccache_is_scoped_to_test_jobs(self):
         expected = UNIT_CACHE_JOBS | SOURCE_HOME_CACHE_JOBS
@@ -1297,8 +1388,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertEqual(len(caches), 33)
         for event, ref, ref_type, override, cached in CASES:
             with self.subTest(event=event, ref=ref, override=override):
-                context = {"github.event_name": event, "github.ref": ref,
-                           "github.ref_type": ref_type, "inputs.ref": override}
+                context = event_context(event, ref, ref_type, override)
                 use_cache = evaluate(field(SOURCE, "CI_USE_CACHE"), context)
                 self.assertEqual(use_cache, cached)
                 context["env.CI_USE_CACHE"] = str(use_cache).lower()
@@ -1335,7 +1425,7 @@ class ReleasePolicyTests(unittest.TestCase):
         decision, = [step for step in steps("custody-harness-smoke") if "id: should-run" in step]
         script = textwrap.dedent(decision.split("        run: |\n", 1)[1])
         for event, ref, _, _, _ in CASES:
-            context = {"github.event_name": event, "github.ref": ref}
+            context = event_context(event, ref)
             eligible = event in ("pull_request", "merge_group", "workflow_dispatch") or (event == "push" and ref in SAVING_REFS)
             self.assertEqual(evaluate(field(JOBS["custody-harness-smoke"], "if"), context), eligible)
             self.assertEqual(evaluate(field(filter_step, "if"), context), event == "pull_request")
@@ -1402,8 +1492,7 @@ class ReleasePolicyTests(unittest.TestCase):
         for event, ref, _, _, _ in CASES:
             groups = []
             for run_id in ("101", "102", "103"):
-                context = {"github.workflow": "CI", "github.event_name": event,
-                           "github.ref": ref, "github.run_id": run_id}
+                context = event_context(event, ref, **{"github.workflow": "CI", "github.run_id": run_id})
                 groups.append(re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda match: str(evaluate(match[1], context)), group))
                 self.assertEqual(evaluate(field(concurrency, "cancel-in-progress"), context), event == "pull_request")
             self.assertEqual(len(set(groups)), 1 if event == "pull_request" else 3)
@@ -1449,8 +1538,7 @@ class ReleasePolicyTests(unittest.TestCase):
                             ("source-home-macos", "macos-14")):
             packages = [step for step in steps(job) if step.startswith("name: build and package release binaries\n")]
             for event, ref, ref_type, override, _ in CASES:
-                context = {"github.event_name": event, "github.ref": ref,
-                           "github.ref_type": ref_type, "inputs.ref": override, "matrix.os": runner}
+                context = event_context(event, ref, ref_type, override, **{"matrix.os": runner})
                 with self.subTest(job=job, event=event, ref=ref, override=override):
                     self.assertEqual(any(evaluate(field(step, "if"), context) for step in packages),
                                      job == "source-home-linux-arm64")
@@ -1502,8 +1590,7 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertIn("sccache --show-stats", statistics)
             self.assertIn("sccache --show-stats --stats-format=json", statistics)
         for event, ref, ref_type, override, cached in CASES:
-            context = {"github.event_name": event, "github.ref": ref,
-                       "github.ref_type": ref_type, "inputs.ref": override}
+            context = event_context(event, ref, ref_type, override)
             context["env.CI_USE_CACHE"] = str(evaluate(field(SOURCE, "CI_USE_CACHE"), context)).lower()
             for job in expected_jobs:
                 setup, = [step for step in steps(job) if f"uses: {LOCAL_CACHE_ACTION}" in step]
@@ -1712,8 +1799,10 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertEqual(watcher.split("    permissions:\n", 1)[1].split("    steps:\n", 1)[0], "      actions: write\n")
         for event, ref, ref_type, override, _ in CASES:
             for head in ("Elacity/elastos-runtime", "someone/fork"):
-                context = {"github.event_name": event, "github.ref": ref, "github.repository": "Elacity/elastos-runtime",
-                           "github.event.pull_request.head.repo.full_name": head}
+                context = event_context(
+                    event, ref, ref_type, override,
+                    **{"github.repository": "Elacity/elastos-runtime",
+                       "github.event.pull_request.head.repo.full_name": head})
                 self.assertEqual(job_runs("cancel-on-failure", context),
                                  event == "pull_request" and head == "Elacity/elastos-runtime", (event, head))
         watch = ("cancel-on-failure", "in_progress", None)
@@ -1824,9 +1913,10 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertNotIn("restore-keys:", restore)
         for event, ref, ref_type, override, cached in CASES:
             for hit in ("true", "false"):
-                context = {"github.event_name": event, "github.ref": ref,
-                           "env.CI_USE_CACHE": str(cached).lower(),
-                           "steps.engine-cache.outputs.cache-hit": hit}
+                context = event_context(
+                    event, ref, ref_type, override,
+                    **{"env.CI_USE_CACHE": str(cached).lower(),
+                       "steps.engine-cache.outputs.cache-hit": hit})
                 self.assertEqual(evaluate(field(save, "if"), context),
                                  cached and event == "push" and ref == "refs/heads/develop" and hit == "false")
         self.assertEqual(field(JOBS["engine-llama-arm64"], "image"),
