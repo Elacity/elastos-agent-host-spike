@@ -1,18 +1,79 @@
 //! This test code stands in for the Runtime's launch by CID, which does not exist yet.
 
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use capsule_bundle::{
     admit_staged_for_stand_in, bind_content_stand_in, load, select_stand_in_dependencies,
-    Installed, Refusal, SignedClaim, TrustPolicy,
+    Installed, Loaded, Refusal, SignedClaim, TrustPolicy,
 };
-use capsule_v1_host_test::{admission, Bridge};
+use capsule_v1_host_test::{admission, Bridge, StandInBinding, STAND_IN_TEST_PRINCIPAL};
 use elastos_common::CapsuleManifest;
 use serde_json::Value;
 
 pub const ALBUM: &str = "localhost://Users/self/.AppData/App/photo-viewer/album.json";
-const PLAYLIST: &str = "localhost://Users/self/.AppData/App/photo-viewer/playlist.json";
+pub const PLAYLIST: &str = "localhost://Users/self/.AppData/App/photo-viewer/playlist.json";
+
+pub fn launch_members(
+    album: &str,
+    playlist: &str,
+    images: &BTreeMap<String, Vec<u8>>,
+) -> BTreeSet<String> {
+    let mut members: BTreeSet<_> = images.keys().cloned().collect();
+    members.insert(album.into());
+    members.insert(playlist.into());
+    members
+}
+
+pub fn arm_content_stand_in(
+    bridge: &mut Bridge,
+    binding_id: String,
+    content_cid: String,
+    members: BTreeSet<String>,
+    readmit: Box<dyn FnMut() -> Result<(), String> + Send>,
+) {
+    let binding = StandInBinding {
+        binding_id,
+        content_cid,
+        instance_id: "".into(),
+        principal: STAND_IN_TEST_PRINCIPAL.into(),
+        members,
+        active: false,
+        readmit,
+    };
+    bridge.arm_stand_in(binding);
+}
+
+pub fn close_content_stand_in(bridge: &mut Bridge) {
+    bridge.close_stand_in();
+}
+
+pub fn content_readmit(
+    packages: [Loaded; 3],
+    claims: BTreeMap<String, SignedClaim>,
+    policy: Arc<Mutex<TrustPolicy>>,
+    installed: Vec<Installed>,
+    store: PathBuf,
+    now: u64,
+) -> Box<dyn FnMut() -> Result<(), String> + Send> {
+    Box::new(move || {
+        let policy = policy.lock().unwrap().clone();
+        for package in &packages {
+            admit_staged_for_stand_in(package, &claims, &policy, &installed, &store, now)
+                .map_err(|refusal| match refusal {
+                    Refusal::CidRevoked(cid) => format!(
+                        "Content CID {cid} is revoked by the current policy; this launch is stopped."
+                    ),
+                    Refusal::PolicyStale { .. } =>
+                        "The held policy is older than the accepted policy; use the current policy."
+                            .into(),
+                    refusal => refusal.to_string(),
+                })?;
+        }
+        Ok(())
+    })
+}
 
 #[derive(Debug)]
 pub struct StandInEvidence {
@@ -22,6 +83,8 @@ pub struct StandInEvidence {
     pub playlist: Value,
     pub lines: Vec<Value>,
     pub bytes_served: BTreeMap<String, usize>,
+    pub armed: bool,
+    pub binding_active: bool,
 }
 
 #[derive(Debug)]
@@ -86,7 +149,9 @@ pub async fn open_content_stand_in(
         store,
         now,
     )?;
-    let objects: Vec<_> = bind_content_stand_in(&content)?.into_iter().collect();
+    let images = bind_content_stand_in(&content)?;
+    let members = launch_members(ALBUM, PLAYLIST, &images);
+    let objects: Vec<_> = images.into_iter().collect();
     let mut bridge = Bridge::with_list(ALBUM, "elastos.photo-viewer.album/v1", PLAYLIST, &objects);
     if let Some(denied_read) = denied_read {
         bridge.deny(denied_read, "read");
@@ -106,9 +171,26 @@ pub async fn open_content_stand_in(
     manifest
         .validate()
         .map_err(|reason| before_run("manifest", reason))?;
+    let viewer = load(store, &dependencies.viewer.cid)?;
     std::fs::remove_dir_all(source_core).map_err(|reason| before_run("source", reason))?;
+    arm_content_stand_in(
+        &mut bridge,
+        format!("stand-in-{content_cid}"),
+        content_cid.into(),
+        members,
+        content_readmit(
+            [content.clone(), viewer, core],
+            claims.clone(),
+            Arc::new(Mutex::new(policy.clone())),
+            installed.to_vec(),
+            store.into(),
+            now,
+        ),
+    );
     #[rustfmt::skip]
     let (result, bridge) = capsule_v1_host_test::run(dependencies.core.path.as_path(), manifest, bridge).await;
+    let mut bridge = bridge;
+    close_content_stand_in(&mut bridge);
     result.map_err(|reason: String| StandInLaunchError::Launch {
         stage: "run",
         reason,
@@ -129,6 +211,11 @@ pub async fn open_content_stand_in(
         content_cid: content.cid,
         viewer_cid: dependencies.viewer.cid,
         core_cid: dependencies.core.cid,
+        armed: bridge.stand_in.is_some(),
+        binding_active: bridge
+            .stand_in
+            .as_ref()
+            .is_some_and(|binding| binding.active),
         playlist,
         lines: bridge.lines,
         bytes_served: bridge.bytes_served,
