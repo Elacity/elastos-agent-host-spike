@@ -5,7 +5,7 @@
 //! (`tools/build`), under its own schema line:
 //!
 //! ```text
-//! schema: wc-005.run-receipt/v2
+//! schema: wc-005.run-receipt/v3
 //! bundle: <the verified lab CID, as its Display form>
 //! function: digest
 //! argument: 1592590337
@@ -19,6 +19,8 @@
 //! memory_cap_bytes: <memory_mb × 1048576>
 //! wasmtime_memory_cap: ENFORCED max-memory-size=<bytes>,max-memories=1,trap-on-grow-failure=y
 //! wasmer_memory_cap: SKIPPED: no memory cap flag in wasmer run --help or wasmer --help (wc-010a)
+//! wasmtime_memory_maximum_bytes: <pages × 65536, or none (the module has no memory)>
+//! wasmer_memory_maximum_bytes: <pages × 65536, or none (the module has no memory)>
 //! ```
 //!
 //! wc-010c (v2 adds the last four lines): the declared size the module runs
@@ -28,6 +30,14 @@
 //! per-engine line follows the recorded argument only, never the engine's
 //! name. No peak memory is recorded (wc-010a: `/usr/bin/time -l` gives the
 //! engine process's resident memory, not the capsule's linear memory).
+//!
+//! Task 034 (v3 adds the last two lines): per engine, `wasmtime` then
+//! `wasmer`, the module memory maximum that engine's run was checked against,
+//! in bytes: the value [`crate::run::run_engine`]'s one memory check
+//! (`wasm_capsule_audit::memories`) returned in that engine's own run, never
+//! the declared size, a constant or the engine's name; or `none (the module
+//! has no memory)` when it returned none. The `wasmer_memory_cap: SKIPPED`
+//! line still reports only that wasmer was given no cap flag.
 //!
 //! Every value comes from the run: the lab CID the verifier checked, the
 //! function and argument the runner passed, and what each engine printed and
@@ -70,7 +80,7 @@ use crate::run::{Engine, Reason, TwoEngineRefusal, TwoEngineRun, DIGEST_ARGUMENT
 use std::path::Path;
 
 /// The receipt's schema line value.
-pub const RECEIPT_SCHEMA: &str = "wc-005.run-receipt/v2";
+pub const RECEIPT_SCHEMA: &str = "wc-005.run-receipt/v3";
 
 /// The refusal receipt's schema line value (task 044).
 pub const REFUSAL_SCHEMA: &str = "wc-005.run-refusal/v1";
@@ -98,6 +108,12 @@ pub fn render(run: &TwoEngineRun) -> String {
     for engine in [Engine::Wasmtime, Engine::Wasmer] {
         receipt.push_str(&memory_cap_line(engine, run.memory_cap(engine)));
     }
+    for engine in [Engine::Wasmtime, Engine::Wasmer] {
+        receipt.push_str(&memory_maximum_line(
+            engine,
+            run.memory_maximum_bytes(engine),
+        ));
+    }
     receipt
 }
 
@@ -110,6 +126,15 @@ fn memory_cap_line(engine: Engine, cap: Option<&str>) -> String {
         None => format!(
             "{engine}_memory_cap: SKIPPED: no memory cap flag in {engine} run --help or {engine} --help (wc-010a)\n"
         ),
+    }
+}
+
+/// Task 034: `engine`'s module memory maximum line: the bytes its run recorded
+/// from the one memory check, or `none` when the module has no memory.
+fn memory_maximum_line(engine: Engine, maximum: Option<u64>) -> String {
+    match maximum {
+        Some(bytes) => format!("{engine}_memory_maximum_bytes: {bytes}\n"),
+        None => format!("{engine}_memory_maximum_bytes: none (the module has no memory)\n"),
     }
 }
 

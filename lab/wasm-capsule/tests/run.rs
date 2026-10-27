@@ -1804,7 +1804,7 @@ fn receipt_records_observed_engine_versions() {
     let name = bundle_identity(&signed.bundle).expect("name the bundle");
     let tmp = TempDir::new("run3-receipt");
     let root = canonical(&tmp);
-    assert_eq!(RECEIPT_SCHEMA, "wc-005.run-receipt/v2");
+    assert_eq!(RECEIPT_SCHEMA, "wc-005.run-receipt/v3");
 
     // Two runs of the same bundle, by stand-ins that print the pinned versions
     // with made-up tails (task 038: only the pinned versions run), each
@@ -1853,7 +1853,7 @@ fn receipt_records_observed_engine_versions() {
         assert_eq!(
             receipt,
             format!(
-                "schema: wc-005.run-receipt/v2\n\
+                "schema: wc-005.run-receipt/v3\n\
                  bundle: {name}\n\
                  function: digest\n\
                  argument: 1592590337\n\
@@ -1866,7 +1866,9 @@ fn receipt_records_observed_engine_versions() {
                  memory_mb: 64\n\
                  memory_cap_bytes: 67108864\n\
                  wasmtime_memory_cap: ENFORCED max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y\n\
-                 {WASMER_SKIPPED}\n"
+                 {WASMER_SKIPPED}\n\
+                 wasmtime_memory_maximum_bytes: none (the module has no memory)\n\
+                 wasmer_memory_maximum_bytes: none (the module has no memory)\n"
             ),
             "{case}: the receipt"
         );
@@ -2263,7 +2265,7 @@ fn real_receipt_names_both_installed_engines() {
     assert_eq!(
         lines[..4],
         [
-            "schema: wc-005.run-receipt/v2".to_string(),
+            "schema: wc-005.run-receipt/v3".to_string(),
             format!("bundle: {name}"),
             "function: digest".to_string(),
             format!("argument: {FIXED_INPUT}"),
@@ -2271,7 +2273,8 @@ fn real_receipt_names_both_installed_engines() {
     );
     // wc-010c: this capsule declares no `resources`, so the Runtime's default
     // 64 MB = 67108864 bytes; the real wasmtime ran under that cap, wasmer
-    // under none.
+    // under none. Task 034: both runs were checked against the capsule's own
+    // maximum, 1024 pages (task 032), 67108864 bytes.
     assert_eq!(
         lines[10..],
         [
@@ -2279,6 +2282,8 @@ fn real_receipt_names_both_installed_engines() {
             "memory_cap_bytes: 67108864",
             "wasmtime_memory_cap: ENFORCED max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y",
             WASMER_SKIPPED,
+            "wasmtime_memory_maximum_bytes: 67108864",
+            "wasmer_memory_maximum_bytes: 67108864",
         ]
     );
     eprintln!("RECEIPT (this machine):\n{receipt}");
@@ -2601,6 +2606,9 @@ const MAXIMUM_1025: [u8; 4] = [0x01, 0x01, 0x81, 0x08];
 
 /// Minimum 1 page, maximum 32 pages: exactly a declared 2 MB.
 const MAXIMUM_32: [u8; 3] = [0x01, 0x01, 0x20];
+
+/// Task 034: minimum 1 page, maximum 16 pages: 1 MB, under a declared 2 MB.
+const MAXIMUM_16: [u8; 3] = [0x01, 0x01, 0x10];
 
 /// Minimum 1 page, maximum 33 pages: one page over a declared 2 MB.
 const MAXIMUM_33: [u8; 3] = [0x01, 0x01, 0x21];
@@ -3289,8 +3297,8 @@ fn receipt_records_the_declared_memory_cap() {
 
     let receipt = render(&passed);
     let lines: Vec<&str> = receipt.lines().collect();
-    assert_eq!(lines.len(), 14, "the v2 receipt's lines:\n{receipt}");
-    assert_eq!(lines[0], "schema: wc-005.run-receipt/v2");
+    assert_eq!(lines.len(), 16, "the v3 receipt's lines:\n{receipt}");
+    assert_eq!(lines[0], "schema: wc-005.run-receipt/v3");
     assert_eq!(
         lines[10..],
         [
@@ -3298,9 +3306,88 @@ fn receipt_records_the_declared_memory_cap() {
             "memory_cap_bytes: 2097152",
             "wasmtime_memory_cap: ENFORCED max-memory-size=2097152,max-memories=1,trap-on-grow-failure=y",
             WASMER_SKIPPED,
+            "wasmtime_memory_maximum_bytes: none (the module has no memory)",
+            "wasmer_memory_maximum_bytes: none (the module has no memory)",
         ],
         "the receipt's memory lines:\n{receipt}"
     );
+}
+
+/// Task 034: the receipt's per-engine memory maximum lines for a signed bundle
+/// declaring `memory_mb` with one memory of maximum `limits`, run through `run`
+/// on [`marked`] stand-ins: the `memory_mb` the test's own `verify_bundle` call
+/// read from the same bundle's manifest, then the `wasmtime` and `wasmer`
+/// lines, each `None` when the receipt has none.
+fn receipt_memory_maximums(
+    root: &Path,
+    limits: &[u8],
+    memory_mb: u32,
+) -> (u32, [Option<String>; 2]) {
+    let signed = signed_bundle_declaring(
+        root,
+        "bundle",
+        &memory_module(limits, GROW_TO_THE_CAP),
+        memory_mb,
+    );
+    let declared = verify_bundle(&signed.bundle, Some(&signed.sig), &signed.accepted, &[])
+        .unwrap_or_else(|refusal| panic!("the verifier refused: {refusal}"))
+        .memory_mb();
+    let engines = work_root(root, "engines");
+    let wasmtime = marked(&engines, "wasmtime", "printf 'same\\n'\n");
+    let wasmer = marked(&engines, "wasmer", "printf 'same\\n'\n");
+    let work = work_root(root, "work");
+
+    let receipt = render(&two_ran(run(&signed.input(&wasmtime, &wasmer, &work))));
+    let line = |key| receipt_line(&receipt, key).map(str::to_owned);
+    (
+        declared,
+        [
+            line("wasmtime_memory_maximum_bytes"),
+            line("wasmer_memory_maximum_bytes"),
+        ],
+    )
+}
+
+/// Task 034 (M1 C0 lab half): both engines' receipt lines can be tested
+/// against the manifest. A signed bundle declaring `memory_mb: 2` with one
+/// memory of maximum 32 pages, run through `run` on stand-in engines: the
+/// declared size comes from the test's own `verify_bundle` call on the same
+/// bundle, never from the receipt or the run, and both
+/// `wasmtime_memory_maximum_bytes` and `wasmer_memory_maximum_bytes` must be
+/// present and equal to `memory_mb × 2^20`, 2097152.
+#[test]
+fn receipt_memory_maximum_matches_the_bundle_manifest() {
+    let tmp = TempDir::new("run34-manifest");
+    let (declared, lines) = receipt_memory_maximums(&canonical(&tmp), &MAXIMUM_32, 2);
+    assert_eq!(declared, 2, "the manifest's declared memory_mb");
+    let declared_bytes = u64::from(declared) << 20;
+    assert_eq!(declared_bytes, 2_097_152);
+    for (engine_kind, line) in ENGINES.iter().zip(lines) {
+        assert_eq!(
+            line,
+            Some(format!(
+                "{engine_kind}_memory_maximum_bytes: {declared_bytes}"
+            )),
+            "{engine_kind}: the receipt's maximum line is missing or not the manifest's declared size"
+        );
+    }
+}
+
+/// Task 034: the receipt records what each run was checked against, not the
+/// manifest's size. Declared `memory_mb: 2` with a module maximum of 16 pages:
+/// both lines say 1048576, not the declared 2097152.
+#[test]
+fn receipt_records_a_lower_module_maximum_as_it_is() {
+    let tmp = TempDir::new("run34-lower");
+    let (declared, lines) = receipt_memory_maximums(&canonical(&tmp), &MAXIMUM_16, 2);
+    assert_eq!(declared, 2, "the manifest's declared memory_mb");
+    for (engine_kind, line) in ENGINES.iter().zip(lines) {
+        assert_eq!(
+            line,
+            Some(format!("{engine_kind}_memory_maximum_bytes: 1048576")),
+            "{engine_kind}: the receipt's maximum line is not the module's own 16 × 64 KiB"
+        );
+    }
 }
 
 /// wc-010c: the receipt's cap line is the argv the engine got, not a claim
