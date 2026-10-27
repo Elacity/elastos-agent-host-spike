@@ -5247,10 +5247,17 @@ fn file_profile_contract_refuses_nested_grants() {
 }
 
 /// A Scheme `#;` datum comment or `#|` block comment is refused so a later
-/// `(allow …)` cannot hide behind a `;` line-comment reader.
+/// `(allow …)` cannot hide behind a `;` line-comment reader. The same
+/// check plants the `#;` token and the `#x` `#o` `#b` hash-token arms:
+/// those extras are leftover atoms, so a mutant that drops them still
+/// leaves a complete profile.
 ///
 /// Falsifier: skip `profile_holds_scheme_comment`; this test fails because
 /// `#;(version 0)(allow file*)` then passes the contract.
+/// Falsifier: treat token `#;` as empty; then a trailing `#;` is dropped
+/// and the complete profile passes.
+/// Falsifier: accept `#x` `#o` `#b` as named hash tokens; then a trailing
+/// `#x` is skipped as a leftover atom and the complete profile passes.
 #[test]
 fn file_profile_contract_refuses_scheme_comments() {
     let complete = contract_fixture_profile(true);
@@ -5258,6 +5265,10 @@ fn file_profile_contract_refuses_scheme_comments() {
         "#;(version 0)(allow file*)",
         "#;(allow file*)",
         "#| hidden |#(allow file*)",
+        "#;",
+        "#x",
+        "#o",
+        "#b",
     ] {
         let profile = format!("{complete}{extra}\n");
         let refusal = check_profile_contract("fixture-provider", &profile)
@@ -5324,42 +5335,63 @@ fn file_profile_contract_refuses_hash_backslash_number_decoy() {
         .expect_err("a Scheme #\\; number decoy must be refused");
 }
 
-/// A zero-width space inside a string is a format character. Only the
-/// non-ASCII check refuses it; the unknown-`#` arm never sees this input.
+/// A zero-width space or a NUL inside a string is a format character.
+/// Only the ASCII-set check refuses it; the unknown-`#` arm never sees
+/// this input.
 ///
-/// Falsifier: skip the non-ASCII `allowed` check; then this string parses
+/// Falsifier: skip the non-ASCII `allowed` check; then the ZWSP string
+/// parses and this test fails.
+/// Falsifier: allow NUL in the ASCII set; then the NUL string parses
 /// and this test fails.
 #[test]
 fn file_profile_contract_refuses_zwsp_hash_semicolon() {
-    let refusal = std::panic::catch_unwind(|| profile_characters("\"a\u{200b}b\""));
+    let zwsp = std::panic::catch_unwind(|| profile_characters("\"a\u{200b}b\""));
     assert!(
-        refusal.is_err(),
+        zwsp.is_err(),
         "a zero-width space inside a string must be refused"
     );
+    let nul = std::panic::catch_unwind(|| profile_characters("\"a\0b\""));
+    assert!(nul.is_err(), "a NUL inside a string must be refused");
 }
 
 /// An unknown string escape is refused. Allowed escapes are `\\`, `\"`,
-/// `\n`, and `\t` only.
+/// `\n`, and `\t` only. This plants `\r` and the `\x` `\u` `\0` forms so
+/// an allow-those-three mutant cannot hide behind the `\r` case.
 ///
 /// Falsifier: allow any string escape; then `"foo\\r"` parses and this
 /// test fails.
-#[test]
-fn file_profile_contract_refuses_unknown_string_escape() {
-    let refusal = std::panic::catch_unwind(|| profile_characters(r#""foo\r""#));
-    assert!(refusal.is_err(), "an unknown string escape must be refused");
-}
-
-/// A carriage return inside a string is a format character. Only the
-/// ASCII-set check refuses it.
-///
-/// Falsifier: allow CR in the ASCII set; then this string parses and this
+/// Falsifier: allow `\x` `\u` `\0`; then those strings parse and this
 /// test fails.
 #[test]
+fn file_profile_contract_refuses_unknown_string_escape() {
+    for sample in [r#""foo\r""#, r#""foo\x""#, r#""foo\u""#, r#""foo\0""#] {
+        let refusal = std::panic::catch_unwind(|| profile_characters(sample));
+        assert!(
+            refusal.is_err(),
+            "an unknown string escape must be refused: {sample}"
+        );
+    }
+}
+
+/// A carriage return inside a string or a `;` line comment is a format
+/// character. The string case hits the ASCII-set check; the comment case
+/// hits the comment-body check.
+///
+/// Falsifier: allow CR in the ASCII set; then the string parses and this
+/// test fails.
+/// Falsifier: allow CR inside `;` comments; then the comment form parses
+/// and this test fails.
+#[test]
 fn file_profile_contract_refuses_carriage_return() {
-    let refusal = std::panic::catch_unwind(|| profile_characters("\"a\rb\""));
+    let in_string = std::panic::catch_unwind(|| profile_characters("\"a\rb\""));
     assert!(
-        refusal.is_err(),
+        in_string.is_err(),
         "a carriage return inside a string must be refused"
+    );
+    let in_comment = std::panic::catch_unwind(|| profile_characters("; comment\r\n"));
+    assert!(
+        in_comment.is_err(),
+        "a carriage return inside a ; line comment must be refused"
     );
 }
 
@@ -5375,11 +5407,17 @@ fn file_profile_contract_refuses_hash_mid_token() {
 }
 
 /// A `#[cfg(feature = "never")]` test that does not compile as the tiny crate
-/// is not a citation. The source walk is gone; the real cargo list does not
-/// name `present_case`.
+/// is not a citation. The same test plants the macos-cfg, plain-fn, and
+/// no-owning-file arms so those mutants cannot hide behind `feature = "never"`.
 ///
 /// Falsifier: restore the source-walk fallback; then this planted test counts
 /// and this test fails.
+/// Falsifier: treat `cfg(target_os = "macos")` as listable; then the macos
+/// predicate and source-walk asserts fail on Linux.
+/// Falsifier: skip the cited-file `#[test]` source walk; then a plain
+/// `fn present_case` counts.
+/// Falsifier: count when no owning file matches; then an orphan `#[test]`
+/// snippet counts.
 #[test]
 fn citation_refuses_feature_gated_test_when_cargo_cannot_list() {
     let source = concat!(
@@ -5397,6 +5435,72 @@ fn citation_refuses_feature_gated_test_when_cargo_cannot_list() {
     assert!(
         !rust_holds_cited_test(source, "present_case"),
         "a feature-gated test the real cargo list omits must not count"
+    );
+
+    assert_eq!(
+        rust_cfg_predicate_is_unlistable(r#"target_os = "macos""#),
+        !cfg!(target_os = "macos"),
+        "macos cfg is listable only on a macos host"
+    );
+    let macos = concat!(
+        "#[cfg(target_os = \"macos\")]\n",
+        "#[test]\n",
+        "fn present_case() {}\n"
+    );
+    assert_eq!(
+        rust_source_holds_listed_test(macos, "present_case"),
+        cfg!(target_os = "macos"),
+        "a macos-only #[test] must be blanked when the host is not macos"
+    );
+    assert_eq!(
+        rust_cargo_lists_test(macos, "present_case"),
+        Some(cfg!(target_os = "macos")),
+        "the tiny crate lists a macos test only on macos"
+    );
+    assert_eq!(
+        rust_holds_cited_test(macos, "present_case"),
+        cfg!(target_os = "macos"),
+        "a macos-only test must not count on Linux"
+    );
+
+    let plain = "fn present_case() {}\n";
+    assert!(
+        !rust_source_holds_listed_test(plain, "present_case"),
+        "a plain fn without #[test] must not count"
+    );
+    let plain_missing = concat!(
+        "use missing_crate::Thing;\n",
+        "fn present_case() {\n",
+        "    let _ = Thing;\n",
+        "}\n"
+    );
+    assert!(
+        rust_cargo_lists_test(plain_missing, "present_case").is_none(),
+        "the tiny crate cannot compile a missing import"
+    );
+    assert!(
+        !rust_holds_cited_test(plain_missing, "present_case"),
+        "a plain fn the cited file does not mark #[test] must not count"
+    );
+
+    let orphan = concat!(
+        "use missing_crate::Thing;\n",
+        "#[test]\n",
+        "fn present_case() {\n",
+        "    let _ = Thing;\n",
+        "}\n"
+    );
+    assert!(
+        rust_cargo_lists_test(orphan, "present_case").is_none(),
+        "the tiny crate cannot compile a missing import"
+    );
+    assert!(
+        rust_source_holds_listed_test(orphan, "present_case"),
+        "the source walk must see this ungated #[test] so the owner-file arm is reached"
+    );
+    assert!(
+        !rust_holds_cited_test(orphan, "present_case"),
+        "a snippet that matches no owning file must not count"
     );
 }
 
@@ -6247,7 +6351,8 @@ fn profile_holds_scheme_comment(profile: &str) -> bool {
 /// A number token is digits. Every `#` reader form is refused, including
 /// `#\`, `#;`, `#|`, `#!`, `#+`, `#-`, and `#"`. The grammar names only
 /// `#t`, `#f`, and `#include` as hash tokens, because `(if #t …)` fixtures
-/// and a bare `#include` atom use them. `#\` character literals are refused
+/// and a bare `#include` atom use them. `;` is collected into a hash token
+/// so `#;` is one refused token. `#\` character literals are refused
 /// outright. A non-ASCII or zero-width character anywhere is refused. An
 /// unknown escape is refused. An unclosed string is a refusal with its own
 /// reason.
@@ -6325,7 +6430,8 @@ fn profile_characters(profile: &str) -> Vec<(char, bool)> {
                     || next == '+'
                     || next == '.'
                     || next == '/'
-                    || next == '%';
+                    || next == '%'
+                    || next == ';';
                 if !symbol {
                     break;
                 }

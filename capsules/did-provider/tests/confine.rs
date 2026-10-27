@@ -1703,7 +1703,8 @@ fn profile_characters(profile: &str) -> Vec<(char, bool)> {
                     || next == '+'
                     || next == '.'
                     || next == '/'
-                    || next == '%';
+                    || next == '%'
+                    || next == ';';
                 if !symbol {
                     break;
                 }

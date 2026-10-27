@@ -3,7 +3,8 @@
 /// from wallet and did `confine.rs`, so those copies must stay byte-identical
 /// to this file's functions. No shipped `confine.sb` uses a `#\` character
 /// literal; every `#\` form is refused. The grammar names only `#t`, `#f`,
-/// and `#include` as hash tokens.
+/// and `#include` as hash tokens. `;` is collected into a hash token so `#;`
+/// is one refused token, not a `#` token plus a line comment.
 pub fn profile_holds_scheme_comment(profile: &str) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = profile_characters(profile);
@@ -85,7 +86,8 @@ fn profile_characters(profile: &str) -> Vec<(char, bool)> {
                     || next == '+'
                     || next == '.'
                     || next == '/'
-                    || next == '%';
+                    || next == '%'
+                    || next == ';';
                 if !symbol {
                     break;
                 }
