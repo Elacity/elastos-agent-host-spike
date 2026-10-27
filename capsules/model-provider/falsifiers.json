@@ -2339,6 +2339,38 @@
       ]
     },
     {
+      "id": "PV122",
+      "title": "the with-repo check skips the baseline",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    got_added, got_listed = [result for _entry, result, _duration\n                             in run_chosen([added, real], how_for=how_for)]\n",
+          "new": "    got_added, got_listed = [reported(entry, how_for(entry[\"command\"]) if how_for else None)\n                             for entry in (added, real)]\n"
+        }
+      ],
+      "tests": [
+        "the with-repo check holds its entries to the baseline"
+      ]
+    },
+    {
+      "id": "PV123",
+      "title": "a baseline reason drops the missing tests",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        if missing:\n            reasons.append(\"did not run without the edit: \" + \", \".join(missing))\n",
+          "new": "        if missing and not failed:\n            reasons.append(\"did not run without the edit: \" + \", \".join(missing))\n"
+        }
+      ],
+      "tests": [
+        "a baseline reason names failed and missing tests"
+      ]
+    },
+    {
       "id": "MP24",
       "title": "a Runtime-forwarded answer is read as a failure",
       "command": "provider",
@@ -2421,6 +2453,22 @@
       ],
       "tests": [
         "hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect"
+      ]
+    },
+    {
+      "id": "MP29",
+      "title": "a hosted run with no grant passes the binding check and is refused only as a corrupt journal",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "        request\n            .runtime_binding\n            .validate(&request.offer_id, &request.operation, &request.input)\n            .map_err(|_| ProviderFault::invalid_request(\"invalid runtime binding\"))?;",
+          "new": "        let _ = request\n            .runtime_binding\n            .validate(&request.offer_id, &request.operation, &request.input);"
+        }
+      ],
+      "tests": [
+        "hosted_run_with_no_grant_is_refused_before_any_send"
       ]
     }
   ]

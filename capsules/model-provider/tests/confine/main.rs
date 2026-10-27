@@ -2273,15 +2273,21 @@ fn collect_allow_lines(profile: &str) -> Vec<&str> {
                 continue;
             }
             let mut cursor = index + 1;
-            while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\t') {
+            // Between `(` and `allow`, one run skips a space, a tab, a
+            // carriage return (byte 13), a form feed (byte 12), or a vertical
+            // tab (byte 11). After `allow`, the next byte may be the end, a
+            // space, a tab, or a carriage return. A form feed or a vertical
+            // tab there is not a match. A letter, a digit, `-`, or `*` there
+            // is not a match, so `allowing` and `allow-default` stay unseen.
+            while cursor < bytes.len()
+                && matches!(bytes[cursor], b' ' | b'\t' | b'\r' | b'\x0c' | b'\x0b')
+            {
                 cursor += 1;
             }
             let allow = b"allow";
             let after = cursor + allow.len();
-            // `allowing` and `allow-default` stay unseen: the character after
-            // `allow` must be the end of the line or more ASCII whitespace.
             if bytes.get(cursor..after) == Some(&allow[..])
-                && (after == bytes.len() || matches!(bytes[after], b' ' | b'\t'))
+                && (after == bytes.len() || matches!(bytes[after], b' ' | b'\t' | b'\r'))
             {
                 return Some(index);
             }
@@ -2322,18 +2328,32 @@ fn allow_form_closes(profile: &str) -> Result<(), String> {
             continue;
         }
         let line = line.trim();
-        // A line that is only `(` and whose next line starts `allow` is an
-        // allow the collector never sees. Look at that next line only.
+        // A line that trims to `(` and, after a run of empty lines or lines
+        // whose bytes are only spaces, tabs, form feeds, or vertical tabs, a
+        // line that starts with `allow` is an allow the collector never sees.
         if line == "(" {
-            if let Some(next) = lines.get(index + 1) {
-                if !next.starts_with(";;") {
-                    let next = next.trim();
-                    if let Some(rest) = next.strip_prefix("allow") {
-                        if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
-                            return Err(format!("allow form does not close: {line}"));
-                        }
+            let mut cursor = index + 1;
+            while let Some(next) = lines.get(cursor) {
+                // A line with no bytes, or whose every byte is a space, a tab,
+                // a form feed (byte 12), or a vertical tab (byte 11), is part
+                // of that run. A carriage return is not.
+                if next
+                    .bytes()
+                    .all(|byte| matches!(byte, b' ' | b'\t' | b'\x0c' | b'\x0b'))
+                {
+                    cursor += 1;
+                    continue;
+                }
+                if next.starts_with(";;") {
+                    break;
+                }
+                let next = next.trim();
+                if let Some(rest) = next.strip_prefix("allow") {
+                    if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
+                        return Err(format!("allow form does not close: {line}"));
                     }
                 }
+                break;
             }
         }
         if !line.contains("(allow") {
@@ -2430,6 +2450,36 @@ fn allow_rules_trace_to_declared_rights() {
     let same_line_tab = format!("(deny network*) {tab_allow}");
     assert_eq!(collect_allow_lines(&same_line_tab), [tab_allow]);
 
+    // Carriage return, form feed, and vertical tab are in memory. None of
+    // these calls reads the fixture or the profile file.
+    let cr_after = "(allow\rfile-read* (literal \"/tmp/cc-cr-allow\"))";
+    assert_eq!(collect_allow_lines(cr_after), [cr_after]);
+    let cr_before = "(\rallow file-read* (literal \"/tmp/cc-cr-before\"))";
+    assert_eq!(collect_allow_lines(cr_before), [cr_before]);
+    let ff_before = "(\x0callow file-read* (literal \"/tmp/cc-ff-before\"))";
+    assert_eq!(collect_allow_lines(ff_before), [ff_before]);
+    let vt_before = "(\x0ballow file-read* (literal \"/tmp/cc-vt-before\"))";
+    assert_eq!(collect_allow_lines(vt_before), [vt_before]);
+    let ff_same_suffix = "(\x0callow file-read* (literal \"/tmp/cc-ff-same\"))";
+    let ff_same = format!("(deny network*) {ff_same_suffix}");
+    assert_eq!(collect_allow_lines(&ff_same), [ff_same_suffix]);
+    assert!(
+        collect_allow_lines("(allow\x0cfile-read* (literal \"/tmp/cc-ff-after\"))").is_empty(),
+        "a form feed directly after allow collects nothing"
+    );
+    assert!(
+        collect_allow_lines("(allow\x0bfile-read* (literal \"/tmp/cc-vt-after\"))").is_empty(),
+        "a vertical tab directly after allow collects nothing"
+    );
+    assert!(
+        collect_allow_lines("(allowing file-read* (literal \"/tmp/cc-allowing\"))").is_empty(),
+        "(allowing file-read* collects nothing"
+    );
+    assert!(
+        collect_allow_lines("(allow-default)").is_empty(),
+        "(allow-default) collects nothing"
+    );
+
     let profile = fs::read_to_string(PROFILE_PATH).expect("the profile source");
     let unclosed = [
         "(allow file-read-data (literal \"/\"))",
@@ -2446,6 +2496,41 @@ fn allow_rules_trace_to_declared_rights() {
             && !unclosed_message.contains("allow rule has no declared right")
             && !unclosed_message.contains("startup-root-directory widened"),
         "{unclosed_message}"
+    );
+    // A line that trims to `(` and whose next line starts `allow` and then a
+    // space or a tab is in memory. Neither call reads the fixture or the
+    // profile file.
+    let split_space = [
+        "(allow file-read-data (literal \"/\"))",
+        "(",
+        "allow file-read* (literal \"/tmp/cc-split-allow\"))",
+        "(allow sysctl-read)",
+    ]
+    .join("\n");
+    let split_space_message = allow_form_closes(&split_space)
+        .expect_err("a line ( whose next line starts allow must fail before check 2");
+    assert!(
+        split_space_message.contains("allow form does not close")
+            && split_space_message.contains("(")
+            && !split_space_message.contains("allow rule has no declared right")
+            && !split_space_message.contains("startup-root-directory widened"),
+        "{split_space_message}"
+    );
+    let split_tab = [
+        "(allow file-read-data (literal \"/\"))",
+        "(",
+        "allow\tfile-read* (literal \"/tmp/cc-split-allow-tab\"))",
+        "(allow sysctl-read)",
+    ]
+    .join("\n");
+    let split_tab_message = allow_form_closes(&split_tab)
+        .expect_err("a line ( whose next line starts allow must fail before check 2");
+    assert!(
+        split_tab_message.contains("allow form does not close")
+            && split_tab_message.contains("(")
+            && !split_tab_message.contains("allow rule has no declared right")
+            && !split_tab_message.contains("startup-root-directory widened"),
+        "{split_tab_message}"
     );
     if let Err(reason) = allow_form_closes(&profile) {
         panic!("{reason}");
@@ -2872,6 +2957,112 @@ fn platform_baseline_rules_stay_narrow() {
     ]
     .join("\n");
     assert_eq!(allow_form_closes(&not_split), Ok(()));
+
+    // A run of empty lines, or lines whose bytes are only spaces, tabs, form
+    // feeds, or vertical tabs, between `(` and `allow` is the same allow.
+    // None of these profiles reads the fixture or confine.sb.
+    let skipped_before_allow = [
+        [
+            root,
+            "(",
+            "",
+            "allow file-read* (literal \"/tmp/cc-blank-allow\"))",
+            sysctl,
+        ]
+        .join("\n"),
+        [
+            root,
+            "(",
+            "   ",
+            "allow file-read* (literal \"/tmp/cc-spaces-allow\"))",
+            sysctl,
+        ]
+        .join("\n"),
+        [
+            root,
+            "(",
+            "",
+            "",
+            "allow file-read* (literal \"/tmp/cc-two-blank-allow\"))",
+            sysctl,
+        ]
+        .join("\n"),
+        [
+            root,
+            "(",
+            "\t",
+            "allow file-read* (literal \"/tmp/cc-tab-line-allow\"))",
+            sysctl,
+        ]
+        .join("\n"),
+        [
+            root,
+            "(",
+            "\x0c",
+            "allow file-read* (literal \"/tmp/cc-ff-line-allow\"))",
+            sysctl,
+        ]
+        .join("\n"),
+        [
+            root,
+            "(",
+            "\x0b",
+            "allow file-read* (literal \"/tmp/cc-vt-line-allow\"))",
+            sysctl,
+        ]
+        .join("\n"),
+        [
+            root,
+            "(",
+            " \t\x0c\x0b",
+            "allow file-read* (literal \"/tmp/cc-mix-line-allow\"))",
+            sysctl,
+        ]
+        .join("\n"),
+        [
+            root,
+            "( ",
+            "",
+            "allow file-read* (literal \"/tmp/cc-sp-paren-allow\"))",
+            sysctl,
+        ]
+        .join("\n"),
+        [
+            root,
+            "(",
+            "",
+            "allow\tfile-read* (literal \"/tmp/cc-blank-tab\"))",
+            sysctl,
+        ]
+        .join("\n"),
+    ];
+    for profile in skipped_before_allow {
+        let message = allow_form_closes(&profile).unwrap_err();
+        assert_eq!(message, "allow form does not close: (");
+        assert!(
+            !message.contains("startup-root-directory widened"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("allow rule has no declared right"),
+            "{message}"
+        );
+    }
+    let comment_between = [
+        "(",
+        "",
+        "allowing",
+        "(",
+        "",
+        "allow-default",
+        "(",
+        "",
+        ";; note",
+        "allow file-read* (literal \"/tmp/cc-comment-allow\"))",
+        "(",
+    ]
+    .join("\n");
+    assert_eq!(allow_form_closes(&comment_between), Ok(()));
 
     let profile_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("confine.sb");
     let profile = fs::read_to_string(&profile_path).unwrap_or_else(|err| {
