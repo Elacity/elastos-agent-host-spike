@@ -1,5 +1,5 @@
 {
-  "about": "wc-001, task 010, task 009 and wc-004 lab falsifiers. Each one plants a bug in the capsule source, the build script, this capsule's manifest (capsule/capsule.json), the tools crate or the reproducibility copy, and requires every one of its named tests to FAIL at an assertion (a test harness that does not compile, or no matching test, does not count). wc-001: F-WC1 embeds an absolute build path so the two clean builds differ; F-WC1-SPACED-PATH splits the remap flags on a space in the build path; the rest change the digest result, retain an import, alter the digest signature, record a wrong toolchain/hash in the receipt, or name a compiler other than the one Cargo was told to use. Task 010 (the lab name is cc-capsule-identity's lab CID, through wasm_capsule_tools::bundle_identity): the manifest gets a lab schema, a wrong entrypoint, a drifted version or one changed description byte; the tools crate gets a naming function of its own or a second import of the shared function; the reproducibility copy stops reaching the out-of-lane path dependencies, so the named test fails at its assertion that the copy's tools/build succeeded, with cargo's \"failed to load manifest\" error in the child build's output. Task 009 (tools/bundle, the library in tools/src/bundle.rs and its binary): the command names capsule.wasm alone instead of the bundle; an existing OUT_DIR or a planted bundle/ link is followed; the module is copied, not moved; an argument rule falls back to the usage line or loses non-UTF-8 bytes; the two build failures share a reason; tools/build's stdout reaches the command's stdout; a run refusal drops its path or its system cause, names the wrong path, replaces the shared reason, exits with the wrong status or prints to stdout; or the capsule source changes with a matching receipt, so only the pinned sha256 catches it. wc-004 (the verifier, tools/src/verify.rs): the signature check, the unsigned check or the audit is skipped; the path form re-reads capsule.wasm by its path; the caller's grants are dropped; *.seed leaves the lane's .gitignore; a PEM private-key line enters the README; a missing entrypoint falls back to another module, or capsule.wasm is audited whatever the manifest says; an upstream refusal is replaced; the checks run out of order; the verified value gets a public field, a constructor or mutable access; or the tools crate checks the signature or audits twice. wc-008 (no runtime ABI for a bare capsule, tests/runtime_abi.rs): the manifest gains an invented lab_imports field, the near-fit runtime_abi elastos.component/v1, or execution=component (so each ABI is refused for the manifest's fault, which only the exact-reason check catches); or the tools crate names a bundle without the Runtime's manifest check. Task 017: the retired name label (written with a JSON escape, so neither retirement grep matches this file) is appended to LOG.md, a doc that the name-rule test now checks for that label like every other git-listed lane file. 007's lane-own name rule (PR #105) and its 24 falsifiers were retired by task 010; cc-capsule-identity's own tests and falsifiers cover the walk and the encoding. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . Each entry's evidence label, and the count of each kind of evidence, are kept in one place, README.md \"## Falsifiers\"; this text says only what each falsifier plants. wc-005a (task 014): F-WC5c and F-WC5d add a folder or env flag to the engine's argv; F-WC5-DISK-REREAD writes the module read again from disk; F-WC5-RELATIVE-ENGINE and F-WC5-WORK-ROOT-LINK drop the absolute-engine and canonical-root checks; the rest make the run folder shared or reused, erase a refusal's path or cause, read an environment variable, write with a writer of its own, pass the environment on, or accept a failed engine. F-WC4-ENTRYPOINT-ACCESSOR and F-WC4-ENTRYPOINT-REPARSE return another entry or read the manifest again. wc-005b (task 015, the two-engine run in tools/src/run.rs): F-WC5a skips verify_bundle and runs the module from disk; F-WC5b compares only exit statuses; F-WC5-EQUAL-FAILURES takes a failed exit as empty stdout, so equal failures pass; F-WC5-BOTH-ARGS changes the fixed argument for both engines (equal but wrong output, caught only by the real-engine test; NOT RUN when an engine is missing, since that test then prints SKIPPED and passes); F-WC5-VERIFY-TWICE verifies twice; F-WC5-WASMTIME-REFUSAL-DROPPED and -WASMER-REFUSAL-DROPPED discard an engine refusal; F-WC5-ENGINES-REVERSED, -ENGINES-OVERLAP and -BYPASS-RUN-ENGINE run wasmer first, both at once, or wasmer without run_engine; F-WC5-OTHER-CID names the folder again after the run. wc-005c (task 016, the version queries in tools/src/run.rs and the receipt in tools/src/receipt.rs): F-WC5-HARDCODED-VERSIONS prints this Mac's installed versions, not the observed ones; F-WC5-VERSION-CAUSE, -VERSION-START-CAUSE and -VERSION-STDERR lose a failed query's reason, OS cause or stderr; F-WC5-VERSION-EMPTY-ACCEPTED and -VERSION-WHOLE-STDOUT accept an empty first line or keep the whole stdout; F-WC5-QUERY-BEFORE-VERIFY and -VERSION-AFTER-RUN move the queries before verification or after the module runs; F-WC5-VERSION-RELATIVE, -VERSION-ENV and -VERSION-STDIN start the query by a relative path, with the environment, or with a piped stdin; F-WC5-RECEIPT-OVERWRITE writes the receipt with create + truncate and F-WC5-RECEIPT-CAUSE replaces the writer's refusal; F-WC5-RECEIPT-SCHEMA, -CID, -FUNCTION, -ARGUMENT, -VERSION-SWAP, -STATUS and -STDOUT tamper with one receipt field. Task 016 also re-anchored F-WC5-ENGINE-ENV and F-WC5-STDIN-PIPED (the no-ambient rules moved into engine_command, shared by the module run and the version query), F-WC5a (the queries now sit between verification and the runs) and F-WC5-EQUAL-FAILURES (run_engine returns an EngineRun), each the same bug as before. Task 019: F-WC5-START-TWICE makes run_engine start the engine twice and return the second result, so one call is two module runs; F-WC-README-COUNT changes the README's stated falsifier total by one. wc-009a (task 020, the lab grants reader read_grants and the linked and unused lists, all in tools/src/verify.rs): F-WC9-LINK-ALL drops the audit's Undeclared refusal and F-WC9-GRANT-INJECT reports the grants list as linked; F-WC9-GRANTS-LABEL, -SCHEMA, -UNKNOWN-KEY, -IMPORTS-NOT-LIST, -ENTRY-EXTRA-KEY, -ENTRY-NOT-STRING and -DUPLICATE drop one check of the reader, so a malformed grants file is read; -CAUSE, -NOT-JSON, -NOT-OBJECT and -MISSING-KEY lose a refusal's OS cause or own reason; F-WC9-UNUSED-KEEPS-USED and -UNUSED-REORDER keep linked grants among the unused or reverse their file order; F-WC9-GRANTS-READ-TWICE and -PARSE-TWICE read or parse the grants file a second time. Task 020 also re-anchored F-WC5a, F-WC5-VERIFY-TWICE and F-WC5-QUERY-BEFORE-VERIFY (run passes input.granted, not an empty list, to verify_bundle; F-WC5a also fills the new linked and unused lists empty, since it removes the verified value) and F-WC4-SEALED-NEW (the planted constructor fills the new unused field), each the same bug as before. Task 026 (Rong's two rulings, in README.md): F-WC-ENGINE-ENDORSED drops the not from the engine ruling; F-WC-ENGINE-MOVED moves that ruling out of the first section that names both engines; F-WC-ENGINE-TWICE adds a second copy of it; F-WC-ENDORSE-LINE brings back a line that says neither engine is endorsed; F-WC9B0-IMPORT-PATH removes the discovery-only ruling from task 022's section, F-WC9B0-AFTER-ANSWERS moves it after the per-engine answers and F-WC9B0-TWICE adds a second copy of it. Task 026 also re-anchored F-WC-README-COUNT to the new total, the same bug as before. Task 027 (wc-010b, the declared memory cap: VerifiedBundle::memory_mb in tools/src/verify.rs, the wasmtime cap argument in tools/src/run.rs): F-WC10-CAP-IGNORED drops the cap argument, so the runner ignores the declared limit; F-WC10-CAP-FIXED caps at a fixed 64 MB; F-WC10-NO-TRAP drops trap-on-grow-failure=y, so a grow past the cap returns -1; F-WC10-TWO-MEMORIES drops max-memories=1, so a module with a second memory gets a second cap (round 2 of task 027); F-WC10-CAP-OVERFLOW takes the MB to bytes product in u32; F-WC10-CAP-NOT-READ keeps a fixed 64 in the verifier in place of the manifest's resources.memory_mb; F-WC10-WASMER-FLAG gives wasmer a cap flag. Task 027 also re-anchored F-WC5-START-TWICE (start_engine takes the declared memory_mb), F-WC4-ORDER-AUDIT-FIRST (the manifest read returns the entrypoint and memory_mb), F-WC4-SEALED-NEW (the planted constructor fills the new memory_mb field), F-WC4-ENTRYPOINT-REPARSE (the second manifest read keeps only the entrypoint), F-WC5a (its direct engine starts pass the default 64, since it removes the verified value), F-WC5-BYPASS-RUN-ENGINE (its direct start passes the verified memory_mb) and F-WC-README-COUNT (the new total), each the same bug as before. Task 028 (wc-010c, the receipt's memory lines in tools/src/receipt.rs): F-WC10C-WASMER-ENFORCED prints every engine's cap line from wasmtime's recorded cap argument, so wasmer, started with none, reads ENFORCED; F-WC10C-CAP-FIXED prints a fixed 67108864 bytes in place of the declared size. Task 028 also adds receipt_cap_line_matches_the_argv_the_engine_got to F-WC10-CAP-IGNORED's tests (its anchor and mutation unchanged) and re-anchors F-WC-README-COUNT to the new total, the same bug as before. Task 029 (two bugs first planted by tasks 018 and 020, now with entries since tests/lab_cid.rs and tools/src/run.rs are recovery targets): F-WC3-LANE-FILES-QUOTED drops -z from lane_files' git ls-files listing and splits it by line, so a name git quotes is read under its quoted form; F-WC9-RUN-DROPS-GRANTS makes run pass an empty list in place of input.granted to verify_bundle. Task 029 also re-anchors F-WC-README-COUNT to the new total, the same bug as before. Task 031 (M1 B4 lab half, the typed lab operations LAB_OPERATIONS and the v2 grants file with a right per grant, in tools/src/verify.rs): F-WC-B4-UNTYPED-LINKED drops verify_checked's typed-entry check, so a granted import with no typed lab operation is linked; F-WC-B4-RIGHT-IGNORED drops the grants reader's right comparison, so env.f granted write is read. Task 031 also re-anchors F-WC-README-COUNT to the new total, the same bug as before. Task 032 (M1 C0 step ii, the capsule declares its own memory maximum through a link argument in tools/build): F-WC10D-NO-MODULE-MAX drops the link argument, so the capsule declares no memory maximum; F-WC10D-MAX-WRONG passes --max-memory=134217728 (2048 pages) in place of the manifest's 64 MB. Task 032 also re-anchors F-WC1-SPACED-PATH (a second edit turns the new link-argument line into the same whitespace-split RUSTFLAGS form) and F-WC-README-COUNT to the new total, each the same bug as before. Task 036 (tools/build makes its target folder inside $TMPDIR, so a test can watch the folder its traps delete): F-WC1-TRAP-CLEANUP drops rm -rf from the armed cleanup trap, keeping its status rule; F-WC1-CLEANUP-ON-SUCCESS makes the trap the last line re-arms remove nothing; F-WC1-TARGET-OUTSIDE-TMPDIR makes the target folder with a bare mktemp -d again, which on macOS ignores TMPDIR. Task 036 also re-anchors F-WC-README-COUNT to the new total, the same bug as before. Task 038 (M1 C0 lab half, in tools/src/run.rs: run starts only the pinned engine versions, and a capped start the engine rejects is refused as a rejected cap): F-WC5-VERSION-UNPINNED makes the pin check return success at its first line; F-WC10-CAP-REJECTED-RETRY starts the engine again without the cap argument on that refusal and returns that run's result; F-WC10-CAP-REJECTED-UNNAMED never recognises a rejected cap, so it reads as a plain failure; F-WC10-CAP-REJECTED-ANY-STATUS drops the measured exit status from the rule; F-WC10-CAP-REJECTED-UNCAPPED applies the rule to a start given no cap argument. Task 038 also re-anchors F-WC-README-COUNT to the new total, the same bug as before. Task 039 (M1 A12 lab half, in tools/src/run.rs: run_engine removes its module file and its run folder once the engine has exited, on every outcome): F-WC5-RUN-DIR-KEPT makes the removal function return at its first line; F-WC5-RUN-DIR-KEPT-ON-FAILURE calls the removal only after a success; F-WC5-REMOVAL-ERROR-DROPPED ignores a failed removal after a success. Task 039 also changes F-WC5-DISK-REREAD's planted line to find the bundle beside the run folder (the write now sits in write_and_start, which has no work root), the same bug as before, its anchor unchanged, and re-anchors F-WC-README-COUNT to the new total, the same bug as before. Task 040 (M1 A12 lab half, the cleanup census in tests/run.rs after a normal, a trapped and a killed run on both real engines): F-WC-A12-TEMP-LEAK makes run_engine create one extra folder <work root>/<engine>.scratch before its run folder and never remove it. Task 040 also re-anchors F-WC-README-COUNT to the new total, the same bug as before. Task 041 (M1 A8 lab half, host secrets denied: a throwaway HOME holding keys/host-secret is given to a child test process, and recording shims stand in front of both real engines): F-WC-A8-HOME-PREOPEN makes start_engine add --dir=<HOME>, a preopen of the runner's HOME folder, after the memory cap arguments. Task 041 also re-anchors F-WC-README-COUNT to the new total, the same bug as before.",
+  "about": "wc-001, task 010, task 009 and wc-004 lab falsifiers. Each one plants a bug in the capsule source, the build script, this capsule's manifest (capsule/capsule.json), the tools crate or the reproducibility copy, and requires every one of its named tests to FAIL at an assertion (a test harness that does not compile, or no matching test, does not count). wc-001: F-WC1 embeds an absolute build path so the two clean builds differ; F-WC1-SPACED-PATH splits the remap flags on a space in the build path; the rest change the digest result, retain an import, alter the digest signature, record a wrong toolchain/hash in the receipt, or name a compiler other than the one Cargo was told to use. Task 010 (the lab name is cc-capsule-identity's lab CID, through wasm_capsule_tools::bundle_identity): the manifest gets a lab schema, a wrong entrypoint, a drifted version or one changed description byte; the tools crate gets a naming function of its own or a second import of the shared function; the reproducibility copy stops reaching the out-of-lane path dependencies, so the named test fails at its assertion that the copy's tools/build succeeded, with cargo's \"failed to load manifest\" error in the child build's output. Task 009 (tools/bundle, the library in tools/src/bundle.rs and its binary): the command names capsule.wasm alone instead of the bundle; an existing OUT_DIR or a planted bundle/ link is followed; the module is copied, not moved; an argument rule falls back to the usage line or loses non-UTF-8 bytes; the two build failures share a reason; tools/build's stdout reaches the command's stdout; a run refusal drops its path or its system cause, names the wrong path, replaces the shared reason, exits with the wrong status or prints to stdout; or the capsule source changes with a matching receipt, so only the pinned sha256 catches it. wc-004 (the verifier, tools/src/verify.rs): the signature check, the unsigned check or the audit is skipped; the path form re-reads capsule.wasm by its path; the caller's grants are dropped; *.seed leaves the lane's .gitignore; a PEM private-key line enters the README; a missing entrypoint falls back to another module, or capsule.wasm is audited whatever the manifest says; an upstream refusal is replaced; the checks run out of order; the verified value gets a public field, a constructor or mutable access; or the tools crate checks the signature or audits twice. wc-008 (no runtime ABI for a bare capsule, tests/runtime_abi.rs): the manifest gains an invented lab_imports field, the near-fit runtime_abi elastos.component/v1, or execution=component (so each ABI is refused for the manifest's fault, which only the exact-reason check catches); or the tools crate names a bundle without the Runtime's manifest check. Task 017: the retired name label (written with a JSON escape, so neither retirement grep matches this file) is appended to LOG.md, a doc that the name-rule test now checks for that label like every other git-listed lane file. 007's lane-own name rule (PR #105) and its 24 falsifiers were retired by task 010; cc-capsule-identity's own tests and falsifiers cover the walk and the encoding. command is \"lab\" and file paths are relative to examples/agent-host/, so a lab file is ../../lab/wasm-capsule/... . Each entry's evidence label, and the count of each kind of evidence, are kept in one place, README.md \"## Falsifiers\"; this text says only what each falsifier plants. wc-005a (task 014): F-WC5c and F-WC5d add a folder or env flag to the engine's argv; F-WC5-DISK-REREAD writes the module read again from disk; F-WC5-RELATIVE-ENGINE and F-WC5-WORK-ROOT-LINK drop the absolute-engine and canonical-root checks; the rest make the run folder shared or reused, erase a refusal's path or cause, read an environment variable, write with a writer of its own, pass the environment on, or accept a failed engine. F-WC4-ENTRYPOINT-ACCESSOR and F-WC4-ENTRYPOINT-REPARSE return another entry or read the manifest again. wc-005b (task 015, the two-engine run in tools/src/run.rs): F-WC5a skips verify_bundle and runs the module from disk; F-WC5b compares only exit statuses; F-WC5-EQUAL-FAILURES takes a failed exit as empty stdout, so equal failures pass; F-WC5-BOTH-ARGS changes the fixed argument for both engines (equal but wrong output, caught only by the real-engine test; NOT RUN when an engine is missing, since that test then prints SKIPPED and passes); F-WC5-VERIFY-TWICE verifies twice; F-WC5-WASMTIME-REFUSAL-DROPPED and -WASMER-REFUSAL-DROPPED discard an engine refusal; F-WC5-ENGINES-REVERSED, -ENGINES-OVERLAP and -BYPASS-RUN-ENGINE run wasmer first, both at once, or wasmer without run_engine; F-WC5-OTHER-CID names the folder again after the run. wc-005c (task 016, the version queries in tools/src/run.rs and the receipt in tools/src/receipt.rs): F-WC5-HARDCODED-VERSIONS prints this Mac's installed versions, not the observed ones; F-WC5-VERSION-CAUSE, -VERSION-START-CAUSE and -VERSION-STDERR lose a failed query's reason, OS cause or stderr; F-WC5-VERSION-EMPTY-ACCEPTED and -VERSION-WHOLE-STDOUT accept an empty first line or keep the whole stdout; F-WC5-QUERY-BEFORE-VERIFY and -VERSION-AFTER-RUN move the queries before verification or after the module runs; F-WC5-VERSION-RELATIVE, -VERSION-ENV and -VERSION-STDIN start the query by a relative path, with the environment, or with a piped stdin; F-WC5-RECEIPT-OVERWRITE writes the receipt with create + truncate and F-WC5-RECEIPT-CAUSE replaces the writer's refusal; F-WC5-RECEIPT-SCHEMA, -CID, -FUNCTION, -ARGUMENT, -VERSION-SWAP, -STATUS and -STDOUT tamper with one receipt field. Task 016 also re-anchored F-WC5-ENGINE-ENV and F-WC5-STDIN-PIPED (the no-ambient rules moved into engine_command, shared by the module run and the version query), F-WC5a (the queries now sit between verification and the runs) and F-WC5-EQUAL-FAILURES (run_engine returns an EngineRun), each the same bug as before. Task 019: F-WC5-START-TWICE makes run_engine start the engine twice and return the second result, so one call is two module runs; F-WC-README-COUNT changes the README's stated falsifier total by one. wc-009a (task 020, the lab grants reader read_grants and the linked and unused lists, all in tools/src/verify.rs): F-WC9-LINK-ALL drops the audit's Undeclared refusal and F-WC9-GRANT-INJECT reports the grants list as linked; F-WC9-GRANTS-LABEL, -SCHEMA, -UNKNOWN-KEY, -IMPORTS-NOT-LIST, -ENTRY-EXTRA-KEY, -ENTRY-NOT-STRING and -DUPLICATE drop one check of the reader, so a malformed grants file is read; -CAUSE, -NOT-JSON, -NOT-OBJECT and -MISSING-KEY lose a refusal's OS cause or own reason; F-WC9-UNUSED-KEEPS-USED and -UNUSED-REORDER keep linked grants among the unused or reverse their file order; F-WC9-GRANTS-READ-TWICE and -PARSE-TWICE read or parse the grants file a second time. Task 020 also re-anchored F-WC5a, F-WC5-VERIFY-TWICE and F-WC5-QUERY-BEFORE-VERIFY (run passes input.granted, not an empty list, to verify_bundle; F-WC5a also fills the new linked and unused lists empty, since it removes the verified value) and F-WC4-SEALED-NEW (the planted constructor fills the new unused field), each the same bug as before. Task 026 (Rong's two rulings, in README.md): F-WC-ENGINE-ENDORSED drops the not from the engine ruling; F-WC-ENGINE-MOVED moves that ruling out of the first section that names both engines; F-WC-ENGINE-TWICE adds a second copy of it; F-WC-ENDORSE-LINE brings back a line that says neither engine is endorsed; F-WC9B0-IMPORT-PATH removes the discovery-only ruling from task 022's section, F-WC9B0-AFTER-ANSWERS moves it after the per-engine answers and F-WC9B0-TWICE adds a second copy of it. Task 026 also re-anchored F-WC-README-COUNT to the new total, the same bug as before. Task 027 (wc-010b, the declared memory cap: VerifiedBundle::memory_mb in tools/src/verify.rs, the wasmtime cap argument in tools/src/run.rs): F-WC10-CAP-IGNORED drops the cap argument, so the runner ignores the declared limit; F-WC10-CAP-FIXED caps at a fixed 64 MB; F-WC10-NO-TRAP drops trap-on-grow-failure=y, so a grow past the cap returns -1; F-WC10-TWO-MEMORIES drops max-memories=1, so a module with a second memory gets a second cap (round 2 of task 027); F-WC10-CAP-OVERFLOW takes the MB to bytes product in u32; F-WC10-CAP-NOT-READ keeps a fixed 64 in the verifier in place of the manifest's resources.memory_mb; F-WC10-WASMER-FLAG gives wasmer a cap flag. Task 027 also re-anchored F-WC5-START-TWICE (start_engine takes the declared memory_mb), F-WC4-ORDER-AUDIT-FIRST (the manifest read returns the entrypoint and memory_mb), F-WC4-SEALED-NEW (the planted constructor fills the new memory_mb field), F-WC4-ENTRYPOINT-REPARSE (the second manifest read keeps only the entrypoint), F-WC5a (its direct engine starts pass the default 64, since it removes the verified value), F-WC5-BYPASS-RUN-ENGINE (its direct start passes the verified memory_mb) and F-WC-README-COUNT (the new total), each the same bug as before. Task 028 (wc-010c, the receipt's memory lines in tools/src/receipt.rs): F-WC10C-WASMER-ENFORCED prints every engine's cap line from wasmtime's recorded cap argument, so wasmer, started with none, reads ENFORCED; F-WC10C-CAP-FIXED prints a fixed 67108864 bytes in place of the declared size. Task 028 also adds receipt_cap_line_matches_the_argv_the_engine_got to F-WC10-CAP-IGNORED's tests (its anchor and mutation unchanged) and re-anchors F-WC-README-COUNT to the new total, the same bug as before. Task 029 (two bugs first planted by tasks 018 and 020, now with entries since tests/lab_cid.rs and tools/src/run.rs are recovery targets): F-WC3-LANE-FILES-QUOTED drops -z from lane_files' git ls-files listing and splits it by line, so a name git quotes is read under its quoted form; F-WC9-RUN-DROPS-GRANTS makes run pass an empty list in place of input.granted to verify_bundle. Task 029 also re-anchors F-WC-README-COUNT to the new total, the same bug as before. Task 031 (M1 B4 lab half, the typed lab operations LAB_OPERATIONS and the v2 grants file with a right per grant, in tools/src/verify.rs): F-WC-B4-UNTYPED-LINKED drops verify_checked's typed-entry check, so a granted import with no typed lab operation is linked; F-WC-B4-RIGHT-IGNORED drops the grants reader's right comparison, so env.f granted write is read. Task 031 also re-anchors F-WC-README-COUNT to the new total, the same bug as before. Task 032 (M1 C0 step ii, the capsule declares its own memory maximum through a link argument in tools/build): F-WC10D-NO-MODULE-MAX drops the link argument, so the capsule declares no memory maximum; F-WC10D-MAX-WRONG passes --max-memory=134217728 (2048 pages) in place of the manifest's 64 MB. Task 032 also re-anchors F-WC1-SPACED-PATH (a second edit turns the new link-argument line into the same whitespace-split RUSTFLAGS form) and F-WC-README-COUNT to the new total, each the same bug as before. Task 036 (tools/build makes its target folder inside $TMPDIR, so a test can watch the folder its traps delete): F-WC1-TRAP-CLEANUP drops rm -rf from the armed cleanup trap, keeping its status rule; F-WC1-CLEANUP-ON-SUCCESS makes the trap the last line re-arms remove nothing; F-WC1-TARGET-OUTSIDE-TMPDIR makes the target folder with a bare mktemp -d again, which on macOS ignores TMPDIR. Task 036 also re-anchors F-WC-README-COUNT to the new total, the same bug as before. Task 038 (M1 C0 lab half, in tools/src/run.rs: run starts only the pinned engine versions, and a capped start the engine rejects is refused as a rejected cap): F-WC5-VERSION-UNPINNED makes the pin check return success at its first line; F-WC10-CAP-REJECTED-RETRY starts the engine again without the cap argument on that refusal and returns that run's result; F-WC10-CAP-REJECTED-UNNAMED never recognises a rejected cap, so it reads as a plain failure; F-WC10-CAP-REJECTED-ANY-STATUS drops the measured exit status from the rule; F-WC10-CAP-REJECTED-UNCAPPED applies the rule to a start given no cap argument. Task 038 also re-anchors F-WC-README-COUNT to the new total, the same bug as before. Task 039 (M1 A12 lab half, in tools/src/run.rs: run_engine removes its module file and its run folder once the engine has exited, on every outcome): F-WC5-RUN-DIR-KEPT makes the removal function return at its first line; F-WC5-RUN-DIR-KEPT-ON-FAILURE calls the removal only after a success; F-WC5-REMOVAL-ERROR-DROPPED ignores a failed removal after a success. Task 039 also changes F-WC5-DISK-REREAD's planted line to find the bundle beside the run folder (the write now sits in write_and_start, which has no work root), the same bug as before, its anchor unchanged, and re-anchors F-WC-README-COUNT to the new total, the same bug as before. Task 040 (M1 A12 lab half, the cleanup census in tests/run.rs after a normal, a trapped and a killed run on both real engines): F-WC-A12-TEMP-LEAK makes run_engine create one extra folder <work root>/<engine>.scratch before its run folder and never remove it. Task 040 also re-anchors F-WC-README-COUNT to the new total, the same bug as before. Task 041 (M1 A8 lab half, host secrets denied: a throwaway HOME holding keys/host-secret is given to a child test process, and recording shims stand in front of both real engines): F-WC-A8-HOME-PREOPEN makes start_engine add --dir=<HOME>, a preopen of the runner's HOME folder, after the memory cap arguments. Task 041 also re-anchors F-WC-README-COUNT to the new total, the same bug as before. Task 065 (Rong's WC-1 and WC-2: no core-module import is granted, and the v3 grants file names resource and actions as capability-request, in tools/src/verify.rs): F-WC9B-CORE-IMPORT-GRANTED gives the core audit env.f in place of the empty list, so the env.f module reaches both engines; F-WC9B-GRANT-ACTIONS-EMPTY skips the reader's empty-actions refusal; F-WC9B-RETIRED-TABLE-BACK brings a LAB_OPERATIONS table back. It removes F-WC9-GRANT-INJECT, F-WC9-UNUSED-KEEPS-USED, F-WC9-UNUSED-REORDER, F-WC9-RUN-DROPS-GRANTS, F-WC-B4-UNTYPED-LINKED, F-WC-B4-RIGHT-IGNORED and F-WC4e, whose rules (the linked and unused lists, run's granted input, the typed table, the per-import right and the caller's grants) are gone, and re-anchors F-WC4c, F-WC4d, F-WC4-AUDIT-REASON, F-WC4-ORDER-AUDIT-FIRST, F-WC4-SEALED-NEW, F-WC4-SEALED-MUT, F-WC4-SECOND-AUDIT, F-WC9-LINK-ALL, F-WC9-GRANTS-IMPORTS-NOT-LIST, F-WC9-GRANTS-ENTRY-NOT-STRING, F-WC9-GRANTS-DUPLICATE, F-WC5a, F-WC5-VERIFY-TWICE, F-WC5-QUERY-BEFORE-VERIFY, F-WC-ENGINE-RUN-MODULE-DOC, F-WC-B4-TYPE-GAP-HIDDEN, F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT, each the same bug on the new code or text.",
   "falsifiers": [
     {
       "id": "F-WC1",
@@ -711,14 +711,14 @@
     },
     {
       "id": "F-WC4c",
-      "title": "the verifier skips the audit call and returns no imports",
+      "title": "the verifier skips the audit call",
       "command": "lab",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "    let imports = audit(module, granted).map_err(VerifyRefusal::Audit)?;\n",
-          "new": "    let imports: Vec<DeclaredImport> = {\n        let _ = (module, granted);\n        Vec::new()\n    };\n"
+          "old": "    audit(module, &[]).map_err(VerifyRefusal::Audit)?;\n",
+          "new": "    let _ = module;\n"
         }
       ],
       "tests": [
@@ -734,27 +734,11 @@
         {
           "file": "../../lab/wasm-capsule/tools/src/verify.rs",
           "old": "    let checked = checked_bundle(bundle).map_err(VerifyRefusal::Identity)?;\n",
-          "new": "    let checked = checked_bundle(bundle).map_err(VerifyRefusal::Identity)?;\n    let module = std::fs::read(bundle.join(\"capsule.wasm\")).unwrap_or_default();\n    audit(&module, granted).map_err(VerifyRefusal::Audit)?;\n"
+          "new": "    let checked = checked_bundle(bundle).map_err(VerifyRefusal::Identity)?;\n    let module = std::fs::read(bundle.join(\"capsule.wasm\")).unwrap_or_default();\n    audit(&module, &[]).map_err(VerifyRefusal::Audit)?;\n"
         }
       ],
       "tests": [
         "verifier_reads_no_bundle_file_by_path"
-      ]
-    },
-    {
-      "id": "F-WC4e",
-      "title": "the verifier passes an empty list to audit instead of the caller's grants",
-      "command": "lab",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "    let imports = audit(module, granted).map_err(VerifyRefusal::Audit)?;\n",
-          "new": "    let imports = audit(module, &[]).map_err(VerifyRefusal::Audit)?;\n"
-        }
-      ],
-      "tests": [
-        "a_grant_reaches_the_audit_unchanged"
       ]
     },
     {
@@ -893,8 +877,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "    let imports = audit(module, granted).map_err(VerifyRefusal::Audit)?;\n",
-          "new": "    let imports = audit(module, granted).map_err(|_| VerifyRefusal::Audit(AuditRefusal::Malformed))?;\n"
+          "old": "    audit(module, &[]).map_err(VerifyRefusal::Audit)?;\n",
+          "new": "    audit(module, &[]).map_err(|_| VerifyRefusal::Audit(AuditRefusal::Malformed))?;\n"
         }
       ],
       "tests": [
@@ -909,8 +893,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "    verify_checked_signature(&checked, signature, accepted).map_err(VerifyRefusal::Identity)?;\n    let (entrypoint, memory_mb) = entrypoint_index(&checked)?;\n    let module = &checked.entries()[entrypoint].content;\n    let imports = audit(module, granted).map_err(VerifyRefusal::Audit)?;\n",
-          "new": "    let (entrypoint, memory_mb) = entrypoint_index(&checked)?;\n    let module = &checked.entries()[entrypoint].content;\n    let imports = audit(module, granted).map_err(VerifyRefusal::Audit)?;\n    verify_checked_signature(&checked, signature, accepted).map_err(VerifyRefusal::Identity)?;\n"
+          "old": "    verify_checked_signature(&checked, signature, accepted).map_err(VerifyRefusal::Identity)?;\n    let (entrypoint, memory_mb) = entrypoint_index(&checked)?;\n    let module = &checked.entries()[entrypoint].content;\n    audit(module, &[]).map_err(VerifyRefusal::Audit)?;\n",
+          "new": "    let (entrypoint, memory_mb) = entrypoint_index(&checked)?;\n    let module = &checked.entries()[entrypoint].content;\n    audit(module, &[]).map_err(VerifyRefusal::Audit)?;\n    verify_checked_signature(&checked, signature, accepted).map_err(VerifyRefusal::Identity)?;\n"
         }
       ],
       "tests": [
@@ -958,7 +942,7 @@
         {
           "file": "../../lab/wasm-capsule/tools/src/verify.rs",
           "old": "impl VerifiedBundle {\n",
-          "new": "impl VerifiedBundle {\n    pub fn new(checked: CheckedBundle, entrypoint: usize, imports: Vec<DeclaredImport>) -> Self {\n        VerifiedBundle {\n            checked,\n            entrypoint,\n            imports,\n            unused: Vec::new(),\n            memory_mb: 64,\n        }\n    }\n\n"
+          "new": "impl VerifiedBundle {\n    pub fn new(checked: CheckedBundle, entrypoint: usize) -> Self {\n        VerifiedBundle {\n            checked,\n            entrypoint,\n            memory_mb: 64,\n        }\n    }\n\n"
         }
       ],
       "tests": [
@@ -967,14 +951,14 @@
     },
     {
       "id": "F-WC4-SEALED-MUT",
-      "title": "the verified value gives mutable access to its import list",
+      "title": "the verified value gives mutable access to its declared memory size",
       "command": "lab",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "    pub fn imports(&self) -> &[DeclaredImport] {\n        &self.imports\n    }\n",
-          "new": "    pub fn imports(&self) -> &[DeclaredImport] {\n        &self.imports\n    }\n\n    pub fn imports_mut(&mut self) -> &mut Vec<DeclaredImport> {\n        &mut self.imports\n    }\n"
+          "old": "    pub fn memory_mb(&self) -> u32 {\n        self.memory_mb\n    }\n",
+          "new": "    pub fn memory_mb(&self) -> u32 {\n        self.memory_mb\n    }\n\n    pub fn memory_mb_mut(&mut self) -> &mut u32 {\n        &mut self.memory_mb\n    }\n"
         }
       ],
       "tests": [
@@ -1006,7 +990,7 @@
         {
           "file": "../../lab/wasm-capsule/tools/src/verify.rs",
           "old": "    Ok(VerifiedBundle {\n        checked,\n",
-          "new": "    audit(module, granted).map_err(VerifyRefusal::Audit)?;\n    Ok(VerifiedBundle {\n        checked,\n"
+          "new": "    audit(module, &[]).map_err(VerifyRefusal::Audit)?;\n    Ok(VerifiedBundle {\n        checked,\n"
         }
       ],
       "tests": [
@@ -1458,7 +1442,7 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/run.rs",
-          "old": "    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, input.granted)\n        .map_err(TwoEngineRefusal::Verify)?;\n    check_module_memory(&bundle).map_err(TwoEngineRefusal::Memory)?;\n",
+          "old": "    let bundle = verify_bundle(input.bundle, input.signature, input.accepted)\n        .map_err(TwoEngineRefusal::Verify)?;\n    check_module_memory(&bundle).map_err(TwoEngineRefusal::Memory)?;\n",
           "new": "    let module = input.bundle.join(\"capsule.wasm\");\n"
         },
         {
@@ -1470,11 +1454,6 @@
           "file": "../../lab/wasm-capsule/tools/src/run.rs",
           "old": "        cid: bundle.cid(),\n",
           "new": "        cid: crate::bundle_identity(input.bundle)\n            .map_err(|error| TwoEngineRefusal::Verify(VerifyRefusal::Identity(error)))?,\n"
-        },
-        {
-          "file": "../../lab/wasm-capsule/tools/src/run.rs",
-          "old": "        linked: bundle.imports().to_vec(),\n        unused_grants: bundle.unused_grants().to_vec(),\n",
-          "new": "        linked: Vec::new(),\n        unused_grants: Vec::new(),\n"
         }
       ],
       "tests": [
@@ -1543,8 +1522,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/run.rs",
-          "old": "    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, input.granted)\n        .map_err(TwoEngineRefusal::Verify)?;\n",
-          "new": "    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, input.granted)\n        .map_err(TwoEngineRefusal::Verify)?;\n    let _again = verify_bundle(input.bundle, input.signature, input.accepted, input.granted)\n        .map_err(TwoEngineRefusal::Verify)?;\n"
+          "old": "    let bundle = verify_bundle(input.bundle, input.signature, input.accepted)\n        .map_err(TwoEngineRefusal::Verify)?;\n",
+          "new": "    let bundle = verify_bundle(input.bundle, input.signature, input.accepted)\n        .map_err(TwoEngineRefusal::Verify)?;\n    let _again = verify_bundle(input.bundle, input.signature, input.accepted)\n        .map_err(TwoEngineRefusal::Verify)?;\n"
         }
       ],
       "tests": [
@@ -1719,8 +1698,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/run.rs",
-          "old": "    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, input.granted)\n        .map_err(TwoEngineRefusal::Verify)?;\n    check_module_memory(&bundle).map_err(TwoEngineRefusal::Memory)?;\n    let wasmtime_version =\n        query_version(Engine::Wasmtime, input.wasmtime).map_err(TwoEngineRefusal::Version)?;\n    let wasmer_version =\n        query_version(Engine::Wasmer, input.wasmer).map_err(TwoEngineRefusal::Version)?;\n",
-          "new": "    let wasmtime_version =\n        query_version(Engine::Wasmtime, input.wasmtime).map_err(TwoEngineRefusal::Version)?;\n    let wasmer_version =\n        query_version(Engine::Wasmer, input.wasmer).map_err(TwoEngineRefusal::Version)?;\n    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, input.granted)\n        .map_err(TwoEngineRefusal::Verify)?;\n    check_module_memory(&bundle).map_err(TwoEngineRefusal::Memory)?;\n"
+          "old": "    let bundle = verify_bundle(input.bundle, input.signature, input.accepted)\n        .map_err(TwoEngineRefusal::Verify)?;\n    check_module_memory(&bundle).map_err(TwoEngineRefusal::Memory)?;\n    let wasmtime_version =\n        query_version(Engine::Wasmtime, input.wasmtime).map_err(TwoEngineRefusal::Version)?;\n    let wasmer_version =\n        query_version(Engine::Wasmer, input.wasmer).map_err(TwoEngineRefusal::Version)?;\n",
+          "new": "    let wasmtime_version =\n        query_version(Engine::Wasmtime, input.wasmtime).map_err(TwoEngineRefusal::Version)?;\n    let wasmer_version =\n        query_version(Engine::Wasmer, input.wasmer).map_err(TwoEngineRefusal::Version)?;\n    let bundle = verify_bundle(input.bundle, input.signature, input.accepted)\n        .map_err(TwoEngineRefusal::Verify)?;\n    check_module_memory(&bundle).map_err(TwoEngineRefusal::Memory)?;\n"
         }
       ],
       "tests": [
@@ -1993,8 +1972,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/README.md",
-          "old": "`falsifiers.json` holds 192 planted bugs",
-          "new": "`falsifiers.json` holds 191 planted bugs"
+          "old": "`falsifiers.json` holds 188 planted bugs",
+          "new": "`falsifiers.json` holds 187 planted bugs"
         }
       ],
       "tests": [
@@ -2003,34 +1982,18 @@
     },
     {
       "id": "F-WC9-LINK-ALL",
-      "title": "the verifier drops the audit's Undeclared refusal, so a module with an import that is not granted reaches both engines",
+      "title": "the verifier drops the audit's Undeclared refusal, so a module with a core import reaches both engines",
       "command": "lab",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "    let imports = audit(module, granted).map_err(VerifyRefusal::Audit)?;\n",
-          "new": "    let imports = match audit(module, granted) {\n        Err(AuditRefusal::Undeclared { .. }) => Vec::new(),\n        result => result.map_err(VerifyRefusal::Audit)?,\n    };\n"
+          "old": "    audit(module, &[]).map_err(VerifyRefusal::Audit)?;\n",
+          "new": "    match audit(module, &[]) {\n        Err(AuditRefusal::Undeclared { .. }) => {}\n        result => {\n            result.map_err(VerifyRefusal::Audit)?;\n        }\n    }\n"
         }
       ],
       "tests": [
-        "declared_not_granted_import_refuses_instantiation_by_name"
-      ]
-    },
-    {
-      "id": "F-WC9-GRANT-INJECT",
-      "title": "the linked list is the grants list, not the audit's result, so a grant for an import the module does not have is reported as linked",
-      "command": "lab",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "    let imports = audit(module, granted).map_err(VerifyRefusal::Audit)?;\n",
-          "new": "    audit(module, granted).map_err(VerifyRefusal::Audit)?;\n    let imports = granted.to_vec();\n"
-        }
-      ],
-      "tests": [
-        "grant_for_an_import_the_module_does_not_have_links_nothing_and_is_reported"
+        "core_module_import_is_refused_before_any_engine_start"
       ]
     },
     {
@@ -2147,14 +2110,14 @@
     },
     {
       "id": "F-WC9-GRANTS-IMPORTS-NOT-LIST",
-      "title": "an imports value that is not a list is read as an empty list",
+      "title": "a grants value that is not a list is read as an empty list",
       "command": "lab",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "    let entries = imports.as_array().ok_or(GrantsReason::ImportsNotAList)?;\n",
-          "new": "    let none = Vec::new();\n    let entries = imports.as_array().unwrap_or(&none);\n"
+          "old": "    let entries = grants.as_array().ok_or(GrantsReason::GrantsNotAList)?;\n",
+          "new": "    let none = Vec::new();\n    let entries = grants.as_array().unwrap_or(&none);\n"
         }
       ],
       "tests": [
@@ -2163,7 +2126,7 @@
     },
     {
       "id": "F-WC9-GRANTS-ENTRY-EXTRA-KEY",
-      "title": "a grant entry may hold keys beyond module and name",
+      "title": "a grant entry may hold keys beyond resource and actions",
       "command": "lab",
       "expect": "caught",
       "edits": [
@@ -2179,14 +2142,14 @@
     },
     {
       "id": "F-WC9-GRANTS-ENTRY-NOT-STRING",
-      "title": "a grant's name that is not a string is taken as its JSON text",
+      "title": "a grant's resource that is not a string is taken as its JSON text",
       "command": "lab",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "        name: entry.get(GRANT_KEYS[1])?.as_str()?.to_owned(),\n",
-          "new": "        name: entry\n            .get(GRANT_KEYS[1])?\n            .to_string()\n            .trim_matches('\"')\n            .to_owned(),\n"
+          "old": "    let resource = entry.get(GRANT_KEYS[0])?.as_str()?.to_owned();\n",
+          "new": "    let resource = entry\n        .get(GRANT_KEYS[0])?\n        .to_string()\n        .trim_matches('\"')\n        .to_owned();\n"
         }
       ],
       "tests": [
@@ -2195,50 +2158,18 @@
     },
     {
       "id": "F-WC9-GRANTS-DUPLICATE",
-      "title": "the same module and name may be granted twice",
+      "title": "the same resource may be granted twice",
       "command": "lab",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "        if granted.contains(&grant) {\n            return Err(GrantsReason::DuplicateGrant {\n                module: grant.module,\n                name: grant.name,\n            });\n        }\n",
+          "old": "        if granted.iter().any(|seen| seen.resource == grant.resource) {\n            return Err(GrantsReason::DuplicateResource {\n                resource: grant.resource,\n            });\n        }\n",
           "new": ""
         }
       ],
       "tests": [
-        "grants_file_refusals_keep_their_reason"
-      ]
-    },
-    {
-      "id": "F-WC9-UNUSED-KEEPS-USED",
-      "title": "the unused grants keep the grants the module imports",
-      "command": "lab",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "        .filter(|grant| !imports.contains(grant))\n",
-          "new": "        .filter(|_| true)\n"
-        }
-      ],
-      "tests": [
-        "unused_grants_excludes_linked_and_preserves_file_order"
-      ]
-    },
-    {
-      "id": "F-WC9-UNUSED-REORDER",
-      "title": "the unused grants come back in reverse file order",
-      "command": "lab",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "        .cloned()\n        .collect()\n",
-          "new": "        .cloned()\n        .rev()\n        .collect()\n"
-        }
-      ],
-      "tests": [
-        "unused_grants_excludes_linked_and_preserves_file_order"
+        "resource_granted_twice_is_refused"
       ]
     },
     {
@@ -2567,55 +2498,6 @@
       ],
       "tests": [
         "lane_files_reads_names_git_would_quote"
-      ]
-    },
-    {
-      "id": "F-WC9-RUN-DROPS-GRANTS",
-      "title": "run passes an empty list in place of input.granted to verify_bundle, so a granted import is refused",
-      "command": "lab",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "../../lab/wasm-capsule/tools/src/run.rs",
-          "old": "verify_bundle(input.bundle, input.signature, input.accepted, input.granted)",
-          "new": "verify_bundle(input.bundle, input.signature, input.accepted, &[])"
-        }
-      ],
-      "tests": [
-        "runner_uses_only_explicit_inputs",
-        "granted_import_is_linked"
-      ]
-    },
-    {
-      "id": "F-WC-B4-UNTYPED-LINKED",
-      "title": "verify_checked drops the typed-entry check, so a granted import with no typed lab operation is linked",
-      "command": "lab",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "    if let Some(import) = imports\n        .iter()\n        .find(|import| lab_operation(import).is_none())\n    {\n        return Err(VerifyRefusal::UntypedImport {\n            module: import.module.clone(),\n            name: import.name.clone(),\n        });\n    }\n",
-          "new": ""
-        }
-      ],
-      "tests": [
-        "module_import_with_no_typed_operation_is_refused"
-      ]
-    },
-    {
-      "id": "F-WC-B4-RIGHT-IGNORED",
-      "title": "the grants reader drops the right comparison, so a grant naming a right its operation does not need is read",
-      "command": "lab",
-      "expect": "caught",
-      "edits": [
-        {
-          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "        check_right(&grant, right)?;\n",
-          "new": "        let _ = (check_right, right);\n"
-        }
-      ],
-      "tests": [
-        "grant_naming_a_right_the_operation_does_not_need_is_refused"
       ]
     },
     {
@@ -2998,14 +2880,14 @@
     },
     {
       "id": "F-WC-B4-TYPE-GAP-HIDDEN",
-      "title": "README's import type gap loses its not, so it calls a typed lab operation a type check",
+      "title": "README's import type gap loses its not, so it calls a linked Bus interface type-checked",
       "command": "lab",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/wasm-capsule/README.md",
-          "old": "so a typed lab operation is not a type check; this blocks",
-          "new": "so a typed lab operation is a type check; this blocks"
+          "old": "so a linked Bus interface is not type-checked; this blocks",
+          "new": "so a linked Bus interface is type-checked; this blocks"
         }
       ],
       "tests": [
@@ -3047,14 +2929,14 @@
     },
     {
       "id": "F-WC-ENGINE-RUN-MODULE-DOC",
-      "title": "the run.rs module doc goes back to the base's wording, so no module doc line says test-only, not endorsed",
+      "title": "the run.rs module doc's engine label becomes test-only; neither is endorsed, so no module doc line says test-only, not endorsed",
       "command": "lab",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/run.rs",
-          "old": "//! machine, not the Component ABI. Both engines are test-only, not endorsed.\n//! The runner gives the engines no host function of its own, so a granted\n//! import is only let through verification, not hosted (wc-009b). The grants\n//! are a lab stand-in, not admission.",
-          "new": "//! machine, not the Component ABI. Both engines are test-only; neither is\n//! endorsed. The runner gives the engines no host function of its own, so a\n//! granted import is only let through verification, not hosted (wc-009b). The\n//! grants are a lab stand-in, not admission."
+          "old": "//! machine, not the Component ABI. Both engines are test-only, not endorsed.\n//! The runner gives the engines no host function of its own, and no import\n//! reaches them: the module it runs imports nothing (task 065). The Bus path\n//! is the lab's only import path, and no engine hosts it yet (wc-009b).",
+          "new": "//! machine, not the Component ABI. Both engines are test-only; neither is endorsed.\n//! The runner gives the engines no host function of its own, and no import\n//! reaches them: the module it runs imports nothing (task 065). The Bus path\n//! is the lab's only import path, and no engine hosts it yet (wc-009b)."
         }
       ],
       "tests": [
@@ -3085,8 +2967,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/README.md",
-          "old": "outside the 192",
-          "new": "outside the 191"
+          "old": "outside the 188",
+          "new": "outside the 187"
         }
       ],
       "tests": [
@@ -3161,6 +3043,54 @@
       "tests": [
         "bus_interfaces_are_the_runtime_admission_list",
         "bus_imports_refuses_an_interface_outside_bus_v1_by_name"
+      ]
+    },
+    {
+      "id": "F-WC9B-CORE-IMPORT-GRANTED",
+      "title": "the core audit gets env.f as a declared import in place of the empty list, so the env.f module reaches both engines",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    audit(module, &[]).map_err(VerifyRefusal::Audit)?;\n",
+          "new": "    audit(\n        module,\n        &[wasm_capsule_audit::DeclaredImport {\n            module: \"env\".into(),\n            name: \"f\".into(),\n        }],\n    )\n    .map_err(VerifyRefusal::Audit)?;\n"
+        }
+      ],
+      "tests": [
+        "core_module_import_is_refused_before_any_engine_start"
+      ]
+    },
+    {
+      "id": "F-WC9B-GRANT-ACTIONS-EMPTY",
+      "title": "the grants reader skips the empty-actions refusal, so a grant naming no action is read",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    if grant.actions.is_empty() {\n        return Err(GrantsReason::EmptyActions {\n            resource: grant.resource,\n        });\n    }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "grant_with_no_actions_is_refused"
+      ]
+    },
+    {
+      "id": "F-WC9B-RETIRED-TABLE-BACK",
+      "title": "a LAB_OPERATIONS table naming env.f comes back in tools/src/verify.rs",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "/// The Bus v1 interfaces a capsule may import",
+          "new": "pub const LAB_OPERATIONS: [(&str, &str); 1] = [(\"env\", \"f\")];\n\n/// The Bus v1 interfaces a capsule may import"
+        }
+      ],
+      "tests": [
+        "retired_core_grant_names_are_gone_from_the_tools"
       ]
     }
   ]

@@ -1594,3 +1594,67 @@
   Gate run after all edits: `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check` clean; `cargo test
   --locked` 137 passed, 3 ignored, 0 failed (`tests/run.rs` 74 passed, 2 ignored; `tests/verify.rs` 29 passed); then
   `git status --porcelain -- elastos/` printed nothing.
+- 065 (wc-009b, second half; M1 B4 and C0 lab half, P10). Flint's INBOX note (28 Oct 00:30) relays Rong's WC-1 (High:
+  `env.f` is a core import the Runtime refuses) and WC-2 (Medium: "lab grants name `resource` and `actions` exactly as
+  `capability-request`, labelled 'lab stand-in, not admission'"). Base `a05945ca13eedff49040690f38c5d3ec041588cb`
+  (064's tip), cargo and rustc 1.91.0. `tools/src/verify.rs`: `verify_checked` and `verify_bundle` lose `granted`;
+  the one audit call is `audit(module, &[])`. Removed: `Effect`, `LabOperation`, `LAB_OPERATIONS`, `lab_operation`,
+  `VerifyRefusal::UntypedImport`, `grants_not_imported`, `VerifiedBundle::imports`/`unused_grants` and their fields,
+  the `DeclaredImport` re-export, `check_right` and `GrantsReason::RightNotNeeded`. Grants v3: `GRANTS_SCHEMA =
+  "wc-009.lab-grants/v3"` (label unchanged), keys `schema`, `label`, `grants`; `pub struct LabGrant { pub resource:
+  String, pub actions: Vec<String> }`; `read_grants -> Result<Vec<LabGrant>, GrantsRefusal>` in file order.
+  `GrantsReason`: `ImportsNotAList` renamed `GrantsNotAList`, `EntryNotATriple` renamed `EntryNotAGrant`,
+  `DuplicateGrant` renamed `DuplicateResource` (texts name `grants` and a resource); new `RetiredKey`, `EmptyResource`,
+  `EmptyActions`, `EmptyAction`, `RepeatedAction`, each its own text. `tools/src/run.rs`: `RunInput` loses `granted`,
+  `run` calls `verify_bundle(input.bundle, input.signature, input.accepted)`, and `TwoEngineRun` loses `linked` and
+  `unused_grants`; module docs of both files no longer grant, link, type or give a right to a core import. Nothing in
+  `run` reads the grants file. The passed-run receipt is unchanged: it never held the linked or unused-grant lines
+  (`tools/src/receipt.rs` is not edited, and the receipt tests pass unchanged).
+  Tests renamed or removed, each with one reason. Renamed: `declared_not_granted_import_refuses_instantiation_by_name`
+  → `core_module_import_is_refused_before_any_engine_start` (same assertions; there is no grant to leave out). Removed
+  with their rules: `a_grant_reaches_the_audit_unchanged` (no caller grants), `unused_grants_excludes_linked_and_preserves_file_order`
+  and `grant_for_an_import_the_module_does_not_have_links_nothing_and_is_reported` (no unused list),
+  `granted_import_is_linked` (no core import can be granted; the refusal is the renamed test),
+  `valid_signature_with_empty_grants_file_links_nothing` (`run` reads no grants file and links nothing; the zero-import
+  run is `zero_grants_zero_imports_runs`), `module_import_with_no_typed_operation_is_refused` (no typed table; an
+  `env.g` import is refused by the audit like any core import), `grant_naming_a_right_the_operation_does_not_need_is_refused`
+  (no right), and `readme_lists_each_typed_lab_operation` (no table to list). Changed: the zero-grants run tests drop
+  their `linked()`/`unused_grants()` checks and their grants file; `verifier_uses_manifest_entrypoint` keeps only its
+  refusal; `verified_entrypoint_is_the_audited_module` uses a type-section-only module with no import as `main.wasm`;
+  `verifier_audits_the_checked_bytes`, `signed_bundle_verifies_against_its_key` and
+  `the_real_capsule_passes_the_verifier` drop `imports()`; `verified_bundle_is_sealed` lists eight public functions;
+  `runner_uses_only_explicit_inputs` holds the three-argument call; `grants_file_refusals_keep_their_reason` is v3 (21
+  cases); `host_secret_probe_imports_are_refused_before_any_engine_starts` keeps its undeclared case and loses its
+  `call`-grant case (no core grant exists); `run_with_grants`/`GrantsRun` became `run_counting`/`CountingRun`.
+  `tests/common/grants.rs` keeps `IMPORTING_MODULE`, `importing`, `write_grants` and a v3 `grants_file`. New:
+  `grants_file_names_resource_and_actions_as_capability_request`, `grant_with_an_empty_resource_is_refused`,
+  `grant_with_no_actions_is_refused`, `grant_with_an_empty_action_is_refused`, `grant_naming_an_action_twice_is_refused`,
+  `resource_granted_twice_is_refused`, `grant_with_a_retired_right_or_module_key_is_refused` and
+  `retired_core_grant_names_are_gone_from_the_tools` (`tests/verify.rs`). Task 046's gap sentence reworded in README,
+  ADOPTION and `tests/docs.rs`; the wc-009a and typed-operations sections in README and ADOPTION each get the
+  "Retired by task 065" first line; 064's README section says `env.f` is retired. My first gate run failed two docs
+  guards on two of my own new README lines (one said "endorsed" without "not endorsed", one named the type-check
+  falsifier with no "not"); both lines reworded, which also shows the two guards still work.
+  Falsifiers: removed F-WC4e, F-WC9-GRANT-INJECT, F-WC9-UNUSED-KEEPS-USED, F-WC9-UNUSED-REORDER, F-WC9-RUN-DROPS-GRANTS,
+  F-WC-B4-UNTYPED-LINKED and F-WC-B4-RIGHT-IGNORED (rules gone; one line each in README). New F-WC9B-CORE-IMPORT-GRANTED
+  (the `DeclaredImport` written as `wasm_capsule_audit::DeclaredImport`, since `verify.rs` no longer imports it),
+  F-WC9B-GRANT-ACTIONS-EMPTY and F-WC9B-RETIRED-TABLE-BACK (a third, so the source scan has a runner entry).
+  Re-anchored: F-WC4c, F-WC4d, F-WC4-AUDIT-REASON, F-WC4-ORDER-AUDIT-FIRST, F-WC4-SEALED-NEW, F-WC4-SEALED-MUT,
+  F-WC4-SECOND-AUDIT, F-WC9-LINK-ALL, F-WC9-GRANTS-IMPORTS-NOT-LIST, F-WC9-GRANTS-ENTRY-NOT-STRING,
+  F-WC9-GRANTS-DUPLICATE, F-WC5a, F-WC5-VERIFY-TWICE, F-WC5-QUERY-BEFORE-VERIFY, F-WC-ENGINE-RUN-MODULE-DOC,
+  F-WC-B4-TYPE-GAP-HIDDEN, F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT (188). Every anchor is found exactly once
+  (checked over all 188 entries). The JSON was written back with ASCII escapes, and the two hand escapes the file
+  holds (the `B` of the PEM header in F-WC4g's plant and the hyphen of the retired label in
+  F-WC3-RETIRED-LABEL-DOC's plant, each written as a JSON `u00XX` escape) were put back, so no other entry
+  changed. Canonical runner from the repo root, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I
+  examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC9 F-WC-B4 F-WC4 F-WC5a
+  F-WC5-VERIFY-TWICE F-WC5-QUERY-BEFORE-VERIFY F-WC-ENGINE-RUN-MODULE-DOC F-WC-README-COUNT F-WC-README-OUTSIDE-COUNT`:
+  "baseline: 28 named tests pass without an edit, 0 do not", "summary: 51 CAUGHT of 51", exit 0, no
+  `*.falsify-original` left. The 51: all 22 F-WC4 entries, F-WC5a, F-WC5-VERIFY-TWICE, F-WC5-QUERY-BEFORE-VERIFY,
+  F-WC9-LINK-ALL, the 13 F-WC9-GRANTS-*, the three F-WC9B0-*, F-WC9B-BUS-LIST-WIDENED, the three new F-WC9B-*,
+  F-WC-B4-TYPE-GAP-HIDDEN, F-WC-B4-TYPE-CHECK-CLAIMED, F-WC-ENGINE-RUN-MODULE-DOC, F-WC-README-COUNT and
+  F-WC-README-OUTSIDE-COUNT. After the run, F-WC4c's title alone was shortened (no anchor change). README totals: 188
+  entries, 125 runner-caught, 68 hand-proven.
+  Gate run after all edits: `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check` clean; `cargo test
+  --locked` 137 passed, 3 ignored, 0 failed (`tests/run.rs` 70 passed, 2 ignored; `tests/verify.rs` 34 passed;
+  `tests/docs.rs` 5 passed).

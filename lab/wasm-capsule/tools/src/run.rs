@@ -132,16 +132,17 @@
 //! launch path, not lab tooling. It is no admission or launch decision.
 //!
 //! wc-005b: [`run`] is the two-engine runner. It takes a [`RunInput`]: the
-//! bundle path, its in-memory name signature, the accepted signer DIDs, the
-//! granted imports (wc-009a: the caller's list from the lab grants file, read
-//! by [`crate::verify::read_grants`]), both engine program paths, a work root
-//! and (task 043) the run control both module runs get. In order:
+//! bundle path, its in-memory name signature, the accepted signer DIDs, both
+//! engine program paths, a work root and (task 043) the run control both
+//! module runs get. Task 065: it takes no granted imports, since no core-module
+//! import is granted, and it reads no lab grants file. In order:
 //!
 //! 0. task 043: a zero run budget is refused, before anything else;
-//! 1. wc-004's [`verify_bundle`] is called once, with the granted imports
-//!    passed unchanged. A refusal is returned unchanged; nothing is written and
-//!    no engine is started, so a module with an import that is not granted
-//!    never reaches an engine; task 033: then the verified module's memory
+//! 1. wc-004's [`verify_bundle`] is called once. A refusal is returned
+//!    unchanged; nothing is written and no engine is started, so a module with
+//!    any core import (task 065: none is granted) never reaches an engine, and
+//!    is refused with the audit's own `undeclared import <module>.<name>`;
+//!    task 033: then the verified module's memory
 //!    check, the one [`run_engine`] calls; a refusal is returned as
 //!    [`TwoEngineRefusal::Memory`], and no engine process starts, not even a
 //!    `--version` query;
@@ -167,8 +168,7 @@
 //! not started after `wasmtime` is refused. So two engines that fail the same
 //! way are refused with the first failure's own reason, never as equal
 //! outputs. Success returns the verified lab CID, both observed versions, both
-//! exit statuses and both stdouts, plus the verifier's linked imports and
-//! unused grants; [`crate::receipt`] renders the first five. The
+//! exit statuses and both stdouts; [`crate::receipt`] renders all five. The
 //! versions are what the engines printed, never configured, and none of them
 //! is part of the lab CID. Since task 038 an engine upgrade is refused before
 //! any module run; changing a pin is a deliberate edit after a fresh probe.
@@ -185,12 +185,12 @@
 //!
 //! The two-engine result is a behaviour proof on one core module on this
 //! machine, not the Component ABI. Both engines are test-only, not endorsed.
-//! The runner gives the engines no host function of its own, so a granted
-//! import is only let through verification, not hosted (wc-009b). The grants
-//! are a lab stand-in, not admission.
+//! The runner gives the engines no host function of its own, and no import
+//! reaches them: the module it runs imports nothing (task 065). The Bus path
+//! is the lab's only import path, and no engine hosts it yet (wc-009b).
 
 use crate::bundle::{write_new_file, Reason as WriteReason, RunRefusal as WriteRefusal};
-use crate::verify::{verify_bundle, DeclaredImport, VerifiedBundle, VerifyRefusal};
+use crate::verify::{verify_bundle, VerifiedBundle, VerifyRefusal};
 use capsule_identity::{LabCid, NameSignature};
 use std::error::Error;
 use std::fmt;
@@ -1158,9 +1158,6 @@ pub struct RunInput<'a> {
     pub signature: Option<&'a NameSignature>,
     /// The accepted signer DIDs.
     pub accepted: &'a [String],
-    /// The granted imports, from the lab grants file: a lab stand-in, not
-    /// admission.
-    pub granted: &'a [DeclaredImport],
     /// The absolute path of the `wasmtime` program.
     pub wasmtime: &'a Path,
     /// The absolute path of the `wasmer` program.
@@ -1173,8 +1170,7 @@ pub struct RunInput<'a> {
 }
 
 /// A two-engine run that passed: the verified lab CID, each engine's observed
-/// version and exit status, both stdouts, the linked imports and the unused
-/// grants; wc-010c: the declared `memory_mb` the module runs were given and
+/// version and exit status and both stdouts; wc-010c: the declared `memory_mb` the module runs were given and
 /// each engine's memory cap argument, as its [`EngineRun`] read it back from
 /// the argv it was started with; task 034: each engine's module memory
 /// maximum, as its own [`run_engine`] call's memory check returned it; task
@@ -1191,8 +1187,6 @@ pub struct TwoEngineRun {
     statuses: [ExitStatus; 2],
     wasmtime: Vec<u8>,
     wasmer: Vec<u8>,
-    linked: Vec<DeclaredImport>,
-    unused_grants: Vec<DeclaredImport>,
     memory_mb: u32,
     memory_caps: [Option<String>; 2],
     memory_maximums: [Option<u64>; 2],
@@ -1237,18 +1231,6 @@ impl TwoEngineRun {
             Engine::Wasmtime => self.statuses[0],
             Engine::Wasmer => self.statuses[1],
         }
-    }
-
-    /// The imports both in the signed module and granted: the verifier's
-    /// `imports()`, the audit's own list.
-    pub fn linked(&self) -> &[DeclaredImport] {
-        &self.linked
-    }
-
-    /// The grants the module does not import, in file order: the verifier's
-    /// `unused_grants()`.
-    pub fn unused_grants(&self) -> &[DeclaredImport] {
-        &self.unused_grants
     }
 
     /// The declared `memory_mb` the module runs were given: the manifest's
@@ -1361,7 +1343,7 @@ pub fn run(input: &RunInput) -> Result<TwoEngineRun, TwoEngineRefusal> {
         check_cancel(input.control, engine, program)?;
         query_version(engine, program)
     };
-    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, input.granted)
+    let bundle = verify_bundle(input.bundle, input.signature, input.accepted)
         .map_err(TwoEngineRefusal::Verify)?;
     check_module_memory(&bundle).map_err(TwoEngineRefusal::Memory)?;
     let wasmtime_version =
@@ -1388,8 +1370,6 @@ pub fn run(input: &RunInput) -> Result<TwoEngineRun, TwoEngineRefusal> {
         statuses,
         wasmtime,
         wasmer,
-        linked: bundle.imports().to_vec(),
-        unused_grants: bundle.unused_grants().to_vec(),
         memory_mb,
         memory_caps,
         memory_maximums,
