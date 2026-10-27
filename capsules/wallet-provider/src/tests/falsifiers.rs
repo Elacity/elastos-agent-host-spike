@@ -131,9 +131,13 @@ use std::process::Command;
 /// rules list reads "with no rules"; WP103 skips a rule that is not a string,
 /// so the right with a non-string rule passes the check; and WP104 drops only
 /// the pin table's `startup-sysctl` row, so the sysctl read claimed by
-/// `storage` passes. `declared_rights_trace_refuses_each_bad_input` fails on
-/// each case.
-const EXPECTED_FALSIFIERS: usize = 102;
+/// `storage`. `declared_rights_trace_refuses_each_bad_input` fails on
+/// each case. Task 089's WP105 makes the lab generator `generate_profile` emit
+/// `(allow file-read* (literal "/private/var/cc-confine-generated"))` after the
+/// contract head, so
+/// `generated_did_and_wallet_profiles_match_their_committed_oracles` fails
+/// because neither declared-rights file names that rule.
+const EXPECTED_FALSIFIERS: usize = 103;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
