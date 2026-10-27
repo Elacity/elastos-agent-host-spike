@@ -7017,3 +7017,174 @@ The shell refusal is removed. `visible` was left as it is.
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `standin-runtime/mod.rs:146` decides from stored grants. This change adds no capsule import. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:2146` `standin_sibling_cannot_use_the_grant`. The planted `return Ok(())` fails that assertion and the restored test passes. |
 | 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:147` reads grants and does not read instances. `admit_resident` at `:166` still admits a path on its own. |
+
+## 049 — A12: a stopped stand-in run leaves no live grant
+
+049: `standin_a12_census` reads the shell `all_sessions_live` view, passes that body to the one grader `grants::live_grant_state`, reads the shell capsule list, and then returns the one physical census `census::cleanup`'s `Err` or `Ok(())` only for a line with `root checks PASS`. `standin_stopped_run_leaves_no_live_grant` admits `/capsules/read-shared` twice, starts both, seeds `req-1` on `component-1` and `req-2` on `component-2`, stops both, and proves the empty live view, the `stopped` entries and the physical census. A second stand-in with no seed proves the live-status refusal. The test uses one `ThrowawayHome` and one free `127.0.0.1:0` port. It adds no `StandIn` method, no second life filter and no second session compare. `fn live_grant_state` becomes `pub(super) fn live_grant_state`; its body is unchanged. `falsifiers.json` gains `F-standin-a12-stub`, `F-standin-a12-skip-status` and `F-standin-a12-skip-cleanup`. `standin-runtime/mod.rs`, `src/census.rs`, `src/report.rs` and `GAPS.md` are unchanged. `run_leaves_no_live_grant` stays `#[ignore = "blocked: AC-021-GRANTS"]`. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+The journey, read only at `35697329be0aad89eb68d0adf78aa94d24751317:lab/resident-instances/SPEC.md`:
+
+> **A12.** Launch `read-shared` twice, grant both, and wait for both `running`.
+> The pending view saw both requests, and the live-grant view shows a grant for
+> each session. These are the census's positive controls. Stop both. The census
+> then requires zero live grants as well.
+
+> **Census.** No launched instance is `starting`, `running` or `stopping`. No
+> pending request comes from a journey session. In A6 and A12, no live grant
+> belongs to a journey session. No process below the operator pid is new since
+> the baseline. `GET /api/health` is still ok.
+
+This task takes the grant view and the instance-status check, plus the socket and file census that stays with this lane. The pending-request sentences and the operator process-tree walk are not this task. The test asserts the stand-in did the work. It scores no A12 on the real Runtime.
+
+### Hand-run falsifiers
+
+Each plant ran alone and was restored before the next. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects standin_stopped_run_leaves_no_live_grant -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true` and lane `target/host` plus `target/host-build`. After the last restore, the full gate passed and `git diff -- lab/agent-conformance/standin-runtime/mod.rs` printed nothing. Each planted run retained its throwaway root; those three roots were removed after this record. Each plant compiled.
+
+F-standin-a12-stub. Planted exit 101 in 1.78 seconds. Restored exit 0 in 1.73 seconds. Assertion: `tests/effects.rs:1169:5` `the stand-in keeps the seeded grants live before the stops: Ok(())`.
+
+Old:
+
+```text
+fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Result<(), String> {
+```
+
+New:
+
+```text
+fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Result<(), String> {
+    return Ok(());
+```
+
+The start of `standin_a12_census` returns `Ok(())` before the grant list is read.
+
+F-standin-a12-skip-status. Planted exit 101 in 1.57 seconds. Restored exit 0 in 1.73 seconds. Assertion: `tests/effects.rs:1179:5` `the stand-in refuses a running instance in the census: Ok(())`.
+
+Old:
+
+```text
+        if status == "starting" || status == "running" || status == "stopping" {
+```
+
+New:
+
+```text
+        if false && (status == "starting" || status == "running" || status == "stopping") {
+```
+
+The live-status condition never refuses a `running` instance.
+
+F-standin-a12-skip-cleanup. Planted exit 101 in 1.46 seconds. Restored exit 0 in 1.73 seconds. Assertion: `tests/effects.rs:1221:5` `the stand-in refuses the temp leftover: Ok(())`.
+
+Old:
+
+```text
+    match census::cleanup(home, port) {
+```
+
+New:
+
+```text
+    match Ok::<String, String>("root checks PASS".to_owned()) {
+```
+
+The physical census call is replaced by a passing string.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`. Both commands stayed inside 600 seconds. The locked suite passed on the first run, so there was no census rerun.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.14 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 260.95 seconds. The effects target passed 58 tests, 0 failed, 12 ignored, in 203.63 seconds. The runtime target passed 10 tests, 0 failed, 2 ignored, in 16.77 seconds. The report target passed 23 tests.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `tests/effects.rs:1070` reads the shell live view. The seeded resource is a Public path, not a code or content identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | The change is test code on the lab stand-in. It opens one loopback port and one throwaway home. |
+| 3. A second path or a second copy of one rule? | No | `tests/common/grants.rs:1628` is the one grant grader. `tests/effects.rs:1091` calls the one physical census `census::cleanup`. `standin-runtime/mod.rs` keeps its one life filter. |
+| 4. Runtime core grows? | No | No `elastos/` or `capsules/` edit. The stand-in stays in its lab folder. |
+| 5. Refusals deny by default with a clear reason? | Yes | `tests/effects.rs:1087` returns `instance still live: <status>`, and `:1091` returns the census `Err` line. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The test seeds the stand-in and adds no capsule import. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/effects.rs:1099` `standin_stopped_run_leaves_no_live_grant`. Each of the three plants fails that named test and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | `tests/effects.rs:1138` seeds a grant per session, and `:1184` stops an instance through `delete_capsule`. The grant view and the instance list stay separate reads. |
+
+### Gate failure after submission, and the one allowed rerun
+
+The supervisor's `test` check ran `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0` and exited 101. The effects target reported 57 passed, 1 failed, 12 ignored in 235.96 seconds. The only failure was `agent_cannot_read_human_space_without_grant`, and its census line was `cleanup census: FAIL retained:target/home-79868-1793107816321670000-2; process leftover; processes:1 paths:["stdout-6"] API sockets:0 temp:0 paths:[]; excludes only test PID; outside-root:BLOCKED(AC-006-STORAGE)`. That is acceptance 6's allowed case: an allowed named test and a process-leftover path matching `stdout-<digits>`. The root stayed at `lab/agent-conformance/target/home-79868-1793107816321670000-2`.
+
+The rerun used the same command and environment, with lane `target/host` and `target/host-build`, and exited 101 in 283.36 seconds. The effects target reported 57 passed, 1 failed, 12 ignored in 230.81 seconds. `standin_stopped_run_leaves_no_live_grant` passed. The only failure was `process_isolation::parallel_instances_complete_independently`, at `tests/common/parallel.rs:88:14`, with `cleanup census: FAIL retained:target/home-68200-1793108400375307000-168; process leftover; processes:1 paths:["home/Library/Application Support/elastos/host-process.lock"] API sockets:0 temp:0 paths:[]; excludes only test PID; outside-root:BLOCKED(AC-006-STORAGE)`. That test name and that path are outside acceptance 6's allowed list, so the rerun failed and work stops here. The retained roots are `lab/agent-conformance/target/home-68200-1793108400375307000-168` through `-172`. No live holder remained on either retained root when inspected after the runs. No census or operator edit was made.
+
+### Fixture read-bound fix, and the passing gate
+
+A later supervisor `test` check exited 101 in `grants::tests::client_session_credentials_are_guarded`. The test expected `Err("invalid fixture authorization header")` and got `Err("could not bound fixture read")` at `tests/common/grants.rs:2641:21`. The one `http` read loop set the read timeout again on every iteration. After the peer closed the connection, that repeated `set_read_timeout` could fail under load, so the invalid status token never reached `remember_capability`.
+
+The fix in `http` sets one read timeout per response, retries `Interrupted`, and keeps the total bound with a post-read deadline check. Each refusal keeps its own string: `could not bound fixture read` only for a non-interrupted or repeated set failure, and `fixture HTTP response exceeded its bound` after the deadline. The synthetic test now reaches the expected token refusal. This is a second `tests/common/grants.rs` change beyond `pub(super) fn live_grant_state`; the gate failure required it. `fn live_grant_state` and its body stay as specified.
+
+Old:
+
+```text
+    let mut bytes = Vec::new();
+    loop {
+        let remaining = bound
+            .checked_sub(started.elapsed())
+            .filter(|d| !d.is_zero())
+            .ok_or("fixture HTTP response exceeded its bound")?;
+        stream
+            .set_read_timeout(Some(remaining))
+            .map_err(|_| "could not bound fixture read")?;
+        let mut chunk = [0; 4096];
+        let size = stream
+            .read(&mut chunk)
+            .map_err(|_| "fixture response read failed")?;
+        if size == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..size]);
+        if bytes.len() > 1024 * 1024 {
+            return Err("fixture HTTP response exceeded size bound");
+        }
+    }
+```
+
+New:
+
+```text
+    let read_bound = bound
+        .checked_sub(started.elapsed())
+        .filter(|d| !d.is_zero())
+        .ok_or("fixture HTTP response exceeded its bound")?;
+    let mut attempts = 0;
+    while let Err(error) = stream.set_read_timeout(Some(read_bound)) {
+        if error.kind() != std::io::ErrorKind::Interrupted || attempts == 2 {
+            return Err("could not bound fixture read");
+        }
+        attempts += 1;
+    }
+    let mut bytes = Vec::new();
+    loop {
+        let mut chunk = [0; 4096];
+        let size = stream
+            .read(&mut chunk)
+            .map_err(|_| "fixture response read failed")?;
+        if size == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..size]);
+        if bytes.len() > 1024 * 1024 {
+            return Err("fixture HTTP response exceeded size bound");
+        }
+        if started.elapsed() >= bound {
+            return Err("fixture HTTP response exceeded its bound");
+        }
+    }
+```
+
+The failing test passed 10 standalone runs in a row after the fix, 0.16 to 0.18 seconds each.
+
+Gates after the fix, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`:
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.14 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 281.08 seconds. The effects target passed 58 tests, 0 failed, 12 ignored in 215.18 seconds; `grants::tests::client_session_credentials_are_guarded` and `standin_stopped_run_leaves_no_live_grant` passed. The runtime target passed 10 tests, 0 failed, 2 ignored in 14.53 seconds. The process-isolation target passed 9 tests. The report target passed 23 tests. The artifact target passed 7 tests. The build target passed 1 test. The lib target passed 31 tests. The probe unit target passed 3 tests.
+
+No `Cargo.toml` or `Cargo.lock` change.

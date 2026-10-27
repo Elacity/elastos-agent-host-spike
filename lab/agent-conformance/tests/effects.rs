@@ -2,10 +2,14 @@ mod common;
 #[path = "common/probe.rs"]
 mod probe;
 
+use agent_conformance::census;
 use agent_conformance::harness::ThrowawayHome;
 use agent_conformance::identity::{Observation, StagedProbe, MANIFEST};
 use agent_conformance::runtime::runtime_under_test;
+use agent_conformance::standin_runtime::{Caller as StandInCaller, Life, StandIn, Start};
 use probe::{build_probe, Effect};
+use serde_json::json;
+use std::collections::BTreeSet;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -1059,4 +1063,170 @@ fn exercise_owned_roots() -> Result<(), &'static str> {
 #[ignore = "blocked: AC-039-OWNED-ROOT"]
 fn instance_writes_only_under_own_storage_root() {
     exercise_owned_roots().expect("Runtime refuses a sibling write under the other owned root");
+}
+
+fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Result<(), String> {
+    let view = standin
+        .get_capability_list(StandInCaller::Shell, Some("all_sessions_live"))
+        .map_err(|(_, reason)| reason)?;
+    match grants::live_grant_state(&view) {
+        Ok("pending:0 grants:0") => {}
+        Ok(state) => return Err(state.to_owned()),
+        Err(reason) => return Err(reason.to_owned()),
+    }
+    let listed = standin
+        .get_capsules(StandInCaller::Shell)
+        .map_err(|(_, reason)| reason)?;
+    let capsules = listed["capsules"]
+        .as_array()
+        .ok_or("capsule list requires a capsule array")?;
+    for capsule in capsules {
+        let status = capsule["status"]
+            .as_str()
+            .ok_or("capsule entry requires a status")?;
+        if status == "starting" || status == "running" || status == "stopping" {
+            return Err(format!("instance still live: {status}"));
+        }
+    }
+    match census::cleanup(home, port) {
+        Ok(line) if line.contains("root checks PASS") => Ok(()),
+        Ok(line) => Err(line),
+        Err(line) => Err(line),
+    }
+}
+
+#[test]
+fn standin_stopped_run_leaves_no_live_grant() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("the stand-in run binds one loopback port");
+    let port = listener
+        .local_addr()
+        .expect("the stand-in run reads its port")
+        .port();
+    drop(listener);
+    let home = ThrowawayHome::new().expect("the stand-in run uses one throwaway home");
+    let launch_two = |standin: &mut StandIn| -> Vec<String> {
+        standin
+            .admit_resident("/capsules/read-shared", "read-shared", Start::Ok)
+            .expect("the stand-in admits read-shared");
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let launch = standin
+                .post_capsules(
+                    StandInCaller::Shell,
+                    &json!({"path": "/capsules/read-shared"}),
+                )
+                .expect("the stand-in launches the admitted path");
+            let id = launch["id"]
+                .as_str()
+                .expect("the stand-in names the launched instance")
+                .to_owned();
+            standin
+                .finish_start(&id)
+                .expect("the stand-in finishes start");
+            ids.push(id);
+        }
+        ids
+    };
+    let mut stopped_run = StandIn::new();
+    assert_eq!(
+        launch_two(&mut stopped_run),
+        vec!["component-1".to_owned(), "component-2".to_owned()],
+        "the stand-in numbers the two launches"
+    );
+    for (request_id, session_id) in [("req-1", "component-1"), ("req-2", "component-2")] {
+        stopped_run.seed_grant(
+            request_id,
+            session_id,
+            "localhost://Public/resident-instances/shared.txt",
+            "read",
+            "session",
+            0,
+            Life::Live,
+            false,
+        );
+    }
+    let view = stopped_run
+        .get_capability_list(StandInCaller::Shell, Some("all_sessions_live"))
+        .expect("the stand-in returns the shell live view");
+    let requests: BTreeSet<&str> = view["capabilities"]
+        .as_array()
+        .expect("the stand-in returns a capability list")
+        .iter()
+        .map(|grant| {
+            grant["request_id"]
+                .as_str()
+                .expect("the stand-in names each live grant")
+        })
+        .collect();
+    assert_eq!(
+        requests,
+        BTreeSet::from(["req-1", "req-2"]),
+        "the stand-in lists exactly the two seeded grants"
+    );
+    let census = standin_a12_census(&stopped_run, &home, port);
+    assert!(
+        matches!(&census, Err(reason) if reason.contains("live grant leftover")),
+        "the stand-in keeps the seeded grants live before the stops: {census:?}"
+    );
+    let mut running_run = StandIn::new();
+    assert_eq!(
+        launch_two(&mut running_run),
+        vec!["component-1".to_owned(), "component-2".to_owned()],
+        "the stand-in numbers the second run's launches"
+    );
+    let census = standin_a12_census(&running_run, &home, port);
+    assert!(
+        matches!(&census, Err(reason) if reason.contains("instance still live: running")),
+        "the stand-in refuses a running instance in the census: {census:?}"
+    );
+    stopped_run
+        .delete_capsule(
+            StandInCaller::Shell,
+            "component-1",
+            &json!({"reason": "stop one"}),
+        )
+        .expect("the stand-in stops component-1");
+    stopped_run
+        .delete_capsule(
+            StandInCaller::Shell,
+            "component-2",
+            &json!({"reason": "stop two"}),
+        )
+        .expect("the stand-in stops component-2");
+    let listed = stopped_run
+        .get_capsules(StandInCaller::Shell)
+        .expect("the stand-in lists the stopped pair");
+    let capsules = listed["capsules"]
+        .as_array()
+        .expect("the stand-in returns a capsule list");
+    assert_eq!(
+        capsules.len(),
+        2,
+        "the stand-in keeps both stopped entries after the stops"
+    );
+    for capsule in capsules {
+        assert_eq!(
+            capsule["status"], "stopped",
+            "the stand-in reports a stopped entry as not live"
+        );
+    }
+    assert!(
+        standin_a12_census(&stopped_run, &home, port).is_ok(),
+        "the stand-in leaves no live grant, live instance or physical leftover after both stops"
+    );
+    let leftover = home.temp().join("a12-temp-leftover");
+    std::fs::write(&leftover, b"leftover").expect("the stand-in run plants one temp file");
+    let census = standin_a12_census(&stopped_run, &home, port);
+    assert!(
+        matches!(&census, Err(reason) if reason.contains("temp leftover")),
+        "the stand-in refuses the temp leftover: {census:?}"
+    );
+    std::fs::remove_file(&leftover).expect("the stand-in run removes its temp file");
+    assert!(
+        standin_a12_census(&stopped_run, &home, port).is_ok(),
+        "the stand-in returns to a clean physical census after the temp file is removed"
+    );
+    home.finish()
+        .expect("the stand-in run removes its throwaway home");
 }

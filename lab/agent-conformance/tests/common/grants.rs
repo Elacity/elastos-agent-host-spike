@@ -1625,7 +1625,7 @@ fn require_empty_pending(response: &Value) -> Result<()> {
     Ok(())
 }
 
-fn live_grant_state(response: &Value) -> Result<&'static str> {
+pub(super) fn live_grant_state(response: &Value) -> Result<&'static str> {
     let grants = response["capabilities"]
         .as_array()
         .ok_or("cleanup grant response requires a capability list")?;
@@ -1885,15 +1885,19 @@ fn http(
         .write_all(head.as_bytes())
         .and_then(|_| stream.write_all(&body))
         .map_err(|_| "fixture request write failed")?;
+    let read_bound = bound
+        .checked_sub(started.elapsed())
+        .filter(|d| !d.is_zero())
+        .ok_or("fixture HTTP response exceeded its bound")?;
+    let mut attempts = 0;
+    while let Err(error) = stream.set_read_timeout(Some(read_bound)) {
+        if error.kind() != std::io::ErrorKind::Interrupted || attempts == 2 {
+            return Err("could not bound fixture read");
+        }
+        attempts += 1;
+    }
     let mut bytes = Vec::new();
     loop {
-        let remaining = bound
-            .checked_sub(started.elapsed())
-            .filter(|d| !d.is_zero())
-            .ok_or("fixture HTTP response exceeded its bound")?;
-        stream
-            .set_read_timeout(Some(remaining))
-            .map_err(|_| "could not bound fixture read")?;
         let mut chunk = [0; 4096];
         let size = stream
             .read(&mut chunk)
@@ -1904,6 +1908,9 @@ fn http(
         bytes.extend_from_slice(&chunk[..size]);
         if bytes.len() > 1024 * 1024 {
             return Err("fixture HTTP response exceeded size bound");
+        }
+        if started.elapsed() >= bound {
+            return Err("fixture HTTP response exceeded its bound");
         }
     }
     response_json(&bytes)
