@@ -531,7 +531,8 @@ That argv is the one wc-005's discovery recorded for `wasmtime` 45.0.1 and
   work root); `<engine> still ran at its run budget of <n> ms: the runner
   stopped it with SIGKILL`; `the runner could not stop <engine> with SIGKILL:
   <OS error>`; `the runner could not wait for <engine>: <OS error>` (a failed
-  `try_wait`, after which the engine is stopped too, or a failed reap); and
+  poll, `reap`'s `wait4(pid, WNOHANG)` since task 062, after which the engine is
+  stopped too, or a failed reap after a kill, `Child::wait`); and
   `<engine>'s output could not be read: <OS error>`;
 - task 045: `the run on <engine> was cancelled by its caller: no engine starts
   after a cancel, and a running one is stopped with SIGKILL` (its path is the
@@ -543,8 +544,9 @@ caller passes it explicitly as `RunControl::new(budget)`: there is no default,
 and none is read from the environment or a file
 (`runner_uses_only_explicit_inputs`). `start_engine` starts the engine with the
 same argv, empty environment and null stdin as before, reads its stdout and
-stderr on a thread each (so a full pipe never blocks it), and polls `try_wait`
-every `WAIT_POLL` (10 ms) until the engine exits or the budget, counted from
+stderr on a thread each (so a full pipe never blocks it), and polls `reap`
+(`wait4(pid, WNOHANG)`, since task 062; task 043 polled `try_wait`) every
+`WAIT_POLL` (10 ms) until the engine exits or the budget, counted from
 just after the start, has passed. An engine that exits in time gives the same
 success or refusal as before. One still running at the budget is sent SIGKILL
 by the runner (`Child::kill`), reaped (`Child::wait`), both readers are joined,
@@ -1442,6 +1444,26 @@ runner refuses that run as `EngineFailed`. wasmtime's argv is unchanged. The
 claim stays "a self-contained capsule in a fixed flat space with a
 host-enforced cap", on this one Mac only. Both engines stay test-only; the
 engine choice is Anders's.
+
+**One test for the whole cap claim (task 063, wc-010c's cap half).** Flint's
+note (INBOX, 28 Oct 00:25) asked for one named test that runs the capsule on
+each engine with its declared cap and shows it never exceeds it.
+`capsule_stays_under_declared_memory_cap` (`tests/run.rs`) reads the rules of
+tasks 027, 033 and 034 through both receipts, per engine, and adds no rule:
+(a) the built capsule (declared 64 MB) through `run` on both real engines: its
+v4 receipt says `memory_cap_bytes: 67108864`, `wasmtime_memory_cap` is ENFORCED
+with `max-memory-size=67108864`, each `<engine>_memory_maximum_bytes` is at
+most 67108864, and each `<engine>_process_max_rss_bytes` line is there with
+task 062's label; (b) `grow_module(GROW_PAST_THE_CAP)`, one page past the
+declared 64 MB, through `run` on both real engines is refused because wasmtime
+traps (refusal receipt `reason: engine_failed`, `engine: wasmtime`, the trap
+in its detail), and the same module through `run_engine` on real wasmer prints
+`-1`; (c) a module whose maximum is 1025 pages, one over, through `run` on
+counting stand-ins is refused as `memory_maximum_above_declared`, and neither
+stand-in is started, not even for `--version`. RSS is never compared with the
+cap: it is engine process RSS, not linear memory (task 062's label). A missing
+real engine prints SKIPPED for (a) and (b) and the test prints no PASS; (c)
+needs no engine. Falsifier F-WC10G-CAP-RAISED ("## Falsifiers").
 
 ## Granted import hosting discovery (wc-009b0)
 
@@ -2647,8 +2669,20 @@ module maximum lines"). Both new tests run a bundle signed by
 
 The v3 text in the three updated tests: the zero-memory `MODULE` gives the
 `none` line on both engines (`receipt_records_observed_engine_versions`,
-`receipt_records_the_declared_memory_cap`, now 16 lines), and the real capsule
+`receipt_records_the_declared_memory_cap`, now 18 lines, the v4 count since
+task 062), and the real capsule
 gives `67108864` on both (`real_receipt_names_both_installed_engines`).
+
+Task 063, the cap half of wc-010c (`tests/run.rs`; README "The runner checks
+the module's maximum (task 033)"):
+
+- `capsule_stays_under_declared_memory_cap` — Flint's one named test: (a) the
+  built capsule through `run` on both real engines, read through the v4
+  receipt; (b) one page past the declared 64 MB, refused through `run` because
+  wasmtime traps (read through the refusal receipt), and `-1` on wasmer
+  through `run_engine`; (c) a 1025-page maximum through `run` on `counting`
+  stand-ins, refused as `memory_maximum_above_declared` with no start. It adds
+  no rule and never compares RSS with the cap.
 
 Task 064, the Bus v1 import contract (README "Bus v1 import contract
 (wc-009b)"). In `tests/verify.rs`:
@@ -2681,7 +2715,7 @@ each input run at most once per test binary):
 
 ## Falsifiers
 
-`falsifiers.json` holds 188 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 189 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 20 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 14 wc-009a (task 020), seven task 026,
@@ -2689,8 +2723,8 @@ seven wc-010b (task 027), two wc-010c (task 028), one task 029, two task
 032, one task 035, three task 036, five task 038, three task
 039, one task 040, one task 041, two task 043, one task 044, one task
 033, two task 034, one task 045, two task 046, one task 050, three task
-052, one task 056, two task 062, one task 064 and three task 065. Task 065
-removed seven entries whose rule is gone (its section, at the end): one of
+052, one task 056, two task 062, one task 064, three task 065 and one task
+063. Task 065 removed seven entries whose rule is gone (its section): one of
 wc-004's, three of wc-009a's, one of task 029's and both of task 031's.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
@@ -2698,14 +2732,14 @@ This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 125, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 126, the sections below
 marked runner-caught, less task 065's removals (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046, 050, 052, 056, 062, 064 and 065: 1 + 1 + 23 + 11 + 20 + 2 + 14 + 7 + 7
-+ 2 + 1 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1 + 3 + 1 + 2 + 1 + 3), each run by the canonical runner with its summary
+029, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046, 050, 052, 056, 062, 064, 065 and 063: 1 + 1 + 23 + 11 + 20 + 2 + 14 + 7 + 7
++ 2 + 1 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1 + 3 + 1 + 2 + 1 + 3 + 1), each run by the canonical runner with its summary
 line quoted.
 Hand-proven, pending R1: 68, each counted once: the 63 entries of the sections
 marked so (wc-001, tasks 010 and 009, wc-004 and wc-008: 9 + 7 + 23 + 20 + 4),
-and five proofs with no `falsifiers.json` entry, outside the 188 (task 036's
+and five proofs with no `falsifiers.json` entry, outside the 189 (task 036's
 `/bin/bash` 3.2 guard in `tests/reproducible.rs`, task 042's killed-run
 stop and task 049's two environment record proofs in `tests/run.rs`, and task
 053's import-section refusal in `tests/common/wasm_shape.rs`; none of these
@@ -3682,3 +3716,19 @@ canonical runner reports each CAUGHT (LOG.md, task 065):
 
 No label changes: the re-anchored F-WC4 entries stay in wc-004's hand-proven
 count, the rest keep their runner-caught label.
+
+Task 063's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 063). Its anchor in `tools/src/run.rs`, a recovery target, is
+found exactly once (task 027's F-WC10-CAP-OVERFLOW plants on the same line,
+each run on its own), and its one named test fails at its assertion:
+
+- F-WC10G-CAP-RAISED — `memory_cap_bytes` returns twice the declared bytes, so
+  the cap is raised (`capsule_stays_under_declared_memory_cap`: part (c)'s
+  1025-page module now passes the memory check and both stand-ins run, so `run`
+  passes where it must refuse, at `tests/run.rs`'s `two_refused`; part (c)
+  runs first, so (a) and (b) are not reached). Part (c) needs no real engine,
+  so the plant is caught with either engine missing.
+
+Task 063 also re-anchors F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT to the
+new total, each the same bug as before (LOG.md, task 063). This task changes no
+other label.

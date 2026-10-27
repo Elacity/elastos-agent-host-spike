@@ -3364,6 +3364,137 @@ fn process_peak_rss_follows_the_memory_the_engine_touched() {
     eprintln!("PASS: each engine's measured peak follows the memory its process touched");
 }
 
+/// Task 063: the declared 64 MB in bytes, `64 × 2^20`, written out so no
+/// runner conversion makes it.
+const DECLARED_64_MB: u64 = 67_108_864;
+
+/// Task 063 (wc-010c, the cap half; Flint, INBOX 28 Oct 00:25): one test that
+/// reads the existing cap rules (tasks 027, 033, 034) through both receipts,
+/// on each engine. It adds no rule. (a) The built capsule through `run` on both
+/// real engines: the v4 receipt names the declared 64 MB, `wasmtime` ENFORCED
+/// with exactly that cap, each engine's checked maximum at most the cap, and
+/// each peak line present with task 062's label. RSS is never compared with
+/// the cap. (b) [`grow_module`] growing one page past the cap: `run` refuses it
+/// because `wasmtime` traps, and its refusal receipt holds the trap; the same
+/// module on `wasmer` alone prints `-1`. (c) A module whose maximum is one page
+/// over the declared size: `run` on [`counting`] stand-ins refuses it before
+/// any engine process starts. (a) and (b) need both real engines; a missing
+/// engine prints SKIPPED, and the test then never prints PASS.
+#[test]
+fn capsule_stays_under_declared_memory_cap() {
+    let tmp = TempDir::new("run063-cap");
+    let root = canonical(&tmp);
+
+    // (c) Stand-ins: refused before any start, on either engine.
+    let over = memory_module(&MAXIMUM_1025, GROW_PAST_THE_CAP);
+    let signed = signed_bundle_declaring(&root, "bundle-over", &over, 64);
+    let engines = work_root(&root, "engines-over");
+    let stand_ins = [counting(&engines, "wasmtime"), counting(&engines, "wasmer")];
+    let work = work_root(&root, "work-over");
+    let refusal = two_refused(run(&signed.input(&stand_ins[0], &stand_ins[1], &work)));
+    assert!(
+        matches!(refusal, TwoEngineRefusal::Memory(_)),
+        "(c) wasmtime and wasmer: not a memory refusal: {refusal}"
+    );
+    assert_eq!(
+        receipt_lines(&render_refused(&refusal))[1..4],
+        [
+            "outcome: refused",
+            "reason: memory_maximum_above_declared",
+            "engine: none"
+        ],
+        "(c) wasmtime and wasmer: the refusal receipt"
+    );
+    for (engine_kind, program) in ENGINES.into_iter().zip(&stand_ins) {
+        for kind in ["module", "version"] {
+            assert_eq!(
+                starts(program, kind),
+                0,
+                "(c) {engine_kind}: a {kind} start after a maximum over the declared 64 MB"
+            );
+        }
+    }
+
+    let Some(programs) = real_engines("the declared-cap runs (a) and (b)") else {
+        return;
+    };
+
+    // (a) The built capsule: the passed-run receipt.
+    let built = built_capsule(&root);
+    let signed = signed_bundle_declaring(&root, "bundle-built", &built, 64);
+    let work = work_root(&root, "work-built");
+    let passed = two_ran(run(&signed.input(&programs[0], &programs[1], &work)));
+    let receipt = render(&passed);
+    assert_eq!(
+        receipt_line(&receipt, "memory_cap_bytes"),
+        Some("memory_cap_bytes: 67108864"),
+        "(a) wasmtime and wasmer: the declared cap:\n{receipt}"
+    );
+    assert_eq!(
+        receipt_line(&receipt, "wasmtime_memory_cap"),
+        Some("wasmtime_memory_cap: ENFORCED max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y"),
+        "(a) wasmtime: the cap it was started with:\n{receipt}"
+    );
+    for engine_kind in ENGINES {
+        let key = format!("{engine_kind}_memory_maximum_bytes");
+        let maximum: u64 = receipt_line(&receipt, &key)
+            .and_then(|line| line.strip_prefix(&format!("{key}: ")))
+            .and_then(|bytes| bytes.parse().ok())
+            .unwrap_or_else(|| panic!("(a) {engine_kind}: no checked maximum in:\n{receipt}"));
+        assert!(
+            maximum <= DECLARED_64_MB,
+            "(a) {engine_kind}: the checked maximum {maximum} is above the declared 64 MB"
+        );
+        assert_eq!(
+            passed.stdout(engine_kind),
+            format!("{FIXED_OUTPUT}\n").as_bytes(),
+            "(a) {engine_kind}"
+        );
+    }
+    // Present and labelled only: RSS is not linear memory (task 062).
+    peak_lines(&receipt);
+
+    // (b) One page past the cap: wasmtime traps, so `run` refuses.
+    let past = grow_module(GROW_PAST_THE_CAP);
+    let signed = signed_bundle_declaring(&root, "bundle-past", &past, 64);
+    let work = work_root(&root, "work-past");
+    let refusal = two_refused(run(&signed.input(&programs[0], &programs[1], &work)));
+    let refused_receipt = render_refused(&refusal);
+    let lines = receipt_lines(&refused_receipt);
+    assert_eq!(
+        lines[1..4],
+        [
+            "outcome: refused",
+            "reason: engine_failed",
+            "engine: wasmtime"
+        ],
+        "(b) wasmtime: the refusal receipt"
+    );
+    assert!(
+        lines[4].contains("forcing trap when growing memory to 67174400 bytes"),
+        "(b) wasmtime: the refusal receipt's detail has no trap: {}",
+        lines[4]
+    );
+    let value = verify_bundle(&signed.bundle, Some(&signed.sig), &signed.accepted)
+        .unwrap_or_else(|refusal| panic!("(b) the verifier refused: {refusal}"));
+    let wasmer_work = work_root(&root, "work-past-wasmer");
+    let stdout = ran(run_engine(
+        &value,
+        Engine::Wasmer,
+        &programs[1],
+        &wasmer_work,
+        &TEST_CONTROL,
+    ));
+    assert_eq!(
+        String::from_utf8_lossy(&stdout),
+        "-1\n",
+        "(b) wasmer: the grow past the declared 64 MB did not return -1"
+    );
+    eprintln!(
+        "PASS: under the declared 64 MB on both engines: (a) enforced and recorded, (b) wasmtime trapped and wasmer returned -1, (c) refused before any start"
+    );
+}
+
 /// Task 034: the receipt's per-engine memory maximum lines for a signed bundle
 /// declaring `memory_mb` with one memory of maximum `limits`, run through `run`
 /// on [`marked`] stand-ins: the `memory_mb` the test's own `verify_bundle` call

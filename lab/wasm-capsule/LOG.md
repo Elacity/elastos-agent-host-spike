@@ -1658,3 +1658,32 @@
   Gate run after all edits: `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check` clean; `cargo test
   --locked` 137 passed, 3 ignored, 0 failed (`tests/run.rs` 70 passed, 2 ignored; `tests/verify.rs` 34 passed;
   `tests/docs.rs` 5 passed).
+- 063 (wc-010c, the cap half; M1 C0 step iii, P18, P11). Flint's INBOX note (28 Oct 00:25) asked for one named test
+  that runs the capsule on each engine with the declared cap and proves it never exceeds it, and one falsifier that
+  raises the cap. Base `aa01a96407e0a84501ec7b13cccfc15f826405a5` (065's tip). No runner, receipt or verifier change.
+  `tests/run.rs`: `capsule_stays_under_declared_memory_cap` and the constant `DECLARED_64_MB` (67108864, written out),
+  reusing `grow_module`, `memory_module`, `MAXIMUM_1025`, `GROW_PAST_THE_CAP`, `signed_bundle_declaring`, `counting`,
+  `starts`, `real_engines`, `built_capsule`, `two_ran`, `two_refused`, `receipt_line`, `receipt_lines` and
+  `peak_lines`; no existing test changed. (c) runs first on `counting` stand-ins (a 1025-page maximum, declared 64 MB:
+  `TwoEngineRefusal::Memory`, refusal receipt `outcome: refused`, `reason: memory_maximum_above_declared`, `engine:
+  none`, zero module and zero `--version` starts on each stand-in); then, with both real engines, (a) the built
+  capsule's v4 receipt (`memory_cap_bytes: 67108864`, `wasmtime_memory_cap: ENFORCED
+  max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y`, each `<engine>_memory_maximum_bytes` at most
+  67108864, `FIXED_OUTPUT` on both, both peak lines present with 062's label, RSS never compared with the cap) and
+  (b) `grow_module(GROW_PAST_THE_CAP)` through `run` refused with `reason: engine_failed`, `engine: wasmtime` and the
+  trap line `forcing trap when growing memory to 67174400 bytes` in its detail, then the same module through
+  `run_engine` on real wasmer printing `-1`. A missing engine prints SKIPPED and the test prints no PASS.
+  Falsifier F-WC10G-CAP-RAISED (`memory_cap_bytes` returns `u64::from(memory_mb) * BYTES_PER_MB * 2`; anchor found
+  once in `tools/src/run.rs`). Hand check first: with the plant, the test panics at `tests/run.rs:1267`
+  (`two_refused`: `run` passed part (c)'s module); `run.rs` restored, `git diff` empty for it. Canonical runner from
+  the repo root, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py --from
+  lab/wasm-capsule/falsifiers.json F-WC10G-CAP-RAISED F-WC-README-COUNT F-WC-README-OUTSIDE-COUNT`: "baseline: 2
+  named tests pass without an edit, 0 do not", "summary: 3 CAUGHT of 3" (F-WC10G-CAP-RAISED 19s), no
+  `*.falsify-original` left. README: a paragraph under task 033's section, a named-tests entry, task 063's falsifier
+  section, totals 189 entries, 126 runner-caught, 68 hand-proven (F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT
+  re-anchored to 189). 062's two wrong-text FOLLOWUPs (cursor, round 1), docs only: README's task 043 refusal item
+  and run budget paragraph, and ADOPTION's 043 item, now say the poll is `reap` (`wait4(pid, WNOHANG)`) since 062,
+  not `try_wait`; README's v3-text sentence now says `receipt_records_the_declared_memory_cap` is 18 lines, as
+  `tests/run.rs` asserts. Gate run after all edits: `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools --
+  --check` clean; `cargo test --locked` 138 passed, 3 ignored, 0 failed (`tests/run.rs` 71 passed, 2 ignored;
+  `tests/docs.rs` 5 passed); the new test printed its PASS line on wasmtime 45.0.1 and wasmer 7.5.0.
