@@ -704,3 +704,5 @@ The new `standin_` rows are this stand-in, and a PASS there leaves the real Runt
 These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A6 credit.
 
 `standin_stopped_run_leaves_no_live_grant` is this stand-in, and a PASS there gives the Runtime no A12 credit.
+
+`standin_stop_denies_that_sessions_pending` is this stand-in, and a PASS there gives the Runtime no A10 credit.

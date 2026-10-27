@@ -7196,3 +7196,527 @@ The review failed the section above. Acceptance 1 lets `tests/common/grants.rs` 
 The `http` read loop is restored byte for byte to the "Old" block above: each `read` gets only the time left, and `could not bound fixture read` comes from the per-read `set_read_timeout`. `fn live_grant_state` stays `pub(super)` and its body is unchanged. So `git diff -U0 -- lab/agent-conformance/tests/common/grants.rs` against 048's merge shows one hunk again.
 
 The `client_session_credentials_are_guarded` failure (`Err("could not bound fixture read")` where `Err("invalid fixture authorization header")` was expected, `tests/common/grants.rs:2641`) is left for its own task. That task needs a test that fails without its fix, a loopback server that drips one byte every 1.5 s and must get `fixture HTTP response exceeded its bound` within about 2.1 s, and a falsifier id. It is not 049's.
+
+## 052 — A10: a stand-in stop settles that session's pending requests
+
+052: `StandIn` gains one request store beside `grants`. `seed_request` is the lab seam that stores one pending record. `get_capability_requests` answers `GET /api/capability/requests?session=`. It reuses `require_shell`, then refuses a missing or empty session, then returns that session's records sorted by `request_id`. `stop_one` calls `settle_pending` once, after `revoke_live`, with the stored `stopped: ` cause. `settle_pending` changes only that session's `Pending` records to `Denied`, sets `settled_by` to `runtime`, and writes the cause to `decision_reason`. It leaves `request_id`, `session_id`, `resource`, `action` and `reason`. `finish_start` does not settle. `delete_capsule`, `revoke_live`, `keep`, `visible` and `authorise` keep their signatures and bodies, except the one `stop_one` cause line now names a local `cause` so the same text reaches both the instance and its requests. No method reads the clock, the disk or a WIT file. There is no second request route, no second deny function and no HTTP server. There is no new `falsifiers.json` id. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+### Quote from the resident SPEC (read only)
+
+> RI-5 Runtime settlement and the request record
+>
+> When an instance stops or fails, the Runtime denies each of its pending
+> requests within the bound. The denial reason names the end: it contains the
+> stop reason, or the failure cause.
+>
+> The shell reads a session's requests, pending or settled, with a new shell-only
+> route:
+>
+> ```text
+> GET /api/capability/requests?session=<session_id>
+> ```
+>
+> ```json
+> {"requests": [{"request_id": "...", "session_id": "...", "resource": "...",
+>                "action": "read", "reason": "...", "status": "denied",
+>                "decision_reason": "instance stopped: ...",
+>                "settled_by": "runtime"}]}
+> ```
+>
+> `status` is `pending`, `granted`, `denied` or `expired`. `settled_by` is
+> `shell` or `runtime`, and `null` only while pending. A session's records stay
+> readable for at least 60 seconds after its instance ends.
+
+### Quote of the two journey functions (read only)
+
+```rust
+pub fn a10_cancel_one_instance<R: ResidentRuntime>(rt: &mut R) -> Outcome {
+    run(rt, |j| {
+        let (a, b) = j.launch_pair(Fixture::ReadShared, Fixture::ReadShared)?;
+        let ra = j.wait_request(&a)?;
+        let rb = j.wait_request(&b)?;
+        j.stop(&a, CANCEL_REASON)?;
+        j.runtime_settlement(&a, Some(&ra), CANCEL_REASON)?;
+        j.together(&[&b], State::live, "live", "after instance-1 was cancelled")?;
+        if !j.still_pending(&rb)? {
+            return Err(format!(
+                "the pending request from {} was settled when {} was cancelled",
+                b.label, a.label
+            ));
+        }
+        j.grant(&rb)?;
+        j.wait_state(&b, State::Running)?;
+        j.watch(&a, &State::Stopped)?;
+        j.together(
+            &[&b],
+            |state| *state == State::Running,
+            "running",
+            "after the watch",
+        )?;
+        j.stop(&b, CLEANUP_REASON)?;
+        let census = j.census(false)?;
+        Ok(format!(
+            "A10: instance-1 stopped mid-request with the cancel reason; the Runtime denied its pending request naming the stop; no request from it for {}s; instance-2 kept its own request, got its grant and kept running; {census}",
+            WATCH.as_secs()
+        ))
+    })
+}
+```
+
+```rust
+    fn runtime_settlement(
+        &mut self,
+        of: &Launched,
+        seen: Option<&Request>,
+        mention: &str,
+    ) -> Result<RequestRecord, String> {
+        let what = format!("the Runtime's settlement of the request from {}", of.label);
+        let record = self.wait(STATE_BOUND, &what, |rt| {
+            let records = rt.requests(&of.session)?;
+            match records.as_slice() {
+                [] => Ok(None),
+                [one] if one.status == Status::Pending => Ok(None),
+                [one] => Ok(Some(one.clone())),
+                more => Err(format!(
+                    "{} has {} request records; the fixture makes one",
+                    of.label,
+                    more.len()
+                )),
+            }
+        })?;
+        if record.request.session != of.session {
+            return Err(format!(
+                "the request records for {} name another session",
+                of.label
+            ));
+        }
+        fixture_request(&record.request, of)?;
+        if seen.is_some_and(|request| request.id != record.request.id) {
+            return Err(format!(
+                "the settled record for {} is not the request that was pending",
+                of.label
+            ));
+        }
+        if self.decided.contains(&record.request.id) {
+            return Err(format!(
+                "the harness decided the request from {}; this check needs the Runtime's own settlement",
+                of.label
+            ));
+        }
+        if record.status != Status::Denied {
+            return Err(format!(
+                "the request from {} ended {:?}; the Runtime must deny it when the instance ends",
+                of.label, record.status
+            ));
+        }
+        if record.settled_by != Some(Actor::Runtime) {
+            return Err(format!(
+                "the request from {} was settled by {:?}, not by the Runtime",
+                of.label, record.settled_by
+            ));
+        }
+        if mention.is_empty() || !record.decision.contains(mention) {
+            return Err(format!(
+                "the Runtime's denial for {} reads {:?}, which omits {:?}",
+                of.label, record.decision, mention
+            ));
+        }
+        if self.rt.pending()?.iter().any(|r| r.session == of.session) {
+            return Err(format!("a request from {} is still pending", of.label));
+        }
+        Ok(record)
+    }
+```
+
+### The settlement
+
+`settle_pending` is the one deny path for a stop. It runs from the accepted arm of `stop_one` only, after `revoke_live`, and receives the same `stopped: ` cause text the instance stores. A refused stop returns before that call. `finish_start` stores `failed` with its cause and calls no settlement. `get_capability_requests` filters no record by age, so a denied record stays readable at `set_instant(60)`.
+
+### Tests
+
+The lib target has ten new tests in `standin_runtime::tests`:
+
+- `standin_stop_denies_that_sessions_pending`: two running instances, a pending request for each, a live grant on instance 1, and one stop. The stopped session's record is one `denied` entry with `settled_by` `runtime` and `decision_reason` `stopped: stop one`. The shell live view has no grant and the request list has no `req-g`. The sibling request stays pending. The denied entry is still returned at instant 60. A second stand-in with two requests and the reason `cancel the run` proves every pending record is denied, sorted, with that cause.
+- `standin_stop_leaves_the_siblings_request`: the same stop leaves `req-2` pending with `settled_by` null, and instance 2 stays `running`.
+- `standin_failed_start_leaves_the_request`: `Start::Error("start refused")` and `Start::Trap("start trapped")` each leave the request pending and store the failed cause.
+- `standin_requests_are_shell_only`: a client read is 403 for a valid, missing and empty session. A shell read with no session or an empty session is 400 `requests need a session`. A valid shell read returns the record.
+- `standin_duplicate_request_is_refused`: a second seed of `req-1` with different fields is 400 `request already stored: req-1`. The first record stays pending and no replacement record exists.
+- `standin_request_seed_validation`: each empty required field is 400 with the one reason and stores nothing. An empty `reason` is accepted and stored as `""`.
+- `standin_request_record_contract`: the body's only key is `requests`. Each entry has the eight keys. Two records are sorted, hold the complete pending values, and another session's record stays out. An unknown session is `{"requests":[]}`.
+- `standin_refused_stop_preserves_requests`: client, malformed-body, unknown-instance and empty-id refusals leave the record pending. The ended-instance refusal also leaves a request seeded after the accepted stop pending.
+- `standin_stop_preserves_settled_requests`: a fixture record that is already `denied` and settled by `shell` keeps its values through an accepted stop, which denies only the new pending record.
+- `standin_starting_stop_denies_that_sessions_pending`: an accepted stop during `starting` denies the starting instance's pending request.
+
+### Hand-run falsifiers
+
+No list id. Each plant was restored before the next. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::NAME -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. The planted crate compiled every time. After the last restore, `standin-runtime/mod.rs` matched its pre-plant bytes (`sha256 28ce9afa7247fbbe6466920819de1bcb89a25465e198c9d0c2ad32df26955d1b`) and `git diff -- lab/agent-conformance/standin-runtime/mod.rs` showed the candidate only. The plant expressions are absent from that file.
+
+F-standin-a10-stub. Named test `standin_stop_denies_that_sessions_pending`. Planted exit 101 in 1.231 seconds. Restored exit 0 in 0.645 seconds. Assertion: `src/../standin-runtime/mod.rs:1995:9` `assertion left == right failed: the stand-in denies the stopped instance's pending request and names the stop`. The record stayed `pending` with no settler.
+
+Old:
+
+```text
+    fn settle_pending(&mut self, session_id: &str, cause: &str) {
+        for request in &mut self.requests {
+```
+
+New:
+
+```text
+    fn settle_pending(&mut self, session_id: &str, cause: &str) {
+        return;
+        for request in &mut self.requests {
+```
+
+F-standin-a10-sibling. Named test `standin_stop_leaves_the_siblings_request`. Planted exit 101 in 0.996 seconds. Restored exit 0 in 0.680 seconds. Assertion: `src/../standin-runtime/mod.rs:2064:9` `assertion left == right failed: the stand-in leaves the sibling's request pending`. The sibling's request was `denied` with `stopped: stop one`.
+
+Old:
+
+```text
+            if request.session_id == session_id && request.status == RequestStatus::Pending {
+```
+
+New:
+
+```text
+            if request.status == RequestStatus::Pending {
+```
+
+F-standin-a10-blank-reason. Named test `standin_stop_denies_that_sessions_pending`. Planted exit 101 in 1.092 seconds. Restored exit 0 in 1.048 seconds. Assertion: `src/../standin-runtime/mod.rs:1994:9` `assertion left == right failed: the stand-in denies the stopped instance's pending request and names the stop`. The record had `status` `denied` and `decision_reason` `""`.
+
+Old:
+
+```text
+                request.decision_reason = cause.to_owned();
+```
+
+New:
+
+```text
+                request.decision_reason = String::new();
+```
+
+F-standin-a10-fail-settles. Named test `standin_failed_start_leaves_the_request`. Planted exit 101 in 1.156 seconds. Restored exit 0 in 1.087 seconds. Assertion: `src/../standin-runtime/mod.rs:2101:13` `assertion left == right failed: the stand-in leaves the request pending when start fails with start refused`.
+
+Old:
+
+```text
+        let (phase, cause, ended_at) = apply_start(&instance.start, instant);
+        instance.phase = phase;
+        instance.cause = cause;
+        instance.ended_at = ended_at;
+        Ok(())
+```
+
+New:
+
+```text
+        let (phase, cause, ended_at) = apply_start(&instance.start, instant);
+        instance.phase = phase;
+        instance.cause = cause;
+        instance.ended_at = ended_at;
+        if phase == ResidentStatus::Failed {
+            let id = instance.id.clone();
+            let cause = instance.cause.clone();
+            self.settle_pending(&id, &cause);
+        }
+        Ok(())
+```
+
+The other plants cover the read, seed, record, refusal and guard rules that the spec check names.
+
+F-standin-a10-read-shell. Named test `standin_requests_are_shell_only`. Planted exit 101 in 1.081 seconds. Assertion: `src/../standin-runtime/mod.rs:2121:13`. `require_shell` is removed from `get_capability_requests`, so a client read succeeds.
+
+Old:
+
+```text
+    pub fn get_capability_requests(
+        &self,
+        caller: Caller<'_>,
+        session: Option<&str>,
+    ) -> Result<Value, (u16, String)> {
+        require_shell(caller)?;
+        let Some(session) = session.filter(|session| !session.is_empty()) else {
+```
+
+New:
+
+```text
+    pub fn get_capability_requests(
+        &self,
+        caller: Caller<'_>,
+        session: Option<&str>,
+    ) -> Result<Value, (u16, String)> {
+        let Some(session) = session.filter(|session| !session.is_empty()) else {
+```
+
+F-standin-a10-read-order. Named test `standin_requests_are_shell_only`. Planted exit 101 in 1.137 seconds. Assertion: `src/../standin-runtime/mod.rs:2122:13`. The query check runs first, so a client with no session gets 400 instead of 403.
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let Some(session) = session.filter(|session| !session.is_empty()) else {
+            return Err((400, "requests need a session".to_owned()));
+        };
+        let mut listed: Vec<&Request> = self
+```
+
+New:
+
+```text
+        let Some(session) = session.filter(|session| !session.is_empty()) else {
+            return Err((400, "requests need a session".to_owned()));
+        };
+        require_shell(caller)?;
+        let mut listed: Vec<&Request> = self
+```
+
+F-standin-a10-seed-id / -session / -resource / -action. Named test `standin_request_seed_validation`. Planted exits 101 in 0.873, 1.286, 0.880 and 0.931 seconds. Assertion for each: `src/../standin-runtime/mod.rs:1236:9` in the one refusal helper; the refused field then passed into storage. The restored condition is one expression:
+
+```text
+        if request_id.is_empty()
+            || session_id.is_empty()
+            || resource.is_empty()
+            || action.is_empty()
+        {
+```
+
+Each plant removed one disjunct and kept the other three, for example:
+
+```text
+        if session_id.is_empty() || resource.is_empty() || action.is_empty() {
+```
+
+F-standin-a10-duplicate. Named test `standin_duplicate_request_is_refused`. Planted exit 101 in 0.988 seconds. Assertion: `src/../standin-runtime/mod.rs:2148:9`. The duplicate check is removed.
+
+Old:
+
+```text
+        if self
+            .requests
+            .iter()
+            .any(|request| request.request_id == request_id)
+        {
+            return Err((400, format!("request already stored: {request_id}")));
+        }
+        self.requests.push(Request {
+```
+
+New:
+
+```text
+        self.requests.push(Request {
+```
+
+F-standin-a10-record-key. Named test `standin_request_record_contract`. Planted exit 101 in 1.185 seconds. Assertion: `src/../standin-runtime/mod.rs:686:9` in `assert_keys`. The entry gains a `duration` key.
+
+Old:
+
+```text
+        "settled_by": request.settled_by,
+    })
+```
+
+New:
+
+```text
+        "settled_by": request.settled_by,
+        "duration": "once",
+    })
+```
+
+F-standin-a10-record-session. Named test `standin_request_record_contract`. Planted exit 101 in 0.893 seconds. Assertion: `src/../standin-runtime/mod.rs:2242:9`. The session filter is replaced, so another session's record appears.
+
+Old:
+
+```text
+            .filter(|request| request.session_id == session)
+```
+
+New:
+
+```text
+            .filter(|request| !request.request_id.is_empty())
+```
+
+F-standin-a10-record-order. Named test `standin_request_record_contract`. Planted exit 101 in 1.269 seconds. Assertion: `src/../standin-runtime/mod.rs:2242:9`. The sort runs in reverse order.
+
+Old:
+
+```text
+        listed.sort_by(|left, right| left.request_id.cmp(&right.request_id));
+```
+
+New:
+
+```text
+        listed.sort_by(|left, right| right.request_id.cmp(&left.request_id));
+```
+
+F-standin-a10-record-pending. Named test `standin_request_record_contract`. Planted exit 101 in 1.382 seconds. Assertion: `src/../standin-runtime/mod.rs:2242:9`. A seeded pending record carries a non-empty `decision_reason`.
+
+Old:
+
+```text
+            status: RequestStatus::Pending,
+            decision_reason: String::new(),
+            settled_by: None,
+```
+
+New:
+
+```text
+            status: RequestStatus::Pending,
+            decision_reason: "seeded".to_owned(),
+            settled_by: None,
+```
+
+F-standin-a10-one-request. Named test `standin_stop_denies_that_sessions_pending`. Planted exit 101 in 0.947 seconds. Assertion: `src/../standin-runtime/mod.rs:2043:9`. The second pending request stays `pending`.
+
+Old:
+
+```text
+                request.decision_reason = cause.to_owned();
+            }
+```
+
+New:
+
+```text
+                request.decision_reason = cause.to_owned();
+                break;
+            }
+```
+
+F-standin-a10-fields. Named test `standin_stop_denies_that_sessions_pending`. Planted exit 101 in 1.028 seconds. Assertion: `src/../standin-runtime/mod.rs:1995:9`. The settled record loses its `resource`.
+
+Old:
+
+```text
+                request.settled_by = Some("runtime");
+                request.decision_reason = cause.to_owned();
+```
+
+New:
+
+```text
+                request.settled_by = Some("runtime");
+                request.resource = String::new();
+                request.decision_reason = cause.to_owned();
+```
+
+F-standin-a10-settler. Named test `standin_stop_denies_that_sessions_pending`. Planted exit 101 in 1.311 seconds. Assertion: `src/../standin-runtime/mod.rs:1994:9`. The settler reads `shell`.
+
+Old:
+
+```text
+                request.settled_by = Some("runtime");
+```
+
+New:
+
+```text
+                request.settled_by = Some("shell");
+```
+
+F-standin-a10-discard. Named test `standin_stop_denies_that_sessions_pending`. Planted exit 101 in 1.145 seconds. Assertion: `src/../standin-runtime/mod.rs:2028:9` at the instant-60 read. A denied record drops out at 60 seconds.
+
+Old:
+
+```text
+            .filter(|request| request.session_id == session)
+```
+
+New:
+
+```text
+            .filter(|request| {
+                request.session_id == session
+                    && !(self.instant >= FAILED_KEEP_SECS
+                        && request.status == RequestStatus::Denied)
+            })
+```
+
+F-standin-a10-early-settle. Named test `standin_refused_stop_preserves_requests`. Planted exit 101 in 0.862 seconds. Assertion: `src/../standin-runtime/mod.rs:2350:9`. The ended instance's new request was denied before the phase check.
+
+Old:
+
+```text
+        let phase = self.instances[index].phase;
+        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
+            return Err(not_live(phase));
+        }
+        let session_id = self.instances[index].id.clone();
+```
+
+New:
+
+```text
+        let phase = self.instances[index].phase;
+        let session_id = self.instances[index].id.clone();
+        self.settle_pending(&session_id, "stopped: planted");
+        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
+            return Err(not_live(phase));
+        }
+```
+
+F-standin-a10-guard. Named test `standin_stop_preserves_settled_requests`. Planted exit 101 in 1.150 seconds. Assertion: `src/../standin-runtime/mod.rs:2378:9`. The settled record is rewritten.
+
+Old:
+
+```text
+            if request.session_id == session_id && request.status == RequestStatus::Pending {
+```
+
+New:
+
+```text
+            if request.session_id == session_id {
+```
+
+F-standin-a10-starting. Named test `standin_starting_stop_denies_that_sessions_pending`. Planted exit 101 in 1.455 seconds. Assertion: `src/../standin-runtime/mod.rs:2408:9`. A stop during `starting` settles nothing.
+
+Old:
+
+```text
+        self.revoke_live(&session_id);
+        self.settle_pending(&session_id, &cause);
+```
+
+New:
+
+```text
+        self.revoke_live(&session_id);
+        if phase == ResidentStatus::Running {
+            self.settle_pending(&session_id, &cause);
+        }
+```
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.144 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 286.42 seconds. This was the first gate run and it passed inside the 600-second bound. The visible targets were the report target 23 passed, the runtime target 10 passed with 2 ignored, the probe unit target 3 passed, and both doc-test targets 0. The earlier targets ran before those, so the run reached the end with no failure line. The per-target counts on the later counting run were the lib target 41 passed, the report binary 1 passed, the artifact target 7 passed, the build target 1 passed, the effects target 58 passed with 12 ignored, the harness target 9 passed and the report target 23 passed.
+
+Two confirmation runs of the same command then failed one test each. Neither test touches this slice and each passes alone. The failures are recorded here because they are real runs:
+- Counting run: exit 101, real 275.52 seconds. The only failure was `grant_refused_from_another_session` in `tests/effects.rs`. Alone: exit 0 in 9.82 seconds.
+- Clean-pass attempt: exit 101, real 286.19 seconds. The only failure was `cleanup_census_refuses_each_leftover` in `tests/runtime.rs`. Alone: exit 0 in 1.61 seconds.
+
+No `Cargo.toml` or `Cargo.lock` change. The filtered output did not keep the census lines for those two failures; each failing test passes alone without a leftover in its own census.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `standin-runtime/mod.rs:155` `seed_request` takes the shell's request text. `:196` `get_capability_requests` filters by session id. Neither names code or content by a URL. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `standin-runtime/mod.rs:387` reads and writes the stand-in's request store. The methods open no file, network or `wasi` import, and the shell route grants nothing. |
+| 3. A second path or a second copy of one rule? | No | `standin-runtime/mod.rs:387` `settle_pending` is the one deny path and `stop_one` at `:371` calls it once. `:201` `require_shell` is reused. `:208` is the one session filter. |
+| 4. Runtime core grows? | No | The edit is `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and `LOG.md`. `src/lib.rs:9` still points the lab module there. |
+| 5. Refusals deny by default with a clear reason? | Yes | `standin-runtime/mod.rs:170` returns 400 `request needs an id, a session, a resource and an action`. `:178` returns 400 `request already stored:`. `:201` calls `require_shell`, whose `:528` returns 403 `This endpoint requires shell privileges`. `:203` returns 400 `requests need a session`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `standin-runtime/mod.rs:387` decides from stored records. This change adds no capsule import and no Runtime call. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:1983` `standin_stop_denies_that_sessions_pending`. The planted early return fails its assertion at `:1995` and the restored test passes. Twenty-two plants cover the ten new tests. |
+| 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:356` `stop_one` stops an instance and settles its requests; it does not admit a path. `:155` `seed_request` stores a request and creates no grant. |
+
+The real A10 row stays blocked. `standin_stop_denies_that_sessions_pending` is the lab stand-in, and a PASS there gives the Runtime no A10 credit.
