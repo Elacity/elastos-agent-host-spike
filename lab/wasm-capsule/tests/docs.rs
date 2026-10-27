@@ -2,6 +2,9 @@
 //! `falsifiers.json` holds (PRINCIPLES P12). README's "## Falsifiers" opens
 //! with the one sentence "`falsifiers.json` holds N planted bugs"; this test
 //! counts the entries of the file's `"falsifiers"` list and requires that N.
+//! Task 052: the same test requires that the one "outside the N" in that
+//! section, where the hand-proven sentence places its proofs with no entry,
+//! states the same N.
 //!
 //! Task 023: README's "## Falsifiers" is the one place for evidence labels and
 //! counts (P10, P12). `falsifiers.json`'s `"about"` text only says what each
@@ -30,6 +33,13 @@ use wasm_capsule_tools::verify::{LabOperation, LAB_OPERATIONS};
 /// The words before and after the total in README's summary sentence.
 const TOTAL_BEFORE: &str = "`falsifiers.json` holds ";
 const TOTAL_AFTER: &str = " planted bugs";
+
+/// README's section of falsifier counts and evidence labels.
+const FALSIFIERS_SECTION: &str = "## Falsifiers";
+
+/// The words before the figure that README's hand-proven sentence places its
+/// proofs with no entry outside of: "outside the N" (task 052).
+const OUTSIDE_BEFORE: &str = "outside the ";
 
 /// Words that state an evidence status, which only README's "## Falsifiers"
 /// may hold. Each is matched as a whole word, ignoring case.
@@ -105,6 +115,17 @@ fn stated_totals(text: &str) -> Vec<usize> {
             if digits == 0 || !rest[digits..].starts_with(TOTAL_AFTER) {
                 return None;
             }
+            rest[..digits].parse().ok()
+        })
+        .collect()
+}
+
+/// Each N that `text` states as "outside the N", in order.
+fn stated_outside_figures(text: &str) -> Vec<usize> {
+    text.match_indices(OUTSIDE_BEFORE)
+        .filter_map(|(at, _)| {
+            let rest = &text[at + OUTSIDE_BEFORE.len()..];
+            let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
             rest[..digits].parse().ok()
         })
         .collect()
@@ -354,7 +375,8 @@ fn readme_falsifier_total_matches_falsifiers_json() {
         .as_array()
         .expect("falsifiers.json has a \"falsifiers\" list")
         .len();
-    let stated = stated_totals(&lane_file("README.md"));
+    let readme = lane_file("README.md");
+    let stated = stated_totals(&readme);
     assert_eq!(
         stated.len(),
         1,
@@ -365,6 +387,25 @@ fn readme_falsifier_total_matches_falsifiers_json() {
         stated[0], held,
         "README says falsifiers.json holds {} planted bugs, but it holds {held}",
         stated[0]
+    );
+
+    let (_, section) = sections(&readme)
+        .into_iter()
+        .find(|(heading, _)| *heading == FALSIFIERS_SECTION)
+        .unwrap_or_else(|| panic!("README.md has no section {FALSIFIERS_SECTION:?}"));
+    let outside = stated_outside_figures(section);
+    assert_eq!(
+        outside.len(),
+        1,
+        "README's {FALSIFIERS_SECTION:?} says \"outside the N\" {} times, not once \
+         (falsifiers.json holds {held}): {outside:?}",
+        outside.len()
+    );
+    assert_eq!(
+        outside[0], held,
+        "README's {FALSIFIERS_SECTION:?} places its proofs with no entry outside the {}, but \
+         falsifiers.json holds {held}",
+        outside[0]
     );
 }
 
