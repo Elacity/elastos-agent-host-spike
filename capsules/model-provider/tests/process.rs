@@ -1486,7 +1486,9 @@ impl LocalRelayBackend {
 
     /// The connections the backend has accepted so far. It reads a counter and
     /// does not stop the backend, so a run that reached no backend can be told
-    /// from one that did.
+    /// from one that did. `observe()` cannot check for zero requests: it waits
+    /// `FIXTURE_EVENT_TIMEOUT` for a first one and fails when none comes, so a
+    /// zero-request check reads this counter instead.
     fn accepted(&self) -> usize {
         self.accepted.load(Ordering::Relaxed)
     }
