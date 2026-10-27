@@ -7720,3 +7720,108 @@ No `Cargo.toml` or `Cargo.lock` change. The filtered output did not keep the cen
 | 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:356` `stop_one` stops an instance and settles its requests; it does not admit a path. `:155` `seed_request` stores a request and creates no grant. |
 
 The real A10 row stays blocked. `standin_stop_denies_that_sessions_pending` is the lab stand-in, and a PASS there gives the Runtime no A10 credit.
+
+## 053 — Stand-in is the one contract other lanes call
+
+053: `tests/standin_contract.rs` is the one new Rust file. It adds `standin_matches_ra1_fields` and `standin_matches_ra6_states`, both call `agent_conformance::standin_runtime::StandIn`, and neither builds a second grant list, status map or JSON builder. `standin-runtime/README.md` gains a final `## Callers` section and `RUNBOOK.md` gains one paragraph. `standin-runtime/mod.rs`, `src/lib.rs`, `Cargo.toml` and `Cargo.lock` keep their bytes.
+
+### Quote from RA-1: Smallest change (read only)
+
+> 1. Add one read-only method on `CapabilityManager` that answers "can this token
+>    still be used now?". It reads the store the manager already owns: epoch,
+>    individual revocation, use count against `max_uses`, and the token's own
+>    expiry. A handler cannot do this today. The store field is private and the
+>    manager has two public getters, neither of which reads use counts or
+>    revocations (`manager.rs:95`, `:641`, `:646`).
+> 2. In `list_capabilities`, when the caller is a shell session and asks for the
+>    global view, list every `Granted` request that passes that test. Add
+>    `"scope": "all_sessions_live"` to the response, and add the session id to
+>    each entry (today's entry type has none). Every other caller keeps today's
+>    own-session list.
+>
+> This touches two crates, `elastos-runtime` (the method) and `elastos-server`
+> (the handler and the response marker). It adds no route if the query form is
+> used.
+
+### Quote from RA-6: Smallest change (read only)
+
+> The SPEC extends existing routes (Principle 10). Each part, from its evidence:
+>
+> - **RI-1.** Add a `resident` interface (`start`, `stop`) and a world that
+>   exports it, beside `product-capsule-v1` in `elastos/wit/`. Bind it in the
+>   component provider. Select it by the manifest ABI. Check the validator
+>   (`component.rs:76`) against the new function names.
+> - **RI-2.** For a resident component, spawn `start` and return after admission
+>   with the activation id and session (`component.rs:168`, `:352`). Keep the
+>   bridge principal and manifest bounds registered until the instance ends.
+>   Today the launch clears them when `start` returns (`runtime.rs:320`, `:324`).
+> - **RI-3.** Call `register_capsule` from the launch. Add `session_id` and
+>   `cause` to `RunningCapsuleInfo` and to the list answer. Keep a stopped or
+>   failed entry for the retention the SPEC states.
+> - **RI-4.** Accept a reason on `DELETE /api/capsules/:id`. Give the component
+>   provider a real stop. The engine uses fuel only, and the activation record
+>   holds no interrupt handle (`component.rs:83`, `:32-35`). A guest inside a
+>   request wait must also end (`resource_bridge.rs:1008`). The stop then revokes
+>   the session's grants and settles its pending requests (RA-2).
+>
+> The SPEC fixes only what A3, A6, A10, A11 and A12 observe. It leaves events,
+> streams, restart and the full Bus v2 operation set to Elacity issues 181 and
+> 463.
+
+### Plants
+
+No list id. Each plant ran one at a time, compiled, and was restored before the next. The command was `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test standin_contract NAME -- --exact`. After the last restore and before the gates, `standin-runtime/mod.rs` matched its pre-plant bytes (`sha256 28ce9afa7247fbbe6466920819de1bcb89a25465e198c9d0c2ad32df26955d1b`) and `git diff -- lab/agent-conformance/standin-runtime/mod.rs lab/agent-conformance/src/lib.rs lab/agent-conformance/Cargo.toml lab/agent-conformance/Cargo.lock` printed 0 lines.
+
+F-standin-contract-stub. Named test `standin_matches_ra1_fields`. Old bytes at the start of `get_capability_list`:
+
+```rust
+    ) -> Result<Value, (u16, String)> {
+        if let Some(scope) = scope {
+```
+
+New bytes:
+
+```rust
+    ) -> Result<Value, (u16, String)> {
+        return Ok(json!({ "scope": "all_sessions_live", "capabilities": [] }));
+        if let Some(scope) = scope {
+```
+
+Planted exit 101 in 1.89 seconds. The planted crate compiled with the unreachable-code warning. Assertion: `tests/standin_contract.rs:29:5` (`assert_keys`) from the client body call at `tests/standin_contract.rs:84`, message `the stand-in did the work: the client body is the capability list`; left `{"capabilities", "scope"}`, right `{"capabilities"}`. The stub's empty shell bodies still match the empty view, so the plain client body is the first assertion to fail. Restored, the named test passed in 0.00 seconds.
+
+F-standin-contract-field. Named test `standin_matches_ra1_fields`. Old bytes in `entry`:
+
+```rust
+    fields.insert("request_id".to_owned(), json!(grant.request_id));
+    if include_session {
+        fields.insert("session_id".to_owned(), json!(grant.session_id));
+    }
+    fields.insert("resource".to_owned(), json!(grant.resource));
+```
+
+New bytes:
+
+```rust
+    fields.insert("request_id".to_owned(), json!(grant.request_id));
+    fields.insert("resource".to_owned(), json!(grant.resource));
+```
+
+Planted exit 101 in 1.32 seconds. The planted crate compiled with the unused-parameter warning. Assertion: `tests/standin_contract.rs:29:5` (`assert_keys`) from the shell entry call at `tests/standin_contract.rs:151`, message `the stand-in did the work: the shell entry carries the six RA-1 fields`; left `{"action", "duration", "granted_at", "request_id", "resource"}`, right `{"action", "duration", "granted_at", "request_id", "resource", "session_id"}`. Restored, the named test passed.
+
+F-standin-contract-state. Named test `standin_matches_ra6_states`. Old bytes in `post_capsules`:
+
+```rust
+        let phase = ResidentStatus::Starting;
+```
+
+New bytes:
+
+```rust
+        let phase = ResidentStatus::Running;
+```
+
+Planted exit 101 in 1.36 seconds. The planted crate compiled. Assertion: `tests/standin_contract.rs:231:5`, message `the stand-in did the work: the launch answers starting before start returns`; left `String("running")`, right `"starting"`. Restored, the named test passed in 0.00 seconds.
+
+### Gates
+
+`cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` passed. `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` passed with exit 0 in 296.67 seconds (`real`): 155 passed, 0 failed, 14 ignored across 12 targets, including both contract tests in `tests/standin_contract.rs`. `Cargo.toml` and `Cargo.lock` keep their bytes. No census leftover appeared, so the single rerun rule did not apply.

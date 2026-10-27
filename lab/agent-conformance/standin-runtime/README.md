@@ -33,3 +33,11 @@ The status strings are `starting`, `running`, `stopping`, `stopped` and `failed`
 `authorise` is a lab test seam, not a route. A sibling is refused with `wrong capsule`. A stop removes that session's live grant through the one filter. This value is the lab stand-in and the real route can replace it later because the refusal matches (M1-R). `instance_grant_does_not_authorise_sibling` stays the process-isolation row.
 
 This value is the lab stand-in and the real route can replace it later because the JSON matches (M1-R). `parallel_capsules_complete_independently` stays `#[ignore = "blocked: RT4"]`. `run_leaves_no_live_grant` stays blocked on the real Runtime.
+
+## Callers
+
+This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.
+
+`standin_matches_ra1_fields` and `standin_matches_ra6_states` in `tests/standin_contract.rs` lock the RA-1 and RA-6 fields and states above. RA-2, RA-3, RA-4, RA-5 and RA-7 are later slices. #309 at `513988ebd` names no provider-launch route.
+
+This value is the lab stand-in and the real route can replace it later because the JSON matches (M1-R). A PASS gives the Runtime no credit.
