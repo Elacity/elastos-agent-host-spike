@@ -10,9 +10,10 @@ use crate::contract::{
     hex_hash, model_input_hash, validate_bounded_trimmed, validate_input_hash, validate_run_id,
     BackendCost, BackendFact, BackendReport, BackendTokenUsage, OfferSummary, ProviderFault,
     RunError, RunEvent, RunStatus, RunTerminalOutcome, RunView, RuntimeCreateBinding,
-    BACKEND_REPORT_SCHEMA, HOSTED_PLACEMENT, HOSTED_SELECTION_PINNED, MAX_EVENT_SEQUENCE,
-    MODEL_POLICY_SCHEMA, RUN_EVENT_SCHEMA, RUN_OUTPUT_CONTENT_SCHEMA, RUN_OUTPUT_OBJECT_SCHEMA,
-    RUN_OUTPUT_TEXT_SCHEMA, SINGLE_DISPATCH_NO_RETRY, UPSTREAM_FALLBACK_OPERATOR_ASSERTED_DISABLED,
+    UsageUnknownReason, BACKEND_REPORT_SCHEMA, HOSTED_PLACEMENT, HOSTED_SELECTION_PINNED,
+    MAX_EVENT_SEQUENCE, MODEL_POLICY_SCHEMA, RUN_EVENT_SCHEMA, RUN_OUTPUT_CONTENT_SCHEMA,
+    RUN_OUTPUT_OBJECT_SCHEMA, RUN_OUTPUT_TEXT_SCHEMA, SINGLE_DISPATCH_NO_RETRY,
+    UPSTREAM_FALLBACK_OPERATOR_ASSERTED_DISABLED,
 };
 use elastos_model_contract::{
     MAX_RUNTIME_BINDING_ID_BYTES, MAX_RUNTIME_OPERATION_BYTES, RUNTIME_CREATE_BINDING_SCHEMA,
@@ -1865,11 +1866,47 @@ pub(crate) fn validate_backend_report(report: &BackendReport) -> anyhow::Result<
     if let BackendFact::Reported { value } = &report.resolved_model {
         validate_bounded_trimmed(value, "resolved_model", MAX_MODEL_BYTES)?;
     }
+    if let BackendFact::Unknown {
+        reason,
+        observed_partial,
+    } = &report.resolved_model
+    {
+        if reason.is_some() {
+            anyhow::bail!("resolved_model records a usage reason");
+        }
+        if observed_partial.is_some() {
+            anyhow::bail!("resolved_model records observed partial usage");
+        }
+    }
     if let BackendFact::Reported { value } = &report.usage {
         validate_backend_usage(value)?;
     }
+    if let BackendFact::Unknown {
+        reason,
+        observed_partial: Some(observed),
+    } = &report.usage
+    {
+        // Only a cut can keep counts: a refusal sent nothing, and counts with
+        // no reason would claim a cut the provider did not record.
+        if !matches!(reason, Some(UsageUnknownReason::Cut)) {
+            anyhow::bail!("usage records observed counts without a cut reason");
+        }
+        validate_backend_usage(observed)?;
+    }
     if let BackendFact::Reported { value } = &report.cost {
         validate_backend_cost(value)?;
+    }
+    if let BackendFact::Unknown {
+        reason,
+        observed_partial,
+    } = &report.cost
+    {
+        if reason.is_some() {
+            anyhow::bail!("cost records a usage reason");
+        }
+        if observed_partial.is_some() {
+            anyhow::bail!("cost records observed partial usage");
+        }
     }
     Ok(())
 }
@@ -2552,7 +2589,7 @@ mod tests {
     use crate::config::{OfferPolicy, MAX_EVENT_BYTES_LIMIT};
     use crate::contract::{
         model_input_hash, OfferSummary, RunError, RunEvent, RunStatus, RuntimeCreateBinding,
-        RUN_EVENT_SCHEMA, RUN_OUTPUT_TEXT_SCHEMA,
+        BACKEND_REPORT_SCHEMA, RUN_EVENT_SCHEMA, RUN_OUTPUT_TEXT_SCHEMA,
     };
     use elastos_model_contract::RUNTIME_CREATE_BINDING_SCHEMA;
     fn temp_root(label: &str) -> PathBuf {
@@ -4792,5 +4829,131 @@ mod tests {
         assert_eq!(file_bytes(&path), b"replacement retained");
         assert_eq!(journal.pruned_issued_floor_ms().unwrap(), issued);
         assert!(held_original.exists());
+    }
+
+    #[test]
+    fn stored_observed_partial_needs_counts_and_a_cut_reason() {
+        let stored = |usage: serde_json::Value| {
+            serde_json::json!({
+                "schema": BACKEND_REPORT_SCHEMA,
+                "resolved_model": {"status": "unknown"},
+                "usage": usage,
+                "cost": {"status": "unknown"},
+            })
+        };
+        let observed = serde_json::json!({"input_tokens": 7, "output_tokens": 1});
+        let kept: BackendReport = serde_json::from_value(stored(serde_json::json!({
+            "status": "unknown",
+            "reason": "cut",
+            "observed_partial": observed,
+        })))
+        .unwrap();
+        validate_backend_report(&kept).unwrap();
+        assert_eq!(
+            serde_json::to_value(&kept).unwrap()["usage"],
+            serde_json::json!({
+                "status": "unknown",
+                "reason": "cut",
+                "observed_partial": {"input_tokens": 7, "output_tokens": 1},
+            })
+        );
+
+        // An empty partial says nothing was observed, so it is not a count.
+        let empty: BackendReport = serde_json::from_value(stored(serde_json::json!({
+            "status": "unknown",
+            "reason": "cut",
+            "observed_partial": {},
+        })))
+        .unwrap();
+        assert!(
+            validate_backend_report(&empty).is_err(),
+            "an empty observed_partial must be refused on load"
+        );
+
+        // A refusal sent nothing, so nothing can be observed.
+        let refused: BackendReport = serde_json::from_value(stored(serde_json::json!({
+            "status": "unknown",
+            "reason": "refused",
+            "observed_partial": observed,
+        })))
+        .unwrap();
+        assert!(
+            validate_backend_report(&refused).is_err(),
+            "observed_partial on a refused reason must be refused on load"
+        );
+
+        // Only a cut can carry observed counts.
+        let no_reason: BackendReport = serde_json::from_value(stored(serde_json::json!({
+            "status": "unknown",
+            "observed_partial": observed,
+        })))
+        .unwrap();
+        assert!(
+            validate_backend_report(&no_reason).is_err(),
+            "observed_partial without a cut reason must be refused on load"
+        );
+
+        for (fact, partial) in [
+            ("resolved_model", serde_json::json!("resolved-model")),
+            ("cost", serde_json::json!({"value": "1"})),
+        ] {
+            let mut value = stored(serde_json::json!({"status": "unknown"}));
+            value[fact] = serde_json::json!({
+                "status": "unknown",
+                "observed_partial": partial,
+            });
+            let report: BackendReport = serde_json::from_value(value).unwrap();
+            assert!(
+                validate_backend_report(&report).is_err(),
+                "{fact} must refuse observed partial counts"
+            );
+        }
+    }
+
+    #[test]
+    fn stored_backend_report_names_cut_or_refused_only_for_usage() {
+        let stored = |usage: serde_json::Value| {
+            serde_json::json!({
+                "schema": BACKEND_REPORT_SCHEMA,
+                "resolved_model": {"status": "unknown"},
+                "usage": usage,
+                "cost": {"status": "unknown"},
+            })
+        };
+        let plain: BackendReport =
+            serde_json::from_value(stored(serde_json::json!({"status": "unknown"}))).unwrap();
+        validate_backend_report(&plain).unwrap();
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap()["usage"],
+            serde_json::json!({"status": "unknown"})
+        );
+        for reason in ["cut", "refused"] {
+            let report: BackendReport = serde_json::from_value(stored(serde_json::json!({
+                "status": "unknown",
+                "reason": reason,
+            })))
+            .unwrap();
+            validate_backend_report(&report).unwrap();
+            assert_eq!(
+                serde_json::to_value(&report).unwrap()["usage"],
+                serde_json::json!({"status": "unknown", "reason": reason})
+            );
+        }
+        assert!(
+            serde_json::from_value::<BackendReport>(stored(serde_json::json!({
+                "status": "unknown",
+                "reason": "estimated",
+            })))
+            .is_err()
+        );
+        for fact in ["resolved_model", "cost"] {
+            let mut value = stored(serde_json::json!({"status": "unknown"}));
+            value[fact] = serde_json::json!({"status": "unknown", "reason": "cut"});
+            let report: BackendReport = serde_json::from_value(value).unwrap();
+            assert!(
+                validate_backend_report(&report).is_err(),
+                "{fact} must refuse a reason"
+            );
+        }
     }
 }
