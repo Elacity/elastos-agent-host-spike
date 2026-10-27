@@ -46,8 +46,12 @@ provider (P10). The `sandbox-exec -f confine.sb` launch is the tests' launch
 to exactly one approved declared right in the `rights` array of
 `tests/fixtures/confine/declared-rights.json`, or to one platform-baseline
 rule in that file. `startup-root-directory` and `startup-sysctl` are on the
-platform-baseline list, not in the `rights` array. Each justification names
-the model-provider executable and macOS. They are Runtime platform baseline,
+platform-baseline list, not in the `rights` array. Each justification starts
+with `macOS model-provider executable bound as PROVIDER_EXECUTABLE:` and then
+gives this document's reason: `Process startup reads the root directory
+before main runs` for the root read, and `At startup the Rust runtime reads
+the page size to place its stack guard page.` for the sysctl read.
+They are Runtime platform baseline,
 technical OS permissions with no user approval prompt, not approved rights.
 The file is a lab stand-in for the Runtime generator's input, not a manifest
 field. The generator itself stays the Runtime's (Anders).

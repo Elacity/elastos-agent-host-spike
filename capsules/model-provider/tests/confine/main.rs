@@ -2409,8 +2409,8 @@ fn allow_rules_trace_to_declared_rights() {
     let baseline_ids: Vec<&str> = baseline.iter().map(entry_id).collect();
     assert_eq!(baseline_ids, ["startup-root-directory", "startup-sysctl"]);
     let justifications = [
-        "macOS model-provider executable bound as PROVIDER_EXECUTABLE: file-read-data of literal / is the startup root-directory read.",
-        "macOS model-provider executable bound as PROVIDER_EXECUTABLE: sysctl-read is the startup page-size read, with no write and no added sysctl name.",
+        "macOS model-provider executable bound as PROVIDER_EXECUTABLE: Process startup reads the root directory before main runs",
+        "macOS model-provider executable bound as PROVIDER_EXECUTABLE: At startup the Rust runtime reads the page size to place its stack guard page.",
     ];
     assert_eq!(baseline.len(), justifications.len());
     for (entry, expected) in baseline.iter().zip(justifications) {
