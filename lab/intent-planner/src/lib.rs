@@ -23,7 +23,11 @@
 //! the result is never two grants or two bus calls. Names and paths are
 //! checked against that grammar before any compare or hash and refused, never
 //! folded or truncated. `canonical()` keeps the plan step order. A failed
-//! execute does not spend. A step the Runtime cannot express is BLOCKED with
+//! execute does not spend. Multi-step execute validates every grant before it
+//! spends or calls the bus, so a later failure leaves every grant unused.
+//! The minted token names the approved step resource; a mismatch is refused.
+//! Execute refuses unless this Host minted the token and the review `host_id`
+//! matches that mint. A step the Runtime cannot express is BLOCKED with
 //! the missing capability. The public entry does not store a journal. A
 //! `stored` bus reply, or any reply other than the exact BLOCKED token, fails
 //! the run.
@@ -162,6 +166,7 @@ pub struct Grant {
     action: Action,
     operation: String,
     resource: String,
+    host_id: String,
 }
 
 impl Grant {
@@ -268,6 +273,12 @@ impl Host {
         self.grants.validate_journal_write(token, resource)
     }
 
+    /// Peek whether a journal write token still names `resource` and has a use.
+    /// Does not spend.
+    pub fn journal_write_ready(&self, token: &str, resource: &str) -> Result<(), String> {
+        self.grants.journal_write_ready(token, resource)
+    }
+
     /// Records the person's choice. Approve mints one lab token for each
     /// step the Runtime can name. Reject mints none. A blocked step gets no token.
     /// An empty or duplicate-step plan cannot be approved: the recorded choice
@@ -313,6 +324,15 @@ impl Host {
         {
             return Err(Refuse::OutsidePlan);
         }
+        for grant in &allowed {
+            let agent = plan_agent(&grant.resource);
+            self.grants
+                .journal_write_ready(&grant.token, &runtime_bridge::scoped_guest(&grant.resource))
+                .map_err(|_| Refuse::Bridge)?;
+            if grant.resource != runtime_bridge::guest_journal(agent) {
+                return Err(Refuse::OutsidePlan);
+            }
+        }
         let mut recorded = Vec::new();
         let mut spent = Vec::new();
         for step in steps {
@@ -333,7 +353,7 @@ impl Host {
             let grant = grant_that_covers(&allowed, step)?;
             let reply = runtime_bridge::invoke_journal(
                 &grant.token,
-                &step.resource,
+                &grant.resource,
                 Some(self.audit.path()),
             )
             .map_err(|_| Refuse::Bridge)?;
@@ -369,13 +389,13 @@ impl Host {
     }
 
     fn mint(&self, step: &Step) -> Grant {
-        let agent = plan_agent(&step.resource);
         Grant {
-            token: self.grants.mint_journal_write(agent),
+            token: self.grants.mint_write(&step.resource),
             step_id: step.id,
             action: step.capability.action,
             operation: step.capability.operation.clone(),
             resource: step.resource.clone(),
+            host_id: self.id.clone(),
         }
     }
 
@@ -406,6 +426,12 @@ impl Host {
                 continue;
             }
             let grant = grant_that_covers(&review.grants, step)?;
+            if validated_name(&review.host_id).is_some()
+                && validated_name(&grant.host_id).is_some()
+                && grant.host_id != review.host_id
+            {
+                return Err(Refuse::ForeignHost);
+            }
             if self.used.contains(&grant.token) {
                 return Err(Refuse::GrantSpent);
             }
@@ -1569,6 +1595,97 @@ fn dotdot_notes_path_is_refused_at_execute() {
         .expect_err("notes/a..b");
     assert_eq!(error, Refuse::OutsidePlan);
     assert!(host.effects().is_empty());
+}
+
+#[test]
+fn failed_two_step_execute_does_not_spend_the_first_grant() {
+    let plan = Plan {
+        principal: "ada".to_owned(),
+        intent: INTENT.to_owned(),
+        steps: vec![journal_write_step(1, "ada"), journal_write_step(2, "bea")],
+    };
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    assert_eq!(review.grants().len(), 2);
+    let ada = review.grants()[0].token().to_owned();
+    let bea = review.grants()[1].token().to_owned();
+    host.validate_journal_write(&bea, &runtime_bridge::scoped_journal("bea"))
+        .expect("pre-spend second grant");
+    let error = host
+        .execute(&review, &plan, &plan.steps)
+        .expect_err("partial spend");
+    assert_eq!(error, Refuse::Bridge);
+    assert_eq!(error.to_string(), "the bus bridge did not answer");
+    assert!(host.effects().is_empty());
+    assert!(runtime_bridge::component_invoke_audit(host.audit_dir()).is_empty());
+    host.journal_write_ready(&ada, &runtime_bridge::scoped_journal("ada"))
+        .expect("first grant still unused");
+    let retry = host
+        .execute(&review, &plan, &plan.steps)
+        .expect_err("retry after partial spend");
+    assert_eq!(retry, Refuse::Bridge);
+    assert_ne!(retry, Refuse::GrantSpent);
+    assert!(host.effects().is_empty());
+    assert!(runtime_bridge::component_invoke_audit(host.audit_dir()).is_empty());
+    host.journal_write_ready(&ada, &runtime_bridge::scoped_journal("ada"))
+        .expect("retry must not spend the first grant");
+}
+
+#[test]
+fn secrets_path_does_not_mint_a_journal_token() {
+    let secrets = runtime_bridge::guest_journal("ada").replace("journal", "secrets");
+    let plan = Plan {
+        principal: "ada".to_owned(),
+        intent: INTENT.to_owned(),
+        steps: vec![Step {
+            id: 1,
+            capability: Capability {
+                action: Action::Write,
+                operation: "write".to_owned(),
+            },
+            resource: secrets.clone(),
+        }],
+    };
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    assert_eq!(review.grants().len(), 1);
+    let token =
+        elastos_runtime::capability::CapabilityToken::from_base64(review.grants()[0].token())
+            .expect("lab token");
+    assert_eq!(
+        token.resource().as_str(),
+        runtime_bridge::scoped_guest(&secrets)
+    );
+    assert_ne!(
+        token.resource().as_str(),
+        runtime_bridge::scoped_journal("ada")
+    );
+    let error = host
+        .execute(&review, &plan, &plan.steps)
+        .expect_err("secrets");
+    assert_eq!(error, Refuse::OutsidePlan);
+    assert_eq!(error.to_string(), "a step is outside the approved plan");
+    assert!(host.effects().is_empty());
+    assert!(runtime_bridge::component_invoke_audit(host.audit_dir()).is_empty());
+}
+
+#[test]
+fn rewritten_host_id_does_not_run_on_a_second_host() {
+    let plan = sample();
+    let mut host_a = Host::new();
+    let review = host_a.review(&plan, Choice::Approve);
+    let mut host_b = Host::new();
+    let mut transplanted = review.clone();
+    transplanted.host_id = host_b.id.clone();
+    let error = host_b
+        .execute(&transplanted, &plan, &plan.steps)
+        .expect_err("rewritten host id");
+    assert_eq!(error, Refuse::ForeignHost);
+    assert_eq!(error.to_string(), "the review was minted by another host");
+    assert!(host_a.effects().is_empty());
+    assert!(host_b.effects().is_empty());
+    assert!(runtime_bridge::component_invoke_audit(host_a.audit_dir()).is_empty());
+    assert!(runtime_bridge::component_invoke_audit(host_b.audit_dir()).is_empty());
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@ test: blocked_journal_effect_comes_from_an_in_process_library_call
 --- old
             let reply = runtime_bridge::invoke_journal(
                 &grant.token,
-                &step.resource,
+                &grant.resource,
                 Some(self.audit.path()),
             )
             .map_err(|_| Refuse::Bridge)?;

@@ -1,0 +1,8 @@
+id: R5-11
+file: src/lib.rs
+test: secrets_path_does_not_mint_a_journal_token
+--- old
+            token: self.grants.mint_write(&step.resource),
+--- new
+            token: self.grants.mint_journal_write(plan_agent(&step.resource)),
+--- end
