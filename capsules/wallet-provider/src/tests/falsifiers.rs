@@ -173,8 +173,10 @@ use std::process::Command;
 /// naming the missing case; WP122 drops the refusal `code`, so
 /// `suite_entry_keeps_the_refusal_code` fails; and WP123 records every bound
 /// result as `Ok`, so `wallet_suite_entry_records_an_inner_refusal_as_refused`
-/// fails.
-const EXPECTED_FALSIFIERS: usize = 121;
+/// fails. Task 096's WP124 makes the stand-in use wallet's root layout for did,
+/// so `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
+/// fails because the did start is refused at its first `init`.
+const EXPECTED_FALSIFIERS: usize = 122;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
