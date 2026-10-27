@@ -656,16 +656,21 @@ impl Drop for ConfinedProvider {
 /// name, the host `os`, the confinement tool and the declared rights the lab
 /// generator profiles from. `Ok(ConfinedProvider)` is Started: the provider
 /// answered `init` `ok` under the generated profile. `Err(String)` is Refused:
-/// nothing started, and the reason says why.
+/// no provider is returned, and the reason says why.
 ///
-/// It refuses, in this order and starting nothing:
+/// It refuses, in this order:
 ///
 /// 1. an `os` outside `DECLARED_CONFINED_OS`, with one reason for every such
 ///    OS that names that OS and the list where the stand-in applies
 ///    confinement;
 /// 2. an absent `sandbox_exec`, with a reason that names the OS and the path;
-/// 3. a refusal of `write_generated_profile`, returned unchanged;
-/// 4. a start that `sandbox-exec` refuses, or an `init` that does not answer
+/// 3. a present `sandbox_exec` that is not `SANDBOX_EXEC`, with a reason that
+///    names the OS, the given path and `SANDBOX_EXEC`, so the tool the stand-in
+///    checks is the one `start_under` runs;
+/// 4. a `binary_path` that is not a file, with a reason that names the
+///    provider and that path, before any profile is written;
+/// 5. a refusal of `write_generated_profile`, returned unchanged;
+/// 6. a start that `sandbox-exec` refuses, or an `init` that does not answer
 ///    `ok`, with the `try_send` failure or the answer.
 ///
 /// Otherwise it writes the profile the one lab writer generates from the
@@ -695,6 +700,19 @@ fn standin_spawn_confined_provider(
         return Err(format!(
             "{name} start on {os} is refused: the confinement tool {} is absent",
             sandbox_exec.display()
+        ));
+    }
+    if sandbox_exec != Path::new(SANDBOX_EXEC) {
+        return Err(format!(
+            "{name} start on {os} is refused: the confinement tool {} is not {SANDBOX_EXEC}, \
+             which is the one the stand-in runs",
+            sandbox_exec.display()
+        ));
+    }
+    if !binary_path.is_file() {
+        return Err(format!(
+            "{name} start is refused: the provider binary {} is not a file",
+            binary_path.display()
         ));
     }
     let profile = profile_dir.join(format!("{name}-standin.sb"));
@@ -3205,20 +3223,32 @@ fn generator_refuses_an_unnamed_right_and_the_start_is_refused() {
 /// tool path, each refuse with one reason that names that OS and the list
 /// where the stand-in applies confinement. Case (c) `macos` with the absent
 /// `tests/absent-sandbox-exec` refuses with a reason that names the OS and the
-/// path. Those three run on every host and start no process; each creates no
-/// wallet directory under its base and no profile file.
+/// path. Case (c2) `macos` with the test executable as the tool refuses with a
+/// reason that names that path and `SANDBOX_EXEC`. Those four run on every
+/// host and start no process; each creates no wallet directory under its base
+/// and no profile file.
 ///
-/// Cases (d) an added `unnamed-right` rights entry and (e) a declared
-/// `storage` rule that names a parameter the launch does not bind run only
-/// through `sandbox_available`. Case (d) returns the exact unnamed-id reason
-/// and writes no profile. Case (e) writes the profile, and `sandbox-exec`
-/// exits before the provider, so the reason carries the exit status and
-/// `sandbox-exec`'s line. Both create no wallet directory.
+/// Cases (c3) a `binary_path` that is not a file, (d) an added
+/// `unnamed-right` rights entry, (e) a declared `storage` rule that names a
+/// parameter the launch does not bind, and (f) an `init` that cannot create
+/// its wallet directory run only through `sandbox_available`. Case (c3)
+/// refuses with a reason that names the provider and the absent path before
+/// any profile, and creates neither a profile nor a wallet directory. Case (d)
+/// returns the exact unnamed-id reason and writes no profile. Case (e) writes
+/// the profile, and `sandbox-exec` exits before the provider, so the reason
+/// carries the exit status and `sandbox-exec`'s line. Case (f) writes the
+/// profile, and `init` answers a JSON error because `wallet_dir(base)` is a
+/// planted regular file, so the reason holds `init answered` and the answer,
+/// and the planted path stays a regular file. Cases (c3), (d) and (e) create
+/// no wallet directory.
 ///
 /// Falsifier: WP112 starts the binary bare in the OS refusal, so (a) and (b)
 /// return Started; WP113 starts it bare after a failed `init`, so (e) returns
 /// Started; WP115 ignores the writer's refusal and starts under the committed
-/// `confine.sb`, so (d) returns Started instead of its reason.
+/// `confine.sb`, so (d) returns Started instead of its reason. WP118 removes
+/// the check that the tool is `SANDBOX_EXEC`, so (c2) is Started; WP119
+/// removes the binary-file check, so (c3) panics in `resolved`; WP120 returns
+/// `Ok(provider)` for an `init` answer that is not `ok`, so (f) is Started.
 #[test]
 fn standin_launcher_refuses_a_start_it_cannot_confine() {
     let declared_path =
@@ -3235,7 +3265,8 @@ fn standin_launcher_refuses_a_start_it_cannot_confine() {
     );
     let confined_os = DECLARED_CONFINED_OS.join(", ");
     let absent_text = absent.display().to_string();
-    let cases: [(&str, &str, &Path, Vec<&str>); 3] = [
+    let present_text = present.display().to_string();
+    let cases: [(&str, &str, &Path, Vec<&str>); 4] = [
         (
             "(a) a forced unsupported OS",
             "plan9",
@@ -3253,6 +3284,12 @@ fn standin_launcher_refuses_a_start_it_cannot_confine() {
             "macos",
             absent.as_path(),
             vec!["macos", absent_text.as_str()],
+        ),
+        (
+            "(c2) macos with another tool",
+            "macos",
+            present.as_path(),
+            vec![present_text.as_str(), SANDBOX_EXEC],
         ),
     ];
     for (case, os, sandbox_exec, named) in cases {
@@ -3296,6 +3333,52 @@ fn standin_launcher_refuses_a_start_it_cannot_confine() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
+
+    // (c3) A binary path that is not a file is refused before any profile.
+    let fixture = tempfile::tempdir().expect("temporary wallet base");
+    let base = resolved(fixture.path());
+    let profile_root = tempfile::tempdir().expect("temporary profile root");
+    let profile_dir = resolved(profile_root.path());
+    let absent_binary = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/absent-provider-binary");
+    assert!(
+        !absent_binary.exists(),
+        "the fixture path must be absent: {}",
+        absent_binary.display()
+    );
+    let refusal = standin_spawn_confined_provider(
+        std::env::consts::OS,
+        Path::new(SANDBOX_EXEC),
+        "wallet-provider",
+        &absent_binary,
+        &base,
+        &declared,
+        &profile_dir,
+    )
+    .err()
+    .expect("(c3) a binary path that is not a file must be refused");
+    assert!(
+        refusal.contains("wallet-provider")
+            && refusal.contains(&absent_binary.display().to_string()),
+        "(c3) the refusal must name the provider and the path: {refusal}"
+    );
+    assert!(
+        !refusal.contains("must resolve"),
+        "(c3) the refusal must come before the binary is resolved: {refusal}"
+    );
+    eprintln!("(c3) stand-in refusal: {refusal}");
+    assert!(
+        fs::read_dir(&profile_dir)
+            .expect("the profile directory must be readable")
+            .next()
+            .is_none(),
+        "(c3) a refused start must write no profile: {}",
+        profile_dir.display()
+    );
+    assert!(
+        !wallet_dir(&base).exists(),
+        "(c3) a refused start must create no wallet directory: {}",
+        wallet_dir(&base).display()
+    );
 
     // (d) A right the shared contract does not name is refused unchanged.
     let fixture = tempfile::tempdir().expect("temporary wallet base");
@@ -3387,6 +3470,43 @@ fn standin_launcher_refuses_a_start_it_cannot_confine() {
         !wallet_dir(&base).exists(),
         "(e) a refused start must create no wallet directory: {}",
         wallet_dir(&base).display()
+    );
+
+    // (f) An init answer whose status is not ok is refused with the answer.
+    let fixture = tempfile::tempdir().expect("temporary wallet base");
+    let base = resolved(fixture.path());
+    let profile_root = tempfile::tempdir().expect("temporary profile root");
+    let profile_dir = resolved(profile_root.path());
+    let planted = wallet_dir(&base);
+    fs::create_dir_all(planted.parent().expect("wallet parent"))
+        .expect("prepare the wallet parent");
+    fs::write(&planted, b"not a directory").expect("plant a regular file at the wallet directory");
+    let refusal = standin_spawn_confined_provider(
+        std::env::consts::OS,
+        Path::new(SANDBOX_EXEC),
+        "wallet-provider",
+        provider,
+        &base,
+        &declared,
+        &profile_dir,
+    )
+    .err()
+    .expect("(f) an init answer that is not ok must be refused");
+    assert!(
+        refusal.contains("init answered"),
+        "(f) the refusal must carry the init answer: {refusal}"
+    );
+    assert!(
+        refusal.contains(r#""status":"error""#),
+        "(f) the refusal must carry the answer's status: {refusal}"
+    );
+    eprintln!("(f) stand-in refusal: {refusal}");
+    assert!(
+        fs::metadata(&planted)
+            .expect("the planted path must still exist")
+            .is_file(),
+        "(f) the planted wallet directory path must stay a regular file: {}",
+        planted.display()
     );
 }
 
