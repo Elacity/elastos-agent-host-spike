@@ -1865,11 +1865,17 @@ pub(crate) fn validate_backend_report(report: &BackendReport) -> anyhow::Result<
     if let BackendFact::Reported { value } = &report.resolved_model {
         validate_bounded_trimmed(value, "resolved_model", MAX_MODEL_BYTES)?;
     }
+    if let BackendFact::Unknown { reason: Some(_) } = &report.resolved_model {
+        anyhow::bail!("resolved_model records a usage reason");
+    }
     if let BackendFact::Reported { value } = &report.usage {
         validate_backend_usage(value)?;
     }
     if let BackendFact::Reported { value } = &report.cost {
         validate_backend_cost(value)?;
+    }
+    if let BackendFact::Unknown { reason: Some(_) } = &report.cost {
+        anyhow::bail!("cost records a usage reason");
     }
     Ok(())
 }
@@ -2552,7 +2558,7 @@ mod tests {
     use crate::config::{OfferPolicy, MAX_EVENT_BYTES_LIMIT};
     use crate::contract::{
         model_input_hash, OfferSummary, RunError, RunEvent, RunStatus, RuntimeCreateBinding,
-        RUN_EVENT_SCHEMA, RUN_OUTPUT_TEXT_SCHEMA,
+        BACKEND_REPORT_SCHEMA, RUN_EVENT_SCHEMA, RUN_OUTPUT_TEXT_SCHEMA,
     };
     use elastos_model_contract::RUNTIME_CREATE_BINDING_SCHEMA;
     fn temp_root(label: &str) -> PathBuf {
@@ -4792,5 +4798,52 @@ mod tests {
         assert_eq!(file_bytes(&path), b"replacement retained");
         assert_eq!(journal.pruned_issued_floor_ms().unwrap(), issued);
         assert!(held_original.exists());
+    }
+
+    #[test]
+    fn stored_backend_report_names_cut_or_refused_only_for_usage() {
+        let stored = |usage: serde_json::Value| {
+            serde_json::json!({
+                "schema": BACKEND_REPORT_SCHEMA,
+                "resolved_model": {"status": "unknown"},
+                "usage": usage,
+                "cost": {"status": "unknown"},
+            })
+        };
+        let plain: BackendReport =
+            serde_json::from_value(stored(serde_json::json!({"status": "unknown"}))).unwrap();
+        validate_backend_report(&plain).unwrap();
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap()["usage"],
+            serde_json::json!({"status": "unknown"})
+        );
+        for reason in ["cut", "refused"] {
+            let report: BackendReport = serde_json::from_value(stored(serde_json::json!({
+                "status": "unknown",
+                "reason": reason,
+            })))
+            .unwrap();
+            validate_backend_report(&report).unwrap();
+            assert_eq!(
+                serde_json::to_value(&report).unwrap()["usage"],
+                serde_json::json!({"status": "unknown", "reason": reason})
+            );
+        }
+        assert!(
+            serde_json::from_value::<BackendReport>(stored(serde_json::json!({
+                "status": "unknown",
+                "reason": "estimated",
+            })))
+            .is_err()
+        );
+        for fact in ["resolved_model", "cost"] {
+            let mut value = stored(serde_json::json!({"status": "unknown"}));
+            value[fact] = serde_json::json!({"status": "unknown", "reason": "cut"});
+            let report: BackendReport = serde_json::from_value(value).unwrap();
+            assert!(
+                validate_backend_report(&report).is_err(),
+                "{fact} must refuse a reason"
+            );
+        }
     }
 }

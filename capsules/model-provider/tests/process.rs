@@ -2056,19 +2056,20 @@ fn hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect()
 /// `:1638-1642`), and it never writes the closing `0\r\n\r\n`, which is only
 /// at `:1650`. Its caller shuts the socket down when `forward` returns an
 /// error (`:531-532`), so the provider reads an incomplete chunked body. The
-/// worker's chunk read then maps the error through
-/// `map_text_reqwest_failure` (`capsules/model-provider/src/adapters.rs:2027`,
-/// `:2397`) to `map_reqwest_failure` (`:2773`) and `AdapterFault::transport`
-/// (`:159-168`). That fault becomes a `failed` terminal with
-/// `output: None` and `backend_report: None` (`:1489-1509`), so the
-/// `resolved-model` the cut stream already named is dropped. The state layer
-/// stores `BackendReport::unknown()` for a hosted run with no report
-/// (`capsules/model-provider/src/state.rs:1352-1354`): `resolved_model`,
-/// `usage` and `cost` are all unknown
-/// (`capsules/model-provider/src/contract.rs:212-219`). A clean end with no
-/// `[DONE]` would instead be `response_malformed` "text stream ended before
-/// terminal marker" (`src/adapters.rs:2029-2033`), so the code assertion tells
-/// the two apart.
+/// worker marks the effect as sent and its response body as started
+/// (`capsules/model-provider/src/adapters.rs:2025`, `:2029`), so the chunk read
+/// error (`:2057`) maps through `map_text_reqwest_failure` (`:2430`) to
+/// `map_reqwest_failure` (`:2806`) and `AdapterFault::transport`
+/// (`:159-168`). That fault becomes a `failed` terminal with `output: None`
+/// and the usage fact unknown with reason `cut`
+/// (`hosted_fault_backend_report`, `:1487-1500`): the reason records a stream
+/// cut after send, and a Runtime account can tell it from a run that sent
+/// nothing (Flint, 28 Oct 00:25). The `resolved-model` the cut stream already
+/// named is dropped, and `resolved_model` and `cost` stay plain unknown
+/// (`capsules/model-provider/src/contract.rs:178-199`, `:225-252`). A clean
+/// end with no `[DONE]` would instead be `response_malformed` "text stream
+/// ended before terminal marker" (`src/adapters.rs:2059-2063`), so the code
+/// assertion tells the two apart.
 ///
 /// The buffered `ready` delta is not asserted: whether it is published before
 /// the fault depends on the flush timer (`src/adapters.rs:2007-2026`).
@@ -2164,10 +2165,10 @@ fn hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage() {
         json!({
             "schema": BACKEND_REPORT_SCHEMA,
             "resolved_model": {"status": "unknown"},
-            "usage": {"status": "unknown"},
+            "usage": {"status": "unknown", "reason": "cut"},
             "cost": {"status": "unknown"},
         }),
-        "a cut hosted stream must record resolved_model, usage and cost as unknown: {settled}"
+        "a cut hosted stream must record usage unknown with reason cut: {settled}"
     );
 
     let (connections, requests) = stand_in.observe();
@@ -2369,15 +2370,17 @@ fn hosted_cancel_while_the_answer_is_held_settles_unknown_and_sends_nothing_more
 /// sends anything. The provider stores the prepared run, reads the offer's open
 /// journal rows (`src/state.rs:606`, `:608`) and compares that count with
 /// `concurrency_limit` (`:609`). A count above it fails the new run with
-/// `rate_limited`/`model_busy` (`:610-620`) and returns its view (`:621`)
+/// `rate_limited`/`model_busy` (`:610-618`) and returns its view (`:620`)
 /// before `self.adapters.dispatch` (`:623`), so the Runtime socket sees no
-/// effect for the refused run. The run is hosted and carries no report, so its
-/// terminal stores `BackendReport::unknown()` (`src/state.rs:1352-1354`, the
-/// arm at `:1354`), which makes `resolved_model`, `usage` and `cost` all
-/// `unknown` (`src/contract.rs:212-219`). A sent run with no report records the
-/// same value, so a Runtime reading only `usage` cannot tell "not sent" from
-/// "sent, not reported". The third run is created after the held run settles,
-/// so its admission shows the ceiling counts open runs, not every run.
+/// effect for the refused run. This terminal is reached before any send, so it
+/// records `usage` unknown with reason `refused`
+/// (`transition_error_refused_before_send`, `src/state.rs:1417-1425`, through
+/// `transition_error_with_usage_reason`, `:1427-1449`); `resolved_model` and
+/// `cost` stay plain unknown (`src/contract.rs:178-199`, `:225-252`). The
+/// reason makes "not sent" distinct from the `cut` reason a sent run records
+/// when its response stream ends early. The third run is created after the
+/// held run settles, so its admission shows the ceiling counts open runs, not
+/// every run.
 ///
 /// Off macOS the provider refuses every hosted run before any socket, so the
 /// test prints one `SKIP` line and returns.
@@ -2503,17 +2506,17 @@ fn hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect() {
         created_b["data"]["terminal"]["output"].is_null(),
         "a refused run must carry no output: {created_b}"
     );
-    // A hosted terminal transition with no report records
-    // `BackendReport::unknown()` (`src/state.rs:1352-1354`).
+    // This terminal is reached before any send, so `transition_error_refused_before_send`
+    // (`src/state.rs:1417-1425`) records usage unknown with reason `refused`.
     assert_eq!(
         created_b["data"]["terminal"]["backend_report"],
         json!({
             "schema": BACKEND_REPORT_SCHEMA,
             "resolved_model": {"status": "unknown"},
-            "usage": {"status": "unknown"},
+            "usage": {"status": "unknown", "reason": "refused"},
             "cost": {"status": "unknown"},
         }),
-        "a refused hosted run must record resolved_model, usage and cost as unknown: {created_b}"
+        "a refused hosted run must record usage unknown with reason refused: {created_b}"
     );
     assert_eq!(
         stand_in.connection_count(),

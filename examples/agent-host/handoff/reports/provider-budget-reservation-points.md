@@ -304,13 +304,19 @@ proposes a Runtime design; each names what is missing.
    record no binding and keep no pending account.
    The provider side already joins a retry to the original run
    (`capsules/model-provider/src/state.rs:518-531`, `:5025-5026`).
-   A run the provider refuses at its own ceiling sends nothing to the Runtime,
-   yet records `usage` as `unknown`
-   (`capsules/model-provider/tests/process.rs:2099`,
-   `capsules/model-provider/src/state.rs:1352-1354`), the same value a sent run
-   with no report records, so a Runtime account cannot tell "not sent" from
-   "sent, not reported" by the usage field alone; that is Anders-owned, with no
-   design.
+   A hosted run whose usage the provider never saw keeps `usage` as `unknown`
+   and now names why: a run the provider refuses before it sends anything
+   records `{"status": "unknown", "reason": "refused"}`
+   (`capsules/model-provider/src/state.rs:1417-1425`), and a run whose response
+   stream was cut after send records `{"status": "unknown", "reason": "cut"}`
+   (`capsules/model-provider/src/adapters.rs:1487-1500`). The model-busy test
+   (`capsules/model-provider/tests/process.rs:2388`,
+   `hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect`)
+   proves the refused case and the stand-in's single connection; the cut test
+   (`capsules/model-provider/tests/process.rs:2080`,
+   `hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage`) proves
+   the cut case. This is the lab shape, offered as input to Anders's Runtime
+   usage record; the provider keeps no budget reservation.
 
 ## Tests still missing
 

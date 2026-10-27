@@ -4,8 +4,8 @@ use crate::config::{
 };
 use crate::contract::{
     BackendCost, BackendFact, BackendReport, BackendTokenUsage, ErrorClass, RunError, RunEvent,
-    RunStatus, RuntimeCreateBinding, BACKEND_REPORT_SCHEMA, MAX_EVENT_SEQUENCE, RUN_EVENT_SCHEMA,
-    RUN_OUTPUT_CONTENT_SCHEMA, RUN_OUTPUT_OBJECT_SCHEMA, RUN_OUTPUT_TEXT_SCHEMA,
+    RunStatus, RuntimeCreateBinding, UsageUnknownReason, BACKEND_REPORT_SCHEMA, MAX_EVENT_SEQUENCE,
+    RUN_EVENT_SCHEMA, RUN_OUTPUT_CONTENT_SCHEMA, RUN_OUTPUT_OBJECT_SCHEMA, RUN_OUTPUT_TEXT_SCHEMA,
 };
 use crate::journal::{deterministic_run_id, now_ms};
 use crate::local_llama::{LocalLlamaEngines, LocalLlamaFault, LocalTiming, LocalTimingStage};
@@ -382,7 +382,7 @@ impl<T: PartialEq> CapturedBackendFact<T> {
     fn into_report(self) -> BackendFact<T> {
         match self {
             Self::Reported(value) => BackendFact::Reported { value },
-            Self::Unknown | Self::Invalid => BackendFact::Unknown,
+            Self::Unknown | Self::Invalid => BackendFact::Unknown { reason: None },
         }
     }
 }
@@ -1473,41 +1473,66 @@ fn cancel_local_text(
     })
 }
 
+/// How far one hosted effect request reached before a worker fault. The
+/// reason code follows the send: nothing written is `refused`, a response
+/// body that started and then failed is `cut`, and a Runtime status answer
+/// keeps the plain unknown usage (`Sent`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostedEffectSend {
+    NotSent,
+    Sent,
+    ResponseStarted,
+}
+
+fn hosted_fault_backend_report(hosted: bool, send: HostedEffectSend) -> Option<Box<BackendReport>> {
+    if !hosted {
+        return None;
+    }
+    let reason = match send {
+        HostedEffectSend::NotSent => UsageUnknownReason::Refused,
+        HostedEffectSend::Sent => return None,
+        HostedEffectSend::ResponseStarted => UsageUnknownReason::Cut,
+    };
+    Some(Box::new(BackendReport::unknown_with_usage_reason(reason)))
+}
+
 async fn run_local_text_worker(mut task: LocalTextWorkerTask) -> bool {
     let timing =
         matches!(&task.backend, LocalTextBackend::LocalLlama { .. }).then(LocalTiming::start);
     if let Some(timing) = &timing {
         timing.record(LocalTimingStage::RunStarted);
     }
-    let result = match run_local_text_worker_with_timing(&mut task, timing.as_ref()).await {
-        Ok(result) => result,
-        Err(fault) if fault.error.class == ErrorClass::BackendTimeout => {
-            if let Some(timing) = &timing {
-                timing.record(LocalTimingStage::RunTimeout);
+    let mut send = HostedEffectSend::NotSent;
+    let result =
+        match run_local_text_worker_with_timing(&mut task, timing.as_ref(), &mut send).await {
+            Ok(result) => result,
+            Err(fault) if fault.error.class == ErrorClass::BackendTimeout => {
+                if let Some(timing) = &timing {
+                    timing.record(LocalTimingStage::RunTimeout);
+                }
+                return true;
             }
-            return true;
-        }
-        Err(fault) => {
-            // The public terminal carries the error class, not the detail.
-            // The test seam keeps it, keyed by this run.
-            #[cfg(test)]
-            crate::test_support::record_adapter_detail(&task.run_id, fault.detail.as_deref());
-            if let Some(timing) = &timing {
-                timing.record(LocalTimingStage::RunFailed);
+            Err(fault) => {
+                // The public terminal carries the error class, not the detail.
+                // The test seam keeps it, keyed by this run.
+                #[cfg(test)]
+                crate::test_support::record_adapter_detail(&task.run_id, fault.detail.as_deref());
+                if let Some(timing) = &timing {
+                    timing.record(LocalTimingStage::RunFailed);
+                }
+                ReconcileResult::Terminal {
+                    events: Vec::new(),
+                    status: match fault.error.class {
+                        ErrorClass::Cancelled => RunStatus::Cancelled,
+                        ErrorClass::SettlementUnknown => RunStatus::SettlementUnknown,
+                        _ => RunStatus::Failed,
+                    },
+                    output: None,
+                    error: Some(fault.error),
+                    backend_report: hosted_fault_backend_report(task.hosted_socket.is_some(), send),
+                }
             }
-            ReconcileResult::Terminal {
-                events: Vec::new(),
-                status: match fault.error.class {
-                    ErrorClass::Cancelled => RunStatus::Cancelled,
-                    ErrorClass::SettlementUnknown => RunStatus::SettlementUnknown,
-                    _ => RunStatus::Failed,
-                },
-                output: None,
-                error: Some(fault.error),
-                backend_report: None,
-            }
-        }
-    };
+        };
     let guard = if matches!(&task.backend, LocalTextBackend::LocalLlama { .. })
         && *task.cancel_rx.borrow()
         && pure_local_stop_result(&result)
@@ -1757,12 +1782,14 @@ async fn run_http_artifact_status_worker_inner(
 async fn run_local_text_worker_inner(
     task: &mut LocalTextWorkerTask,
 ) -> std::result::Result<ReconcileResult, AdapterFault> {
-    run_local_text_worker_with_timing(task, None).await
+    let mut send = HostedEffectSend::NotSent;
+    run_local_text_worker_with_timing(task, None, &mut send).await
 }
 
 async fn run_local_text_worker_with_timing(
     task: &mut LocalTextWorkerTask,
     timing: Option<&LocalTiming>,
+    send: &mut HostedEffectSend,
 ) -> std::result::Result<ReconcileResult, AdapterFault> {
     if !matches!(&task.backend, LocalTextBackend::LocalLlama { .. }) {
         require_external_http_containment(task.hosted_socket.as_deref())?;
@@ -1794,6 +1821,7 @@ async fn run_local_text_worker_with_timing(
                 &task.run_id,
                 &task.request_id,
                 task.hosted_socket.as_deref(),
+                send,
             )
             .await;
         }
@@ -1994,9 +2022,11 @@ async fn run_local_text_worker_with_timing(
         }
         response = request.send() => response.map_err(|err| map_text_reqwest_failure(err, private_endpoint))?
     };
+    *send = HostedEffectSend::Sent;
     if !response.status().is_success() {
         return Err(map_effect_http_status(&response, runtime_socket));
     }
+    *send = HostedEffectSend::ResponseStarted;
 
     let mut response = response;
     let mut line = Vec::new();
@@ -2165,6 +2195,7 @@ async fn run_decision_worker(
     run_id: &str,
     request_id: &str,
     hosted_socket: Option<&str>,
+    send: &mut HostedEffectSend,
 ) -> std::result::Result<ReconcileResult, AdapterFault> {
     require_external_http_containment(hosted_socket)?;
     let client = backend_client_with_socket(
@@ -2196,9 +2227,11 @@ async fn run_decision_worker(
         _ = cancel.changed() => return Ok(worker_settlement_unknown_result()),
         response = request.send() => response.map_err(map_reqwest_failure)?,
     };
+    *send = HostedEffectSend::Sent;
     if !response.status().is_success() {
         return Err(map_effect_http_status(&response, hosted_socket));
     }
+    *send = HostedEffectSend::ResponseStarted;
     let value = tokio::select! {
         _ = cancel.changed() => return Ok(worker_settlement_unknown_result()),
         value = read_bounded_json_response_async(response) => value?,
@@ -4006,6 +4039,7 @@ mod tests {
                     "run:fixture",
                     "fixture-request",
                     None,
+                    &mut HostedEffectSend::NotSent,
                 ))
                 .unwrap();
             let ReconcileResult::Terminal {
@@ -4081,6 +4115,7 @@ mod tests {
             let input = decision_input();
             let offer = openai_offer(&url);
             let result = runtime.block_on(async {
+                let mut send = HostedEffectSend::NotSent;
                 let worker = run_decision_worker(
                     &url,
                     None,
@@ -4092,6 +4127,7 @@ mod tests {
                     "run:fixture",
                     "fixture-request",
                     None,
+                    &mut send,
                 );
                 let interrupt = async {
                     ready_rx.await.unwrap();
@@ -5828,6 +5864,7 @@ mod tests {
             "run:fixture",
             "fixture-request",
             None,
+            &mut HostedEffectSend::NotSent,
         ));
         assert!(fault.unwrap_err().error.message.contains("paused"));
         TEST_EXTERNAL_HTTP_ALLOWED.with(|allowed| allowed.set(true));

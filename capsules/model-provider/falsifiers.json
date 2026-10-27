@@ -2743,6 +2743,38 @@
       "tests": [
         "an_ra1_grant_for_another_request_does_not_reach_the_model"
       ]
+    },
+    {
+      "id": "MP40",
+      "title": "the cut path records plain unknown usage (no reason), so a Runtime account cannot tell the sent-then-cut run from a run that sent nothing, and the cut test fails at its backend_report assert; only the ResponseStarted arm of hosted_fault_backend_report changes, so the refused path still names its reason",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "        HostedEffectSend::ResponseStarted => UsageUnknownReason::Cut,",
+          "new": "        HostedEffectSend::ResponseStarted => return Some(Box::new(BackendReport::unknown())),"
+        }
+      ],
+      "tests": [
+        "hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage"
+      ]
+    },
+    {
+      "id": "MP41",
+      "title": "the refused path records plain unknown usage (no reason), so a Runtime account cannot tell a run the provider refused before any send from a sent run with no report, and the model-busy test fails at run B's backend_report assert while the stand-in still sees exactly one connection",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "            transition_error_refused_before_send(\n                &offer,\n                &mut run,\n                RunError {\n                    class: ErrorClass::RateLimited,\n                    code: \"model_busy\".to_string(),",
+          "new": "            transition_error(\n                &offer,\n                &mut run,\n                RunError {\n                    class: ErrorClass::RateLimited,\n                    code: \"model_busy\".to_string(),"
+        }
+      ],
+      "tests": [
+        "hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect"
+      ]
     }
   ]
 }
