@@ -546,6 +546,8 @@ class TaskNameProbe(unittest.TestCase):
         self.assertEqual(os.path.realpath(self.root), self.root)
         self.assertEqual(os.path.realpath(self.parent), self.parent)
         result = run_unsandboxed(self.binary)
+        if classify(result) == "deny":
+            raise HarnessError("unsandboxed control denied task_name_for_pid")
         self.assertEqual(result.argv, [self.binary])
         self.assertEqual(len(result.argv), 1)
         self.assertNotIn(sbx.SANDBOX_EXEC, result.argv)
@@ -1370,6 +1372,47 @@ class TaskNameRules(unittest.TestCase):
                 "not a deny and not an allow. stderr='Operation not permitted\\n'",
             ),
         )
+
+    def test_unsandboxed_control_failures_are_errors(self):
+        """Every failed control reports one harness error and zero failures."""
+        class Control(TaskNameProbe):
+            skip_reason = None
+            parent = os.path.realpath("/private/ccrt-tname-control-parent")
+            root = os.path.realpath("/private/ccrt-tname-control-root")
+            binary = os.path.join(root, "tname")
+
+        denied = (
+            "control denied",
+            sbx.Result(exit_code=0, stdout=DENY_STDOUT, stderr="", argv=[]),
+            "unsandboxed control denied task_name_for_pid",
+        )
+        for label, refused, expected in self.refusal_samples() + (denied,):
+            with self.subTest(reason=label):
+                injected = sbx.Result(
+                    exit_code=refused.exit_code,
+                    stdout=refused.stdout,
+                    stderr=refused.stderr,
+                    argv=[Control.binary],
+                )
+                result = unittest.TestResult()
+                with patch.object(Path, "read_text", return_value=HELPER_C), patch(
+                    __name__ + ".run_unsandboxed", return_value=injected
+                ) as control, patch.object(
+                    result, "addError", wraps=result.addError
+                ) as added:
+                    Control("test_unsandboxed_task_name_succeeds").run(result)
+                control.assert_called_once_with(Control.binary)
+                self.assertEqual(result.testsRun, 1)
+                self.assertEqual(len(result.errors), 1)
+                error = added.call_args.args[1][1]
+                self.assertIsInstance(error, HarnessError)
+                self.assertEqual(str(error), expected)
+                self.assertEqual(result.failures, [])
+                self.assertEqual(result.expectedFailures, [])
+                self.assertEqual(result.unexpectedSuccesses, [])
+                self.assertEqual(result.skipped, [])
+                self.assertFalse(result.wasSuccessful())
+        self.launch_guard.assert_not_called()
 
     def test_classifier_refusal_reasons(self):
         """Each classifier refusal preserves its exact, distinct reason."""
