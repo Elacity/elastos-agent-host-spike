@@ -1473,13 +1473,17 @@ fn cancel_local_text(
     })
 }
 
-/// How far one hosted effect request reached before a worker fault. The
-/// reason code follows the send: nothing written is `refused`, a response
-/// body that started and then failed is `cut`, and a Runtime status answer
-/// keeps the plain unknown usage (`Sent`).
+/// How far one hosted effect request reached before a worker fault. `NotSent`
+/// is a fault before `request.send()`; `ConnectFailed` is a send error that
+/// never established a connection; `SendUncertain` is a send error after the
+/// request may have been written, so the provider cannot claim nothing was
+/// sent; `Sent` is the Runtime's status answer, and `ResponseStarted` is a
+/// response body that started and then failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HostedEffectSend {
     NotSent,
+    ConnectFailed,
+    SendUncertain,
     Sent,
     ResponseStarted,
 }
@@ -1489,8 +1493,8 @@ fn hosted_fault_backend_report(hosted: bool, send: HostedEffectSend) -> Option<B
         return None;
     }
     let reason = match send {
-        HostedEffectSend::NotSent => UsageUnknownReason::Refused,
-        HostedEffectSend::Sent => return None,
+        HostedEffectSend::NotSent | HostedEffectSend::ConnectFailed => UsageUnknownReason::Refused,
+        HostedEffectSend::SendUncertain | HostedEffectSend::Sent => return None,
         HostedEffectSend::ResponseStarted => UsageUnknownReason::Cut,
     };
     Some(Box::new(BackendReport::unknown_with_usage_reason(reason)))
@@ -1529,7 +1533,10 @@ async fn run_local_text_worker(mut task: LocalTextWorkerTask) -> bool {
                     },
                     output: None,
                     error: Some(fault.error),
-                    backend_report: hosted_fault_backend_report(task.hosted_socket.is_some(), send),
+                    backend_report: hosted_fault_backend_report(
+                        task.offer.summary().hosted.is_some(),
+                        send,
+                    ),
                 }
             }
         };
@@ -2020,7 +2027,15 @@ async fn run_local_text_worker_with_timing(
         _ = task.cancel_rx.changed() => {
             return Ok(cancel_text_worker(&task.backend).await);
         }
-        response = request.send() => response.map_err(|err| map_text_reqwest_failure(err, private_endpoint))?
+        response = request.send() => response.map_err(|err| {
+            *send = if err.is_connect() {
+                HostedEffectSend::ConnectFailed
+            } else {
+                // The request may have been written; nothing here proves it was not.
+                HostedEffectSend::SendUncertain
+            };
+            map_text_reqwest_failure(err, private_endpoint)
+        })?
     };
     *send = HostedEffectSend::Sent;
     if !response.status().is_success() {
@@ -2225,7 +2240,15 @@ async fn run_decision_worker(
     }
     let response = tokio::select! {
         _ = cancel.changed() => return Ok(worker_settlement_unknown_result()),
-        response = request.send() => response.map_err(map_reqwest_failure)?,
+        response = request.send() => response.map_err(|err| {
+            *send = if err.is_connect() {
+                HostedEffectSend::ConnectFailed
+            } else {
+                // The request may have been written; nothing here proves it was not.
+                HostedEffectSend::SendUncertain
+            };
+            map_reqwest_failure(err)
+        })?,
     };
     *send = HostedEffectSend::Sent;
     if !response.status().is_success() {

@@ -2775,6 +2775,54 @@
       "tests": [
         "hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect"
       ]
+    },
+    {
+      "id": "MP42",
+      "title": "the worker records plain unknown usage for a hosted send that never connected, so a run that sent nothing is indistinguishable from a sent run with no report, and the connect-failure test fails at run's backend_report assert; this breaks only the NotSent/ConnectFailed arm, so the ceiling and cut tags keep their reasons",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "        HostedEffectSend::NotSent | HostedEffectSend::ConnectFailed => UsageUnknownReason::Refused,",
+          "new": "        HostedEffectSend::NotSent | HostedEffectSend::ConnectFailed => return None,"
+        }
+      ],
+      "tests": [
+        "hosted_run_that_cannot_connect_records_usage_refused"
+      ]
+    },
+    {
+      "id": "MP43",
+      "title": "a send error after the request may have been written is tagged refused, so a run the Runtime received and may have forwarded records usage unknown with a reason that claims nothing was sent, and the closed-socket test fails at its backend_report assert; the arm also fails open for accounting",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "        HostedEffectSend::SendUncertain | HostedEffectSend::Sent => return None,",
+          "new": "        HostedEffectSend::SendUncertain => UsageUnknownReason::Refused,\n        HostedEffectSend::Sent => return None,"
+        }
+      ],
+      "tests": [
+        "hosted_run_whose_socket_closes_before_the_status_keeps_usage_unknown"
+      ]
+    },
+    {
+      "id": "MP44",
+      "title": "the worker decides hosted evidence from the process runtime socket instead of the offer, so on macOS a local offer under the Runtime-hosted socket carries a usage reason that state rejects as hosted evidence, the apply is rolled back and the run settles settlement_unknown instead of keeping its backend error; the local-fault test fails at its status assert",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "                        task.offer.summary().hosted.is_some(),",
+          "new": "                        task.hosted_socket.is_some(),"
+        }
+      ],
+      "tests": [
+        "local_fault_under_the_runtime_socket_keeps_its_backend_error"
+      ]
     }
   ]
 }

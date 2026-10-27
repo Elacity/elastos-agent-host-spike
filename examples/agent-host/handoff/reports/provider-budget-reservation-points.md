@@ -307,16 +307,27 @@ proposes a Runtime design; each names what is missing.
    A hosted run whose usage the provider never saw keeps `usage` as `unknown`
    and now names why: a run the provider refuses before it sends anything
    records `{"status": "unknown", "reason": "refused"}`
-   (`capsules/model-provider/src/state.rs:1417-1425`), and a run whose response
-   stream was cut after send records `{"status": "unknown", "reason": "cut"}`
-   (`capsules/model-provider/src/adapters.rs:1487-1500`). The model-busy test
-   (`capsules/model-provider/tests/process.rs:2388`,
+   (`capsules/model-provider/src/state.rs:1419-1425` and
+   `capsules/model-provider/src/adapters.rs:1496`), and a run whose response
+   started and then failed records `{"status": "unknown", "reason": "cut"}`
+   (`capsules/model-provider/src/adapters.rs:1498`). A send error after the
+   request may have been written keeps plain `unknown`, because the provider
+   cannot prove nothing was sent
+   (`capsules/model-provider/src/adapters.rs:2030-2039`). The model-busy test
+   (`capsules/model-provider/tests/process.rs:2711`,
    `hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect`)
-   proves the refused case and the stand-in's single connection; the cut test
-   (`capsules/model-provider/tests/process.rs:2080`,
+   is the note's refused-before-send case and proves that reason and the
+   stand-in's single connection; the connect-failure test
+   (`capsules/model-provider/tests/process.rs:2229`,
+   `hosted_run_that_cannot_connect_records_usage_refused`) proves the same
+   reason at the send boundary; the cut test
+   (`capsules/model-provider/tests/process.rs:2108`,
    `hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage`) proves
-   the cut case. This is the lab shape, offered as input to Anders's Runtime
-   usage record; the provider keeps no budget reservation.
+   the cut case; and the closed-socket test
+   (`capsules/model-provider/tests/process.rs:2329`,
+   `hosted_run_whose_socket_closes_before_the_status_keeps_usage_unknown`)
+   proves the untagged case. This is the lab shape, offered as input to
+   Anders's Runtime usage record; the provider keeps no budget reservation.
 
 ## Tests still missing
 

@@ -142,16 +142,11 @@ fn start_local_llama_run(label: &str) -> (ProviderProcess, PathBuf) {
     (provider, events)
 }
 
-fn start_local_llama_fixture(
-    label: &str,
-    mode: &str,
-    prompt: &str,
-) -> (ProviderProcess, PathBuf, Value, Value) {
-    let root = test_support::temp_root_path("model-provider-process", label);
-    std::fs::create_dir_all(&root).unwrap();
-    let root = std::fs::canonicalize(root).unwrap();
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let (engine, model, events) = test_support::write_fake_llama_server(&root, mode);
+/// The local llama fixture offer for `mode`, with the fake server and model it
+/// names written under `root`. It carries no hosted disclosure, so it is the
+/// non-hosted offer the hosted-evidence check must exclude.
+fn local_llama_offer(root: &Path, mode: &str) -> (Value, PathBuf) {
+    let (engine, model, events) = test_support::write_fake_llama_server(root, mode);
     let offer = json!({
         "id": "local-text",
         "title": "Local Text",
@@ -190,6 +185,19 @@ fn start_local_llama_fixture(
         },
         "enabled": true
     });
+    (offer, events)
+}
+
+fn start_local_llama_fixture(
+    label: &str,
+    mode: &str,
+    prompt: &str,
+) -> (ProviderProcess, PathBuf, Value, Value) {
+    let root = test_support::temp_root_path("model-provider-process", label);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (offer, events) = local_llama_offer(&root, mode);
     let mut provider = ProviderProcess::start();
     let init_request = json!({
         "op": "init",
@@ -835,6 +843,9 @@ enum HostedEffectAnswer {
     Refused,
     Streaming,
     Cut,
+    /// Reads the effect request to its end and closes without a status line,
+    /// as a peer that received the request and then died.
+    Closed,
     /// Relays the recorded request body to this base URL and copies the backend
     /// answer back as the Runtime's hosted stream.
     Relay {
@@ -950,6 +961,12 @@ impl HostedEffectStandIn {
     /// hosted stream after the head and one chunk.
     fn bind_cut(label: &str) -> Self {
         Self::bind_answering(label, HostedEffectAnswer::Cut, None)
+    }
+
+    /// Binds the stand-in that reads each effect request and closes without a
+    /// status line.
+    fn bind_closed(label: &str) -> Self {
+        Self::bind_answering(label, HostedEffectAnswer::Closed, None)
     }
 
     /// Binds the stand-in that relays each hosted effect to the real backend at
@@ -1193,6 +1210,7 @@ fn serve_hosted_effect(
         HostedEffectAnswer::Refused => RUNTIME_HOSTED_REFUSAL.to_vec(),
         HostedEffectAnswer::Streaming => runtime_hosted_stream_answer(),
         HostedEffectAnswer::Cut => runtime_hosted_cut_answer(),
+        HostedEffectAnswer::Closed => return,
         HostedEffectAnswer::Relay { backend_url } => {
             let outcome = relay_hosted_effect(&stream, &body, &backend_url);
             *relay_outcome.lock().unwrap() = Some(outcome);
@@ -1871,6 +1889,17 @@ fn hosted_effect_offer(model: &str, runtime_ms_limit: u64) -> Value {
     })
 }
 
+/// An `init` request over the given offers and `runtime_hosted_socket`, with
+/// the fixture root as `base_path` and its `journal` folder as `journal_dir`.
+fn effect_init_with_offers(root: &Path, socket_path: &Path, offers: Vec<Value>) -> Value {
+    json!({"op": "init", "config": {
+        "base_path": root, "allowed_paths": [], "read_only": false, "encryption_key": "",
+        "extra": {"provider_id": "model-provider", "journal_dir": root.join("journal"),
+        "offers": offers,
+        "runtime_hosted_socket": socket_path}
+    }})
+}
+
 /// The `init` request every hosted test sends: the shared offer and the
 /// stand-in's socket, with the fixture root as `base_path` and its `journal`
 /// folder as `journal_dir`. The offer's model id and run limit are parameters,
@@ -1881,12 +1910,11 @@ fn hosted_effect_init(
     model: &str,
     runtime_ms_limit: u64,
 ) -> Value {
-    json!({"op": "init", "config": {
-        "base_path": root, "allowed_paths": [], "read_only": false, "encryption_key": "",
-        "extra": {"provider_id": "model-provider", "journal_dir": root.join("journal"),
-        "offers": [hosted_effect_offer(model, runtime_ms_limit)],
-        "runtime_hosted_socket": &stand_in.path}
-    }})
+    effect_init_with_offers(
+        root,
+        &stand_in.path,
+        vec![hosted_effect_offer(model, runtime_ms_limit)],
+    )
 }
 
 /// A retry of an open hosted run is a replay, not a second send. The stored
@@ -2187,6 +2215,301 @@ fn hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage() {
         recorded.value("authorization"),
         None,
         "a hosted run must carry no bearer key"
+    );
+
+    provider.shutdown();
+}
+
+/// A hosted run whose effect socket cannot be reached never writes the effect.
+/// `reqwest::send()` fails before a connection, so the worker records the usage
+/// fact unknown with reason `refused` (`src/adapters.rs` `ConnectFailed`) and
+/// the run keeps its transport error. Off macOS the provider refuses every
+/// hosted run before any socket, so the test prints one `SKIP` line and returns.
+#[test]
+fn hosted_run_that_cannot_connect_records_usage_refused() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted connect failure: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-connect-failure");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // No listener is bound at this path, so the send fails before a connection.
+    let socket = Path::new("/tmp").join(format!(
+        "mp-process-hosted-connect-{}.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&socket);
+    let init = effect_init_with_offers(
+        &root,
+        &socket,
+        vec![hosted_effect_offer(
+            HOSTED_FIXTURE_MODEL,
+            HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+        )],
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "a hosted answer with no reachable Runtime socket"
+    });
+    let create_request = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": "session:test",
+            "capsule_id": "assistant",
+            "grant_id": "grant:test",
+            "request_id": test_support::fixture_model_request_id("request:hosted-connect-failure"),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": model_input_hash(&input).unwrap()
+        }
+    });
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    assert_eq!(
+        create["data"]["run_id"], expected_run_id,
+        "runs_create must return the contract run id"
+    );
+    let settled = wait_for_run_terminal(
+        &mut provider,
+        &expected_run_id,
+        &access_binding(&create_request),
+    );
+    assert_eq!(
+        settled["data"]["status"], "failed",
+        "a hosted run with no reachable socket must fail: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["error"]["code"], "transport_interrupted",
+        "the connect failure must keep its transport fault: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["backend_report"],
+        json!({
+            "schema": BACKEND_REPORT_SCHEMA,
+            "resolved_model": {"status": "unknown"},
+            "usage": {"status": "unknown", "reason": "refused"},
+            "cost": {"status": "unknown"},
+        }),
+        "a hosted run that never connected must record usage unknown with reason refused: {settled}"
+    );
+
+    provider.shutdown();
+}
+
+/// A send error after the Runtime socket read the effect does not prove the
+/// request was not written. The stand-in reads the whole request and closes
+/// without a status line, so `reqwest::send()` fails after a possible write;
+/// the worker records no reason (`src/adapters.rs` `SendUncertain`), and only a
+/// connect failure names `refused`. Off macOS the provider refuses every
+/// hosted run before any socket, so the test prints one `SKIP` line.
+#[test]
+fn hosted_run_whose_socket_closes_before_the_status_keeps_usage_unknown() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted closed socket: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root =
+        test_support::temp_root_path("model-provider-process", "hosted-closed-before-status");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind_closed("hosted-closed-before-status");
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "a hosted answer whose socket closes before the status"
+    });
+    let create_request = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": "session:test",
+            "capsule_id": "assistant",
+            "grant_id": "grant:test",
+            "request_id": test_support::fixture_model_request_id(
+                "request:hosted-closed-before-status"
+            ),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": model_input_hash(&input).unwrap()
+        }
+    });
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    assert_eq!(
+        create["data"]["run_id"], expected_run_id,
+        "runs_create must return the contract run id"
+    );
+    let settled = wait_for_run_terminal(
+        &mut provider,
+        &expected_run_id,
+        &access_binding(&create_request),
+    );
+    assert_eq!(
+        settled["data"]["status"], "failed",
+        "a hosted run whose socket closes before the status must fail: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["error"]["code"], "transport_interrupted",
+        "the send error must keep its transport fault: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["backend_report"],
+        json!({
+            "schema": BACKEND_REPORT_SCHEMA,
+            "resolved_model": {"status": "unknown"},
+            "usage": {"status": "unknown"},
+            "cost": {"status": "unknown"},
+        }),
+        "a send error after a possible write must keep usage unknown with no reason: {settled}"
+    );
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "the closed run must open exactly one connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "the closed run must send exactly one request, which the stand-in read"
+    );
+
+    provider.shutdown();
+}
+
+/// The worker's hosted report follows the offer, not the process socket. On
+/// macOS the Runtime sets `runtime_hosted_socket` for every model provider, a
+/// local offer included. A local fault must reach the state with no report,
+/// because `transition_terminal_with_backend_report` (`src/state.rs:1355`)
+/// rejects hosted evidence for a non-hosted run; a report here settles the run
+/// `settlement_unknown` and drops its backend error. The fake engine exits on
+/// start, so the worker faults before any effect request. Off macOS the
+/// provider refuses the offer before any engine, so one `SKIP` line.
+#[test]
+fn local_fault_under_the_runtime_socket_keeps_its_backend_error() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider local fault under the Runtime socket: off macOS the \
+             provider refuses every external offer before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "local-fault-hosted-socket");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = Path::new("/tmp").join(format!(
+        "mp-process-local-fault-{}.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&socket);
+    let (offer, _events) = local_llama_offer(&root, "loader_failure");
+    let init = effect_init_with_offers(&root, &socket, vec![offer]);
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "a local answer whose engine cannot start"
+    });
+    let create_request = json!({
+        "op": "runs_create",
+        "offer_id": "local-text",
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": "session:test",
+            "capsule_id": "assistant",
+            "grant_id": "grant:test",
+            "request_id": test_support::fixture_model_request_id("request:local-fault"),
+            "offer_id": "local-text",
+            "operation": "text.generate",
+            "input_hash": model_input_hash(&input).unwrap()
+        }
+    });
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    assert_eq!(
+        create["data"]["run_id"], expected_run_id,
+        "runs_create must return the contract run id"
+    );
+    let settled = wait_for_run_terminal(
+        &mut provider,
+        &expected_run_id,
+        &access_binding(&create_request),
+    );
+    assert_eq!(
+        settled["data"]["status"], "failed",
+        "a local fault must fail the run, not settle it unknown: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["error"]["code"], "backend_failed",
+        "a local engine that cannot start must keep its backend error: {settled}"
+    );
+    assert!(
+        settled["data"]["terminal"].get("backend_report").is_none(),
+        "a local run must carry no hosted backend report: {settled}"
     );
 
     provider.shutdown();
