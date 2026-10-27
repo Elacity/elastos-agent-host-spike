@@ -2299,34 +2299,60 @@ fn allow_rules_trace_to_declared_rights() {
             })
             .collect()
     }
+    fn collect_allow_lines(profile: &str) -> Vec<&str> {
+        let mut allow_lines: Vec<&str> = profile
+            .lines()
+            .filter(|line| !line.starts_with(";;"))
+            .map(str::trim)
+            .filter(|line| line.starts_with("(allow "))
+            .collect();
+        // An allow after another form on the same line is one more allow line.
+        // A suffix stays even when it equals a line already collected. A line
+        // that starts with `(allow ` is taken once, by the walk above.
+        for line in profile
+            .lines()
+            .filter(|line| !line.starts_with(";;"))
+            .map(str::trim)
+        {
+            if line.starts_with("(allow ") {
+                continue;
+            }
+            let Some(start) = line.find("(allow ") else {
+                continue;
+            };
+            let suffix = &line[start..];
+            allow_lines.push(suffix);
+        }
+        allow_lines
+    }
+    fn declared_rule_match(allow_lines: &[&str], rule: &str) -> Result<(), String> {
+        match allow_lines.iter().filter(|line| **line == rule).count() {
+            0 => Err(format!("declared rule is not an allow line: {rule}")),
+            1 => Ok(()),
+            _ => Err(format!(
+                "declared rule matches more than one allow line: {rule}"
+            )),
+        }
+    }
+
+    // Same-line copies are in memory. Neither profile reads the fixture.
+    let storage_rule = "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))";
+    assert_eq!(
+        declared_rule_match(&collect_allow_lines(storage_rule), storage_rule),
+        Ok(())
+    );
+    let same_line_copy = format!("{storage_rule}\n(deny network*) {storage_rule}");
+    let message = declared_rule_match(&collect_allow_lines(&same_line_copy), storage_rule)
+        .expect_err("a same-line copy of the storage rule must fail check 3");
+    assert!(
+        message.contains("declared rule matches more than one allow line")
+            && message.contains(storage_rule)
+            && !message.contains("allow rule has no declared right"),
+        "{message}"
+    );
 
     let profile = fs::read_to_string(PROFILE_PATH).expect("the profile source");
-    let mut allow_lines: Vec<&str> = profile
-        .lines()
-        .filter(|line| !line.starts_with(";;"))
-        .map(str::trim)
-        .filter(|line| line.starts_with("(allow "))
-        .collect();
-    // An allow after another form on the same line is one more allow line.
-    // A line that already starts with `(allow ` stays the one copy, so a
-    // declared rule is not counted twice.
-    for line in profile
-        .lines()
-        .filter(|line| !line.starts_with(";;"))
-        .map(str::trim)
-    {
-        if line.starts_with("(allow ") {
-            continue;
-        }
-        let Some(start) = line.find("(allow ") else {
-            continue;
-        };
-        let suffix = &line[start..];
-        if allow_lines.contains(&suffix) {
-            continue;
-        }
-        allow_lines.push(suffix);
-    }
+    let allow_lines = collect_allow_lines(&profile);
     let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
     let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
         panic!(
@@ -2378,11 +2404,8 @@ fn allow_rules_trace_to_declared_rights() {
 
     for entry in rights.iter().chain(baseline.iter()) {
         for rule in rule_strings(entry) {
-            let matches = allow_lines.iter().filter(|line| **line == rule).count();
-            match matches {
-                0 => panic!("declared rule is not an allow line: {rule}"),
-                1 => {}
-                _ => panic!("declared rule matches more than one allow line: {rule}"),
+            if let Err(reason) = declared_rule_match(&allow_lines, rule) {
+                panic!("{reason}");
             }
         }
     }
