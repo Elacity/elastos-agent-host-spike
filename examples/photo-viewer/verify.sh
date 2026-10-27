@@ -44,6 +44,9 @@ cargo fmt --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" -- --check
 cargo clippy --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" --all-targets -- -D warnings
 cargo test --locked --manifest-path "${VIEWER_DIR}/host-test/Cargo.toml" -- --nocapture
 
+# This test code stands in for the Runtime's launch by CID, which does not exist yet.
+python3 -I "${VIEWER_DIR}/falsify-ph6-stand-in.py"
+
 # Every refusal: break it, see its test fail, restore it.
 # The runner itself: a case is caught only when every named test fails.
 python3 -I "${VIEWER_DIR}/../capsule-kit/falsify/test_falsify_kit.py"

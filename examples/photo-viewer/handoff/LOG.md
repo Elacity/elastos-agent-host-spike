@@ -56,3 +56,4 @@ One line per slice: date, slice, branch, last commit, result.
 - 2026-10-28 task 034: the stand-in binds the bytes load checked; it does not launch.
 - 2026-10-28 task 035: the stand-in admits staged content only when its claim is present; it does not launch.
 - 2026-10-28 task 036: the stand-in selects the pinned viewer and its core; it does not launch.
+- 2026-10-28 task 037: the stand-in runs the staged photo core through the kit; the per-effect guard is still later.
