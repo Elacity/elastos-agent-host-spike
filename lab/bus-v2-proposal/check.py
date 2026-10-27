@@ -18,6 +18,13 @@ CITATION = re.compile(
 
 DRAFT = Path("lab/bus-v2-proposal/CORE-CALLS-PROPOSAL.md")
 
+# The one owned citation. Its quotation stays unchecked until a slice owns it.
+OWNED_SPAN = "examples/agent-host/src/lib.rs:3754"
+OWNED_MARKER = "`" + OWNED_SPAN + "`"
+
+# The draft indents a quotation by exactly four spaces.
+DRAFT_INDENT = "    "
+
 
 def read_file(root, rel):
     """Return file bytes, or None when ``rel`` is not a file under ``root``."""
@@ -113,6 +120,73 @@ def _spans(text):
         cursor = closed + 1
 
 
+def pinned_line(root, sha, rel, number):
+    """Return line NUMBER of REL at commit SHA, or None when it is absent."""
+    if sha is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "show", sha + ":" + rel],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        text = decode_text(result.stdout)
+    except UnicodeDecodeError:
+        return None
+    lines = text.splitlines()
+    if number < 1 or number > len(lines):
+        return None
+    return lines[number - 1]
+
+
+def _owned_target():
+    """Return the path and line number of the owned span."""
+    rel, _, number = OWNED_SPAN.rpartition(":")
+    return rel, int(number)
+
+
+def owned_quote(text):
+    """Return the one quotation after the owned span, or None when absent."""
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if OWNED_MARKER not in line:
+            continue
+        for following in lines[index + 1:]:
+            if not following:
+                continue
+            if not following.startswith(DRAFT_INDENT):
+                return None
+            return following[len(DRAFT_INDENT):]
+        return None
+    return None
+
+
+def quoted_line_matches(quoted, source):
+    """True only when the quotation equals the pinned source line."""
+    return quoted == source
+
+
+def _quote_refusal(root, text, sha):
+    """Return the one quote refusal, or None when the owned quote is absent."""
+    if text.count(OWNED_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + OWNED_SPAN
+    quoted = owned_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _owned_target()
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + OWNED_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + OWNED_SPAN
+    return None
+
+
 def _past_end(number, rel, count):
     return "refuse: line %s is past the end of %s (%s lines)" % (number, rel, count)
 
@@ -154,12 +228,15 @@ def problems(root):
     if text is None:
         return ["refuse: proposal is absent"]
     refusals = []
-    reason = pin_refusal(text)
-    if reason is not None:
-        refusals.append(reason)
+    pin_reason = pin_refusal(text)
+    sha = None
+    pinned = False
+    if pin_reason is not None:
+        refusals.append(pin_reason)
     else:
         sha = pin_sha(text)
-        if sha is not None and not commit_exists(root, sha):
+        pinned = sha is not None and commit_exists(root, sha)
+        if sha is not None and not pinned:
             refusals.append("refuse: pinned commit is not a commit: " + sha)
     for span in _spans(text):
         match = CITATION.fullmatch(span)
@@ -168,6 +245,10 @@ def problems(root):
         reason = _refusal(root, match)
         if reason is not None:
             refusals.append(reason)
+    if pin_reason is None and pinned:
+        quote = _quote_refusal(root, text, sha)
+        if quote is not None:
+            refusals.append(quote)
     return refusals
 
 
