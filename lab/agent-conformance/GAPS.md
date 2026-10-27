@@ -77,6 +77,11 @@ For plain `serve`, the same path is a CLI **default**
 Thus an in-root argument contains this constructor for `serve`;
 AC-006-STORAGE remains the separate `run` blocker above.
 
+AC-006-STORAGE covers only the `run` client's fixed scratch path
+(`elastos/crates/elastos-server/src/run_cmd.rs:236`). An owned storage root,
+bound to a verified identity and session, is AC-039-OWNED-ROOT. The
+`operator_storage_is_under_throwaway_home` row keeps the ID AC-006-STORAGE.
+
 ## Launch by bundle CID (025)
 
 | Ignored test | Blocker ID | Runtime change that enables acceptance |
@@ -813,8 +818,10 @@ check reads metadata only and leaves the build tree outside its selection.
 ## 023 — two granted Home directories
 
 `two_instances_overlap_with_separate_grants` and
-`instance_grant_does_not_authorise_sibling` exercise the
-**process-isolation lab half of A3, A6 and A9**. Two hash-named builds use the
+`instance_grant_does_not_authorise_sibling` exercise
+**process isolation, not A3 (A3 needs resident instances in one Runtime); lab half of A6 and A9**.
+A3 is independent resident capsule instances inside one Runtime
+(https://github.com/Elacity/elastos-runtime/issues/181). Two hash-named builds use the
 same probe, operator, seed route and collector. The controller seeds distinct
 bytes in separate granted Home directories. Both first reads receive separate
 `session` grants; both sibling reads reach new pending requests in their
@@ -826,9 +833,10 @@ controller records the earlier session grant and the later sibling request,
 and both clients remain alive at the barrier. It has no direct cross-session
 live-grant census (AC-021-GRANTS).
 
-AC-006-STORAGE above covers both clients' shared `/tmp/elastos/storage`. This
-journey proves separation of granted Home directories; the client-storage
-half stays BLOCKED under that existing row. RT4 still owns resident instances
+AC-006-STORAGE covers only the `run` client's fixed scratch path
+(`elastos/crates/elastos-server/src/run_cmd.rs:236`). Both clients share that
+path. Owned storage roots are AC-039-OWNED-ROOT. This journey proves
+separation of granted Home directories. RT4 still owns resident instances
 inside one operator. The task's scope label appears in the table and receipt.
 The controller seeds the files to keep this journey to two read requests per
 instance. A guest-write variant needs an additional action grant, which the
@@ -923,7 +931,7 @@ That refusal binds the token to the requesting session. The Runtime's own
 no verified agent principal. `elastos/crates/elastos-server/src/api/handlers/capability.rs:339-346`
 mints the token with the requesting session. `elastos/crates/elastos-runtime/src/capability/manager.rs:408-415`
 refuses a different caller. Anders owns the change. A permitted Public read
-earns no A5 credit. Owned storage is a separate gap.
+earns no A5 credit. Owned storage is AC-039-OWNED-ROOT.
 
 Acceptance compares the grant's principal and capsule with independently
 established caller evidence for the requesting session. Runtime owns that
@@ -933,3 +941,26 @@ it; a principal string in the grant record alone cannot satisfy the check.
 | Ignored test | Blocker ID | Runtime change that enables acceptance |
 | --- | --- | --- |
 | `grant_record_names_agent_identity` | AC-038-GRANT-PRINCIPAL | Anders: the Runtime binds each minted token to the principal and session it verified and supplies separate verified caller evidence for the comparison (https://github.com/Elacity/elastos-runtime/issues/464). `capability.rs` grant_request mints with the requesting session at lines 339-346, and `manager.rs` validate_recurring checks that session at lines 408-415. |
+
+## AC-039-OWNED-ROOT — each instance writes only under its own storage root
+
+`instance_writes_only_under_own_storage_root` is
+`#[ignore = "blocked: AC-039-OWNED-ROOT"]`. Sessions A and B are lab client
+sessions on the run client's attach route. Each requests a write under its own
+area (`localhost://Public/agent-conformance-grants/instance-a/` and
+`localhost://Public/agent-conformance-grants/instance-b/`). The fixture grants
+each request and each session writes its own file. Session B then requests a
+write under A's area. Acceptance is a Runtime refusal of that request, with a
+reason and no shell decision (`denied` or `auto_denied` from
+`/api/capability/request`). Today every request is stored pending for the
+calling session
+(`elastos/crates/elastos-server/src/api/handlers/capability.rs:117-142`). The
+grant names the session and the resource
+(`elastos/crates/elastos-server/src/api/handlers/capability.rs:297-346`). There
+is no owned storage root to bind. Anders owns the change. A pending sibling
+request is denied through the existing deny route before the row fails, so the
+operator is left with no pending request. This row is never a pass.
+
+| Ignored test | Blocker ID | Runtime change that enables acceptance |
+| --- | --- | --- |
+| `instance_writes_only_under_own_storage_root` | AC-039-OWNED-ROOT | Anders: the Runtime gives each instance an owned storage root bound to its verified identity and session, and refuses a sibling's request for it (https://github.com/Elacity/elastos-runtime/issues/464). |
