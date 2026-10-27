@@ -2823,6 +2823,54 @@
       "tests": [
         "local_fault_under_the_runtime_socket_keeps_its_backend_error"
       ]
+    },
+    {
+      "id": "MP45",
+      "title": "a cut drops the usage counts the stream already sent, so a Runtime account loses the observed partial counts and the cut-after-usage test fails at its backend_report assert; the refused and no-usage cut paths keep their shape because only the observed counts are removed",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "    Some(Box::new(BackendReport::unknown_with_observed_usage(\n        reason,\n        progress.observed_usage.clone(),\n    )))",
+          "new": "    Some(Box::new(BackendReport::unknown_with_usage_reason(reason)))"
+        }
+      ],
+      "tests": [
+        "hosted_stream_cut_after_a_usage_chunk_keeps_only_the_observed_counts"
+      ]
+    },
+    {
+      "id": "MP46",
+      "title": "a cut fills a missing total_tokens in as input plus output, so the provider records a number the backend never sent instead of only the observed counts, and the cut-after-usage test fails at its backend_report assert",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "        progress.observed_usage.clone(),",
+          "new": "        progress.observed_usage.clone().map(|usage| BackendTokenUsage {\n            total_tokens: Some(\n                usage.input_tokens.unwrap_or(0) + usage.output_tokens.unwrap_or(0),\n            ),\n            ..usage\n        }),"
+        }
+      ],
+      "tests": [
+        "hosted_stream_cut_after_a_usage_chunk_keeps_only_the_observed_counts"
+      ]
+    },
+    {
+      "id": "MP47",
+      "title": "the dispatch-error arm goes back to plain transition_error, so a hosted run the provider refuses before any worker records usage unknown with no reason and a Runtime account cannot tell it from a sent run with no report; the dispatch-refusal test fails at its backend_report assert while the stand-in still sees no connection",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "                transition_error_refused_before_send(&stored_offer, &mut run, fault.error)?;",
+          "new": "                transition_error(&stored_offer, &mut run, fault.error)?;"
+        }
+      ],
+      "tests": [
+        "hosted_run_refused_at_dispatch_records_usage_refused"
+      ]
     }
   ]
 }

@@ -379,10 +379,20 @@ impl<T: PartialEq> CapturedBackendFact<T> {
         }
     }
 
+    fn reported(&self) -> Option<&T> {
+        match self {
+            Self::Reported(value) => Some(value),
+            Self::Unknown | Self::Invalid => None,
+        }
+    }
+
     fn into_report(self) -> BackendFact<T> {
         match self {
             Self::Reported(value) => BackendFact::Reported { value },
-            Self::Unknown | Self::Invalid => BackendFact::Unknown { reason: None },
+            Self::Unknown | Self::Invalid => BackendFact::Unknown {
+                reason: None,
+                observed_partial: None,
+            },
         }
     }
 }
@@ -1479,8 +1489,9 @@ fn cancel_local_text(
 /// request may have been written, so the provider cannot claim nothing was
 /// sent; `Sent` is the Runtime's status answer, and `ResponseStarted` is a
 /// response body that started and then failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum HostedEffectSend {
+    #[default]
     NotSent,
     ConnectFailed,
     SendUncertain,
@@ -1488,16 +1499,41 @@ enum HostedEffectSend {
     ResponseStarted,
 }
 
-fn hosted_fault_backend_report(hosted: bool, send: HostedEffectSend) -> Option<Box<BackendReport>> {
+/// How far one hosted effect reached before a worker fault, and the usage the
+/// stream really reported before it. The worker keeps the observed counts
+/// here, because a cut returns a fault and the report it built is consumed
+/// only on a clean end.
+#[derive(Default)]
+struct HostedEffectProgress {
+    send: HostedEffectSend,
+    observed_usage: Option<BackendTokenUsage>,
+}
+
+impl HostedEffectProgress {
+    /// Keeps the counts the stream reported so far. Only a `Reported` usage is
+    /// observed: `Invalid` (two different values, or a bad object) keeps no
+    /// partial count, because nothing there was observed as one value.
+    fn observe_usage(&mut self, report: Option<&HostedBackendReport>) {
+        self.observed_usage = report.and_then(|report| report.usage.reported()).cloned();
+    }
+}
+
+fn hosted_fault_backend_report(
+    hosted: bool,
+    progress: &HostedEffectProgress,
+) -> Option<Box<BackendReport>> {
     if !hosted {
         return None;
     }
-    let reason = match send {
+    let reason = match progress.send {
         HostedEffectSend::NotSent | HostedEffectSend::ConnectFailed => UsageUnknownReason::Refused,
         HostedEffectSend::SendUncertain | HostedEffectSend::Sent => return None,
         HostedEffectSend::ResponseStarted => UsageUnknownReason::Cut,
     };
-    Some(Box::new(BackendReport::unknown_with_usage_reason(reason)))
+    Some(Box::new(BackendReport::unknown_with_observed_usage(
+        reason,
+        progress.observed_usage.clone(),
+    )))
 }
 
 async fn run_local_text_worker(mut task: LocalTextWorkerTask) -> bool {
@@ -1506,9 +1542,9 @@ async fn run_local_text_worker(mut task: LocalTextWorkerTask) -> bool {
     if let Some(timing) = &timing {
         timing.record(LocalTimingStage::RunStarted);
     }
-    let mut send = HostedEffectSend::NotSent;
+    let mut progress = HostedEffectProgress::default();
     let result =
-        match run_local_text_worker_with_timing(&mut task, timing.as_ref(), &mut send).await {
+        match run_local_text_worker_with_timing(&mut task, timing.as_ref(), &mut progress).await {
             Ok(result) => result,
             Err(fault) if fault.error.class == ErrorClass::BackendTimeout => {
                 if let Some(timing) = &timing {
@@ -1535,7 +1571,7 @@ async fn run_local_text_worker(mut task: LocalTextWorkerTask) -> bool {
                     error: Some(fault.error),
                     backend_report: hosted_fault_backend_report(
                         task.offer.summary().hosted.is_some(),
-                        send,
+                        &progress,
                     ),
                 }
             }
@@ -1789,14 +1825,14 @@ async fn run_http_artifact_status_worker_inner(
 async fn run_local_text_worker_inner(
     task: &mut LocalTextWorkerTask,
 ) -> std::result::Result<ReconcileResult, AdapterFault> {
-    let mut send = HostedEffectSend::NotSent;
-    run_local_text_worker_with_timing(task, None, &mut send).await
+    let mut progress = HostedEffectProgress::default();
+    run_local_text_worker_with_timing(task, None, &mut progress).await
 }
 
 async fn run_local_text_worker_with_timing(
     task: &mut LocalTextWorkerTask,
     timing: Option<&LocalTiming>,
-    send: &mut HostedEffectSend,
+    progress: &mut HostedEffectProgress,
 ) -> std::result::Result<ReconcileResult, AdapterFault> {
     if !matches!(&task.backend, LocalTextBackend::LocalLlama { .. }) {
         require_external_http_containment(task.hosted_socket.as_deref())?;
@@ -1828,7 +1864,7 @@ async fn run_local_text_worker_with_timing(
                 &task.run_id,
                 &task.request_id,
                 task.hosted_socket.as_deref(),
-                send,
+                progress,
             )
             .await;
         }
@@ -2028,7 +2064,7 @@ async fn run_local_text_worker_with_timing(
             return Ok(cancel_text_worker(&task.backend).await);
         }
         response = request.send() => response.map_err(|err| {
-            *send = if err.is_connect() {
+            progress.send = if err.is_connect() {
                 HostedEffectSend::ConnectFailed
             } else {
                 // The request may have been written; nothing here proves it was not.
@@ -2037,11 +2073,11 @@ async fn run_local_text_worker_with_timing(
             map_text_reqwest_failure(err, private_endpoint)
         })?
     };
-    *send = HostedEffectSend::Sent;
+    progress.send = HostedEffectSend::Sent;
     if !response.status().is_success() {
         return Err(map_effect_http_status(&response, runtime_socket));
     }
-    *send = HostedEffectSend::ResponseStarted;
+    progress.send = HostedEffectSend::ResponseStarted;
 
     let mut response = response;
     let mut line = Vec::new();
@@ -2115,6 +2151,9 @@ async fn run_local_text_worker_with_timing(
                     )?,
                     _ => parse_chat_completions_stream_event(&payload, backend_report.as_mut())?,
                 };
+                // Keep what the stream already reported, so a cut after this
+                // event can record it as observed partial.
+                progress.observe_usage(backend_report.as_ref());
                 match parsed {
                     ParsedTextStreamEvent::Delta(delta) if !delta.is_empty() => {
                         append_local_text_delta(&mut stream_state, &task.offer, &delta)?;
@@ -2210,7 +2249,7 @@ async fn run_decision_worker(
     run_id: &str,
     request_id: &str,
     hosted_socket: Option<&str>,
-    send: &mut HostedEffectSend,
+    progress: &mut HostedEffectProgress,
 ) -> std::result::Result<ReconcileResult, AdapterFault> {
     require_external_http_containment(hosted_socket)?;
     let client = backend_client_with_socket(
@@ -2241,7 +2280,7 @@ async fn run_decision_worker(
     let response = tokio::select! {
         _ = cancel.changed() => return Ok(worker_settlement_unknown_result()),
         response = request.send() => response.map_err(|err| {
-            *send = if err.is_connect() {
+            progress.send = if err.is_connect() {
                 HostedEffectSend::ConnectFailed
             } else {
                 // The request may have been written; nothing here proves it was not.
@@ -2250,11 +2289,11 @@ async fn run_decision_worker(
             map_reqwest_failure(err)
         })?,
     };
-    *send = HostedEffectSend::Sent;
+    progress.send = HostedEffectSend::Sent;
     if !response.status().is_success() {
         return Err(map_effect_http_status(&response, hosted_socket));
     }
-    *send = HostedEffectSend::ResponseStarted;
+    progress.send = HostedEffectSend::ResponseStarted;
     let value = tokio::select! {
         _ = cancel.changed() => return Ok(worker_settlement_unknown_result()),
         value = read_bounded_json_response_async(response) => value?,
@@ -4062,7 +4101,7 @@ mod tests {
                     "run:fixture",
                     "fixture-request",
                     None,
-                    &mut HostedEffectSend::NotSent,
+                    &mut HostedEffectProgress::default(),
                 ))
                 .unwrap();
             let ReconcileResult::Terminal {
@@ -4138,7 +4177,7 @@ mod tests {
             let input = decision_input();
             let offer = openai_offer(&url);
             let result = runtime.block_on(async {
-                let mut send = HostedEffectSend::NotSent;
+                let mut progress = HostedEffectProgress::default();
                 let worker = run_decision_worker(
                     &url,
                     None,
@@ -4150,7 +4189,7 @@ mod tests {
                     "run:fixture",
                     "fixture-request",
                     None,
-                    &mut send,
+                    &mut progress,
                 );
                 let interrupt = async {
                     ready_rx.await.unwrap();
@@ -5887,7 +5926,7 @@ mod tests {
             "run:fixture",
             "fixture-request",
             None,
-            &mut HostedEffectSend::NotSent,
+            &mut HostedEffectProgress::default(),
         ));
         assert!(fault.unwrap_err().error.message.contains("paused"));
         TEST_EXTERNAL_HTTP_ALLOWED.with(|allowed| allowed.set(true));

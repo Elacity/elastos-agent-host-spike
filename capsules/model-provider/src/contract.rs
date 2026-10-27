@@ -182,14 +182,22 @@ pub enum BackendFact<T> {
     Unknown {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<UsageUnknownReason>,
+        /// The counts the stream really sent before a cut, kept as observed:
+        /// no field is added, filled in or extrapolated. Only `usage` may
+        /// carry them, and only with reason `cut`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        observed_partial: Option<T>,
     },
 }
 
-/// Why a hosted run has no usage count. `Cut` means the effect request
-/// reached the Runtime socket and the response body started, then the stream
-/// was cut. `Refused` means the provider sent nothing: it refused the run, or
-/// the request never reached the Runtime socket. A usage fact with no reason
-/// says only that no count arrived.
+/// Why a hosted run has no usage count. `Cut` means the request was sent and
+/// the response started, but no complete usage count arrived: the stream was
+/// cut, the body was malformed or oversized, or a backend failure event ended
+/// it. A cut may keep the counts the stream sent before it as
+/// `observed_partial`; a fact that sent none carries no such field. `Refused`
+/// means the provider sent nothing: it refused the run, or the request never
+/// reached the Runtime socket. A usage fact with no reason says only that no
+/// count arrived.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageUnknownReason {
@@ -218,8 +226,8 @@ pub struct BackendCost {
 
 /// Usage is the one backend fact that records its unknown reason, because the
 /// two causes a Runtime account must tell apart are both about missing usage;
-/// the journal refuses a reason on `resolved_model` or `cost`. A fact with no
-/// reason keeps the bare `{"status": "unknown"}` shape.
+/// the journal refuses a reason or `observed_partial` on `resolved_model` or
+/// `cost`. A fact with neither keeps the bare `{"status": "unknown"}` shape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BackendReport {
@@ -233,17 +241,37 @@ impl BackendReport {
     pub fn unknown() -> Self {
         Self {
             schema: BACKEND_REPORT_SCHEMA.to_string(),
-            resolved_model: BackendFact::Unknown { reason: None },
-            usage: BackendFact::Unknown { reason: None },
-            cost: BackendFact::Unknown { reason: None },
+            resolved_model: BackendFact::Unknown {
+                reason: None,
+                observed_partial: None,
+            },
+            usage: BackendFact::Unknown {
+                reason: None,
+                observed_partial: None,
+            },
+            cost: BackendFact::Unknown {
+                reason: None,
+                observed_partial: None,
+            },
         }
     }
 
     /// The unknown report of a hosted run that records why it has no usage.
     pub fn unknown_with_usage_reason(reason: UsageUnknownReason) -> Self {
+        Self::unknown_with_observed_usage(reason, None)
+    }
+
+    /// The unknown report of a hosted cut that keeps the counts the stream
+    /// really sent. `observed` is copied as parsed: a missing field stays
+    /// missing, and no total is computed.
+    pub fn unknown_with_observed_usage(
+        reason: UsageUnknownReason,
+        observed: Option<BackendTokenUsage>,
+    ) -> Self {
         Self {
             usage: BackendFact::Unknown {
                 reason: Some(reason),
+                observed_partial: observed,
             },
             ..Self::unknown()
         }

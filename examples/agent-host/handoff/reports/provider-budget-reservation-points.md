@@ -323,7 +323,9 @@ proposes a Runtime design; each names what is missing.
    reason at the send boundary; the cut test
    (`capsules/model-provider/tests/process.rs:2108`,
    `hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage`) proves
-   the cut case; and the closed-socket test
+   the cut case, and a cut that followed a usage event keeps only the counts
+   the backend sent, labelled `observed_partial`, so no number is filled in;
+   and the closed-socket test
    (`capsules/model-provider/tests/process.rs:2329`,
    `hosted_run_whose_socket_closes_before_the_status_keeps_usage_unknown`)
    proves the untagged case. This is the lab shape, offered as input to

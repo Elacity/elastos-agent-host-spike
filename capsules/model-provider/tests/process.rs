@@ -772,6 +772,13 @@ const RUNTIME_HOSTED_STREAM_EVENTS: [&str; 2] = [
     r#"{"model":"resolved-model","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":1,"total_tokens":8}}"#,
 ];
 
+/// The usage event a cut-after-usage answer sends before the cut. It carries
+/// `prompt_tokens` and `completion_tokens` and no `total_tokens`, so the
+/// provider must keep exactly the two counts it sent and must not fill a total
+/// in (Flint, 28 Oct 00:25, decision (a)).
+const RUNTIME_HOSTED_PARTIAL_USAGE_EVENT: &str =
+    r#"{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":1}}"#;
+
 /// The Runtime's accepted head, copied from `write_response_head`
 /// (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:1662-1670`).
 /// The Runtime forwards the backend's content type (`:1589-1599`), so this
@@ -833,6 +840,19 @@ fn runtime_hosted_cut_answer() -> Vec<u8> {
     answer
 }
 
+/// The Runtime's answer when the backend sent a usage event and the Runtime
+/// then cut the stream: `runtime_hosted_cut_answer`'s head and framing, one
+/// more chunk that holds the usage event, and the same cut with no
+/// `0\r\n\r\n`.
+fn runtime_hosted_cut_after_usage_answer() -> Vec<u8> {
+    let mut answer = runtime_hosted_cut_answer();
+    push_runtime_hosted_stream_frame(
+        &mut answer,
+        format!("data: {RUNTIME_HOSTED_PARTIAL_USAGE_EVENT}\n\n").as_bytes(),
+    );
+    answer
+}
+
 /// What the stand-in answers: the Runtime's refusal, which is the default, its
 /// accepted head followed by the whole backend stream, its accepted head
 /// followed by a cut stream, a real backend answer relayed through that same
@@ -843,6 +863,8 @@ enum HostedEffectAnswer {
     Refused,
     Streaming,
     Cut,
+    /// As `Cut`, but the backend sent a usage event before the cut.
+    CutAfterUsage,
     /// Reads the effect request to its end and closes without a status line,
     /// as a peer that received the request and then died.
     Closed,
@@ -961,6 +983,12 @@ impl HostedEffectStandIn {
     /// hosted stream after the head and one chunk.
     fn bind_cut(label: &str) -> Self {
         Self::bind_answering(label, HostedEffectAnswer::Cut, None)
+    }
+
+    /// Binds the stand-in that answers as the Runtime does when it cuts a
+    /// hosted stream after the backend sent a usage event.
+    fn bind_cut_after_usage(label: &str) -> Self {
+        Self::bind_answering(label, HostedEffectAnswer::CutAfterUsage, None)
     }
 
     /// Binds the stand-in that reads each effect request and closes without a
@@ -1210,6 +1238,7 @@ fn serve_hosted_effect(
         HostedEffectAnswer::Refused => RUNTIME_HOSTED_REFUSAL.to_vec(),
         HostedEffectAnswer::Streaming => runtime_hosted_stream_answer(),
         HostedEffectAnswer::Cut => runtime_hosted_cut_answer(),
+        HostedEffectAnswer::CutAfterUsage => runtime_hosted_cut_after_usage_answer(),
         HostedEffectAnswer::Closed => return,
         HostedEffectAnswer::Relay { backend_url } => {
             let outcome = relay_hosted_effect(&stream, &body, &backend_url);
@@ -2220,6 +2249,131 @@ fn hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage() {
     provider.shutdown();
 }
 
+/// A cut after the stream sent a valid usage object keeps exactly the counts
+/// that object carried, beside the `cut` reason (Flint, 28 Oct 00:25, decision
+/// (a): record partial counts only when observed, labelled as observed
+/// partial, never filled in). The run still fails `transport_interrupted`, and
+/// `status` stays `unknown`, so a reader that checks only `status` still sees
+/// "not reported" and fails closed. `resolved_model` and `cost` stay plain
+/// unknown, as 064 records them. The stand-in sends `prompt_tokens` and
+/// `completion_tokens` and no `total_tokens`, so the total stays absent: the
+/// provider keeps the fields the backend sent and computes nothing.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_stream_cut_after_a_usage_chunk_keeps_only_the_observed_counts() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted cut after usage: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-cut-after-usage");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind_cut_after_usage("hosted-cut-after-usage");
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "a hosted answer that reports usage before the cut"
+    });
+    let create_request = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": "session:test",
+            "capsule_id": "assistant",
+            "grant_id": "grant:test",
+            "request_id": test_support::fixture_model_request_id(
+                "request:hosted-cut-after-usage"
+            ),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": model_input_hash(&input).unwrap()
+        }
+    });
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    assert_eq!(
+        create["data"]["run_id"], expected_run_id,
+        "runs_create must return the contract run id"
+    );
+
+    let settled = wait_for_run_terminal(
+        &mut provider,
+        &expected_run_id,
+        &access_binding(&create_request),
+    );
+    assert_eq!(
+        settled["data"]["run_id"], expected_run_id,
+        "runs_get must return the contract run id"
+    );
+    assert_eq!(
+        settled["data"]["status"], "failed",
+        "a cut hosted stream must fail the run: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["error"]["code"], "transport_interrupted",
+        "a cut hosted stream must settle with the transport fault: {settled}"
+    );
+    assert!(
+        settled["data"]["terminal"]["output"].is_null(),
+        "a failed run must carry no output: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["backend_report"],
+        json!({
+            "schema": BACKEND_REPORT_SCHEMA,
+            "resolved_model": {"status": "unknown"},
+            "usage": {
+                "status": "unknown",
+                "reason": "cut",
+                "observed_partial": {"input_tokens": 7, "output_tokens": 1},
+            },
+            "cost": {"status": "unknown"},
+        }),
+        "a cut after a usage chunk must keep only the observed counts: {settled}"
+    );
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "the cut run must open exactly one connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "the cut run must send exactly one request"
+    );
+
+    provider.shutdown();
+}
+
 /// A hosted run whose effect socket cannot be reached never writes the effect.
 /// `reqwest::send()` fails before a connection, so the worker records the usage
 /// fact unknown with reason `refused` (`src/adapters.rs` `ConnectFailed`) and
@@ -2898,6 +3052,118 @@ fn hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect() {
             "a hosted run must carry no bearer key"
         );
     }
+
+    provider.shutdown();
+}
+
+/// A hosted run the provider refuses in `dispatch`, before any worker is
+/// spawned, records `usage` unknown with reason `refused`: nothing was sent,
+/// so nothing could be observed and no `observed_partial` appears. The
+/// `max_output_tokens` field reaches `validate_text_messages`
+/// (`src/adapters.rs:1305`), which refuses it for every offer that is not a
+/// local llama offer, and that fault reaches the state's dispatch-error arm
+/// (`src/state.rs:637-641`), which tags the terminal `refused` through
+/// `transition_error_refused_before_send`. The stand-in sees no connection.
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_run_refused_at_dispatch_records_usage_refused() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted dispatch refusal: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-dispatch-refusal");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind("hosted-dispatch-refusal");
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "a hosted run whose input the offer refuses",
+        "max_output_tokens": 4
+    });
+    let create_request = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": "session:test",
+            "capsule_id": "assistant",
+            "grant_id": "grant:test",
+            "request_id": test_support::fixture_model_request_id(
+                "request:hosted-dispatch-refusal"
+            ),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": model_input_hash(&input).unwrap()
+        }
+    });
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+    let created = provider.request(create_request.clone());
+    assert_eq!(
+        created["status"], "ok",
+        "unexpected create response: {created}"
+    );
+    assert_eq!(
+        created["data"]["run_id"], expected_run_id,
+        "runs_create must return the contract run id"
+    );
+    assert_eq!(
+        created["data"]["status"], "failed",
+        "a dispatch refusal must fail the run at once: {created}"
+    );
+    assert_eq!(
+        created["data"]["terminal"]["error"]["code"], "context_rejected",
+        "a refused input must keep its context reason: {created}"
+    );
+    assert_eq!(
+        created["data"]["terminal"]["error"]["class"], "context_rejected",
+        "a refused input must keep its context class: {created}"
+    );
+    assert!(
+        created["data"]["terminal"]["output"].is_null(),
+        "a refused run must carry no output: {created}"
+    );
+    assert_eq!(
+        created["data"]["terminal"]["backend_report"],
+        json!({
+            "schema": BACKEND_REPORT_SCHEMA,
+            "resolved_model": {"status": "unknown"},
+            "usage": {"status": "unknown", "reason": "refused"},
+            "cost": {"status": "unknown"},
+        }),
+        "a dispatch refusal must record usage unknown with reason refused: {created}"
+    );
+
+    // Dispatch returned before any worker, so no connection can be made; the
+    // wait gives a wrongly spawned worker time to show itself.
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        stand_in.connection_count(),
+        0,
+        "a run refused at dispatch must open no connection to the Runtime socket"
+    );
 
     provider.shutdown();
 }
