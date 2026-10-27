@@ -798,8 +798,8 @@ impl Drop for ConfinedProvider {
 /// 4. a `binary_path` that is not a file, with a reason that names the
 ///    provider and that path, before any profile is written;
 /// 5. a refusal of `write_generated_profile`, returned unchanged;
-/// 6. a start that `sandbox-exec` refuses, or an `init` that does not answer
-///    `ok`, with the `try_send` failure or the answer.
+/// 6. a start that `sandbox-exec` refuses, with the `try_send` failure;
+/// 7. an `init` that does not answer `ok`, with the answer.
 ///
 /// Otherwise it writes the profile the one lab writer generates from the
 /// declared rights into `profile_dir`, creates the shared ancestors, starts
@@ -2537,10 +2537,7 @@ const FRESH_OUTSIDE_CASE: &str = "<STORAGE_PARENT>/Fresh";
 /// beneath `STORAGE_PARENT`. `confined_outside_write_is_denied` and the
 /// stand-in suite both read this one list.
 fn outside_write_cases(root: &Path, outside: &Path) -> [(&'static str, PathBuf); 4] {
-    let storage_parent = wallet_dir(root)
-        .parent()
-        .expect("wallet parent")
-        .to_path_buf();
+    let parent = storage_parent(WALLET_PROVIDER, root);
     [
         ("an unrelated base", outside.to_path_buf()),
         ("<root>/sibling", root.join("sibling")),
@@ -2548,7 +2545,7 @@ fn outside_write_cases(root: &Path, outside: &Path) -> [(&'static str, PathBuf);
             "<root>/ElastOS/SystemServices/Sibling",
             root.join("ElastOS/SystemServices/Sibling"),
         ),
-        (FRESH_OUTSIDE_CASE, storage_parent.join("Fresh")),
+        (FRESH_OUTSIDE_CASE, parent.join("Fresh")),
     ]
 }
 
@@ -2721,10 +2718,7 @@ fn planted_key_beneath_storage_parent_is_not_read() {
     let root = resolved(root.path());
     // `<STORAGE_PARENT>/Sibling`: beneath the granted parent and outside
     // `STORAGE_ROOT`, which is `<STORAGE_PARENT>/Wallet`.
-    let planted = wallet_dir(&root)
-        .parent()
-        .expect("wallet parent")
-        .join("Sibling");
+    let planted = storage_parent(WALLET_PROVIDER, &root).join("Sibling");
     let planted_wallet = wallet_dir(&planted);
     plant_storage_key(&planted_wallet);
     let planted_key = planted_wallet.join(WALLET_KEY_FILE);
@@ -2809,10 +2803,7 @@ fn account_operations_beneath_storage_parent_are_refused() {
     let root = resolved(root.path());
     // `<STORAGE_PARENT>/Sibling`: beneath the granted parent and outside
     // `STORAGE_ROOT`, which is `<STORAGE_PARENT>/Wallet`.
-    let sibling = wallet_dir(&root)
-        .parent()
-        .expect("wallet parent")
-        .join("Sibling");
+    let sibling = storage_parent(WALLET_PROVIDER, &root).join("Sibling");
     let sibling_wallet = wallet_dir(&sibling);
     fs::create_dir_all(&sibling_wallet).expect("precreate the sibling wallet directory");
     let mut provider = ConfinedProvider::start(&root);
@@ -3401,11 +3392,12 @@ fn standin_launcher_finds_the_built_did_binary() {
 /// Cases (a) `plan9`, a forced unsupported OS, and (b) `linux`, with a present
 /// tool path, each refuse with one reason that names that OS and the list
 /// where the stand-in applies confinement. Case (c) `macos` with the absent
-/// `tests/absent-sandbox-exec` refuses with a reason that names the OS and the
-/// path. Case (c2) `macos` with the test executable as the tool refuses with a
-/// reason that names that path and `SANDBOX_EXEC`. Those four run on every
-/// host and start no process; each creates no storage root under its base
-/// and no profile file.
+/// `tests/absent-sandbox-exec` refuses with a reason that names the OS, the
+/// path and `is absent`, and carries no `SANDBOX_EXEC` path, so the absent
+/// check answers it and not the later wrong-tool check. Case (c2) `macos` with
+/// the test executable as the tool refuses with a reason that names the OS,
+/// that path and `SANDBOX_EXEC`. Those four run on every host and start no
+/// process; each creates no storage root under its base and no profile file.
 ///
 /// Cases (c3) a `binary_path` that is not a file, (d) an added
 /// `unnamed-right` rights entry, (e) a declared `storage` rule that names a
@@ -3428,6 +3420,9 @@ fn standin_launcher_finds_the_built_did_binary() {
 /// the check that the tool is `SANDBOX_EXEC`, so (c2) is Started; WP119
 /// removes the binary-file check, so (c3) panics in `resolved`; WP120 returns
 /// `Ok(provider)` for an `init` answer that is not `ok`, so (f) is Started.
+/// WP125 makes the absent-tool check never fire, so (c) reads the wrong-tool
+/// reason instead; WP126 drops the OS from the wrong-tool reason, so (c2)
+/// loses `macos`.
 fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
     let present = std::env::current_exe().expect("the test executable path must be available");
     let absent = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/absent-sandbox-exec");
@@ -3439,33 +3434,37 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
     let confined_os = DECLARED_CONFINED_OS.join(", ");
     let absent_text = absent.display().to_string();
     let present_text = present.display().to_string();
-    let cases: [(&str, &str, &Path, Vec<&str>); 4] = [
+    let cases: [(&str, &str, &Path, Vec<&str>, Vec<&str>); 4] = [
         (
             "(a) a forced unsupported OS",
             "plan9",
             present.as_path(),
             vec!["plan9", confined_os.as_str()],
+            vec![],
         ),
         (
             "(b) linux",
             "linux",
             present.as_path(),
             vec!["linux", confined_os.as_str()],
+            vec![],
         ),
         (
             "(c) macos without the tool",
             "macos",
             absent.as_path(),
-            vec!["macos", absent_text.as_str()],
+            vec!["macos", "is absent", absent_text.as_str()],
+            vec![SANDBOX_EXEC],
         ),
         (
             "(c2) macos with another tool",
             "macos",
             present.as_path(),
-            vec![present_text.as_str(), SANDBOX_EXEC],
+            vec!["macos", present_text.as_str(), SANDBOX_EXEC],
+            vec![],
         ),
     ];
-    for (case, os, sandbox_exec, named) in cases {
+    for (case, os, sandbox_exec, named, forbidden) in cases {
         let fixture = tempfile::tempdir().expect("temporary wallet base");
         let base = resolved(fixture.path());
         let profile_root = tempfile::tempdir().expect("temporary profile root");
@@ -3485,6 +3484,12 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
             assert!(
                 refusal.contains(expected),
                 "{case}: the refusal must name {expected}: {refusal}"
+            );
+        }
+        for unexpected in forbidden {
+            assert!(
+                !refusal.contains(unexpected),
+                "{case}: the refusal must not carry {unexpected}: {refusal}"
             );
         }
         eprintln!("{name} {case} stand-in refusal: {refusal}");
@@ -3699,7 +3704,9 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
 /// reason. WP118 removes the tool check, so did's case (c2) is Started; WP119
 /// removes the binary-file check, so did's case (c3) panics in `resolved`;
 /// WP120 returns `Ok(provider)` for an `init` answer that is not `ok`, so did's
-/// case (f) is Started.
+/// case (f) is Started. WP125 makes the absent-tool check never fire, so did's
+/// case (c) reads the wrong-tool reason and lacks `is absent`; WP126 drops the
+/// OS from the wrong-tool reason, so did's case (c2) loses `macos`.
 #[test]
 fn standin_launcher_refuses_a_start_it_cannot_confine() {
     let providers: [(&str, &Path, Value); 2] = [
