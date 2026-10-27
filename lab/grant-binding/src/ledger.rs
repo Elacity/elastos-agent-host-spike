@@ -480,6 +480,31 @@ fn model_reserve_on_a_sibling_instance_is_refused() {
 }
 
 #[test]
+fn model_forged_instance_does_not_move_the_reserve() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_instance: Some(sibling),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_instance, Some(sibling));
+    let reservation = verifier
+        .reserve(&call, &request, 4)
+        .expect("forged instance does not move the reserve");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
 fn model_settle_known_outcome_charges_the_measured_figure() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
