@@ -1496,7 +1496,10 @@ fn bitcoin_proofs_persist_under_storage_root() {
         data["proof_type"], "bitcoin_signed_message",
         "verify_bip322_proof must answer its proof type"
     );
-    assert_eq!(data["address"], address);
+    assert_eq!(
+        data["address"], address,
+        "verify_bip322_proof must answer the challenge address"
+    );
     provider.shutdown();
 
     let mut provider = ConfinedProvider::start(&root);
@@ -2530,17 +2533,20 @@ fn planted_key_beneath_storage_parent_is_not_read() {
 /// `attach_validated_chain_outcome` calls of task 085, the
 /// `request_protected_content_rights_signature` call of task 086, and the
 /// `create_managed_account` and `list_accounts` calls that 072 named come last.
-/// The array runs before
-/// the `storage_error` check, so a grant on the parent fails this test on one
-/// of those calls rather than only on `init`. `list_accounts` is sent only to
+/// The loop sends every call in the array and records each call that is not
+/// refused; after the loop one assertion fails, naming every recorded kind
+/// with its result status and code, so a WP88 run names every call in the
+/// array. The array runs before the `storage_error` check, so a grant on the
+/// parent fails on the calls that are not refused rather than only on `init`.
+/// `list_accounts` is sent only to
 /// show that the refused `create_managed_account` created nothing. After
 /// `init` for the granted root answers ok, the same call answers ok, the
 /// listing holds that account, and the account is in the store under the root.
 ///
 /// Falsifiers: append a read and write grant on `STORAGE_PARENT` (WP88); the
-/// sibling `init` then succeeds, so `rename_account` answers `not_found` and
-/// this test fails on `not_initialized`. Remove the storage-root grant (WP18);
-/// the granted `init` fails, so this test fails on its ok.
+/// sibling `init` then succeeds, so the loop records every call that is not
+/// refused and the one assertion names them all. Remove the storage-root
+/// grant (WP18); the granted `init` fails, so this test fails on its ok.
 #[test]
 fn account_operations_beneath_storage_parent_are_refused() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
@@ -2563,8 +2569,8 @@ fn account_operations_beneath_storage_parent_are_refused() {
     // The four account edits of task 080, the four managed-recovery calls of
     // task 081, the four EVM proof and link calls of task 082, the two
     // Bitcoin proof calls of task 083 and the four managed approval calls of
-    // task 084 come first, so a grant on `STORAGE_PARENT` fails the first
-    // call of the loop.
+    // task 084 come first, so a grant on `STORAGE_PARENT` answers these calls
+    // without the refusal this test requires.
     let operations = [
         WalletProviderOperationV2::RenameAccount {
             account_id: "wallet:eip155:20:0xabc".to_string(),
@@ -2700,33 +2706,47 @@ fn account_operations_beneath_storage_parent_are_refused() {
             include_revoked: false,
         },
     ];
+    let mut not_refused = Vec::new();
     for operation in operations {
+        let kind = operation_kind(&operation);
         let request = wallet_request(operation);
         let answer = provider.send(&json!({
             "op": "wallet_contract",
             "request": request,
             "_runtime_invocation": runtime_invocation_envelope(),
         }));
-        assert_eq!(
-            answer["status"], "ok",
-            "wallet_contract must answer through the protocol: {answer}"
-        );
-        let result = &answer["data"]["result"];
-        assert_eq!(
-            result["status"], "error",
-            "the account call must answer with a result error: {answer}"
-        );
-        assert_eq!(
-            result["code"], "not_initialized",
-            "the refused Init must leave no usable root: {answer}"
-        );
-        assert!(
-            result["message"]
-                .as_str()
-                .is_some_and(|message| !message.is_empty()),
-            "the result error must carry a reason: {answer}"
-        );
+        let result = answer.get("data").and_then(|data| data.get("result"));
+        let refused = answer.get("status").and_then(Value::as_str) == Some("ok")
+            && result
+                .and_then(|result| result.get("status"))
+                .and_then(Value::as_str)
+                == Some("error")
+            && result
+                .and_then(|result| result.get("code"))
+                .and_then(Value::as_str)
+                == Some("not_initialized")
+            && result
+                .and_then(|result| result.get("message"))
+                .and_then(Value::as_str)
+                .is_some_and(|message| !message.is_empty());
+        if !refused {
+            not_refused.push((
+                kind,
+                refusal_field(result.and_then(|result| result.get("status"))),
+                refusal_field(result.and_then(|result| result.get("code"))),
+            ));
+        }
     }
+    assert!(
+        not_refused.is_empty(),
+        "every call beneath STORAGE_PARENT must be refused with not_initialized; \
+         calls not refused: {}",
+        not_refused
+            .iter()
+            .map(|(kind, status, code)| format!("{kind} (status {status}, code {code})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 
     // The refused `init` is why every call above answered `not_initialized`.
     assert_storage_error(&denied);
@@ -2780,6 +2800,23 @@ fn account_operations_beneath_storage_parent_are_refused() {
     );
 
     provider.shutdown();
+}
+
+/// The serde `kind` tag of one wallet operation, so a failure names it.
+fn operation_kind(operation: &WalletProviderOperationV2) -> String {
+    serde_json::to_value(operation)
+        .expect("the operation must serialize")
+        .get("kind")
+        .and_then(Value::as_str)
+        .expect("the operation must serialize with its kind tag")
+        .to_string()
+}
+
+/// The text a refusal record prints for a result status or code.
+fn refusal_field(field: Option<&Value>) -> String {
+    field
+        .and_then(Value::as_str)
+        .map_or_else(|| "none".to_string(), |text| text.to_string())
 }
 
 /// A complete key file makes the outside root readable if the profile ever
