@@ -1,0 +1,31 @@
+LABEL=emulated 5.15 kernel under qemu-system TCG (not Jetson)
+native=0
+jetson=0
+emulated_cpu=1
+qemu_accel=tcg
+============================================================
+Linux (none) 5.15.208-0-virt #1-Alpine SMP Mon, 25 May 2026 11:41:38 +0000 aarch64 Linux
+uid=0 gid=0
+--- landlock probe ---
+landlock_abi=1
+--- fail-closed-linux suites ---
+LABEL=emulated 5.15 kernel under qemu-system TCG (not Jetson)
+native=0
+jetson=0
+emulated_cpu=1
+nonce=8e526b6c03c99f57deeefbc7212d83e8
+src=/tmp/fcl-r7-aarch64/crate
+mode=abi1
+uid=1000 gid=1000
+Linux (none) 5.15.208-0-virt #1-Alpine SMP Mon, 25 May 2026 11:41:38 +0000 aarch64 Linux
+=== ABI-1 refusal probe ===
+provider=did-provider exit=71
+fail-closed-linux refused to start did-provider: layer landlock, step abi_floor: this kernel's Landlock ABI 1 cannot deny truncate (needs ABI 3); ioctl_dev (needs ABI 5); the provider was not started
+provider=wallet-provider exit=71
+fail-closed-linux refused to start wallet-provider: layer landlock, step abi_floor: this kernel's Landlock ABI 1 cannot deny truncate (needs ABI 3); ioctl_dev (needs ABI 5); the provider was not started
+provider=model-provider exit=71
+fail-closed-linux refused to start model-provider: layer landlock, step abi_floor: this kernel's Landlock ABI 1 cannot deny truncate (needs ABI 3); ioctl_dev (needs ABI 5); the provider was not started
+FCL_MARK nonce=8e526b6c03c99f57deeefbc7212d83e8 suite=abi1 exit=0 passed=3 failed=0 ignored=0 status=PASS
+overall=0
+--- guest finished status=0 ---
+FCL_MARK nonce=8e526b6c03c99f57deeefbc7212d83e8 suite=guest exit=0

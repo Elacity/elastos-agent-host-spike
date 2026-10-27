@@ -1,0 +1,98 @@
+LABEL=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+native=0
+jetson=0
+emulated_cpu=1
+qemu_accel=tcg
+============================================================
+Linux (none) 6.18.58-0-virt #1-Alpine SMP PREEMPT_DYNAMIC 2026-10-21 13:45:15 aarch64 Linux
+uid=0 gid=0
+--- landlock probe ---
+landlock_abi=7
+--- fail-closed-linux suites ---
+LABEL=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+native=0
+jetson=0
+emulated_cpu=1
+nonce=b3acb3fd6e8df016d2c437ca62680aa3
+src=/tmp/fcl-r7-aarch64/crate
+mode=full
+uid=1000 gid=1000
+Linux (none) 6.18.58-0-virt #1-Alpine SMP PREEMPT_DYNAMIC 2026-10-21 13:45:15 aarch64 Linux
+=== suite lib expected=9 ===
+test tests::exe_identity_requires_matching_dev_and_inode ... ok
+test tests::execve_eof_is_a_start_and_confine_ready_is_a_refusal ... ok
+test tests::extra_test_right_is_absent_from_the_file_profile ... ok
+test tests::fault_decode_rejects_a_short_record_and_an_unknown_step ... ok
+test tests::fault_round_trips_through_the_pipe_encoding ... ok
+test tests::file_profile_needs_truncate_and_ioctl_dev_not_refer ... ok
+test tests::handled_bits_follow_the_abi_and_never_invent_a_right ... ok
+test tests::per_right_floor_for_abi_1_through_6 ... ok
+test tests::pid_namespace_is_a_required_guard_step ... ok
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+suite=lib exit=0 passed=9 failed=0 ignored=0 status=PASS
+FCL_MARK nonce=b3acb3fd6e8df016d2c437ca62680aa3 suite=lib exit=0 passed=9 failed=0 ignored=0 status=PASS
+=== suite simulated expected=22 ===
+test sim_add_path_rule_rejects_access_outside_handled_fs ... ok
+test sim_capability_drop_failure_refuses ... ok
+test sim_confined_provider_starts_after_every_layer ... ok
+test sim_every_guard_step_failure_stops_before_exec ... ok
+test sim_extra_floor_still_names_the_missing_right ... ok
+test sim_id_maps_unwritable_refuses ... ok
+test sim_landlock_abi_floor_cannot_be_lowered ... ok
+test sim_landlock_abi_too_old_refuses ... ok
+test sim_landlock_missing_refuses ... ok
+test sim_landlock_ruleset_unappliable_refuses ... ok
+test sim_lying_abi_5_with_abi_1_rights_refuses ... ok
+test sim_lying_kernel_enforcement_refuses ... ok
+test sim_missing_right_is_never_silently_dropped ... ok
+test sim_no_exec_filter_failure_refuses ... ok
+test sim_no_new_privs_failure_refuses ... ok
+test sim_per_right_floor_for_each_abi ... ok
+test sim_pid_namespace_unavailable_refuses ... ok
+test sim_seccomp_install_failure_refuses ... ok
+test sim_stdio_sanitize_failure_refuses ... ok
+test sim_test_extra_right_does_not_refuse_on_abi_7 ... ok
+test sim_test_extra_right_refuses_on_abi_6 ... ok
+test sim_user_namespaces_off_refuses ... ok
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+suite=simulated exit=0 passed=22 failed=0 ignored=0 status=PASS
+FCL_MARK nonce=b3acb3fd6e8df016d2c437ca62680aa3 suite=simulated exit=0 passed=22 failed=0 ignored=0 status=PASS
+=== suite real_kernel expected=32 ===
+test real_capability_drop_failure_refuses ... ok
+test real_close_pipe_without_exec_is_not_a_start ... ok
+test real_confine_ready_without_exec_is_not_a_start ... ok
+test real_confined_child_cannot_signal_host ... ok
+test real_confined_provider_has_every_layer ... ok
+test real_daemonize_keeps_namespace_until_init_dies ... ok
+test real_empty_fault_pipe_is_not_a_start ... ok
+test real_extra_floor_still_names_the_missing_right ... ok
+test real_granted_path_reexec_is_refused ... ok
+test real_id_map_unwritable_refuses ... ok
+test real_inherited_pty_ioctl_is_not_available ... ok
+test real_init_reaps_orphaned_grandchild ... ok
+test real_landlock_abi_below_required_refuses ... ok
+test real_landlock_missing_refuses ... ok
+test real_landlock_ruleset_unappliable_refuses ... ok
+test real_lying_enforcement_self_test_refuses ... ok
+test real_lying_rights_probe_refuses ... ok
+test real_memfd_procfd_second_image_is_refused ... ok
+test real_memfd_second_image_is_refused ... ok
+test real_no_new_privs_failure_refuses ... ok
+test real_per_right_floor_refuses_on_this_kernel ... ok
+test real_pid_namespace_unavailable_refuses ... ok
+test real_production_cli_rejects_test_hooks_without_switch ... ok
+test real_reaper_forwards_signal ... ok
+test real_reaper_propagates_exit_status ... ok
+test real_same_uid_host_cannot_ptrace_or_read_mem ... ok
+test real_seccomp_install_failure_refuses ... ok
+test real_sigkill_returned_pid_tears_down_namespace ... ok
+test real_silent_expected_binary_is_a_start ... ok
+test real_stdin_pty_is_not_a_terminal ... ok
+test real_stdin_socket_cannot_import_fd ... ok
+test real_user_namespaces_off_refuses ... ok
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.09s
+suite=real_kernel exit=0 passed=32 failed=0 ignored=0 status=PASS
+FCL_MARK nonce=b3acb3fd6e8df016d2c437ca62680aa3 suite=real_kernel exit=0 passed=32 failed=0 ignored=0 status=PASS
+overall=0
+--- guest finished status=0 ---
+FCL_MARK nonce=b3acb3fd6e8df016d2c437ca62680aa3 suite=guest exit=0
