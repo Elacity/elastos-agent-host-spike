@@ -17,6 +17,10 @@ python3 -I "${VIEWER_DIR}/verify_gate_test.py" --falsify
 python3 -I "${VIEWER_DIR}/patterns_test.py"
 python3 -I "${VIEWER_DIR}/patterns_test.py" --falsify
 
+# Restore each report plant before the Cargo checks.
+python3 -I "${VIEWER_DIR}/client_owner_report_test.py"
+python3 -I "${VIEWER_DIR}/client_owner_report_test.py" --falsify
+
 GATE=0
 case "${GATE_LIST:-}" in
     # run-lane.sh exports the gate commands (the substring is `gates-photo`),

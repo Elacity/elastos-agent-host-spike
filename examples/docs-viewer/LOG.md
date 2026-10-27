@@ -6,3 +6,4 @@
 - 2026-10-27 task 026: PATTERNS names bus2 `conflict` and the `bus2` directory cd.
 - 2026-10-27 task 027: the kit owns the launch client and the docs page ships the copy.
 - 2026-10-27 task 027 round 2: the kit owns the launch client and the docs page ships the copy; refreshed the archive renderer copy from its kit owner so the existing byte check passes.
+- 2026-10-27 task 029: the kit reports name `page-client.js` as the one owner of `launchToken` and `pageClient`.
