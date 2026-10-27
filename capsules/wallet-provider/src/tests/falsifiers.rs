@@ -138,12 +138,13 @@ use std::process::Command;
 /// `generated_did_and_wallet_profiles_match_their_committed_oracles` fails
 /// because neither declared-rights file names that rule. Task 090's WP106
 /// makes the rights-list id refusal in `declared_entries` never fire, so case
-/// (a) writes a profile for the unnamed right, WP107 makes the
+/// (a) writes a profile for the unnamed right, and WP107 makes the
 /// platform-baseline id refusal never fire, so case (b) writes one for the
-/// unnamed baseline rule, and WP108 makes `write_generated_profile` create the
-/// path before it calls `generate_profile`; each makes
-/// `generator_refuses_an_unnamed_right_and_the_start_is_refused` fail on its
-/// no-file assertion. Task 091's WP109 makes `generate_profile` append
+/// unnamed baseline rule; `generator_refuses_an_unnamed_right_and_the_start_is_refused`
+/// then panics at its refusal check in the did case, and the panic names
+/// `did-provider` and the case. WP108 makes `write_generated_profile` create the
+/// path before it calls `generate_profile`, so both cases fail the no-file
+/// assertion in the did case. Task 091's WP109 makes `generate_profile` append
 /// `(deny file-write* (literal "/private/var/cc-confine-generated"))` after the
 /// declared rules; only the oracle comparison catches it, because the head
 /// keeps its order, the contract checks read only allow forms, and the
