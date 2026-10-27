@@ -699,6 +699,16 @@ class SignalProbe(unittest.TestCase):
 class SignalRules(unittest.TestCase):
     """Classifiers, markers, and provenance. They do not launch ``/bin/kill``."""
 
+    def assert_findings_match_allows(self, repo, allows):
+        """Each finding path belongs to all profiles that name it."""
+        recorded = {FINDINGS[name] for name in allows}
+        for relative in set(FINDINGS.values()):
+            path = Path(repo) / relative
+            if relative in recorded:
+                self.assertTrue(path.is_file(), relative)
+            else:
+                self.assertFalse(path.exists(), relative)
+
     def test_skip_policy_falsifiers(self):
         """``skip_reason`` names each missing path, launches nothing, and takes no control."""
         signature = inspect.signature(skip_reason)
@@ -987,65 +997,84 @@ class SignalRules(unittest.TestCase):
         self.assertFalse(os.path.exists(quiet))
         self.assertEqual(leaked_markers(case_cls, baseline), [])
         self.assertEqual(findings_snapshot(), live)
+        self.assert_findings_match_allows(ROOT, ALLOWS)
         if not ALLOWS:
-            self.assertFalse((ROOT / FINDINGS["wallet"]).exists())
-            self.assertFalse((ROOT / FINDINGS["model"]).exists())
             self.assertFalse((ROOT / "lab" / "redteam" / "CRITICAL.md").exists())
 
     def test_recorded_allow_keeps_gate_green(self):
-        """An injected allow on the real wallet test is an expected failure.
+        """Each profile's sole recorded allow keeps its real deny test green.
 
-        The launch result is injected. Sibling tests stay unmarked. Restoring
-        the marker leaves the live class as it was. The live findings stay
-        absent.
+        This includes did alone, which owns the same finding path as wallet.
+        The launch result is injected, so the probe's binary skip state is
+        cleared for the injection and restored afterwards. Sibling tests and
+        live findings stay as they were.
         """
         baseline = mark_snapshot(SignalProbe)
         live = findings_snapshot()
-        directory = tempfile.mkdtemp(prefix="ccrt-sig-green-")
         pid = str(os.getpid())
         allow = sbx.Result(exit_code=0, stdout="", stderr="", argv=[KILL, "-0", pid])
         saved = signal_under
+        saved_skip = SignalProbe.skip_reason
 
         def injected(_profile, _pid):
             return allow
 
         try:
-            apply_allow(directory, "wallet")
-            self.assertEqual(marker_problems(SignalProbe, "wallet", baseline), [])
-            # The marker falsifiers must also work after a real allow has
-            # already marked the wallet test before this injection starts.
-            self.test_recorded_allow_is_expected_failure()
-            globals()["signal_under"] = injected
-            result = unittest.TestResult()
-            SignalProbe("test_wallet_signal_is_denied").run(result)
-            self.assertEqual(result.failures, [])
-            self.assertEqual(result.errors, [])
-            self.assertEqual(result.skipped, [])
-            self.assertEqual(result.unexpectedSuccesses, [])
-            self.assertEqual(len(result.expectedFailures), 1)
-            self.assertEqual(
-                result.expectedFailures[0][0]._testMethodName,
-                "test_wallet_signal_is_denied",
-            )
-            self.assertTrue(result.wasSuccessful())
+            SignalProbe.skip_reason = None
             for name, method_name in DENY_TESTS.items():
-                if name == "wallet":
-                    continue
-                method = getattr(SignalProbe, method_name)
-                self.assertEqual(method.__doc__, baseline[method_name][0])
-                self.assertEqual(
-                    getattr(method, "__unittest_expecting_failure__", False),
-                    baseline[method_name][1],
-                )
+                with self.subTest(profile=name):
+                    restore_marks(SignalProbe, baseline)
+                    with tempfile.TemporaryDirectory(prefix="ccrt-sig-green-") as directory:
+                        apply_allow(directory, name)
+                        self.assert_findings_match_allows(directory, {name})
+                        self.assertEqual(marker_problems(SignalProbe, name, baseline), [])
+                        # Marker falsifiers also run after a real allow has
+                        # already marked a deny test before this injection.
+                        self.test_recorded_allow_is_expected_failure()
+                        globals()["signal_under"] = injected
+                        result = unittest.TestResult()
+                        SignalProbe(method_name).run(result)
+                        self.assertEqual(result.failures, [])
+                        self.assertEqual(result.errors, [])
+                        self.assertEqual(result.skipped, [])
+                        self.assertEqual(result.unexpectedSuccesses, [])
+                        self.assertEqual(len(result.expectedFailures), 1)
+                        self.assertEqual(
+                            result.expectedFailures[0][0]._testMethodName,
+                            method_name,
+                        )
+                        self.assertTrue(result.wasSuccessful())
+                        for sibling, sibling_method in DENY_TESTS.items():
+                            if sibling == name:
+                                continue
+                            method = getattr(SignalProbe, sibling_method)
+                            self.assertEqual(method.__doc__, baseline[sibling_method][0])
+                            self.assertEqual(
+                                getattr(method, "__unittest_expecting_failure__", False),
+                                baseline[sibling_method][1],
+                            )
+                    self.assertFalse(os.path.exists(directory))
         finally:
             globals()["signal_under"] = saved
+            SignalProbe.skip_reason = saved_skip
             restore_marks(SignalProbe, baseline)
-            shutil.rmtree(directory, ignore_errors=True)
+        self.assertEqual(SignalProbe.skip_reason, saved_skip)
         self.assertEqual(leaked_markers(SignalProbe, baseline), [])
         self.assertEqual(findings_snapshot(), live)
-        self.assertFalse(os.path.exists(directory))
-        if "wallet" not in ALLOWS:
-            self.assertFalse((ROOT / FINDINGS["wallet"]).exists())
+        self.assert_findings_match_allows(ROOT, ALLOWS)
+
+    def test_recorded_allow_keeps_gate_green_when_tools_missing(self):
+        """Launch-free allow injections restore each missing-binary skip state."""
+        saved_skip = SignalProbe.skip_reason
+        try:
+            for missing in (sbx.SANDBOX_EXEC, KILL, f"{sbx.SANDBOX_EXEC} {KILL}"):
+                with self.subTest(missing=missing):
+                    reason = "missing " + missing
+                    SignalProbe.skip_reason = reason
+                    self.test_recorded_allow_keeps_gate_green()
+                    self.assertEqual(SignalProbe.skip_reason, reason)
+        finally:
+            SignalProbe.skip_reason = saved_skip
 
     def test_harness_error_is_not_expected_failure(self):
         """Exit 65 on the one launch of each marked deny test is a unittest error.
@@ -1323,16 +1352,13 @@ class SignalRules(unittest.TestCase):
         self.assertIn(".gitkeep", end)
         self.assertNotIn("grant-binding-002.md", REQUIRED_FINDINGS)
         unchanged_findings(preserved_view(START_FINDINGS), preserved_view(end))
+        self.assert_findings_match_allows(ROOT, ALLOWS)
         if ALLOWS:
-            for name in ALLOWS:
-                self.assertTrue((ROOT / FINDINGS[name]).is_file())
             return
         unchanged_findings(START_FINDINGS, end)
         self.assertNotIn("CRITICAL-confine-044.md", end)
         self.assertNotIn("CRITICAL-cc-model-confine-044.md", end)
         self.assertIsNone(end["/CRITICAL.md"])
-        self.assertFalse((ROOT / FINDINGS["wallet"]).exists())
-        self.assertFalse((ROOT / FINDINGS["model"]).exists())
 
 
 if __name__ == "__main__":
