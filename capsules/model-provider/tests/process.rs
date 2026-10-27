@@ -11,7 +11,7 @@ use elastos_model_contract::{
 };
 use serde_json::{json, Value};
 use std::io::{BufRead as _, BufReader, Read, Write as _};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -1275,15 +1275,19 @@ fn read_request(reader: impl Read) -> RecordedRequest {
     }
 }
 
-/// A local loopback backend for the relaying stand-in. It accepts one
-/// connection, reads that connection's one request to its end, records it, and
-/// answers `200` with the backend stream (`runtime_hosted_stream_frames`) as
-/// one plain `text/event-stream` body and `Connection: close`. The relay test
-/// uses it to read the bytes the relay actually sent, and no network leaves
-/// the loopback interface.
+/// A local loopback backend for the relaying stand-in. It accepts and answers
+/// every connection until the test observes it: each connection's one request
+/// is read to its end with `read_request`, recorded, and answered `200` with
+/// the backend stream (`runtime_hosted_stream_frames`) as one plain
+/// `text/event-stream` body and `Connection: close`. The relay test uses it to
+/// read the bytes the relay actually sent, and no network leaves the loopback
+/// interface.
 struct LocalRelayBackend {
     url: String,
+    listener: Arc<TcpListener>,
+    sender: mpsc::Sender<RecordedRequest>,
     requests: Receiver<RecordedRequest>,
+    stop: Arc<AtomicBool>,
     accept: Option<thread::JoinHandle<()>>,
 }
 
@@ -1291,27 +1295,31 @@ impl LocalRelayBackend {
     fn bind() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind the local relay backend");
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let (request_tx, requests) = mpsc::channel();
-        let accept = thread::spawn(move || {
-            let Ok((stream, _)) = listener.accept() else {
-                return;
-            };
-            let _ = stream.set_read_timeout(Some(FIXTURE_EVENT_TIMEOUT));
-            let recorded = read_request(&stream);
-            let _ = request_tx.send(recorded);
-            let body = runtime_hosted_stream_frames().concat();
-            let mut answer = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
-                 content-length: {}\r\nconnection: close\r\n\r\n",
-                body.len()
-            )
-            .into_bytes();
-            answer.extend_from_slice(body.as_bytes());
-            let _ = (&stream).write_all(&answer);
-        });
+        listener
+            .set_nonblocking(true)
+            .expect("a stoppable local relay backend");
+        let listener = Arc::new(listener);
+        let (sender, requests) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let accept = {
+            let listener = Arc::clone(&listener);
+            let stopping = Arc::clone(&stop);
+            let sender = sender.clone();
+            thread::spawn(move || {
+                while !stopping.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((stream, _)) => serve_local_relay_request(stream, &sender),
+                        Err(_) => thread::sleep(Duration::from_millis(5)),
+                    }
+                }
+            })
+        };
         Self {
             url,
+            listener,
+            sender,
             requests,
+            stop,
             accept: Some(accept),
         }
     }
@@ -1321,22 +1329,51 @@ impl LocalRelayBackend {
     }
 
     /// Every request the backend read, waiting `FIXTURE_EVENT_TIMEOUT` for the
-    /// first one, then joining the accept thread so the test ends after the
-    /// answer. A relay that reaches the backend twice records two requests.
+    /// first one, then stopping the accept loop and answering the connections
+    /// still queued on the listener. Every wait is bounded by
+    /// `FIXTURE_EVENT_TIMEOUT`, so a relay that sends no request fails with
+    /// "the relay must reach the local backend" and one that reaches the
+    /// backend twice records two requests.
     fn observe(mut self) -> Vec<RecordedRequest> {
         let first = self
             .requests
             .recv_timeout(FIXTURE_EVENT_TIMEOUT)
             .expect("the relay must reach the local backend");
+        self.stop.store(true, Ordering::Relaxed);
         if let Some(accept) = self.accept.take() {
             let _ = accept.join();
         }
+        // A connection the relay made just before the stop can still wait on
+        // the listener, so answer it here before counting the records.
+        while let Ok((stream, _)) = self.listener.accept() {
+            serve_local_relay_request(stream, &self.sender);
+        }
         let mut recorded = vec![first];
-        while let Ok(request) = self.requests.recv_timeout(Duration::from_millis(20)) {
+        while let Ok(request) = self.requests.try_recv() {
             recorded.push(request);
         }
         recorded
     }
+}
+
+/// Reads one request from an accepted loopback connection, records it, and
+/// answers `200` with the backend stream (`runtime_hosted_stream_frames`) as
+/// one plain `text/event-stream` body and `Connection: close`.
+fn serve_local_relay_request(stream: TcpStream, sender: &mpsc::Sender<RecordedRequest>) {
+    // On macOS an accepted socket keeps the listener's non-blocking mode.
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(FIXTURE_EVENT_TIMEOUT));
+    let recorded = read_request(&stream);
+    let _ = sender.send(recorded);
+    let body = runtime_hosted_stream_frames().concat();
+    let mut answer = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+         content-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    answer.extend_from_slice(body.as_bytes());
+    let _ = (&stream).write_all(&answer);
 }
 
 /// The provider's half of the join with the Runtime's hosted effect transport.
@@ -2787,7 +2824,7 @@ fn relay_reports_a_closed_provider_socket_as_unreachable() {
 /// (`examples/agent-host/handoff/reports/provider-a4-deepseek-turn-gaps.md`,
 /// "The A4 path, as Anders states it"). The relay itself is checked on every
 /// gate by `hosted_relay_forwards_the_provider_body_unchanged_and_no_key`
-/// (`MP30`, `MP31`); this test is the real Sparks run only.
+/// (`MP30`, `MP31`, `MP33`, `MP34`); this test is the real Sparks run only.
 ///
 /// Its failure messages print the run's status and error code, never the run,
 /// so a failed real turn prints no answer text (049 review).
@@ -2830,8 +2867,6 @@ fn opt_in_real_deepseek_turn_through_the_runtime_socket_completes_with_text_and_
         backend,
         mut provider,
     } = turn;
-    // The backend's own status explains a failed run before the run's error
-    // code does.
     match &backend {
         RelayOutcome::Answered { status: 200, .. } => {}
         RelayOutcome::Answered {

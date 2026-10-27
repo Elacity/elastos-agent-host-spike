@@ -2566,6 +2566,38 @@
       "tests": [
         "relay_reports_a_closed_provider_socket_as_unreachable"
       ]
+    },
+    {
+      "id": "MP33",
+      "title": "the relay sends the provider body to the backend twice",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/tests/process.rs",
+          "old": "    let status = response.status();",
+          "new": "    let _ = client\n        .post(&endpoint)\n        .header(\"content-type\", \"application/json\")\n        .body(body.to_vec())\n        .send()\n        .await;\n    let status = response.status();"
+        }
+      ],
+      "tests": [
+        "hosted_relay_forwards_the_provider_body_unchanged_and_no_key"
+      ]
+    },
+    {
+      "id": "MP34",
+      "title": "the relay adds a header other than authorization",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/tests/process.rs",
+          "old": "        .header(\"content-type\", \"application/json\")",
+          "new": "        .header(\"content-type\", \"application/json\")\n        .header(\"x-planted\", \"1\")"
+        }
+      ],
+      "tests": [
+        "hosted_relay_forwards_the_provider_body_unchanged_and_no_key"
+      ]
     }
   ]
 }
