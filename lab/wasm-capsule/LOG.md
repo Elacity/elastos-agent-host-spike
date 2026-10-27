@@ -1237,3 +1237,31 @@
   `Cargo.lock`, `tools/`, `capsule/`, `tools/build`, `audit/`, lab CID or pin changed. Retired-label greps from the repo
   root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256'
   lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 045 (M1 A10 and A12 lab half: a cancelled run settles as cancelled and leaves nothing behind). Base
+  `c263e7474`. `tools/src/run.rs`: `RunControl` now holds an `Arc<AtomicBool>` cancel flag (`RunControl::new` is no
+  longer `const`; a clone shares the flag), `RunControl::cancel_handle() -> CancelHandle` (`Clone + Send`),
+  `CancelHandle::cancel()`, `RunControl::is_cancelled()`, and `Reason::Cancelled { engine }` (path: the engine program).
+  `check_cancel` is called by `run_engine` right after `check_budget` (no folder, no start) and by `run` before each
+  `--version` query (a local `query_version` closure, so the anchored query lines keep their form; refused as
+  `TwoEngineRefusal::Version`); `run_engine`'s check covers each module run. `wait_within_budget` checks the flag
+  first on every poll: `stop_engine` (SIGKILL, reap), output dropped, `Cancelled`, then `finish_run` removes the run
+  folder. `tools/src/receipt.rs`: id `cancelled` and `outcome: cancelled` from the id alone (`refusal_outcome`);
+  every other refusal stays `outcome: refused`. No new dependency; `Cargo.toml` and `Cargo.lock` unchanged. Tests
+  (`tests/run.rs`): `cancelled_run_settles_as_cancelled_and_leaves_nothing_on_both_engines` (real engines, both
+  found: wasmtime answered 27.5 ms and wasmer 10.9 ms after `cancel()`, census empty),
+  `cancel_before_start_starts_no_engine`, `run_cancelled_during_wasmtime_never_starts_wasmer`,
+  `refused_and_failed_runs_leave_nothing_under_the_scratch_root`; `refusal_receipt_ids_are_distinct_and_named` gains
+  the `Cancelled` example and checks every `outcome:` line; `TEST_CONTROL` and `KILLED_RUN_CONTROL` are `LazyLock`.
+  Falsifier F-WC-A10-CANCEL-CLEANUP-SKIPPED (anchor `let outcome = write_and_start(...)`, found once): by hand, the
+  named test panicked at `tests/run.rs:3866` with "cancelled run on wasmtime: the census found leftovers under
+  .../work-wasmtime: entry: wasmtime", and `run.rs` was copied back (`cmp` clean). Canonical runner, from the repo
+  root, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py --from
+  lab/wasm-capsule/falsifiers.json F-WC-A10-CANCEL-CLEANUP-SKIPPED`: "baseline: 1 named tests pass without an edit, 0
+  do not", CAUGHT, "summary: 1 CAUGHT of 1". F-WC-README-COUNT re-anchored to 182: "summary: 1 CAUGHT of 1". Re-run of
+  the neighbouring entries (F-WC5a, F-WC5-QUERY-BEFORE-VERIFY, F-WC5-VERSION-AFTER-RUN, F-WC5-ENGINES-OVERLAP,
+  F-WC5-BYPASS-RUN-ENGINE, F-WC-A7-BUDGET-IGNORED, F-WC-A7-PIPE-BLOCKED, F-WC-A7-RECEIPT-REASON-GENERIC,
+  F-WC5-RUN-DIR-KEPT-ON-FAILURE, F-WC-A12-TEMP-LEAK): "summary: 10 CAUGHT of 10". All 182 anchors found exactly once.
+  Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (127 passed, 3
+  ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0. Retired-label
+  greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target
+  'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
