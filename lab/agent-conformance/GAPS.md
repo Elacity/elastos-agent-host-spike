@@ -683,11 +683,12 @@ check credential surfaces; it supplies zero approval or denial decisions.
 The Runtime must exit naturally with its explicit pending-request refusal
 within the collector's 40-second bound. A collector timeout or any other
 error fails. The capsule's manifest and successful admission supply zero
-grant credit. F-ac2c creates that optional policy file with an exact entry for
-the one attempted effect; the same Controller then approves the pending
-request. The guest checks every byte and exits successfully, which must fail
-the refusal assertion. This is a controller-owned fixture policy, using the
-existing approval API; it claims no Runtime policy-file loader.
+grant credit. F-ac2c plants the `NotFound` arm of `Fixture::no_policy` so a
+missing policy file is treated as a grant of the one read. The one runner
+applies that arm with `python3 -I examples/agent-host/falsify.py --from lab/agent-conformance/falsifiers.json F-report-blocker-list F-ac1c F-ac2c F-agent-host-p7`.
+The guest checks every byte and exits successfully, which must fail
+the refusal assertion. The planted arm uses the existing approval API; it
+claims no Runtime policy-file loader.
 
 AC-010-OFFLINE remains closed by 013's measured recipe. AC-006-STORAGE keeps
 its existing `run` constructor scope. All these launches use the existing
