@@ -163,17 +163,19 @@ A passing signature is the name check and grants nothing. The signature is a sep
         Ok(())
     }
 
-`lab/capsule-identity/src/lib.rs:1248` states that this result is not a trust, admission or launch.
+`lab/capsule-identity/src/lib.rs:1252` states that this result is not a trust, admission or launch.
 
     /// `Ok(())` means all four passed. It is not a trust, admission or launch
     /// value. A wrong key, a changed signature and a name moved onto other bytes
     /// all fail step 4 with one reason.
 
-The capsule-identity README states M1 check B1. `lab/capsule-identity/README.md:697` states that a valid signature grants nothing by itself. This section cites that statement.
+The capsule-identity README states M1 check B1. `lab/capsule-identity/README.md:807` states that a valid signature grants nothing by itself. This section cites that statement.
 
     The rule: a valid signature grants nothing by itself. A bundle whose test-key
     signature verifies is still not admitted, and it gets no grant. This library
-    checks identity only, and it sits in no admission or launch path.
+    checks identity only, and it sits in no Runtime admission or launch path; the
+    lab's stand-in launcher, in test code, calls it
+    ([below](#lab-stand-in-launcher-m1-check-b1)).
 
 The asks file is the declaration and the Runtime enforces each grant.
 
