@@ -8,7 +8,8 @@ passes while the probed property holds.
 The owner's session and instance tests open the call after the registry
 change. This probe opens it first. The same call must then be refused, and
 the refused reserve must not spend the ceiling. The same call's child path
-is refused after the session change. ``ledger.held`` stays inside
+is refused after the session change. A grant succeeds, the identity changes,
+and the same call is refused. ``ledger.held`` stays inside
 the crate. The probe watches the ceiling: a refused reserve of 5, then a
 reserve of 5 that must succeed, then a reserve of 1 that must be over the
 ceiling.
@@ -55,8 +56,9 @@ SESSION_NAME = "test_stale_call_session_replay_is_refused"
 SIBLING_NAME = "test_stale_call_sibling_instance_replay_is_refused"
 CLEAN_NAME = "test_clean_full_ceiling_reserve_succeeds"
 PATH_NAME = "test_stale_call_use_path_is_refused"
+IDENTITY_NAME = "test_stale_call_identity_replay_is_refused"
 LINK_NAME = "redteam_manifest_is_not_a_grant_link"
-PROBE_NAMES = (SESSION_NAME, SIBLING_NAME, CLEAN_NAME, PATH_NAME)
+PROBE_NAMES = (SESSION_NAME, SIBLING_NAME, CLEAN_NAME, PATH_NAME, IDENTITY_NAME)
 STALE_NAMES = (SESSION_NAME, SIBLING_NAME)
 REPO_MARKER = "@@REDTEAM_REPO@@"
 # Manifest texts the link plant hands to the owner's detector.
@@ -65,11 +67,16 @@ AUDIT_SHAPED_MANIFEST = 'audit = { path = "../wasm-capsule/audit" }'
 PATH_MANIFEST = 'grant-binding = { path = "lab/grant-binding" }'
 
 TIMEOUT_S = 240
-CLEAN = "these two stale calls were refused and did not spend the ceiling, and the same call's child path was refused, on {commit}"
+CLEAN = "these two stale calls were refused and did not spend the ceiling, and the same call's child path was refused, and the same call was refused after the identity change, on {commit}"
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _COMPILE = re.compile(r"could not compile|error\[E\d+\]")
 
+IDENTITY_OLD = (
+    "        if live.identity != grant.identity {\n"
+    "            return Err(Refuse::Identity);\n"
+    "        }\n"
+)
 SESSION_OLD = (
     "        if live.session != grant.session {\n"
     "            return Err(Refuse::Session);\n"
@@ -305,6 +312,31 @@ fn test_stale_call_use_path_is_refused() {
 }
 
 #[test]
+fn test_stale_call_identity_replay_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let request = guest(handle);
+    let call = verifier.open_call(instance);
+    let decision = verifier
+        .use_grant(call, &request)
+        .expect("grant before the identity change");
+    assert_eq!(decision.identity, "agent-1");
+    verifier
+        .host_set_identity(instance, "agent-2")
+        .expect("set identity");
+    match verifier.use_grant(call, &request) {
+        Err(refusal) => {
+            assert_eq!(refusal, Refuse::Identity);
+            assert_eq!(refusal.to_string(), "identity does not match the grant");
+        }
+        Ok(decision) => panic!("accepted replay: use_grant returned Ok({decision:?})"),
+    }
+}
+
+#[test]
 fn redteam_manifest_is_not_a_grant_link() {
     let repo = "@@REDTEAM_REPO@@";
     let baked = format!("{repo}/lab/redteam/Cargo.toml");
@@ -483,8 +515,8 @@ def anchor_reason(relative, count, name, head):
 def recorded_from(text):
     """Probe names in a finding. The first line is the live pin. The body records Ok or OverCeiling.
 
-    A finding may name a stale probe or the use_path probe. The clean reserve
-    and a compile-error name stay unknown.
+    A finding may name a stale probe, the use_path probe, or the identity
+    probe. The clean reserve and a compile-error name stay unknown.
     """
     lines = text.splitlines()
     if not lines:
@@ -496,7 +528,7 @@ def recorded_from(text):
     for line in lines[1:]:
         if line.startswith("probe: "):
             name = line[len("probe: "):].strip()
-            if name not in STALE_NAMES and name != PATH_NAME:
+            if name not in STALE_NAMES and name != PATH_NAME and name != IDENTITY_NAME:
                 raise ProbeError(f"finding names an unknown probe {name}")
             names.add(name)
         if line.startswith("observed: Ok") or line.startswith("observed: OverCeiling"):
@@ -939,6 +971,69 @@ class GrantReplayProbe(unittest.TestCase):
         """A child path on the call opened before the session change is refused after it."""
         self.check_real(PATH_NAME)
 
+    def test_stale_call_identity_replay_is_refused(self):
+        """A grant on the call opened before the identity change is refused after it."""
+        self.check_real(IDENTITY_NAME)
+
+    def test_renamed_identity_method_turns_compile_error_into_failure(self):
+        """The identity method name is ``IDENTITY_NAME``. ``setUp`` and ``expect_recorded`` look up that name.
+
+        A compile error on that method is an error, including when a finding
+        records it. Renaming the method leaves it outside ``PROBE_NAMES``, so
+        ``setUp`` does not raise. The body fails, and the result is a failure.
+        The finding's name does not mark the renamed method as an expected failure.
+        """
+        compile = Suite(
+            101,
+            "could not compile `grant-binding`\n",
+            {
+                name: Outcome("error", "compile error", "could not compile `grant-binding`")
+                for name in PROBE_NAMES
+            },
+        )
+        self.assertTrue(callable(getattr(GrantReplayProbe, IDENTITY_NAME)))
+
+        class Named(unittest.TestCase):
+            skip_reason = None
+            real = compile
+            real_error = None
+
+            def setUp(self):
+                GrantReplayProbe.setUp(self)
+
+            def test_stale_call_identity_replay_is_refused(self):
+                self.fail("body ran after a compile error")
+
+        expect_recorded(Named, {IDENTITY_NAME})
+        self.assertTrue(getattr(Named, IDENTITY_NAME).__unittest_expecting_failure__)
+        named = run_case(Named)
+        self.assertEqual(named.expectedFailures, [])
+        self.assertEqual(named.failures, [])
+        self.assertEqual(len(named.errors), 1)
+        self.assertIn("compile error", named.errors[0][1])
+
+        class Renamed(unittest.TestCase):
+            skip_reason = None
+            real = compile
+            real_error = None
+
+            def setUp(self):
+                GrantReplayProbe.setUp(self)
+
+            def test_identity_replay_under_another_name(self):
+                outcome = self.real.by_name[IDENTITY_NAME]
+                kind = gate_kind(outcome, IDENTITY_NAME, {IDENTITY_NAME})
+                self.assertEqual(kind, "pass")
+
+        expect_recorded(Renamed, {IDENTITY_NAME})
+        renamed_method = Renamed.test_identity_replay_under_another_name
+        self.assertFalse(getattr(renamed_method, "__unittest_expecting_failure__", False))
+        renamed = run_case(Renamed)
+        self.assertEqual(renamed.errors, [])
+        self.assertEqual(renamed.expectedFailures, [])
+        self.assertEqual(len(renamed.failures), 1)
+        self.assertIn("'error' != 'pass'", renamed.failures[0][1])
+
     def plant(self, name, relative, old, new):
         dest = copy_crate(self.work / f"crate-{name}")
         self.assertFalse((dest / "target").exists())
@@ -958,7 +1053,9 @@ class GrantReplayProbe(unittest.TestCase):
         sibling = suite.by_name[SIBLING_NAME]
         clean = suite.by_name[CLEAN_NAME]
         path = suite.by_name[PATH_NAME]
+        identity = suite.by_name[IDENTITY_NAME]
         self.assertEqual(path.kind, "passed", evidence(suite.output) or tail(suite.output))
+        self.assertEqual(identity.kind, "passed", evidence(suite.output) or tail(suite.output))
         self.assertEqual(clean.kind, "failed", evidence(suite.output) or tail(suite.output))
         self.assertIn("without a refused replay", clean.output)
         self.assertNotEqual(clean.kind, "error")
@@ -992,6 +1089,7 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertIn("accepted replay: use_path returned Ok", path.output)
         self.assertNotIn("lost accounting:", path.output)
         self.assertEqual(suite.by_name[SIBLING_NAME].kind, "passed", evidence(suite.output))
+        self.assertEqual(suite.by_name[IDENTITY_NAME].kind, "passed", evidence(suite.output))
         self.assertEqual(suite.by_name[CLEAN_NAME].kind, "passed", evidence(suite.output))
 
     def test_deleted_instance_comparison_is_caught(self):
@@ -1003,6 +1101,20 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertIn("accepted replay:", sibling.output)
         self.assertNotIn("lost accounting:", sibling.output)
         self.assertEqual(suite.by_name[SESSION_NAME].kind, "passed", evidence(suite.output))
+        self.assertEqual(suite.by_name[PATH_NAME].kind, "passed", evidence(suite.output))
+        self.assertEqual(suite.by_name[IDENTITY_NAME].kind, "passed", evidence(suite.output))
+        self.assertEqual(suite.by_name[CLEAN_NAME].kind, "passed", evidence(suite.output))
+
+    def test_deleted_identity_comparison_is_caught(self):
+        """Deleting the live identity comparison accepts the same call after the identity change."""
+        self.require_one_anchor("lab/grant-binding/src/lib.rs", IDENTITY_OLD, "identity")
+        suite = self.plant("drop-identity", "src/lib.rs", IDENTITY_OLD, "")
+        identity = suite.by_name[IDENTITY_NAME]
+        self.assertTrue(identity.caught, evidence(suite.output) or tail(suite.output))
+        self.assertIn("accepted replay: use_grant returned Ok", identity.output)
+        self.assertNotIn("lost accounting:", identity.output)
+        self.assertEqual(suite.by_name[SESSION_NAME].kind, "passed", evidence(suite.output))
+        self.assertEqual(suite.by_name[SIBLING_NAME].kind, "passed", evidence(suite.output))
         self.assertEqual(suite.by_name[PATH_NAME].kind, "passed", evidence(suite.output))
         self.assertEqual(suite.by_name[CLEAN_NAME].kind, "passed", evidence(suite.output))
 
@@ -1016,6 +1128,7 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertTrue(accounting_plant_caught(session, sibling, clean), evidence(suite.output) or tail(suite.output))
         self.assertEqual(clean.kind, "passed", evidence(suite.output) or tail(suite.output))
         self.assertEqual(suite.by_name[PATH_NAME].kind, "passed", evidence(suite.output) or tail(suite.output))
+        self.assertEqual(suite.by_name[IDENTITY_NAME].kind, "passed", evidence(suite.output) or tail(suite.output))
 
     def test_compile_error_is_error(self):
         """Invalid Rust is an error. It is not a caught plant and not an expected failure."""
@@ -1071,6 +1184,12 @@ class GrantReplayProbe(unittest.TestCase):
             "observed: Ok\n"
         )
         self.assertEqual(recorded_from(path_only), {PATH_NAME})
+        identity_only = pin_line() + (
+            "\nprobe: " + IDENTITY_NAME + "\n"
+            "call: open_call, use_grant, host_set_identity, use_grant\n"
+            "observed: Ok\n"
+        )
+        self.assertEqual(recorded_from(identity_only), {IDENTITY_NAME})
         both = pin_line() + (
             "\nprobe: " + SESSION_NAME + "\n"
             "probe: " + SIBLING_NAME + "\n"
@@ -1250,7 +1369,8 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertEqual(
             lines[0],
             "these two stale calls were refused and did not spend the ceiling, "
-            "and the same call's child path was refused, on " + self.head,
+            "and the same call's child path was refused, "
+            "and the same call was refused after the identity change, on " + self.head,
         )
         self.assertEqual(lines[1], self.pin_line)
         self.assertEqual(probe_report(ok, None, True, self.head, self.pin_line), [])
@@ -1274,6 +1394,8 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertNotIn(LINK_NAME, STALE_NAMES)
         self.assertIn(PATH_NAME, PROBE_NAMES)
         self.assertNotIn(PATH_NAME, STALE_NAMES)
+        self.assertIn(IDENTITY_NAME, PROBE_NAMES)
+        self.assertNotIn(IDENTITY_NAME, STALE_NAMES)
         boom = ProbeError("real suite failed")
         saved_error = self.real_error
         calls = []
