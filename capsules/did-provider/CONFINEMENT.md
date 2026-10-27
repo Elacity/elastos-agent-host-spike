@@ -390,7 +390,7 @@ This section records the lab evidence for M1 checks C0 and B3 for
 `did-provider`. It states what the evidence is and gives no verdict; cc-redteam
 judges C0 and B3.
 
-Pins: read at the base head this build started from, `e31f0f517a3364c6067b1989c1c985c21f823312`, the head of `spike/spark/confine/111-b3-summaries-list-every-suite-panic-and-pin-the-base-head`; its parent is `16c4997d20b332d5e5f82999a10a035fcee6a3ab`, which `git rev-parse spike/spike/agent-host` reports until 111 merges, and the earlier fetched head `c76403f1c26ac1ed8be7ed218b988d9d34ce2327` from `git fetch spike spike/agent-host` and one `git rev-parse FETCH_HEAD` is an ancestor of it; each file pin below is a commit that holds the file, read with `git show <commit>:<path>`, every `confine.rs` line number is from `git show e31f0f517a3364c6067b1989c1c985c21f823312:capsules/wallet-provider/tests/confine.rs`, and each wallet `falsifiers.json` entry line is from `git show e31f0f517a3364c6067b1989c1c985c21f823312:capsules/wallet-provider/falsifiers.json`.
+Pins: `e31f0f517a3364c6067b1989c1c985c21f823312` is a fixed commit on this lane; every `confine.rs` line number in this section is read with `git show e31f0f517a3364c6067b1989c1c985c21f823312:capsules/wallet-provider/tests/confine.rs`, each wallet `falsifiers.json` entry line in this section is read with `git show e31f0f517a3364c6067b1989c1c985c21f823312:capsules/wallet-provider/falsifiers.json`, and each file pin below is a commit that holds the file, read with `git show <commit>:<path>`.
 
 Gap (#309, routed to Flint): draft PR #309 at 513988ebd names no provider-launch ask, so this launcher has no RA route to copy, and M1-R for C0 and B3 waits on that ask.
 
