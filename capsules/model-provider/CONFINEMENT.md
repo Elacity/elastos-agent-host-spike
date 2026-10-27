@@ -48,8 +48,8 @@ to exactly one approved declared right in the `rights` array of
 rule in that file. `startup-root-directory` and `startup-sysctl` are on the
 platform-baseline list, not in the `rights` array. Each justification starts
 with `macOS model-provider executable bound as PROVIDER_EXECUTABLE:` and then
-gives this document's reason: `Process startup reads the root directory
-before main runs` for the root read, and `At startup the Rust runtime reads
+gives this document's reason: Process startup reads the root directory
+before `main` runs for the root read, and `At startup the Rust runtime reads
 the page size to place its stack guard page.` for the sysctl read.
 They are Runtime platform baseline,
 technical OS permissions with no user approval prompt, not approved rights.
@@ -550,6 +550,9 @@ profile does not grant".
   `declared rule matches more than one allow line`. The trace calls
   `allow_form_closes`. An allow form that contains `(allow` and does not
   close fails with `allow form does not close`, before check 2.
+  `collect_allow_lines` takes `(allow` followed by ASCII whitespace, including
+  a tab, and `( allow`. The baseline file scan calls that same function and
+  keeps no second `(allow ` filter.
 - `platform_baseline_rules_stay_narrow`: `startup-root-directory` stays
   `(allow file-read-data (literal "/"))` and `startup-sysctl` stays
   `(allow sysctl-read)`. Each pin is written in the test. A wider path or
@@ -565,6 +568,8 @@ profile does not grant".
   line fails, even when both pins remain. The failure contains `allow form
   does not close`. `F-cc38a` writes `(allow` on its own line after the root
   pin, then `file-read* (literal "/tmp/cc-unclosed"))` on the next line.
+  A line that trims to `(` and whose next line starts with `allow` and then
+  a space or a tab fails with `allow form does not close`.
 - `startup_is_refused_when_the_profile_cannot_be_applied`: a missing profile,
   a copy of `confine.sb` with its last `)` removed, and `confine.sb` with
   `STORAGE_ROOT` unbound each refuse the start. It runs under

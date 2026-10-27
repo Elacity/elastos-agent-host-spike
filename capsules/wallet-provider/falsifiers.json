@@ -1681,6 +1681,70 @@
       "tests": [
         "declared_rights_trace_refuses_each_bad_input"
       ]
+    },
+    {
+      "id": "WP105",
+      "title": "the lab generator emits an allow rule that neither declared-rights file names",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    for form in PROFILE_HEAD {\n        profile.push_str(form);\n        profile.push('\\n');\n    }",
+          "new": "    for form in PROFILE_HEAD {\n        profile.push_str(form);\n        profile.push('\\n');\n    }\n    profile.push_str(\"(allow file-read* (literal \\\"/private/var/cc-confine-generated\\\"))\\n\");"
+        }
+      ],
+      "tests": [
+        "generated_did_and_wallet_profiles_match_their_committed_oracles"
+      ]
+    },
+    {
+      "id": "WP106",
+      "title": "the rights-list id refusal never fires",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "if !CONTRACT_RIGHTS.contains(&claim.id.as_str()) {",
+          "new": "if false && !CONTRACT_RIGHTS.contains(&claim.id.as_str()) {"
+        }
+      ],
+      "tests": [
+        "generator_refuses_an_unnamed_right_and_the_start_is_refused"
+      ]
+    },
+    {
+      "id": "WP107",
+      "title": "the platform-baseline id refusal never fires",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "if !PLATFORM_BASELINE_IDS.contains(&claim.id.as_str()) {",
+          "new": "if false && !PLATFORM_BASELINE_IDS.contains(&claim.id.as_str()) {"
+        }
+      ],
+      "tests": [
+        "generator_refuses_an_unnamed_right_and_the_start_is_refused"
+      ]
+    },
+    {
+      "id": "WP108",
+      "title": "the lab writer creates the profile path before the generator refuses",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let profile = generate_profile(name, declared)?;",
+          "new": "    fs::write(path, \"\").map_err(|err| {\n        format!(\"{name} generated profile {} must be writable: {err}\", path.display())\n    })?;\n    let profile = generate_profile(name, declared)?;"
+        }
+      ],
+      "tests": [
+        "generator_refuses_an_unnamed_right_and_the_start_is_refused"
+      ]
     }
   ]
 }

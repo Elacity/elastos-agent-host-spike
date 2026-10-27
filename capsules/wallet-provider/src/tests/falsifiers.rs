@@ -131,9 +131,20 @@ use std::process::Command;
 /// rules list reads "with no rules"; WP103 skips a rule that is not a string,
 /// so the right with a non-string rule passes the check; and WP104 drops only
 /// the pin table's `startup-sysctl` row, so the sysctl read claimed by
-/// `storage` passes. `declared_rights_trace_refuses_each_bad_input` fails on
-/// each case.
-const EXPECTED_FALSIFIERS: usize = 102;
+/// `storage`. `declared_rights_trace_refuses_each_bad_input` fails on
+/// each case. Task 089's WP105 makes the lab generator `generate_profile` emit
+/// `(allow file-read* (literal "/private/var/cc-confine-generated"))` after the
+/// contract head, so
+/// `generated_did_and_wallet_profiles_match_their_committed_oracles` fails
+/// because neither declared-rights file names that rule. Task 090's WP106
+/// makes the rights-list id refusal in `declared_entries` never fire, so case
+/// (a) writes a profile for the unnamed right, WP107 makes the
+/// platform-baseline id refusal never fire, so case (b) writes one for the
+/// unnamed baseline rule, and WP108 makes `write_generated_profile` create the
+/// path before it calls `generate_profile`; each makes
+/// `generator_refuses_an_unnamed_right_and_the_start_is_refused` fail on its
+/// no-file assertion.
+const EXPECTED_FALSIFIERS: usize = 106;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
