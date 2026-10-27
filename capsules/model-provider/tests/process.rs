@@ -1129,7 +1129,8 @@ impl HostedEffectStandIn {
         *released.lock().unwrap() = false;
     }
 
-    /// Lets every held answer go with the Runtime's refusal.
+    /// Lets every held answer go: each connection writes the answer its
+    /// stand-in is bound to, which is the Runtime's refusal only for `bind`.
     fn release_answer(&self) {
         let (released, wake) = &*self.answer_released;
         *released.lock().unwrap() = true;
@@ -3206,6 +3207,255 @@ fn hosted_cancel_while_the_answer_is_held_settles_unknown_and_sends_nothing_more
         requests.len(),
         1,
         "the cancelled hosted run must send exactly one request"
+    );
+    let recorded = &requests[0];
+    assert_eq!(recorded.request_line, "POST /v1/hosted-effect HTTP/1.1");
+    assert_eq!(
+        recorded.value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
+    );
+
+    provider.shutdown();
+}
+
+/// Another caller cannot read, page or cancel a hosted run. The one owner rule
+/// is `assert_run_owner` (`src/state.rs:1141-1151`): it compares the run's
+/// stored `principal_id` and `capsule_id` with the caller's. It does not
+/// compare the access binding's `session_id`, `grant_id` or `request_id`, so a
+/// new access invocation from the same principal and capsule reads the same run
+/// (`rotate_access_invocation`, `src/state.rs:1964`, and the contract's reason:
+/// "Session and grant rotation preserve ownership by principal and capsule",
+/// `elastos/crates/elastos-model-contract/src/lib.rs:198-199`).
+/// `handle_runs_get` (`src/state.rs:655`), `handle_runs_events` (`:682`) and
+/// `handle_runs_cancel` (`:710`) each call the rule before any dispatch, and a
+/// missing journal file maps to the same fault (`src/journal.rs:1210`), so a
+/// foreign caller learns no more than it would for a run that was never
+/// created. This test holds the streaming stand-in's answer, creates one
+/// hosted run, and gives that run id to two foreign bindings built from the
+/// owner's access binding: one that changes only `principal_id` and one that
+/// changes only `capsule_id`. Each of the three ops must return exactly the
+/// response the same op returns for the owner binding of a run id this journal
+/// never created. The held answer is then released: a foreign cancel must have
+/// left the run open, so the run completes with the answer test's text and the
+/// terminal text stays unreadable to both foreign bindings. Off macOS the
+/// provider refuses every hosted run before any socket, so the test prints one
+/// `SKIP` line and returns.
+#[test]
+fn another_caller_cannot_read_page_or_cancel_a_hosted_run() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider another caller cannot read page or cancel a hosted run: \
+             off macOS the provider refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "another-caller");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind_streaming("hosted-another-caller");
+    stand_in.hold_answer();
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "a hosted answer another caller cannot touch"
+    });
+    let create_request = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": "session:test",
+            "capsule_id": "assistant",
+            "grant_id": "grant:test",
+            "request_id": test_support::fixture_model_request_id("request:another-caller"),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": model_input_hash(&input).unwrap()
+        }
+    });
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let run_id = model_run_id(&binding);
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    assert_eq!(
+        create["data"]["run_id"], run_id,
+        "runs_create must return the contract run id"
+    );
+    assert!(
+        matches!(
+            create["data"]["status"].as_str(),
+            Some("prepared" | "running")
+        ),
+        "the hosted run must report an open status while the answer is held: {create}"
+    );
+    // The stand-in records the request before it holds the answer, so the
+    // worker owns the open send before any foreign op arrives.
+    stand_in.wait_for_connections(1);
+
+    let access = access_binding(&create_request);
+    // The reference responses: the owner's own binding of a run id this
+    // journal never created. One field of the create binding changes, its
+    // request id, so the run id differs and no run file exists.
+    let mut absent_create = create_request.clone();
+    absent_create["runtime_binding"]["request_id"] = json!(test_support::fixture_model_request_id(
+        "request:another-caller-absent"
+    ));
+    let absent = access_binding(&absent_create);
+    let absent_run_id = absent["run_id"].as_str().unwrap().to_string();
+    assert_ne!(absent_run_id, run_id, "the reference run id must be new");
+    let absent_get = provider.request(json!({
+        "op": "runs_get", "run_id": absent_run_id, "runtime_binding": absent.clone()
+    }));
+    let absent_events = provider.request(json!({
+        "op": "runs_events", "run_id": absent_run_id,
+        "runtime_binding": absent.clone(), "after_sequence": 0
+    }));
+    let absent_cancel = provider.request(json!({
+        "op": "runs_cancel", "run_id": absent_run_id, "runtime_binding": absent
+    }));
+    for response in [&absent_get, &absent_events, &absent_cancel] {
+        assert_eq!(
+            response["status"], "error",
+            "an op on a run that was never created must fail: {response}"
+        );
+        assert_eq!(
+            response["code"], "run_not_found",
+            "an op on a run that was never created must say the run is not \
+             available for the current caller: {response}"
+        );
+        assert!(
+            response.get("data").is_none(),
+            "a refusal must carry no run data: {response}"
+        );
+    }
+
+    let mut foreign_principal = access.clone();
+    foreign_principal["principal_id"] = json!("person:local:other");
+    let mut foreign_capsule = access.clone();
+    foreign_capsule["capsule_id"] = json!("other-capsule");
+
+    // Each foreign binding asks for the same run id. A dropped owner compare
+    // fails at the first op that no longer refuses, so the asserts name the
+    // op that answered.
+    for (field, foreign) in [
+        ("principal_id", &foreign_principal),
+        ("capsule_id", &foreign_capsule),
+    ] {
+        let got = provider.request(json!({
+            "op": "runs_get", "run_id": run_id, "runtime_binding": foreign.clone()
+        }));
+        assert_eq!(
+            got, absent_get,
+            "a foreign {field} must get the never-created response from runs_get, \
+             not the owner's run: {got}"
+        );
+        let page = provider.request(json!({
+            "op": "runs_events", "run_id": run_id,
+            "runtime_binding": foreign.clone(), "after_sequence": 0
+        }));
+        assert_eq!(
+            page, absent_events,
+            "a foreign {field} must get the never-created response from runs_events, \
+             not the owner's events: {page}"
+        );
+        let cancel = provider.request(json!({
+            "op": "runs_cancel", "run_id": run_id, "runtime_binding": foreign.clone()
+        }));
+        assert_eq!(
+            cancel, absent_cancel,
+            "a foreign {field} must get the never-created response from runs_cancel, \
+             so the owner's run is not cancelled: {cancel}"
+        );
+    }
+
+    // The six foreign calls are done; the owner's run is still the held one.
+    let owner = provider.request(json!({
+        "op": "runs_get", "run_id": run_id, "runtime_binding": access.clone()
+    }));
+    assert_eq!(
+        owner["status"], "ok",
+        "unexpected owner runs_get response: {owner}"
+    );
+    assert!(
+        matches!(
+            owner["data"]["status"].as_str(),
+            Some("prepared" | "running")
+        ),
+        "the foreign calls must leave the run open, not reconciling or terminal: {owner}"
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "the foreign calls must not open a second Runtime socket connection"
+    );
+
+    stand_in.release_answer();
+    let settled = wait_for_run_terminal(&mut provider, &run_id, &access);
+    assert_eq!(
+        settled["data"]["status"], "completed",
+        "the owner's released answer must complete the run, so the foreign \
+         cancel had no effect: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["output"],
+        json!({"schema": RUN_OUTPUT_TEXT_SCHEMA, "text": "ready"}),
+        "the run must carry the streamed text: {settled}"
+    );
+
+    // The terminal text stays unreadable to both foreign bindings.
+    for (field, foreign) in [
+        ("principal_id", &foreign_principal),
+        ("capsule_id", &foreign_capsule),
+    ] {
+        let got = provider.request(json!({
+            "op": "runs_get", "run_id": run_id, "runtime_binding": foreign.clone()
+        }));
+        assert_eq!(
+            got, absent_get,
+            "a foreign {field} must get the never-created response from runs_get \
+             after the terminal, not the completed run: {got}"
+        );
+        let page = provider.request(json!({
+            "op": "runs_events", "run_id": run_id,
+            "runtime_binding": foreign.clone(), "after_sequence": 0
+        }));
+        assert_eq!(
+            page, absent_events,
+            "a foreign {field} must get the never-created response from runs_events \
+             after the terminal, not the run's text: {page}"
+        );
+    }
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "the owned hosted run must open exactly one connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "the owned hosted run must send exactly one request"
     );
     let recorded = &requests[0];
     assert_eq!(recorded.request_line, "POST /v1/hosted-effect HTTP/1.1");

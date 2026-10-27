@@ -2904,6 +2904,70 @@
       "tests": [
         "hosted_text_sent_before_a_runtime_cut_stays_ordered_and_replays_after_restart"
       ]
+    },
+    {
+      "id": "MP49",
+      "title": "the owner rule stops comparing principal_id, so another principal reads, pages and cancels a hosted run the owner opened",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "    if run.runtime_binding.principal_id != binding.principal_id\n        || run.runtime_binding.capsule_id != binding.capsule_id\n    {",
+          "new": "    if run.runtime_binding.capsule_id != binding.capsule_id\n    {"
+        }
+      ],
+      "tests": [
+        "another_caller_cannot_read_page_or_cancel_a_hosted_run"
+      ]
+    },
+    {
+      "id": "MP50",
+      "title": "the owner rule stops comparing capsule_id, so another capsule reads, pages and cancels a hosted run the host opened and no test catches it today",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "    if run.runtime_binding.principal_id != binding.principal_id\n        || run.runtime_binding.capsule_id != binding.capsule_id\n    {",
+          "new": "    if run.runtime_binding.principal_id != binding.principal_id\n    {"
+        }
+      ],
+      "tests": [
+        "another_caller_cannot_read_page_or_cancel_a_hosted_run"
+      ]
+    },
+    {
+      "id": "MP51",
+      "title": "cancel stops calling the owner rule while get and events still call it, so a foreign caller cancels the owner's held hosted run",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "        if request.op != \"runs_cancel\" {\n            return Err(ProviderFault::invalid_request(\n                \"invalid runs_cancel request op\",\n            ));\n        }\n        validate_run_lookup_request(&request.run_id, None, &request.runtime_binding)?;\n        let mut run = self.journal.load_run(&request.run_id)?;\n        assert_run_owner(&request.runtime_binding, &run)?;",
+          "new": "        if request.op != \"runs_cancel\" {\n            return Err(ProviderFault::invalid_request(\n                \"invalid runs_cancel request op\",\n            ));\n        }\n        validate_run_lookup_request(&request.run_id, None, &request.runtime_binding)?;\n        let mut run = self.journal.load_run(&request.run_id)?;"
+        }
+      ],
+      "tests": [
+        "another_caller_cannot_read_page_or_cancel_a_hosted_run"
+      ]
+    },
+    {
+      "id": "MP52",
+      "title": "events stop calling the owner rule while get and cancel still call it, so a foreign caller pages the owner's hosted run",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "        if request.op != \"runs_events\" {\n            return Err(ProviderFault::invalid_request(\n                \"invalid runs_events request op\",\n            ));\n        }\n        validate_run_lookup_request(\n            &request.run_id,\n            request.after_sequence,\n            &request.runtime_binding,\n        )?;\n        let mut run = self.journal.load_run(&request.run_id)?;\n        assert_run_owner(&request.runtime_binding, &run)?;",
+          "new": "        if request.op != \"runs_events\" {\n            return Err(ProviderFault::invalid_request(\n                \"invalid runs_events request op\",\n            ));\n        }\n        validate_run_lookup_request(\n            &request.run_id,\n            request.after_sequence,\n            &request.runtime_binding,\n        )?;\n        let mut run = self.journal.load_run(&request.run_id)?;"
+        }
+      ],
+      "tests": [
+        "another_caller_cannot_read_page_or_cancel_a_hosted_run"
+      ]
     }
   ]
 }
