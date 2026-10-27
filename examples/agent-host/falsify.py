@@ -296,8 +296,11 @@ def load(path=DATA):
 # - capsules/did-provider/falsifiers.json: did's src/main.rs, did's
 #   confine.sb and did's tests/confine.rs.
 # - capsules/wallet-provider/falsifiers.json: wallet's src/main.rs, wallet's
-#   confine.sb, wallet's tests/confine.rs and src/tests/falsifiers.rs, and
-#   did's src/main.rs, did's confine.sb and did's tests/confine.rs.
+#   confine.sb, wallet's tests/confine.rs, src/tests/falsifiers.rs and
+#   tests/common/profile_generator.rs, and did's src/main.rs, did's
+#   confine.sb and did's tests/confine.rs. The profile generator file is
+#   named ahead of the move: wallet's WP93 to WP103 and WP105 to WP108 edit
+#   it once confine moves the lab profile generator there.
 # - lab/capsule-identity/falsifiers.json: capsule-identity's .gitignore,
 #   README.md, src/lib.rs, tests/common/mod.rs and
 #   fixtures/wc001-core/capsule.json.
@@ -339,6 +342,7 @@ PROVIDER_TARGETS = (
     "capsules/did-provider/confine.sb",
     "capsules/did-provider/tests/confine.rs",
     "capsules/wallet-provider/src/main.rs",
+    "capsules/wallet-provider/tests/common/profile_generator.rs",
     "capsules/wallet-provider/confine.sb",
     "capsules/wallet-provider/tests/confine.rs",
     "capsules/wallet-provider/src/tests/falsifiers.rs",
@@ -2113,7 +2117,8 @@ def a_killed_provider_edit_is_recovered():
     through main(), and repeat the edit. This lane's model-provider targets,
     the model provider's confinement test harness and process test file, the
     confine lane's five did/wallet targets plus its did confinement test
-    harness and wallet's falsifier honesty test, capsule-identity's
+    harness, wallet's falsifier honesty test and wallet's profile generator
+    file, capsule-identity's
     .gitignore, README.md, src/lib.rs, tests/common/mod.rs and
     fixtures/wc001-core/capsule.json, and
     the wasm lab's .gitignore, README.md, LOG.md, capsule/capsule.json,
@@ -2148,6 +2153,7 @@ def a_killed_provider_edit_is_recovered():
                  "../../capsules/wallet-provider/src/main.rs",
                  "../../capsules/wallet-provider/confine.sb",
                  "../../capsules/wallet-provider/tests/confine.rs",
+                 "../../capsules/wallet-provider/tests/common/profile_generator.rs",
                  "../../capsules/wallet-provider/src/tests/falsifiers.rs",
                  "../../lab/capsule-identity/src/lib.rs",
                  "../../lab/capsule-identity/tests/common/mod.rs",

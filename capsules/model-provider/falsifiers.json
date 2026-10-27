@@ -2419,6 +2419,22 @@
       ]
     },
     {
+      "id": "PV127",
+      "title": "startup recovery skips wallet's profile generator file",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"capsules/wallet-provider/src/main.rs\",\n    \"capsules/wallet-provider/tests/common/profile_generator.rs\",",
+          "new": "    \"capsules/wallet-provider/src/main.rs\","
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
       "id": "MP24",
       "title": "a Runtime-forwarded answer is read as a failure",
       "command": "provider",
