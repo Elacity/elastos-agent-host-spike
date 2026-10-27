@@ -46,8 +46,12 @@ provider (P10). The `sandbox-exec -f confine.sb` launch is the tests' launch
 to exactly one approved declared right in the `rights` array of
 `tests/fixtures/confine/declared-rights.json`, or to one platform-baseline
 rule in that file. `startup-root-directory` and `startup-sysctl` are on the
-platform-baseline list, not in the `rights` array. Each justification names
-the model-provider executable and macOS. They are Runtime platform baseline,
+platform-baseline list, not in the `rights` array. Each justification starts
+with `macOS model-provider executable bound as PROVIDER_EXECUTABLE:` and then
+gives this document's reason: `Process startup reads the root directory
+before main runs` for the root read, and `At startup the Rust runtime reads
+the page size to place its stack guard page.` for the sysctl read.
+They are Runtime platform baseline,
 technical OS permissions with no user approval prompt, not approved rights.
 The file is a lab stand-in for the Runtime generator's input, not a manifest
 field. The generator itself stays the Runtime's (Anders).
@@ -198,7 +202,10 @@ half"). `byte_different_file_at_bound_path_starts` shows the profile binds
 `PROVIDER_EXECUTABLE` by path: a byte-different file at the bound path, in a
 temporary directory, gets past the profile's exec refusal. The show is not
 exit 65, because exit 65 means the profile did not apply, and it is not exit
-71 with `execvp()` and `Operation not permitted`. A process still running
+71 with `execvp()` and `Operation not permitted`. `F-cc36a` removes the
+last parenthesis of the `STORAGE_ROOT` allow, so this launch exits 65 and
+`byte_different_file_at_bound_path_starts` fails because the profile did not
+apply. A process still running
 after 2 seconds, or any other exit, is the outcome the test allows. The
 launch helper records the sha256
 when it binds `PROVIDER_EXECUTABLE` and refuses with a digest-mismatch reason
@@ -520,6 +527,9 @@ profile does not grant".
   `PROVIDER_EXECUTABLE` and started. The copy's digest differs from the real
   binary. The show is not exit 65, because exit 65 means the profile did not
   apply, and it is not exit 71 with `execvp()` and `Operation not permitted`.
+  `F-cc36a` removes the last parenthesis of the `STORAGE_ROOT` allow, so this
+  launch exits 65 and `byte_different_file_at_bound_path_starts` fails because
+  the profile did not apply.
   A process still running after 2 seconds, or any other exit, is the outcome
   the test allows. The real binary's digest is
   unchanged. It runs under `sandbox-exec`, as the other confined tests do.
@@ -533,7 +543,11 @@ profile does not grant".
   `tests/fixtures/confine/declared-rights.json`, or to one platform-baseline
   rule in that file. `startup-root-directory` and `startup-sysctl` are on
   the platform-baseline list. The test reads the profile and the fixture
-  from disk. It starts no process and needs no sandbox.
+  from disk. It starts no process and needs no sandbox. An allow written
+  after another form on the same line is taken from that `(allow `. A new
+  grant fails check 2. `F-cc37a` writes that allow after `(deny network*)`.
+  A same-line copy of a declared rule is kept, and check 3 fails with
+  `declared rule matches more than one allow line`.
 - `platform_baseline_rules_stay_narrow`: `startup-root-directory` stays
   `(allow file-read-data (literal "/"))` and `startup-sysctl` stays
   `(allow sysctl-read)`. Each pin is written in the test. A wider path or
@@ -545,7 +559,9 @@ profile does not grant".
   exempts only the exact parameter-bound storage grants. Literal filenames
   that contain parameter names still fail. Each refusal reason is asserted.
   The test reads `confine.sb` from disk. It starts no process and needs no
-  sandbox.
+  sandbox. An allow form that contains `(allow` and does not close on that
+  line fails, even when both pins remain. The failure contains `allow form
+  does not close`.
 - `startup_is_refused_when_the_profile_cannot_be_applied`: a missing profile,
   a copy of `confine.sb` with its last `)` removed, and `confine.sb` with
   `STORAGE_ROOT` unbound each refuse the start. It runs under
@@ -614,9 +630,7 @@ python3 -I examples/agent-host/falsify.py --from capsules/model-provider/confine
 runner. Every entry uses `expect: caught`. F-cc12a uses command `wallet`,
 because the one shape check is in the wallet crate, and every other entry
 uses command `provider`. Each mutates `confine.sb` only, except the eighteen
-entries that edit `tests/confine/main.rs` and except F-cc35f and F-cc35g,
-which each mutate `confine.sb` and also append their added grant to
-`startup-root-directory` in `tests/fixtures/confine/declared-rights.json`.
+entries that edit `tests/confine/main.rs`.
 The eighteen are: F-cc1e removes the outside-read
 fixture rule, F-cc8-rm-journal removes the outside-create fixture grant,
 F-cc15a, F-cc15b and F-cc15c each undo one part of how the Runtime socket
@@ -677,8 +691,10 @@ allow_rules_trace_to_declared_rights.
 | F-cc35c | One line, `(allow file-read-data (literal "/tmp/STORAGE_ROOT-leak"))`, is added after the root pin; both startup pins stay | `platform_baseline_rules_stay_narrow` | The wider literal path still reaches the baseline check when its filename contains `STORAGE_ROOT`. |
 | F-cc35d | One line, `(allow file-read-data (literal "/tmp/STORAGE_PARENT-leak"))`, is added after the root pin; both startup pins stay | `platform_baseline_rules_stay_narrow` | The wider literal path still reaches the baseline check when its filename contains `STORAGE_PARENT`. |
 | F-cc35e | One line, `(allow file-read-data (literal "/tmp/PROVIDER_EXECUTABLE-leak"))`, is added after the root pin; both startup pins stay | `platform_baseline_rules_stay_narrow` | The wider literal path still reaches the baseline check when its filename contains `PROVIDER_EXECUTABLE`. |
-| F-cc35f | Both startup pins stay. One line, `(allow file-write* (literal "/tmp/cc35-write-only"))`, is added to the profile and to `startup-root-directory` in the declared-rights fixture | `platform_baseline_rules_stay_narrow` | The added file write is a wider operation while both pins remain. |
-| F-cc35g | Both startup pins stay. One line, `(allow file* (literal "/tmp/cc35-wildcard"))`, is added to the profile and to `startup-root-directory` in the declared-rights fixture | `platform_baseline_rules_stay_narrow` | The file wildcard is a wider operation while both pins remain, even with a matching declaration. |
+| F-cc35f | Both startup pins stay. One line, `(allow file-write* (literal "/tmp/cc35-write-only"))`, is added to the profile | `platform_baseline_rules_stay_narrow` | The added file write is a wider operation while both pins remain. |
+| F-cc35g | Both startup pins stay. One line, `(allow file* (literal "/tmp/cc35-wildcard"))`, is added to the profile | `platform_baseline_rules_stay_narrow` | The file wildcard is a wider operation while both pins remain. |
+| F-cc36a | The last parenthesis of the `STORAGE_ROOT` allow is removed | `byte_different_file_at_bound_path_starts` | The launch exits 65 and the test fails because the profile did not apply. |
+| F-cc37a | `(allow file-read-data (literal "/tmp/cc-same-line-allow"))` is written after `(deny network*)` on the same line | `allow_rules_trace_to_declared_rights` | That allow has no declared right and no platform baseline. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
@@ -693,6 +709,8 @@ F-cc35b needs no rebuild: the test reads confine.sb at runtime.
 F-cc35c, F-cc35d and F-cc35e also read confine.sb at runtime and need no rebuild.
 F-cc35f needs no rebuild: the test reads confine.sb at runtime.
 F-cc35g needs no rebuild: the test reads confine.sb at runtime.
+F-cc36a needs no rebuild: sandbox-exec reads confine.sb at launch.
+F-cc37a needs no rebuild: the test reads confine.sb at runtime.
 
 The list is a Mac gate. On a Mac without `/usr/bin/sandbox-exec` the unmutated
 suite fails, so a list run there is no evidence. Off macOS, when
@@ -700,7 +718,7 @@ suite fails, so a list run there is no evidence. Off macOS, when
 entry reads SURVIVED there. The entries whose tests need no sandbox (F-cc12a,
 F-cc15a, F-cc15b, F-cc15c, F-cc16a, F-cc16b, F-cc16c, F-cc17a, F-cc17b,
 F-cc29a, F-cc30a, F-cc30b, F-cc30c, F-cc30d, F-cc30e, F-cc30f, F-cc31a,
-F-cc35a, F-cc35b, F-cc35c, F-cc35d, F-cc35e, F-cc35f and F-cc35g) are
+F-cc35a, F-cc35b, F-cc35c, F-cc35d, F-cc35e, F-cc35f, F-cc35g and F-cc37a) are
 CAUGHT on any host that builds their crate. F-cc12a reads the profile files
 and is CAUGHT on any host that builds the wallet crate. The model-provider
 entries among them are CAUGHT on any Unix host where `tests/confine/main.rs`

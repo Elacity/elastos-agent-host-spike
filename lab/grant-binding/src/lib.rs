@@ -651,6 +651,20 @@ fn model_owned_root_must_sit_under_the_agent() {
 }
 
 #[test]
+fn model_extended_agent_segment_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let refusal = verifier
+        .bind_grant(instance, "UsersAI/agent-10/notes", rights())
+        .expect_err("extended agent segment");
+    assert_eq!(refusal, Refuse::OutsidePrincipal);
+    assert_eq!(
+        refusal.to_string(),
+        "owned root is outside the agent principal"
+    );
+}
+
+#[test]
 fn model_public_storage_read_is_refused() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
@@ -674,6 +688,20 @@ fn model_public_storage_read_is_refused() {
     verifier
         .use_path(&call, &request, "UsersAI/agent-1/notes/Public")
         .expect("a later Public segment is a normal child path");
+}
+
+#[test]
+fn model_public_prefix_is_not_a_public_read() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let refusal = verifier
+        .bind_grant(instance, "Publicity/notes", rights())
+        .expect_err("public prefix");
+    assert_eq!(refusal, Refuse::OutsidePrincipal);
+    assert_eq!(
+        refusal.to_string(),
+        "owned root is outside the agent principal"
+    );
 }
 
 #[test]

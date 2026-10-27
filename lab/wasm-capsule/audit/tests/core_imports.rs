@@ -1,5 +1,7 @@
 use std::{fs, path::Path};
-use wasm_capsule_audit::{audit, audit_component, DeclaredImport, Refusal, AUDIT_API};
+use wasm_capsule_audit::{
+    audit, audit_component, memories, DeclaredImport, MemoryLimits, Refusal, AUDIT_API,
+};
 use wasmparser::{Parser, Payload, Validator};
 
 fn import(module: &str, name: &str) -> DeclaredImport {
@@ -439,6 +441,10 @@ fn public_api_is_v1() {
                 ["#[derive(Debug, Clone, PartialEq, Eq)]"].as_slice(),
             ),
             (
+                "pub struct MemoryLimits {",
+                ["#[derive(Debug, Clone, PartialEq, Eq)]"].as_slice(),
+            ),
+            (
                 "pub enum Refusal {",
                 [
                     "#[derive(Debug, Clone, PartialEq, Eq)]",
@@ -470,6 +476,12 @@ fn public_api_is_v1() {
         "pub enum Refusal",
         "pub fn audit(",
         "pub fn audit_component(",
+        "pub struct MemoryLimits",
+        "pub minimum:",
+        "pub maximum:",
+        "pub memory64:",
+        "pub shared:",
+        "pub fn memories(",
     ];
     let public: Vec<_> = source
         .lines()
@@ -492,4 +504,93 @@ fn public_api_is_v1() {
             "expected one {prefix}"
         );
     }
+    assert_eq!(
+        interface
+            .matches("pub fn memories(wasm: &[u8]) -> Result<Vec<MemoryLimits>, Refusal>;")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn defined_memory_reports_its_page_limits() {
+    let wasm = wat::parse_str("(module (memory 16 1024) (memory 1))").unwrap();
+    assert_eq!(
+        memories(&wasm),
+        Ok(vec![
+            MemoryLimits {
+                minimum: 16,
+                maximum: Some(1024),
+                memory64: false,
+                shared: false,
+            },
+            MemoryLimits {
+                minimum: 1,
+                maximum: None,
+                memory64: false,
+                shared: false,
+            },
+        ])
+    );
+}
+
+#[test]
+fn imported_memory_reports_its_page_limits() {
+    let wasm = wat::parse_str(
+        r#"(module (import "env" "fd" (func)) (import "env" "memory" (memory 2 8)))"#,
+    )
+    .unwrap();
+    assert_eq!(
+        memories(&wasm),
+        Ok(vec![MemoryLimits {
+            minimum: 2,
+            maximum: Some(8),
+            memory64: false,
+            shared: false,
+        }])
+    );
+}
+
+#[test]
+fn memory_without_a_maximum_reports_none() {
+    let empty = wat::parse_str("(module)").unwrap();
+    assert_eq!(memories(&empty), Ok(vec![]));
+    let wasm = wat::parse_str("(module (memory 16))").unwrap();
+    assert_eq!(
+        memories(&wasm),
+        Ok(vec![MemoryLimits {
+            minimum: 16,
+            maximum: None,
+            memory64: false,
+            shared: false,
+        }])
+    );
+}
+
+#[test]
+fn memory64_is_reported() {
+    let wasm = wat::parse_str("(module (memory i64 1 4))").unwrap();
+    assert_eq!(
+        memories(&wasm),
+        Ok(vec![MemoryLimits {
+            minimum: 1,
+            maximum: Some(4),
+            memory64: true,
+            shared: false,
+        }])
+    );
+}
+
+#[test]
+fn shared_memory_is_reported() {
+    let wasm = wat::parse_str("(module (memory 1 2 shared))").unwrap();
+    assert_eq!(
+        memories(&wasm),
+        Ok(vec![MemoryLimits {
+            minimum: 1,
+            maximum: Some(2),
+            memory64: false,
+            shared: true,
+        }])
+    );
 }

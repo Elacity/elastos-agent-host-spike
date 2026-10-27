@@ -601,6 +601,69 @@ fn model_forged_overwrite_does_not_remove_the_right() {
 }
 
 #[test]
+fn model_forged_child_journal_does_not_narrow_the_child_grant() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(parent)
+    };
+    assert!(request.forged_child_journal);
+    let child = verifier
+        .create_child_journal(&call, &request, "UsersAI/agent-1/journal/page.md")
+        .expect("child journal");
+    assert_ne!(child, parent);
+    let child_decision = verifier
+        .use_grant(call, &guest(child))
+        .expect("child grant");
+    assert_eq!(
+        child_decision.rights,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        }
+    );
+    assert_eq!(child_decision.owned_root, "UsersAI/agent-1/journal/page.md");
+}
+
+#[test]
+fn model_forged_identity_does_not_move_the_child_path() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(parent)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    let child = verifier
+        .create_child_journal(&call, &request, "UsersAI/agent-1/journal/page.md")
+        .expect("forged identity does not move the child path");
+    assert_ne!(child, parent);
+    let child_decision = verifier
+        .use_grant(call, &guest(child))
+        .expect("child grant");
+    assert_eq!(child_decision.owned_root, "UsersAI/agent-1/journal/page.md");
+    assert_eq!(child_decision.identity, "agent-1");
+}
+
+#[test]
 fn model_owned_root_needs_a_resource_segment() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");

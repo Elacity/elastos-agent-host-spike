@@ -939,3 +939,64 @@ fn model_settled_reservation_id_is_not_reused() {
     assert_eq!(after.open.get(&second.id), Some(&4));
     assert!(!after.open.contains_key(&first.id));
 }
+
+#[test]
+fn model_reserve_before_admit_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    let refusal = verifier
+        .reserve(&call, &guest(handle), 1)
+        .expect_err("reserve before admit");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 0,
+            held: 0,
+            asked: 1,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    let after_refusal = books(&verifier);
+    assert_eq!(after_refusal.held, 0);
+    assert_eq!(after_refusal.charged, 0);
+    assert!(after_refusal.open.is_empty());
+    verifier.admit(1);
+    verifier
+        .reserve(&call, &guest(handle), 1)
+        .expect("admit opens the ceiling");
+    assert_eq!(books(&verifier).held, 1);
+}
+
+#[test]
+fn model_reported_usage_does_not_open_ceiling_room() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(5);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(handle)
+    };
+    assert!(request.reported_usage > 0);
+    let refusal = verifier
+        .reserve(&call, &request, 6)
+        .expect_err("reported usage does not open room");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 5,
+            held: 0,
+            asked: 6,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    let after_refusal = books(&verifier);
+    assert_eq!(after_refusal.held, 0);
+    assert_eq!(after_refusal.charged, 0);
+    assert!(after_refusal.open.is_empty());
+    verifier
+        .reserve(&call, &request, 5)
+        .expect("at the stored ceiling");
+    assert_eq!(books(&verifier).held, 5);
+}
