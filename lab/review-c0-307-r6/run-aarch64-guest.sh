@@ -189,7 +189,15 @@ mkdir -p "$BINS"
 copy_latest() {
     prefix=$1
     dest=$2
-    src=$(ls -t "$DEPS"/${prefix}-* "$DEPS_BUILD"/${prefix}-* 2>/dev/null | grep -v '\.d$' | grep -v '\.rlib$' | head -1)
+    src=""
+    for dir in "$DEPS_BUILD" "$DEPS"; do
+        [ -d "$dir" ] || continue
+        cand=$(find "$dir" -maxdepth 1 -type f -name "${prefix}-*" ! -name '*.d' ! -name '*.rlib' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
+        if [ -n "$cand" ] && [ -x "$cand" ]; then
+            src=$cand
+            break
+        fi
+    done
     test -n "$src" && test -x "$src"
     cp -a "$src" "$dest"
     chmod 755 "$dest"
@@ -327,22 +335,51 @@ if grep -qi 'jetson=1' "$QEMU_LOG"; then
 fi
 
 python3 - "$EVIDENCE" "$MODE" "$NONCE" <<'PY'
-import pathlib, sys
+import pathlib, re, sys
 ev, mode, nonce = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
-summary = (ev / "summary.txt").read_text() if (ev / "summary.txt").exists() else ""
 console = (ev / "qemu-console.txt").read_text() if (ev / "qemu-console.txt").exists() else ""
-text = summary + "\n" + console
-if nonce not in text and f"nonce={nonce}" not in text:
+if nonce not in console and f"nonce={nonce}" not in console:
     print("nonce missing from guest output")
     sys.exit(1)
+
+# 9p on Alpine virt often fails (missing fscache). Recover RESULTS from console.
+keep = []
+started = False
+for line in console.splitlines():
+    if line.startswith("LABEL=") or line.startswith("--- landlock") or line.startswith("=== "):
+        started = True
+    if started:
+        if line.startswith("[") and ("sysrq" in line or "reboot:" in line):
+            break
+        keep.append(line)
+results = "\n".join(keep).rstrip() + "\n"
+if keep:
+    (ev / "RESULTS.txt").write_text(results)
+    (ev / "summary.txt").write_text(results)
+    (ev / "reconstruct.txt").write_text(
+        "evidence_mount=console-only\nreconstruct=qemu-console.txt\n"
+    )
+
+marks = {
+    m.group("suite"): m.group("status")
+    for m in re.finditer(
+        r"FCL_MARK nonce=\S+ suite=(?P<suite>\S+) .* status=(?P<status>\S+)",
+        console,
+    )
+}
 if mode == "abi1":
-    status = (ev / "abi1.status").read_text().strip() if (ev / "abi1.status").exists() else "MISSING"
+    status = marks.get("abi1") or (
+        (ev / "abi1.status").read_text().strip() if (ev / "abi1.status").exists() else "MISSING"
+    )
+    (ev / "abi1.status").write_text(status + "\n")
     print(f"abi1.status={status}")
     sys.exit(0 if status == "PASS" else 1)
 ok = True
-for name, expected in (("lib", "9"), ("simulated", "22"), ("real_kernel", "31")):
-    st = ev / f"{name}.status"
-    status = st.read_text().strip() if st.exists() else "MISSING"
+for name in ("lib", "simulated", "real_kernel"):
+    status = marks.get(name) or (
+        (ev / f"{name}.status").read_text().strip() if (ev / f"{name}.status").exists() else "MISSING"
+    )
+    (ev / f"{name}.status").write_text(status + "\n")
     print(f"{name}.status={status}")
     if status != "PASS":
         ok = False

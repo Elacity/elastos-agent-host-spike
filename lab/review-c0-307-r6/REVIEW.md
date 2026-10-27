@@ -38,9 +38,12 @@ ungranted. A terminal or a socket on fds 0-2 is replaced. An
 inherited socket or pty on fd 3+ is gone. `falsify.py` is 35/35
 caught; C00 survived with 62 tests (9+22+31).
 
-The author's extra-right rows are ABI-aware in source: on ABI < 7
-they refuse `future_fs`; on ABI >= 7 they assert a start. This host
-is ABI 6, so the refuse half ran here.
+The author's extra-right rows are ABI-aware: on ABI < 7 they refuse
+`future_fs`; on ABI >= 7 they assert a start. This host is ABI 6, so
+the refuse half ran here. The emulated ABI 7 guest ran the start
+half (`real_per_right_floor_refuses_on_this_kernel` ok). The
+emulated ABI 1 guest refused did, wallet, and model with exit 71
+and named truncate plus ioctl_dev.
 
 A same-uid host process can still `PTRACE_ATTACH` the confined
 provider and open `/proc/<pid>/mem`. Dumpable stays 1. Inside the
@@ -81,7 +84,7 @@ Control suite is 62 tests (9+22+31).
 | C0-T2 | falsify 35/35 caught, C00 survives | **HOLDS** (control 62 tests) | `evidence/falsify.txt` |
 | C0-T3 | after confine, execve/execveat EPERM except the helper's one granted-path execve | **HOLDS** | official memfd/reexec/procfd rows; live hunts below |
 | C0-T4 | fds 0-2 that are terminals or sockets are replaced with /dev/null | **HOLDS** | official stdin pty/socket rows; inherited fd 3 gone |
-| C0-T5 | extra-right real_kernel rows are ABI-aware (ABI>=7 asserts ABI-7) | **HOLDS** in source; ABI 6 host ran the refuse half | `real_per_right_floor_refuses_on_this_kernel` |
+| C0-T5 | extra-right real_kernel rows are ABI-aware (ABI>=7 asserts ABI-7) | **HOLDS** | ABI 6 host: refuse half. ABI 7 guest: `real_per_right_floor_refuses_on_this_kernel` and `sim_test_extra_right_does_not_refuse_on_abi_7` both ok |
 
 ## New hunts (this session)
 
@@ -139,11 +142,25 @@ LABEL=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
 native=0
 jetson=0
 emulated_cpu=1
+landlock_abi=7
 ```
 
-Expected if the author's ABI-7 claim holds: lib 9, simulated 22,
-real_kernel 31. Evidence under `evidence/aarch64-qemu-system-6.18/`
-when the guest finishes.
+Guest finished. 9p failed to load (missing fscache symbols). RESULTS
+were reconstructed from `qemu-console.txt`.
+
+```text
+lib          9 passed; 0 failed; 0 ignored
+simulated   22 passed; 0 failed; 0 ignored
+real_kernel 31 passed; 0 failed; 0 ignored
+```
+
+Extra-right ABI-7 half: `sim_test_extra_right_does_not_refuse_on_abi_7`
+and `real_per_right_floor_refuses_on_this_kernel` both ok. That row
+asserts a start when `host >= TEST_FUTURE_FS_ABI` (7). Also
+`real_extra_floor_still_names_the_missing_right` ok.
+
+Evidence: `evidence/aarch64-qemu-system-6.18/`. Kernel sha256
+`d1876369b061ef3bc33314f490240efcd32b031393cb34c6f81134fa862fe472`.
 
 Never native ARM. Never Jetson.
 
@@ -153,23 +170,35 @@ Same qemu-system TCG, Alpine virt 5.15. Label:
 
 ```text
 LABEL=emulated 5.15 kernel under qemu-system TCG (not Jetson)
+landlock_abi=1
 ```
 
-Author claim: did / wallet / model each exit 71 and name
-`truncate` (needs ABI 3) and `ioctl_dev` (needs ABI 5).
-Evidence under `evidence/aarch64-qemu-5.15/` when that guest
-finishes.
+Guest finished. 9p failed the same way. RESULTS reconstructed from
+`qemu-console.txt`.
 
-This is an emulated 5.15 kernel, not a Jetson. It does not prove
+```text
+provider=did-provider exit=71
+  cannot deny truncate (needs ABI 3); ioctl_dev (needs ABI 5)
+provider=wallet-provider exit=71
+  cannot deny truncate (needs ABI 3); ioctl_dev (needs ABI 5)
+provider=model-provider exit=71
+  cannot deny truncate (needs ABI 3); ioctl_dev (needs ABI 5)
+suite=abi1 passed=3 failed=0 status=PASS
+```
+
+Author claim HOLDS on this emulated 5.15 kernel. It does not prove
 tegra 5.15.148, JetPack LSM config, or real provider binaries.
+
+Evidence: `evidence/aarch64-qemu-5.15/`. Kernel sha256
+`b439cfd5003d74d851da95efd0f8befe17ff3943d8bed079d531701a1b61c242`.
 
 ## Exact counts per platform
 
 | Platform | lib | simulated | real_kernel | notes |
 | --- | --- | --- | --- | --- |
 | Linux x86_64, kernel 6.12.94+, ABI 6 | 9 | 22 | 31 | official claim holds |
-| aarch64 emulated CPU, kernel 6.18, ABI 7 | pending guest | pending | pending | author claims 31/31 |
-| emulated 5.15 kernel, ABI 1 | n/a | n/a | n/a | pending guest; author claims 3/3 refuse 71 |
+| aarch64 emulated CPU, kernel 6.18, ABI 7 | 9 | 22 | 31 | extra-right rows assert start |
+| emulated 5.15 kernel, ABI 1 | n/a | n/a | n/a | 3/3 providers exit 71 naming truncate and ioctl_dev |
 | Real Jetson | NOT RUN | NOT RUN | NOT RUN | still needed |
 
 ## Not covered
@@ -212,9 +241,11 @@ DeepSeek: none.
 ## Next
 
 Keep #307 draft. Optional: set dumpable 0 and deny later
-`PR_SET_DUMPABLE`. Run the ABI 7 and ABI 1 guests (this session
-is doing that). Run the same rows on a real Jetson board.
+`PR_SET_DUMPABLE`. Run the same rows on a real Jetson board.
 
 **VERDICT: PASS** at `13447927` for the Linux lab half of the
 claimed leftovers. The r5 memfd second image is closed. Host
-dumpable/ptrace is a named residual with an exact patch above.
+counts 9/22/31 and falsify 35/35 hold. ABI 7 guest is 9/22/31
+including extra-right start. ABI 1 guest is 3/3 refuse 71 naming
+truncate and ioctl_dev. Host dumpable/ptrace is a named residual
+with an exact patch above. Real Jetson stays NOT RUN.

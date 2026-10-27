@@ -1,0 +1,329 @@
+[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x000f0510]
+[    0.000000] Linux version 6.18.58-0-virt (buildozer@build-3-23-aarch64) (cc (Alpine 15.2.0) 15.2.0, GNU ld (GNU Binutils) 2.45.1) #1-Alpine SMP PREEMPT_DYNAMIC 2026-10-21 13:45:15
+[    0.000000] random: crng init done
+[    0.000000] Machine model: linux,dummy-virt
+[    0.000000] earlycon: pl11 at MMIO 0x0000000009000000 (options '')
+[    0.000000] printk: legacy bootconsole [pl11] enabled
+[    0.000000] efi: UEFI not found.
+[    0.000000] OF: reserved mem: Reserved memory: No reserved-memory node in the DT
+[    0.000000] NUMA: Faking a node at [mem 0x0000000040000000-0x000000013fffffff]
+[    0.000000] NODE_DATA(0) allocated [mem 0x13f5f77c0-0x13f5f9c7f]
+[    0.000000] Zone ranges:
+[    0.000000]   DMA      [mem 0x0000000040000000-0x00000000ffffffff]
+[    0.000000]   DMA32    empty
+[    0.000000]   Normal   [mem 0x0000000100000000-0x000000013fffffff]
+[    0.000000] Movable zone start for each node
+[    0.000000] Early memory node ranges
+[    0.000000]   node   0: [mem 0x0000000040000000-0x000000013fffffff]
+[    0.000000] Initmem setup node 0 [mem 0x0000000040000000-0x000000013fffffff]
+[    0.000000] psci: probing for conduit method from DT.
+[    0.000000] psci: PSCIv1.1 detected in firmware.
+[    0.000000] psci: Using standard PSCI v0.2 function IDs
+[    0.000000] psci: Trusted OS migration not required
+[    0.000000] psci: SMC Calling Convention v1.0
+[    0.000000] percpu: Embedded 34 pages/cpu s99608 r8192 d31464 u139264
+[    0.000000] Detected PIPT I-cache on CPU0
+[    0.000000] CPU features: detected: Address authentication (architected QARMA5 algorithm)
+[    0.000000] CPU features: detected: HCRX_EL2 register
+[    0.000000] CPU features: detected: Spectre-v4
+[    0.000000] CPU features: detected: Spectre-BHB
+[    0.000000] alternatives: applying boot alternatives
+[    0.000000] Kernel command line: console=ttyAMA0 earlycon=pl011,0x09000000 panic=1 
+[    0.000000] printk: log buffer data + meta data: 131072 + 458752 = 589824 bytes
+[    0.000000] Dentry cache hash table entries: 524288 (order: 10, 4194304 bytes, linear)
+[    0.000000] Inode-cache hash table entries: 262144 (order: 9, 2097152 bytes, linear)
+[    0.000000] software IO TLB: area num 2.
+[    0.000000] software IO TLB: mapped [mem 0x00000000fbfff000-0x00000000fffff000] (64MB)
+[    0.000000] Fallback order for Node 0: 0 
+[    0.000000] Built 1 zonelists, mobility grouping on.  Total pages: 1048576
+[    0.000000] Policy zone: Normal
+[    0.000000] mem auto-init: stack:all(zero), heap alloc:on, heap free:off
+[    0.000000] SLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=2, Nodes=1
+[    0.000000] Dynamic Preempt: none
+[    0.000000] rcu: Preemptible hierarchical RCU implementation.
+[    0.000000] rcu: 	RCU restricting CPUs from NR_CPUS=4096 to nr_cpu_ids=2.
+[    0.000000] 	Trampoline variant of Tasks RCU enabled.
+[    0.000000] 	Tracing variant of Tasks RCU enabled.
+[    0.000000] rcu: RCU calculated value of scheduler-enlistment delay is 100 jiffies.
+[    0.000000] rcu: Adjusting geometry for rcu_fanout_leaf=16, nr_cpu_ids=2
+[    0.000000] RCU Tasks: Setting shift to 1 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=2.
+[    0.000000] RCU Tasks Trace: Setting shift to 1 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=2.
+[    0.000000] NR_IRQS: 64, nr_irqs: 64, preallocated irqs: 0
+[    0.000000] Root IRQ handler: gic_handle_irq
+[    0.000000] GICv2m: range[mem 0x08020000-0x08020fff], SPI[80:143]
+[    0.000000] rcu: srcu_init: Setting srcu_struct sizes based on contention.
+[    0.000000] clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 1911260446275000 ns
+[    0.000000] arch_timer: cp15 timer running at 62.50MHz (virt).
+[    0.000000] clocksource: arch_sys_counter: mask: 0x1ffffffffffffff max_cycles: 0x1cd42e208c, max_idle_ns: 881590405314 ns
+[    0.000069] sched_clock: 57 bits at 63MHz, resolution 16ns, wraps every 4398046511096ns
+[    0.003752] kfence: initialized - using 2097152 bytes for 255 objects at 0x(____ptrval____)-0x(____ptrval____)
+[    0.019913] Console: colour dummy device 80x25
+[    0.028430] Calibrating delay loop (skipped), value calculated using timer frequency.. 125.00 BogoMIPS (lpj=62500)
+[    0.029374] pid_max: default: 32768 minimum: 301
+[    0.035048] LSM: initializing lsm=lockdown,capability,landlock,yama
+[    0.038304] landlock: Up and running.
+[    0.038493] Yama: becoming mindful.
+[    0.042583] Mount-cache hash table entries: 8192 (order: 4, 65536 bytes, linear)
+[    0.043008] Mountpoint-cache hash table entries: 8192 (order: 4, 65536 bytes, linear)
+[    0.123443] rcu: Hierarchical SRCU implementation.
+[    0.123789] rcu: 	Max phase no-delay instances is 400.
+[    0.127197] Timer migration: 1 hierarchy levels; 8 children per group; 1 crossnode level
+[    0.138393] EFI services will not be available.
+[    0.142294] smp: Bringing up secondary CPUs ...
+[    0.155163] Detected PIPT I-cache on CPU1
+[    0.158971] CPU1: Booted secondary processor 0x0000000001 [0x000f0510]
+[    0.165176] smp: Brought up 1 node, 2 CPUs
+[    0.165571] SMP: Total of 2 processors activated.
+[    0.165738] CPU: All CPU(s) started at EL1
+[    0.166257] CPU features: detected: Branch Target Identification
+[    0.166455] CPU features: detected: 32-bit EL0 Support
+[    0.166618] CPU features: detected: 32-bit EL1 Support
+[    0.166823] CPU features: detected: ARMv8.4 Translation Table Level
+[    0.166998] CPU features: detected: Data cache clean to the PoU not required for I/D coherence
+[    0.167222] CPU features: detected: Common not Private translations
+[    0.167561] CPU features: detected: CRC32 instructions
+[    0.167710] CPU features: detected: Data independent timing control (DIT)
+[    0.167879] CPU features: detected: E0PD
+[    0.168038] CPU features: detected: Enhanced Privileged Access Never
+[    0.168197] CPU features: detected: Enhanced Virtualization Traps
+[    0.168348] CPU features: detected: Fine Grained Traps
+[    0.168652] CPU features: detected: Generic authentication (architected QARMA5 algorithm)
+[    0.168894] CPU features: detected: RCpc load-acquire (LDAPR)
+[    0.169067] CPU features: detected: 52-bit Virtual Addressing for KVM (LPA2)
+[    0.169221] CPU features: detected: LSE atomic instructions
+[    0.169359] CPU features: detected: Memory Copy and Memory Set instructions
+[    0.169577] CPU features: detected: Privileged Access Never
+[    0.169854] CPU features: detected: RAS Extension Support
+[    0.170112] CPU features: detected: RASv1p1 Extension Support
+[    0.170272] CPU features: detected: Random Number Generator
+[    0.170411] CPU features: detected: Speculation barrier (SB)
+[    0.170568] CPU features: detected: Stage-2 Force Write-Back
+[    0.170790] CPU features: detected: Trap EL0 IMPLEMENTATION DEFINED functionality
+[    0.170954] CPU features: detected: TLB range maintenance instructions
+[    0.171196] CPU features: detected: Scalable Matrix Extension
+[    0.171338] CPU features: detected: FA64
+[    0.171463] CPU features: detected: Speculative Store Bypassing Safe (SSBS)
+[    0.171616] CPU features: detected: Scalable Vector Extension
+[    0.185894] alternatives: applying system-wide alternatives
+[    0.203813] CPU features: detected: Hardware dirty bit management on CPU0-1
+[    0.205048] SVE: maximum available vector length 256 bytes per vector
+[    0.205265] SVE: default vector length 64 bytes per vector
+[    0.206853] SME: minimum available vector length 16 bytes per vector
+[    0.207037] SME: maximum available vector length 256 bytes per vector
+[    0.207196] SME: default vector length 32 bytes per vector
+[    0.226920] Memory: 3972028K/4194304K available (13312K kernel code, 1994K rwdata, 8460K rodata, 2048K init, 9282K bss, 217808K reserved, 0K cma-reserved)
+[    0.266965] devtmpfs: initialized
+[    0.363793] posixtimers hash table entries: 1024 (order: 2, 16384 bytes, linear)
+[    0.364433] futex hash table entries: 512 (32768 bytes on 1 NUMA nodes, total 32 KiB, linear).
+[    0.365791] 23904 pages in range for non-PLT usage
+[    0.365902] 515424 pages in range for PLT usage
+[    0.370273] pinctrl core: initialized pinctrl subsystem
+[    0.376437] DMI not present or invalid.
+[    0.402779] NET: Registered PF_NETLINK/PF_ROUTE protocol family
+[    0.414032] DMA: preallocated 512 KiB GFP_KERNEL pool for atomic allocations
+[    0.416507] DMA: preallocated 512 KiB GFP_KERNEL|GFP_DMA pool for atomic allocations
+[    0.417446] DMA: preallocated 512 KiB GFP_KERNEL|GFP_DMA32 pool for atomic allocations
+[    0.418322] audit: initializing netlink subsys (disabled)
+[    0.421522] audit: type=2000 audit(0.331:1): state=initialized audit_enabled=0 res=1
+[    0.427748] thermal_sys: Registered thermal governor 'step_wise'
+[    0.430059] cpuidle: using governor ladder
+[    0.430871] cpuidle: using governor menu
+[    0.432671] hw-breakpoint: found 6 breakpoint and 4 watchpoint registers.
+[    0.436079] ASID allocator initialised with 65536 entries
+[    0.439812] Serial: AMBA PL011 UART driver
+[    0.563472] 9000000.pl011: ttyAMA0 at MMIO 0x9000000 (irq = 13, base_baud = 0) is a PL011 rev1
+[    0.565692] printk: console [ttyAMA0] enabled
+[    0.565692] printk: console [ttyAMA0] enabled
+[    0.566977] printk: legacy bootconsole [pl11] disabled
+[    0.566977] printk: legacy bootconsole [pl11] disabled
+[    0.598679] HugeTLB: registered 1.00 GiB page size, pre-allocated 0 pages
+[    0.598915] HugeTLB: 0 KiB vmemmap can be freed for a 1.00 GiB page
+[    0.599003] HugeTLB: registered 32.0 MiB page size, pre-allocated 0 pages
+[    0.599048] HugeTLB: 0 KiB vmemmap can be freed for a 32.0 MiB page
+[    0.599112] HugeTLB: registered 2.00 MiB page size, pre-allocated 0 pages
+[    0.599155] HugeTLB: 0 KiB vmemmap can be freed for a 2.00 MiB page
+[    0.599219] HugeTLB: registered 64.0 KiB page size, pre-allocated 0 pages
+[    0.599479] HugeTLB: 0 KiB vmemmap can be freed for a 64.0 KiB page
+[    0.639952] ACPI: Interpreter disabled.
+[    0.641463] iommu: Default domain type: Translated
+[    0.641550] iommu: DMA domain TLB invalidation policy: lazy mode
+[    0.680786] clocksource: Switched to clocksource arch_sys_counter
+[    0.746434] VFS: Disk quotas dquot_6.6.0
+[    0.746741] VFS: Dquot-cache hash table entries: 512 (order 0, 4096 bytes)
+[    0.753947] pnp: PnP ACPI: disabled
+[    0.867893] NET: Registered PF_INET protocol family
+[    0.869834] IP idents hash table entries: 65536 (order: 7, 524288 bytes, linear)
+[    1.187910] tcp_listen_portaddr_hash hash table entries: 2048 (order: 3, 32768 bytes, linear)
+[    1.188374] Table-perturb hash table entries: 65536 (order: 6, 262144 bytes, linear)
+[    1.188635] TCP established hash table entries: 32768 (order: 6, 262144 bytes, linear)
+[    1.189416] TCP bind hash table entries: 32768 (order: 8, 1048576 bytes, linear)
+[    1.189964] TCP: Hash tables configured (established 32768 bind 32768)
+[    1.193589] MPTCP token hash table entries: 4096 (order: 5, 98304 bytes, linear)
+[    1.194327] UDP hash table entries: 2048 (order: 5, 131072 bytes, linear)
+[    1.194737] UDP-Lite hash table entries: 2048 (order: 5, 131072 bytes, linear)
+[    1.197464] NET: Registered PF_UNIX/PF_LOCAL protocol family
+[    1.198110] NET: Registered PF_XDP protocol family
+[    1.198650] PCI: CLS 0 bytes, default 64
+[    1.202076] kvm [1]: HYP mode not available
+[    1.207383] Unpacking initramfs...
+[    1.215292] Initialise system trusted keyrings
+[    1.227698] workingset: timestamp_bits=44 max_order=20 bucket_order=0
+[    1.637002] Key type asymmetric registered
+[    1.637403] Asymmetric key parser 'x509' registered
+[    1.638422] Block layer SCSI generic (bsg) driver version 0.4 loaded (major 248)
+[    1.639954] io scheduler mq-deadline registered
+[    1.640090] io scheduler kyber registered
+[    1.640665] io scheduler bfq registered
+[    1.655719] pci-host-generic 4010000000.pcie: host bridge /pcie@10000000 ranges:
+[    1.656992] pci-host-generic 4010000000.pcie:       IO 0x003eff0000..0x003effffff -> 0x0000000000
+[    1.657817] pci-host-generic 4010000000.pcie:      MEM 0x0010000000..0x003efeffff -> 0x0010000000
+[    1.658030] pci-host-generic 4010000000.pcie:      MEM 0x8000000000..0xffffffffff -> 0x8000000000
+[    1.659017] pci-host-generic 4010000000.pcie: Memory resource size exceeds max for 32 bits
+[    1.660507] pci-host-generic 4010000000.pcie: ECAM at [mem 0x4010000000-0x401fffffff] for [bus 00-ff]
+[    1.663759] pci-host-generic 4010000000.pcie: PCI host bridge to bus 0000:00
+[    1.664406] pci_bus 0000:00: root bus resource [bus 00-ff]
+[    1.664552] pci_bus 0000:00: root bus resource [io  0x0000-0xffff]
+[    1.664667] pci_bus 0000:00: root bus resource [mem 0x10000000-0x3efeffff]
+[    1.664748] pci_bus 0000:00: root bus resource [mem 0x8000000000-0xffffffffff]
+[    1.666444] pci 0000:00:00.0: [1b36:0008] type 00 class 0x060000 conventional PCI endpoint
+[    1.676493] pci 0000:00:01.0: [1af4:1000] type 00 class 0x020000 conventional PCI endpoint
+[    1.676973] pci 0000:00:01.0: BAR 0 [io  0x0000-0x001f]
+[    1.677109] pci 0000:00:01.0: BAR 1 [mem 0x00000000-0x00000fff]
+[    1.677412] pci 0000:00:01.0: BAR 4 [mem 0x00000000-0x00003fff 64bit pref]
+[    1.677567] pci 0000:00:01.0: ROM [mem 0x00000000-0x0007ffff pref]
+[    1.688349] pci 0000:00:01.0: ROM [mem 0x10000000-0x1007ffff pref]: assigned
+[    1.688681] pci 0000:00:01.0: BAR 4 [mem 0x8000000000-0x8000003fff 64bit pref]: assigned
+[    1.689043] pci 0000:00:01.0: BAR 1 [mem 0x10080000-0x10080fff]: assigned
+[    1.689386] pci 0000:00:01.0: BAR 0 [io  0x1000-0x101f]: assigned
+[    1.689863] pci_bus 0000:00: resource 4 [io  0x0000-0xffff]
+[    1.689969] pci_bus 0000:00: resource 5 [mem 0x10000000-0x3efeffff]
+[    1.690054] pci_bus 0000:00: resource 6 [mem 0x8000000000-0xffffffffff]
+[    1.706481] virtio-pci 0000:00:01.0: enabling device (0000 -> 0003)
+[    1.716703] Serial: 8250/16550 driver, 4 ports, IRQ sharing enabled
+[    1.775811] hv_vmbus: registering driver hyperv_keyboard
+[    1.790824] rtc-pl031 9010000.pl031: registered as rtc0
+[    1.791638] rtc-pl031 9010000.pl031: setting system clock to 2026-10-27T00:38:43 UTC (1793061523)
+[    1.801476] NET: Registered PF_INET6 protocol family
+[    1.816047] Segment Routing with IPv6
+[    1.816673] In-situ OAM (IOAM) with IPv6
+[    1.961666] registered taskstats version 1
+[    1.969613] Loading compiled-in X.509 certificates
+[    4.830604] Freeing initrd memory: 32416K
+[    5.034966] Loaded X.509 cert 'alpinelinux.org: Alpine Linux kernel key: 87fa969a47f3e2a6aa35859eb932a17c95abcd82'
+[    5.216590] Demotion targets for Node 0: null
+[    5.220608] Key type .fscrypt registered
+[    5.220677] Key type fscrypt-provisioning registered
+[    5.279080] clk: Disabling unused clocks
+[    5.280076] PM: genpd: Disabling unused power domains
+[    5.587827] Freeing unused kernel memory: 2048K
+[    5.589377] Run /init as init process
+tmp_mount=tmpfs+baked
+[    6.195776] netfs: FS-Cache loaded
+insmod_ok=kernel/fs/netfs/netfs.ko
+[    6.250317] 9pnet: Installing 9P2000 support
+insmod_ok=kernel/net/9p/9pnet.ko
+insmod_ok=kernel/net/9p/9pnet_virtio.ko
+[    6.327583] 9p: Installing v9fs 9p2000 file system support
+insmod_ok=kernel/fs/9p/9p.ko
+[    6.380012] 9pnet_virtio: no channels available for device evidence
+evidence_mount=console-only
+============================================================
+LABEL=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+native=0
+jetson=0
+emulated_cpu=1
+qemu_accel=tcg
+============================================================
+Linux (none) 6.18.58-0-virt #1-Alpine SMP PREEMPT_DYNAMIC 2026-10-21 13:45:15 aarch64 Linux
+uid=0 gid=0
+--- landlock probe ---
+landlock_abi=7
+--- fail-closed-linux suites ---
+LABEL=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+native=0
+jetson=0
+emulated_cpu=1
+nonce=123b7776e12b4f8de976051d59d263a3
+src=/tmp/fcl-r6-aarch64/crate
+mode=full
+uid=1000 gid=1000
+Linux (none) 6.18.58-0-virt #1-Alpine SMP PREEMPT_DYNAMIC 2026-10-21 13:45:15 aarch64 Linux
+=== suite lib expected=9 ===
+test tests::exe_identity_requires_matching_dev_and_inode ... ok
+test tests::execve_eof_is_a_start_and_confine_ready_is_a_refusal ... ok
+test tests::extra_test_right_is_absent_from_the_file_profile ... ok
+test tests::fault_decode_rejects_a_short_record_and_an_unknown_step ... ok
+test tests::fault_round_trips_through_the_pipe_encoding ... ok
+test tests::file_profile_needs_truncate_and_ioctl_dev_not_refer ... ok
+test tests::handled_bits_follow_the_abi_and_never_invent_a_right ... ok
+test tests::per_right_floor_for_abi_1_through_6 ... ok
+test tests::pid_namespace_is_a_required_guard_step ... ok
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+suite=lib exit=0 passed=9 failed=0 ignored=0 status=PASS
+FCL_MARK nonce=123b7776e12b4f8de976051d59d263a3 suite=lib exit=0 passed=9 failed=0 ignored=0 status=PASS
+=== suite simulated expected=22 ===
+test sim_add_path_rule_rejects_access_outside_handled_fs ... ok
+test sim_capability_drop_failure_refuses ... ok
+test sim_confined_provider_starts_after_every_layer ... ok
+test sim_every_guard_step_failure_stops_before_exec ... ok
+test sim_extra_floor_still_names_the_missing_right ... ok
+test sim_id_maps_unwritable_refuses ... ok
+test sim_landlock_abi_floor_cannot_be_lowered ... ok
+test sim_landlock_abi_too_old_refuses ... ok
+test sim_landlock_missing_refuses ... ok
+test sim_landlock_ruleset_unappliable_refuses ... ok
+test sim_lying_abi_5_with_abi_1_rights_refuses ... ok
+test sim_lying_kernel_enforcement_refuses ... ok
+test sim_missing_right_is_never_silently_dropped ... ok
+test sim_no_exec_filter_failure_refuses ... ok
+test sim_no_new_privs_failure_refuses ... ok
+test sim_per_right_floor_for_each_abi ... ok
+test sim_pid_namespace_unavailable_refuses ... ok
+test sim_seccomp_install_failure_refuses ... ok
+test sim_stdio_sanitize_failure_refuses ... ok
+test sim_test_extra_right_does_not_refuse_on_abi_7 ... ok
+test sim_test_extra_right_refuses_on_abi_6 ... ok
+test sim_user_namespaces_off_refuses ... ok
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.82s
+suite=simulated exit=0 passed=22 failed=0 ignored=0 status=PASS
+FCL_MARK nonce=123b7776e12b4f8de976051d59d263a3 suite=simulated exit=0 passed=22 failed=0 ignored=0 status=PASS
+=== suite real_kernel expected=31 ===
+test real_capability_drop_failure_refuses ... ok
+test real_close_pipe_without_exec_is_not_a_start ... ok
+test real_confine_ready_without_exec_is_not_a_start ... ok
+test real_confined_child_cannot_signal_host ... ok
+test real_confined_provider_has_every_layer ... ok
+test real_daemonize_keeps_namespace_until_init_dies ... ok
+test real_empty_fault_pipe_is_not_a_start ... ok
+test real_extra_floor_still_names_the_missing_right ... ok
+test real_granted_path_reexec_is_refused ... ok
+test real_id_map_unwritable_refuses ... ok
+test real_inherited_pty_ioctl_is_not_available ... ok
+test real_init_reaps_orphaned_grandchild ... ok
+test real_landlock_abi_below_required_refuses ... ok
+test real_landlock_missing_refuses ... ok
+test real_landlock_ruleset_unappliable_refuses ... ok
+test real_lying_enforcement_self_test_refuses ... ok
+test real_lying_rights_probe_refuses ... ok
+test real_memfd_procfd_second_image_is_refused ... ok
+test real_memfd_second_image_is_refused ... ok
+test real_no_new_privs_failure_refuses ... ok
+test real_per_right_floor_refuses_on_this_kernel ... ok
+test real_pid_namespace_unavailable_refuses ... ok
+test real_production_cli_rejects_test_hooks_without_switch ... ok
+test real_reaper_forwards_signal ... ok
+test real_reaper_propagates_exit_status ... ok
+test real_seccomp_install_failure_refuses ... ok
+test real_sigkill_returned_pid_tears_down_namespace ... ok
+test real_silent_expected_binary_is_a_start ... ok
+test real_stdin_pty_is_not_a_terminal ... ok
+test real_stdin_socket_cannot_import_fd ... ok
+test real_user_namespaces_off_refuses ... ok
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.39s
+suite=real_kernel exit=0 passed=31 failed=0 ignored=0 status=PASS
+FCL_MARK nonce=123b7776e12b4f8de976051d59d263a3 suite=real_kernel exit=0 passed=31 failed=0 ignored=0 status=PASS
+overall=0
+--- guest finished status=0 ---
+FCL_MARK nonce=123b7776e12b4f8de976051d59d263a3 suite=guest exit=0
+[   24.135029] sysrq: Power Off
+[   24.142958] reboot: Power down
