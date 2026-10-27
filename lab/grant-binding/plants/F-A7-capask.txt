@@ -1,0 +1,8 @@
+id: F-A7-capask
+file: src/ledger.rs
+test: ledger::model_lower_admit_binds_an_asked_agent
+--- old
+                *stored = (*stored).min(ceiling);
+--- new
+                let _kept = stored;
+--- end

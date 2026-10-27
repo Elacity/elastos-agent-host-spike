@@ -33,6 +33,9 @@ fn handles_match(bound: Handle, presented: Handle) -> bool {
 #[derive(Debug)]
 pub(crate) struct Ledger {
     ceiling: u64,
+    admitted: u64,
+    ceilings: HashMap<String, u64>,
+    pending_identity: Option<String>,
     held: u64,
     next_reservation: u64,
     charged: u64,
@@ -44,6 +47,9 @@ impl Ledger {
     pub(crate) fn new() -> Self {
         Self {
             ceiling: 0,
+            admitted: 0,
+            ceilings: HashMap::new(),
+            pending_identity: None,
             held: 0,
             next_reservation: 0,
             charged: 0,
@@ -159,8 +165,31 @@ impl std::fmt::Display for TimeoutRefuse {
 }
 
 impl Verifier {
+    /// Stages the grant identity whose admitted amount the next `admit` keeps.
+    pub(crate) fn stage_admitted_identity(&self, identity: &str) {
+        self.ledger.lock().expect("ledger lock").pending_identity = Some(identity.to_owned());
+    }
+
+    /// Records `ceiling` as the last admitted ceiling. A staged identity keeps
+    /// it for its own reserves. With nothing staged, no identity keeps a
+    /// ceiling above it.
+    fn store_staged_ceiling(&self, ceiling: u64) {
+        let mut ledger = self.ledger.lock().expect("ledger lock");
+        ledger.admitted = ceiling;
+        if let Some(identity) = ledger.pending_identity.take() {
+            ledger.ceilings.insert(identity, ceiling);
+        } else {
+            for stored in ledger.ceilings.values_mut() {
+                *stored = (*stored).min(ceiling);
+            }
+        }
+    }
+
     /// Sets the allowance ceiling. Outstanding holds stay as they are.
+    /// A staged identity keeps this ceiling for its own reserves, and an
+    /// admit with nothing staged lowers any identity ceiling above it.
     pub fn admit(&self, ceiling: u64) {
+        self.store_staged_ceiling(ceiling);
         self.ledger.lock().expect("ledger lock").ceiling = ceiling;
     }
 
@@ -176,8 +205,18 @@ impl Verifier {
     ) -> Result<Reservation, ReserveRefuse> {
         self.resolve(*call, request.handle)
             .map_err(ReserveRefuse::Binding)?;
+        let identity = self
+            .grants
+            .get(&request.handle)
+            .expect("resolved grant")
+            .identity
+            .clone();
         let mut ledger = self.ledger.lock().expect("ledger lock");
         let held = ledger.held;
+        ledger.ceiling = ledger.admitted;
+        if let Some(agent_ceiling) = ledger.ceilings.get(&identity).copied() {
+            ledger.ceiling = agent_ceiling;
+        }
         let ledger: &mut Ledger = &mut ledger;
         let total = match held.checked_add(amount) {
             Some(total) if total <= ledger.ceiling => total,
@@ -1500,4 +1539,150 @@ fn model_unknown_from_another_handle_does_not_mark_the_hold() {
     assert_eq!(after_release.charged, 0);
     assert_eq!(after_release.held, 0);
     assert!(!after_release.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_second_agent_does_not_raise_the_ceiling() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-2", "session-a");
+    assert_ne!(second, first);
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", rights())
+        .expect("bind");
+    assert_ne!(second_handle, first_handle);
+    let first_call = verifier.open_call(first);
+    let second_call = verifier.open_call(second);
+    let first_request = guest(first_handle);
+    let second_request = guest(second_handle);
+    let granted = verifier
+        .admit_ask(
+            &first_call,
+            &first_request,
+            crate::ask::BudgetAsk { amount: 4 },
+            10,
+        )
+        .expect("first ask");
+    assert_eq!(granted, 4);
+    let granted = verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            crate::ask::BudgetAsk { amount: 50 },
+            80,
+        )
+        .expect("second ask");
+    assert_eq!(granted, 50);
+    let refusal = verifier
+        .reserve(&first_call, &first_request, 5)
+        .expect_err("second ask does not raise the first ceiling");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 0,
+            asked: 5,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    verifier
+        .reserve(&second_call, &second_request, 50)
+        .expect("second agent keeps its own ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 50);
+}
+
+#[test]
+fn model_lower_admit_binds_an_asked_agent() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = guest(handle);
+    let granted = verifier
+        .admit_ask(&call, &request, crate::ask::BudgetAsk { amount: 10 }, 10)
+        .expect("ask");
+    assert_eq!(granted, 10);
+    verifier.admit(4);
+    let refusal = verifier
+        .reserve(&call, &request, 8)
+        .expect_err("a lower admit binds the asked agent");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 0,
+            asked: 8,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    verifier
+        .reserve(&call, &request, 4)
+        .expect("inside the lower ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+}
+
+#[test]
+fn model_unasked_agent_reads_the_last_admit() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-2", "session-a");
+    let third = verifier.register_instance("agent-3", "session-a");
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", rights())
+        .expect("bind");
+    let third_handle = verifier
+        .bind_grant(third, "UsersAI/agent-3/notes", rights())
+        .expect("bind");
+    let first_call = verifier.open_call(first);
+    let second_call = verifier.open_call(second);
+    let third_call = verifier.open_call(third);
+    let first_request = guest(first_handle);
+    let second_request = guest(second_handle);
+    let third_request = guest(third_handle);
+    verifier
+        .admit_ask(
+            &first_call,
+            &first_request,
+            crate::ask::BudgetAsk { amount: 50 },
+            80,
+        )
+        .expect("first ask");
+    verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            crate::ask::BudgetAsk { amount: 4 },
+            10,
+        )
+        .expect("second ask");
+    verifier
+        .reserve(&first_call, &first_request, 1)
+        .expect("first agent inside its own ceiling");
+    let refusal = verifier
+        .reserve(&third_call, &third_request, 40)
+        .expect_err("an agent with no ask reads the last admit");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 1,
+            asked: 40,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 1);
 }
