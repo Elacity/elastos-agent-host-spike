@@ -1,0 +1,15 @@
+id: R5-7a
+file: src/lib.rs
+test: failed_two_step_execute_does_not_spend_the_first_grant
+--- old
+        for grant in &allowed {
+            let agent = plan_agent(&grant.resource);
+            self.grants
+                .journal_write_ready(&grant.token, &runtime_bridge::scoped_guest(&grant.resource))
+                .map_err(|_| Refuse::Bridge)?;
+            if grant.resource != runtime_bridge::guest_journal(agent) {
+                return Err(Refuse::OutsidePlan);
+            }
+        }
+--- new
+--- end

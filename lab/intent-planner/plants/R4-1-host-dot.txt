@@ -1,0 +1,10 @@
+id: R4-1
+file: src/lib.rs
+test: dot_or_dotdot_host_id_is_foreign
+--- old
+        || raw.contains("..")
+        || raw == "."
+        || raw == ".."
+--- new
+        || raw.contains("..")
+--- end

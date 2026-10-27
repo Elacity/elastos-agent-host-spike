@@ -1,0 +1,11 @@
+id: R4-6
+file: src/lib.rs
+test: embedded_dotdot_host_id_is_foreign
+--- old
+        || raw.contains('%')
+        || raw.contains("..")
+        || raw == "."
+--- new
+        || raw.contains('%')
+        || raw == "."
+--- end

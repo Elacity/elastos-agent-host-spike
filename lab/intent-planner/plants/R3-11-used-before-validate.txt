@@ -2,23 +2,25 @@ id: R3-11
 file: src/lib.rs
 test: failed_execute_does_not_spend_the_grant
 --- old
-        for grant in &spent {
+        for grant in &allowed {
             let agent = plan_agent(&grant.resource);
             self.grants
-                .validate_journal_write(&grant.token, &runtime_bridge::scoped_journal(agent))
+                .journal_write_ready(&grant.token, &runtime_bridge::scoped_guest(&grant.resource))
                 .map_err(|_| Refuse::Bridge)?;
+            if grant.resource != runtime_bridge::guest_journal(agent) {
+                return Err(Refuse::OutsidePlan);
+            }
         }
-        self.effects.extend(recorded);
-        self.used
-            .extend(spent.iter().map(|grant| grant.token.clone()));
 --- new
         self.used
-            .extend(spent.iter().map(|grant| grant.token.clone()));
-        for grant in &spent {
+            .extend(allowed.iter().map(|grant| grant.token.clone()));
+        for grant in &allowed {
             let agent = plan_agent(&grant.resource);
             self.grants
-                .validate_journal_write(&grant.token, &runtime_bridge::scoped_journal(agent))
+                .journal_write_ready(&grant.token, &runtime_bridge::scoped_guest(&grant.resource))
                 .map_err(|_| Refuse::Bridge)?;
+            if grant.resource != runtime_bridge::guest_journal(agent) {
+                return Err(Refuse::OutsidePlan);
+            }
         }
-        self.effects.extend(recorded);
 --- end

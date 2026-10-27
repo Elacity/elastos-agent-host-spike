@@ -49,13 +49,19 @@ pub fn guest_notes(agent: &str) -> String {
 
 /// The resource a capability token stores after `Users/self` is scoped.
 pub fn scoped_journal(agent: &str) -> String {
+    scoped_guest(&guest_journal(agent))
+}
+
+/// Rewrite a guest `Users/self` URI the way a capability token stores it.
+pub fn scoped_guest(guest_uri: &str) -> String {
     let root = elastos_server::auth::principal_localhost_root(LAUNCHING_PERSON);
-    format!("{root}/.AppData/Agents/{agent}/tasks/task-1/journal")
+    guest_uri.replacen("localhost://Users/self", &root, 1)
 }
 
 /// A lab `CapabilityManager`: signer and use counter for one Host.
 pub struct Grants {
     manager: CapabilityManager,
+    store: Arc<CapabilityStore>,
 }
 
 impl std::fmt::Debug for Grants {
@@ -66,20 +72,22 @@ impl std::fmt::Debug for Grants {
 
 impl Grants {
     pub fn new() -> Self {
+        let store = Arc::new(CapabilityStore::new());
         Self {
             manager: CapabilityManager::new(
-                Arc::new(CapabilityStore::new()),
+                store.clone(),
                 Arc::new(AuditLog::new()),
                 Arc::new(MetricsManager::new()),
             ),
+            store,
         }
     }
 
-    /// One allow-once write grant. The token is the base64 form the bus carries.
-    pub fn mint_journal_write(&self, agent: &str) -> String {
+    /// One allow-once write grant bound to `guest_uri` after `Users/self` is scoped.
+    pub fn mint_write(&self, guest_uri: &str) -> String {
         let token = self.manager.grant(
             CAPSULE_ID,
-            ResourceId::new(scoped_journal(agent)),
+            ResourceId::new(scoped_guest(guest_uri)),
             Action::Write,
             TokenConstraints::new(0, false, None, Some(1)),
             None,
@@ -87,6 +95,37 @@ impl Grants {
         token
             .to_base64()
             .expect("a Runtime capability token encodes")
+    }
+
+    /// One allow-once write grant. The token is the base64 form the bus carries.
+    #[allow(dead_code)]
+    pub fn mint_journal_write(&self, agent: &str) -> String {
+        self.mint_write(&guest_journal(agent))
+    }
+
+    /// True when this Host minted the token, it names `resource`, and a use
+    /// remains. Does not spend.
+    pub fn journal_write_ready(&self, token_b64: &str, resource: &str) -> Result<(), String> {
+        let token = elastos_runtime::capability::CapabilityToken::from_base64(token_b64)?;
+        if !token.verify_signature(self.manager.public_key())
+            || token.issuer() != &self.manager.public_key_bytes()
+        {
+            return Err("token was not minted by this host".to_owned());
+        }
+        if token.resource().as_str() != resource {
+            return Err(format!(
+                "wrong resource: expected {}, got {}",
+                token.resource(),
+                resource
+            ));
+        }
+        if let Some(max_uses) = token.constraints().max_uses() {
+            let used = block_on(self.store.get_use_count(token.id()));
+            if used >= max_uses {
+                return Err(format!("use limit exceeded: {used} >= {max_uses}"));
+            }
+        }
+        Ok(())
     }
 
     pub fn validate_journal_write(&self, token_b64: &str, resource: &str) -> Result<(), String> {

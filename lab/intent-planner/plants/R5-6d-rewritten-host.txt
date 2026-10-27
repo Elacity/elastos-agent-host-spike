@@ -1,0 +1,12 @@
+id: R5-6d
+file: src/lib.rs
+test: rewritten_host_id_does_not_run_on_a_second_host
+--- old
+            if validated_name(&grant.host_id).is_none()
+                || grant.host_id != review.host_id
+                || grant.host_id != self.id
+            {
+                return Err(Refuse::ForeignHost);
+            }
+--- new
+--- end

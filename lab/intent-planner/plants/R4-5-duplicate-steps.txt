@@ -1,0 +1,9 @@
+id: R4-5
+file: src/lib.rs
+test: duplicate_journal_steps_are_refused
+--- old
+    if has_duplicate_steps(steps) {
+        return Err(Refuse::DuplicateStep);
+    }
+--- new
+--- end

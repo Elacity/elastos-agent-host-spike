@@ -24,6 +24,12 @@ test: approved_grant_runs_once
                 continue;
             }
             let grant = grant_that_covers(&review.grants, step)?;
+            if validated_name(&grant.host_id).is_none()
+                || grant.host_id != review.host_id
+                || grant.host_id != self.id
+            {
+                return Err(Refuse::ForeignHost);
+            }
             if self.used.contains(&grant.token) {
                 return Err(Refuse::GrantSpent);
             }
@@ -41,6 +47,7 @@ test: approved_grant_runs_once
                 action: step.capability.action,
                 operation: step.capability.operation.clone(),
                 resource: step.resource.clone(),
+                host_id: String::new(),
             })
             .collect())
 --- end

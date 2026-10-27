@@ -1,0 +1,9 @@
+id: R4-4
+file: src/lib.rs
+test: empty_plan_cannot_be_approved
+--- old
+    if steps.is_empty() {
+        return Err(Refuse::EmptyPlan);
+    }
+--- new
+--- end
