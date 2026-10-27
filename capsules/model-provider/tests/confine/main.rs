@@ -2316,11 +2316,26 @@ fn collect_allow_lines(profile: &str) -> Vec<&str> {
 }
 
 fn allow_form_closes(profile: &str) -> Result<(), String> {
-    for line in profile.lines() {
+    let lines: Vec<&str> = profile.lines().collect();
+    for (index, line) in lines.iter().enumerate() {
         if line.starts_with(";;") {
             continue;
         }
         let line = line.trim();
+        // A line that is only `(` and whose next line starts `allow` is an
+        // allow the collector never sees. Look at that next line only.
+        if line == "(" {
+            if let Some(next) = lines.get(index + 1) {
+                if !next.starts_with(";;") {
+                    let next = next.trim();
+                    if let Some(rest) = next.strip_prefix("allow") {
+                        if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
+                            return Err(format!("allow form does not close: {line}"));
+                        }
+                    }
+                }
+            }
+        }
         if !line.contains("(allow") {
             continue;
         }
@@ -2801,6 +2816,62 @@ fn platform_baseline_rules_stay_narrow() {
     );
     let committed_allows = [exec, root, sysctl, parent, storage].join("\n");
     assert_eq!(allow_form_closes(&committed_allows), Ok(()));
+
+    // A line that trims to `(` whose next line starts `allow` and a space or
+    // a tab is an allow the collector never sees. Both pins stay.
+    let split_space = [
+        "(allow file-read-data (literal \"/\"))",
+        "(",
+        "allow file-read* (literal \"/tmp/cc-split-allow\"))",
+        "(allow sysctl-read)",
+    ]
+    .join("\n");
+    let split_space_message = allow_form_closes(&split_space).unwrap_err();
+    assert!(
+        split_space_message.contains("allow form does not close"),
+        "{split_space_message}"
+    );
+    assert!(split_space_message.contains("("), "{split_space_message}");
+    assert!(
+        !split_space_message.contains("startup-root-directory widened"),
+        "{split_space_message}"
+    );
+    assert!(
+        !split_space_message.contains("allow rule has no declared right"),
+        "{split_space_message}"
+    );
+    let split_tab = [
+        "(allow file-read-data (literal \"/\"))",
+        "(",
+        "allow\tfile-read* (literal \"/tmp/cc-split-allow-tab\"))",
+        "(allow sysctl-read)",
+    ]
+    .join("\n");
+    let split_tab_message = allow_form_closes(&split_tab).unwrap_err();
+    assert!(
+        split_tab_message.contains("allow form does not close"),
+        "{split_tab_message}"
+    );
+    assert!(split_tab_message.contains("("), "{split_tab_message}");
+    assert!(
+        !split_tab_message.contains("startup-root-directory widened"),
+        "{split_tab_message}"
+    );
+    assert!(
+        !split_tab_message.contains("allow rule has no declared right"),
+        "{split_tab_message}"
+    );
+    let not_split = [
+        "(",
+        "allowing",
+        "(",
+        "allow-default",
+        "(",
+        "(deny network*)",
+        "(",
+    ]
+    .join("\n");
+    assert_eq!(allow_form_closes(&not_split), Ok(()));
 
     let profile_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("confine.sb");
     let profile = fs::read_to_string(&profile_path).unwrap_or_else(|err| {
