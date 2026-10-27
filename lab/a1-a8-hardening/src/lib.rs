@@ -5,7 +5,9 @@
 //! Runtime path the agent-conformance lane uses; its data-dir rule covers
 //! Linux as well as macOS.
 
+use serde::de::{self, Deserialize, Deserializer, MapAccess, Visitor};
 use sha2::{Digest, Sha256};
+use std::fmt;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -214,6 +216,24 @@ fn entrypoint(manifest: &[u8]) -> String {
         .to_owned()
 }
 
+/// Bytes the Runtime `load` path will open from this staged capsule.
+pub fn staged_component_bytes(capsule: &Path, manifest: &[u8]) -> Vec<u8> {
+    fs::read(capsule.join(entrypoint(manifest))).expect("read the staged component")
+}
+
+/// Hash of the exact bytes that will be executed. The staged file and the
+/// in-memory copy that the test hashed must match. A TOCTOU swap FAILs.
+pub fn executed_bytes_hash(staged: &[u8], claimed: &[u8]) -> Result<String, String> {
+    let staged_hash = sha256(staged);
+    let claimed_hash = sha256(claimed);
+    if staged_hash != claimed_hash {
+        return Err(format!(
+            "module_hash must be of the exact bytes executed (staged {staged_hash}, hashed {claimed_hash})"
+        ));
+    }
+    Ok(staged_hash)
+}
+
 /// The root component's import names, read independently of the Runtime.
 /// Names that wit-component generates for types and functions are left out,
 /// as the Runtime's own check skips them.
@@ -278,16 +298,29 @@ impl Run {
     }
 }
 
-/// Size and inode of `runtime/capability-requests.jsonl` at guest launch.
-/// Readers use only bytes appended after this snapshot. A changed inode
-/// after a known file is a different file, not an append. A missing inode
-/// is not a launch window: the file must stay absent until `elastos run`
-/// starts, then the first inode seen during that run is the lock.
+/// Size, offset and inode of `runtime/capability-requests.jsonl` at guest
+/// launch. Readers use only bytes after `offset`. A changed inode after a
+/// known file is a different file, not an append. A missing inode is not a
+/// launch window: the file must stay absent until `elastos run` starts,
+/// then the first inode seen during that run is the lock. `size` is the
+/// real length at lock (and the max seen after that). A later shrink
+/// FAILs.
 #[derive(Clone, Debug)]
 pub struct ReceiptCursor {
     pub path: PathBuf,
     pub inode: Option<u64>,
     pub size: u64,
+    pub offset: u64,
+}
+
+/// Host-held snapshot of the receipt file at the end of `elastos run`.
+/// `receipts_since_launch` judges this copy, not a later rewrite.
+#[derive(Clone, Debug)]
+pub struct ReceiptSeal {
+    pub hash: String,
+    pub inode: u64,
+    pub size: u64,
+    pub bytes: Vec<u8>,
 }
 
 /// Host-side name of the guest function that asked the bus. Required for
@@ -315,6 +348,7 @@ pub struct Home {
     temp: PathBuf,
     finished: bool,
     launch_receipts: Mutex<Option<ReceiptCursor>>,
+    receipt_seal: Mutex<Option<ReceiptSeal>>,
 }
 
 struct Spawned {
@@ -359,6 +393,7 @@ impl Home {
             temp,
             finished: false,
             launch_receipts: Mutex::new(None),
+            receipt_seal: Mutex::new(None),
         }
     }
 
@@ -467,6 +502,7 @@ impl Home {
             std::thread::sleep(Duration::from_millis(20));
         };
         self.lock_launch_receipts();
+        self.seal_launch_receipts();
         stop_group(spawned.child.id());
         if status.is_none() {
             let _ = spawned.child.wait();
@@ -494,7 +530,9 @@ impl Home {
         );
     }
 
-    fn lock_launch_receipts(&self) {
+    /// Record the real size and inode at first sight. A later shrink of
+    /// that inode FAILs. Size 0 is only for a file that is still absent.
+    pub fn lock_launch_receipts(&self) {
         let path = self.receipts_path();
         let Ok(meta) = fs::metadata(&path) else {
             return;
@@ -503,20 +541,68 @@ impl Home {
             .launch_receipts
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if guard.is_none() {
-            *guard = Some(ReceiptCursor {
-                path,
-                inode: Some(meta.ino()),
-                size: 0,
-            });
+        if let Some(cursor) = guard.as_mut() {
+            if let Some(inode) = cursor.inode {
+                if meta.ino() != inode {
+                    panic!(
+                        "capability-requests.jsonl inode changed after launch (was {inode}, now {})",
+                        meta.ino()
+                    );
+                }
+            }
+            if meta.len() < cursor.size {
+                panic!(
+                    "capability-requests.jsonl shrank after launch (was {}, now {})",
+                    cursor.size,
+                    meta.len()
+                );
+            }
+            cursor.size = meta.len();
+            cursor.inode = Some(meta.ino());
+            return;
+        }
+        *guard = Some(ReceiptCursor {
+            path,
+            inode: Some(meta.ino()),
+            size: meta.len(),
+            offset: 0,
+        });
+    }
+
+    /// Snapshot the receipt bytes at the end of `elastos run`. Later
+    /// rewrites of the same inode are judged against this copy.
+    pub fn seal_launch_receipts(&self) {
+        self.lock_launch_receipts();
+        let guard = self
+            .launch_receipts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(cursor) = guard.as_ref() else {
+            return;
+        };
+        match seal_receipt_file(&cursor.path) {
+            Ok(seal) => {
+                *self.receipt_seal.lock().unwrap_or_else(|e| e.into_inner()) = Some(seal);
+            }
+            Err(reason) => panic!("{reason}"),
         }
     }
 
     /// Receipts the Runtime created during this `elastos run`. A file that
     /// appeared before spawn is refused by [`Home::assert_receipts_absent`].
+    /// After `run_until` seals the file, a same-inode rewrite FAILs.
     /// A missing assigned id is not used here.
     pub fn receipts_since_launch(&self) -> Vec<CapabilityRequestRecord> {
         self.lock_launch_receipts();
+        let sealed = self
+            .receipt_seal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(seal) = sealed {
+            return records_from_sealed_receipts(&seal, &self.receipts_path())
+                .unwrap_or_else(|reason| panic!("{reason}"));
+        }
         let guard = self
             .launch_receipts
             .lock()
@@ -562,11 +648,13 @@ impl Home {
                 path,
                 inode: Some(meta.ino()),
                 size: meta.len(),
+                offset: meta.len(),
             },
             Err(_) => ReceiptCursor {
                 path,
                 inode: None,
                 size: 0,
+                offset: 0,
             },
         }
     }
@@ -578,6 +666,7 @@ impl Home {
             path: self.receipts_path(),
             inode: None,
             size: 0,
+            offset: 0,
         })
     }
 
@@ -628,29 +717,84 @@ pub struct CapabilityRequestRecord {
     pub session_id: Option<String>,
     pub module_hash: Option<String>,
     pub guest_function: Option<String>,
+    pub seq: Option<u64>,
 }
 
 fn optional_string(value: &serde_json::Value, key: &str) -> Option<String> {
     value
         .get(key)
         .and_then(serde_json::Value::as_str)
-        .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(str::to_string)
 }
 
-/// Parse one Runtime receipt line. Hash aliases and guest stderr are ignored.
-pub fn parse_capability_record(line: &str) -> Option<CapabilityRequestRecord> {
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    Some(CapabilityRequestRecord {
-        action: value.get("action")?.as_str()?.to_string(),
-        resource: value.get("resource")?.as_str()?.to_string(),
-        code: value.get("code")?.as_str()?.to_string(),
+fn optional_seq(value: &serde_json::Value) -> Result<Option<u64>, String> {
+    match value.get("seq") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(number)) => number
+            .as_u64()
+            .ok_or_else(|| "receipt seq must be an unsigned integer".to_string())
+            .map(Some),
+        Some(_) => Err("receipt seq must be an unsigned integer".to_string()),
+    }
+}
+
+struct UniqueObject(serde_json::Map<String, serde_json::Value>);
+
+impl<'de> Deserialize<'de> for UniqueObject {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct UniqueVisitor;
+        impl<'de> Visitor<'de> for UniqueVisitor {
+            type Value = UniqueObject;
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a JSON object with unique keys")
+            }
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<UniqueObject, M::Error> {
+                let mut object = serde_json::Map::new();
+                while let Some((key, value)) = map.next_entry::<String, serde_json::Value>()? {
+                    if object.contains_key(&key) {
+                        return Err(de::Error::custom(format!("duplicate JSON key {key}")));
+                    }
+                    object.insert(key, value);
+                }
+                Ok(UniqueObject(object))
+            }
+        }
+        deserializer.deserialize_map(UniqueVisitor)
+    }
+}
+
+fn has_whitespace(text: &str) -> bool {
+    text.bytes().any(|byte| byte.is_ascii_whitespace())
+}
+
+/// Parse one Runtime receipt line. Duplicate keys FAIL. Bind fields are
+/// byte-exact: they are not trimmed. Hash aliases and guest stderr are ignored.
+pub fn parse_capability_record(line: &str) -> Result<CapabilityRequestRecord, String> {
+    let UniqueObject(object) = serde_json::from_str(line).map_err(|error| error.to_string())?;
+    let value = serde_json::Value::Object(object);
+    Ok(CapabilityRequestRecord {
+        action: value
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "receipt is missing action".to_string())?
+            .to_string(),
+        resource: value
+            .get("resource")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "receipt is missing resource".to_string())?
+            .to_string(),
+        code: value
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "receipt is missing code".to_string())?
+            .to_string(),
         capsule_id: optional_string(&value, "capsule_id"),
         principal_id: optional_string(&value, "principal_id"),
         session_id: optional_string(&value, "session_id"),
         module_hash: optional_string(&value, "module_hash"),
         guest_function: optional_string(&value, "guest_function"),
+        seq: optional_seq(&value)?,
     })
 }
 
@@ -706,12 +850,62 @@ pub fn host_sequence_function(
 }
 
 /// Missing Runtime-ask fields (NEEDS RUNTIME) or a hard mismatch (FAIL).
-/// Session must equal this launch's id. `module_hash` is the only hash
-/// field. `guest_function` is required.
+/// Session must equal this launch's id, must be an unguessable 128-bit
+/// hex minted host-side, and must not alias `capsule_id` or
+/// `identity::context().session`. `module_hash` is the only hash field.
+/// `guest_function` is required. `seq` must be strictly increasing.
 pub fn authorship_gaps(
     records: &[CapabilityRequestRecord],
     bind: &LaunchBind,
 ) -> Result<Vec<&'static str>, String> {
+    if records
+        .iter()
+        .any(|record| record.capsule_id.as_deref().is_some_and(has_whitespace))
+    {
+        return Err(format!(
+            "capsule_id must be byte-exact; whitespace is refused; host records: {records:?}"
+        ));
+    }
+    if records
+        .iter()
+        .any(|record| match (&record.session_id, &record.capsule_id) {
+            (Some(session), Some(capsule)) => session == capsule,
+            _ => false,
+        })
+    {
+        return Err(format!(
+            "session_id must not alias capsule_id or identity::context().session; host records: {records:?}"
+        ));
+    }
+    if let Some(assigned) = bind.assigned.as_deref() {
+        if bind.session_id.as_deref() == Some(assigned)
+            || records
+                .iter()
+                .any(|record| record.session_id.as_deref() == Some(assigned))
+        {
+            return Err(format!(
+                "session_id must not alias capsule_id or identity::context().session; host records: {records:?}"
+            ));
+        }
+    }
+    if records.iter().any(|record| {
+        record
+            .session_id
+            .as_deref()
+            .is_some_and(|session| !is_session_id(session))
+    }) {
+        return Err(format!(
+            "session_id must be an unguessable per-launch id; host records: {records:?}"
+        ));
+    }
+    if let Some(session) = bind.session_id.as_deref() {
+        if !is_session_id(session) {
+            return Err(format!(
+                "session_id must be an unguessable per-launch id; host records: {records:?}"
+            ));
+        }
+    }
+    refuse_seq(records)?;
     if let Some(id) = bind.assigned.as_deref() {
         if records
             .iter()
@@ -778,10 +972,33 @@ pub fn authorship_gaps(
     {
         missing.push("guest function");
     }
+    if records.is_empty() || records.iter().any(|record| record.seq.is_none()) {
+        missing.push("receipt seq");
+    }
     Ok(missing)
 }
 
-fn read_capability_requests_since(
+fn refuse_seq(records: &[CapabilityRequestRecord]) -> Result<(), String> {
+    if records.iter().all(|record| record.seq.is_none()) {
+        return Ok(());
+    }
+    if records.iter().any(|record| record.seq.is_none()) {
+        return Err(format!(
+            "receipt seq is missing on some lines; host records: {records:?}"
+        ));
+    }
+    let nums: Vec<u64> = records.iter().map(|record| record.seq.unwrap()).collect();
+    for pair in nums.windows(2) {
+        if pair[1] != pair[0] + 1 {
+            return Err(format!(
+                "receipt seq must be strictly increasing without gaps or repeats; host records: {records:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn read_capability_requests_since(
     cursor: &ReceiptCursor,
 ) -> Result<Vec<CapabilityRequestRecord>, Option<String>> {
     let meta = match fs::metadata(&cursor.path) {
@@ -804,7 +1021,8 @@ fn read_capability_requests_since(
         }
     }
     let mut file = File::open(&cursor.path).map_err(|_| None)?;
-    file.seek(SeekFrom::Start(cursor.size)).map_err(|_| None)?;
+    file.seek(SeekFrom::Start(cursor.offset))
+        .map_err(|_| None)?;
     let mut text = String::new();
     file.read_to_string(&mut text).map_err(|_| None)?;
     if !text.is_empty() && !text.ends_with('\n') {
@@ -814,7 +1032,78 @@ fn read_capability_requests_since(
             text.clear();
         }
     }
-    Ok(text.lines().filter_map(parse_capability_record).collect())
+    let mut records = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match parse_capability_record(line) {
+            Ok(record) => records.push(record),
+            Err(reason)
+                if reason.contains("duplicate JSON key")
+                    || reason.contains("receipt seq must be") =>
+            {
+                return Err(Some(reason));
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(records)
+}
+
+/// Snapshot the receipt file bytes. Used at the end of `elastos run`.
+pub fn seal_receipt_file(path: &Path) -> Result<ReceiptSeal, String> {
+    let meta = fs::metadata(path)
+        .map_err(|error| format!("capability-requests.jsonl could not be sealed: {error}"))?;
+    let bytes = fs::read(path)
+        .map_err(|error| format!("capability-requests.jsonl could not be sealed: {error}"))?;
+    Ok(ReceiptSeal {
+        hash: sha256(&bytes),
+        inode: meta.ino(),
+        size: meta.len(),
+        bytes,
+    })
+}
+
+/// Judge the sealed copy. A same-inode rewrite after `run_until` FAILs.
+pub fn records_from_sealed_receipts(
+    seal: &ReceiptSeal,
+    path: &Path,
+) -> Result<Vec<CapabilityRequestRecord>, String> {
+    let meta = fs::metadata(path)
+        .map_err(|error| format!("capability-requests.jsonl rewritten after run ({error})"))?;
+    if meta.ino() != seal.inode {
+        return Err(format!(
+            "capability-requests.jsonl inode changed after launch (was {}, now {})",
+            seal.inode,
+            meta.ino()
+        ));
+    }
+    if meta.len() < seal.size {
+        return Err(format!(
+            "capability-requests.jsonl shrank after launch (was {}, now {})",
+            seal.size,
+            meta.len()
+        ));
+    }
+    let current = fs::read(path).map_err(|error| error.to_string())?;
+    if meta.len() != seal.size || sha256(&current) != seal.hash {
+        return Err(
+            "capability-requests.jsonl rewritten after run; host receipts are the sealed copy"
+                .to_string(),
+        );
+    }
+    let cursor = ReceiptCursor {
+        path: path.to_path_buf(),
+        inode: Some(seal.inode),
+        size: seal.size,
+        offset: 0,
+    };
+    match read_capability_requests_since(&cursor) {
+        Ok(records) => Ok(records),
+        Err(Some(reason)) => Err(reason),
+        Err(None) => Ok(Vec::new()),
+    }
 }
 
 /// The component id the Runtime printed on a `[run]` line. Guest-controlled
@@ -830,7 +1119,8 @@ pub fn assigned_component_id(text: &str) -> Option<String> {
 }
 
 /// The session id the Runtime printed on a `[run]` line. Presence of any
-/// non-empty string on a receipt is not a bind.
+/// non-empty string on a receipt is not a bind. `session-1` and
+/// `identity::context().session` (`capsule_id`) are not a bind.
 pub fn assigned_session_id(text: &str) -> Option<String> {
     text.lines()
         .filter(|line| line.starts_with("[run] "))
@@ -838,7 +1128,7 @@ pub fn assigned_session_id(text: &str) -> Option<String> {
             for word in line.split(|c: char| c.is_whitespace() || c == '\'' || c == '"' || c == ',')
             {
                 if let Some(value) = word.strip_prefix("session_id=") {
-                    if !value.is_empty() {
+                    if is_session_id(value) {
                         return Some(value.to_string());
                     }
                 }
@@ -850,17 +1140,11 @@ pub fn assigned_session_id(text: &str) -> Option<String> {
         })
 }
 
-fn is_session_id(word: &str) -> bool {
-    let Some(rest) = word
-        .strip_prefix("session-")
-        .or_else(|| word.strip_prefix("session:"))
-    else {
-        return false;
-    };
-    !rest.is_empty()
-        && rest
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+/// Unguessable per-launch id: 32 lowercase hex digits (128 bits), minted
+/// host-side. Optional `session-` prefix. `session-1` is refused.
+pub fn is_session_id(word: &str) -> bool {
+    let hex = word.strip_prefix("session-").unwrap_or(word);
+    hex.len() == 32 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn is_component_id(word: &str) -> bool {
@@ -1049,7 +1333,7 @@ mod tests {
     const HASH: &str = "f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737";
     const ASSIGNED: &str = "component-341af27a-6b9c-4892-a618-808f0b687a9d";
     const FOREIGN: &str = "component-00000000-0000-0000-0000-000000000000";
-    const SESSION: &str = "session-this-launch";
+    const SESSION: &str = "0123456789abcdef0123456789abcdef";
 
     fn denied(action: &str, capsule: &str) -> String {
         format!(
@@ -1085,6 +1369,7 @@ mod tests {
         assert!(missing.contains(&"session id"));
         assert!(missing.contains(&"guest module hash"));
         assert!(missing.contains(&"guest function"));
+        assert!(missing.contains(&"receipt seq"));
     }
 
     #[test]
@@ -1101,7 +1386,7 @@ mod tests {
     fn session_must_equal_this_launch() {
         let mut records = honest_today();
         for record in &mut records {
-            record.session_id = Some("other-session".into());
+            record.session_id = Some("fedcba9876543210fedcba9876543210".into());
             record.module_hash = Some(HASH.into());
             record.guest_function = Some(GUEST_FUNCTION_JOURNAL_GRANTS.into());
         }
@@ -1131,6 +1416,7 @@ mod tests {
         let missing = authorship_gaps(&[record], &bind(Some(ASSIGNED), Some(SESSION))).unwrap();
         assert!(missing.contains(&"guest module hash"));
         assert!(missing.contains(&"guest function"));
+        assert!(missing.contains(&"receipt seq"));
     }
 
     #[test]
@@ -1154,10 +1440,14 @@ mod tests {
         )
         .is_none());
         assert_eq!(
-            assigned_session_id("[run] Component capsule attached session_id=session-this-launch")
-                .as_deref(),
+            assigned_session_id(&format!(
+                "[run] Component capsule attached session_id={SESSION}"
+            ))
+            .as_deref(),
             Some(SESSION)
         );
+        assert!(assigned_session_id("[run] session_id=session-1").is_none());
+        assert!(assigned_session_id(&format!("[run] session_id={ASSIGNED}")).is_none());
         assert!(assigned_component_id(
             "guest printed component-00000000-0000-0000-0000-000000000000\n"
         )
@@ -1177,6 +1467,8 @@ mod tests {
             record.module_hash = Some(HASH.into());
             record.guest_function = Some(GUEST_FUNCTION_JOURNAL_GRANTS.into());
         }
+        records[0].seq = Some(1);
+        records[1].seq = Some(2);
         assert!(
             authorship_gaps(&records, &bind(Some(ASSIGNED), Some(SESSION)))
                 .unwrap()

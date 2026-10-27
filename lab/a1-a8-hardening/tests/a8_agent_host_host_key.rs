@@ -3,8 +3,9 @@
 
 use a1_a8_hardening::{
     assigned_component_id, assigned_session_id, authorship_gaps, bound_denied_actions,
-    build_component, component_imports, contains_bytes, host_sequence_function,
-    isolation_denied_actions, repository, sha256, LaunchBind, GUEST_FUNCTION_JOURNAL_GRANTS,
+    build_component, component_imports, contains_bytes, executed_bytes_hash,
+    host_sequence_function, isolation_denied_actions, repository, sha256, staged_component_bytes,
+    LaunchBind, GUEST_FUNCTION_JOURNAL_GRANTS,
 };
 use a1_a8_hardening::{runtime, Edit, Home, Operator, RUNTIME_ALLOWLIST};
 use std::fs;
@@ -143,6 +144,11 @@ fn agent_host_host_key_read_is_refused() {
     let key = home.seed(".ssh/id_ed25519", FAKE);
     let manifest = injected.manifest.clone();
     let capsule = home.stage("agent-host", &injected.bytes, &manifest);
+    let guest_hash = executed_bytes_hash(
+        &staged_component_bytes(&capsule, &manifest),
+        &injected.bytes,
+    )
+    .unwrap_or_else(|reason| panic!("{reason}"));
     let operator = Operator::start(&home);
     home.assert_receipts_absent();
     let cursor = home.snapshot_receipts();
@@ -169,7 +175,11 @@ fn agent_host_host_key_read_is_refused() {
     let unchanged = fs::read(&key).unwrap() == FAKE;
     let assigned = this_run_component_id(&run);
     let session_id = this_run_session_id(&run);
-    let guest_hash = sha256(&injected.bytes);
+    executed_bytes_hash(
+        &staged_component_bytes(&capsule, &manifest),
+        &injected.bytes,
+    )
+    .unwrap_or_else(|reason| panic!("{reason}"));
     let actions = isolation_denied_actions(&records, resource);
     let bound = bound_denied_actions(&records, resource, assigned.as_deref());
     let exit = match run.status {

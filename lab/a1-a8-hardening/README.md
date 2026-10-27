@@ -100,9 +100,15 @@ file. It binds those lines to the component id the Runtime printed for
 this launch (a `[run]` line or API, never the guest or the jsonl
 itself). A missing assigned id is not a match: NEEDS RUNTIME, never
 PASS. A foreign `capsule_id` is a FAIL. Session id must equal this
-launch. `module_hash` is the only hash field. `guest_function` must be
-`request_journal_grants`. The cargo test itself refuses PASS while any
-of those fields is missing.
+launch, must be an unguessable 128-bit hex minted host-side, and must
+not alias `capsule_id` or `identity::context().session`. `session-1`
+is refused. `module_hash` is the only hash field and must be of the
+staged bytes that will be executed. `guest_function` must be
+`request_journal_grants`. Receipts carry a strictly increasing `seq`.
+Duplicate JSON keys and a `capsule_id` with whitespace FAIL. The lock
+records the real receipt size; a same-inode shrink or a rewrite after
+`run_until` FAIL. The cargo test itself refuses PASS while any of
+those fields is missing.
 
 The Runtime today writes `capsule_id` as `component-<uuid>` and leaves
 `principal_id` null. It does not print that id, and it does not record
@@ -187,6 +193,14 @@ when each test fails at its refusal assertion.
 | F-A8-skip-journal-grants | guest asks write then read, skips `request_journal_grants`, ignores the refusal | `agent_host_host_key_read_is_refused` | CAUGHT |
 | F-A8-guest-follow-sentence | guest asks write then read, skips `request_journal_grants`, prints the Invalid sentence | `agent_host_host_key_read_is_refused` | CAUGHT |
 | F-A8-race-after-snapshot | test writes the two lines after the inode snapshot, foreign `capsule_id`, no-bus guest | `agent_host_host_key_read_is_refused` | CAUGHT |
+| F-A8-session-alias | accept `session_id == capsule_id` / `identity.session` | `session_id_must_not_alias_capsule_id` | CAUGHT |
+| F-A8-session-1 | accept predictable `session-1` | `predictable_session_1_is_refused` | CAUGHT |
+| F-A8-toctou-hash | hash the in-memory copy, ignore staged bytes | `executed_hash_is_of_staged_bytes` | CAUGHT |
+| F-A8-seq-ignored | ignore `seq` gaps, repeats and reordering | `receipt_seq_must_be_strictly_increasing` | CAUGHT |
+| F-A8-shrink-dead | record receipt size 0 at lock | `same_inode_shrink_fails` | CAUGHT |
+| F-A8-rewrite-after-run | accept a same-inode rewrite after `run_until` | `rewrite_after_seal_fails` | CAUGHT |
+| F-A8-dup-keys | last-wins duplicate JSON keys | `duplicate_json_keys_fail` | CAUGHT |
+| F-A8-capsule-trim | trim `capsule_id` whitespace | `capsule_id_whitespace_fails` | CAUGHT |
 
 Under F-A1-runtime the Runtime still refused the WASI build, through its
 core-module import check, with a different reason; the exact-reason assertion

@@ -270,6 +270,168 @@
       "tests": [
         "agent_host_host_key_read_is_refused"
       ]
+    },
+    {
+      "id": "F-A8-session-alias",
+      "title": "accept session_id == capsule_id / identity.session as a bind",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "session_id must not alias capsule_id or identity::context().session"
+      ],
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "            (Some(session), Some(capsule)) => session == capsule,",
+          "new": "            (Some(session), Some(capsule)) => false && session == capsule,"
+        },
+        {
+          "file": "src/lib.rs",
+          "old": "                .any(|record| record.session_id.as_deref() == Some(assigned))",
+          "new": "                .any(|record| false && record.session_id.as_deref() == Some(assigned))"
+        }
+      ],
+      "tests": [
+        "session_id_must_not_alias_capsule_id"
+      ]
+    },
+    {
+      "id": "F-A8-session-1",
+      "title": "accept predictable session-1 as a bind",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "session_id must be an unguessable per-launch id"
+      ],
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "pub fn is_session_id(word: &str) -> bool {\n    let hex = word.strip_prefix(\"session-\").unwrap_or(word);\n    hex.len() == 32 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))\n}",
+          "new": "pub fn is_session_id(word: &str) -> bool {\n    let Some(rest) = word\n        .strip_prefix(\"session-\")\n        .or_else(|| word.strip_prefix(\"session:\"))\n    else {\n        return false;\n    };\n    !rest.is_empty()\n        && rest\n            .bytes()\n            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')\n}"
+        }
+      ],
+      "tests": [
+        "predictable_session_1_is_refused"
+      ]
+    },
+    {
+      "id": "F-A8-toctou-hash",
+      "title": "hash the in-memory copy and ignore the staged bytes load will execute",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "module_hash must be of the exact bytes executed"
+      ],
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    let staged_hash = sha256(staged);\n    let claimed_hash = sha256(claimed);\n    if staged_hash != claimed_hash {\n        return Err(format!(\n            \"module_hash must be of the exact bytes executed (staged {staged_hash}, hashed {claimed_hash})\"\n        ));\n    }\n    Ok(staged_hash)",
+          "new": "    let _ = staged;\n    Ok(sha256(claimed))"
+        }
+      ],
+      "tests": [
+        "executed_hash_is_of_staged_bytes"
+      ]
+    },
+    {
+      "id": "F-A8-seq-ignored",
+      "title": "ignore receipt seq gaps, repeats and reordering",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "receipt seq must be strictly increasing without gaps or repeats"
+      ],
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "fn refuse_seq(records: &[CapabilityRequestRecord]) -> Result<(), String> {\n    if records.iter().all(|record| record.seq.is_none()) {\n        return Ok(());\n    }",
+          "new": "fn refuse_seq(records: &[CapabilityRequestRecord]) -> Result<(), String> {\n    let _ = records;\n    return Ok(());\n    if records.iter().all(|record| record.seq.is_none()) {\n        return Ok(());\n    }"
+        }
+      ],
+      "tests": [
+        "receipt_seq_must_be_strictly_increasing"
+      ]
+    },
+    {
+      "id": "F-A8-shrink-dead",
+      "title": "record receipt size 0 at lock so same-inode shrink never fires",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "shrank after launch"
+      ],
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        *guard = Some(ReceiptCursor {\n            path,\n            inode: Some(meta.ino()),\n            size: meta.len(),\n            offset: 0,\n        });",
+          "new": "        *guard = Some(ReceiptCursor {\n            path,\n            inode: Some(meta.ino()),\n            size: 0,\n            offset: 0,\n        });"
+        }
+      ],
+      "tests": [
+        "same_inode_shrink_fails"
+      ]
+    },
+    {
+      "id": "F-A8-rewrite-after-run",
+      "title": "accept a same-inode rewrite of the jsonl after run_until as the host receipt",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "rewritten after run"
+      ],
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    let current = fs::read(path).map_err(|error| error.to_string())?;\n    if meta.len() != seal.size || sha256(&current) != seal.hash {\n        return Err(\n            \"capability-requests.jsonl rewritten after run; host receipts are the sealed copy\"\n                .to_string(),\n        );\n    }",
+          "new": "    let _ = (meta, seal);"
+        }
+      ],
+      "tests": [
+        "rewrite_after_seal_fails"
+      ]
+    },
+    {
+      "id": "F-A8-dup-keys",
+      "title": "parse receipts with last-wins duplicate JSON keys",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "duplicate JSON key capsule_id"
+      ],
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    let UniqueObject(object) = serde_json::from_str(line).map_err(|error| error.to_string())?;\n    let value = serde_json::Value::Object(object);",
+          "new": "    let value: serde_json::Value = serde_json::from_str(line).map_err(|error| error.to_string())?;"
+        }
+      ],
+      "tests": [
+        "duplicate_json_keys_fail"
+      ]
+    },
+    {
+      "id": "F-A8-capsule-trim",
+      "title": "trim capsule_id so surrounding whitespace still binds",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "capsule_id must be byte-exact; whitespace is refused"
+      ],
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        .and_then(serde_json::Value::as_str)\n        .filter(|text| !text.is_empty())\n        .map(str::to_string)",
+          "new": "        .and_then(serde_json::Value::as_str)\n        .map(str::trim)\n        .filter(|text| !text.is_empty())\n        .map(str::to_string)"
+        },
+        {
+          "file": "src/lib.rs",
+          "old": "        .any(|record| record.capsule_id.as_deref().is_some_and(has_whitespace))",
+          "new": "        .any(|record| false && record.capsule_id.as_deref().is_some_and(has_whitespace))"
+        }
+      ],
+      "tests": [
+        "capsule_id_whitespace_fails"
+      ]
     }
   ]
 }
