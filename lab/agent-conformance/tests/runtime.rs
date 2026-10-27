@@ -141,9 +141,10 @@ fn run_by_cid_refuses_content_provider_whose_bytes_differ_from_its_hash() {
 #[test]
 #[ignore = "blocked: AC-025-CID"]
 fn capsule_named_by_hash() {
-    // Stage the probe, make its bundle CID available offline, run it by --cid,
-    // and require the same activation result as the directory launch.
-    panic!("blocked: AC-025-CID — requires a provider-resolvable bundle CID and an isolated offline content fixture");
+    // Remaining, in order: a measured Kubo v0.40.1 match for the staged probe
+    // bundle's lab CID; the offline content fixture; `--cid` reaching the
+    // directory launch's activation.
+    panic!("blocked: AC-025-CID — requires a measured Kubo v0.40.1 match for the staged probe bundle's lab CID, the offline content fixture (installed, checksum-verified ipfs-provider, a local-only Kubo policy and a socket census), and --cid reaching the directory launch's activation");
 }
 
 #[test]

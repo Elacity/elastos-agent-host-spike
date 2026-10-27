@@ -2374,6 +2374,38 @@
       "tests": [
         "hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect"
       ]
+    },
+    {
+      "id": "MP27",
+      "title": "a hosted cancel with an open send claims a clean cancel",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "fn worker_settlement_unknown_result() -> ReconcileResult {\n    ReconcileResult::Terminal {\n        events: Vec::new(),\n        status: RunStatus::SettlementUnknown,",
+          "new": "fn worker_settlement_unknown_result() -> ReconcileResult {\n    ReconcileResult::Terminal {\n        events: Vec::new(),\n        status: RunStatus::Cancelled,"
+        }
+      ],
+      "tests": [
+        "hosted_cancel_while_the_answer_is_held_settles_unknown_and_sends_nothing_more"
+      ]
+    },
+    {
+      "id": "MP28",
+      "title": "a second open hosted run passes the offer ceiling",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "if active_runs > offer.policy.concurrency_limit as usize {",
+          "new": "if active_runs > offer.policy.concurrency_limit as usize + 1 {"
+        }
+      ],
+      "tests": [
+        "hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect"
+      ]
     }
   ]
 }

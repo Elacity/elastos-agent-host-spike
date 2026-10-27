@@ -25,6 +25,7 @@ or Cargo error gives FAIL and a non-zero command exit status. BLOCKED rows
 remain open in [GAPS.md](GAPS.md).
 BLOCKED requires exactly one `GAPS.md` row with the test name, matching blocker IDs and a Runtime change.
 A missing or conflicting row, an unreadable `GAPS.md`, or a listed test that passes gives FAIL and a fixed reason.
+A backticked table line inside a fenced code block in `GAPS.md` still counts as a row, and a cell must not hold `\|`.
 
 - `home_is_throwaway`: checks the Mac data path, fresh root, path guard, symlink refusals and removal after success.
 - `launch_env_is_only_the_throwaway_home`: checks the four allowed environment entries, including `ELASTOS_CARRIER_MDNS=0`, null stdin, exit status and both output streams.
@@ -33,7 +34,7 @@ A missing or conflicting row, an unreadable `GAPS.md`, or a listed test that pas
 - `runtime_data_dir_is_under_throwaway_home`: places a dummy coordinates file in the guarded data directory and requires Runtime to remove it and return the same refusal reason. Its documentation-address URL is rejected before any network call.
 - `run_by_cid_without_content_provider_is_refused`: runs `--cid` with an encoder-produced synthetic lab CID in a fresh Home; requires a nonzero exit, `ipfs-provider not found`, and zero materialized capsule entries in TMPDIR.
 - `run_by_cid_refuses_content_provider_whose_bytes_differ_from_its_hash`: stamps a different byte string's SHA-256 on the installed marker script; requires the complete checksum refusal on one stderr line, an absent marker, and zero materialized capsule entries.
-- `capsule_named_by_hash`: BLOCKED (AC-025-CID). The full journey will stage the probe, make its CID available offline, run `--cid`, and require the directory launch's activation result. The verdict and changes needed are in [GAPS.md](GAPS.md#launch-by-bundle-cid-025).
+- `capsule_named_by_hash`: BLOCKED (AC-025-CID). Still required, in order: a measured Kubo v0.40.1 match for the staged probe bundle's lab CID; the offline content fixture (installed, checksum-verified `ipfs-provider`, a local-only Kubo policy and a socket census); `--cid` reaching the directory launch's activation. The verdict is in [GAPS.md](GAPS.md#launch-by-bundle-cid-025).
 - `serve_refuses_provider_whose_bytes_differ_from_its_hash`: installs the provider and its hash, appends one byte to the copy, and requires a nonzero `serve` exit with `localhost-provider` and `failed checksum verification` on stderr. It also checks that storage exists inside the root and the readiness file is absent.
 - `run_table_requires_cargo_results`: checks PASS, BLOCKED and FAIL grading against Cargo-format result fixtures.
 - `run_table_grades_blocker_lists_by_one_rule`: checks whole multi-word blocker reasons, trimmed semicolon lists and FAIL for empty reasons or parts. F-report-blocker-list keeps only the first whitespace word; the named test must fail planted and pass restored.

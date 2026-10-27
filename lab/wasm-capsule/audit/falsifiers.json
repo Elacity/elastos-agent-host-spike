@@ -817,6 +817,25 @@
       "tests": [
         "a_different_version_of_a_declared_interface_is_refused"
       ]
+    },
+    {
+      "id": "F-CWA20a",
+      "title": "Drop every memory maximum",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "maximum: ty.maximum,",
+          "new": "maximum: None,"
+        }
+      ],
+      "tests": [
+        "defined_memory_reports_its_page_limits",
+        "imported_memory_reports_its_page_limits",
+        "memory64_is_reported",
+        "shared_memory_is_reported"
+      ]
     }
   ]
 }
