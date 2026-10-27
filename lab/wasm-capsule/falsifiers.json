@@ -1350,7 +1350,8 @@
         }
       ],
       "tests": [
-        "engine_starts_with_an_empty_environment"
+        "engine_starts_with_an_empty_environment",
+        "host_secret_fixture_never_reaches_either_real_engine"
       ]
     },
     {
