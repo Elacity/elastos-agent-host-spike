@@ -1088,3 +1088,25 @@ fn model_lower_ceiling_does_not_refuse_the_settle() {
     assert_eq!(freed.held, 4);
     assert_eq!(freed.charged, 8);
 }
+
+#[test]
+fn model_forged_ceiling_does_not_replace_the_settled_charge() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_ceiling: 9,
+        ..guest(handle)
+    };
+    assert!(request.forged_ceiling > 0);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("settle");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
