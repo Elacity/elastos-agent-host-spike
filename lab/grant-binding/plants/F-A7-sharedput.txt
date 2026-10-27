@@ -1,0 +1,11 @@
+id: F-A7-sharedput
+file: src/ledger.rs
+test: ledger::model_other_agent_hold_does_not_fill_the_ceiling
+--- old
+        ledger.held = total;
+        if let Some(shared_total) = put_back {
+            ledger.held = shared_total;
+        }
+--- new
+        ledger.held = total;
+--- end

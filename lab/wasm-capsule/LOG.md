@@ -1351,3 +1351,173 @@
   passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0.
   Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn
   --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, Task 052 (runner entries for the two `tools/src/run.rs` engine label falsifiers; second review of PR #245,
+  P10, P12). Base `21535ff0200c23f3298fe8be227958bf5c0b397f`. Task 026's F-WC-ENGINE-RUN-MODULE-DOC and
+  F-WC-ENGINE-RUN-ENUM-DOC get `falsifiers.json` entries, each editing only `tools/src/run.rs` (a recovery target
+  since provider 026, PR #242, which merged before PR #245) with one exact replace back to the wording of
+  `bf752df1a^1`: the module doc line "Both engines are test-only, not endorsed." becomes the base's two lines ("...
+  test-only; neither is" / "endorsed."), and `/// A host engine: test-only, not endorsed.` becomes the base's
+  `/// A test-only host engine. Neither is endorsed.`; each anchor holds its whole line, so it is found once. 050's
+  FOLLOWUP: README's "outside the 184" is now "outside the 188", and `readme_falsifier_total_matches_falsifiers_json`
+  also finds the one "outside the N" in README's "## Falsifiers" and fails, naming the figure and the held count, when
+  it is missing, stated twice or not the total; new entry F-WC-README-OUTSIDE-COUNT plants "outside the 187".
+  Canonical runner, from the repo root, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I
+  examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC-ENGINE-RUN-MODULE-DOC
+  F-WC-ENGINE-RUN-ENUM-DOC F-WC-README-OUTSIDE-COUNT F-WC-README-COUNT` (F-WC-README-COUNT re-anchored to 188):
+  "baseline: 2 named tests pass without an edit, 0 do not", "F-WC-README-COUNT CAUGHT", "F-WC-ENGINE-RUN-MODULE-DOC
+  CAUGHT", "F-WC-ENGINE-RUN-ENUM-DOC CAUGHT", "F-WC-README-OUTSIDE-COUNT CAUGHT", "summary: 4 CAUGHT of 4", exit 0;
+  `git status --short` then listed only this task's files, with no `*.falsify-original` left. Each assertion, quoted by
+  running the named test inside the runner's own `falsify.Mutation` (exit 101 each): MODULE-DOC `tests/docs.rs:281:5`
+  "tools/src/run.rs's module doc has no line saying "test-only, not endorsed""; ENUM-DOC `:286:5` "tools/src/run.rs's
+  doc comment on `pub enum Engine` does not say "test-only, not endorsed""; README-OUTSIDE-COUNT `:404:5` "README's "##
+  Falsifiers" places its proofs with no entry outside the 187, but falsifiers.json holds 188"; README-COUNT `:386:5`
+  "README says falsifiers.json holds 187 planted bugs, but it holds 188". By hand, the same way, "outside the 188" ->
+  "outside every count" fails at `:397:5` "README's "## Falsifiers" says "outside the N" 0 times, not once
+  (falsifiers.json holds 188): []"; README and run.rs sha256 equal before and after. README: the two leave task 026's
+  hand-proven paragraph (now the three ADOPTION entries; only `ADOPTION.md` is not a recovery target) for a new "Task
+  052's three" runner-caught paragraph; total 185 -> 188, runner-caught 121 -> 124, hand-proven stays 68 (task 026's
+  five were outside every count). All 188 entries' 197 anchors found exactly once. SECOND-REVIEW.md's #241 promise-3
+  cite now gives `PROVIDER_TARGETS` per commit, each checked with `git show <commit>:examples/agent-host/falsify.py`:
+  `falsify.py:291-325` at `33cbed8c5`, `:323-383` at `43b4af944`, neither naming `falsifiers.json`; #241's verdict is
+  unchanged. No change to `tools/src/run.rs`, ADOPTION, `Cargo.toml` or `Cargo.lock`. Gates in `lab/wasm-capsule/`,
+  with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (128 passed, 3 ignored, 0 failed), `cargo test
+  --locked --workspace` (155 passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools
+  -- --check` exit 0. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and
+  `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, Task 053 (the capsule shape test reads imports through the one audit reader; P3, P10, P11). Base
+  `c305ca5a2f9e3c36cab728c9c3b28b572e4821ab`. `built_capsule_has_the_required_wasm_shape` (`tests/shape.rs`) first
+  asserts `audit(&bytes, &[])`, its refusal mapped to its Display string, equals `Ok(Vec::new())`, with the message
+  "the capsule must import nothing: the one audit reader's import list or refusal is {imports:?}"; its doc says the
+  imports are read only through `wasm_capsule_audit::audit`, the lab's one module reader (P10). The shape reader
+  (`tests/common/wasm_shape.rs`) reads no imports: `Shape` lost its import count field, the section-2 arm is
+  `2 => return Err(IMPORT_SECTION_REFUSED.to_string())` with the one reason "the shape reader reads no imports: a
+  module's imports are read only through wasm_capsule_audit::audit", `imported_function_count` and `read_limits` are
+  gone, and `resolve_digest` maps the `digest` index straight to the defined functions. Module and
+  `is_the_required_capsule_shape` docs no longer say it checks "imports nothing". `tests/wasm_shape.rs`: the crafted
+  required-shape test lost its import count assert; `counts_an_import_and_is_not_the_required_shape` became
+  `refuses_a_module_with_an_import_section`, which asserts that exact reason on the same one-import (`env.f`) module.
+  Hand proof (acceptance 4; `tests/common/wasm_shape.rs` is no recovery target): the file's sha256 `a2c614b37fc0...`
+  was saved, line 184 edited to `            2 => {}` with `sed`, and `cargo test --locked --test wasm_shape
+  refuses_a_module_with_an_import_section` exited 101, panicking at `tests/wasm_shape.rs:91:5` with "assertion `left
+  == right` failed: a module with an import section must be refused, not read" (`left: Ok(Shape { is_core_wasm:
+  true, digest: None })`, `right: Err("the shape reader reads no imports: a module's imports are read only through
+  wasm_capsule_audit::audit")`). The saved copy was put back, and the sha256 again read
+  `a2c614b37fc0fdc42f51bf24f1b8f273d9f3c577c7cb9760b2dd5a4effa7f81f` (the file equals its pre-proof state). Canonical
+  runner, from the repo root, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py --from
+  lab/wasm-capsule/falsifiers.json F-WC1-IMPORT F-WC1-SIG`: "baseline: 1 named tests pass without an edit, 0 do not",
+  "F-WC1-IMPORT CAUGHT", "F-WC1-SIG CAUGHT", "summary: 2 CAUGHT of 2", exit 0; `git status --short` then listed only
+  this task's files, with no `*.falsify-original` left. F-WC1-IMPORT's assertion, quoted by running the named test
+  inside the runner's own `falsify.Mutation` (exit 101; `capsule/src/lib.rs` sha256 `4b37b0da16d2...` before and
+  after): `tests/shape.rs:25:5` "the capsule must import nothing: the one audit reader's import list or refusal is
+  Err("undeclared import env.host_entropy")" (`left: Err("undeclared import env.host_entropy")`, `right: Ok([])`), so
+  the audit assertion catches it, not the shape reader's refusal and not a panic in `read`. `falsifiers.json` is
+  unchanged. ADOPTION's shape-reader item now says it checks core Wasm and the `digest` signature, reads no imports,
+  and the zero-import check reads through `audit/` (task 053); its open item for Flint is gone. README: the layout
+  lines and the named-test list say the same; "## Falsifiers" names the hand proof (task 053's one, kept out of the
+  runner-caught total), hand-proven 68 -> 69, total (188) and runner-caught (124) unchanged, and no label changes
+  (F-WC1-IMPORT and F-WC1-SIG stay in wc-001's hand-proven count). From `lab/wasm-capsule/`, `grep -n` for the removed
+  field name `-r . --exclude-dir=target` printed nothing (exit 1). Gates in `lab/wasm-capsule/`, with
+  `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (128 passed, 3 ignored, 0 failed), `cargo test
+  --locked --workspace` (155 passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools
+  -- --check` exit 0. No dependency, `Cargo.toml`, `Cargo.lock`, `capsule/`, `tools/`, `audit/` or `falsifiers.json`
+  change. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn
+  --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, Task 055 (the engine label plant restores the base bytes and README names its list; Rong's second review of
+  PR #245, P12). The runs and byte checks below were made on tree `73f5fc35f141b9f9a28a07d0d090edda57bdb365` (built
+  ahead), not on this task's base. Its commit `cee074ded` was then merged onto parent
+  `705e4fbbdfaef640a51f5c707069a4a5e7564c5b` (`705e4fbbd`, the merge of PR #692): `git rev-parse cee074ded^` prints
+  that full hash. The only lane file that differs between the two is `SECOND-REVIEW.md`: `git diff --stat 73f5fc35f
+  705e4fbbd -- lab/wasm-capsule` prints `lab/wasm-capsule/SECOND-REVIEW.md | 75 +++++++++++++++++++++++++++++++--------`
+  and `1 file changed, 61 insertions(+), 14 deletions(-)`. The runner's named test
+  (`engines_are_labelled_test_only_not_endorsed`, `tests/docs.rs`, which reads README, ADOPTION and `tools/src/run.rs`)
+  and the byte checks (`tools/src/run.rs` and `falsifiers.json`) do not read that file. Task 052's review found two
+  statements not true.
+  (1) README: the sentence on task 026's two `tools/src/run.rs` bugs ended in a colon right before the three ADOPTION
+  bullets. It now comes first, ends with a full stop and says they are listed under "Task 052's three, runner-caught";
+  the ADOPTION sentence follows and ends in the colon that introduces its three bullets. No bullet, id or count changes.
+  (2) F-WC-ENGINE-RUN-MODULE-DOC's plant stopped at `//! endorsed.`, so it mixed the base's line breaks with today's.
+  Its `old` is now today's four lines (`tools/src/run.rs:169-172`, from `//! machine, not the Component ABI.` to `//!
+  are a lab stand-in, not admission.`) and its `new` the base's four (`bf752df1a^1`, lines 70-73); `id`, `title`,
+  `command`, `expect` and `tests` are unchanged, and so is F-WC-ENGINE-RUN-ENUM-DOC. Byte check: the entry's `new`
+  and `old`, each read from `falsifiers.json` with `json.load` and written to a temp file with one closing newline;
+  `cmp` of `new` against `git show bf752df1a^1:lab/wasm-capsule/tools/src/run.rs | sed -n 70,73p` exit 0, `cmp` of
+  `old` against `sed -n 169,172p tools/src/run.rs` exit 0, the whole `old` occurs once in `run.rs` (`str.count` 1),
+  and `grep -c` on its first line as a whole line prints 1. Canonical runner, from the repo root, holding the shared
+  build lease (`fcntl.flock` on the main checkout's `.git/local-ai-heavy-build.lock`, wait bounded at 1500 s, taken
+  after 5 s), `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py --from
+  lab/wasm-capsule/falsifiers.json F-WC-ENGINE-RUN-MODULE-DOC F-WC-ENGINE-RUN-ENUM-DOC`: "baseline: 1 named tests pass
+  without an edit, 0 do not", "F-WC-ENGINE-RUN-MODULE-DOC CAUGHT", "F-WC-ENGINE-RUN-ENUM-DOC CAUGHT", "summary: 2
+  CAUGHT of 2", exit 0. The module-doc assertion, quoted by running `cargo test --locked --test docs
+  engines_are_labelled_test_only_not_endorsed` inside the runner's own `falsify.Mutation` (exit 101):
+  `tests/docs.rs:281:5` "tools/src/run.rs's module doc has no line saying "test-only, not endorsed"". After both runs
+  `tools/src/run.rs` sha256 is `40e712f7e31a...` as before, `git diff -- lab/wasm-capsule/tools/src/run.rs` is empty,
+  and `git status --short` listed only `README.md` and `falsifiers.json`. No entry added or removed, so the README
+  total and its "outside the N" figure are unchanged. Older LOG lines (task 052's "the base's two lines") stay as
+  history. Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (128
+  passed, 3 ignored, 0 failed), `cargo test --locked --workspace` (155 passed, 3 ignored, 0 failed), `cargo fmt --
+  --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0. Retired-label greps from the repo root (`git grep
+  -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both
+  empty, exit 1.
+- 27 Oct, Task 056 (lane tests list the lane's files through one git lister; P10). Base
+  `af3b1a44b38c12fc89842f5111d656c696023c40`. The lane's tests had two copies of the same git file lister:
+  `lane_files` in `tests/lab_cid.rs` (the guards) and an inline one in `no_key_material_is_tracked_in_the_lane`
+  (`tests/verify.rs`, the key scan). Now `lane_paths(lane) -> Vec<String>` in `tests/common/build.rs` (a recovery
+  target) is the one lister: `git ls-files -z --cached --others --exclude-standard`, fails with git's status and
+  stderr, returns every name split on NUL in git's order, with no filter and no read. `lane_files` calls it and keeps
+  its own rules (skip `*.falsify-original`, skip a `NotFound` read); the key scan calls it and keeps its "git listed no
+  lane file" assert and its per-file `scan_lane_file`, so a listed file that is gone is still reported. New test
+  `the_lane_tests_list_files_in_one_place` (`tests/lab_cid.rs`): in the listed `.rs` files under `tests/` and `tools/`
+  (not `audit/`), the quoted lister word (built at run time) appears once, in `tests/common/build.rs`. F-WC3-LANE-FILES-QUOTED's
+  two edits now name `tests/common/build.rs` (each `old` found there once; `id`, `expect`, `tests` unchanged; title
+  names the shared lister). New entry F-WC3-SECOND-LISTER puts an inline lister back into the key scan (`old` `let
+  listed = lane_paths(&lane);` found once in `tests/verify.rs`). F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT are
+  re-anchored to the new total, 189 (README: runner-caught 125). Canonical runner, from the repo root, holding the shared
+  build lease (`fcntl.flock` on the main checkout's `.git/local-ai-heavy-build.lock`, wait bounded at 1500 s, taken
+  after 95 s), `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py --from
+  lab/wasm-capsule/falsifiers.json F-WC3-LANE-FILES-QUOTED F-WC3-SECOND-LISTER F-WC4-SCAN-SKIP-MISSING
+  F-WC4-SCAN-NAME-AFTER-READ`: "baseline: 3 named tests pass without an edit, 0 do not", "F-WC4-SCAN-SKIP-MISSING
+  CAUGHT", "F-WC4-SCAN-NAME-AFTER-READ CAUGHT", "F-WC3-LANE-FILES-QUOTED CAUGHT", "F-WC3-SECOND-LISTER CAUGHT",
+  "summary: 4 CAUGHT of 4", exit 0. The two F-WC3 assertions, quoted by running `cargo test --locked --manifest-path
+  lab/wasm-capsule/Cargo.toml --test lab_cid <test>` inside the runner's own `falsify.Mutation` (lease held, exit 101
+  each): F-WC3-LANE-FILES-QUOTED, `tests/lab_cid.rs:127:5` "lane_files did not list every file under its real name"
+  (left `[("plain.md", "plain text\n")]`, right also holding `("review\"note.md", "quoted text\n")`);
+  F-WC3-SECOND-LISTER, `tests/lab_cid.rs:156:5` "the lane tests must run "ls-files" in one place, lane_paths; found
+  at: ["tests/common/build.rs:27", "tests/verify.rs:1226"]". A second run, same lease (taken after 5 s), same command
+  with `F-WC-README-COUNT F-WC-README-OUTSIDE-COUNT`: "baseline: 1 named tests pass without an edit, 0 do not",
+  "F-WC-README-COUNT CAUGHT", "F-WC-README-OUTSIDE-COUNT CAUGHT", "summary: 2 CAUGHT of 2", exit 0. After the runs
+  `git status --short` listed only this task's five edited files. Gates in `lab/wasm-capsule/`, with
+  `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (129 passed, 3 ignored, 0 failed), `cargo test
+  --locked --workspace` (156 passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p
+  wasm-capsule-tools -- --check` exit 0. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
+  lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, Task 060 (README's wasmer help-search lists name every line they matched; P12, second review of PRs #238
+  and #240). Base `c76403f1c26ac1ed8be7ed218b988d9d34ce2327`. README only, the two "### wasmer 7.5.0: SKIPPED" parts;
+  both SKIPPED results, every table row, command, exit code and stdout stay word for word. `/opt/homebrew/bin/wasmer
+  --version` printed `wasmer 7.5.0`. `wasmer run --help > R` exit 0 (272 lines), `wasmer --help > T` exit 0 (66
+  lines), then one `grep -n -i <word>` per word on each file (exit 1 = no match). Memory cap words, `R`: `memory` 91,
+  92, 111, 112, 120, 121, 123, 124 (`--enable-experimental-unaligned-memory-accesses`, `--enable-bulk-memory`,
+  `--enable-multi-memory`, `--enable-memory64`); `grow` 220, 221, 223 (`--with-compact-on-growth`); `trap` 241
+  (`--skip-journal-stdio`, inside "bootstrap"), 266 (`--COREDUMP_PATH <COREDUMP_PATH>`, "Generate a coredump at this
+  path if a WebAssembly trap occurs"); `max` 200 (`--enable-cpu-backoff`); `size` 221 (`--with-compact-on-growth`),
+  256, 257 (`--stack-size`); `limit`, `pages`, `heap`, `resource`, `rlimit`, `bytes` exit 1. `T`: all eleven words
+  exit 1. The old list left out 241 and 266 (and named no flag for 200); README now names all three. No line is about
+  capping linear memory, so the SKIPPED result holds. Import words, `R`: `preload` exit 1; `import` 249
+  (`--deny-multiple-wasi-versions`), 269 (`--experimental-napi`); `link` 117, 118 (`--enable-module-linking`);
+  `module` 86, 117, 118, 142, 145, 159, 173, 238, 241, 249, 252, 254, 260, 269; `host` 109 (`--enable-multi-value`),
+  141, 142, 153, 154, 156, 171; `use` 17, 23, 37, 47, 52, 68, 86, 158, 195, 200, 203, 208, 228, 232, 254; `env` 16,
+  22, 34, 43, 47, 49, 57 (`[env: NAME=]` and token lines of `--wasmer-dir`, `--cache-dir`, `--registry`,
+  `--log-format`, `--token`, `--log-events`), 147, 148 (`--env`), 150, 151 (`--env-file`), 153, 154, 156
+  (`--forward-host-env`), 232 (`--snapshot-on`). `T`: `preload`, `import`, `link`, `module`, `host` exit 1; `use` 12
+  (`config`), 17 (`whoami`), 43 (`--log-format`); `env` 49, 55 (`--log-format`, `--log-events`). README now names the
+  flag of every matched line, says `--env-file` and `--forward-host-env` are ambient like `--env` (they hand the guest
+  host environment), not imports, and that each `[env: NAME=]` line names the host variable for a wasmer option. No
+  line supplies a core-module import from another module file, so the SKIPPED result holds. No test or falsifier (no
+  new rule). Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (129
+  passed, 3 ignored, 0 failed), `cargo test --locked --workspace` (156 passed, 3 ignored, 0 failed), `cargo fmt --
+  --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0. Retired-label greps from the repo root (`git grep
+  -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both
+  empty, exit 1. `git status --short` listed only `README.md` and `LOG.md`. Round 2: the supervisor's `cargo test
+  --locked` failed once on `run_stops_wasmtime_at_its_budget_and_never_starts_wasmer` (`tests/run.rs:4330`, "refused
+  after 5.633411667s, not within 5 s of its budget 500ms"), a wall-clock bound that reads no README or LOG line;
+  nothing was changed for it (`tests/` is out of scope). Re-run: `cargo test --locked` (129 passed, 3 ignored, 0
+  failed, that test passed) and `cargo test --locked --workspace` (156 passed, 3 ignored, 0 failed).

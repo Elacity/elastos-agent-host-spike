@@ -14,9 +14,10 @@ sign that printed lab CID, and a check can say whether that key did.
   key sign that name?
 - It never answers "may this run?". It makes no trust, admission or launch
   decision. It sits in no Runtime admission or launch path, and no Runtime
-  code calls it; the lab's stand-in launcher, in test code, calls it (see
-  [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)). Admission stays a separate decision under each Runtime's trust policy.
-  A signature check that returns `Ok(())` is not a permission to run.
+  code calls it; the lab's stand-in launcher, in test code, calls it (see [the
+  stand-in launcher](#lab-stand-in-launcher-m1-check-b1)). Admission stays a
+  separate decision under each Runtime's trust policy. A signature check that
+  returns `Ok(())` is not a permission to run.
 - Its value is a **lab CID**, a lab package CID: the CIDv1 SHA-256 UnixFS
   directory root of the bundle, printed as 59 characters that start
   `bafybei`. It is a prototype, not an admission, and it defines no shared
@@ -494,6 +495,11 @@ the bytes it hands out are the bytes its lab CID names.
 - Since task 016 it also keeps, in a private field, whether the one manifest
   check found the manifest's `type` to be `wasm`. Only the variant binding's
   check (e2) reads it, and no accessor hands it out.
+- Since task 036 it also keeps, in a private field, the manifest's `name`
+  from that same check, and `manifest_name()` hands it out. `check_manifest`
+  returns both values from its one `CapsuleManifest` parse, so a caller that
+  needs the name never parses `capsule.json` again (P10). The name is identity
+  data the manifest states, not a decision.
 - The entries come in the walk's order. The encoder sorts each directory's
   links by name; a caller that needs an order sorts the entries by path.
 - It lives in memory only. It has no file or serialized form, and nothing
@@ -515,6 +521,7 @@ The public API another lab may call:
 | `checked_bundle(bundle: &Path) -> Result<CheckedBundle, Refusal>` | the lab CID and the bytes it names; a refusal is exactly `lab_cid`'s, variant and text |
 | `CheckedBundle::cid(&self) -> LabCid` | the lab CID of the entries |
 | `CheckedBundle::entries(&self) -> &[BundleEntry]` | every regular file the walk read, as `path` and `content` |
+| `CheckedBundle::manifest_name(&self) -> &str` | the `name` of the bundle's `capsule.json`, as the one manifest check read it |
 | `CheckedBundle::check_name(&self, claimed: &str) -> Result<(), Refusal>` | `Ok(())` when `claimed` is this lab CID; otherwise `NotALabCid` or `NameMismatch` |
 
 | `str::parse::<LabCid>(printed)` | the `LabCid` a printed lab CID names; otherwise `NotALabCid` (see [Reading a printed lab CID](#reading-a-printed-lab-cid)) |
@@ -533,6 +540,7 @@ walk only through it.
 | The checked form judges the bytes it holds; the path form reads the folder now | `checked_name_check_judges_the_checked_bytes` | F-CI3g, F-CI9h (no compare), F-CI9i (no `b`, its own reading), F-CI9j (walks again) |
 | The checked form refuses a lab CID its bytes do not give | `checked_name_check_refuses_a_mismatch` | F-CI3g, F-CI9h |
 | The checked form calls the one claim check and the one compare, and reads nothing | `checked_name_check_shares_the_claim_check_and_the_compare` | F-CI9h, F-CI9i, F-CI9j |
+| `manifest_name()` answers each committed fixture's manifest `name`, as the test states it | `checked_bundle_hands_out_the_manifest_name` | F-CI36a (an empty string) |
 
 The tests are in `tests/checked_bundle.rs` unless the table names another
 file. F-CI3g skips the one compare, so it lists the checked form's two tests
@@ -832,8 +840,10 @@ signs it:
 - The library's public functions are exactly the identity checks: `lab_cid`,
   `lab_cid_observed`, `checked_bundle`, `checked_bundle_observed`,
   `check_name` and its checked form `CheckedBundle::check_name`,
-  `CheckedBundle::cid`, `CheckedBundle::entries`, `encode_entries`,
-  `entry_kind`, `entry_path`, `name_signature_message`, `sign_bundle`,
+  `CheckedBundle::cid`, `CheckedBundle::entries`,
+  `CheckedBundle::manifest_name` (task 036: the checked manifest's `name`,
+  identity data), `encode_entries`, `entry_kind`, `entry_path`,
+  `name_signature_message`, `sign_bundle`,
   `verify_checked_signature` and `verify_name_signature`, and task 011's
   package record: `domain_separated_digest`,
   `PackageRecord::package_record_payload`, `sign_package_record`,
@@ -1304,8 +1314,10 @@ release records.
 
 `StandInRuntime` in `tests/common/mod.rs` is a lab stand-in for the Runtime's
 launch route, not the Runtime. It lives in test code, so the library stays
-identity only (`the_harness_exports_only_identity_checks` and its list are
-unchanged), and the falsifier runner restores its file after a killed run.
+identity only (`the_harness_exports_only_identity_checks` still lists only
+identity checks; task 036 added `CheckedBundle::manifest_name`, which hands
+out the checked manifest's `name`), and the falsifier runner restores its file
+after a killed run.
 A launch names the bundle by its lab CID only. The stand-in recomputes the CID
 from the stored bytes and checks the publisher's signed package record before
 anything is launched. It holds a store (printed lab CID -> bundle folder,
@@ -1325,10 +1337,25 @@ one name compare and one record check, never a copy (P10):
 | (d) | `checked_bundle` of the stored folder refuses (here: `capsule.json` removed after publish) | the walk's own refusal | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
 | (e) | `CheckedBundle::check_name(cid)` refuses: the stored bytes changed after publish (here: one byte of `asks.json`) | the compare's own refusal, naming both CIDs | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
 | (f) | no record's `cid` equals the requested CID | starts "unsigned:" and names the CID | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
-| (g) | `verify_checked_package_record` refuses: a signer not accepted, an empty accepted list, a flipped signature byte | the record check's own refusal | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
+| (g) | `verify_checked_package_record` refuses every record that binds the CID: a signer not accepted, an empty accepted list, a flipped signature byte | the first such record's own refusal, in store order | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch`, `standin_launch_does_not_depend_on_record_order` |
+
+**Several records for one CID.** More than one package record can bind the
+same CID, for example one by a signer the stand-in does not accept and one by
+a signer it does. Checks (f) and (g) take every record that binds the
+requested CID, in store order, and the launch goes on when at least one of
+them passes `verify_checked_package_record`. So the answer does not depend on
+the records' order. When none passes, the answer is the first such record's
+own refusal, unchanged, so a single record is refused with exactly its own
+text; with no record at all, the answer is the "unsigned:" text.
+`standin_launch_does_not_depend_on_record_order` launches one instance from
+`[unaccepted signer, accepted signer]` and from the reverse, and refuses two
+records by two unaccepted signers with the first one's "not in the accepted
+list" text, listing no instance.
 
 Only then it adds one instance and answers `{"id", "name", "status":
-"launched", "session_id"}`, with `name` from the checked manifest's `name`.
+"launched", "session_id"}`, with `name` from `CheckedBundle::manifest_name()`,
+the checked manifest's `name` from the one manifest check: the stand-in never
+parses `capsule.json` itself.
 `get_capsules` answers `{"capsules": [...]}`, one entry per launched instance
 with `id`, `name`, `status`, `session_id` and `cause` (`null`); a refused
 launch never appears. `standin_launches_a_signed_bundle_by_its_cid` runs the
@@ -1374,6 +1401,7 @@ Each route, field and state, and where it comes from. #309 is draft PR #309,
 | state "refused": status 400 and the reason | `routes.rs:116`, `Err((StatusCode::BAD_REQUEST, e.to_string()))` |
 | grant view `GET /api/capability/list?scope=all_sessions_live` (`get_capability_list_all_sessions_live`): `scope` `all_sessions_live`, `capabilities` entries with `request_id`, `resource`, `action`, `duration`, `granted_at` and `session_id` | #309 `01-live-grant-view.md:11` (a shell session reads every session's live grants) and `:83` (the `scope` marker and the session id per entry), at `513988ebd`; entry keys and `capabilities` from `CapabilityOutput` and `ListCapabilitiesOutput`, `elastos/crates/elastos-server/src/api/handlers/capability.rs:411-423` |
 | grant seed `seed_grant` | lab test seam, not a route; #309 and this lab model no shell approval |
+| asks read `asks_of` | lab test seam, not a route; #309 has no asks field on any route (RA-1 to RA-7) |
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
@@ -1381,6 +1409,7 @@ Each route, field and state, and where it comes from. #309 is draft PR #309,
 | (e) bytes changed after publish are refused by the name compare | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32b ((e) removed; the case then fails at (g) with another reason) |
 | (g) the record check refuses before launch | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32c ((g) removed) |
 | (f) a CID with no record is refused as unsigned | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32d (a missing record launches) |
+| (f) and (g) every record for the CID is checked, so the launch does not depend on the records' order | `standin_launch_does_not_depend_on_record_order` | F-CI36b (only the first record for the CID is checked) |
 | (a) `path` is never a fallback | `standin_launches_by_cid_only` | F-CI32e (a body with `path` is looked up by its folder) |
 | A refused launch leaves no instance | `standin_launches_by_cid_only`, `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32f (the instance is added before the checks) |
 | A launched answer has its listed instance | `standin_launches_a_signed_bundle_by_its_cid` | F-CI32g (answers launched, adds no instance) |
@@ -1403,6 +1432,45 @@ Not shown:
 
 Claim scope: one Mac, the `agent-host` fixture, test keys only, records in
 memory.
+
+### Asks come only from the signed bytes (M1 check B2, no-schema part)
+
+A launched instance is handed its asks only as the `asks.json` bytes of the
+checked bundle that passed every check above. `checked_launch` takes the
+manifest's `name` (`CheckedBundle::manifest_name()`) and the content of the
+`asks.json` entry (`CheckedBundle::entries()`) from the same `CheckedBundle`,
+the one walk (P10), and the launch keeps that content in the instance, once: `Some(bytes)`, or `None` when
+the bundle has no `asks.json`. Nothing reads the folder again.
+`asks_of(session_id)`, a lab test seam, not a route (#309 has no asks field on
+any route), answers that instance's bytes, and `None` for an unknown session.
+The launch answer, the `get_capsules` entry and the grant view keep exactly
+the keys above, with no asks key, and the launch body stays `{"cid"}`.
+
+`standin_hands_an_instance_only_its_signed_asks_bytes` launches the signed
+`agent-host` bundle as in the journey above: its session answers the
+committed `fixtures/agent-host/asks.json` bytes. Then one byte of the stored
+`asks.json` changes. The session still answers the signed bytes, and a second
+launch of the same CID is refused by (e), the name compare's own refusal, with
+no new instance and an empty grant view.
+`standin_gives_each_session_its_own_asks` launches `agent-host` and `web-app`
+(which has no `asks.json`), each signed by a fresh test key, in both orders:
+the `agent-host` session answers its bytes, the `web-app` session answers
+`None`, and so does an unknown session.
+
+| Rule | Named test | Falsifiers |
+| --- | --- | --- |
+| The instance keeps the signed bytes from launch; a change on disk after launch does not reach it | `standin_hands_an_instance_only_its_signed_asks_bytes` | F-CI35a (the planted accept-anything stub: `asks_of` reads `asks.json` from the stored folder at call time) |
+| Each session answers its own asks | `standin_gives_each_session_its_own_asks` | F-CI35b (`asks_of` ignores the session and answers the first instance's asks) |
+| A bundle with no `asks.json` is handed `None`, not empty bytes | `standin_gives_each_session_its_own_asks` | F-CI35c (`Some(Vec::new())` for a bundle with no `asks.json`) |
+
+Not shown:
+
+- No ask schema, provisional or not, and no parse or field read of
+  `asks.json`: to the stand-in it is bytes.
+- No mapping of an ask to an operation; that is `lab/bus-v2-proposal/`, and
+  this lane writes no B2 encoding.
+- No grant from an ask: a launch still adds none (the grant view above).
+- The Runtime hands no asks to anything here; `asks_of` is the stand-in's.
 
 ## Why a lab CID and not the Runtime's CID
 
@@ -1548,7 +1616,8 @@ tests/package_record.rs  the lab package record outside the bundle binds the CID
 tests/parse.rs           a printed lab CID is read with the one claim check
 tests/refusals.rs        each refusal and its reason
 tests/stand_in.rs        the lab stand-in launches by CID after the publisher check;
-                         a valid signature alone yields no grant
+                         a valid signature alone yields no grant; an instance
+                         is handed only its signed asks.json bytes
 tests/variant_binding.rs the signed variant binding outside the bundles
 tests/walk.rs            changes made while a bundle is named; one walk
 falsifiers.json          planted bugs, each caught by named tests
@@ -1556,7 +1625,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 254 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 259 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1589,8 +1658,11 @@ F-CI24a to F-CI24e (see
 029's F-CI29a to F-CI29e (see [the inventory check](#the-inventory-check)),
 and task 030's F-CI30a and F-CI30b (see [claim scope](#claim-scope)), and
 task 031's F-CI31a and F-CI31b (see [the inventory check](#the-inventory-check)),
-and task 032's F-CI32a to F-CI32g and task 033's F-CI33a to F-CI33c (both:
-see [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)).
+and task 032's F-CI32a to F-CI32g, task 033's F-CI33a to F-CI33c and task
+035's F-CI35a to F-CI35c (all three: see
+[the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)), and task 036's
+F-CI36a (see [the checked bundle](#checked-bundle-the-name-and-the-bytes-it-covers))
+and F-CI36b (see [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -1658,6 +1730,29 @@ F-CI33a in `post_capsules` (its anchor, the `Ok(self.launch(name))` line, is
 part of F-CI32f's anchor and found exactly once), and F-CI33b and F-CI33c in
 `get_capability_list_all_sessions_live`, each anchor a line task 033 added,
 found exactly once. Task 033 changed no older edit's text.
+Task 035's entries also edit `tests/common/mod.rs`, in `StandInRuntime`:
+F-CI35a and F-CI35b in `asks_of`, and F-CI35c in `signed_asks`, each anchor a
+line task 035 added, found exactly once. Task 035 made `checked_launch` answer
+the name and the asks together, so `post_capsules` now reads
+`let (name, asks) = ...` and `Ok(self.launch(name, asks))`. The anchors and
+replacements of F-CI32a, F-CI32f and F-CI33a changed only by that: F-CI32a's
+stub is now `(String::from("stub"), None)`, and F-CI32f's and F-CI33a's
+`launch` calls take `asks` (F-CI32f's early call takes `None`). Their titles
+and tests are unchanged, and each anchor is still found exactly once.
+Task 036's F-CI36a edits `src/lib.rs`, in `CheckedBundle::manifest_name`, and
+F-CI36b edits `tests/common/mod.rs`, in the stand-in's `check_records`; each
+anchor is a line task 036 added, found exactly once. Task 036 moved seventeen
+older edits, each with its same bug and the same tests. `check_manifest` now
+returns the WASM flag and the manifest's `name`, and the seam reads
+`let (wasm, name) = check_manifest(&manifest.content)?;`, so F-CI1k, F-CI1l,
+F-CI3a, F-CI3b, F-CI3i and F-CI12a anchor on that line, F-CI1f and F-CI9c
+set an empty name beside the `false` flag, and F-CI1g's fallback returns
+`Ok((false, String::new()))`. `CheckedBundle` gained its `name` field, so
+F-CI9a, F-CI9b, F-CI9d, F-CI9e and F-CI9j build or define it with that field.
+The stand-in's record lookup moved into `check_records`, so F-CI32c now
+replaces the record check there and F-CI32d answers `Ok(())` where no record
+binds the CID. The stand-in imports neither `CapsuleManifest` nor
+`MANIFEST_FILE` now, so F-CI33a's planted code names both by their paths.
 
 ### The inventory check
 
@@ -1791,6 +1886,9 @@ F-CI28d and F-CI23e to F-CI23h each CAUGHT). At task 031 it reported
 edit, 0 do not`; F-CI31a and F-CI31b and F-CI29a to F-CI29e each CAUGHT).
 At task 032 it reported `summary: 251 CAUGHT of 251` (`baseline: 130 named
 tests pass without an edit, 0 do not`; with the id prefix `F-CI32`: 7 of 7).
+At task 036 it reported `summary: 259 CAUGHT of 259` (`baseline: 136 named
+tests pass without an edit, 0 do not`; with the id prefix `F-CI36`: 2 of 2,
+and the seventeen moved edits each CAUGHT).
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029,
 030, 031 and 032 prove each of their falsifiers by break, named test fails, revert.

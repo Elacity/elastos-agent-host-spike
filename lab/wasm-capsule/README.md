@@ -44,6 +44,8 @@ tools/src/receipt.rs  wc-005c's run receipt: `render` and `write_receipt`
 tools/src/bin/bundle.rs  the `bundle` binary: parse, run, print, exit status
 tests/                host-side named tests + the shape reader (never in the capsule)
   common/             build driver (and the copy layout) + minimal wasm shape reader
+                      (core Wasm and the `digest` signature only; it reads no imports,
+                      the zero-import check reads through `audit/`, task 053)
   bundle_builds/      small stand-in build scripts for `tools/bundle`'s tests
 falsifiers.json       planted bugs, each caught by a named test (provider format)
 rust-toolchain.toml   pins rustc 1.91.0 + the wasm target (for adoption)
@@ -1089,12 +1091,19 @@ No memory cap flag in its help. Searched `wasmer run --help` and
 `wasmer --help` (both exit 0) case-insensitively for `memory`, `grow`, `trap`,
 `limit`, `pages`, `max`, `heap`, `size`, `resource`, `rlimit` and `bytes`.
 `wasmer --help` matched none. `wasmer run --help` matched only lines about
-other things: `--enable-experimental-unaligned-memory-accesses`,
+other things, each in the help of one of these flags:
+`--enable-experimental-unaligned-memory-accesses`,
 `--enable-bulk-memory`, `--enable-multi-memory`, `--enable-memory64` (Wasm
-features), `--with-compact-on-growth` (journal compaction), a CPU back-off
-"maximum amount of time", and `--stack-size <STACK_SIZE>` with "Set the default
-stack size (default is 1048576)" (the stack, not linear memory). So this CLI
-gives no way to cap a module's linear memory, and a cap cannot be claimed for
+features), `--with-compact-on-growth` (journal compaction; its `grow` and
+`size` matches), `--enable-cpu-backoff`'s CPU back-off "maximum amount of
+time", `--stack-size <STACK_SIZE>` with "Set the default stack size (default
+is 1048576)" (the stack, not linear memory), `--skip-journal-stdio` with "Skip
+writes to stdout and stderr when replying journal events to bootstrap a
+module" (journal replay; `trap` matches inside "bootstrap"), and
+`--COREDUMP_PATH <COREDUMP_PATH>` with "Generate a coredump at this path if a
+WebAssembly trap occurs" (where to write a crash dump after a trap; it sets no
+limit). Task 060 re-ran each search and lists every matched line in LOG. So
+this CLI gives no way to cap a module's linear memory, and a cap cannot be claimed for
 wasmer. The contrast and start runs, engine path `/opt/homebrew/bin/wasmer`,
 from the same folder (stderr empty, 0 bytes, on each):
 
@@ -1499,13 +1508,32 @@ Searched `/opt/homebrew/bin/wasmer run --help` and
 `/opt/homebrew/bin/wasmer --help` (both exit 0) case-insensitively for
 `preload`, `import`, `link`, `module`, `host`, `use` and `env`. `wasmer --help`
 matched none of `preload`, `import`, `link`, `module` or `host`; its `use` and
-`env` matches are about logs, config and the registry login. In
+`env` matches are about logs (`--log-format`, `--log-events`), the `config`
+command and the `whoami` command (the registry login). In
 `wasmer run --help` no line matched `preload`; `import` matched only "Require
-WASI modules to only import 1 version of WASI" and "Enable experimental N-API
-imports for modules that require them"; the `module`, `host`, `use` and `env`
-matches are about other things (compile threads, folders and the CWD, network,
-journals, the cache, the webc entrypoint, and `--env <KEY=VALUE>`, "Pass
-custom environment variables", which is ambient, not an import). Two lines
+WASI modules to only import 1 version of WASI" (`--deny-multiple-wasi-versions`)
+and "Enable experimental N-API imports for modules that require them"
+(`--experimental-napi`); `link` matched only `--enable-module-linking`. The
+`module`, `host`, `use` and `env` matches are about other things than
+supplying an import, each in the help of one of these flags: Wasmer's own
+home and cache folders (`--wasmer-dir`, `--cache-dir`, `--disable-cache`), the
+registry and its token (`--registry`, `--token`), logs (`--log-format`,
+`--log-events`), the compiler and compile threads (`--cranelift`,
+`--experimental-artifact`, `--compiler-threads`), Wasm features
+(`--enable-multi-value`, whose text names host functions returning multiple
+values, and `--enable-module-linking`), folders and the CWD (`--volume`,
+`--cwd`), containers (`--use`), network (`--net`), threads and CPU back-off
+(`--enable-async-threads`, `--enable-cpu-backoff`), journals and snapshots
+(`--journal`, `--journal-writable`, `--snapshot-on`, `--stop-after-snapshot`,
+`--skip-journal-stdio`), the webc entrypoint (`--entrypoint`), the two
+`import` flags above, and the guest environment (the three flags below). Each
+`[env: NAME=]` line says which host variable sets that wasmer option, not a
+guest variable. Three flags give the guest environment variables:
+`--env <KEY=VALUE>`, "Pass custom environment variables"; `--env-file <PATH>`,
+"Load environment variables from a dotenv file"; and `--forward-host-env`,
+"Forward all host env variables to guest".
+All three are ambient, not imports: they hand the guest host environment.
+Task 060 re-ran each search and lists every matched line in LOG. Two lines
 look close, and each was tried once:
 
 ```text
@@ -1818,9 +1846,16 @@ Limits, not claimed:
 - `the_receipt_names_the_exact_toolchain` — receipt rustc/target match the build.
 - `receipt_hashes_match_artifact_and_lockfile` — receipt hashes match the files.
 - `built_capsule_has_the_required_wasm_shape` — core Wasm, zero imports, digest sig.
+  Task 053: the zero imports are read only through `wasm_capsule_audit::audit`
+  (`audit(&bytes, &[])` returns `Ok` with an empty list), the lab's one module
+  reader (P10); the shape reader checks only core Wasm and the `digest`
+  signature.
 - plus crafted-byte coverage of the shape reader. Task 037 removed task 032's
   three memory tests with the shape reader's memory parse: the shape reader
-  reads no memory.
+  reads no memory. Task 053 removed its import count: it reads no imports, and
+  `refuses_a_module_with_an_import_section` (in place of
+  `counts_an_import_and_is_not_the_required_shape`) holds its one exact refusal
+  of a module with an import section, which names `wasm_capsule_audit::audit`.
 
 The lab name, in `tests/lab_cid.rs` (through `wasm_capsule_tools::bundle_identity`):
 
@@ -1837,6 +1872,11 @@ The lab name, in `tests/lab_cid.rs` (through `wasm_capsule_tools::bundle_identit
   `lab_cid_observed`, `checked_bundle_observed`, `encode_entries`) are named by
   the one export line only. wc-004's imports of the checked bundle and the name
   signature are allowed. If git cannot run, it fails.
+- `the_lane_tests_list_files_in_one_place` (task 056) — of the lane's listed
+  `.rs` files under `tests/` and `tools/` (not `audit/`, cx-wasm-audit's
+  crate), only `tests/common/build.rs` runs git's file lister, and only once:
+  `lane_paths` there is the lane tests' one lister (P10). A failure names each
+  file and line where the quoted lister word appears.
 
 `tools/bundle`, in `tests/bundle.rs`:
 
@@ -1948,7 +1988,8 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
   `imports()` is `[env.f]`, `unused_grants()` is `[z.last, a.first]`, and the
   lab CID and the entries are the bundle's own two files.
 - `no_key_material_is_tracked_in_the_lane` — every file `git ls-files
-  --cached --others --exclude-standard -z` lists in the lane: no `.key` or
+  -z --cached --others --exclude-standard` lists in the lane, from the one
+  shared lister, `lane_paths` in `tests/common/build.rs` (task 056): no `.key` or
   `.seed` name, no PEM private-key line, no 32-byte file that is not UTF-8.
   The name is checked before any read, and a listed file that cannot be read
   is a finding with its path and cause, never skipped: a key file still in
@@ -2120,7 +2161,8 @@ Task 019's two:
 - `readme_falsifier_total_matches_falsifiers_json` (`tests/docs.rs`) — counts
   the `"falsifiers"` entries with `serde_json`, finds the total sentence that
   opens "## Falsifiers" exactly once, and fails naming both numbers when they
-  differ.
+  differ. Since task 052 it also finds the one "outside the N" in that
+  section and fails naming both numbers when N is not the total.
 
 wc-009a's run tests (task 020), in `tests/run.rs`. Each signs its bundle with a
 fresh key, writes a lab grants file beside the bundle, reads it with
@@ -2458,31 +2500,33 @@ gives `67108864` on both (`real_receipt_names_both_installed_engines`).
 
 ## Falsifiers
 
-`falsifiers.json` holds 185 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 189 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
 seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
 031, two task 032, one task 035, three task 036, five task 038, three task
 039, one task 040, one task 041, two task 043, one task 044, one task
-033, two task 034, one task 045, two task 046 and one task 050.
+033, two task 034, one task 045, two task 046, one task 050, three task
+052 and one task 056.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 121, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 125, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046 and 050: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
-+ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1), each run by the canonical runner with its summary
+029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046, 050, 052 and 056: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
++ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1 + 3 + 1), each run by the canonical runner with its summary
 line quoted.
-Hand-proven, pending R1: 68, each counted once: the 64 entries of the sections
+Hand-proven, pending R1: 69, each counted once: the 64 entries of the sections
 marked so (wc-001, tasks 010 and 009, wc-004 and wc-008: 9 + 7 + 23 + 21 + 4),
-and four proofs with no `falsifiers.json` entry, outside the 184 (task 036's
+and five proofs with no `falsifiers.json` entry, outside the 189 (task 036's
 `/bin/bash` 3.2 guard in `tests/reproducible.rs`, task 042's killed-run
-stop and task 049's two environment record proofs in `tests/run.rs`; neither
-file is a recovery target, so a proof that edits one is a hand proof), each
+stop and task 049's two environment record proofs in `tests/run.rs`, and task
+053's import-section refusal in `tests/common/wasm_shape.rs`; none of these
+files is a recovery target, so a proof that edits one is a hand proof), each
 proved by the repo's break →
 named test fails → revert method with `cargo test` in this workspace. Their
 labels stay until each is run by the canonical runner and its summary line is
@@ -2846,19 +2890,17 @@ entry's one named test fails at its assertion:
 Task 026 also re-anchored F-WC-README-COUNT to the new total, the same bug as
 before.
 
-Task 026's five planted bugs outside `README.md`, each hand-proven, pending R1
-(`ADOPTION.md` and `tools/src/run.rs` are not recovery targets, so they have no
-`falsifiers.json` entry and are outside every count above; LOG.md, task 026):
+Task 026's two planted bugs in `tools/src/run.rs` are runner-caught since task
+052; they are listed under "Task 052's three, runner-caught" below. Task 026's
+three planted bugs in `ADOPTION.md`, each hand-proven, pending R1
+(`ADOPTION.md` is not a recovery target, so they have no `falsifiers.json`
+entry and are outside every count above; LOG.md, task 026):
 
 - F-WC-ENGINE-ADOPTION — ADOPTION loses the engine ruling
   (`engines_are_labelled_test_only_not_endorsed`, which says "not endorsed",
   at its count assertion).
 - F-WC-ENDORSE-ADOPTION — ADOPTION's "not endorsed" claim-scope line goes back
   to the base's wording (that test, at its line assertion).
-- F-WC-ENGINE-RUN-MODULE-DOC and F-WC-ENGINE-RUN-ENUM-DOC — the module doc, or
-  the doc on `pub enum Engine`, in `tools/src/run.rs` goes back to the base's
-  wording, so it no longer says "test-only, not endorsed" (that test, at its
-  module-doc or enum-doc assertion).
 - F-WC9B0-ADOPTION — ADOPTION loses the discovery-only ruling
   (`hosting_discovery_is_not_the_import_path`, at its ADOPTION assertion).
 
@@ -2937,9 +2979,11 @@ LOG.md, task 029). Each bug was first planted by hand in an earlier task; it
 gets its entry now that its file is a recovery target (R2 done). Each named
 test fails at its assertion:
 
-- F-WC3-LANE-FILES-QUOTED — `lane_files` in `tests/lab_cid.rs` drops `-z`
-  and splits git's listing by line, so a name git quotes (`review"note.md`) is
-  read under its quoted form and skipped (task 018's bug;
+- F-WC3-LANE-FILES-QUOTED — the lister drops `-z` and splits git's listing by
+  line, so a name git quotes (`review"note.md`) is read by `lane_files` under
+  its quoted form and skipped. Since task 056 both edits are in the one shared
+  lister, `lane_paths` in `tests/common/build.rs`; before, they were in
+  `lane_files` in `tests/lab_cid.rs` (task 018's bug;
   `lane_files_reads_names_git_would_quote`, "lane_files did not list every file
   under its real name").
 - F-WC9-RUN-DROPS-GRANTS — `run` in `tools/src/run.rs` passes `&[]` in place
@@ -3298,3 +3342,61 @@ F-WC5-RECEIPT-OVERWRITE (its planted `fs::write` builds the renamed
 new total. The canonical runner reports all six CAUGHT (LOG.md, task 050). Each
 keeps its own evidence label above: F-WC3-IO-CAUSE-MANIFEST and -WRITE stay in
 task 009's hand-proven count, and this task changes no label.
+
+Task 052's three, runner-caught (the canonical runner's summary line is in
+LOG.md, task 052). Two were planted by hand in task 026 and get their entries
+now: `tools/src/run.rs` has been a recovery target since provider 026 (PR
+#242), which merged before task 026 did, so task 026's reason for leaving them
+out did not hold. Each anchor is found exactly once, and each named test fails
+at its assertion:
+
+- F-WC-ENGINE-RUN-MODULE-DOC — the module doc of `tools/src/run.rs` goes back
+  to the base's wording, so no module doc line says "test-only, not endorsed"
+  (`engines_are_labelled_test_only_not_endorsed`, which says "not endorsed",
+  at its module-doc assertion).
+- F-WC-ENGINE-RUN-ENUM-DOC — the doc on `pub enum Engine` goes back to the
+  base's wording, so it no longer says "test-only, not endorsed" (that test, at
+  its enum-doc assertion).
+- F-WC-README-OUTSIDE-COUNT — the hand-proven sentence's "outside the N"
+  becomes one less than the file holds, the stale figure task 050 left
+  (`readme_falsifier_total_matches_falsifiers_json`, at its "outside the N"
+  comparison).
+
+Task 052 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before, and keeps its runner-caught label above.
+
+Task 053's one, hand-proven, pending R1 (LOG.md, task 053). It has no
+`falsifiers.json` entry and is kept out of the runner-caught total:
+`tests/common/wasm_shape.rs` is not a recovery target. It is the fifth proof
+with no entry in the hand-proven sentence above (69):
+
+- The shape reader's section-2 arm goes back to skipping the section
+  (`2 => {}`), so a module with an import section is read, not refused
+  (`refuses_a_module_with_an_import_section`, at its exact-reason assertion).
+
+Task 053 also moves `built_capsule_has_the_required_wasm_shape`'s zero-import
+check onto `wasm_capsule_audit::audit`. The canonical runner reports
+F-WC1-IMPORT and F-WC1-SIG CAUGHT (LOG.md, task 053), and F-WC1-IMPORT is now
+caught by the audit assertion, which names `env.host_entropy`. No entry
+changes (both anchors are in `capsule/src/lib.rs`), and this task changes no
+label: both stay in wc-001's hand-proven count.
+
+Task 056's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 056). The lane tests now list git's files through one lister,
+`lane_paths` in `tests/common/build.rs` (P10): `lane_files` (the guards; it
+skips a gone file and the runner's backups) and the key scan (it reports a
+gone file) both call it. The anchor is found exactly once, and the named test
+fails at its assertion:
+
+- F-WC3-SECOND-LISTER — the key scan in `no_key_material_is_tracked_in_the_lane`
+  (`tests/verify.rs`) runs its own inline `git ls-files` lister again in place
+  of `lane_paths` (`the_lane_tests_list_files_in_one_place`, which names
+  `tests/verify.rs` and its line).
+
+Task 056 also moves F-WC3-LANE-FILES-QUOTED's two edits into
+`tests/common/build.rs` (the same bug, now in the shared lister; it keeps task
+029's runner-caught label), and re-anchors F-WC-README-COUNT and
+F-WC-README-OUTSIDE-COUNT to the new total, each the same bug as before. The
+canonical runner reports F-WC3-LANE-FILES-QUOTED, F-WC4-SCAN-SKIP-MISSING,
+F-WC4-SCAN-NAME-AFTER-READ, F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT
+CAUGHT (LOG.md, task 056). This task changes no other label.

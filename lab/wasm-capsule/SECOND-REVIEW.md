@@ -233,18 +233,33 @@ Lane diff: `git diff a5b4e8a10^1 a5b4e8a10 -- lab/wasm-capsule/` (10 files,
     F-WC-README-COUNT`, which select F-WC4-SEALED-NEW: "summary: 1 BUILD
     FAILED, 93 CAUGHT of 94". The one not caught was F-WC5a, caught after a
     fourth edit ("1 CAUGHT of 1").
-  - Task 047's run at dc78bca5b (below). It named 22 ids: the 18 `F-WC9-*` ids
-    now in the list and 020's four re-anchored entries, F-WC4-SEALED-NEW
-    included, and not F-WC-README-COUNT: "summary: 22 CAUGHT of 22", exit 0.
-    So on a tree that holds 025's merged change, F-WC4-SEALED-NEW was first
-    run by the canonical runner in 047's run.
-  - Task 051's re-run of the same 22 ids at 720cdde57 (below, "Re-run at
-    720cdde57"): "summary: 22 CAUGHT of 22", exit 0.
+  - Task 027's run, the first canonical run on a tree that holds 025's merged
+    change whose list selects F-WC4-SEALED-NEW. Task 027 ran at base
+    `f92fe85970ad0898be4f5247cf580b1f5eaf4bda` and merged as PR #254, merge
+    `c5f50b08a`. `git merge-base --is-ancestor a5b4e8a10 c5f50b08a` exits 0,
+    and so does `git merge-base --is-ancestor a5b4e8a10 f92fe8597` (027's
+    base). Its round-1 LOG entry, `git show dc78bca5b:lab/wasm-capsule/LOG.md`
+    lines 501-505 (the same lines at `c5f50b08a`), names 13 ids:
+    `F-WC10-CAP-IGNORED F-WC10-CAP-FIXED F-WC10-NO-TRAP F-WC10-CAP-OVERFLOW F-WC10-CAP-NOT-READ
+    F-WC10-WASMER-FLAG F-WC5-START-TWICE F-WC5a F-WC5-BYPASS-RUN-ENGINE
+    F-WC4-ORDER-AUDIT-FIRST F-WC4-ENTRYPOINT-REPARSE F-WC4-SEALED-NEW
+    F-WC-README-COUNT`, and records `"baseline: 11 named tests pass without an
+    edit, 0 do not", "summary: 13 CAUGHT of 13", exit 0`. No earlier one: of
+    the lane's merges between `a5b4e8a10` and `c5f50b08a`, tasks 021 (#238)
+    and 022 (#240) log no runner run, task 023 (#241) logs hand proofs only,
+    and task 026 (#245) runs eight ids, none of which selects
+    F-WC4-SEALED-NEW.
+  - Task 047's run at dc78bca5b (below), a later run. It named 22 ids: the 18
+    `F-WC9-*` ids now in the list and 020's four re-anchored entries,
+    F-WC4-SEALED-NEW included, and not F-WC-README-COUNT: "summary: 22 CAUGHT
+    of 22", exit 0.
+  - Task 051's re-run of the same 22 ids on the tree 720cdde57 (below, "Re-run
+    at 720cdde57"): "summary: 22 CAUGHT of 22", exit 0.
 
   This bullet used to say the merge's 21-of-21 run covered all four of 020's
   re-anchored entries; it did not. The verdict stays PASS, because the promise
   still holds at a base: every entry it names is runner-caught at dc78bca5b by
-  047's run, and at 720cdde57 by 051's re-run. The miss was in the merge's
+  047's run, and on the tree 720cdde57 by 051's re-run. The miss was in the merge's
   record of its run, not in the merged code: the merge's `falsifiers.json` is
   the same blob as at `5f3d23418` (promise 1).
 - Promise 5: README keeps the link rule in Rong's words, the grants file
@@ -304,14 +319,20 @@ exit 0
 Each of the 22 entries printed CAUGHT. After the run, `git status --short`
 printed nothing, and no `*.falsify-original` backup was left in the lane.
 
-Re-run at 720cdde57. Task 051 ran the same 22 ids at its base
+Re-run at 720cdde57. Task 051 ran the same 22 ids on the tree
 `720cdde578bfcd1063069a8d717f3baf5c8a979f` (`720cdde57`, the merge of 048's
 PR #621), from the repo root, with this file as the only change in the tree.
-All 22 ids are still in the list (184 entries), so no merge removed one. The
-runner ran only while holding the shared build lease (`fcntl.flock` on
-`/Users/sash/code/elastos-runtime/.git/local-ai-heavy-build.lock`), with the
-wait bounded at 1500 s. The first try timed out on that wait and ran nothing;
-the second took the lease after 135 s:
+That tree is not the parent of 051's commit: `67309348b` has parent
+`9c382b0c6444edeb7244bfcc4b3f75362daae65f` (`9c382b0c6`, the merge of task
+050's PR #650). `falsifiers.json` holds 184 entries at 720cdde57 and 185 at
+9c382b0c6. Both counts come from
+`git show <commit>:lab/wasm-capsule/falsifiers.json | grep -c '"id"'`, and
+`python3 -I -c` printing `len(json.load(sys.stdin)["falsifiers"])` over the
+same output gives the same two numbers. All 22 ids are still in the list, so
+no merge removed one. The runner ran only while holding the shared build lease
+(`.git/local-ai-heavy-build.lock` in the main checkout, taken with
+`fcntl.flock`), with the wait bounded at 1500 s. The first try timed out on
+that wait and ran nothing; the second took the lease after 135 s:
 
 ```
 $ RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py \
@@ -327,6 +348,32 @@ showed only this file, and no `*.falsify-original` backup was left in the lane.
 No finding. Every promise held at the merge. The later changes to the format,
 the test grants and one label were made on purpose by tasks 029, 031 and 039,
 and none of them broke 025's promises.
+
+### Re-run at 73f5fc35f
+
+Task 054 ran the same 22 ids at its base
+`73f5fc35f141b9f9a28a07d0d090edda57bdb365` (`73f5fc35f`, the merge of
+cu-bus-v2-proposal 079's PR #678), from the repo root, with this file as the
+only change in the tree. The tree was task 054's round-1 commit `7baed3aee`,
+whose parent is 73f5fc35f and whose only changed file is this one
+(`git diff --name-only 73f5fc35f 7baed3aee`). This section was rewritten only
+after the run. `falsifiers.json` holds 188 entries at 73f5fc35f
+(`git show 73f5fc35f:lab/wasm-capsule/falsifiers.json | grep -c '"id"'`, and
+the same `python3 -I -c` count), and all 22 ids are in it. The runner ran only
+while holding the shared build lease (`.git/local-ai-heavy-build.lock` in the
+main checkout, taken with `fcntl.flock`), with the wait bounded at 1500 s. It
+took the lease after 50 s:
+
+```
+$ RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py \
+    --from lab/wasm-capsule/falsifiers.json <the same 22 ids as above>
+baseline: 10 named tests pass without an edit, 0 do not
+summary: 22 CAUGHT of 22
+exit 0
+```
+
+Each of the 22 entries printed CAUGHT. After the run, `git status --short`
+printed nothing, and no `*.falsify-original` backup was left in the lane.
 
 ## PR #238 (task 021), merge 3a4d2812a
 
@@ -558,7 +605,8 @@ Lane diff: `git diff 33cbed8c5^1 33cbed8c5 -- lab/wasm-capsule/` (4 files,
   assertion lines of the test at the merge. It also records the restore
   (`shasum -a 256` equal to the fixed file). `falsifiers.json` is the
   runner's input, not a recovery target, at the merge and at 43b4af944
-  (`examples/agent-host/falsify.py:339-359` lists no `falsifiers.json`), so a
+  (`PROVIDER_TARGETS`, `examples/agent-host/falsify.py:291-325` at 33cbed8c5
+  and `:323-383` at 43b4af944, lists no `falsifiers.json`), so a
   hand proof is the only kind possible. This review re-proved one of the
   eight at 43b4af944 (below).
 - Promise 4: one README sentence saying "## Falsifiers" is the one place for

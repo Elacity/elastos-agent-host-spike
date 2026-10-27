@@ -1,7 +1,9 @@
 //! M1 check B1 through the lab stand-in launcher, `StandInRuntime` in
 //! `common`: a launch names the bundle by its lab CID only, and the stand-in
 //! recomputes the CID from the stored bytes and checks the publisher's
-//! signed package record before anything is launched. The stand-in is a lab
+//! signed package record before anything is launched. A launched instance is
+//! handed only the `asks.json` bytes of the checked, signed bundle (M1 check
+//! B2, the part with no schema and no parse). The stand-in is a lab
 //! stand-in for the Runtime's launch route, not the Runtime: it runs nothing,
 //! and these tests say nothing about what the Runtime does.
 mod common;
@@ -266,6 +268,61 @@ fn standin_refuses_an_unsigned_or_mismatched_bundle_before_launch() {
     assert_refused(&mut stand_in, &launch_body(), &own, "(g3)");
 }
 
+#[test]
+fn standin_launch_does_not_depend_on_record_order() {
+    // Several package records can bind one CID. The launch goes on when at
+    // least one of them passes the record check, whatever their order.
+    let published = publish_agent_host();
+    let accepted_key = fresh_signing_key();
+    let accepted_record = sign(&accepted_key, &published.folder);
+    let unaccepted_record = sign(&fresh_signing_key(), &published.folder);
+    for (records, case) in [
+        (
+            vec![unaccepted_record.clone(), accepted_record.clone()],
+            "[unaccepted, accepted]",
+        ),
+        (
+            vec![accepted_record.clone(), unaccepted_record.clone()],
+            "[accepted, unaccepted]",
+        ),
+    ] {
+        let mut stand_in = StandInRuntime::new(
+            [published.entry.clone()],
+            records,
+            vec![did_of(&accepted_key)],
+        );
+        let answer = stand_in
+            .post_capsules(&launch_body())
+            .unwrap_or_else(|(status, reason)| panic!("{case}: refused with {status}: {reason}"));
+        assert_eq!(answer["status"], "launched", "{case}");
+        let listed = listed_instances(&stand_in);
+        assert_eq!(listed.len(), 1, "{case}: exactly one instance");
+        assert_eq!(listed[0]["id"], answer["id"], "{case}");
+    }
+
+    // When no record passes, the answer is the first one's own refusal, in
+    // store order, and nothing is launched.
+    let first = sign(&fresh_signing_key(), &published.folder);
+    let second = sign(&fresh_signing_key(), &published.folder);
+    assert_ne!(first.signer_did, second.signer_did);
+    let accepted = vec![did_of(&accepted_key)];
+    let own = verify_checked_package_record(&checked(&published.folder), &first, &accepted)
+        .expect_err("not accepted")
+        .to_string();
+    assert_eq!(
+        own,
+        format!("signer {} is not in the accepted list", first.signer_did)
+    );
+    let mut stand_in =
+        StandInRuntime::new([published.entry.clone()], vec![first, second], accepted);
+    assert_refused(
+        &mut stand_in,
+        &launch_body(),
+        &own,
+        "two unaccepted signers",
+    );
+}
+
 /// Launch the published `agent-host` by its CID; the answer must hold
 /// exactly 032's keys.
 fn launched(stand_in: &mut StandInRuntime) -> Value {
@@ -375,4 +432,121 @@ fn standin_grant_view_lists_a_seeded_grant() {
 
     // The seed is not a launch: the instance list is unchanged.
     assert_eq!(listed_instances(&stand_in).len(), 1);
+}
+
+/// Change one byte of the stored `asks.json` in `folder`; the changed bytes.
+fn change_stored_asks(folder: &Path) -> Vec<u8> {
+    let asks = folder.join("asks.json");
+    let mut bytes = fs::read(&asks).expect("read asks.json");
+    bytes[0] ^= 1;
+    fs::write(&asks, &bytes).expect("write asks.json");
+    bytes
+}
+
+#[test]
+fn standin_hands_an_instance_only_its_signed_asks_bytes() {
+    let published = publish_agent_host();
+    let (mut stand_in, _) = signed_stand_in(&published);
+    let signed = read_fixture(&AGENT_HOST, "asks.json");
+
+    let answer = launched(&mut stand_in);
+    let session = answer["session_id"].as_str().expect("a session id");
+    assert_eq!(
+        stand_in.asks_of(session),
+        Some(signed.clone()),
+        "the instance is handed the committed asks.json bytes"
+    );
+
+    // One byte of the stored asks.json changes after the launch.
+    let changed = change_stored_asks(&published.folder);
+    assert_ne!(changed, signed);
+    assert_eq!(
+        stand_in.asks_of(session),
+        Some(signed),
+        "a change on disk after launch must not reach the instance"
+    );
+
+    // A second launch of the same CID is refused by case (e), the name
+    // compare's own refusal, and leaves no new instance and no grant.
+    let now = named(&published.folder).to_string();
+    assert_ne!(now, AGENT_HOST_LAB_CID);
+    let compare = checked(&published.folder)
+        .check_name(AGENT_HOST_LAB_CID)
+        .expect_err("the bytes changed")
+        .to_string();
+    assert!(compare.contains(AGENT_HOST_LAB_CID) && compare.contains(&now));
+    assert_eq!(
+        stand_in.post_capsules(&launch_body()),
+        Err((400, compare)),
+        "(e) after the change"
+    );
+    assert_eq!(listed_instances(&stand_in).len(), 1, "no new instance");
+    assert_eq!(grant_view(&stand_in), Vec::<Value>::new(), "no grant");
+}
+
+#[test]
+fn standin_gives_each_session_its_own_asks() {
+    let agent_host = publish_agent_host();
+    let parent = temp_dir();
+    let web_app = parent.path().join("web-app");
+    assemble_at(&WEB_APP, &web_app);
+    let web_entry = published(&web_app);
+    assert_eq!(web_entry.0, WEB_APP_LAB_CID, "the fixture's pin");
+    assert!(
+        checked(&web_app)
+            .entries()
+            .iter()
+            .all(|entry| entry.path != "asks.json"),
+        "web-app has no asks.json"
+    );
+    let signed = read_fixture(&AGENT_HOST, "asks.json");
+
+    for order in [
+        [AGENT_HOST_LAB_CID, WEB_APP_LAB_CID],
+        [WEB_APP_LAB_CID, AGENT_HOST_LAB_CID],
+    ] {
+        let case = format!("launched in the order {order:?}");
+        let key = fresh_signing_key();
+        let records = vec![sign(&key, &agent_host.folder), sign(&key, &web_app)];
+        let mut stand_in = StandInRuntime::new(
+            [agent_host.entry.clone(), web_entry.clone()],
+            records,
+            vec![did_of(&key)],
+        );
+        let mut sessions = Vec::new();
+        for cid in order {
+            let answer = stand_in
+                .post_capsules(&json!({ "cid": cid }))
+                .unwrap_or_else(|(status, reason)| {
+                    panic!("{case}: refused with {status}: {reason}")
+                });
+            assert_eq!(keys(&answer), ["id", "name", "session_id", "status"]);
+            let session = answer["session_id"].as_str().expect("a session id");
+            sessions.push((cid, session.to_owned()));
+        }
+        let session_of = |wanted: &str| {
+            sessions
+                .iter()
+                .find(|(cid, _)| *cid == wanted)
+                .map(|(_, session)| session.clone())
+                .expect("launched")
+        };
+        assert_eq!(
+            stand_in.asks_of(&session_of(AGENT_HOST_LAB_CID)),
+            Some(signed.clone()),
+            "{case}: agent-host's session answers its own asks.json bytes"
+        );
+        assert_eq!(
+            stand_in.asks_of(&session_of(WEB_APP_LAB_CID)),
+            None,
+            "{case}: web-app has no asks.json, so its session answers none"
+        );
+        assert_eq!(
+            stand_in.asks_of("no-such-session"),
+            None,
+            "{case}: an unknown session answers none"
+        );
+        assert_eq!(listed_instances(&stand_in).len(), 2, "{case}");
+        assert_eq!(grant_view(&stand_in), Vec::<Value>::new(), "{case}");
+    }
 }

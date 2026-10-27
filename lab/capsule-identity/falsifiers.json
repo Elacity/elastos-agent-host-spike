@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032 and 033). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035 and 036). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -94,8 +94,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let manifest = entries\n        .iter()\n        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n    let wasm = check_manifest(&manifest.content)?;\n",
-          "new": "    let mut wasm = false;\n    if let Some(manifest) = entries.iter().find(|entry| entry.path == MANIFEST_FILE) {\n        wasm = check_manifest(&manifest.content)?;\n    }\n"
+          "old": "    let manifest = entries\n        .iter()\n        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n    let (wasm, name) = check_manifest(&manifest.content)?;\n",
+          "new": "    let (mut wasm, mut name) = (false, String::new());\n    if let Some(manifest) = entries.iter().find(|entry| entry.path == MANIFEST_FILE) {\n        (wasm, name) = check_manifest(&manifest.content)?;\n    }\n"
         }
       ],
       "tests": [
@@ -111,7 +111,7 @@
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
           "old": "    let manifest: CapsuleManifest = serde_json::from_slice(bytes)\n        .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;\n",
-          "new": "    let Ok(manifest) = serde_json::from_slice::<CapsuleManifest>(bytes) else {\n        serde_json::from_slice::<serde_json::Value>(bytes)\n            .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;\n        return Ok(false);\n    };\n"
+          "new": "    let Ok(manifest) = serde_json::from_slice::<CapsuleManifest>(bytes) else {\n        serde_json::from_slice::<serde_json::Value>(bytes)\n            .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;\n        return Ok((false, String::new()));\n    };\n"
         }
       ],
       "tests": [
@@ -179,8 +179,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let wasm = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    let wasm = check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path != MANIFEST_FILE)\n        .collect();\n    encode_entries(&entries)\n"
+          "old": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path != MANIFEST_FILE)\n        .collect();\n    encode_entries(&entries)\n"
         }
       ],
       "tests": [
@@ -196,8 +196,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let wasm = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    let wasm = check_manifest(&manifest.content)?;\n    let entrypoint = serde_json::from_slice::<CapsuleManifest>(&manifest.content)\n        .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?\n        .entrypoint;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path == MANIFEST_FILE || entry.path == entrypoint)\n        .collect();\n    encode_entries(&entries)\n"
+          "old": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    let entrypoint = serde_json::from_slice::<CapsuleManifest>(&manifest.content)\n        .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?\n        .entrypoint;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path == MANIFEST_FILE || entry.path == entrypoint)\n        .collect();\n    encode_entries(&entries)\n"
         }
       ],
       "tests": [
@@ -545,8 +545,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let wasm = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    let wasm = check_manifest(&manifest.content)?;\n    let folder = bundle.file_name().unwrap_or_default().to_string_lossy();\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .map(|entry| BundleEntry {\n            path: format!(\"{folder}/{}\", entry.path),\n            content: entry.content,\n        })\n        .collect();\n    encode_entries(&entries)\n"
+          "old": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    let folder = bundle.file_name().unwrap_or_default().to_string_lossy();\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .map(|entry| BundleEntry {\n            path: format!(\"{folder}/{}\", entry.path),\n            content: entry.content,\n        })\n        .collect();\n    encode_entries(&entries)\n"
         }
       ],
       "tests": [
@@ -561,8 +561,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let wasm = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    let wasm = check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .map(|entry| BundleEntry {\n            path: bundle\n                .join(&entry.path)\n                .to_string_lossy()\n                .trim_start_matches('/')\n                .to_owned(),\n            content: entry.content,\n        })\n        .collect();\n    encode_entries(&entries)\n"
+          "old": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .map(|entry| BundleEntry {\n            path: bundle\n                .join(&entry.path)\n                .to_string_lossy()\n                .trim_start_matches('/')\n                .to_owned(),\n            content: entry.content,\n        })\n        .collect();\n    encode_entries(&entries)\n"
         }
       ],
       "tests": [
@@ -652,8 +652,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let wasm = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    let wasm = check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path != \"asks.json\")\n        .collect();\n    encode_entries(&entries)\n"
+          "old": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path != \"asks.json\")\n        .collect();\n    encode_entries(&entries)\n"
         }
       ],
       "tests": [
@@ -782,8 +782,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "        .map(|cid| CheckedBundle { cid, entries, wasm })\n",
-          "new": "        .and_then(|cid| {\n            let entries = entries\n                .into_iter()\n                .map(|entry| {\n                    let content = std::fs::read(bundle.join(&entry.path))\n                        .map_err(|error| unreadable(&entry.path, error))?;\n                    Ok(BundleEntry {\n                        path: entry.path,\n                        content,\n                    })\n                })\n                .collect::<Result<Vec<_>, Refusal>>()?;\n            Ok(CheckedBundle { cid, entries, wasm })\n        })\n"
+          "old": "        .map(|cid| CheckedBundle {\n            cid,\n            entries,\n            wasm,\n            name,\n        })\n",
+          "new": "        .and_then(|cid| {\n            let entries = entries\n                .into_iter()\n                .map(|entry| {\n                    let content = std::fs::read(bundle.join(&entry.path))\n                        .map_err(|error| unreadable(&entry.path, error))?;\n                    Ok(BundleEntry {\n                        path: entry.path,\n                        content,\n                    })\n                })\n                .collect::<Result<Vec<_>, Refusal>>()?;\n            Ok(CheckedBundle {\n                cid,\n                entries,\n                wasm,\n                name,\n            })\n        })\n"
         }
       ],
       "tests": [
@@ -799,8 +799,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "        .map(|cid| CheckedBundle { cid, entries, wasm })\n",
-          "new": "        .map(|cid| CheckedBundle {\n            cid,\n            entries: entries\n                .into_iter()\n                .filter(|entry| entry.path != MANIFEST_FILE)\n                .collect(),\n            wasm,\n        })\n"
+          "old": "        .map(|cid| CheckedBundle {\n            cid,\n            entries,\n            wasm,\n            name,\n        })\n",
+          "new": "        .map(|cid| CheckedBundle {\n            cid,\n            entries: entries\n                .into_iter()\n                .filter(|entry| entry.path != MANIFEST_FILE)\n                .collect(),\n            wasm,\n            name,\n        })\n"
         }
       ],
       "tests": [
@@ -815,8 +815,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let manifest = entries\n        .iter()\n        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n    let wasm = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    let wasm = false;\n    encode_entries(&entries)\n"
+          "old": "    let manifest = entries\n        .iter()\n        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n    let (wasm, name) = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    let (wasm, name) = (false, String::new());\n    encode_entries(&entries)\n"
         },
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
@@ -837,8 +837,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "pub struct CheckedBundle {\n    cid: LabCid,\n    entries: Vec<BundleEntry>,\n    wasm: bool,\n}\n",
-          "new": "pub struct CheckedBundle {\n    cid: LabCid,\n    pub entries: Vec<BundleEntry>,\n    wasm: bool,\n}\n"
+          "old": "pub struct CheckedBundle {\n    cid: LabCid,\n    entries: Vec<BundleEntry>,\n    wasm: bool,\n    name: String,\n}\n",
+          "new": "pub struct CheckedBundle {\n    cid: LabCid,\n    pub entries: Vec<BundleEntry>,\n    wasm: bool,\n    name: String,\n}\n"
         }
       ],
       "tests": [
@@ -854,7 +854,7 @@
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
           "old": "impl CheckedBundle {\n",
-          "new": "impl CheckedBundle {\n    pub fn new(cid: LabCid, entries: Vec<BundleEntry>) -> Self {\n        Self { cid, entries, wasm: false }\n    }\n\n"
+          "new": "impl CheckedBundle {\n    pub fn new(cid: LabCid, entries: Vec<BundleEntry>) -> Self {\n        Self {\n            cid,\n            entries,\n            wasm: false,\n            name: String::new(),\n        }\n    }\n\n"
         }
       ],
       "tests": [
@@ -936,13 +936,13 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "pub struct CheckedBundle {\n    cid: LabCid,\n    entries: Vec<BundleEntry>,\n    wasm: bool,\n}\n",
-          "new": "pub struct CheckedBundle {\n    cid: LabCid,\n    entries: Vec<BundleEntry>,\n    wasm: bool,\n    bundle: std::path::PathBuf,\n}\n"
+          "old": "pub struct CheckedBundle {\n    cid: LabCid,\n    entries: Vec<BundleEntry>,\n    wasm: bool,\n    name: String,\n}\n",
+          "new": "pub struct CheckedBundle {\n    cid: LabCid,\n    entries: Vec<BundleEntry>,\n    wasm: bool,\n    name: String,\n    bundle: std::path::PathBuf,\n}\n"
         },
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "        .map(|cid| CheckedBundle { cid, entries, wasm })\n",
-          "new": "        .map(|cid| CheckedBundle {\n            cid,\n            entries,\n            wasm,\n            bundle: bundle.to_path_buf(),\n        })\n"
+          "old": "        .map(|cid| CheckedBundle {\n            cid,\n            entries,\n            wasm,\n            name,\n        })\n",
+          "new": "        .map(|cid| CheckedBundle {\n            cid,\n            entries,\n            wasm,\n            name,\n            bundle: bundle.to_path_buf(),\n        })\n"
         },
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
@@ -2005,8 +2005,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let wasm = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    let wasm = check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path != \"weights.gguf\")\n        .collect();\n    encode_entries(&entries)\n"
+          "old": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path != \"weights.gguf\")\n        .collect();\n    encode_entries(&entries)\n"
         }
       ],
       "tests": [
@@ -4061,8 +4061,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        let name = self.checked_launch(body).map_err(|reason| (400, reason))?;\n",
-          "new": "        let name = String::from(\"stub\");\n"
+          "old": "        let (name, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;\n",
+          "new": "        let (name, asks) = (String::from(\"stub\"), None);\n"
         }
       ],
       "tests": [
@@ -4094,8 +4094,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        verify_checked_package_record(&checked, record, &self.accepted).map_err(said)?;\n",
-          "new": ""
+          "old": "            match verify_checked_package_record(checked, record, &self.accepted) {\n",
+          "new": "            match Ok::<(), Refusal>(()) {\n"
         }
       ],
       "tests": [
@@ -4110,8 +4110,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "            .ok_or_else(|| format!(\"unsigned: no package record binds {cid}\"))?;\n        verify_checked_package_record(&checked, record, &self.accepted).map_err(said)?;\n",
-          "new": "            ;\n        if let Some(record) = record {\n            verify_checked_package_record(&checked, record, &self.accepted).map_err(said)?;\n        }\n"
+          "old": "            None => Err(format!(\"unsigned: no package record binds {cid}\")),\n",
+          "new": "            None => Ok(()),\n"
         }
       ],
       "tests": [
@@ -4147,8 +4147,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        let name = self.checked_launch(body).map_err(|reason| (400, reason))?;\n        Ok(self.launch(name))\n",
-          "new": "        self.launch(String::new());\n        let name = self.checked_launch(body).map_err(|reason| (400, reason))?;\n        self.instances.pop();\n        Ok(self.launch(name))\n"
+          "old": "        let (name, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;\n        Ok(self.launch(name, asks))\n",
+          "new": "        self.launch(String::new(), None);\n        let (name, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;\n        self.instances.pop();\n        Ok(self.launch(name, asks))\n"
         }
       ],
       "tests": [
@@ -4180,8 +4180,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        Ok(self.launch(name))\n",
-          "new": "        let answer = self.launch(name);\n        let session_id = answer[\"session_id\"].as_str().expect(\"a session id\").to_owned();\n        let folder = self.store[body[\"cid\"].as_str().expect(\"a cid\")].clone();\n        let manifest: CapsuleManifest =\n            serde_json::from_slice(&fs::read(folder.join(MANIFEST_FILE)).expect(\"the manifest\"))\n                .expect(\"a manifest\");\n        for capability in manifest.capabilities {\n            self.seed_grant(&session_id, &capability, \"*\", \"session\");\n        }\n        Ok(answer)\n"
+          "old": "        Ok(self.launch(name, asks))\n",
+          "new": "        let answer = self.launch(name, asks);\n        let session_id = answer[\"session_id\"].as_str().expect(\"a session id\").to_owned();\n        let folder = self.store[body[\"cid\"].as_str().expect(\"a cid\")].clone();\n        let manifest: elastos_common::CapsuleManifest =\n            serde_json::from_slice(&fs::read(folder.join(capsule_identity::MANIFEST_FILE)).expect(\"the manifest\"))\n                .expect(\"a manifest\");\n        for capability in manifest.capabilities {\n            self.seed_grant(&session_id, &capability, \"*\", \"session\");\n        }\n        Ok(answer)\n"
         }
       ],
       "tests": [
@@ -4219,6 +4219,87 @@
       "tests": [
         "standin_valid_signature_alone_yields_no_grant",
         "standin_grant_view_lists_a_seeded_grant"
+      ]
+    },
+    {
+      "id": "F-CI35a",
+      "title": "the planted accept-anything stub: asks_of reads asks.json from the stored folder at call time, so a change on disk after launch reaches the instance",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "            .and_then(|instance| instance.asks.clone())\n",
+          "new": "            .and_then(|_| fs::read(self.store.values().next()?.join(ASKS_FILE)).ok())\n"
+        }
+      ],
+      "tests": [
+        "standin_hands_an_instance_only_its_signed_asks_bytes"
+      ]
+    },
+    {
+      "id": "F-CI35b",
+      "title": "asks_of ignores the session and answers the first instance's asks",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "            .find(|instance| instance.session_id == session_id)\n",
+          "new": "            .next()\n"
+        }
+      ],
+      "tests": [
+        "standin_gives_each_session_its_own_asks"
+      ]
+    },
+    {
+      "id": "F-CI35c",
+      "title": "a bundle with no asks.json is handed Some(Vec::new()), not None",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        .map(|entry| entry.content.clone())\n",
+          "new": "        .map(|entry| entry.content.clone())\n        .or(Some(Vec::new()))\n"
+        }
+      ],
+      "tests": [
+        "standin_gives_each_session_its_own_asks"
+      ]
+    },
+    {
+      "id": "F-CI36a",
+      "title": "manifest_name() answers an empty string, not the name the one manifest check read",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        &self.name\n",
+          "new": "        \"\"\n"
+        }
+      ],
+      "tests": [
+        "checked_bundle_hands_out_the_manifest_name",
+        "standin_launches_a_signed_bundle_by_its_cid"
+      ]
+    },
+    {
+      "id": "F-CI36b",
+      "title": "the stand-in checks only the first package record for the CID, so the launch depends on the records' order",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        for record in self.records.iter().filter(|record| record.cid == cid) {\n",
+          "new": "        for record in self.records.iter().filter(|record| record.cid == cid).take(1) {\n"
+        }
+      ],
+      "tests": [
+        "standin_launch_does_not_depend_on_record_order"
       ]
     }
   ]

@@ -4,10 +4,12 @@
 //! `None` is the plain route. `Some("all_sessions_live")` is the query form.
 //! One filter keeps a grant whose life is `Live`. An ended session stays.
 //!
-//! `post_capsules` and `get_capsules` answer the capsule routes for an
-//! admitted resident guest. Launch answers `starting` with the Bus session
-//! before `finish_start`. One map names the five statuses. One check refuses
-//! a client on a shell-only route.
+//! `post_capsules`, `get_capsules` and `delete_capsule` answer the capsule
+//! routes for an admitted resident guest. Launch answers `starting` with the
+//! Bus session before `finish_start`. A stop stores `stopped` and revokes
+//! that session's `Live` grants. One map names the five statuses. One age
+//! compare keeps a `failed` or `stopped` entry. One check refuses a client
+//! on a shell-only route. `authorise` is a lab seam on that same filter.
 
 use serde_json::{json, Map, Value};
 
@@ -39,14 +41,13 @@ pub enum Start {
     Trap(String),
 }
 
-/// Five list statuses. This slice stores `Starting`, `Running` and `Failed`.
+/// Five list statuses. This slice stores `Starting`, `Running`, `Stopped` and `Failed`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResidentStatus {
     Starting,
     Running,
     #[allow(dead_code)]
     Stopping,
-    #[allow(dead_code)]
     Stopped,
     Failed,
 }
@@ -75,7 +76,7 @@ struct Instance {
     start: Start,
     phase: ResidentStatus,
     cause: String,
-    failed_at: Option<u64>,
+    ended_at: Option<u64>,
 }
 
 pub struct StandIn {
@@ -100,6 +101,7 @@ impl StandIn {
     /// Lab test seam, not a route.
     ///
     /// `granted_at` is the seeded value. This method reads no clock.
+    #[allow(clippy::too_many_arguments)]
     pub fn seed_grant(
         &mut self,
         request_id: &str,
@@ -140,6 +142,27 @@ impl StandIn {
 
     /// Lab test seam, not a route.
     ///
+    /// `Ok(())` means the grant authorises that caller. This method reads no
+    /// clock, no disk and no WIT file.
+    pub fn authorise(&self, caller: Caller<'_>, request_id: &str) -> Result<(), (u16, String)> {
+        let Some(grant) = self
+            .grants
+            .iter()
+            .find(|grant| grant.request_id == request_id)
+        else {
+            return Err(unknown_grant(request_id));
+        };
+        if !is_live(grant.life) {
+            return Err(grant_not_live(grant.life));
+        }
+        if !session_authorises(grant, caller) {
+            return Err(wrong_capsule(grant, caller));
+        }
+        Ok(())
+    }
+
+    /// Lab test seam, not a route.
+    ///
     /// Stores one resident guest for `path`. This method reads no directory.
     pub fn admit_resident(
         &mut self,
@@ -168,21 +191,27 @@ impl StandIn {
     pub fn finish_start(&mut self, id: &str) -> Result<(), (u16, String)> {
         let instant = self.instant;
         let Some(instance) = self.instances.iter_mut().find(|instance| instance.id == id) else {
-            return Err((400, format!("unknown instance: {id}")));
+            return Err(unknown_instance(id));
         };
+        if matches!(
+            instance.phase,
+            ResidentStatus::Stopped | ResidentStatus::Stopping
+        ) {
+            return Err(not_live(instance.phase));
+        }
         if instance.phase != ResidentStatus::Starting {
             return Err((400, "start already returned".to_owned()));
         }
-        let (phase, cause, failed_at) = apply_start(&instance.start, instant);
+        let (phase, cause, ended_at) = apply_start(&instance.start, instant);
         instance.phase = phase;
         instance.cause = cause;
-        instance.failed_at = failed_at;
+        instance.ended_at = ended_at;
         Ok(())
     }
 
     /// Lab test seam, not a route.
     ///
-    /// Replaces the instant used for failed-entry age. This method reads no clock.
+    /// Replaces the instant used for ended-entry age. This method reads no clock.
     pub fn set_instant(&mut self, secs: u64) {
         self.instant = secs;
     }
@@ -204,7 +233,7 @@ impl StandIn {
             start,
             phase,
             cause: String::new(),
-            failed_at: None,
+            ended_at: None,
         });
         Ok(launch_body(&id, &name, phase))
     }
@@ -220,6 +249,47 @@ impl StandIn {
         listed.sort_by(|left, right| left.id.cmp(&right.id));
         let capsules = listed.into_iter().map(capsule_entry).collect::<Vec<_>>();
         Ok(json!({ "capsules": capsules }))
+    }
+
+    /// `DELETE /api/capsules/:id`.
+    ///
+    /// `id` is the path segment. The shell body carries `reason`. Ok is null.
+    pub fn delete_capsule(
+        &mut self,
+        caller: Caller<'_>,
+        id: &str,
+        body: &Value,
+    ) -> Result<Value, (u16, String)> {
+        require_shell(caller)?;
+        let reason = stop_reason(body)?;
+        self.stop_one(id, reason)?;
+        Ok(Value::Null)
+    }
+
+    fn stop_one(&mut self, id: &str, reason: &str) -> Result<(), (u16, String)> {
+        let instant = self.instant;
+        let Some(index) = self.instances.iter().position(|instance| instance.id == id) else {
+            return Err(unknown_instance(id));
+        };
+        let phase = self.instances[index].phase;
+        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
+            return Err(not_live(phase));
+        }
+        let session_id = self.instances[index].id.clone();
+        self.instances[index].phase = ResidentStatus::Stopped;
+        self.instances[index].cause = format!("stopped: {reason}");
+        self.instances[index].ended_at = Some(instant);
+        self.revoke_live(&session_id);
+        Ok(())
+    }
+
+    /// Writes `Revoked` on `Live` grants of one session. Other lives stay.
+    fn revoke_live(&mut self, session_id: &str) {
+        for grant in &mut self.grants {
+            if grant.session_id == session_id && is_live(grant.life) {
+                grant.life = Life::Revoked;
+            }
+        }
     }
 
     fn mint_id(&mut self) -> String {
@@ -283,7 +353,12 @@ impl StandIn {
 fn keep(grant: &Grant, caller: Caller<'_>) -> bool {
     // Ending a session leaves a live grant in this view.
     let _ended = grant.session_ended;
-    grant.life == Life::Live && visible(grant, caller)
+    is_live(grant.life) && visible(grant, caller)
+}
+
+/// One life test. `keep`, `revoke_live` and `authorise` use it.
+fn is_live(life: Life) -> bool {
+    life == Life::Live
 }
 
 fn visible(grant: &Grant, caller: Caller<'_>) -> bool {
@@ -291,6 +366,12 @@ fn visible(grant: &Grant, caller: Caller<'_>) -> bool {
         Caller::Shell => true,
         Caller::Client { session_id } => grant.session_id == session_id,
     }
+}
+
+/// Session decision for `authorise`. A shell sees every grant and still does
+/// not hold it. The session compare stays in `visible`.
+fn session_authorises(grant: &Grant, caller: Caller<'_>) -> bool {
+    !matches!(caller, Caller::Shell) && visible(grant, caller)
 }
 
 fn entry(grant: &Grant, include_session: bool) -> Value {
@@ -387,15 +468,79 @@ fn apply_start(start: &Start, instant: u64) -> (ResidentStatus, String, Option<u
     }
 }
 
+/// One age compare. `failed` and `stopped` stay while age is under 60 seconds.
 fn keeps_instance(instance: &Instance, instant: u64) -> bool {
     match instance.phase {
         ResidentStatus::Starting | ResidentStatus::Running => true,
-        ResidentStatus::Failed => match instance.failed_at {
+        ResidentStatus::Failed | ResidentStatus::Stopped => match instance.ended_at {
             Some(at) => instant.saturating_sub(at) < FAILED_KEEP_SECS,
             None => false,
         },
-        ResidentStatus::Stopping | ResidentStatus::Stopped => false,
+        ResidentStatus::Stopping => false,
     }
+}
+
+/// One unknown-instance reason. `delete_capsule` and `finish_start` both use it.
+fn unknown_instance(id: &str) -> (u16, String) {
+    (400, format!("unknown instance: {id}"))
+}
+
+fn unknown_grant(request_id: &str) -> (u16, String) {
+    (400, format!("unknown grant: {request_id}"))
+}
+
+fn life_text(life: Life) -> &'static str {
+    match life {
+        Life::Live => "Live",
+        Life::Exhausted => "Exhausted",
+        Life::Revoked => "Revoked",
+        Life::Expired => "Expired",
+    }
+}
+
+fn grant_not_live(life: Life) -> (u16, String) {
+    (400, format!("grant is not live: {}", life_text(life)))
+}
+
+fn wrong_capsule(grant: &Grant, caller: Caller<'_>) -> (u16, String) {
+    let mut reason = format!("wrong capsule: expected {}", grant.session_id);
+    if let Caller::Client { session_id } = caller {
+        reason.push_str(&format!(", got {session_id}"));
+    }
+    (403, reason)
+}
+
+/// One not-live reason. `delete_capsule` and `finish_start` both use it.
+fn not_live(status: ResidentStatus) -> (u16, String) {
+    (
+        400,
+        format!("instance is not live: {}", status_text(status)),
+    )
+}
+
+/// The stop body is an object whose only key is a non-empty string `reason`.
+fn stop_reason(body: &Value) -> Result<&str, (u16, String)> {
+    let Some(object) = body.as_object() else {
+        return Err((400, "stop body needs reason".to_owned()));
+    };
+    let mut reason = None;
+    let mut reason_not_string = false;
+    for (key, value) in object {
+        if key != "reason" {
+            return Err((400, format!("stop body rejects {key}")));
+        }
+        match value {
+            Value::String(text) if text.is_empty() => {
+                return Err((400, "stop needs a reason".to_owned()));
+            }
+            Value::String(text) => reason = Some(text.as_str()),
+            _ => reason_not_string = true,
+        }
+    }
+    if reason_not_string {
+        return Err((400, "stop reason must be a string".to_owned()));
+    }
+    reason.ok_or_else(|| (400, "stop body misses reason".to_owned()))
 }
 
 #[cfg(test)]
@@ -819,6 +964,91 @@ mod tests {
         );
     }
 
+    fn assert_delete(
+        result: &Result<Value, (u16, String)>,
+        status: u16,
+        reason: &str,
+        message: &str,
+    ) {
+        assert!(
+            matches!(
+                result,
+                Err((got_status, got_reason)) if *got_status == status && got_reason == reason
+            ),
+            "{message}: {result:?}"
+        );
+    }
+
+    fn admit_shared(standin: &mut StandIn, start: Start) {
+        standin
+            .admit_resident(SHARED_PATH, SHARED_NAME, start)
+            .expect("the stand-in admits the resident path");
+    }
+
+    fn launch_starting(standin: &mut StandIn) -> String {
+        let launched = standin
+            .post_capsules(Caller::Shell, &shared_body())
+            .expect("the stand-in launches");
+        launched["id"]
+            .as_str()
+            .expect("the stand-in names the launch")
+            .to_owned()
+    }
+
+    fn launch_finished(standin: &mut StandIn) -> String {
+        let id = launch_starting(standin);
+        standin
+            .finish_start(&id)
+            .expect("the stand-in finishes start");
+        id
+    }
+
+    fn stop_body() -> Value {
+        json!({ "reason": "stop one" })
+    }
+
+    fn seed_at(standin: &mut StandIn, request_id: &str, session_id: &str, life: Life) {
+        standin.seed_grant(
+            request_id, session_id, "res", "read", "once", 1, life, false,
+        );
+    }
+
+    fn grant_record(standin: &StandIn, request_id: &str) -> (Life, bool) {
+        let grant = standin
+            .grants
+            .iter()
+            .find(|grant| grant.request_id == request_id)
+            .expect("the stand-in stores the seeded grant");
+        (grant.life, grant.session_ended)
+    }
+
+    fn assert_capsule(standin: &StandIn, id: &str, status: &str, cause: &str, message: &str) {
+        let listed = shell_list(standin);
+        let entry = listed["capsules"]
+            .as_array()
+            .expect("the stand-in returns capsules")
+            .iter()
+            .find(|entry| entry["id"] == id);
+        let expected = json!({
+            "id": id,
+            "name": SHARED_NAME,
+            "status": status,
+            "session_id": id,
+            "cause": cause,
+        });
+        assert_eq!(entry, Some(&expected), "{message}");
+    }
+
+    fn assert_next_launch(standin: &mut StandIn, id: &str) {
+        let launched = standin
+            .post_capsules(Caller::Shell, &shared_body())
+            .expect("the stand-in launches after a refused stop");
+        assert_eq!(
+            launched["id"], id,
+            "the stand-in does not spend an id on a refused stop"
+        );
+    }
+
     #[test]
     fn standin_one_admit_per_path() {
         let mut standin = StandIn::new();
@@ -1207,8 +1437,7 @@ mod tests {
         assert!(
             matches!(
                 &unknown,
-                Err((400, reason))
-                    if reason.starts_with("unknown instance:") && reason.contains("component-9")
+                Err((400, reason)) if reason == "unknown instance: component-9"
             ),
             "the stand-in refuses an unknown instance: {unknown:?}"
         );
@@ -1216,6 +1445,25 @@ mod tests {
             shell_list(&standin)["capsules"][0]["status"],
             "running",
             "the stand-in leaves the running instance in place"
+        );
+
+        let mut failed = StandIn::new();
+        admit_shared(&mut failed, Start::Error("start refused".to_owned()));
+        let failed_id = launch_finished(&mut failed);
+        let second_failed = failed.finish_start(&failed_id);
+        assert!(
+            matches!(
+                &second_failed,
+                Err((400, reason)) if reason == "start already returned"
+            ),
+            "the stand-in accepts start once on a failed instance: {second_failed:?}"
+        );
+        assert_capsule(
+            &failed,
+            &failed_id,
+            "failed",
+            "start refused",
+            "the stand-in keeps the failed cause after a second start",
         );
     }
 
@@ -1252,6 +1500,918 @@ mod tests {
         assert_eq!(
             launched["id"], "component-1",
             "the stand-in does not spend an id on a refused client launch"
+        );
+    }
+
+    #[test]
+    fn standin_stop_sets_stopped() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        let id = launch_finished(&mut standin);
+        assert_eq!(
+            id, "component-1",
+            "the stand-in names the first launch component-1"
+        );
+        let stopped = standin
+            .delete_capsule(Caller::Shell, "component-1", &stop_body())
+            .expect("the stand-in stops one running instance");
+        assert!(
+            stopped.is_null(),
+            "the stand-in answers null when it stops one instance"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "stopped",
+            "stopped: stop one",
+            "the stand-in stores stopped with the stop reason",
+        );
+        let later = standin.finish_start("component-1");
+        assert!(
+            matches!(
+                &later,
+                Err((400, reason)) if reason == "instance is not live: stopped"
+            ),
+            "the stand-in refuses finish_start after a stop: {later:?}"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "stopped",
+            "stopped: stop one",
+            "the stand-in keeps stopped after finish_start",
+        );
+    }
+
+    #[test]
+    fn standin_stop_body_is_reason_only() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        launch_finished(&mut standin);
+        seed_at(&mut standin, "req-1", "component-1", Life::Live);
+        let cases = [
+            (Value::Null, "stop body needs reason"),
+            (json!({}), "stop body misses reason"),
+            (json!({ "reason": 1 }), "stop reason must be a string"),
+            (json!({ "reason": "" }), "stop needs a reason"),
+            (
+                json!({ "reason": "stop one", "cid": "bafy" }),
+                "stop body rejects cid",
+            ),
+        ];
+        for (body, reason) in cases {
+            let result = standin.delete_capsule(Caller::Shell, "component-1", &body);
+            let message = format!("the stand-in refuses this stop body: {reason}");
+            assert_delete(&result, 400, reason, &message);
+            assert_capsule(
+                &standin,
+                "component-1",
+                "running",
+                "",
+                "the stand-in leaves the running instance unchanged",
+            );
+            assert_eq!(
+                grant_record(&standin, "req-1"),
+                (Life::Live, false),
+                "the stand-in leaves the live grant unchanged"
+            );
+        }
+        assert_next_launch(&mut standin, "component-2");
+    }
+
+    #[test]
+    fn standin_unknown_stop_is_refused() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        launch_finished(&mut standin);
+        seed_at(&mut standin, "req-1", "component-1", Life::Live);
+        let unknown = standin.delete_capsule(Caller::Shell, "component-9", &stop_body());
+        assert_delete(
+            &unknown,
+            400,
+            "unknown instance: component-9",
+            "the stand-in refuses an unknown stop",
+        );
+        let empty = standin.delete_capsule(Caller::Shell, "", &stop_body());
+        assert_delete(
+            &empty,
+            400,
+            "unknown instance: ",
+            "the stand-in refuses a stop of an empty id",
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in leaves the known instance unchanged",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-1"),
+            (Life::Live, false),
+            "the stand-in leaves the seeded grant live"
+        );
+        let (plain, query) = shell_pair(&standin);
+        assert_eq!(
+            plain, query,
+            "the stand-in returns one shell body for both route forms"
+        );
+        assert_eq!(
+            request_ids(&plain),
+            BTreeSet::from(["req-1".to_owned()]),
+            "the stand-in still lists the seeded live grant"
+        );
+        assert_next_launch(&mut standin, "component-2");
+    }
+
+    #[test]
+    fn standin_stop_refuses_a_failed_instance() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Error("start refused".to_owned()));
+        launch_finished(&mut standin);
+        seed_at(&mut standin, "req-1", "component-1", Life::Live);
+        let result = standin.delete_capsule(Caller::Shell, "component-1", &stop_body());
+        assert_delete(
+            &result,
+            400,
+            "instance is not live: failed",
+            "the stand-in refuses to stop a failed instance",
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "failed",
+            "start refused",
+            "the stand-in keeps the failed cause",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-1"),
+            (Life::Live, false),
+            "the stand-in leaves a live grant on a refused stop"
+        );
+        let (plain, query) = shell_pair(&standin);
+        assert_eq!(
+            plain, query,
+            "the stand-in returns one shell body for both route forms"
+        );
+        assert_eq!(
+            request_ids(&plain),
+            BTreeSet::from(["req-1".to_owned()]),
+            "the stand-in still lists the live grant"
+        );
+        assert_next_launch(&mut standin, "component-2");
+    }
+
+    #[test]
+    fn standin_stop_revokes_that_sessions_grants() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        launch_finished(&mut standin);
+        launch_finished(&mut standin);
+        seed_at(&mut standin, "req-1", "component-1", Life::Live);
+        seed_at(&mut standin, "req-1b", "component-1", Life::Live);
+        seed_at(&mut standin, "req-e", "component-1", Life::Exhausted);
+        seed_at(&mut standin, "req-r", "component-1", Life::Revoked);
+        seed_at(&mut standin, "req-x", "component-1", Life::Expired);
+        seed_at(&mut standin, "req-2", "component-2", Life::Live);
+        let stopped = standin
+            .delete_capsule(Caller::Shell, "component-1", &stop_body())
+            .expect("the stand-in stops component-1");
+        assert!(
+            stopped.is_null(),
+            "the stand-in answers null when it revokes that session"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-1"),
+            (Life::Revoked, false),
+            "the stand-in revokes that session's live grant"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-1b"),
+            (Life::Revoked, false),
+            "the stand-in revokes every live grant of that session"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-e"),
+            (Life::Exhausted, false),
+            "the stand-in leaves an exhausted grant exhausted"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-r"),
+            (Life::Revoked, false),
+            "the stand-in leaves a revoked grant revoked"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-x"),
+            (Life::Expired, false),
+            "the stand-in leaves an expired grant expired"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-2"),
+            (Life::Live, false),
+            "the stand-in leaves the sibling session's grant live"
+        );
+        let (plain, query) = shell_pair(&standin);
+        assert_eq!(
+            plain, query,
+            "the stand-in returns one shell body for both route forms"
+        );
+        assert_eq!(
+            request_ids(&plain),
+            BTreeSet::from(["req-2".to_owned()]),
+            "the stand-in lists the sibling grant and leaves the revoked grants out"
+        );
+        let client = standin
+            .get_capability_list(
+                Caller::Client {
+                    session_id: "component-1",
+                },
+                None,
+            )
+            .expect("the stand-in client view");
+        assert_eq!(
+            request_ids(&client),
+            BTreeSet::new(),
+            "the stand-in client view is empty after the stop"
+        );
+    }
+
+    #[test]
+    fn standin_stop_leaves_the_sibling() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        launch_finished(&mut standin);
+        launch_finished(&mut standin);
+        seed_at(&mut standin, "req-1", "component-1", Life::Live);
+        seed_at(&mut standin, "req-2", "component-2", Life::Live);
+        let stopped = standin
+            .delete_capsule(Caller::Shell, "component-1", &stop_body())
+            .expect("the stand-in stops component-1");
+        assert!(
+            stopped.is_null(),
+            "the stand-in answers null when it stops one sibling"
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in leaves the sibling running",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-2"),
+            (Life::Live, false),
+            "the stand-in leaves the sibling grant live"
+        );
+        let (plain, query) = shell_pair(&standin);
+        assert_eq!(
+            plain, query,
+            "the stand-in returns one shell body for both route forms"
+        );
+        assert_eq!(
+            request_ids(&plain),
+            BTreeSet::from(["req-2".to_owned()]),
+            "the stand-in still lists the sibling grant"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "stopped",
+            "stopped: stop one",
+            "the stand-in stops only the named instance",
+        );
+    }
+
+    #[test]
+    fn standin_stopped_stays_for_sixty_seconds() {
+        let mut standin = StandIn::new();
+        standin.set_instant(0);
+        admit_shared(&mut standin, Start::Ok);
+        launch_finished(&mut standin);
+        launch_finished(&mut standin);
+        let stopped = standin
+            .delete_capsule(Caller::Shell, "component-1", &stop_body())
+            .expect("the stand-in stops component-1 at instant 0");
+        assert!(
+            stopped.is_null(),
+            "the stand-in answers null when it stops one instance"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "stopped",
+            "stopped: stop one",
+            "the stand-in lists a stopped instance at instant 0",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in lists the running sibling at instant 0",
+        );
+        standin.set_instant(59);
+        assert_capsule(
+            &standin,
+            "component-1",
+            "stopped",
+            "stopped: stop one",
+            "the stand-in lists a stopped instance at instant 59",
+        );
+        standin.set_instant(60);
+        assert_eq!(
+            shell_list(&standin),
+            json!({
+                "capsules": [{
+                    "id": "component-2",
+                    "name": SHARED_NAME,
+                    "status": "running",
+                    "session_id": "component-2",
+                    "cause": "",
+                }]
+            }),
+            "the stand-in omits a stopped instance at instant 60 and keeps the running sibling"
+        );
+
+        let mut later = StandIn::new();
+        later.set_instant(1_000);
+        admit_shared(&mut later, Start::Ok);
+        launch_finished(&mut later);
+        launch_finished(&mut later);
+        later.set_instant(1_070);
+        later
+            .delete_capsule(Caller::Shell, "component-1", &stop_body())
+            .expect("the stand-in stops component-1 at instant 1070");
+        assert_capsule(
+            &later,
+            "component-1",
+            "stopped",
+            "stopped: stop one",
+            "the stand-in lists a stopped instance at the stop instant",
+        );
+        later.set_instant(1_129);
+        assert_capsule(
+            &later,
+            "component-1",
+            "stopped",
+            "stopped: stop one",
+            "the stand-in lists a stopped instance 59 seconds after the stop",
+        );
+        later.set_instant(1_130);
+        assert_eq!(
+            shell_list(&later),
+            json!({
+                "capsules": [{
+                    "id": "component-2",
+                    "name": SHARED_NAME,
+                    "status": "running",
+                    "session_id": "component-2",
+                    "cause": "",
+                }]
+            }),
+            "the stand-in omits a stopped instance 60 seconds after the stop and keeps the running sibling"
+        );
+    }
+
+    #[test]
+    fn standin_stop_during_start_blocks_finish() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        let first = launch_starting(&mut standin);
+        let second = launch_starting(&mut standin);
+        assert_eq!(
+            (first, second),
+            ("component-1".to_owned(), "component-2".to_owned()),
+            "the stand-in launches two starting instances"
+        );
+        seed_at(&mut standin, "req-1", "component-1", Life::Live);
+        seed_at(&mut standin, "req-2", "component-2", Life::Live);
+        let stopped = standin
+            .delete_capsule(Caller::Shell, "component-1", &stop_body())
+            .expect("the stand-in stops an instance during start");
+        assert!(
+            stopped.is_null(),
+            "the stand-in answers null when it stops during start"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "stopped",
+            "stopped: stop one",
+            "the stand-in stores stopped before start returns",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-1"),
+            (Life::Revoked, false),
+            "the stand-in revokes the starting instance's live grant"
+        );
+        let (plain, query) = shell_pair(&standin);
+        assert_eq!(
+            plain, query,
+            "the stand-in returns one shell body for both route forms"
+        );
+        assert_eq!(
+            request_ids(&plain),
+            BTreeSet::from(["req-2".to_owned()]),
+            "the stand-in drops the revoked grant and keeps the sibling grant"
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "starting",
+            "",
+            "the stand-in leaves the starting sibling",
+        );
+        let finished = standin.finish_start("component-1");
+        assert!(
+            matches!(
+                &finished,
+                Err((400, reason)) if reason == "instance is not live: stopped"
+            ),
+            "the stand-in refuses finish_start after a stop during start: {finished:?}"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "stopped",
+            "stopped: stop one",
+            "the stand-in keeps stopped when finish_start follows the stop",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "starting",
+            "",
+            "the stand-in leaves the starting sibling after the refused finish",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-2"),
+            (Life::Live, false),
+            "the stand-in leaves the sibling grant live"
+        );
+    }
+
+    #[test]
+    fn standin_second_stop_is_refused() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        launch_finished(&mut standin);
+        launch_finished(&mut standin);
+        seed_at(&mut standin, "req-1", "component-1", Life::Live);
+        seed_at(&mut standin, "req-e", "component-1", Life::Exhausted);
+        seed_at(&mut standin, "req-2", "component-2", Life::Live);
+        standin
+            .delete_capsule(Caller::Shell, "component-1", &stop_body())
+            .expect("the stand-in stops component-1 once");
+        let second = standin.delete_capsule(Caller::Shell, "component-1", &stop_body());
+        assert_delete(
+            &second,
+            400,
+            "instance is not live: stopped",
+            "the stand-in refuses a second stop",
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "stopped",
+            "stopped: stop one",
+            "the stand-in keeps the first stop reason",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-1"),
+            (Life::Revoked, false),
+            "the stand-in leaves the revoked grant revoked"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-e"),
+            (Life::Exhausted, false),
+            "the stand-in leaves an exhausted grant exhausted"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-2"),
+            (Life::Live, false),
+            "the stand-in leaves the sibling grant live"
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in leaves the sibling running",
+        );
+        assert_next_launch(&mut standin, "component-3");
+    }
+
+    #[test]
+    fn standin_client_cannot_stop() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        launch_finished(&mut standin);
+        seed_at(&mut standin, "req-1", "component-1", Life::Live);
+        let client = Caller::Client {
+            session_id: "component-1",
+        };
+        let valid = stop_body();
+        let attempts = [
+            (
+                "component-1",
+                valid.clone(),
+                "the stand-in refuses a client stop",
+            ),
+            (
+                "component-1",
+                Value::Null,
+                "the stand-in refuses a client stop when the body is not an object",
+            ),
+            (
+                "component-1",
+                json!({}),
+                "the stand-in refuses a client stop when reason is missing",
+            ),
+            (
+                "component-1",
+                json!({ "reason": 1 }),
+                "the stand-in refuses a client stop when reason is not a string",
+            ),
+            (
+                "component-1",
+                json!({ "reason": "" }),
+                "the stand-in refuses a client stop when reason is empty",
+            ),
+            (
+                "component-9",
+                valid.clone(),
+                "the stand-in refuses a client stop of an unknown id",
+            ),
+            (
+                "",
+                valid,
+                "the stand-in refuses a client stop of an empty id",
+            ),
+        ];
+        for (id, body, message) in attempts {
+            let result = standin.delete_capsule(client, id, &body);
+            assert_delete(
+                &result,
+                403,
+                "This endpoint requires shell privileges",
+                message,
+            );
+            assert_capsule(
+                &standin,
+                "component-1",
+                "running",
+                "",
+                "the stand-in leaves the running instance after a client stop",
+            );
+            assert_eq!(
+                grant_record(&standin, "req-1"),
+                (Life::Live, false),
+                "the stand-in leaves the live grant after a client stop"
+            );
+        }
+        let shell_body = standin.delete_capsule(Caller::Shell, "component-1", &Value::Null);
+        assert_delete(
+            &shell_body,
+            400,
+            "stop body needs reason",
+            "the stand-in shell is refused for the body, not for shell privileges",
+        );
+        let shell_unknown = standin.delete_capsule(Caller::Shell, "component-9", &stop_body());
+        assert_delete(
+            &shell_unknown,
+            400,
+            "unknown instance: component-9",
+            "the stand-in shell is refused for the unknown id, not for shell privileges",
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in leaves the running instance after the shell refusals",
+        );
+        assert_next_launch(&mut standin, "component-2");
+    }
+
+    fn launch_two_running(standin: &mut StandIn) {
+        admit_shared(standin, Start::Ok);
+        launch_finished(standin);
+        launch_finished(standin);
+    }
+
+    fn assert_unknown(result: &Result<(), (u16, String)>, request_id: &str, who: &str) {
+        let expected = format!("unknown grant: {request_id}");
+        assert!(
+            matches!(
+                result,
+                Err((400, reason)) if reason.starts_with("unknown grant:") && reason == &expected
+            ),
+            "the stand-in refuses unknown grant {request_id:?} for {who}: {result:?}"
+        );
+    }
+
+    fn assert_not_live(result: &Result<(), (u16, String)>, life_name: &str, message: &str) {
+        let expected = format!("grant is not live: {life_name}");
+        assert!(
+            matches!(
+                result,
+                Err((400, reason))
+                    if reason.starts_with("grant is not live:")
+                        && reason.contains(life_name)
+                        && reason == &expected
+            ),
+            "{message}: {result:?}"
+        );
+    }
+
+    fn assert_wrong_capsule(
+        result: &Result<(), (u16, String)>,
+        grant_session: &str,
+        caller_session: Option<&str>,
+        message: &str,
+    ) {
+        assert!(
+            matches!(
+                result,
+                Err((403, reason))
+                    if reason.contains("wrong capsule")
+                        && reason.contains(grant_session)
+                        && caller_session.is_none_or(|session_id| reason.contains(session_id))
+            ),
+            "{message}: {result:?}"
+        );
+    }
+
+    #[test]
+    fn standin_sibling_cannot_use_the_grant() {
+        let mut standin = StandIn::new();
+        launch_two_running(&mut standin);
+        standin.seed_grant(
+            "req-1",
+            "component-1",
+            "res",
+            "read",
+            "once",
+            1,
+            Life::Live,
+            true,
+        );
+        let (plain, query) = shell_pair(&standin);
+        assert_eq!(
+            plain, query,
+            "the stand-in returns one shell body for both route forms"
+        );
+        assert_eq!(
+            request_ids(&plain),
+            BTreeSet::from(["req-1".to_owned()]),
+            "the stand-in lists exactly the one live grant"
+        );
+        assert_eq!(
+            plain["capabilities"][0]["session_id"], "component-1",
+            "the stand-in binds that grant to component-1"
+        );
+        let sibling_list = standin
+            .get_capability_list(
+                Caller::Client {
+                    session_id: "component-2",
+                },
+                None,
+            )
+            .expect("the stand-in client view");
+        assert_eq!(
+            request_ids(&sibling_list),
+            BTreeSet::new(),
+            "the stand-in client list for component-2 is empty"
+        );
+        let refused = standin.authorise(
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "req-1",
+        );
+        assert_wrong_capsule(
+            &refused,
+            "component-1",
+            Some("component-2"),
+            "the stand-in refuses instance 1's grant for instance 2",
+        );
+        let owner = standin.authorise(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "req-1",
+        );
+        assert!(
+            owner.is_ok(),
+            "the stand-in authorises the owning client: {owner:?}"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in leaves instance 1 running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in leaves instance 2 running",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-1"),
+            (Life::Live, true),
+            "the stand-in leaves the seeded grant unchanged"
+        );
+    }
+
+    #[test]
+    fn standin_stop_clears_that_sessions_grant() {
+        let mut standin = StandIn::new();
+        launch_two_running(&mut standin);
+        seed_at(&mut standin, "req-1", "component-1", Life::Live);
+        seed_at(&mut standin, "req-2", "component-2", Life::Live);
+        let stopped = standin
+            .delete_capsule(Caller::Shell, "component-1", &stop_body())
+            .expect("the stand-in stops component-1");
+        assert!(
+            stopped.is_null(),
+            "the stand-in answers null when it stops one instance"
+        );
+        let owner = standin.authorise(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "req-1",
+        );
+        assert_not_live(
+            &owner,
+            "Revoked",
+            "the stand-in refuses the stopped session's grant",
+        );
+        let (plain, query) = shell_pair(&standin);
+        assert_eq!(
+            plain, query,
+            "the stand-in returns one shell body for both route forms"
+        );
+        assert_eq!(
+            request_ids(&plain),
+            BTreeSet::from(["req-2".to_owned()]),
+            "the stand-in lists exactly the sibling grant"
+        );
+        let sibling_own = standin.authorise(
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "req-2",
+        );
+        assert!(
+            sibling_own.is_ok(),
+            "the stand-in authorises instance 2's own grant: {sibling_own:?}"
+        );
+        let sibling_other = standin.authorise(
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "req-1",
+        );
+        assert_not_live(
+            &sibling_other,
+            "Revoked",
+            "the stand-in refuses the stopped grant before the caller check",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in leaves instance 2 running",
+        );
+    }
+
+    #[test]
+    fn standin_authorise_unknown_grant() {
+        let mut standin = StandIn::new();
+        standin.seed_grant(
+            "req-1",
+            "component-1",
+            "res",
+            "read",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        let callers = [
+            ("shell", Caller::Shell),
+            (
+                "owner",
+                Caller::Client {
+                    session_id: "component-1",
+                },
+            ),
+            (
+                "sibling",
+                Caller::Client {
+                    session_id: "component-2",
+                },
+            ),
+        ];
+        for (who, caller) in callers {
+            for request_id in ["", "req-missing"] {
+                let result = standin.authorise(caller, request_id);
+                assert_unknown(&result, request_id, who);
+            }
+        }
+        let owner = standin.authorise(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "req-1",
+        );
+        assert!(
+            owner.is_ok(),
+            "the stand-in authorises the owning client of a known live grant: {owner:?}"
+        );
+    }
+
+    #[test]
+    fn standin_authorise_dead_grants() {
+        let mut standin = StandIn::new();
+        let rows = [
+            ("req-exhausted", Life::Exhausted, "Exhausted"),
+            ("req-revoked", Life::Revoked, "Revoked"),
+            ("req-expired", Life::Expired, "Expired"),
+        ];
+        for (request_id, life, _) in rows {
+            standin.seed_grant(
+                request_id,
+                "component-1",
+                "res",
+                "read",
+                "once",
+                1,
+                life,
+                false,
+            );
+        }
+        let callers = [
+            Caller::Client {
+                session_id: "component-1",
+            },
+            Caller::Client {
+                session_id: "component-2",
+            },
+            Caller::Shell,
+        ];
+        for (request_id, life, life_name) in rows {
+            for caller in callers {
+                let result = standin.authorise(caller, request_id);
+                assert_not_live(
+                    &result,
+                    life_name,
+                    "the stand-in refuses a grant that is not live before the caller check",
+                );
+            }
+            assert_eq!(
+                grant_record(&standin, request_id),
+                (life, false),
+                "the stand-in leaves a {life_name} grant unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn standin_shell_cannot_authorise() {
+        let mut standin = StandIn::new();
+        standin.seed_grant(
+            "req-1",
+            "component-1",
+            "res",
+            "read",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        let shell = standin.authorise(Caller::Shell, "req-1");
+        assert_wrong_capsule(
+            &shell,
+            "component-1",
+            None,
+            "the stand-in refuses a shell presentation of a live grant",
+        );
+        let owner = standin.authorise(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "req-1",
+        );
+        assert!(
+            owner.is_ok(),
+            "the stand-in authorises the owning client of that live grant: {owner:?}"
         );
     }
 }

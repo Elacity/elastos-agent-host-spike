@@ -154,17 +154,17 @@ use std::process::Command;
 /// `generate_profile` in wallet-provider's `src/main.rs`, and WP111 names it
 /// in did-provider's, so `lab_generator_is_named_only_in_test_code` fails
 /// because its walk reads the provider's non-test file and the refusal names
-/// that path. Task 094's WP112 starts the binary bare in the stand-in's OS
+/// that path. Task 094's WP112 starts the binary bare in the stand-in's host
 /// refusal, WP113 starts it bare after a failed `init`, and WP115 ignores the
 /// writer's refusal and starts under the committed `confine.sb`, so
-/// `standin_launcher_refuses_a_start_it_cannot_confine` fails on cases (a),
-/// (b), (e) and (d); WP114 replaces the stand-in's generated-profile start
-/// with a bare start, so
-/// `standin_launcher_starts_wallet_confined_under_the_generated_profile` fails
-/// at its outside `init`. Task 095's WP116 binds the stand-in's `STORAGE_ROOT`
+/// `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` fails
+/// on cases (a), (e) and (d); WP114 replaces the stand-in's generated-profile
+/// start with a bare start, so the same test fails at its outside `init`.
+/// Task 095's WP116 binds the stand-in's `STORAGE_ROOT`
 /// to the base instead of the wallet directory, so
-/// `standin_start_matches_the_oracle_on_the_permitted_and_denied_suite` fails
-/// on a denied case the widened grant permits, and WP117 writes the generated
+/// `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
+/// fails at did's suite step, where the widened grant permits the sibling
+/// write; and WP117 writes the generated
 /// profile but starts under the committed `confine.sb`, so
 /// `standin_start_runs_under_the_generated_profile_not_the_committed_file`
 /// fails because the start is then Started. Task 097's WP118 removes the tool
@@ -172,21 +172,56 @@ use std::process::Command;
 /// so did's case (c3) panics in `resolved`; and WP120 returns `Ok(provider)`
 /// for an `init` answer that is not `ok`, so did's case (f) is Started.
 /// Task 098's WP121 removes the planted-key push, so
-/// `standin_start_matches_the_oracle_on_the_permitted_and_denied_suite` fails
-/// naming the missing case; WP122 drops the refusal `code`, so
+/// `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
+/// fails naming the missing case; WP122 drops the refusal `code`, so
 /// `suite_entry_keeps_the_refusal_code` fails; and WP123 records every bound
 /// result as `Ok`, so `wallet_suite_entry_records_an_inner_refusal_as_refused`
 /// fails. Task 096's WP124 makes the stand-in use wallet's root layout for did,
-/// so `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
+/// so `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
 /// fails because the did start is refused at its first `init`. Task 099's
-/// WP126 makes the absent-tool check never fire, so did's case (c) is answered
+/// WP125 makes the absent-tool check never fire, so did's case (c) is answered
 /// by the wrong-tool reason and lacks `is absent`; and WP126 drops the OS from
-/// the wrong-tool reason, so did's case (c2) lacks `macos`. Task 100's WP127
+/// the wrong-tool reason, so did's case (c2) lacks `on macos`. Task 100's WP127
 /// appends a write grant on `STORAGE_PARENT` to the stand-in's generated
-/// profile for did, so
-/// `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
-/// fails on the sibling write case, which answers `ok`.
-const EXPECTED_FALSIFIERS: usize = 125;
+/// profile for did after the writer, so
+/// `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
+/// fails at did's launched-profile check, where `check_declared_rights` refuses
+/// the appended allow form because no declared right names it; the suite never
+/// starts. Task 101's
+/// WP128
+/// returns `did_provider_dir().join("target/debug/did-provider")` from the one
+/// build-output reader instead of the reported `executable`, so
+/// `did_binary_is_the_executable_the_build_reports` fails on its fixture path
+/// while `standin_launcher_finds_the_built_did_binary` alone still passes
+/// because the guessed file exists after did's build; and WP129 returns
+/// `wallet_dir(base)` for the unknown-name arm of `provider_storage_root`, so
+/// `provider_storage_root_refuses_an_unknown_provider_name` fails because no
+/// refusal comes. Task 103's WP130 disables the kind check in
+/// `did_binary_executable`, so
+/// `did_binary_is_the_executable_the_build_reports` fails because the non-bin
+/// artifact's executable is read first. Task 104 folds the three stand-in
+/// launcher tests into
+/// `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` and
+/// re-anchors WP112 on the host refusal; WP131 starts the binary bare on a
+/// simulated Linux host with a missing primitive, so the journey fails at did's
+/// Landlock row, and WP132 returns one fixed reason that names no primitive, so
+/// the journey fails on that row's words. Task 105 folds the two suite tests
+/// into
+/// `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`,
+/// which reads the file the stand-in launched; WP133 appends one allow form the
+/// suite does not exercise to that file, so the journey fails at did's
+/// launched-profile check, where `check_declared_rights` refuses the appended
+/// allow form because no declared right names it; and WP134 removes
+/// `(deny network*)` from it, so the journey fails at that check, where
+/// `check_profile_contract` refuses the profile without its explicit network
+/// denial. Task 108 adds WP138, which appends
+/// `(deny file-write* (literal "/private/var/cc-confine-launched"))` to the file
+/// the stand-in launches after the writer; only `compare_profile_to_its_oracle`
+/// catches it, at did's launched-profile check, because the head keeps its
+/// order, the contract checks read only allow forms and no suite case reads
+/// that literal, so the journey fails at its launched profile and its oracle
+/// disagree panic, which names the planted form.
+const EXPECTED_FALSIFIERS: usize = 136;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

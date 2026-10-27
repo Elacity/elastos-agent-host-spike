@@ -27,9 +27,8 @@ use rand::rngs::OsRng;
 use capsule_identity::{
     check_name, checked_bundle, checked_bundle_observed, lab_cid, lab_cid_observed,
     verify_checked_package_record, BundleEntry, CheckedBundle, LabCid, Moment, PackageRecord,
-    Refusal, MANIFEST_FILE,
+    Refusal,
 };
-use elastos_common::CapsuleManifest;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -1383,6 +1382,11 @@ pub fn published(folder: &Path) -> (String, PathBuf) {
 /// no grant: a valid publisher signature alone yields none. No shell approval
 /// is modelled; a grant exists only through the test seam
 /// [`StandInRuntime::seed_grant`].
+///
+/// A launched instance is handed its asks only as the `asks.json` bytes of
+/// the checked bundle it was launched from, read through the test seam
+/// [`StandInRuntime::asks_of`]: a change on disk after launch does not reach
+/// it. The bytes are never parsed, and #309 has no asks field.
 pub struct StandInRuntime {
     store: BTreeMap<String, PathBuf>,
     records: Vec<PackageRecord>,
@@ -1396,6 +1400,10 @@ struct Instance {
     id: String,
     name: String,
     session_id: String,
+    /// The content of the `asks.json` entry of the checked bundle it was
+    /// launched from, or `None` when that bundle has none. Set once, at
+    /// launch.
+    asks: Option<Vec<u8>>,
 }
 
 /// One grant held for a session: a record, never a token.
@@ -1446,8 +1454,8 @@ impl StandInRuntime {
     /// one instance is added and the answer is `{"id", "name", "status":
     /// "launched", "session_id"}`.
     pub fn post_capsules(&mut self, body: &Value) -> Result<Value, (u16, String)> {
-        let name = self.checked_launch(body).map_err(|reason| (400, reason))?;
-        Ok(self.launch(name))
+        let (name, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;
+        Ok(self.launch(name, asks))
     }
 
     /// `GET /api/capsules`: `{"capsules": [...]}`, one entry per launched
@@ -1498,13 +1506,27 @@ impl StandInRuntime {
         });
     }
 
+    /// Lab test seam, not a route: the asks the instance of `session_id` was
+    /// handed at launch, the `asks.json` bytes of the checked, signed bundle
+    /// it was launched from. `None` when that bundle has no `asks.json`, or
+    /// when no instance has that session. #309 has no asks field on any
+    /// route, and nothing here parses the bytes.
+    pub fn asks_of(&self, session_id: &str) -> Option<Vec<u8>> {
+        self.instances
+            .iter()
+            .find(|instance| instance.session_id == session_id)
+            .and_then(|instance| instance.asks.clone())
+    }
+
     /// The checks of a launch, in this order, each library refusal as its own
     /// text: (a) the body, (b) the one parse of a printed lab CID, (c) the
     /// store, (d) the one walk, (e) the one name compare against the stored
     /// bytes, (f) a package record for that CID, (g) the one record check.
     /// (a), (b) and (c) come before the CID check. The answer is the stored
-    /// manifest's `name`.
-    fn checked_launch(&self, body: &Value) -> Result<String, String> {
+    /// manifest's `name`, from [`CheckedBundle::manifest_name`], and the
+    /// bundle's `asks.json` bytes, both from the one checked bundle that
+    /// passed every check.
+    fn checked_launch(&self, body: &Value) -> Result<(String, Option<Vec<u8>>), String> {
         let cid = self.launch_cid(body)?;
         cid.parse::<LabCid>().map_err(said)?;
         let folder = self
@@ -1513,13 +1535,27 @@ impl StandInRuntime {
             .ok_or_else(|| format!("no bundle is stored under {cid}"))?;
         let checked = checked_bundle(folder).map_err(said)?;
         checked.check_name(&cid).map_err(said)?;
-        let record = self
-            .records
-            .iter()
-            .find(|record| record.cid == cid)
-            .ok_or_else(|| format!("unsigned: no package record binds {cid}"))?;
-        verify_checked_package_record(&checked, record, &self.accepted).map_err(said)?;
-        Ok(manifest_name(&checked))
+        self.check_records(&checked, &cid)?;
+        Ok((checked.manifest_name().to_owned(), signed_asks(&checked)))
+    }
+
+    /// Checks (f) and (g): every package record that binds `cid`, in store
+    /// order, gets the one record check. The launch goes on when at least one
+    /// of them passes, so the answer does not depend on the records' order.
+    /// When none passes, the answer is the first one's own refusal; when no
+    /// record binds `cid`, the bundle is unsigned.
+    fn check_records(&self, checked: &CheckedBundle, cid: &str) -> Result<(), String> {
+        let mut first_refusal = None;
+        for record in self.records.iter().filter(|record| record.cid == cid) {
+            match verify_checked_package_record(checked, record, &self.accepted) {
+                Ok(()) => return Ok(()),
+                Err(refusal) => first_refusal = first_refusal.or(Some(refusal)),
+            }
+        }
+        match first_refusal {
+            Some(refusal) => Err(said(refusal)),
+            None => Err(format!("unsigned: no package record binds {cid}")),
+        }
     }
 
     /// Check (a): the body is a JSON object whose only key is `cid`, with a
@@ -1544,14 +1580,16 @@ impl StandInRuntime {
         Ok(cid.to_owned())
     }
 
-    /// Add one instance named `name`, with the next id and session id from a
-    /// counter, and answer for it.
-    fn launch(&mut self, name: String) -> Value {
+    /// Add one instance named `name` and handed `asks`, with the next id and
+    /// session id from a counter, and answer for it. The answer holds no asks
+    /// key.
+    fn launch(&mut self, name: String, asks: Option<Vec<u8>>) -> Value {
         let number = self.instances.len() + 1;
         let instance = Instance {
             id: format!("instance-{number}"),
             name,
             session_id: format!("session-{number}"),
+            asks,
         };
         let answer = json!({
             "id": instance.id,
@@ -1569,15 +1607,15 @@ fn said(refusal: Refusal) -> String {
     refusal.to_string()
 }
 
-/// The `name` of the manifest the walk checked, read from the checked bytes
-/// with the Runtime's own `CapsuleManifest`, never from the folder again.
-fn manifest_name(checked: &CheckedBundle) -> String {
-    let manifest = checked
+/// The asks file of a bundle, which the lab never parses.
+const ASKS_FILE: &str = "asks.json";
+
+/// The content of the checked bundle's `asks.json` entry, or `None` when it
+/// has none: the bytes the walk read, never read from the folder again.
+fn signed_asks(checked: &CheckedBundle) -> Option<Vec<u8>> {
+    checked
         .entries()
         .iter()
-        .find(|entry| entry.path == MANIFEST_FILE)
-        .expect("a checked bundle holds its manifest");
-    let manifest: CapsuleManifest =
-        serde_json::from_slice(&manifest.content).expect("a checked manifest parses");
-    manifest.name
+        .find(|entry| entry.path == ASKS_FILE)
+        .map(|entry| entry.content.clone())
 }

@@ -9,8 +9,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/audit/Cargo.toml",
-          "old": "wasmparser = \"=0.258.0\"",
-          "new": "wasmparser = \"0.258.0\""
+          "old": "version = \"=0.258.0\"",
+          "new": "version = \"0.258.0\""
         }
       ],
       "tests": [
@@ -836,6 +836,22 @@
         "memory64_is_reported",
         "shared_memory_is_reported",
         "memories_follow_import_then_definition_order"
+      ]
+    },
+    {
+      "id": "F-CWA21a",
+      "title": "Match an interface when the declared name ends with the import",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if !declared_interfaces.contains(&name.as_str()) {",
+          "new": "if !declared_interfaces.iter().any(|declared| declared.ends_with(name.as_str())) {"
+        }
+      ],
+      "tests": [
+        "a_different_version_of_a_declared_interface_is_refused"
       ]
     }
   ]

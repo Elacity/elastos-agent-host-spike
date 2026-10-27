@@ -808,8 +808,8 @@
         },
         {
           "file": "../../lab/agent-conformance/probe/capsule.json",
-          "old": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\"]",
-          "new": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\", \"localhost://Public/../../../../.ssh/id_ed25519\"]"
+          "old": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\", \"elastos://net/stream\"]",
+          "new": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\", \"elastos://net/stream\", \"localhost://Public/../../../../.ssh/id_ed25519\"]"
         }
       ],
       "tests": [

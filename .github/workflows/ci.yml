@@ -144,6 +144,8 @@ jobs:
   engine-llama-amd64:
     name: engine-llama-amd64
     runs-on: ubuntu-24.04
+    # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
+    if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     timeout-minutes: 45
     needs: source-gate
     container:
@@ -211,6 +213,8 @@ jobs:
   engine-llama-arm64:
     name: engine-llama-arm64
     runs-on: ubuntu-24.04-arm
+    # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
+    if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     timeout-minutes: 45
     needs: source-gate
     container:
@@ -334,6 +338,8 @@ jobs:
   test-elastos:
     name: test-elastos
     runs-on: ubuntu-24.04
+    # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
+    if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     timeout-minutes: 60
     needs: source-gate
     steps:
@@ -420,6 +426,8 @@ jobs:
   test-capsules:
     name: test-capsules
     runs-on: ubuntu-24.04
+    # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
+    if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     timeout-minutes: 45
     needs: source-gate
     steps:
@@ -529,7 +537,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     needs: source-gate
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'push' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'))
+    if: (github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'push' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'))) && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))
     # The top-level `permissions: contents: read` above zeroes every other
     # scope for every job; dorny/paths-filter resolves a pull_request's
     # changed files via the GitHub API (this job's checkout is fetch-depth 1,
@@ -640,6 +648,8 @@ jobs:
   release-upstream-paths:
     name: release-upstream-paths
     runs-on: ubuntu-24.04
+    # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
+    if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     timeout-minutes: 5
     # dorny/paths-filter reads a pull request's changed files from the API.
     permissions:
@@ -677,7 +687,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     needs: [release-upstream-paths, engine-llama-arm64]
-    if: needs.release-upstream-paths.outputs.run == 'true'
+    if: (needs.release-upstream-paths.outputs.run == 'true') && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))
     strategy:
       fail-fast: false
       matrix:
@@ -734,6 +744,8 @@ jobs:
   source-home-linux:
     name: source-home-linux (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
+    if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     timeout-minutes: 120
     needs: [source-gate, engine-llama-amd64]
     env:
@@ -1014,6 +1026,8 @@ jobs:
   source-home-linux-arm64:
     name: source-home-linux (${{ matrix.check_name || matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
+    if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     timeout-minutes: 90
     needs: [source-gate, engine-llama-arm64]
     env:
@@ -1032,6 +1046,8 @@ jobs:
   source-home-macos:
     name: source-home-macos
     runs-on: macos-14
+    # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
+    if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     # The two hop builds may take 30 minutes and the update journey step 75.
     timeout-minutes: 150
     needs: source-gate
@@ -1346,6 +1362,8 @@ jobs:
   update-hop-linux:
     name: update-hop-linux
     runs-on: ubuntu-24.04
+    # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
+    if: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/')) }}
     # Source-home with the hop builds may take 45 minutes and the update journey 75.
     timeout-minutes: 150
     needs: source-gate
@@ -1588,8 +1606,9 @@ jobs:
           # Jobs that wait on needs appear late; two quiet polls confirm the end.
           while (( done_polls < 2 )); do
             sleep 20
+            # cargo-audit reports RustSec advisories in its own red job but does not cancel the rest: base has open advisories, and cancelling on it killed every PR run within a minute.
             counts="$(gh api "$run/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" --jq \
-              '[.jobs[] | select(.name != "cancel-on-failure")] | "\(map(select(.conclusion == "failure" or .conclusion == "timed_out")) | length) \(map(select(.status != "completed")) | length)"')" || continue
+              '[.jobs[] | select(.name != "cancel-on-failure" and .name != "cargo-audit")] | "\(map(select(.conclusion == "failure" or .conclusion == "timed_out")) | length) \(map(select(.status != "completed")) | length)"')" || continue
             read -r failed pending <<< "$counts"
             if (( failed > 0 )); then
               echo "A job failed; cancelling the rest of this pull request run."

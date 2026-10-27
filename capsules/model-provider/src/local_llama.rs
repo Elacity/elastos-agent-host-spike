@@ -1082,7 +1082,7 @@ fn exited_guard_signal_can_settle(guard_exited: bool, errno: Option<i32>) -> boo
 #[cfg(all(test, unix))]
 thread_local! {
     static LAST_CLOSURE_STAGE: std::cell::RefCell<Option<(&'static str, Option<i32>)>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 fn guard_close_failed(stage: &'static str, errno: Option<i32>) -> LocalLlamaFault {
