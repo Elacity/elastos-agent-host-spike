@@ -1521,3 +1521,40 @@
   after 5.633411667s, not within 5 s of its budget 500ms"), a wall-clock bound that reads no README or LOG line;
   nothing was changed for it (`tests/` is out of scope). Re-run: `cargo test --locked` (129 passed, 3 ignored, 0
   failed, that test passed) and `cargo test --locked --workspace` (156 passed, 3 ignored, 0 failed).
+- 062 (wc-010c, the peak half; M1 C0 step iii, P18). Flint's answer (INBOX, 28 Oct 00:25): "The receipt records the
+  declared cap and a measured peak, labelled honestly: process RSS from `/usr/bin/time -l` is labelled 'engine process
+  RSS, not linear memory'; record linear-memory peak only if it is actually measured, never cited." Base
+  `da6d76700a734629f067f189dd26c6d91645c6dd`. `tools/src/run.rs`: the one poll loop (`wait_within_budget`) asks
+  `reap` in place of `child.try_wait()`; `reap` calls `libc::wait4(pid, &mut status, WNOHANG, &mut rusage)`, builds the
+  `ExitStatus` from that same call (`ExitStatusExt::from_raw`), so each module-run process is reaped once and never
+  waited for again through `Child`, and returns `ru_maxrss` in bytes. `EngineRun::process_max_rss_bytes` is set only
+  from it in `start_engine`; `TwoEngineRun::process_max_rss_bytes(engine)`; the kill paths keep `stop_engine` as is;
+  the `--version` queries record none. No `/usr/bin/time` wrapper, no `getrusage(RUSAGE_CHILDREN)`.
+  `tools/src/receipt.rs`: schema `wc-005.run-receipt/v4` adds, per engine, `<engine>_process_max_rss_bytes: <n> (engine
+  process RSS, not linear memory)`; the refusal receipt is unchanged. `tools/Cargo.toml` adds `libc = "=0.2.189"`, the
+  version the lockfile already held; `Cargo.lock` gains one line (`"libc"` in `wasm-capsule-tools`' dependencies), no
+  new package. `man 2 getrusage` on this Mac: "ru_maxrss	  the maximum resident set size utilized (in bytes)."
+  Tests (`tests/run.rs`): `receipt_labels_each_engine_peak_as_process_rss_not_linear_memory` (marked stand-ins, 18
+  lines, both peaks > 0, no key with `linear`) and `process_peak_rss_follows_the_memory_the_engine_touched` (both real
+  engines found; the fixture is `memory_module`'s encoding, now `memory_module_running`, 1 to 1024 pages, growing to
+  768 pages and `memory.fill`ing all 48 MiB with byte 1; neither engine refused it). Its run printed "PEAK fill:
+  wasmtime 64503808 bytes, wasmer 68812800 bytes" and "PEAK built: wasmtime 14417920 bytes, wasmer 18743296 bytes".
+  v3 pins moved to v4 (`receipt_records_observed_engine_versions`, `real_receipt_names_both_installed_engines`,
+  `receipt_records_the_declared_memory_cap`). Hand cross-check, the same 65-byte fixture (sha256
+  `456ee4627ccafc2dd20068f2dc034760101cb17ad0db1c55125c8db619038527`, written under the git-ignored `target/` and deleted after), run
+  `/usr/bin/time -l env -i <engine> run --invoke digest ... fill.wasm 1592590337` (`env` execs the engine, so the
+  counter is the engine's), each printing `768`: wasmtime (with the receipt's `-W
+  max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y`) 64503808 and 64471040 bytes "maximum resident set
+  size", beside the receipt's 64503808; wasmer 68648960 and 68665344, beside the receipt's 68812800. Close, not equal.
+  Falsifiers, one at a time by hand, then restored (`cmp` clean): F-WC10H-PEAK-CITED (`process_max_rss_bytes:
+  memory_cap_bytes(memory_mb)`) panicked at `tests/run.rs:3481` "wasmtime ran the built capsule with a process peak
+  of 67108864 bytes, not under 48 MiB"; F-WC10H-PEAK-UNLABELLED panicked at `tests/run.rs:3378` "wasmtime's peak line
+  is not `wasmtime_process_max_rss_bytes: <n> (engine process RSS, not linear memory)`:
+  "wasmtime_process_max_rss_bytes: 2162688"". Canonical runner from the repo root, `RUST_TEST_THREADS=2
+  CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json
+  F-WC10H-PEAK-CITED F-WC10H-PEAK-UNLABELLED`: "baseline: 2 named tests pass without an edit, 0 do not", both CAUGHT,
+  "summary: 2 CAUGHT of 2". Then all 95 entries that edit `tools/src/run.rs`, `tools/src/receipt.rs` or `README.md`:
+  "baseline: 54 named tests pass without an edit, 0 do not", "summary: 1 BUILD FAILED, 94 CAUGHT of 95"; the one was
+  F-WC10-CAP-REJECTED-RETRY, whose planted `EngineRun` literal lacked the new field. Re-anchored (the same bug, its
+  retry's peak 0): "summary: 1 CAUGHT of 1". F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT re-anchored to 191, both
+  CAUGHT in the 95-entry run. README totals: 191 entries, 127 runner-caught, 69 hand-proven.
