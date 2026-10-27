@@ -41,13 +41,39 @@
 //! [`write_new_file`], so an existing file or a link there is refused with
 //! that function's own reason and cause, unchanged. The receipt is not signed;
 //! it makes no admission or launch decision.
+//!
+//! Task 044 (M1 A7 lab half): a refused run gets a receipt too. [`render_refused`]
+//! turns the [`TwoEngineRefusal`] that [`crate::run::run`] returned into these
+//! lines, in this order:
+//!
+//! ```text
+//! schema: wc-005.run-refusal/v1
+//! outcome: refused
+//! reason: <the refusal's id, from refusal_reason>
+//! engine: <wasmtime|wasmer|none>
+//! detail: "<the refusal's Display>"
+//! ```
+//!
+//! [`refusal_reason`] gives one stable lowercase snake_case id per refusal
+//! kind, from one exhaustive `match` over every [`TwoEngineRefusal`] variant
+//! and every [`Reason`] variant, with no wildcard arm, so a new variant without
+//! an id does not build. A verifier refusal has the one id `verify_refused`;
+//! its detail carries the verifier's own text. `engine` is the engine the
+//! reason names, else `none`. Every value comes from the refusal; nothing is
+//! configured. There is no lab CID line, since a verifier refusal may have
+//! none. `detail` is the refusal's Display through `escape_ascii`, as the
+//! quoted values above. [`write_refused_receipt`] writes it through the same
+//! [`write_new_file`]. It is not signed and makes no admission decision.
 
 use crate::bundle::{write_new_file, RunRefusal};
-use crate::run::{Engine, TwoEngineRun, DIGEST_ARGUMENT, DIGEST_EXPORT};
+use crate::run::{Engine, Reason, TwoEngineRefusal, TwoEngineRun, DIGEST_ARGUMENT, DIGEST_EXPORT};
 use std::path::Path;
 
 /// The receipt's schema line value.
 pub const RECEIPT_SCHEMA: &str = "wc-005.run-receipt/v2";
+
+/// The refusal receipt's schema line value (task 044).
+pub const REFUSAL_SCHEMA: &str = "wc-005.run-refusal/v1";
 
 /// The receipt of `run`, as text. The lines and their order are in the module
 /// docs.
@@ -91,4 +117,60 @@ fn memory_cap_line(engine: Engine, cap: Option<&str>) -> String {
 /// [`write_new_file`]. Its refusal is returned unchanged.
 pub fn write_receipt(run: &TwoEngineRun, path: &Path) -> Result<(), RunRefusal> {
     write_new_file(path, render(run).as_bytes())
+}
+
+/// Task 044: the stable reason id of `refusal`, and the engine its reason
+/// names, if any. One exhaustive `match` per level, with no wildcard arm: a
+/// new [`TwoEngineRefusal`] or [`Reason`] variant has no id until one is
+/// written here, so it does not build. A version query's refusal and a module
+/// run's carry the same [`Reason`] type, so each [`Reason`] has one id.
+pub fn refusal_reason(refusal: &TwoEngineRefusal) -> (&'static str, Option<Engine>) {
+    let reason = match refusal {
+        TwoEngineRefusal::Verify(_) => return ("verify_refused", None),
+        TwoEngineRefusal::OutputsDiffer { .. } => return ("outputs_differ", None),
+        TwoEngineRefusal::Version(refusal) | TwoEngineRefusal::Engine(refusal) => &refusal.reason,
+    };
+    match reason {
+        Reason::EngineNotAbsolute => ("engine_not_absolute", None),
+        Reason::WorkRootNotAbsolute => ("work_root_not_absolute", None),
+        Reason::WorkRootUnresolved(_) => ("work_root_unresolved", None),
+        Reason::WorkRootNotCanonical { .. } => ("work_root_not_canonical", None),
+        Reason::WorkRootMetadataFailed(_) => ("work_root_metadata_failed", None),
+        Reason::WorkRootNotAFolder => ("work_root_not_a_folder", None),
+        Reason::RunDirExists => ("run_dir_exists", None),
+        Reason::RunDirNotCreated(_) => ("run_dir_not_created", None),
+        Reason::ModuleNotCreated(_) => ("module_not_created", None),
+        Reason::ModuleNotWritten(_) => ("module_not_written", None),
+        Reason::Writer(_) => ("writer_refused", None),
+        Reason::EngineDidNotStart { engine, .. } => ("engine_did_not_start", Some(*engine)),
+        Reason::EngineFailed { engine, .. } => ("engine_failed", Some(*engine)),
+        Reason::VersionDidNotStart { engine, .. } => ("version_did_not_start", Some(*engine)),
+        Reason::VersionFailed { engine, .. } => ("version_failed", Some(*engine)),
+        Reason::VersionEmpty { engine } => ("version_empty", Some(*engine)),
+        Reason::VersionNotPinned { engine, .. } => ("version_not_pinned", Some(*engine)),
+        Reason::CapRejected { engine, .. } => ("cap_rejected", Some(*engine)),
+        Reason::RunDirNotRemoved(_) => ("run_dir_not_removed", None),
+        Reason::BudgetZero => ("budget_zero", None),
+        Reason::BudgetExceeded { engine, .. } => ("budget_exceeded", Some(*engine)),
+        Reason::EngineNotStopped { engine, .. } => ("engine_not_stopped", Some(*engine)),
+        Reason::EngineNotWaited { engine, .. } => ("engine_not_waited", Some(*engine)),
+        Reason::OutputNotRead { engine, .. } => ("output_not_read", Some(*engine)),
+    }
+}
+
+/// Task 044: the receipt of a refused run, as text. The lines and their order
+/// are in the module docs; every value comes from `refusal`.
+pub fn render_refused(refusal: &TwoEngineRefusal) -> String {
+    let (reason, engine) = refusal_reason(refusal);
+    format!(
+        "schema: {REFUSAL_SCHEMA}\noutcome: refused\nreason: {reason}\nengine: {}\ndetail: \"{}\"\n",
+        engine.map_or("none", Engine::name),
+        refusal.to_string().as_bytes().escape_ascii()
+    )
+}
+
+/// Task 044: write `refusal`'s receipt to `path` as a new file with the
+/// shared [`write_new_file`]. Its refusal is returned unchanged.
+pub fn write_refused_receipt(refusal: &TwoEngineRefusal, path: &Path) -> Result<(), RunRefusal> {
+    write_new_file(path, render_refused(refusal).as_bytes())
 }

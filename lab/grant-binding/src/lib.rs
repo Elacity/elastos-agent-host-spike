@@ -736,6 +736,27 @@ fn model_use_path_under_the_owned_root_is_allowed() {
 }
 
 #[test]
+fn model_forged_identity_does_not_move_the_use_path() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    verifier
+        .use_path(&call, &request, "UsersAI/agent-1/notes/page.md")
+        .expect("forged identity does not move the use path");
+    let decision = verifier.use_grant(call, &guest(handle)).expect("grant");
+    assert_eq!(decision.identity, "agent-1");
+    assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
+}
+
+#[test]
 fn model_use_path_dotdot_is_refused() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
