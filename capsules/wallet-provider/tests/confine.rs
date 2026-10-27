@@ -3481,9 +3481,11 @@ struct SuiteEntry {
     outcome: SuiteOutcome,
 }
 
-/// The first entries of the suite are the permitted calls; every later entry
-/// is a denied case.
+/// The entries before the denied cases are the permitted calls.
 const SUITE_PERMITTED_CASES: usize = 3;
+
+/// The suite ends with one permitted `status` call after the denied cases.
+const SUITE_TRAILING_PERMITTED_CASES: usize = 1;
 
 /// The stable start of a refusal message: its text before the first path
 /// separator, trimmed. Each provider runs on its own temporary root, so the
@@ -3511,6 +3513,39 @@ fn suite_entry(case: &'static str, answer: &Value) -> SuiteEntry {
     SuiteEntry { case, outcome }
 }
 
+/// The suite entry for one wallet answer: `Ok` only when the bound result is
+/// `Ok`, and the inner result's `code` and stable message start for an error.
+/// The provider answers every `wallet_contract` request with an outer `ok` and
+/// puts the result in `data.result`, so the outer status proves nothing about
+/// the effect. An outer answer that is not `ok` or that does not bind to its
+/// request fails the test, because the one wallet request path always answers a
+/// bound response.
+fn wallet_suite_entry(
+    case: &'static str,
+    request: &WalletProviderRequestV2,
+    answer: &Value,
+) -> SuiteEntry {
+    assert_eq!(
+        answer["status"], "ok",
+        "{case}: wallet_contract must answer through the protocol: {answer}"
+    );
+    let data = answer.get("data").unwrap_or_else(|| {
+        panic!("{case}: wallet_contract answer must carry a bound response: {answer}")
+    });
+    let bytes = serde_json::to_vec(data).expect("bound response must serialize");
+    let result = WalletProviderResponseV2::decode_for_request(&bytes, request)
+        .unwrap_or_else(|err| panic!("{case}: provider response must bind to its request: {err}"))
+        .result;
+    let outcome = match result {
+        WalletResultV2::Ok { .. } => SuiteOutcome::Ok,
+        WalletResultV2::Error { code, message } => SuiteOutcome::Refused {
+            status: code,
+            message: stable_message_start(&message),
+        },
+    };
+    SuiteEntry { case, outcome }
+}
+
 /// The one stand-in suite: the permitted wallet calls of
 /// `confined_provider_serves_wallet_operations_under_its_root` and the denied
 /// cases of `confined_outside_write_is_denied` and
@@ -3518,12 +3553,15 @@ fn suite_entry(case: &'static str, answer: &Value) -> SuiteEntry {
 /// provider and one root. It returns one entry per case in a fixed order: `init`
 /// at the root, `status`, the first wallet call of the permitted test (which
 /// creates a managed account and writes its key material under the wallet
-/// root), the four outside writes of the one shared case list, and the planted
-/// key read beneath `STORAGE_PARENT`. The denied cases run last because `init`
-/// resets the root before it refuses. A refusal keeps the answer's `status`
-/// and the stable start of its `message`, so two records from different roots
-/// compare equal. Both callers drive one started provider through this
-/// function; it starts none.
+/// root), the four outside writes of the one shared case list, the planted key
+/// read beneath `STORAGE_PARENT` on its own base, and the `status` after the
+/// denied cases, which shows the provider stays in service. The denied cases
+/// run between the permitted calls because `init` resets the root before it
+/// refuses. A wallet call is `Ok` only when its bound result is `Ok`, so an
+/// inner storage or validation refusal cannot read as a permitted case. A
+/// refusal keeps the answer's `status` and the stable start of its `message`,
+/// so two records from different roots compare equal. Both callers drive one
+/// started provider through this function; it starts none.
 fn wallet_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteEntry> {
     let mut record = Vec::new();
 
@@ -3533,13 +3571,17 @@ fn wallet_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<Sui
     let status = provider.send(&json!({ "op": "status" }));
     record.push(suite_entry("status", &status));
 
-    let (_, answer) =
+    let (request, answer) =
         provider.wallet_request_and_answer(WalletProviderOperationV2::CreateManagedAccount {
             chain_namespace: "eip155:20".to_string(),
             label: Some("Confined".to_string()),
             create_new: false,
         });
-    record.push(suite_entry("create_managed_account", &answer));
+    record.push(wallet_suite_entry(
+        "create_managed_account",
+        &request,
+        &answer,
+    ));
 
     let outside = tempfile::tempdir().expect("temporary outside directory");
     let outside = resolved(outside.path());
@@ -3549,27 +3591,35 @@ fn wallet_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<Sui
         record.push(suite_entry(case, &denied));
     }
 
+    // Its own base beneath `STORAGE_PARENT`, so the planted read starts
+    // without the refused `init` of the outside-write sibling case.
     let planted = wallet_dir(root)
         .parent()
         .expect("wallet parent")
-        .join("Sibling");
+        .join("Planted");
     let planted_wallet = wallet_dir(&planted);
     plant_storage_key(&planted_wallet);
     let denied = provider.init(&planted);
     record.push(suite_entry("planted key beneath STORAGE_PARENT", &denied));
 
+    let status = provider.send(&json!({ "op": "status" }));
+    record.push(suite_entry("status after the denied cases", &status));
+
     record
 }
 
-/// Requires the permitted cases to answer `ok` and every denied case to be
-/// refused, and fails with the case name on the first entry that disagrees.
+/// Requires the leading permitted calls and the trailing `status` to answer
+/// `ok` and every entry between them to be refused, and fails with the case
+/// name on the first entry that disagrees.
 fn assert_suite_outcomes(label: &str, record: &[SuiteEntry]) {
     assert!(
-        record.len() > SUITE_PERMITTED_CASES,
-        "{label} suite must hold the permitted cases and at least one denied case"
+        record.len() > SUITE_PERMITTED_CASES + SUITE_TRAILING_PERMITTED_CASES,
+        "{label} suite must hold the permitted cases, at least one denied case and the trailing status"
     );
     for (index, entry) in record.iter().enumerate() {
-        if index < SUITE_PERMITTED_CASES {
+        let permitted =
+            index < SUITE_PERMITTED_CASES || index >= record.len() - SUITE_TRAILING_PERMITTED_CASES;
+        if permitted {
             assert!(
                 entry.outcome == SuiteOutcome::Ok,
                 "{label} must permit case {:?}: {:?}",
@@ -3594,9 +3644,10 @@ fn assert_suite_outcomes(label: &str, record: &[SuiteEntry]) {
 /// profile through `ConfinedProvider::start`, and once on a provider Started by
 /// `standin_spawn_confined_provider` from wallet's committed declared-rights
 /// file, each on its own fresh temporary root. Every permitted case answers
-/// `ok` and every denied case is refused in both records, and the two records
-/// are equal entry by entry; a difference names the first differing case. The
-/// lab stand-in is test code and not the Runtime.
+/// `ok`, and the key-writing call answers `ok` only when its bound wallet
+/// result is `ok`; every denied case is refused in both records, and the two
+/// records are equal entry by entry; a difference names the first differing
+/// case. The lab stand-in is test code and not the Runtime.
 ///
 /// Falsifier: WP116 binds the stand-in's `STORAGE_ROOT` to the base instead of
 /// the wallet directory; the widened grant permits `<root>/sibling`, so the
@@ -3710,6 +3761,53 @@ fn standin_start_runs_under_the_generated_profile_not_the_committed_file() {
         "a refused start must create no wallet directory: {}",
         wallet_dir(&base).display()
     );
+}
+
+/// The suite records a wallet call as `Ok` only when its bound result is `Ok`.
+///
+/// `handle_wallet_contract` answers every `wallet_contract` request with an
+/// outer `ok` and puts the real result in `data.result`, so an inner refusal
+/// must not read as a permitted case. The test starts the provider under the
+/// committed profile, `init`s the root, sends `create_managed_account` with a
+/// chain namespace the wallet refuses, and requires `wallet_suite_entry` to
+/// record `Refused` with the inner `invalid_request` code and its reason, while
+/// the outer answer is still `ok`. Both callers of the suite read this one
+/// entry function.
+///
+/// Falsifier: read only the outer `status` in `wallet_suite_entry`; this test
+/// fails because the entry reads `Ok`.
+#[test]
+fn wallet_suite_entry_records_an_inner_refusal_as_refused() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let root = tempfile::tempdir().expect("temporary wallet root");
+    let root = resolved(root.path());
+    let mut provider = ConfinedProvider::start(&root);
+    let init = provider.init(&root);
+    assert_eq!(init["status"], "ok", "confined Init must succeed: {init}");
+
+    let (request, answer) =
+        provider.wallet_request_and_answer(WalletProviderOperationV2::CreateManagedAccount {
+            chain_namespace: "bogus".to_string(),
+            label: Some("Refused".to_string()),
+            create_new: false,
+        });
+    assert_eq!(
+        answer["status"], "ok",
+        "the outer answer stays ok for an inner refusal: {answer}"
+    );
+    let entry = wallet_suite_entry("create_managed_account", &request, &answer);
+    assert_eq!(
+        entry.outcome,
+        SuiteOutcome::Refused {
+            status: "invalid_request".to_string(),
+            message: "managed wallets support EVM chains and Bitcoin mainnet P2WPKH".to_string(),
+        },
+        "an inner refusal must be recorded from the bound result: {entry:?}"
+    );
+
+    provider.shutdown();
 }
 
 /// The stored-copy fixture shared by `unbound_copy_is_refused_under_profile`
