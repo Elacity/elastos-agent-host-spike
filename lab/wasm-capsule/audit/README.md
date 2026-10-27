@@ -31,9 +31,9 @@ cargo fmt --manifest-path lab/wasm-capsule/audit/Cargo.toml -- --check
 cargo test --locked --manifest-path lab/wasm-capsule/audit/Cargo.toml
 ```
 
-The fourteen `core_imports` tests cover default features, named refusals, exact
+The sixteen `core_imports` tests cover default features, named refusals, exact
 declarations, malformed bytes, custom-section content, compact import groups,
-refusal order and API v1, and memory page limits for a defined memory, an absent maximum, an imported memory, a 64-bit memory and a shared memory.
+refusal order and API v1, and memory page limits for a defined memory, an absent maximum, an imported memory, a 64-bit memory and a shared memory, in import-then-definition order and with the same validation as `audit`.
 The two retained `skeleton` tests pin the manifest
 and workspace boundary. The nine `component_imports` tests cover exact names
 and versions (including same-major, pre-release and build-metadata versions;
@@ -119,7 +119,7 @@ apply and verify each entry by hand in this workspace.
 | F-CWA17a | Match the name by a declared suffix while the module matches exactly | `declared_import_passes_and_only_that_one` |
 | F-CWA17b | Match the module by a declared suffix while the name matches exactly | `declared_import_passes_and_only_that_one` |
 | F-CWA18a | Match an interface name that ends with a declared interface | `a_different_version_of_a_declared_interface_is_refused` |
-| F-CWA20a | Drop every memory maximum | `defined_memory_reports_its_page_limits`, `imported_memory_reports_its_page_limits`, `memory64_is_reported`, `shared_memory_is_reported` |
+| F-CWA20a | Drop every memory maximum | `defined_memory_reports_its_page_limits`, `imported_memory_reports_its_page_limits`, `memory64_is_reported`, `shared_memory_is_reported`, `memories_follow_import_then_definition_order` |
 
 Start with passing checks. Save the original bytes of the edited file and its
 SHA-256, then apply one entry's exact edits. With the check environment above,
@@ -479,5 +479,20 @@ restored byte-identical, SHA-256
 `Parser::new` and `Validator::new()` each still occurred once. The clean
 format check passed before the mutation and after the restore. The locked
 tests passed after the restore: 25 tests (14 `core_imports`, 9
+`component_imports`, 2 `skeleton`) offline under `RUST_TEST_THREADS=2` and
+`CARGO_INCREMENTAL=0`. `audit/Cargo.lock` stayed absent.
+
+The cwa-020c in-tree run replaced `maximum: ty.maximum,` with `maximum: None,`
+for F-CWA20a. On the clean code, `memories_follow_import_then_definition_order`
+and `memories_use_the_same_validation_as_audit` passed. Under that edit,
+`memories_follow_import_then_definition_order` built and failed at `assert_eq`.
+It returned
+`Ok([MemoryLimits { minimum: 2, maximum: None, memory64: false, shared: false }, MemoryLimits { minimum: 16, maximum: None, memory64: false, shared: false }])`
+where the second limit's expected maximum was `Some(1024)` and its minimum
+stayed 16. Under that same edit, `memories_use_the_same_validation_as_audit`
+passed. `src/lib.rs` restored byte-identical, SHA-256
+`c90500513ac3b71fb3fb12ddc929900557fe9d60cccb5075abcea39d9978262d`. The clean
+format check passed before the mutation and after the restore. The locked
+tests passed after the restore: 27 tests (16 `core_imports`, 9
 `component_imports`, 2 `skeleton`) offline under `RUST_TEST_THREADS=2` and
 `CARGO_INCREMENTAL=0`. `audit/Cargo.lock` stayed absent.
