@@ -32,7 +32,6 @@ use capsule::{FIXED_INPUT, FIXED_OUTPUT};
 use capsule_identity::{sign_bundle, LabCid, NameSignature};
 use common::build::{lane_dir, run_build, TempDir};
 use common::grants::{env_f, grants_file, importing, importing_env, IMPORTING_MODULE};
-use common::wasm_shape;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::fs;
@@ -40,7 +39,7 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use wasm_capsule_audit::Refusal as AuditRefusal;
+use wasm_capsule_audit::{audit, memories, MemoryLimits, Refusal as AuditRefusal};
 use wasm_capsule_tools::bundle::{
     write_new_file, Reason as WriteReason, RunRefusal as WriteRefusal,
 };
@@ -3145,6 +3144,9 @@ fn memory_grow_past_the_module_maximum_returns_minus_one_on_wasmer() {
 /// It defines exactly one memory and imports none, and that memory's maximum
 /// in bytes is the declared `memory_mb` × 2^20 from the verifier's one
 /// manifest read: 1024 pages for this capsule's 64. Its minimum is unchanged.
+/// Task 037: the module is read only through `wasm_capsule_audit` (`audit`
+/// for its imports, `memories` for its memory limits), the lab's one module
+/// reader (P10); the test-only shape reader reads no memory.
 #[test]
 fn built_capsule_declares_the_manifest_memory_as_its_maximum() {
     const WASM_PAGE_BYTES: u64 = 65536;
@@ -3152,31 +3154,40 @@ fn built_capsule_declares_the_manifest_memory_as_its_maximum() {
     let root = canonical(&tmp);
     let built = built_capsule(&root);
     let (_bundle, value) = verified_bundle(&root, "bundle", &built);
-    let shape = wasm_shape::read(&value.entrypoint().content).expect("read the module's shape");
+    let content = &value.entrypoint().content;
 
-    assert_eq!(shape.import_count, 0, "the capsule imports nothing");
-    assert_eq!(
-        shape.imported_memory_count, 0,
-        "the capsule imports no memory"
+    let imports = audit(content, &[]).expect("audit the capsule's imports");
+    assert!(
+        imports.is_empty(),
+        "the capsule imports nothing, so its one memory is defined, not imported: {imports:?}"
     );
+    let limits = memories(content).expect("read the capsule's memory limits");
     assert_eq!(
-        shape.memories.len(),
+        limits.len(),
         1,
-        "the capsule defines exactly one memory: {:?}",
-        shape.memories
+        "the capsule defines exactly one memory: {limits:?}"
     );
-    let memory = shape.memories[0];
+    let memory = &limits[0];
     assert_eq!(memory.minimum, 16, "the minimum is unchanged");
     let maximum = memory
         .maximum
         .expect("the capsule declares no memory maximum");
     assert_eq!(
-        u64::from(maximum) * WASM_PAGE_BYTES,
+        maximum * WASM_PAGE_BYTES,
         u64::from(value.memory_mb()) << 20,
         "the maximum ({maximum} pages) is not the declared memory_mb ({} MB)",
         value.memory_mb()
     );
-    assert_eq!(maximum, 1024, "64 MB is 1024 pages of 64 KiB");
+    assert_eq!(
+        *memory,
+        MemoryLimits {
+            minimum: 16,
+            maximum: Some(1024),
+            memory64: false,
+            shared: false,
+        },
+        "64 MB is one 32-bit, unshared memory of 16 to 1024 pages of 64 KiB"
+    );
 }
 
 /// wc-010b, real engines: the capsule `tools/build` makes, through `run` on
