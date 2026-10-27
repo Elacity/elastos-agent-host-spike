@@ -114,6 +114,20 @@ NO_WRITE_MARKER = "`" + NO_WRITE_SPAN + "`"
 COVER_SPAN = "examples/agent-host/src/lib.rs:8488"
 COVER_MARKER = "`" + COVER_SPAN + "`"
 
+# Its quotation is remainder 4 after the edit range span, source line 2421.
+EDIT_RANGE_SPAN = "examples/agent-host/src/lib.rs:2421-2422"
+EDIT_RANGE_MARKER = "`" + EDIT_RANGE_SPAN + "`"
+EDIT_START_SPAN = "examples/agent-host/src/lib.rs:2421"
+EDIT_END_SPAN = "examples/agent-host/src/lib.rs:2422"
+
+# Its quotation is remainder 0 after the request span, source line 2720.
+REQUEST_SPAN = "examples/agent-host/src/lib.rs:2720"
+REQUEST_MARKER = "`" + REQUEST_SPAN + "`"
+
+# Its quotation is remainder 2 after the is-write span, source line 3290.
+IS_WRITE_SPAN = "examples/agent-host/src/lib.rs:3290"
+IS_WRITE_MARKER = "`" + IS_WRITE_SPAN + "`"
+
 # The draft indents a quotation by exactly four spaces.
 DRAFT_INDENT = "    "
 
@@ -451,6 +465,38 @@ def cover_quote(text):
     return remainders[5]
 
 
+def edit_start_quote(text):
+    """Return remainder 4 after the edit range span, or None when it is absent."""
+    remainders = _remainders(text, EDIT_RANGE_MARKER)
+    if len(remainders) <= 4:
+        return None
+    return remainders[4]
+
+
+def edit_end_quote(text):
+    """Return remainder 5 after the edit range span, or None when it is absent."""
+    remainders = _remainders(text, EDIT_RANGE_MARKER)
+    if len(remainders) <= 5:
+        return None
+    return remainders[5]
+
+
+def request_quote(text):
+    """Return remainder 0 after the request span, or None when it is absent."""
+    remainders = _remainders(text, REQUEST_MARKER)
+    if not remainders:
+        return None
+    return remainders[0]
+
+
+def is_write_quote(text):
+    """Return remainder 2 after the is-write span, or None when it is absent."""
+    remainders = _remainders(text, IS_WRITE_MARKER)
+    if len(remainders) <= 2:
+        return None
+    return remainders[2]
+
+
 def quoted_line_matches(quoted, source):
     """True only when the quotation equals the pinned source line."""
     return quoted == source
@@ -534,6 +580,52 @@ def _observe_quote_refusal(root, text, sha):
     return None
 
 
+def _edit_start_quote_refusal(root, text, sha):
+    """Return the 2421 refusal, or None when that quote is absent or matches."""
+    if text.count(EDIT_RANGE_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + EDIT_RANGE_SPAN
+    quoted = edit_start_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(EDIT_START_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + EDIT_START_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + EDIT_START_SPAN
+    return None
+
+
+def _edit_end_quote_refusal(root, text, sha):
+    """Return the 2422 refusal, or None when that quote is absent or matches."""
+    quoted = edit_end_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(EDIT_END_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + EDIT_END_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + EDIT_END_SPAN
+    return None
+
+
+def _request_quote_refusal(root, text, sha):
+    """Return the 2720 refusal, or None when that quote is absent or matches."""
+    if text.count(REQUEST_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + REQUEST_SPAN
+    quoted = request_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(REQUEST_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + REQUEST_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + REQUEST_SPAN
+    return None
+
+
 def _revision_quote_refusal(root, text, sha):
     """Return the 2741 refusal, or None when that quote is absent or matches."""
     if text.count(REVISION_MARKER) > 1:
@@ -563,6 +655,22 @@ def _op_quote_refusal(root, text, sha):
         return "refuse: quoted line is not in the pinned commit: " + OP_SPAN
     if not quoted_line_matches(quoted, source):
         return "refuse: quoted line does not match " + OP_SPAN
+    return None
+
+
+def _is_write_quote_refusal(root, text, sha):
+    """Return the 3290 refusal, or None when that quote is absent or matches."""
+    if text.count(IS_WRITE_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + IS_WRITE_SPAN
+    quoted = is_write_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(IS_WRITE_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + IS_WRITE_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + IS_WRITE_SPAN
     return None
 
 
@@ -823,16 +931,28 @@ def _cover_quote_refusal(root, text, sha):
 
 
 def _quote_refusals(root, text, sha):
-    """Return the quote refusals in source order: 2067, 2741, 2749, 3308, 3526, 3549, 3754, 3755, 3757, 3767, 3849, 3850, 8149, 8162, 8168, 8187, 8188, 8189, 8190, 8191, 8192, 8193, 8194, then 8488."""
+    """Return the quote refusals in source order: 2067, 2421, 2422, 2720, 2741, 2749, 3290, 3308, 3526, 3549, 3754, 3755, 3757, 3767, 3849, 3850, 8149, 8162, 8168, 8187, 8188, 8189, 8190, 8191, 8192, 8193, 8194, then 8488."""
     observe = _observe_quote_refusal(root, text, sha)
     if observe is not None:
         return [observe]
+    edit_start = _edit_start_quote_refusal(root, text, sha)
+    if edit_start is not None:
+        return [edit_start]
+    edit_end = _edit_end_quote_refusal(root, text, sha)
+    if edit_end is not None:
+        return [edit_end]
+    request = _request_quote_refusal(root, text, sha)
+    if request is not None:
+        return [request]
     revision = _revision_quote_refusal(root, text, sha)
     if revision is not None:
         return [revision]
     op = _op_quote_refusal(root, text, sha)
     if op is not None:
         return [op]
+    is_write = _is_write_quote_refusal(root, text, sha)
+    if is_write is not None:
+        return [is_write]
     no_write = _no_write_quote_refusal(root, text, sha)
     if no_write is not None:
         return [no_write]
