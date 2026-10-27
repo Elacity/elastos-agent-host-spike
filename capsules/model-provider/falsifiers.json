@@ -2323,6 +2323,22 @@
       ]
     },
     {
+      "id": "PV121",
+      "title": "startup recovery skips the model state file",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"lab/wasm-capsule/tests/lab_cid.rs\",\n    \"capsules/model-provider/src/state.rs\",",
+          "new": "    \"lab/wasm-capsule/tests/lab_cid.rs\","
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
       "id": "MP24",
       "title": "a Runtime-forwarded answer is read as a failure",
       "command": "provider",
