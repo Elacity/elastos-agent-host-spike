@@ -568,6 +568,8 @@ profile does not grant".
   line fails, even when both pins remain. The failure contains `allow form
   does not close`. `F-cc38a` writes `(allow` on its own line after the root
   pin, then `file-read* (literal "/tmp/cc-unclosed"))` on the next line.
+  A line that trims to `(` and whose next line starts with `allow` and then
+  a space or a tab fails with `allow form does not close`.
 - `startup_is_refused_when_the_profile_cannot_be_applied`: a missing profile,
   a copy of `confine.sb` with its last `)` removed, and `confine.sb` with
   `STORAGE_ROOT` unbound each refuse the start. It runs under
