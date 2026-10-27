@@ -1231,6 +1231,102 @@ fn model_provider_ops_under_profile() {
     provider.shutdown();
 }
 
+/// After a hosted `init`, an unknown `op` is refused under the oracle and
+/// under the stand-in file, and the storage tree is unchanged.
+///
+/// The request is `{"op":"not_an_op"}`. The answer is `status` `error`,
+/// `code` `unsupported_operation`, and message
+/// `unsupported model provider operation`. The oracle case uses
+/// `Launch::Confined` with `Storage::prepare("unknown-op")`. The stand-in
+/// case reads the declared fixture, calls `standin_profile` once, writes
+/// that text with `write_standin_profile` under
+/// `Storage::prepare("unknown-op-standin")`, and starts with
+/// `Launch::Profile` and `canonical_bindings`. The written file has no line
+/// that starts with `;;`, and `collect_allow_lines` on that file, sorted,
+/// equals the oracle's allow lines, sorted. Both cases pass `assert_serving`
+/// on `init`, create `runs/`, take `tree_snapshot` of `STORAGE_ROOT`, send
+/// the request, require that snapshot to be unchanged, and call `shutdown`.
+/// A launch of the oracle still returns `unsupported_operation`, so this
+/// test adds no falsifier. On a host where `sandbox_available` fails, the
+/// test returns. This does not say B4 is met.
+#[test]
+fn model_unknown_op_is_refused_under_profile() {
+    /// Hosted `init`, then `{"op":"not_an_op"}`. The storage snapshot stays
+    /// the snapshot taken after `init`. Then `shutdown`.
+    fn assert_unknown_op_is_refused(case: &str, storage: &Storage, mut provider: Provider) {
+        let init = provider.ok(&init_request(storage, None));
+        assert_serving(&init);
+        assert!(
+            storage.root.join("runs").is_dir(),
+            "{case}: init must create runs/ under STORAGE_ROOT"
+        );
+        let after_init = tree_snapshot(&storage.root);
+
+        let refused = provider.request(&json!({ "op": "not_an_op" }));
+        assert_eq!(
+            refused,
+            json!({
+                "status": "error",
+                "code": "unsupported_operation",
+                "message": "unsupported model provider operation"
+            }),
+            "{case}: an unknown op must be refused: {refused}"
+        );
+        assert_eq!(
+            tree_snapshot(&storage.root),
+            after_init,
+            "{case}: the unknown op must leave the storage tree after init unchanged"
+        );
+        provider.shutdown();
+    }
+
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+
+    let storage = Storage::prepare("unknown-op");
+    let provider = Provider::start(Launch::Confined(&storage));
+    assert_unknown_op_is_refused("oracle", &storage, provider);
+
+    let storage = Storage::prepare("unknown-op-standin");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let profile = storage.base.join("standin.sb");
+    write_standin_profile(&profile, &generated);
+    let launched = fs::read_to_string(&profile).unwrap_or_else(|err| {
+        panic!("stand-in: the file passed to Launch::Profile must be readable: {err}")
+    });
+    assert!(
+        launched.lines().all(|line| !line.starts_with(";;")),
+        "stand-in: the file passed to Launch::Profile has no line that starts with ;;"
+    );
+    let mut launched_lines = collect_allow_lines(&launched);
+    let oracle = fs::read_to_string(PROFILE_PATH)
+        .unwrap_or_else(|err| panic!("stand-in: the profile oracle must be readable: {err}"));
+    let mut oracle_lines = collect_allow_lines(&oracle);
+    launched_lines.sort();
+    oracle_lines.sort();
+    assert_eq!(
+        launched_lines, oracle_lines,
+        "stand-in: sorted allow lines must equal the oracle's"
+    );
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let bindings = canonical_bindings(&storage, &binary);
+    let provider = Provider::start(Launch::Profile {
+        profile: &profile,
+        bindings: &bindings,
+    });
+    assert_unknown_op_is_refused("stand-in", &storage, provider);
+}
+
 /// The redirect fixture shared by `model_outside_write_denied`,
 /// `model_outside_create_reports_access_denied` and their unconfined control.
 /// It creates `STORAGE_ROOT` to hold the link
