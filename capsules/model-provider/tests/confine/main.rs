@@ -2906,6 +2906,91 @@ fn generated_profile_denies_the_hosted_connect() {
     provider.shutdown();
 }
 
+/// The stand-in launch uses the generated file.
+///
+/// A clone of the declared rights drops the storage write and keeps the
+/// parent read. `standin_profile` builds that text once. `collect_allow_lines`
+/// shows the write rule absent, the parent read present, and the exec rule
+/// present. Those checks run before the sandbox return. `write_standin_profile`
+/// writes the text, and `Launch::Profile` applies that file. `init` with no
+/// journal directory answers `journal_access_denied` with message
+/// `model run journal is not writable`. `storage.root` does not exist, and
+/// `shutdown` exits cleanly. The committed oracle still has the write rule.
+///
+/// Falsifier: F-cc45a makes this launch start under the committed oracle
+/// instead of the generated file, so `init` answers ok.
+#[test]
+fn standin_launch_uses_the_generated_profile() {
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let storage_write = "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))";
+    let parent_read = "(allow file-read* (literal (param \"STORAGE_PARENT\")))";
+    let exec_rule = "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))";
+    let mut dropped = fixture.clone();
+    let rights = dropped
+        .get_mut("rights")
+        .and_then(Value::as_array_mut)
+        .expect("declared rights must hold a rights list");
+    let mut removed = 0;
+    for entry in rights {
+        if entry.get("id").and_then(Value::as_str) != Some("storage") {
+            continue;
+        }
+        let rules = entry
+            .get_mut("rules")
+            .and_then(Value::as_array_mut)
+            .expect("storage holds a rules list");
+        let before = rules.len();
+        rules.retain(|rule| rule.as_str() != Some(storage_write));
+        removed += before - rules.len();
+    }
+    assert_eq!(removed, 1, "the storage write rule is removed once");
+    let generated = standin_profile(&dropped).expect("declared rights build a profile");
+    let allow_lines = collect_allow_lines(&generated);
+    assert!(
+        !allow_lines.contains(&storage_write),
+        "the storage write is absent"
+    );
+    assert!(
+        allow_lines.contains(&parent_read),
+        "the parent read is present"
+    );
+    assert!(allow_lines.contains(&exec_rule), "the exec rule is present");
+
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+
+    let storage = Storage::prepare("standin-dropped-storage");
+    let dropped_profile = storage.base.join("standin-dropped-storage.sb");
+    write_standin_profile(&dropped_profile, &generated);
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let bindings = canonical_bindings(&storage, &binary);
+    let mut provider = Provider::start(Launch::Profile {
+        profile: &dropped_profile,
+        bindings: &bindings,
+    });
+    let denied = provider.request(&init_request(&storage, None));
+    assert_eq!(
+        denied,
+        json!({
+            "status": "error",
+            "code": "journal_access_denied",
+            "message": "model run journal is not writable"
+        }),
+        "init with no journal directory must answer journal_access_denied"
+    );
+    assert!(!storage.root.exists(), "storage.root must not exist");
+    provider.shutdown();
+}
+
 fn collect_allow_lines(profile: &str) -> Vec<&str> {
     fn allow_at(line: &str) -> Option<usize> {
         let bytes = line.as_bytes();
