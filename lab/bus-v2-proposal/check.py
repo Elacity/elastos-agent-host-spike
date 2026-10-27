@@ -4,7 +4,11 @@ One parser. ``problems`` is the only function that decides a citation.
 """
 
 import re
+import subprocess
 from pathlib import Path
+
+# One line: the prefix, a space, and forty lowercase hex digits.
+PIN_LINE = re.compile(r"Pinned commit: ([0-9a-f]{40})")
 
 # The ::func alternative is tried before :start.
 CITATION = re.compile(
@@ -47,6 +51,52 @@ def range_is_reversed(start, end):
 def worktree_root():
     """Repo root. This file lives at lab/bus-v2-proposal/check.py."""
     return Path(__file__).resolve().parents[2]
+
+
+def load_draft(root):
+    """Return the draft text, or None when the draft file is absent."""
+    draft = Path(root) / DRAFT
+    if not draft.is_file():
+        return None
+    return draft.read_text(encoding="utf-8")
+
+
+def _pin_lines(text):
+    return [line for line in text.splitlines() if line.startswith("Pinned commit:")]
+
+
+def pin_refusal(text):
+    """Refuse a draft that does not pin exactly one commit."""
+    pins = _pin_lines(text)
+    if not pins:
+        return "refuse: draft has no pinned commit"
+    if len(pins) != 1 or PIN_LINE.fullmatch(pins[0]) is None:
+        return "refuse: pinned commit is not one 40-hex commit"
+    return None
+
+
+def pin_sha(text):
+    """Return the pinned 40-hex commit, or None when the pin is not one."""
+    pins = _pin_lines(text)
+    if len(pins) != 1:
+        return None
+    match = PIN_LINE.fullmatch(pins[0])
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def commit_exists(root, sha):
+    """True when SHA names a commit object in the git repo at ``root``."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", sha + "^{commit}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
 
 
 def _spans(text):
@@ -99,15 +149,18 @@ def _refusal(root, match):
 
 
 def problems(root):
-    """Return one refusal per bad citation, in source order.
-
-    An absent draft is an empty list. This function does not create it.
-    """
-    draft = Path(root) / DRAFT
-    if not draft.is_file():
-        return []
-    text = draft.read_text(encoding="utf-8")
+    """Return one refusal per bad pin or citation, pin refusals first."""
+    text = load_draft(root)
+    if text is None:
+        return ["refuse: proposal is absent"]
     refusals = []
+    reason = pin_refusal(text)
+    if reason is not None:
+        refusals.append(reason)
+    else:
+        sha = pin_sha(text)
+        if sha is not None and not commit_exists(root, sha):
+            refusals.append("refuse: pinned commit is not a commit: " + sha)
     for span in _spans(text):
         match = CITATION.fullmatch(span)
         if match is None:
@@ -119,11 +172,8 @@ def problems(root):
 
 
 def main():
-    """Check this worktree. Return 0 when the draft is absent or clean."""
+    """Check this worktree. Return 1 when a refusal is printed."""
     root = worktree_root()
-    if not (root / DRAFT).is_file():
-        print("proposal: absent")
-        return 0
     found = problems(root)
     for line in found:
         print(line)
