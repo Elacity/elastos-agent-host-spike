@@ -1237,10 +1237,12 @@ pub fn readme_falsifiers_section() -> Result<&'static str, String> {
 
 /// Where the list's two inventories differ from the list itself: (a) a task
 /// with entries that `about`'s "(tasks ...)" list does not name, (b) a task
-/// that list names with no entry, and (c) a README "Falsifiers" `section`
-/// whose "holds N planted bugs" differs from the number of `ids`. Each
-/// mismatch is its own message. One form only is read: `about` holds one
-/// "(tasks NNN, NNN and NNN)" list of three-digit items; an id is `F-CI`, a
+/// that list names with no entry, (c) a README "Falsifiers" `section` whose
+/// "holds N planted bugs" differs from the number of `ids`, and (d) `about`'s
+/// tasks out of the order the list first holds each task's entries, found
+/// only when (a) and (b) find nothing. Each mismatch is its own message. One
+/// form only is read: `about` holds one "(tasks NNN, NNN and NNN)" list of
+/// three-digit items, each named once; an id is `F-CI`, a
 /// task number of one to three digits with no leading zero, and lowercase
 /// letters; the section says "holds N planted bugs" once. Anything else is
 /// refused with its reason, never read as no mismatch.
@@ -1271,6 +1273,13 @@ pub fn falsifier_inventory_findings(
             found.push(format!("`about` names task {task}, which has no falsifier"));
         }
     }
+    if found.is_empty() && named != with_entries {
+        found.push(format!(
+            "`about` names the tasks in the order {}; the list holds them in the order {}",
+            named.join(", "),
+            with_entries.join(", ")
+        ));
+    }
     if count != ids.len() {
         found.push(format!(
             "README says {count} planted bugs; the list holds {}",
@@ -1281,7 +1290,7 @@ pub fn falsifier_inventory_findings(
 }
 
 /// The three-digit items of `about`'s one "(tasks ...)" list, in order,
-/// split on ", " and " and ".
+/// split on ", " and " and ". A task named twice is refused.
 fn about_tasks(about: &str) -> Result<Vec<String>, String> {
     let open = "(tasks ";
     match about.matches(open).count() {
@@ -1301,6 +1310,9 @@ fn about_tasks(about: &str) -> Result<Vec<String>, String> {
     for item in list[..end].split(", ").flat_map(|item| item.split(" and ")) {
         if item.len() != 3 || !item.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(format!("`about`'s task {item:?} is not three digits"));
+        }
+        if tasks.iter().any(|task| task == item) {
+            return Err(format!("`about` names task {item} more than once"));
         }
         tasks.push(item.to_owned());
     }
