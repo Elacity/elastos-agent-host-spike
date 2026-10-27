@@ -130,11 +130,12 @@ The stand-in refuses in the order of these steps:
 
 1. A host report that `standin_host_refusal` refuses is refused with that one
    reason, before any tool, binary or profile check, so a refused host writes
-   no profile and creates no storage root. The report holds the OS name and,
-   for a simulated Linux host, which of Landlock, user namespaces or the
-   seccomp filter it reports unavailable. The reason starts
-   `{name} start on {os} is refused:` and carries only its own case's words,
-   as the journey paragraph below states.
+   no profile and creates no storage root. A host that reports a missing
+   primitive is refused whatever its OS, before the `DECLARED_CONFINED_OS`
+   lookup, and that is the one host check. The report holds the OS name and
+   which of Landlock, user namespaces or the seccomp filter it reports
+   unavailable. The reason starts `{name} start on {os} is refused:` and
+   carries only its own case's words, as the journey paragraph below states.
 2. An absent `sandbox-exec` is refused with a reason that names the OS and the
    path.
 3. A present confinement tool that is not `SANDBOX_EXEC` is refused with a
@@ -170,17 +171,18 @@ one C0 journey for did first and then wallet: the macOS start through the
 stand-in, one outside write refused with nothing created, the root still
 answering, and `shutdown` exiting 0; then every host and process refusal the
 stand-in must make. The stand-in's input is one host report, not a bare OS
-name: an OS with no confinement design, a simulated Linux host that names one
-of Landlock, user namespaces or the seccomp filter as unavailable, or a
-simulated Linux host that reports nothing missing. Each refusal starts
+name: an OS with no confinement design, a host that names one of Landlock, user
+namespaces or the seccomp filter as unavailable on any OS, or a simulated
+Linux host that reports nothing missing. Each refusal starts
 `{name} start on {os} is refused:` and carries only its own case's words: an OS
 with no confinement design names that OS and the list where the stand-in
-applies confinement; a simulated Linux host with a missing primitive carries
-the design's exact words for it from `CONFINEMENT-LINUX.md`; and a simulated
-Linux host that reports nothing missing says Linux is designed, not enforced,
-in this lab, so `linux` is not in `DECLARED_CONFINED_OS`. The Linux rows are
-simulated host reports and not a Linux run, so no test here probes a kernel or
-claims Linux enforcement.
+applies confinement; a host with a missing primitive carries the design's
+exact words for it from `CONFINEMENT-LINUX.md`, including a simulated `macos`
+host whose report leaves Landlock unavailable; and a simulated Linux host that
+reports nothing missing says Linux is designed, not enforced, in this lab, so
+`linux` is not in `DECLARED_CONFINED_OS`. The Linux rows are simulated host
+reports and not a Linux run, so no test here probes a kernel or claims Linux
+enforcement.
 The B3 journey reads the launched profile, so a stand-in that changes the file
 after the writer, in a way the suite does not exercise, fails before the suite
 starts. The launched file must pass `check_profile_contract` and
@@ -1001,6 +1003,17 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   text test reads `generate_profile`'s own text and no suite case opens a
   socket, so neither catches this edit; only the comparison of the launched
   file does.
+- Move the `DECLARED_CONFINED_OS` lookup back above the missing-primitive check
+  (WP135):
+  `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` fails
+  at did's `macos` Landlock row, which returns Started where `sandbox-exec`
+  exists instead of the design's Landlock words.
+- Prefix the missing-primitive reason with `linux has no confinement design; `
+  (WP136): the same test fails at did's Landlock row, whose reason then
+  carries the forbidden words.
+- Drop the `{name} start on {os} is refused: ` prefix from the final `Err`
+  (WP137): the same test fails at did's first host row, plan9, whose reason
+  then lacks the prefix.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
