@@ -530,6 +530,7 @@ profile does not grant".
   `F-cc36a` removes the last parenthesis of the `STORAGE_ROOT` allow, so this
   launch exits 65 and `byte_different_file_at_bound_path_starts` fails because
   the profile did not apply.
+  The profile binds PROVIDER_EXECUTABLE by path.
   A process still running after 2 seconds, or any other exit, is the outcome
   the test allows. The real binary's digest is
   unchanged. It runs under `sandbox-exec`, as the other confined tests do.
@@ -537,7 +538,9 @@ profile does not grant".
   the sha256 of a copy of `/usr/bin/true`, one byte is appended, and the
   start that passes the recorded digest panics with `PROVIDER_EXECUTABLE
   digest mismatch` before `spawn`. The panic names the path and both
-  digests. It needs no sandbox.
+  digests. That refusal is a lab stand-in for the Runtime's launch-by-hash
+  check, not the Runtime's check. This stand-in counts toward no M1 check.
+  It needs no sandbox.
 - `allow_rules_trace_to_declared_rights`: every allow rule in this oracle
   traces to exactly one approved declared right in the `rights` array of
   `tests/fixtures/confine/declared-rights.json`, or to one platform-baseline
