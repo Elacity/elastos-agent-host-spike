@@ -3206,11 +3206,15 @@ const LSOF: &str = "/usr/sbin/lsof";
 const PS: &str = "/bin/ps";
 const KILL: &str = "/bin/kill";
 const SLEEP: &str = "/bin/sleep";
+/// Task 042: stops a killed-run test's engines when its wait or kill failed.
+const PKILL: &str = "/usr/bin/pkill";
 
 /// Run a census `tool` with `args`. Exit 1 with nothing on stdout or stderr is
 /// "found nothing", an empty list. An exit in `found` with stdout and nothing
-/// on stderr is "found something": its stdout lines. Any other exit or any
-/// stderr is an `Err` with that text, never "found nothing".
+/// on stderr is "found something": its stdout lines. A tool that does not
+/// start (task 042: an `Err`, not a panic, so a caller can stop its engines
+/// first), any other exit or any stderr is an `Err` with that text, never
+/// "found nothing".
 fn census_tool(
     tool: &str,
     args: &[&std::ffi::OsStr],
@@ -3220,7 +3224,7 @@ fn census_tool(
         .args(args)
         .stdin(std::process::Stdio::null())
         .output()
-        .unwrap_or_else(|error| panic!("the census tool {tool} did not start: {error}"));
+        .map_err(|error| format!("the census tool {tool} did not start: {error}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     match output.status.code() {
@@ -3503,14 +3507,61 @@ fn trapped_run_leaves_nothing_under_the_scratch_root() {
     }
 }
 
+/// Task 042: stop every engine of the run under `work_root`, for a killed-run
+/// test that cannot go on: `pkill -KILL -f <work_root>` every 50 ms while
+/// `runner` has not finished, for at most 10 s. It returns what went wrong on
+/// the way, for the failure message: a `pkill` that did not start or exited
+/// other than 0 (killed one) or 1 (none), and a runner still running after
+/// 10 s.
+fn stop_run_engines<T>(work_root: &Path, runner: &std::thread::JoinHandle<T>) -> Vec<String> {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut problems = Vec::new();
+    while !runner.is_finished() {
+        if Instant::now() >= deadline {
+            problems.push(format!("the runner still ran after 10 s of {PKILL}"));
+            break;
+        }
+        let problem = match std::process::Command::new(PKILL)
+            .args(["-KILL", "-f"])
+            .arg(work_root)
+            .stdin(std::process::Stdio::null())
+            .output()
+        {
+            Ok(output) if matches!(output.status.code(), Some(0 | 1)) => None,
+            Ok(output) => Some(format!(
+                "{PKILL} -KILL -f {} ({}): stderr {:?}",
+                work_root.display(),
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            )),
+            Err(error) => Some(format!("{PKILL} did not start: {error}")),
+        };
+        if let Some(problem) = problem.filter(|problem| !problems.contains(problem)) {
+            problems.push(problem);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    problems
+}
+
 /// Task 040, killed run: on each real engine, `run_engine` runs on a thread on
 /// a module whose `digest` loops forever. The test waits (at most 10 s,
 /// polling `pgrep -f <work root>`) for the one engine process, reads its argv,
 /// kills it with `SIGKILL`, and joins the thread: the run is refused as
 /// `EngineFailed`, stopped by signal 9. The live argv held no preopen, env or
 /// network flag and no scratch-root path but the module file; then the census
-/// finds nothing under that run's work root. Every check waits until the
-/// engine is killed, so a failed check never leaves an engine looping.
+/// finds nothing under that run's work root.
+///
+/// Task 042: the thread is joined on every path before any check can fail. If
+/// the wait fails (a `pgrep` that does not start or answers with an error, no
+/// engine process within 10 s, or the run ending first), or `/bin/kill` does
+/// not start or fails, [`stop_run_engines`] first kills every engine of that
+/// run until the thread has finished (at most 10 s), then the thread is joined,
+/// and only then does the test fail, with the first reason and then what the
+/// stop found. If the thread still runs after those 10 s, the join waits for
+/// it: the test never leaves a detached thread that can still start the
+/// engine. A failed check never leaves an engine looping.
 #[test]
 fn killed_run_leaves_nothing_under_the_scratch_root() {
     use std::os::unix::process::ExitStatusExt;
@@ -3546,18 +3597,37 @@ fn killed_run_leaves_nothing_under_the_scratch_root() {
                 Err(error) => break Err(error),
             }
         };
-        let pids = pids.unwrap_or_else(|error| panic!("{engine_kind}: {error}"));
+        let pids = match pids {
+            Ok(pids) => pids,
+            Err(error) => {
+                let stopped = stop_run_engines(&work, &runner);
+                let joined = runner.join();
+                panic!(
+                    "{engine_kind}: {error}; then stopped its engines (problems: {stopped:?}) \
+                     and joined the runner (it panicked: {})",
+                    joined.is_err()
+                );
+            }
+        };
         let argv: Vec<Result<String, String>> = pids.iter().map(|pid| live_argv(pid)).collect();
         let killed = std::process::Command::new(KILL)
             .args(["-KILL"])
             .args(&pids)
             .status()
-            .unwrap_or_else(|error| panic!("{KILL} did not start: {error}"));
+            .map_err(|error| format!("{KILL} did not start: {error}"));
+        let stopped = match &killed {
+            Ok(status) if status.success() => Vec::new(),
+            _ => stop_run_engines(&work, &runner),
+        };
         let result = runner.join().expect("the runner thread panicked");
 
+        let killed = killed.unwrap_or_else(|error| {
+            panic!("{engine_kind}: {error}; then stopped its engines (problems: {stopped:?})")
+        });
         assert!(
             killed.success(),
-            "{engine_kind}: {KILL} -KILL {pids:?}: {killed}"
+            "{engine_kind}: {KILL} -KILL {pids:?}: {killed}; then stopped its engines \
+             (problems: {stopped:?})"
         );
         assert_eq!(
             pids.len(),

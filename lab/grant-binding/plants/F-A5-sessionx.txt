@@ -1,0 +1,12 @@
+id: F-A5-sessionx
+file: src/lib.rs
+test: model_extended_session_is_refused
+--- old
+        if live.session != grant.session {
+            return Err(Refuse::Session);
+        }
+--- new
+        if !live.session.starts_with(&grant.session) {
+            return Err(Refuse::Session);
+        }
+--- end

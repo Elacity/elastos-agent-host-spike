@@ -1669,3 +1669,171 @@ fn hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage() {
 
     provider.shutdown();
 }
+
+/// What the provider does when an agent cancels a hosted text run while the
+/// Runtime still holds the answer. Every text adapter's `cancel` goes to
+/// `cancel_local_text` (`capsules/model-provider/src/adapters.rs:1240-1245`,
+/// function at `:1455-1474`), which sends only the worker's `cancel_tx`
+/// (`:1469`) and returns `Reconciling` (`:1470-1473`). It sends no cancel
+/// effect to the Runtime socket. The worker's open-send select
+/// (`src/adapters.rs:1990-1996`) and its chunk read (`:2015-2019`) both return
+/// `cancel_text_worker` (`:2292-2300`), which for any backend that is not
+/// local llama returns `worker_settlement_unknown_result()`
+/// (`:2685-2697`): status `settlement_unknown`, code `settlement_unknown`,
+/// no output and no backend report. The state layer stores
+/// `BackendReport::unknown()` for a hosted run with no report
+/// (`src/state.rs:1352-1355`), so `resolved_model`, `usage` and `cost` are all
+/// `unknown` (`src/contract.rs:212-219`). The stand-in therefore sees one
+/// connection and one request in total, with no cancel request.
+///
+/// The terminal is read while the stand-in still holds the answer, so the
+/// settlement cannot come from the Runtime's refusal or from a released
+/// answer. Off macOS the provider refuses every hosted run before any socket,
+/// so the test prints one `SKIP` line and returns.
+#[test]
+fn hosted_cancel_while_the_answer_is_held_settles_unknown_and_sends_nothing_more() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted cancel while held: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-cancel-held");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind("hosted-cancel-held");
+    stand_in.hold_answer();
+    let init = hosted_effect_init(&root, &stand_in);
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "a hosted answer held through a cancel"
+    });
+    let create_request = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": "session:test",
+            "capsule_id": "assistant",
+            "grant_id": "grant:test",
+            "request_id": test_support::fixture_model_request_id("request:hosted-cancel-held"),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": model_input_hash(&input).unwrap()
+        }
+    });
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    assert_eq!(
+        create["data"]["run_id"], expected_run_id,
+        "runs_create must return the contract run id"
+    );
+    assert!(
+        matches!(
+            create["data"]["status"].as_str(),
+            Some("prepared" | "running")
+        ),
+        "the hosted run must report an open status while the answer is held: {create}"
+    );
+    // A request reaches the stand-in only after `request.send()` has left the
+    // worker's select (`src/adapters.rs:1990-1996`), so the worker owns the
+    // open send before the cancel arrives.
+    stand_in.wait_for_connections(1);
+
+    let cancel = provider.request(json!({
+        "op": "runs_cancel",
+        "run_id": expected_run_id,
+        "runtime_binding": access_binding(&create_request)
+    }));
+    assert_eq!(
+        cancel["status"], "ok",
+        "unexpected cancel response: {cancel}"
+    );
+    assert_eq!(
+        cancel["data"]["run_id"], expected_run_id,
+        "runs_cancel must return the same run id"
+    );
+    // `cancel_local_text` signals the worker and returns `Reconciling`
+    // (`src/adapters.rs:1469-1473`); it sends nothing to the Runtime socket.
+    assert_eq!(
+        cancel["data"]["status"], "reconciling",
+        "a hosted cancel of an open send must report reconciling: {cancel}"
+    );
+
+    // The answer is still held: this terminal comes from the worker's cancel
+    // arm (`src/adapters.rs:1990-1996` through `:2292-2300` to
+    // `:2685-2697`), not from a backend answer.
+    let settled = wait_for_run_terminal(
+        &mut provider,
+        &expected_run_id,
+        &access_binding(&create_request),
+    );
+    assert_eq!(
+        settled["data"]["run_id"], expected_run_id,
+        "runs_get must return the contract run id"
+    );
+    assert_eq!(
+        settled["data"]["status"], "settlement_unknown",
+        "a hosted cancel with an open send must settle unknown: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["error"]["code"], "settlement_unknown",
+        "a hosted cancel with an open send must carry its reason: {settled}"
+    );
+    assert!(
+        settled["data"]["terminal"].get("output").is_none(),
+        "an unknown settlement must carry no output: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["backend_report"],
+        json!({
+            "schema": BACKEND_REPORT_SCHEMA,
+            "resolved_model": {"status": "unknown"},
+            "usage": {"status": "unknown"},
+            "cost": {"status": "unknown"},
+        }),
+        "a hosted cancel must record resolved_model, usage and cost as unknown: {settled}"
+    );
+
+    // Release only now, so the stand-in thread can exit; the connection and
+    // request counts do not depend on when it sees the close.
+    stand_in.release_answer();
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "the cancelled hosted run must open exactly one connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "the cancelled hosted run must send exactly one request"
+    );
+    let recorded = &requests[0];
+    assert_eq!(recorded.request_line, "POST /v1/hosted-effect HTTP/1.1");
+    assert_eq!(
+        recorded.value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
+    );
+
+    provider.shutdown();
+}
