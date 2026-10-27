@@ -5,13 +5,14 @@
 //! signature checks share, the one key-material scan, the run of README's
 //! Python rule, the scan for lab crates that use this one, read through
 //! `cargo metadata`, the scan of the lane's docs and code for what they
-//! claim about the lab CID, and the check of the falsifier list's inventory
-//! (all five kept here, a file the falsifier runner restores after a killed
-//! run).
+//! claim about the lab CID, the check of the falsifier list's inventory, and
+//! the lab stand-in launcher (all six kept here, a file the falsifier runner
+//! restores after a killed run).
 //! Each test file includes this with `mod common;` and uses only part of it,
 //! so dead-code warnings for the rest are silenced.
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -24,9 +25,12 @@ use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 
 use capsule_identity::{
-    check_name, checked_bundle, checked_bundle_observed, lab_cid, lab_cid_observed, BundleEntry,
-    CheckedBundle, LabCid, Moment, Refusal,
+    check_name, checked_bundle, checked_bundle_observed, lab_cid, lab_cid_observed,
+    verify_checked_package_record, BundleEntry, CheckedBundle, LabCid, Moment, PackageRecord,
+    Refusal, MANIFEST_FILE,
 };
+use elastos_common::CapsuleManifest;
+use serde_json::{json, Value};
 use tempfile::TempDir;
 
 /// The lab CIDs pinned for the committed fixtures. README.md lists the same
@@ -1352,4 +1356,166 @@ fn planted_bug_count(section: &str) -> Result<usize, String> {
             counts.len()
         )),
     }
+}
+
+/// The stand-in's store entry for the bundle folder `folder`, as a test
+/// publishes it: the printed lab CID its bytes give now, and the folder.
+pub fn published(folder: &Path) -> (String, PathBuf) {
+    (named(folder).to_string(), folder.to_path_buf())
+}
+
+/// Lab stand-in for the Runtime's launch route, not the Runtime. It lives in
+/// test code and runs nothing: a launched instance is a record.
+///
+/// Its two methods are named for the two routes of draft PR #309's RA-6 at
+/// `513988ebd`, `POST /api/capsules` ([`StandInRuntime::post_capsules`],
+/// RI-2) and `GET /api/capsules` ([`StandInRuntime::get_capsules`], RI-3),
+/// and take and return JSON bodies. It holds a store (printed lab CID ->
+/// bundle folder, filled at publish time by [`published`]), the publishers'
+/// package records and an explicit list of accepted publisher DIDs. A launch
+/// ends in one of two states: "launched", with one new instance, or
+/// "refused", status 400 with the reason and no instance. The one request
+/// field, `cid`, is a lab field, not in #309: today's route takes `path`.
+pub struct StandInRuntime {
+    store: BTreeMap<String, PathBuf>,
+    records: Vec<PackageRecord>,
+    accepted: Vec<String>,
+    instances: Vec<Instance>,
+}
+
+/// One launched instance: a record, never a running program.
+struct Instance {
+    id: String,
+    name: String,
+    session_id: String,
+}
+
+impl StandInRuntime {
+    /// A stand-in with these store entries, package records and accepted
+    /// publisher DIDs, and no instance.
+    pub fn new(
+        store: impl IntoIterator<Item = (String, PathBuf)>,
+        records: Vec<PackageRecord>,
+        accepted: Vec<String>,
+    ) -> Self {
+        StandInRuntime {
+            store: store.into_iter().collect(),
+            records,
+            accepted,
+            instances: Vec::new(),
+        }
+    }
+
+    /// `POST /api/capsules`: launch the bundle the body names by its lab CID.
+    /// The checks of [`StandInRuntime::checked_launch`] run first; the first
+    /// refusal is the answer, with status 400, and nothing is launched. Then
+    /// one instance is added and the answer is `{"id", "name", "status":
+    /// "launched", "session_id"}`.
+    pub fn post_capsules(&mut self, body: &Value) -> Result<Value, (u16, String)> {
+        let name = self.checked_launch(body).map_err(|reason| (400, reason))?;
+        Ok(self.launch(name))
+    }
+
+    /// `GET /api/capsules`: `{"capsules": [...]}`, one entry per launched
+    /// instance, with its `id`, `name`, `status`, `session_id` and `cause`
+    /// (`null` while it runs; no instance here ever ends).
+    pub fn get_capsules(&self) -> Value {
+        let capsules: Vec<Value> = self
+            .instances
+            .iter()
+            .map(|instance| {
+                json!({
+                    "id": instance.id,
+                    "name": instance.name,
+                    "status": "launched",
+                    "session_id": instance.session_id,
+                    "cause": null,
+                })
+            })
+            .collect();
+        json!({ "capsules": capsules })
+    }
+
+    /// The checks of a launch, in this order, each library refusal as its own
+    /// text: (a) the body, (b) the one parse of a printed lab CID, (c) the
+    /// store, (d) the one walk, (e) the one name compare against the stored
+    /// bytes, (f) a package record for that CID, (g) the one record check.
+    /// (a), (b) and (c) come before the CID check. The answer is the stored
+    /// manifest's `name`.
+    fn checked_launch(&self, body: &Value) -> Result<String, String> {
+        let cid = self.launch_cid(body)?;
+        cid.parse::<LabCid>().map_err(said)?;
+        let folder = self
+            .store
+            .get(&cid)
+            .ok_or_else(|| format!("no bundle is stored under {cid}"))?;
+        let checked = checked_bundle(folder).map_err(said)?;
+        checked.check_name(&cid).map_err(said)?;
+        let record = self
+            .records
+            .iter()
+            .find(|record| record.cid == cid)
+            .ok_or_else(|| format!("unsigned: no package record binds {cid}"))?;
+        verify_checked_package_record(&checked, record, &self.accepted).map_err(said)?;
+        Ok(manifest_name(&checked))
+    }
+
+    /// Check (a): the body is a JSON object whose only key is `cid`, with a
+    /// string value. There is no other field and no fallback.
+    fn launch_cid(&self, body: &Value) -> Result<String, String> {
+        let fields = body.as_object().ok_or(
+            "the launch body is not an object: it must be an object whose only field is cid",
+        )?;
+        if let Some(extra) = fields.keys().find(|key| *key != "cid") {
+            return Err(format!(
+                "the launch body holds the field {extra}: its only field is cid"
+            ));
+        }
+        let Some(cid) = fields.get("cid") else {
+            return Err(
+                "the launch body has no cid field: a launch names its bundle by lab CID".to_owned(),
+            );
+        };
+        let cid = cid
+            .as_str()
+            .ok_or_else(|| format!("the launch body's cid is {cid}, not a string"))?;
+        Ok(cid.to_owned())
+    }
+
+    /// Add one instance named `name`, with the next id and session id from a
+    /// counter, and answer for it.
+    fn launch(&mut self, name: String) -> Value {
+        let number = self.instances.len() + 1;
+        let instance = Instance {
+            id: format!("instance-{number}"),
+            name,
+            session_id: format!("session-{number}"),
+        };
+        let answer = json!({
+            "id": instance.id,
+            "name": instance.name,
+            "status": "launched",
+            "session_id": instance.session_id,
+        });
+        self.instances.push(instance);
+        answer
+    }
+}
+
+/// A library refusal as the stand-in answers it: its own text, unchanged.
+fn said(refusal: Refusal) -> String {
+    refusal.to_string()
+}
+
+/// The `name` of the manifest the walk checked, read from the checked bytes
+/// with the Runtime's own `CapsuleManifest`, never from the folder again.
+fn manifest_name(checked: &CheckedBundle) -> String {
+    let manifest = checked
+        .entries()
+        .iter()
+        .find(|entry| entry.path == MANIFEST_FILE)
+        .expect("a checked bundle holds its manifest");
+    let manifest: CapsuleManifest =
+        serde_json::from_slice(&manifest.content).expect("a checked manifest parses");
+    manifest.name
 }

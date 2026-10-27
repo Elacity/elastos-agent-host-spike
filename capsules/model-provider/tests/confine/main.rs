@@ -1177,6 +1177,105 @@ fn redirect_journal_materializes_outside_when_unconfined() {
     provider.shutdown();
 }
 
+/// After `init`, the storage tree is the same after `status`, `offers_list`
+/// and `shutdown`.
+///
+/// `tree_snapshot` records each relative path, its mode and its file bytes
+/// under `storage.root`. The first snapshot is taken once `init` has answered
+/// and `runs/` exists. The snapshot after `status`, the snapshot after
+/// `offers_list`, and the snapshot taken after `Provider::shutdown` returns
+/// each equal that first snapshot. `status` data equals the `init` data.
+/// `offers_list` returns the hosted offer id. The test starts no run and sets
+/// no `runtime_hosted_socket`. A difference names the call and the relative
+/// paths whose mode or bytes differ. On a host where `sandbox_available`
+/// fails, the test returns.
+#[test]
+fn model_status_offers_and_shutdown_leave_storage_unchanged() {
+    fn storage_tree_changes(
+        before: &[(PathBuf, u32, Vec<u8>)],
+        after: &[(PathBuf, u32, Vec<u8>)],
+    ) -> Vec<String> {
+        let mut changes = Vec::new();
+        let mut left = 0;
+        let mut right = 0;
+        while left < before.len() || right < after.len() {
+            match (before.get(left), after.get(right)) {
+                (Some(earlier), Some(later)) if earlier.0 == later.0 => {
+                    if earlier.1 != later.1 || earlier.2 != later.2 {
+                        changes.push(earlier.0.display().to_string());
+                    }
+                    left += 1;
+                    right += 1;
+                }
+                (Some(earlier), Some(later)) if earlier.0 < later.0 => {
+                    changes.push(earlier.0.display().to_string());
+                    left += 1;
+                }
+                (Some(_), Some(later)) => {
+                    changes.push(later.0.display().to_string());
+                    right += 1;
+                }
+                (Some(earlier), None) => {
+                    changes.push(earlier.0.display().to_string());
+                    left += 1;
+                }
+                (None, Some(later)) => {
+                    changes.push(later.0.display().to_string());
+                    right += 1;
+                }
+                (None, None) => break,
+            }
+        }
+        changes
+    }
+
+    fn same_storage_tree(
+        call: &str,
+        before: &[(PathBuf, u32, Vec<u8>)],
+        after: &[(PathBuf, u32, Vec<u8>)],
+    ) {
+        let paths = storage_tree_changes(before, after).join(", ");
+        assert_eq!(
+            after, before,
+            "{call} changed the storage tree; relative paths whose mode or bytes differ: {paths}"
+        );
+    }
+
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let storage = Storage::prepare("status-offers-shutdown");
+    let mut provider = Provider::start(Launch::Confined(&storage));
+
+    let init = provider.ok(&init_request(&storage, None));
+    assert!(
+        storage.root.join("runs").is_dir(),
+        "init must create runs/ under STORAGE_ROOT"
+    );
+    let after_init = tree_snapshot(&storage.root);
+
+    let status = provider.ok(&json!({ "op": "status" }));
+    assert_eq!(status, init, "status data must equal the init data");
+    same_storage_tree("status", &after_init, &tree_snapshot(&storage.root));
+
+    let listed = provider.ok(&json!({ "op": "offers_list" }));
+    let ids: Vec<&Value> = listed["offers"]
+        .as_array()
+        .expect("offers_list must return an offer array")
+        .iter()
+        .map(|offer| &offer["id"])
+        .collect();
+    assert_eq!(
+        ids,
+        [HOSTED_OFFER],
+        "offers_list must return the configured offer: {listed}"
+    );
+    same_storage_tree("offers_list", &after_init, &tree_snapshot(&storage.root));
+
+    provider.shutdown();
+    same_storage_tree("shutdown", &after_init, &tree_snapshot(&storage.root));
+}
+
 /// The outside-read fixture's one rule: metadata, never content, of the run
 /// record at its outside path. `runs_get` checks that the record exists and
 /// is a private regular file before it opens it; this rule lets those checks
@@ -2744,6 +2843,67 @@ fn standin_refuses_a_start_it_cannot_apply() {
         &storage,
         "expecting ')'",
     );
+}
+
+/// The stand-in text denies the hosted connect.
+///
+/// `Launch::Profile` applies the text `standin_profile` builds. The one
+/// Runtime socket stand-in counts zero connections. The run settles
+/// `transport_interrupted`: `status` `failed`, and `terminal.error` is
+/// `class` `transport_interrupted`, `code` `transport_interrupted`,
+/// `message` `model backend transport was interrupted`. `offers_list`
+/// answers and `shutdown` exits cleanly. This is the stand-in's count,
+/// and this is not the Runtime's refusal.
+///
+/// Falsifier: F-cc44a makes `standin_profile` emit `(allow network*)`
+/// instead of `(deny network*)`. The stand-in then counts a connection,
+/// and the generated head's third line is `(allow network*)`.
+#[test]
+fn generated_profile_denies_the_hosted_connect() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let declared: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&declared).expect("declared rights build a profile");
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let fixture = HostedTransport::prepare("standin-hosted-connect");
+    let profile = fixture.storage.base.join("standin.sb");
+    write_standin_profile(&profile, &generated);
+    let bindings = canonical_bindings(&fixture.storage, &binary);
+    let mut provider = Provider::start(Launch::Profile {
+        profile: &profile,
+        bindings: &bindings,
+    });
+    assert_serving(&provider.ok(&fixture.request));
+
+    provider.ok(&fixture.run.create);
+    let settled = fixture.run.settle(&mut provider);
+    assert_eq!(
+        fixture.socket.observe().connections,
+        0,
+        "the profile must refuse the connect, so no connection reaches the Runtime socket"
+    );
+    assert_eq!(settled["status"], "failed", "the run must fail: {settled}");
+    assert_eq!(
+        settled["terminal"]["error"],
+        json!({
+            "class": "transport_interrupted",
+            "code": "transport_interrupted",
+            "message": "model backend transport was interrupted"
+        }),
+        "the refused connect must fail the run closed"
+    );
+
+    provider.ok(&json!({ "op": "offers_list" }));
+    provider.shutdown();
 }
 
 fn collect_allow_lines(profile: &str) -> Vec<&str> {

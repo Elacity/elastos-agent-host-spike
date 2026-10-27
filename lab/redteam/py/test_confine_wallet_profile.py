@@ -1,20 +1,10 @@
 """Red-team the merged wallet, did and model seatbelt profiles for escapes.
 
-Targets (read only), pinned by guard (a). Measured with
-``git log -1 --format='%H %s' HEAD -- <file>`` and ``shasum -a 256 <file>``
-on HEAD ``95ab22afb58226163a11286748acb372507662db``:
-
-  capsules/wallet-provider/confine.sb
-  commit 959b104022bd0e8ae55636f69f6f06b8eb028e2b  merge PR #157 (confine 037)
-  sha256 fbac35b5ec505eca4f80963b81783273377dc019c4719aab5957346e4dd64d4b
-
-  capsules/did-provider/confine.sb
-  commit 959b104022bd0e8ae55636f69f6f06b8eb028e2b  merge PR #157 (confine 037)
-  sha256 79ec0289fc1a886aa5231586b007d17382b37648b24e64844376827268b84950
-
-  capsules/model-provider/confine.sb
-  commit e324708ce42235d816821f9e5b0570d8999f4b80  merge PR #542 (cc-model-confine 054)
-  sha256 399d0dc9d6381555c0f132d339146aed1420cc6d0395ba0ba475801b9a34bb17
+The wallet, did, and model profiles are the live confine.sb files. This
+module records each sha256 when it loads the classes and compares that
+digest at the end through changed from test_confine_mach. An owner commit
+that changes the bytes is not a failure. A difference between the start
+and the end raises the probe changed <rel>.
 
 ``DidConfineProbe`` and ``ModelConfineProbe`` reuse ``WalletConfineProbe``.
 Each attack drives ``/usr/bin/sandbox-exec`` directly with a stock binary (not
@@ -46,7 +36,6 @@ Honesty (guards d, b):
     (``test_expected_failures_are_recorded_findings``).
 """
 
-import hashlib
 import inspect
 import os
 import shutil
@@ -54,6 +43,7 @@ import tempfile
 import unittest
 
 import sbx
+from test_confine_mach import changed, sha256_file
 
 # Stock binaries, resolved the way the Runtime's own launcher resolves the
 # provider path (so the kernel's resolved-path check matches the profile).
@@ -251,28 +241,6 @@ def _expected_failure_methods(case_cls):
     ]
 
 
-# Sha256 pins for the three profiles this module probes. The pin test reads
-# this table. It does not parse the README. Commits and PRs match the module
-# docstring and the README pin block.
-PROFILE_PINS = {
-    "capsules/wallet-provider/confine.sb": {
-        "commit": "959b104022bd0e8ae55636f69f6f06b8eb028e2b",
-        "pr": "#157",
-        "sha256": "fbac35b5ec505eca4f80963b81783273377dc019c4719aab5957346e4dd64d4b",
-    },
-    "capsules/did-provider/confine.sb": {
-        "commit": "959b104022bd0e8ae55636f69f6f06b8eb028e2b",
-        "pr": "#157",
-        "sha256": "79ec0289fc1a886aa5231586b007d17382b37648b24e64844376827268b84950",
-    },
-    "capsules/model-provider/confine.sb": {
-        "commit": "e324708ce42235d816821f9e5b0570d8999f4b80",
-        "pr": "#542",
-        "sha256": "399d0dc9d6381555c0f132d339146aed1420cc6d0395ba0ba475801b9a34bb17",
-    },
-}
-
-
 class WalletConfineProbe(unittest.TestCase):
     """Direct seatbelt attacks on the merged wallet profile, beyond the owner's."""
 
@@ -353,18 +321,17 @@ class WalletConfineProbe(unittest.TestCase):
             f"{derived} does not start with the bytes of {type(self).PROFILE}",
         )
 
-    def test_profile_sha256_matches_the_recorded_pin(self):
-        """``hashlib.sha256`` of this class's profile equals the recorded pin.
+    def test_profile_bytes_match_the_start(self):
+        """The digest at the end equals the digest taken when the module started.
 
-        ``PROFILE_PINS`` holds one sha256 per profile path. Putting the wallet
-        digest on the did entry makes this test fail on the did class.
+        The did and model classes hash their own profile. This test stores
+        no digest.
         """
         profile = type(self).PROFILE
         rel = profile.relative_to(sbx.REPO_ROOT).as_posix()
-        self.assertIn(rel, PROFILE_PINS, f"no recorded pin for {rel}")
-        recorded = PROFILE_PINS[rel]["sha256"]
-        digest = hashlib.sha256(profile.read_bytes()).hexdigest()
-        self.assertEqual(digest, recorded)
+        self.assertIn(rel, START_SHA, rel)
+        end = sha256_file(profile)
+        changed(rel, START_SHA[rel], end)
 
     @staticmethod
     def _safe_literal(path):
@@ -653,6 +620,26 @@ class ModelConfineProbe(WalletConfineProbe):
     """The wallet probe, pointed at the model-provider profile."""
 
     PROFILE = sbx.REPO_ROOT / "capsules" / "model-provider" / "confine.sb"
+
+
+START_SHA = {}
+
+
+def setUpModule():
+    """Record the three live profile digests. A missing file is an error."""
+    for profile in (
+        WalletConfineProbe.PROFILE,
+        DidConfineProbe.PROFILE,
+        ModelConfineProbe.PROFILE,
+    ):
+        rel = profile.relative_to(sbx.REPO_ROOT).as_posix()
+        START_SHA[rel] = sha256_file(profile)
+
+
+def tearDownModule():
+    """The digest at the end equals the digest from setUpModule."""
+    for rel, before in START_SHA.items():
+        changed(rel, before, sha256_file(sbx.REPO_ROOT / rel))
 
 
 if __name__ == "__main__":

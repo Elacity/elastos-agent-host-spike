@@ -692,3 +692,5 @@ These rows use lab client sessions on the run client's attach and provider route
 - `instance_writes_only_under_own_storage_root`: BLOCKED (AC-039-OWNED-ROOT), with the Runtime change in GAPS.md. Sessions A and B write under their own areas; a sibling write under the other area must be a Runtime refusal with a reason and no shell decision.
 
 Every `standin_` row is the lab stand-in in `standin-runtime/`, and a PASS there gives the Runtime no credit.
+
+The new `standin_` rows are this stand-in, and a PASS there leaves the real Runtime's resident rows blocked.
