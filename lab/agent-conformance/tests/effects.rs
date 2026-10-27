@@ -1382,3 +1382,538 @@ fn standin_stopped_run_leaves_no_live_grant() {
     home.finish()
         .expect("the stand-in run removes its throwaway home");
 }
+
+const STANDIN_SHARED_PATH: &str = "/capsules/read-shared";
+const STANDIN_SHARED_NAME: &str = "read-shared";
+const STANDIN_FAILED_PATH: &str = "/capsules/fail-after-submit";
+const STANDIN_FAILED_NAME: &str = "fail-after-submit";
+const STANDIN_RESOURCE: &str = "localhost://Public/resident-instances/shared.txt";
+
+fn standin_launch(standin: &mut StandIn, path: &str) -> String {
+    let launched = standin
+        .post_capsules(StandInCaller::Shell, &json!({"path": path}))
+        .expect("the stand-in launches the admitted path");
+    launched["id"]
+        .as_str()
+        .expect("the stand-in names the launched instance")
+        .to_owned()
+}
+
+fn standin_capsule(standin: &StandIn, id: &str) -> serde_json::Value {
+    let listed = standin
+        .get_capsules(StandInCaller::Shell)
+        .expect("the stand-in returns the shell capsule list");
+    listed["capsules"]
+        .as_array()
+        .expect("the stand-in returns a capsule list")
+        .iter()
+        .find(|entry| entry["id"] == id)
+        .cloned()
+        .unwrap_or_else(|| panic!("the stand-in lists {id}"))
+}
+
+fn standin_capsule_record(id: &str, name: &str, status: &str, cause: &str) -> serde_json::Value {
+    json!({
+        "id": id,
+        "name": name,
+        "status": status,
+        "session_id": id,
+        "cause": cause,
+    })
+}
+
+fn standin_requests(standin: &StandIn, session: &str) -> Vec<serde_json::Value> {
+    let listed = standin
+        .get_capability_requests(StandInCaller::Shell, Some(session))
+        .expect("the stand-in returns the shell request records");
+    listed["requests"]
+        .as_array()
+        .expect("the stand-in returns a request list")
+        .clone()
+}
+
+fn standin_request_record(
+    request_id: &str,
+    session_id: &str,
+    status: &str,
+    decision_reason: &str,
+    settled_by: Option<&str>,
+) -> serde_json::Value {
+    json!({
+        "request_id": request_id,
+        "session_id": session_id,
+        "resource": STANDIN_RESOURCE,
+        "action": "read",
+        "reason": "read shared",
+        "status": status,
+        "decision_reason": decision_reason,
+        "settled_by": settled_by,
+    })
+}
+
+fn standin_live_grants(standin: &StandIn) -> Vec<serde_json::Value> {
+    standin
+        .get_capability_list(StandInCaller::Shell, Some("all_sessions_live"))
+        .expect("the stand-in returns the shell live view")["capabilities"]
+        .as_array()
+        .expect("the stand-in returns a capability list")
+        .clone()
+}
+
+fn standin_seed_shared_request(standin: &mut StandIn, request_id: &str, session_id: &str) {
+    standin
+        .seed_request(
+            request_id,
+            session_id,
+            STANDIN_RESOURCE,
+            "read",
+            "read shared",
+        )
+        .expect("the stand-in stores the pending request");
+}
+
+#[test]
+fn standin_cancel_survivor_reaches_running() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("the stand-in survivor run binds one loopback port");
+    let port = listener
+        .local_addr()
+        .expect("the stand-in survivor run reads its port")
+        .port();
+    drop(listener);
+    let home = ThrowawayHome::new().expect("the stand-in survivor run uses one throwaway home");
+
+    let mut standin = StandIn::new();
+    standin
+        .admit_resident(STANDIN_SHARED_PATH, STANDIN_SHARED_NAME, Start::Ok)
+        .expect("the stand-in admits read-shared");
+    assert_eq!(
+        (
+            standin_launch(&mut standin, STANDIN_SHARED_PATH),
+            standin_launch(&mut standin, STANDIN_SHARED_PATH),
+        ),
+        ("component-1".to_owned(), "component-2".to_owned()),
+        "the stand-in numbers the two launches component-1 and component-2"
+    );
+    assert_eq!(
+        (
+            standin_capsule(&standin, "component-1"),
+            standin_capsule(&standin, "component-2"),
+        ),
+        (
+            standin_capsule_record("component-1", STANDIN_SHARED_NAME, "starting", ""),
+            standin_capsule_record("component-2", STANDIN_SHARED_NAME, "starting", ""),
+        ),
+        "the stand-in keeps both launches starting before the start returns"
+    );
+    standin_seed_shared_request(&mut standin, "req-1", "component-1");
+    standin_seed_shared_request(&mut standin, "req-2", "component-2");
+
+    standin
+        .delete_capsule(
+            StandInCaller::Shell,
+            "component-1",
+            &json!({"reason": "stop one"}),
+        )
+        .expect("the stand-in stops component-1");
+    assert_eq!(
+        standin_capsule(&standin, "component-1"),
+        standin_capsule_record(
+            "component-1",
+            STANDIN_SHARED_NAME,
+            "stopped",
+            "stopped: stop one"
+        ),
+        "the stand-in stops component-1 with the stop cause"
+    );
+    assert_eq!(
+        standin_requests(&standin, "component-1"),
+        vec![standin_request_record(
+            "req-1",
+            "component-1",
+            "denied",
+            "stopped: stop one",
+            Some("runtime")
+        )],
+        "the stand-in denies component-1's request as the runtime with the stop cause"
+    );
+    assert_eq!(
+        (
+            standin_capsule(&standin, "component-2"),
+            standin_requests(&standin, "component-2"),
+        ),
+        (
+            standin_capsule_record("component-2", STANDIN_SHARED_NAME, "starting", ""),
+            vec![standin_request_record(
+                "req-2",
+                "component-2",
+                "pending",
+                "",
+                None
+            )],
+        ),
+        "the stand-in keeps component-2 starting with its request pending and no settler"
+    );
+
+    standin.set_instant(4);
+    let granted = standin
+        .post_capability_grant(
+            StandInCaller::Shell,
+            &json!({
+                "request_id": "req-2",
+                "duration": "session",
+                "rationale": "grant shared read",
+            }),
+        )
+        .expect("the stand-in grants the survivor's pending request");
+    assert_eq!(
+        granted,
+        json!({"success": true}),
+        "the stand-in answers success true for the survivor grant and stores no token"
+    );
+    assert_eq!(
+        standin_capsule(&standin, "component-2"),
+        standin_capsule_record("component-2", STANDIN_SHARED_NAME, "starting", ""),
+        "the stand-in keeps the granted survivor starting"
+    );
+    assert_eq!(
+        standin_requests(&standin, "component-2"),
+        vec![standin_request_record(
+            "req-2",
+            "component-2",
+            "granted",
+            "grant shared read",
+            Some("shell")
+        )],
+        "the stand-in grants req-2 with the shell as settler and the rationale as decision"
+    );
+    assert_eq!(
+        standin_requests(&standin, "component-1"),
+        vec![standin_request_record(
+            "req-1",
+            "component-1",
+            "denied",
+            "stopped: stop one",
+            Some("runtime")
+        )],
+        "the stand-in leaves the ended instance's denied record unchanged"
+    );
+    let live = standin_live_grants(&standin);
+    let live_ids: BTreeSet<&str> = live
+        .iter()
+        .map(|grant| {
+            grant["request_id"]
+                .as_str()
+                .expect("the stand-in names each live grant")
+        })
+        .collect();
+    assert_eq!(
+        live_ids,
+        BTreeSet::from(["req-2"]),
+        "the stand-in shows exactly the survivor's request as live"
+    );
+    assert_eq!(
+        live,
+        vec![json!({
+            "request_id": "req-2",
+            "session_id": "component-2",
+            "resource": STANDIN_RESOURCE,
+            "action": "read",
+            "duration": "session",
+            "granted_at": 4,
+        })],
+        "the stand-in stores the one live grant for the survivor's session at the test instant"
+    );
+    standin
+        .authorise(
+            StandInCaller::Client {
+                session_id: "component-2",
+            },
+            "req-2",
+        )
+        .expect("the stand-in authorises the survivor's presentation");
+    let ended_presentation = standin.authorise(
+        StandInCaller::Client {
+            session_id: "component-1",
+        },
+        "req-2",
+    );
+    assert!(
+        matches!(&ended_presentation, Err((403, reason)) if reason.contains("wrong capsule")),
+        "the stand-in refuses the ended instance's presentation: {ended_presentation:?}"
+    );
+
+    standin
+        .finish_start("component-2")
+        .expect("the stand-in finishes the survivor's start");
+    assert_eq!(
+        standin_capsule(&standin, "component-2"),
+        standin_capsule_record("component-2", STANDIN_SHARED_NAME, "running", ""),
+        "the stand-in runs the granted survivor after its start returns"
+    );
+    assert_eq!(
+        standin_requests(&standin, "component-2"),
+        vec![standin_request_record(
+            "req-2",
+            "component-2",
+            "granted",
+            "grant shared read",
+            Some("shell")
+        )],
+        "the stand-in keeps the granted record after the survivor start returns"
+    );
+    assert_eq!(
+        standin_live_grants(&standin),
+        vec![json!({
+            "request_id": "req-2",
+            "session_id": "component-2",
+            "resource": STANDIN_RESOURCE,
+            "action": "read",
+            "duration": "session",
+            "granted_at": 4,
+        })],
+        "the stand-in keeps exactly the survivor grant after the start returns"
+    );
+    let census = standin_a12_census(&standin, &home, port);
+    assert!(
+        matches!(&census, Err(reason) if reason.contains("live grant leftover")),
+        "the stand-in refuses the running survivor's live grant in the census: {census:?}"
+    );
+
+    standin
+        .delete_capsule(
+            StandInCaller::Shell,
+            "component-2",
+            &json!({"reason": "stop two"}),
+        )
+        .expect("the stand-in stops component-2");
+    assert_eq!(
+        standin_capsule(&standin, "component-2"),
+        standin_capsule_record(
+            "component-2",
+            STANDIN_SHARED_NAME,
+            "stopped",
+            "stopped: stop two"
+        ),
+        "the stand-in stops component-2 with the stop cause"
+    );
+    assert_eq!(
+        standin_requests(&standin, "component-2"),
+        vec![standin_request_record(
+            "req-2",
+            "component-2",
+            "granted",
+            "grant shared read",
+            Some("shell")
+        )],
+        "the stand-in keeps the survivor's granted record after the stop"
+    );
+    assert!(
+        standin_live_grants(&standin).is_empty(),
+        "the stand-in leaves no live grant after the survivor stop"
+    );
+    let revoked = standin.authorise(
+        StandInCaller::Client {
+            session_id: "component-2",
+        },
+        "req-2",
+    );
+    assert!(
+        matches!(&revoked, Err((400, reason)) if reason.starts_with("grant is not live:") && reason.contains("Revoked")),
+        "the stand-in refuses the stopped survivor's presentation as revoked: {revoked:?}"
+    );
+    assert!(
+        standin_a12_census(&standin, &home, port).is_ok(),
+        "the stand-in's survivor run leaves no live grant, live instance, pending request or physical leftover after both ends"
+    );
+    home.finish()
+        .expect("the stand-in survivor run removes its throwaway home");
+}
+
+#[test]
+fn standin_failed_survivor_reaches_running() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("the stand-in failed-survivor run binds one loopback port");
+    let port = listener
+        .local_addr()
+        .expect("the stand-in failed-survivor run reads its port")
+        .port();
+    drop(listener);
+    let home =
+        ThrowawayHome::new().expect("the stand-in failed-survivor run uses one throwaway home");
+
+    let mut standin = StandIn::new();
+    standin
+        .admit_resident(
+            STANDIN_FAILED_PATH,
+            STANDIN_FAILED_NAME,
+            Start::Error("start refused".to_owned()),
+        )
+        .expect("the stand-in admits fail-after-submit");
+    standin
+        .admit_resident(STANDIN_SHARED_PATH, STANDIN_SHARED_NAME, Start::Ok)
+        .expect("the stand-in admits read-shared");
+    assert_eq!(
+        (
+            standin_launch(&mut standin, STANDIN_FAILED_PATH),
+            standin_launch(&mut standin, STANDIN_SHARED_PATH),
+        ),
+        ("component-1".to_owned(), "component-2".to_owned()),
+        "the stand-in numbers the failing launch first and the shared launch second"
+    );
+    assert_eq!(
+        (
+            standin_capsule(&standin, "component-1"),
+            standin_capsule(&standin, "component-2"),
+        ),
+        (
+            standin_capsule_record("component-1", STANDIN_FAILED_NAME, "starting", ""),
+            standin_capsule_record("component-2", STANDIN_SHARED_NAME, "starting", ""),
+        ),
+        "the stand-in keeps both launches starting before the start returns"
+    );
+    standin_seed_shared_request(&mut standin, "req-1", "component-1");
+    standin_seed_shared_request(&mut standin, "req-2", "component-2");
+
+    standin
+        .finish_start("component-1")
+        .expect("the stand-in returns the failing start");
+    assert_eq!(
+        standin_capsule(&standin, "component-1"),
+        standin_capsule_record(
+            "component-1",
+            STANDIN_FAILED_NAME,
+            "failed",
+            "start refused"
+        ),
+        "the stand-in fails component-1 with the start cause"
+    );
+    assert_eq!(
+        standin_requests(&standin, "component-1"),
+        vec![standin_request_record(
+            "req-1",
+            "component-1",
+            "denied",
+            "start refused",
+            Some("runtime")
+        )],
+        "the stand-in denies component-1's request as the runtime with the failure cause"
+    );
+    assert_eq!(
+        (
+            standin_capsule(&standin, "component-2"),
+            standin_requests(&standin, "component-2"),
+        ),
+        (
+            standin_capsule_record("component-2", STANDIN_SHARED_NAME, "starting", ""),
+            vec![standin_request_record(
+                "req-2",
+                "component-2",
+                "pending",
+                "",
+                None
+            )],
+        ),
+        "the stand-in keeps the failed instance's sibling starting with its request pending"
+    );
+
+    standin.set_instant(4);
+    let granted = standin
+        .post_capability_grant(
+            StandInCaller::Shell,
+            &json!({
+                "request_id": "req-2",
+                "duration": "session",
+                "rationale": "grant shared read",
+            }),
+        )
+        .expect("the stand-in grants the survivor's pending request");
+    assert_eq!(
+        granted,
+        json!({"success": true}),
+        "the stand-in answers success true for the survivor grant and stores no token"
+    );
+    assert_eq!(
+        standin_capsule(&standin, "component-1"),
+        standin_capsule_record(
+            "component-1",
+            STANDIN_FAILED_NAME,
+            "failed",
+            "start refused"
+        ),
+        "the stand-in keeps the failed instance failed after the survivor grant"
+    );
+    assert_eq!(
+        standin_requests(&standin, "component-1"),
+        vec![standin_request_record(
+            "req-1",
+            "component-1",
+            "denied",
+            "start refused",
+            Some("runtime")
+        )],
+        "the stand-in leaves the failed instance's denied record unchanged"
+    );
+    assert_eq!(
+        standin_capsule(&standin, "component-2"),
+        standin_capsule_record("component-2", STANDIN_SHARED_NAME, "starting", ""),
+        "the stand-in keeps the granted survivor starting"
+    );
+    let live = standin_live_grants(&standin);
+    let live_ids: BTreeSet<&str> = live
+        .iter()
+        .map(|grant| {
+            grant["request_id"]
+                .as_str()
+                .expect("the stand-in names each live grant")
+        })
+        .collect();
+    assert_eq!(
+        live_ids,
+        BTreeSet::from(["req-2"]),
+        "the stand-in shows exactly the survivor's request as live"
+    );
+    assert_eq!(
+        live[0]["session_id"], "component-2",
+        "the stand-in binds the survivor grant to the survivor's session"
+    );
+
+    standin
+        .finish_start("component-2")
+        .expect("the stand-in finishes the survivor's start");
+    assert_eq!(
+        standin_capsule(&standin, "component-2"),
+        standin_capsule_record("component-2", STANDIN_SHARED_NAME, "running", ""),
+        "the stand-in runs the granted survivor after its start returns"
+    );
+    let census = standin_a12_census(&standin, &home, port);
+    assert!(
+        matches!(&census, Err(reason) if reason.contains("live grant leftover")),
+        "the stand-in refuses the running survivor's live grant in the census: {census:?}"
+    );
+
+    standin
+        .delete_capsule(
+            StandInCaller::Shell,
+            "component-2",
+            &json!({"reason": "stop two"}),
+        )
+        .expect("the stand-in stops component-2");
+    assert!(
+        standin_a12_census(&standin, &home, port).is_ok(),
+        "the stand-in's failed-survivor run passes the census after the survivor stop"
+    );
+    assert_eq!(
+        standin_requests(&standin, "component-1"),
+        vec![standin_request_record(
+            "req-1",
+            "component-1",
+            "denied",
+            "start refused",
+            Some("runtime")
+        )],
+        "the stand-in keeps the failed instance's denied record after the survivor stop"
+    );
+    home.finish()
+        .expect("the stand-in failed-survivor run removes its throwaway home");
+}

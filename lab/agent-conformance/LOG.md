@@ -8947,3 +8947,124 @@ New:
 | 8. Identity, admission and allowance stay separate? | Yes | The watch reads the instance list and request records at `:312-330`; it changes no phase, request or grant, so `finish_start` stays the admission decision and no allowance is minted. |
 
 A passing row gives the real Runtime no A10 or A11 credit for this watch.
+
+## 063 — A10/A11: survivor runs after the other ends
+
+063: `tests/effects.rs` gains `standin_cancel_survivor_reaches_running` and `standin_failed_survivor_reaches_running`; both use the one grant route, the one start return and the one census, and the stand-in sources stay as found. `standin-runtime/README.md` gains the survivor paragraph before `## Callers`, and `RUNBOOK.md` gains one paragraph after the last stand-in paragraph. `GAPS.md`, `falsifiers.json`, `Cargo.toml`, `Cargo.lock`, `src/census.rs`, `src/harness.rs`, `tests/common/grants.rs` and `standin-runtime/mod.rs` are unchanged.
+
+### Quote from the resident SPEC (read only at `35697329be0aad89eb68d0adf78aa94d24751317`)
+
+The grant sentences this task takes:
+
+```text
+Instance 2 is still live and its request is still pending. Grant it; instance
+2 reaches `running`. For the watch, instance 1 makes no request and stays
+`stopped`. Stop instance 2, then run the census.
+```
+
+```text
+Grant instance 2; it reaches `running`. For the watch, instance 1 makes no
+request and stays `failed`. Stop instance 2, then run the census.
+```
+
+The watch sentences stay 062.
+
+### Tests
+
+Both tests live in `tests/effects.rs`, pass with no operator and no probe build, and bind one `127.0.0.1:0` port, drop the listener and pass that port to the one census as `standin_stopped_run_leaves_no_live_grant` does. They share local assertion helpers at `:1392` (`standin_launch`), `:1402` (`standin_capsule`), `:1435` (`standin_request_record`), `:1454` (`standin_live_grants`) and the resource constant `localhost://Public/resident-instances/shared.txt`. Every assertion message starts `the stand-in`.
+
+- `standin_cancel_survivor_reaches_running` (`:1476`) admits `/capsules/read-shared` as `read-shared` with `Start::Ok`, launches twice without `finish_start` (`component-1` and `component-2`, both `starting`), seeds `req-1` and `req-2`, and deletes `component-1` with `{"reason":"stop one"}`. `component-1` is `stopped` with cause `stopped: stop one`; its record is `req-1` `denied`, `settled_by` `runtime`, `decision_reason` `stopped: stop one`. `component-2` stays `starting` with cause `""`, and `req-2` stays `pending` with `settled_by` null. At instant 4 the shell grant of `req-2` with duration `session` and rationale `grant shared read` is Ok `{"success": true}`; `component-2` stays `starting`, its record is `req-2` `granted` with `settled_by` `shell` and that rationale, the ended record stays unchanged, and the live-grant view is exactly one `req-2` entry with `session_id` `component-2`, `duration` `session` and `granted_at` 4. `authorise` accepts the `component-2` client and refuses the `component-1` client with 403 and `wrong capsule`. `finish_start("component-2")` stores `running` with cause `""`, keeps the granted record and the one live grant, and the census is `Err` containing `live grant leftover`. The stop with `{"reason":"stop two"}` stores `stopped` with cause `stopped: stop two`, keeps `req-2` granted with `settled_by` `shell`, empties the live view, refuses the stopped survivor's presentation with 400 and a reason that starts `grant is not live:` and contains `Revoked`, and the census is `Ok(())`. `home.finish()` is Ok.
+- `standin_failed_survivor_reaches_running` (`:1734`) admits `/capsules/fail-after-submit` with `Start::Error("start refused")` and `/capsules/read-shared` with `Start::Ok`, launches the failing path then the shared path (both `starting`), and seeds `req-1` and `req-2` before `finish_start`. `finish_start("component-1")` stores `failed` with cause `start refused` and denies `req-1` with `settled_by` `runtime` and that cause; `component-2` stays `starting` and `req-2` pending. At instant 4 the same shell grant of `req-2` is Ok `{"success": true}`; the failed instance and its denied record stay, `component-2` stays `starting`, and the live view is exactly `req-2` on `component-2`. `finish_start("component-2")` stores `running` with cause `""`, the census is `Err` containing `live grant leftover`, the stop with `{"reason":"stop two"}` makes the census `Ok(())`, and the failed instance's denied record stays. `home.finish()` is Ok.
+
+No new `StandIn` method. The tests call `post_capability_grant`, `finish_start`, `delete_capsule` and `standin_a12_census`; they call neither `seed_grant` nor `settle_pending`, and `watch_ended` stays uncalled.
+
+### Hand-run falsifiers
+
+No `falsifiers.json` id. Each plant ran alone and was restored before the next. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects standin_cancel_survivor_reaches_running -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. Each planted crate compiled. After the last restore `sha256sum standin-runtime/mod.rs` was `03ec278bad100bf68039f38c821f487a453112c9638a4ff9090853e477bf4e53`, which matches the value 062 recorded, and `git diff -- lab/agent-conformance/standin-runtime/mod.rs` was empty.
+
+F-standin-survivor-session: the session id passed to `seed_grant` is the literal `component-1`. Planted run failed on the assertion at `tests/effects.rs:1615:5`: `the stand-in stores the one live grant for the survivor's session at the test instant`; the live entry's `session_id` was `component-1` and the expected value was `component-2`. Planted real 2.40 seconds. Restored real 2.03 seconds, 1 passed.
+
+Old:
+
+```text
+        self.seed_grant(
+            &request_id,
+            &session_id,
+```
+
+New:
+
+```text
+        self.seed_grant(
+            &request_id,
+            "component-1",
+```
+
+F-standin-survivor-ended: on the success path the one writer is also called for every denied record, with `granted` and `shell` and the same rationale. Planted run failed on the assertion at `tests/effects.rs:1590:5`: `the stand-in leaves the ended instance's denied record unchanged`; `req-1` became `granted` with `settled_by` `shell` and `decision_reason` `grant shared read`. Planted real 1.69 seconds.
+
+Old:
+
+```text
+        self.seed_grant(
+            &request_id,
+            &session_id,
+            &resource,
+            &action,
+            duration,
+            instant,
+            Life::Live,
+            false,
+        );
+        Ok(json!({ "success": true }))
+```
+
+New:
+
+```text
+        self.seed_grant(
+            &request_id,
+            &session_id,
+            &resource,
+            &action,
+            duration,
+            instant,
+            Life::Live,
+            false,
+        );
+        let ended_denials = self
+            .requests
+            .iter()
+            .filter(|request| request.status == RequestStatus::Denied)
+            .map(|request| request.request_id.clone())
+            .collect::<Vec<_>>();
+        for denied_id in ended_denials {
+            self.settle_record(&denied_id, RequestStatus::Granted, rationale, "shell");
+        }
+        Ok(json!({ "success": true }))
+```
+
+### Docs
+
+`standin-runtime/README.md:49` adds the survivor paragraph immediately before `## Callers`: after one instance has ended, `post_capability_grant` of the survivor's pending request stores one `Live` grant for the survivor's session, `finish_start` then stores `running`, the ended request stays `denied` with `settled_by` `runtime`, stopping the survivor makes `standin_a12_census` return success, and the grant does not change phase. It says a PASS gives the Runtime no A10 or A11 credit for the survivor. The RA-1 section, the RI-1 to RI-4 section, the 061 grant paragraph and the 062 watch paragraph stay. `RUNBOOK.md:731` adds one paragraph after the last stand-in paragraph naming both tests and the same no-credit statement. No other RUNBOOK paragraph changes.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. `Cargo.toml` and `Cargo.lock` are unchanged, and the protected diff is empty: `git diff` for `standin-runtime/mod.rs`, `src/census.rs`, `src/harness.rs`, `tests/common/grants.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. The only changed files are `tests/effects.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: real 248.29 seconds, inside the 600-second bound. The command ran every target and reported no failure. The observed tail was report 23 passed, runtime 10 passed with 2 ignored, standin_contract 2 passed, probe 3 passed and doc-tests 0; it carried no `error: test failed` line. Cargo stops after a failing target, so the targets before those in the sequence passed.
+- The effects target alone, recorded for its complete result: exit 0, real 208.15 seconds, 61 passed, 0 failed and 12 ignored. Both new survivor tests passed. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects survivor_reaches_running` exit 0, real 0.40 seconds, 2 passed and 0 failed.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The tests use the seeded Public resource path at `tests/effects.rs:1390` and stored request ids only. No code or content identity is added. |
+| 2. Capsule, Home or UI gains ungranted access? | No | The one grant route refuses every client with `This endpoint requires shell privileges` before the body is read; `standin-runtime/mod.rs:400`. The tests launch and stop through shell calls only. |
+| 3. A second path or a second copy of one rule? | No | The tests call `post_capability_grant` at `tests/effects.rs:1560`, `finish_start` at `:1647`, `delete_capsule` at `:1684` and `standin_a12_census` at `:1677`; `seed_grant` at `standin-runtime/mod.rs:418` stays the one grant store and `settle_record` at `:612` stays the one writer. No new method. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`; `elastos/`, `capsules/` and `scripts/` are untouched. |
+| 5. Refusals deny by default with a clear reason? | Yes | The tests assert the 403 `wrong capsule` refusal at `tests/effects.rs:1642` and the 400 `grant is not live:` with `Revoked` at `:1722`; both come from the unchanged `authorise` at `standin-runtime/mod.rs:450`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The change adds tests and documentation only; no capsule code or import changes, and the stand-in keeps the one shell view the real route answers. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_cancel_survivor_reaches_running` at `tests/effects.rs:1476` and `standin_failed_survivor_reaches_running` at `:1734`; the session and ended-denial plants fail those named tests on their assertions, and the restored tests pass. |
+| 8. Identity, admission and allowance stay separate? | Yes | The unchanged grant route writes one request record and one `Live` grant and changes no phase at `standin-runtime/mod.rs:416-429`; `finish_start` at `:494` stays the admission decision, and `duration` stays the allowance value. A PASS gives the Runtime no A10 or A11 credit for the survivor. |

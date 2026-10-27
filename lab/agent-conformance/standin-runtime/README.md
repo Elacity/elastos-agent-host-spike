@@ -46,6 +46,8 @@ This value is the lab stand-in and the real route can replace it later because t
 
 `StandIn::watch_ended` is a lab observation, not a route. It calls `get_capsules` and `get_capability_requests` for one session at the test instant; it reads no clock and no disk. Two seconds after a stop, the instance is still listed `stopped` with one request that is not pending. Two seconds after a failed start, the same holds for `failed`. A pending request on that session is `made a request after it ended`. At 60 seconds the instance has left the list. `seed_request` can still store a pending record after the end, and the watch reports it and does not remove it. This value is the lab stand-in and the real route can replace it later because the JSON matches (M1-R). A PASS gives the Runtime no A10 or A11 credit for this watch.
 
+After one instance has ended, `post_capability_grant` of the survivor's pending request stores one `Live` grant for the survivor's session, and `finish_start` then stores `running`. The ended request stays `denied` with `settled_by` `runtime`. Stopping the survivor makes `standin_a12_census` return success. The grant does not change phase. This value is the lab stand-in and the real route can replace it later because the JSON matches (M1-R). A PASS gives the Runtime no A10 or A11 credit for the survivor.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.
