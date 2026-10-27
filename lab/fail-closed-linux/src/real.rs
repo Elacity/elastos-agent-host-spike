@@ -981,6 +981,10 @@ fn parse_ppid(stat: &str) -> Option<u32> {
     parts.next()?.parse().ok()
 }
 
+fn ptrace_event(status: libc::c_int) -> libc::c_int {
+    (status >> 16) & 0xff
+}
+
 fn resume_traced_stop(pid: libc::pid_t) -> bool {
     let mut status = 0;
     let stopped = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
@@ -993,7 +997,11 @@ fn resume_traced_stop(pid: libc::pid_t) -> bool {
                 std::ptr::null_mut::<libc::c_void>(),
             )
         };
-        EXEC_RESUMED.store(true, Ordering::Relaxed);
+        // A pre-exec SIGCHLD (Landlock self-test child) also stops the
+        // traced provider. Only TRACEEXEC means the image is past exec.
+        if ptrace_event(status) == libc::PTRACE_EVENT_EXEC {
+            EXEC_RESUMED.store(true, Ordering::Relaxed);
+        }
         return true;
     }
     false
@@ -1004,10 +1012,11 @@ fn resume_exec_stop(pid: libc::pid_t) {
         return;
     }
     // The parent can ack once `/proc/<pid>/exe` matches, before waitpid
-    // reports TRACEEXEC. Spin until that stop is CONTed so a later
+    // reports TRACEEXEC. Spin until that exec stop is CONTed so a later
     // waitpid(-1) plant cannot leave the provider stopped.
     for _ in 0..200 {
-        if resume_traced_stop(pid) {
+        resume_traced_stop(pid);
+        if EXEC_RESUMED.load(Ordering::Relaxed) {
             return;
         }
         unsafe { libc::usleep(1000) };
