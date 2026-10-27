@@ -501,3 +501,334 @@ Dump the raw jsonl from that Home and check `capsule_id` / `session_id`
 macOS A8, aarch64, Jetson: NOT RUN.
 Shipped agent-host bytes: BLOCKED (AC-002-ARGS).
 A8 authorship: NEEDS RUNTIME.
+
+## 27 Oct 2026: #437 r4 authorship lock
+
+Machine: Linux 6.12.94+ x86_64, rustc 1.91.0 (f8297e351 2025-10-28), no KVM.
+Head: `f062eb8c8c3c93a99e7946ee3b0f578726c418d6` on
+`cursor/a8-authorship-lock-0a84`, parent `b0cc24c2` (#301). Lab/test only.
+No Runtime source change.
+
+### Rows
+
+Command: `lab/a1-a8-hardening/run.sh`. cargo exit 0.
+
+```text
+a1 runtime: elastos sha256 e027209ca94cdaf39e6758219f7737c99f5b3cc4f8e6ded9d5d1cb12f4f0d0d3
+a1 wasi build: sha256 a6aa5328127a6c08cd2aee4aae4ef58cf5bb0ca0047e9e3089dedd0b4a33d884 imports ["wasi:cli/environment@0.2.0", "elastos:bus/types@1.0.0"]
+a1 control build: sha256 b2eaaf6f054837ca0880218909766100214706fbaa9a098aba4fca72e06f6c4f imports ["elastos:bus/types@1.0.0"]
+a1 refused run: exit:Some(1) refusal_line:Some("Error: Component capsule failed: Invalid manifest: component import \"wasi:cli/environment@0.2.0\" is not allowed; …")
+a1 control run: exit:Some(0) admitted_line:Some("[run] Component capsule 'a1-wasi-guest' exited")
+a8 runtime: elastos sha256 e027209ca94cdaf39e6758219f7737c99f5b3cc4f8e6ded9d5d1cb12f4f0d0d3
+a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports [five elastos:bus]
+a8 injected agent-host: sha256 f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737 imports [the same five]
+a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+a8 receipt cursor: size:0 inode:None path:/tmp/a8-home.BoWx3g/home/.local/share/elastos/runtime/capability-requests.jsonl
+a8 host key read: exit:Some(1) assigned:None session:None guest_hash:f3d89ab4… host_records:[write then read, both manifest_capability_denied, capsule_id component-f4801332-…, session_id None, module_hash None, guest_function None, seq None] marker_absent:true unchanged:true
+a8 authorship: needs runtime: capability-requests.jsonl omits component id from Runtime [run] output or API, session id, guest module hash, guest function, receipt seq
+
+row | test | result
+A1 | wasi_import_is_refused_at_admission | PASS
+A8 | agent_host_host_key_read_is_refused | NEEDS RUNTIME (capability-requests.jsonl omits component id from Runtime [run] output or API, session id, guest module hash, guest function, receipt seq)
+A8 | shipped_wasm_bus_prints_internal_sentence | NEEDS RUNTIME (WasmBus maps BusError::Internal to BusFailure::Other, so the path-specific Internal sentence is not visible)
+A8 | shipped_agent_host_bytes_read_host_key | BLOCKED (AC-002-ARGS; the shipped agent-host names only its own journal)
+```
+
+Lib unit tests: 8 passed. Authorship-lock tests: 8 passed.
+
+### Falsifiers
+
+`python3 lab/a1-a8-hardening/falsify.py <ID>`, one at a time.
+14 of 14 original plants CAUGHT. 8 of 8 new plants CAUGHT. Each failed
+at a listed `fail_needle` with exit 101. No timeout.
+
+| ID | Observed | Verdict |
+| --- | --- | --- |
+| F-A1a | Control bytes in the refused slot: `exit:Some(0) refusal_line:None`. | CAUGHT |
+| F-A1-runtime | Allowlist off (elastos sha256 `9d4a0c09…`). Core-module check refused the WASI build. Exact-reason assertion failed. | CAUGHT |
+| F-A8a | Manifest declared the fake key. Host record is `pending` for write. `exit:signaled`. | CAUGHT |
+| F-A8-runtime | Manifest refusal off (elastos sha256 `72fe1fa5…`). Same `pending` write and `exit:signaled`. | CAUGHT |
+| F-A8-forge | Forged guest `45e4b8fb…`. `guest_has_refusal_sentence:true`. | CAUGHT |
+| F-A8-early | Old early-return guest `9cff3664…`. `guest_has_early_injection:true`. | CAUGHT |
+| F-A8-skip-guards | Injected `c0745cec…`. `host_records:[]`. | CAUGHT |
+| F-A8-piece-forge | Injected `92d42c03…`. `host_records:[]`. | CAUGHT |
+| F-A8-wasm-bus-only | Honest guest `f3d89ab4…` has write then read. Internal sentence on stderr failed. | CAUGHT |
+| F-A8-direct-request | Injected `8441f14e…`. One `read` only. | CAUGHT |
+| F-A8-test-writes-lines | Test wrote the two lines; no-bus guest `92d42c03…`. File existed before launch. | CAUGHT |
+| F-A8-skip-journal-grants | Injected `47c2355d…`. Write then read present. Cargo FAILED on host-side sequence. | CAUGHT |
+| F-A8-guest-follow-sentence | Injected `66790ec5…`. Write then read present. Invalid sentence printed. Cargo FAILED. | CAUGHT |
+| F-A8-race-after-snapshot | Injected `7d81d0cb…`. Foreign id after snapshot. File existed at spawn. | CAUGHT |
+| F-A8-session-alias | Accept `session_id == capsule_id`. Unit test failed the alias refuse. | CAUGHT |
+| F-A8-session-1 | Accept `session-1`. Unit test failed the unguessable-id refuse. | CAUGHT |
+| F-A8-toctou-hash | Hash the in-memory copy only. Unit test failed the staged-byte check. | CAUGHT |
+| F-A8-seq-ignored | Ignore `seq`. Unit test failed the strictly-increasing refuse. | CAUGHT |
+| F-A8-shrink-dead | Lock size 0. Same-inode shrink no longer panicked. | CAUGHT |
+| F-A8-rewrite-after-run | Skip the seal hash. Rewrite after run was accepted. | CAUGHT |
+| F-A8-dup-keys | Last-wins parse. Duplicate `capsule_id` was accepted. | CAUGHT |
+| F-A8-capsule-trim | Trim `capsule_id`. Whitespace still bound. | CAUGHT |
+
+### Mutants
+
+`python3 lab/a1-a8-hardening/mutants/binding.py`: 7 of 7 original KILLED.
+3 new also KILLED. 10 of 10 total.
+
+| ID | Mutant | Result |
+| --- | --- | --- |
+| M-sequence-stderr | Follow sentence on guest stderr is the lock | KILLED |
+| M-assigned-none-match | Missing assigned matches any `capsule_id` | KILLED |
+| M-after-snapshot-window | Inode-none cursor accepts a post-snapshot file | KILLED |
+| M-println-not-assert | Missing Runtime-ask fields still cargo `ok` | KILLED |
+| M-session-presence | Any non-empty `session_id` binds | KILLED |
+| M-guest-function-optional | `guest_function` is not required | KILLED |
+| M-hash-alias | `wasm_hash` / `guest_hash` count as `module_hash` | KILLED |
+| M-session-alias | `session_id == capsule_id` binds | KILLED |
+| M-session-1 | `session-1` binds | KILLED |
+| M-seq-ignored | `seq` 1 then 3 binds | KILLED |
+
+Restored SHA-256 after each entry:
+
+- `tests/a1_wasi_import.rs`: `ccf9fc61b70f4c0e6a9b7c44de03ecfbac9a76595bdf07ddb55e55a84d34f17a`
+- `tests/a8_agent_host_host_key.rs`: `8d0c842b74ef02c8cf1e892aeed195205992075412ab7aded2d14090e07f91ca`
+- `src/lib.rs`: `c868d26909a315cb25cb6f40e2e0f2a74e1058f260a8c2907218eeac3ca47568`
+- `elastos/crates/elastos-server/src/component.rs`: `7ef1dea5f1bcb725c08f8e54e347a23caa9856992007a2306b8289896a0da992`
+- `elastos/crates/elastos-server/src/resource_bridge.rs`: `d52efcf8754427be26b2c276ae66bb11e8ce521eb84da47fd7128cf2833cf92a`
+
+`git status` showed no Runtime change after restore. The rebuilt
+`elastos` hash is `e027209c…` again.
+
+### macOS (NOT RUN)
+
+Sash's Mac still needs `run.sh`, the twenty-two plants, and
+`mutants/binding.py`. Dump the raw jsonl under
+`~/Library/Application Support/elastos` and check `capsule_id` /
+`session_id` / `module_hash` / `guest_function` / `seq`. Timeouts stay
+NOT CAUGHT.
+
+macOS A8, aarch64, Jetson: NOT RUN.
+A8 authorship: NEEDS RUNTIME.
+
+## 27 Oct 2026: #475 r5 later-PASS holes
+
+Machine: Linux 6.12.94+ x86_64, rustc 1.91.0 (f8297e351 2025-10-28), no KVM.
+Code: `96f8baae406806ebebdda0dba791b4bda861b323` on
+`cursor/a8-authorship-lock-0a84`, parent `75bb4d85`. Lab/test only.
+No Runtime source change. Closes the eight later-PASS holes from
+`lab/review-a8-455-r5/REVIEW.md`.
+
+### Rows
+
+Command: `lab/a1-a8-hardening/run.sh`. cargo exit 0.
+
+```text
+a1 runtime: elastos sha256 e027209ca94cdaf39e6758219f7737c99f5b3cc4f8e6ded9d5d1cb12f4f0d0d3
+a1 wasi build: sha256 a6aa5328127a6c08cd2aee4aae4ef58cf5bb0ca0047e9e3089dedd0b4a33d884 imports ["wasi:cli/environment@0.2.0", "elastos:bus/types@1.0.0"]
+a1 control build: sha256 b2eaaf6f054837ca0880218909766100214706fbaa9a098aba4fca72e06f6c4f imports ["elastos:bus/types@1.0.0"]
+a1 refused run: exit:Some(1) refusal_line:Some("Error: Component capsule failed: Invalid manifest: component import \"wasi:cli/environment@0.2.0\" is not allowed; …")
+a1 control run: exit:Some(0) admitted_line:Some("[run] Component capsule 'a1-wasi-guest' exited")
+a8 runtime: elastos sha256 e027209ca94cdaf39e6758219f7737c99f5b3cc4f8e6ded9d5d1cb12f4f0d0d3
+a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports [five elastos:bus]
+a8 injected agent-host: sha256 f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737 imports [the same five]
+a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+a8 receipt cursor: size:0 inode:None path:/tmp/a8-home.sCDbUm/home/.local/share/elastos/runtime/capability-requests.jsonl
+a8 host key read: exit:Some(1) assigned:None session:None guest_hash:f3d89ab4… host_records:[write then read, both manifest_capability_denied, capsule_id component-f23c18f3-…, session_id None, module_hash None, guest_function None, seq None] marker_absent:true unchanged:true
+a8 authorship: needs runtime: capability-requests.jsonl omits component id from Runtime [run] output or API, session id, guest module hash, guest function, receipt seq
+
+row | test | result
+A1 | wasi_import_is_refused_at_admission | PASS
+A8 | agent_host_host_key_read_is_refused | NEEDS RUNTIME (capability-requests.jsonl omits component id from Runtime [run] output or API, session id, guest module hash, guest function, receipt seq)
+A8 | shipped_wasm_bus_prints_internal_sentence | NEEDS RUNTIME (WasmBus maps BusError::Internal to BusFailure::Other, so the path-specific Internal sentence is not visible)
+A8 | shipped_agent_host_bytes_read_host_key | BLOCKED (AC-002-ARGS; the shipped agent-host names only its own journal)
+```
+
+Lib unit tests: 8 passed. Authorship-lock tests: 16 passed.
+
+### Falsifiers
+
+`python3 lab/a1-a8-hardening/falsify.py <ID>`, one at a time.
+22 of 22 original plants CAUGHT. 8 of 8 r5 plants CAUGHT. 30 of 30
+total. Each failed at a listed `fail_needle` with exit 101. No timeout.
+
+| ID | Observed | Verdict |
+| --- | --- | --- |
+| F-A1a | Control bytes in the refused slot: `exit:Some(0) refusal_line:None`. | CAUGHT |
+| F-A1-runtime | Allowlist off (elastos sha256 `9d4a0c09…`). Core-module check refused the WASI build. Exact-reason assertion failed. | CAUGHT |
+| F-A8a | Manifest declared the fake key. Host record is `pending` for write. `exit:signaled`. | CAUGHT |
+| F-A8-runtime | Manifest refusal off (elastos sha256 `72fe1fa5…`). Same `pending` write and `exit:signaled`. | CAUGHT |
+| F-A8-forge | Forged guest `45e4b8fb…`. `guest_has_refusal_sentence:true`. | CAUGHT |
+| F-A8-early | Old early-return guest `9cff3664…`. `guest_has_early_injection:true`. | CAUGHT |
+| F-A8-skip-guards | Injected `c0745cec…`. `host_records:[]`. | CAUGHT |
+| F-A8-piece-forge | Injected `92d42c03…`. `host_records:[]`. | CAUGHT |
+| F-A8-wasm-bus-only | Honest guest `f3d89ab4…` has write then read. Internal sentence on stderr failed. | CAUGHT |
+| F-A8-direct-request | Injected `8441f14e…`. One `read` only. | CAUGHT |
+| F-A8-test-writes-lines | Test wrote the two lines; no-bus guest `92d42c03…`. File existed before launch. | CAUGHT |
+| F-A8-skip-journal-grants | Injected `47c2355d…`. Write then read present. Cargo FAILED on host-side sequence. | CAUGHT |
+| F-A8-guest-follow-sentence | Injected `66790ec5…`. Write then read present. Invalid sentence printed. Cargo FAILED. | CAUGHT |
+| F-A8-race-after-snapshot | Injected `7d81d0cb…`. Foreign id after snapshot. File existed at spawn. | CAUGHT |
+| F-A8-session-alias | Accept `session_id == capsule_id`. Unit test failed the alias refuse. | CAUGHT |
+| F-A8-session-1 | Accept `session-1`. Unit test failed the unguessable-id refuse. | CAUGHT |
+| F-A8-toctou-hash | Hash the in-memory copy only. Unit test failed the staged-byte check. | CAUGHT |
+| F-A8-seq-ignored | Ignore `seq`. Unit test failed the strictly-increasing refuse. | CAUGHT |
+| F-A8-shrink-dead | Lock size 0. Same-inode shrink no longer panicked. | CAUGHT |
+| F-A8-rewrite-after-run | Skip the seal hash. Rewrite after run was accepted. | CAUGHT |
+| F-A8-dup-keys | Last-wins parse. Duplicate `capsule_id` was accepted. | CAUGHT |
+| F-A8-capsule-trim | Trim `capsule_id`. Whitespace still bound. | CAUGHT |
+| F-A8-session-from-time | Accept 32 hex from the clock. Pin test failed the unguessable-id refuse. | CAUGHT |
+| F-A8-session-from-pid | Accept 32 hex from the pid. Pin test failed the unguessable-id refuse. | CAUGHT |
+| F-A8-session-zeros | Accept the all-zero session. Pin test failed the unguessable-id refuse. | CAUGHT |
+| F-A8-session-reused | Skip the used-set insert. Pin test failed the reuse refuse. | CAUGHT |
+| F-A8-seq-wrap | Wrap `u64::MAX` to `0`. Pin test failed the wrap refuse. | CAUGHT |
+| F-A8-toctou-rename | Skip the post-load inode and hash recheck. Pin test failed the staged-byte check. | CAUGHT |
+| F-A8-symlink-journal | Use `exists()` so a dangling symlink looks absent. Pin test failed the pre-exist refuse. | CAUGHT |
+| F-A8-bom-truncated | Drop a BOM or truncated line and bind the rest. Pin test failed the journal refuse. | CAUGHT |
+
+### Mutants
+
+`python3 lab/a1-a8-hardening/mutants/binding.py`: 10 of 10 KILLED.
+
+| ID | Mutant | Result |
+| --- | --- | --- |
+| M-sequence-stderr | Follow sentence on guest stderr is the lock | KILLED |
+| M-assigned-none-match | Missing assigned matches any `capsule_id` | KILLED |
+| M-after-snapshot-window | Inode-none cursor accepts a post-snapshot file | KILLED |
+| M-println-not-assert | Missing Runtime-ask fields still cargo `ok` | KILLED |
+| M-session-presence | Any non-empty `session_id` binds | KILLED |
+| M-guest-function-optional | `guest_function` is not required | KILLED |
+| M-hash-alias | `wasm_hash` / `guest_hash` count as `module_hash` | KILLED |
+| M-session-alias | `session_id == capsule_id` binds | KILLED |
+| M-session-1 | `session-1` binds | KILLED |
+| M-seq-ignored | `seq` 1 then 3 binds | KILLED |
+
+Restored SHA-256 after each entry:
+
+- `tests/a1_wasi_import.rs`: `ccf9fc61b70f4c0e6a9b7c44de03ecfbac9a76595bdf07ddb55e55a84d34f17a`
+- `tests/a8_agent_host_host_key.rs`: `83849410ea319a911c7cb71c2080c3d5209d08a0cdc49ef26c921fee9e4d8035`
+- `src/lib.rs`: `0180f31a8a7e8d29bfe5194b7749dc4f2a20ea20948db370fce3db475b2884be`
+- `elastos/crates/elastos-server/src/component.rs`: `7ef1dea5f1bcb725c08f8e54e347a23caa9856992007a2306b8289896a0da992`
+- `elastos/crates/elastos-server/src/resource_bridge.rs`: `d52efcf8754427be26b2c276ae66bb11e8ce521eb84da47fd7128cf2833cf92a`
+
+`git status` showed no Runtime change after restore. The rebuilt
+`elastos` hash is `e027209c…` again.
+
+### macOS (NOT RUN)
+
+Sash's Mac still needs `run.sh`, the thirty plants, and
+`mutants/binding.py`. Dump the raw jsonl under
+`~/Library/Application Support/elastos` and check `capsule_id` /
+`session_id` / `module_hash` / `guest_function` / `seq`. Timeouts stay
+NOT CAUGHT.
+
+macOS A8, aarch64, Jetson: NOT RUN.
+A8 authorship: NEEDS RUNTIME.
+
+## 27 Oct 2026: #475 r5 later-PASS holes
+
+Machine: Linux 6.12.94+ x86_64, rustc 1.91.0 (f8297e351 2025-10-28), no KVM.
+Code: `96f8baae406806ebebdda0dba791b4bda861b323` on
+`cursor/a8-authorship-lock-0a84`, parent `75bb4d85`. Lab/test only.
+No Runtime source change. Closes the eight later-PASS holes from
+`lab/review-a8-455-r5/REVIEW.md`.
+
+### Rows
+
+Command: `lab/a1-a8-hardening/run.sh`. cargo exit 0.
+
+```text
+a1 runtime: elastos sha256 e027209ca94cdaf39e6758219f7737c99f5b3cc4f8e6ded9d5d1cb12f4f0d0d3
+a1 wasi build: sha256 a6aa5328127a6c08cd2aee4aae4ef58cf5bb0ca0047e9e3089dedd0b4a33d884 imports ["wasi:cli/environment@0.2.0", "elastos:bus/types@1.0.0"]
+a1 control build: sha256 b2eaaf6f054837ca0880218909766100214706fbaa9a098aba4fca72e06f6c4f imports ["elastos:bus/types@1.0.0"]
+a1 refused run: exit:Some(1) refusal_line:Some("Error: Component capsule failed: Invalid manifest: component import \"wasi:cli/environment@0.2.0\" is not allowed; …")
+a1 control run: exit:Some(0) admitted_line:Some("[run] Component capsule 'a1-wasi-guest' exited")
+a8 runtime: elastos sha256 e027209ca94cdaf39e6758219f7737c99f5b3cc4f8e6ded9d5d1cb12f4f0d0d3
+a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports [five elastos:bus]
+a8 injected agent-host: sha256 f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737 imports [the same five]
+a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+a8 receipt cursor: size:0 inode:None path:/tmp/a8-home.sCDbUm/home/.local/share/elastos/runtime/capability-requests.jsonl
+a8 host key read: exit:Some(1) assigned:None session:None guest_hash:f3d89ab4… host_records:[write then read, both manifest_capability_denied, capsule_id component-f23c18f3-…, session_id None, module_hash None, guest_function None, seq None] marker_absent:true unchanged:true
+a8 authorship: needs runtime: capability-requests.jsonl omits component id from Runtime [run] output or API, session id, guest module hash, guest function, receipt seq
+
+row | test | result
+A1 | wasi_import_is_refused_at_admission | PASS
+A8 | agent_host_host_key_read_is_refused | NEEDS RUNTIME (capability-requests.jsonl omits component id from Runtime [run] output or API, session id, guest module hash, guest function, receipt seq)
+A8 | shipped_wasm_bus_prints_internal_sentence | NEEDS RUNTIME (WasmBus maps BusError::Internal to BusFailure::Other, so the path-specific Internal sentence is not visible)
+A8 | shipped_agent_host_bytes_read_host_key | BLOCKED (AC-002-ARGS; the shipped agent-host names only its own journal)
+```
+
+Lib unit tests: 8 passed. Authorship-lock tests: 16 passed.
+
+### Falsifiers
+
+`python3 lab/a1-a8-hardening/falsify.py <ID>`, one at a time.
+22 of 22 original plants CAUGHT. 8 of 8 r5 plants CAUGHT. 30 of 30
+total. Each failed at a listed `fail_needle` with exit 101. No timeout.
+
+| ID | Observed | Verdict |
+| --- | --- | --- |
+| F-A1a | Control bytes in the refused slot: `exit:Some(0) refusal_line:None`. | CAUGHT |
+| F-A1-runtime | Allowlist off (elastos sha256 `9d4a0c09…`). Core-module check refused the WASI build. Exact-reason assertion failed. | CAUGHT |
+| F-A8a | Manifest declared the fake key. Host record is `pending` for write. `exit:signaled`. | CAUGHT |
+| F-A8-runtime | Manifest refusal off (elastos sha256 `72fe1fa5…`). Same `pending` write and `exit:signaled`. | CAUGHT |
+| F-A8-forge | Forged guest `45e4b8fb…`. `guest_has_refusal_sentence:true`. | CAUGHT |
+| F-A8-early | Old early-return guest `9cff3664…`. `guest_has_early_injection:true`. | CAUGHT |
+| F-A8-skip-guards | Injected `c0745cec…`. `host_records:[]`. | CAUGHT |
+| F-A8-piece-forge | Injected `92d42c03…`. `host_records:[]`. | CAUGHT |
+| F-A8-wasm-bus-only | Honest guest `f3d89ab4…` has write then read. Internal sentence on stderr failed. | CAUGHT |
+| F-A8-direct-request | Injected `8441f14e…`. One `read` only. | CAUGHT |
+| F-A8-test-writes-lines | Test wrote the two lines; no-bus guest `92d42c03…`. File existed before launch. | CAUGHT |
+| F-A8-skip-journal-grants | Injected `47c2355d…`. Write then read present. Cargo FAILED on host-side sequence. | CAUGHT |
+| F-A8-guest-follow-sentence | Injected `66790ec5…`. Write then read present. Invalid sentence printed. Cargo FAILED. | CAUGHT |
+| F-A8-race-after-snapshot | Injected `7d81d0cb…`. Foreign id after snapshot. File existed at spawn. | CAUGHT |
+| F-A8-session-alias | Accept `session_id == capsule_id`. Unit test failed the alias refuse. | CAUGHT |
+| F-A8-session-1 | Accept `session-1`. Unit test failed the unguessable-id refuse. | CAUGHT |
+| F-A8-toctou-hash | Hash the in-memory copy only. Unit test failed the staged-byte check. | CAUGHT |
+| F-A8-seq-ignored | Ignore `seq`. Unit test failed the strictly-increasing refuse. | CAUGHT |
+| F-A8-shrink-dead | Lock size 0. Same-inode shrink no longer panicked. | CAUGHT |
+| F-A8-rewrite-after-run | Skip the seal hash. Rewrite after run was accepted. | CAUGHT |
+| F-A8-dup-keys | Last-wins parse. Duplicate `capsule_id` was accepted. | CAUGHT |
+| F-A8-capsule-trim | Trim `capsule_id`. Whitespace still bound. | CAUGHT |
+| F-A8-session-from-time | Accept 32 hex from the clock. Pin test failed the unguessable-id refuse. | CAUGHT |
+| F-A8-session-from-pid | Accept 32 hex from the pid. Pin test failed the unguessable-id refuse. | CAUGHT |
+| F-A8-session-zeros | Accept the all-zero session. Pin test failed the unguessable-id refuse. | CAUGHT |
+| F-A8-session-reused | Skip the used-set insert. Pin test failed the reuse refuse. | CAUGHT |
+| F-A8-seq-wrap | Wrap `u64::MAX` to `0`. Pin test failed the wrap refuse. | CAUGHT |
+| F-A8-toctou-rename | Skip the post-load inode and hash recheck. Pin test failed the staged-byte check. | CAUGHT |
+| F-A8-symlink-journal | Use `exists()` so a dangling symlink looks absent. Pin test failed the pre-exist refuse. | CAUGHT |
+| F-A8-bom-truncated | Drop a BOM or truncated line and bind the rest. Pin test failed the journal refuse. | CAUGHT |
+
+### Mutants
+
+`python3 lab/a1-a8-hardening/mutants/binding.py`: 10 of 10 KILLED.
+
+| ID | Mutant | Result |
+| --- | --- | --- |
+| M-sequence-stderr | Follow sentence on guest stderr is the lock | KILLED |
+| M-assigned-none-match | Missing assigned matches any `capsule_id` | KILLED |
+| M-after-snapshot-window | Inode-none cursor accepts a post-snapshot file | KILLED |
+| M-println-not-assert | Missing Runtime-ask fields still cargo `ok` | KILLED |
+| M-session-presence | Any non-empty `session_id` binds | KILLED |
+| M-guest-function-optional | `guest_function` is not required | KILLED |
+| M-hash-alias | `wasm_hash` / `guest_hash` count as `module_hash` | KILLED |
+| M-session-alias | `session_id == capsule_id` binds | KILLED |
+| M-session-1 | `session-1` binds | KILLED |
+| M-seq-ignored | `seq` 1 then 3 binds | KILLED |
+
+Restored SHA-256 after each entry:
+
+- `tests/a1_wasi_import.rs`: `ccf9fc61b70f4c0e6a9b7c44de03ecfbac9a76595bdf07ddb55e55a84d34f17a`
+- `tests/a8_agent_host_host_key.rs`: `83849410ea319a911c7cb71c2080c3d5209d08a0cdc49ef26c921fee9e4d8035`
+- `src/lib.rs`: `0180f31a8a7e8d29bfe5194b7749dc4f2a20ea20948db370fce3db475b2884be`
+- `elastos/crates/elastos-server/src/component.rs`: `7ef1dea5f1bcb725c08f8e54e347a23caa9856992007a2306b8289896a0da992`
+- `elastos/crates/elastos-server/src/resource_bridge.rs`: `d52efcf8754427be26b2c276ae66bb11e8ce521eb84da47fd7128cf2833cf92a`
+
+`git status` showed no Runtime change after restore. The rebuilt
+`elastos` hash is `e027209c…` again.
+
+### macOS (NOT RUN)
+
+Sash's Mac still needs `run.sh`, the thirty plants, and
+`mutants/binding.py`. Dump the raw jsonl under
+`~/Library/Application Support/elastos` and check `capsule_id` /
+`session_id` / `module_hash` / `guest_function` / `seq`. Timeouts stay
+NOT CAUGHT.
+
+macOS A8, aarch64, Jetson: NOT RUN.
+A8 authorship: NEEDS RUNTIME.
