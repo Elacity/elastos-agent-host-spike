@@ -16,6 +16,12 @@
 //!
 //! Task 031: README lists each entry of `LAB_OPERATIONS`, the one table of
 //! typed lab operations, on one line, and the list and the table agree.
+//!
+//! Task 046: the lab does not check an import's Wasm type against its typed
+//! lab operation. README's typed operations section and ADOPTION's "Gaps for
+//! Anders" each hold that gap as one exact sentence, and no line of README,
+//! ADOPTION or `tools/src/verify.rs` calls anything type-checked without
+//! saying "not".
 
 use std::fs;
 use std::path::Path;
@@ -58,6 +64,30 @@ const OPERATIONS_SECTION: &str = "### Typed lab operations (M1 B4 lab half)";
 
 /// How each operation line of that subsection starts.
 const OPERATION_LINE_START: &str = "- `";
+
+/// The import type gap (task 046), held once by README's typed operations
+/// section and once by ADOPTION's "Gaps for Anders".
+const TYPE_GAP: &str = "Gap: the lab does not check an import's Wasm type against its typed lab \
+                        operation, so a typed lab operation is not a type check; this blocks \
+                        the type half of M1 B4 (one permission model).";
+
+/// ADOPTION's section of gaps for Anders.
+const GAPS_SECTION: &str = "## Gaps for Anders";
+
+/// How the text of ADOPTION's import type gap item starts, after its number.
+const TYPE_GAP_ITEM_START: &str = "**Import Wasm types are not checked.**";
+
+/// The lane files that may name a type check only to say there is none.
+const TYPE_CHECK_FILES: [&str; 3] = ["README.md", "ADOPTION.md", "tools/src/verify.rs"];
+
+/// Words that claim a type check, matched ignoring case.
+const TYPE_CHECK_WORDS: [&str; 5] = [
+    "type check",
+    "type-check",
+    "type checked",
+    "type-checked",
+    "typechecked",
+];
 
 /// The lane file `name`, as text.
 fn lane_file(name: &str) -> String {
@@ -122,6 +152,53 @@ fn sections(text: &str) -> Vec<(&str, &str)> {
                 .filter(|line| line.starts_with("## "));
             (heading.unwrap_or(""), section)
         })
+        .collect()
+}
+
+/// The lines of README's subsection `OPERATIONS_SECTION`, after its heading
+/// and up to the next heading line.
+fn operations_lines(readme: &str) -> impl Iterator<Item = &str> {
+    readme
+        .lines()
+        .skip_while(|line| *line != OPERATIONS_SECTION)
+        .skip(1)
+        .take_while(|line| !line.starts_with('#'))
+}
+
+/// The text after `line`'s list number ("4. "), if `line` is a numbered list
+/// item's first line.
+fn after_number(line: &str) -> Option<&str> {
+    let rest = line.trim_start_matches(|c: char| c.is_ascii_digit());
+    if rest.len() == line.len() {
+        return None;
+    }
+    rest.strip_prefix(". ")
+}
+
+/// The numbered items of `section` in order: each runs from its number line
+/// to the next number line or the end of `section`.
+fn numbered_items(section: &str) -> Vec<&str> {
+    let mut starts: Vec<usize> = lines_at(section)
+        .filter(|(_, line)| after_number(line).is_some())
+        .map(|(at, _)| at)
+        .collect();
+    starts.push(section.len());
+    starts
+        .windows(2)
+        .map(|pair| &section[pair[0]..pair[1]])
+        .collect()
+}
+
+/// Each line of the lane file `name` that holds a type check word (ignoring
+/// case) but not the word "not", as `name:line: text`.
+fn unnegated_type_checks(name: &str, text: &str) -> Vec<String> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            let lower = line.to_ascii_lowercase();
+            TYPE_CHECK_WORDS.iter().any(|word| lower.contains(word)) && !holds_word(line, "not")
+        })
+        .map(|(index, line)| format!("{name}:{}: {line}", index + 1))
         .collect()
 }
 
@@ -316,11 +393,7 @@ fn readme_lists_each_typed_lab_operation() {
         held, 1,
         "README.md has the heading {OPERATIONS_SECTION:?} {held} times, not once"
     );
-    let listed: Vec<&str> = readme
-        .lines()
-        .skip_while(|line| *line != OPERATIONS_SECTION)
-        .skip(1)
-        .take_while(|line| !line.starts_with('#'))
+    let listed: Vec<&str> = operations_lines(&readme)
         .filter(|line| line.starts_with(OPERATION_LINE_START))
         .collect();
     let table: Vec<String> = LAB_OPERATIONS.iter().map(operation_line).collect();
@@ -328,5 +401,58 @@ fn readme_lists_each_typed_lab_operation() {
     assert_eq!(
         listed, table,
         "README.md's {OPERATIONS_SECTION:?} list and LAB_OPERATIONS differ"
+    );
+}
+
+#[test]
+fn import_type_gap_is_a_named_row_and_nothing_claims_a_type_check() {
+    let readme = lane_file("README.md");
+    let held = readme.matches(TYPE_GAP).count();
+    assert_eq!(
+        held, 1,
+        "README.md holds the import type gap {held} times, not once: {TYPE_GAP:?}"
+    );
+    assert!(
+        operations_lines(&readme).any(|line| line.contains(TYPE_GAP)),
+        "README.md's import type gap is not in {OPERATIONS_SECTION:?}"
+    );
+
+    let adoption = lane_file("ADOPTION.md");
+    let held = adoption.matches(TYPE_GAP).count();
+    assert_eq!(
+        held, 1,
+        "ADOPTION.md holds the import type gap {held} times, not once: {TYPE_GAP:?}"
+    );
+    let (_, gaps) = sections(&adoption)
+        .into_iter()
+        .find(|(heading, _)| *heading == GAPS_SECTION)
+        .unwrap_or_else(|| panic!("ADOPTION.md has no section {GAPS_SECTION:?}"));
+    let item = numbered_items(gaps)
+        .into_iter()
+        .find(|item| {
+            item.lines()
+                .next()
+                .and_then(after_number)
+                .is_some_and(|text| text.starts_with(TYPE_GAP_ITEM_START))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "ADOPTION.md's {GAPS_SECTION:?} has no numbered item starting \
+                 {TYPE_GAP_ITEM_START:?}"
+            )
+        });
+    assert!(
+        item.contains(TYPE_GAP),
+        "ADOPTION.md's import type gap is not on the {GAPS_SECTION:?} item starting \
+         {TYPE_GAP_ITEM_START:?}"
+    );
+
+    let claims: Vec<String> = TYPE_CHECK_FILES
+        .into_iter()
+        .flat_map(|name| unnegated_type_checks(name, &lane_file(name)))
+        .collect();
+    assert!(
+        claims.is_empty(),
+        "a line names a type check without the word \"not\": {claims:#?}"
     );
 }
