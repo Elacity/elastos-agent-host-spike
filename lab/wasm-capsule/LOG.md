@@ -1422,3 +1422,63 @@
   -- --check` exit 0. No dependency, `Cargo.toml`, `Cargo.lock`, `capsule/`, `tools/`, `audit/` or `falsifiers.json`
   change. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn
   --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, Task 055 (the engine label plant restores the base bytes and README names its list; Rong's second review of
+  PR #245, P12). Base `73f5fc35f141b9f9a28a07d0d090edda57bdb365`. Task 052's review found two statements not true.
+  (1) README: the sentence on task 026's two `tools/src/run.rs` bugs ended in a colon right before the three ADOPTION
+  bullets. It now comes first, ends with a full stop and says they are listed under "Task 052's three, runner-caught";
+  the ADOPTION sentence follows and ends in the colon that introduces its three bullets. No bullet, id or count changes.
+  (2) F-WC-ENGINE-RUN-MODULE-DOC's plant stopped at `//! endorsed.`, so it mixed the base's line breaks with today's.
+  Its `old` is now today's four lines (`tools/src/run.rs:169-172`, from `//! machine, not the Component ABI.` to `//!
+  are a lab stand-in, not admission.`) and its `new` the base's four (`bf752df1a^1`, lines 70-73); `id`, `title`,
+  `command`, `expect` and `tests` are unchanged, and so is F-WC-ENGINE-RUN-ENUM-DOC. Byte check: the entry's `new`
+  and `old`, each read from `falsifiers.json` with `json.load` and written to a temp file with one closing newline;
+  `cmp` of `new` against `git show bf752df1a^1:lab/wasm-capsule/tools/src/run.rs | sed -n 70,73p` exit 0, `cmp` of
+  `old` against `sed -n 169,172p tools/src/run.rs` exit 0, the whole `old` occurs once in `run.rs` (`str.count` 1),
+  and `grep -c` on its first line as a whole line prints 1. Canonical runner, from the repo root, holding the shared
+  build lease (`fcntl.flock` on the main checkout's `.git/local-ai-heavy-build.lock`, wait bounded at 1500 s, taken
+  after 5 s), `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py --from
+  lab/wasm-capsule/falsifiers.json F-WC-ENGINE-RUN-MODULE-DOC F-WC-ENGINE-RUN-ENUM-DOC`: "baseline: 1 named tests pass
+  without an edit, 0 do not", "F-WC-ENGINE-RUN-MODULE-DOC CAUGHT", "F-WC-ENGINE-RUN-ENUM-DOC CAUGHT", "summary: 2
+  CAUGHT of 2", exit 0. The module-doc assertion, quoted by running `cargo test --locked --test docs
+  engines_are_labelled_test_only_not_endorsed` inside the runner's own `falsify.Mutation` (exit 101):
+  `tests/docs.rs:281:5` "tools/src/run.rs's module doc has no line saying "test-only, not endorsed"". After both runs
+  `tools/src/run.rs` sha256 is `40e712f7e31a...` as before, `git diff -- lab/wasm-capsule/tools/src/run.rs` is empty,
+  and `git status --short` listed only `README.md` and `falsifiers.json`. No entry added or removed, so the README
+  total and its "outside the N" figure are unchanged. Older LOG lines (task 052's "the base's two lines") stay as
+  history. Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (128
+  passed, 3 ignored, 0 failed), `cargo test --locked --workspace` (155 passed, 3 ignored, 0 failed), `cargo fmt --
+  --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0. Retired-label greps from the repo root (`git grep
+  -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both
+  empty, exit 1.
+- 27 Oct, Task 056 (lane tests list the lane's files through one git lister; P10). Base
+  `af3b1a44b38c12fc89842f5111d656c696023c40`. The lane's tests had two copies of the same git file lister:
+  `lane_files` in `tests/lab_cid.rs` (the guards) and an inline one in `no_key_material_is_tracked_in_the_lane`
+  (`tests/verify.rs`, the key scan). Now `lane_paths(lane) -> Vec<String>` in `tests/common/build.rs` (a recovery
+  target) is the one lister: `git ls-files -z --cached --others --exclude-standard`, fails with git's status and
+  stderr, returns every name split on NUL in git's order, with no filter and no read. `lane_files` calls it and keeps
+  its own rules (skip `*.falsify-original`, skip a `NotFound` read); the key scan calls it and keeps its "git listed no
+  lane file" assert and its per-file `scan_lane_file`, so a listed file that is gone is still reported. New test
+  `the_lane_tests_list_files_in_one_place` (`tests/lab_cid.rs`): in the listed `.rs` files under `tests/` and `tools/`
+  (not `audit/`), the quoted lister word (built at run time) appears once, in `tests/common/build.rs`. F-WC3-LANE-FILES-QUOTED's
+  two edits now name `tests/common/build.rs` (each `old` found there once; `id`, `expect`, `tests` unchanged; title
+  names the shared lister). New entry F-WC3-SECOND-LISTER puts an inline lister back into the key scan (`old` `let
+  listed = lane_paths(&lane);` found once in `tests/verify.rs`). F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT are
+  re-anchored to the new total, 189 (README: runner-caught 125). Canonical runner, from the repo root, holding the shared
+  build lease (`fcntl.flock` on the main checkout's `.git/local-ai-heavy-build.lock`, wait bounded at 1500 s, taken
+  after 95 s), `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py --from
+  lab/wasm-capsule/falsifiers.json F-WC3-LANE-FILES-QUOTED F-WC3-SECOND-LISTER F-WC4-SCAN-SKIP-MISSING
+  F-WC4-SCAN-NAME-AFTER-READ`: "baseline: 3 named tests pass without an edit, 0 do not", "F-WC4-SCAN-SKIP-MISSING
+  CAUGHT", "F-WC4-SCAN-NAME-AFTER-READ CAUGHT", "F-WC3-LANE-FILES-QUOTED CAUGHT", "F-WC3-SECOND-LISTER CAUGHT",
+  "summary: 4 CAUGHT of 4", exit 0. The two F-WC3 assertions, quoted by running `cargo test --locked --manifest-path
+  lab/wasm-capsule/Cargo.toml --test lab_cid <test>` inside the runner's own `falsify.Mutation` (lease held, exit 101
+  each): F-WC3-LANE-FILES-QUOTED, `tests/lab_cid.rs:127:5` "lane_files did not list every file under its real name"
+  (left `[("plain.md", "plain text\n")]`, right also holding `("review\"note.md", "quoted text\n")`);
+  F-WC3-SECOND-LISTER, `tests/lab_cid.rs:156:5` "the lane tests must run "ls-files" in one place, lane_paths; found
+  at: ["tests/common/build.rs:27", "tests/verify.rs:1226"]". A second run, same lease (taken after 5 s), same command
+  with `F-WC-README-COUNT F-WC-README-OUTSIDE-COUNT`: "baseline: 1 named tests pass without an edit, 0 do not",
+  "F-WC-README-COUNT CAUGHT", "F-WC-README-OUTSIDE-COUNT CAUGHT", "summary: 2 CAUGHT of 2", exit 0. After the runs
+  `git status --short` listed only this task's five edited files. Gates in `lab/wasm-capsule/`, with
+  `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (129 passed, 3 ignored, 0 failed), `cargo test
+  --locked --workspace` (156 passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p
+  wasm-capsule-tools -- --check` exit 0. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
+  lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
