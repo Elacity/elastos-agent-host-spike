@@ -131,6 +131,31 @@ def write_macos_shims(shim_dir: Path, *, sandbox: bool = True) -> None:
         sbx = shim_dir / "sandbox-exec"
         sbx.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         paths.append(sbx)
+    chflags = shim_dir / "chflags"
+    chflags.write_text(
+        "#!/bin/sh\n"
+        "flag=\"\"\n"
+        "for arg in \"$@\"; do\n"
+        "  case \"$arg\" in\n"
+        "    -*) continue ;;\n"
+        "    uchg|nouchg|schg|noschg|dump|nodump)\n"
+        "      flag=$arg\n"
+        "      continue\n"
+        "      ;;\n"
+        "  esac\n"
+        "  if [ -z \"$flag\" ] || [ ! -e \"$arg\" ]; then\n"
+        "    continue\n"
+        "  fi\n"
+        "  if [ \"$flag\" = uchg ]; then\n"
+        "    chmod a-w \"$arg\"\n"
+        "  elif [ \"$flag\" = nouchg ]; then\n"
+        "    chmod u+w \"$arg\" 2>/dev/null || chmod a+w \"$arg\"\n"
+        "  fi\n"
+        "done\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    paths.append(chflags)
     for path in paths:
         path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
@@ -298,6 +323,153 @@ def write_run_sh(run: Path, kind: str) -> None:
             "wallet/confined_outside_write_is_denied: FAIL\rwallet/confined_outside_write_is_denied: PASS",
         )
         body = header + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{planted}EOF\n" + probe_write_sh(kind)
+    elif kind == "exec-a-delay22":
+        fail = evidence_text("fail")
+        body = (
+            header
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + probe_write_sh(kind)
+            + "ev=$(cd -- \"$lane\" && pwd -P)/evidence.txt\n"
+            + "plant_dir=/tmp/c17-mac-plant-$$\n"
+            + "mkdir -p -- \"$plant_dir\"\n"
+            + "fail=$plant_dir/fail.txt\n"
+            + f"cat > \"$fail\" <<'EOF'\n{fail}EOF\n"
+            + "cat > \"$plant_dir/rewriter.py\" <<PY\n"
+            + "import pathlib, time\n"
+            + "time.sleep(22)\n"
+            + "pathlib.Path(r'''$ev''').write_bytes(pathlib.Path(r'''$fail''').read_bytes())\n"
+            + "PY\n"
+            + "python3 -I -c 'import os,sys; os.setsid(); "
+            + "os.execv(sys.executable, [\"mds\", \"-I\", sys.argv[1]])' "
+            + "\"$plant_dir/rewriter.py\" &\n"
+        )
+    elif kind == "nohup-exec-a-delay22":
+        fail = evidence_text("fail")
+        body = (
+            header
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + probe_write_sh(kind)
+            + "ev=$(cd -- \"$lane\" && pwd -P)/evidence.txt\n"
+            + "plant_dir=/tmp/c17-mac-plant-$$\n"
+            + "mkdir -p -- \"$plant_dir\"\n"
+            + "fail=$plant_dir/fail.txt\n"
+            + f"cat > \"$fail\" <<'EOF'\n{fail}EOF\n"
+            + "cat > \"$plant_dir/rewriter.py\" <<PY\n"
+            + "import pathlib, time\n"
+            + "time.sleep(22)\n"
+            + "pathlib.Path(r'''$ev''').write_bytes(pathlib.Path(r'''$fail''').read_bytes())\n"
+            + "PY\n"
+            + "nohup python3 -I -c 'import os,sys; os.setsid(); "
+            + "os.execv(sys.executable, [\"mds\", \"-I\", sys.argv[1]])' "
+            + "\"$plant_dir/rewriter.py\" >/dev/null 2>&1 &\n"
+        )
+    elif kind == "reopen-fd-22":
+        fail = evidence_text("fail")
+        body = (
+            header
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + probe_write_sh(kind)
+            + "plant_dir=/tmp/c17-mac-plant-$$\n"
+            + "mkdir -p -- \"$plant_dir\"\n"
+            + "ev=$(cd -- \"$lane\" && pwd -P)/evidence.txt\n"
+            + "fail=$plant_dir/fail.txt\n"
+            + f"cat > \"$fail\" <<'EOF'\n{fail}EOF\n"
+            + "cat > \"$plant_dir/rewriter.py\" <<PY\n"
+            + "import pathlib, time\n"
+            + "path = pathlib.Path(r'''$ev''')\n"
+            + "fh = path.open('rb')\n"
+            + "fh.close()\n"
+            + "time.sleep(22)\n"
+            + "path.write_bytes(pathlib.Path(r'''$fail''').read_bytes())\n"
+            + "PY\n"
+            + "python3 -I -c 'import os,sys; os.setsid(); "
+            + "os.execv(sys.executable, [\"mds\", \"-I\", sys.argv[1]])' "
+            + "\"$plant_dir/rewriter.py\" &\n"
+        )
+    elif kind == "hardlink-delay22":
+        fail = evidence_text("fail")
+        body = (
+            header
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + probe_write_sh(kind)
+            + "plant_dir=/tmp/c17-mac-plant-$$\n"
+            + "mkdir -p -- \"$plant_dir\"\n"
+            + "outside=$plant_dir/linked-evidence\n"
+            + "ln -- \"$lane/evidence.txt\" \"$outside\"\n"
+            + "fail=$plant_dir/fail.txt\n"
+            + f"cat > \"$fail\" <<'EOF'\n{fail}EOF\n"
+            + "cat > \"$plant_dir/rewriter.py\" <<PY\n"
+            + "import pathlib, time\n"
+            + "time.sleep(22)\n"
+            + "pathlib.Path(r'''$outside''').write_bytes(pathlib.Path(r'''$fail''').read_bytes())\n"
+            + "PY\n"
+            + "python3 -I -c 'import os,sys; os.setsid(); "
+            + "os.execv(sys.executable, [\"mds\", \"-I\", sys.argv[1]])' "
+            + "\"$plant_dir/rewriter.py\" &\n"
+        )
+    elif kind == "summary-rewrite":
+        fail = evidence_text("fail")
+        body = (
+            header
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{fail}EOF\n"
+            + probe_write_sh(kind)
+            + "plant_dir=/tmp/c17-mac-plant-$$\n"
+            + "mkdir -p -- \"$plant_dir\"\n"
+            + "sum=${C17_SUMMARY:-}\n"
+            + "cat > \"$plant_dir/rewriter.py\" <<PY\n"
+            + "import pathlib, time, os\n"
+            + "path = pathlib.Path(os.environ.get('C17_SUMMARY_BAK', r'''$sum'''))\n"
+            + "deadline = time.time() + 40\n"
+            + "while time.time() < deadline:\n"
+            + "    if path.is_file() and 'C1-C7: ' in path.read_text(encoding='utf-8', errors='replace'):\n"
+            + "        time.sleep(1.5)\n"
+            + "        text = path.read_text(encoding='utf-8', errors='replace')\n"
+            + "        lines = text.splitlines()\n"
+            + "        if lines:\n"
+            + "            lines[-1] = 'C1-C7: PASS.'\n"
+            + "        path.write_text('\\n'.join(lines) + '\\n', encoding='utf-8')\n"
+            + "        break\n"
+            + "    time.sleep(0.05)\n"
+            + "PY\n"
+            + "export C17_SUMMARY_BAK=\"$sum\"\n"
+            + "python3 -I -c 'import os,sys; os.setsid(); "
+            + "os.execv(sys.executable, [\"mds\", \"-I\", sys.argv[1]])' "
+            + "\"$plant_dir/rewriter.py\" &\n"
+        )
+    elif kind == "mtime-preserve":
+        body = (
+            header
+            + "python3 -I -c '\n"
+            + "import os\n"
+            + "from pathlib import Path\n"
+            + "p = Path.home() / \".elastos\" / \"pre-existing\"\n"
+            + "st = p.stat()\n"
+            + "p.write_text(\"plante\\n\", encoding=\"utf-8\")\n"
+            + "os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))\n"
+            + "'\n"
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + probe_write_sh(kind)
+        )
+    elif kind == "mds-reader":
+        body = (
+            header
+            + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
+            + probe_write_sh(kind)
+            + "plant_dir=/tmp/c17-mac-plant-$$\n"
+            + "mkdir -p -- \"$plant_dir\"\n"
+            + "target=$(cd -- \"$lane\" && pwd -P)/evidence.txt\n"
+            + "cat > \"$plant_dir/reader.py\" <<PY\n"
+            + "import time\n"
+            + "fh = open(r'''$target''', 'rb')\n"
+            + "time.sleep(20)\n"
+            + "fh.close()\n"
+            + "PY\n"
+            + "python3 -I -c 'import os,sys; os.setsid(); "
+            + "os.execv(sys.executable, [\"mds\", \"-I\", sys.argv[1]])' "
+            + "\"$plant_dir/reader.py\" &\n"
+        )
+    elif kind == "probe-stale-allowed":
+        body = header + f"cat > \"$lane/evidence.txt\" <<'EOF'\n{happy}EOF\n"
     else:
         ev_kind = (
             kind
@@ -345,6 +517,10 @@ def write_fixture(root: Path, kind: str, *, include_pin: bool = True) -> Path:
     (repo / "capsules" / "model-provider" / "tests" / "confine" / "main.rs").write_text("// fixture\n", encoding="utf-8")
     (repo / "capsules" / "did-provider" / "tests" / "confine.rs").write_text("// fixture\n", encoding="utf-8")
     write_run_sh(repo / "lab" / "c1-c7-mac-runbook" / "run.sh", kind)
+    if kind == "probe-stale-allowed":
+        probe = repo / "lab" / "c1-c7-mac-runbook" / "probe"
+        probe.mkdir(parents=True, exist_ok=True)
+        (probe / "sbpl.out").write_text("SBPL_PROBE: ALLOWED\n", encoding="utf-8")
     subprocess.run(["git", "init", "-b", BRANCH], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
     if include_pin:
@@ -385,13 +561,17 @@ def run_block(
     fake_home: bool = False,
     stale_summary: bool = False,
     existing_elastos: bool = False,
+    linger: float = 0,
+    timeout: int = 180,
+    c17_clean: str = "0",
+    pre_proc: subprocess.Popen | None = None,
 ) -> dict:
     tmp = Path(tempfile.mkdtemp(prefix=f"c17-mac-dryrun-{kind}-"))
     started = time.time()
-    timeout = 180
     login_elastos = login_home_path() / ".elastos"
     login_existed = login_elastos.exists()
     planted_login = login_elastos / "c17-home-redirect"
+    decoy = pre_proc
     try:
         shim_dir = tmp / "shims"
         if shim:
@@ -412,7 +592,7 @@ def run_block(
         env["PATH"] = ":".join(path_parts)
         env["C17_WORKDIR"] = str(work)
         env["C17_SUMMARY"] = str(summary)
-        env["C17_CLEAN"] = "0"
+        env["C17_CLEAN"] = c17_clean
         if fake_home:
             home = tmp / "fake-home"
             home.mkdir()
@@ -427,8 +607,13 @@ def run_block(
                 elastos = home / ".elastos"
                 elastos.mkdir()
                 (elastos / "pre-existing").write_text("before\n", encoding="utf-8")
+        if kind == "argv-hang" and decoy is None:
+            decoy = subprocess.Popen(
+                [sys.executable, "-I", "-c", f"import time; time.sleep(120)  # {work}"],
+            )
+        fixture_kind = "happy" if kind == "argv-hang" else kind
         if hide is None:
-            remote = write_fixture(tmp, kind, include_pin=include_pin)
+            remote = write_fixture(tmp, fixture_kind, include_pin=include_pin)
             env["C17_REMOTE"] = str(remote)
             env["C17_BRANCH"] = BRANCH
         script = tmp / "block.sh"
@@ -442,12 +627,16 @@ def run_block(
             capture_output=True,
             timeout=timeout,
         )
+        if linger > 0:
+            time.sleep(linger)
         output = (done.stdout or "") + (done.stderr or "")
         last = ""
         reason = ""
         probe = ""
+        summary_text = ""
         if summary.is_file():
-            lines = summary.read_text(encoding="utf-8").splitlines()
+            summary_text = summary.read_text(encoding="utf-8", errors="replace")
+            lines = summary_text.splitlines()
             if lines:
                 last = lines[-1]
             for line in lines:
@@ -455,6 +644,15 @@ def run_block(
                     reason = line[len("reason: ") :]
                 if line.startswith("SBPL_PROBE:"):
                     probe = line
+        evidence = ""
+        ev = work / "src" / "lab" / "c1-c7-mac-runbook" / "evidence.txt"
+        if ev.is_file():
+            evidence = ev.read_text(encoding="utf-8", errors="replace")
+        home_after = ""
+        if fake_home:
+            planted = Path(env["HOME"]) / ".elastos" / "pre-existing"
+            if planted.is_file():
+                home_after = planted.read_text(encoding="utf-8")
         return {
             "kind": kind,
             "exit": done.returncode,
@@ -464,8 +662,13 @@ def run_block(
             "probe": probe,
             "output": output,
             "summary": str(summary) if summary.is_file() else "",
+            "summary_text": summary_text,
+            "evidence": evidence,
+            "home_after": home_after,
             "workdir": str(work),
+            "workdir_exists": work.exists(),
             "tmp": str(tmp),
+            "timeout": False,
         }
     except subprocess.TimeoutExpired as error:
         return {
@@ -477,10 +680,21 @@ def run_block(
             "probe": "",
             "output": (error.stdout or "") + (error.stderr or ""),
             "summary": "",
+            "summary_text": "",
+            "evidence": "",
+            "home_after": "",
             "workdir": str(tmp / "work"),
+            "workdir_exists": (tmp / "work").exists(),
             "tmp": str(tmp),
+            "timeout": True,
         }
     finally:
+        if decoy is not None:
+            decoy.terminate()
+            try:
+                decoy.wait(timeout=2)
+            except Exception:
+                decoy.kill()
         if planted_login.exists():
             planted_login.unlink()
         if kind == "home-redirect" and not login_existed and login_elastos.exists():
@@ -531,6 +745,7 @@ def main() -> int:
     static("readlink-f", "readlink -f" not in text and "readlink -f" not in run_text)
     static("gnu-stat", "stat -c" not in text and "stat --printf" not in text and "stat -f" not in text)
     static("rustup-skip", "already present; skip" in text)
+    static("rustup-no-install", "rustup toolchain install" not in text)
     static("mktemp-trap", "mktemp -d" in text and "trap c17_on_exit EXIT" in text)
     static("no-single-branch", "--single-branch" not in text)
     static("pin", PIN_C17 in text and PIN_C17 in run_text)
@@ -544,6 +759,15 @@ def main() -> int:
     static("lsof-quiet", "lsof" in text and "sleep 15" in text)
     static("login-home", "eval echo ~$(id -un)" in text)
     static("probe-file", "probe/sbpl.out" in text and "sbpl.out" in run_text)
+    static("freeze-uchg", "chflags uchg" in text and "c17_freeze_file" in text)
+    static("nouchg-clean", "chflags nouchg" in text and "c17_nouchg_if_inside" in text)
+    static("elastos-sha256", "hashlib.sha256" in text and ".DS_Store" in text)
+    static("lsof-file-only", "lsof +D" not in text and 'cmds.append(["lsof", "+D"' not in text)
+    static("lsof-timeout", "timeout=10" in text)
+    static("lsof-write-fds", '"w" not in fd and "u" not in fd' in text)
+    static("wait-no-workdir", "for item in (workdir, clone, lane):" not in text and "for item in (clone, lane):" in text)
+    static("leftover-cap", "leftover_deadline = time.time() + 60" in text)
+    static("probe-before", "c17_probe_hash_before" in text and "c17_probe_existed_before" in text)
 
     cases = [
         ("happy", run_block(block, kind="happy", shim=True), "C1-C7: PASS.", None, "SBPL_PROBE: DENIED"),
@@ -582,6 +806,34 @@ def main() -> int:
         ("probe-missing", run_block(block, kind="probe-missing", shim=True), "C1-C7: PASS.", None, "SBPL_PROBE: NOT RUN"),
         ("probe-duplicate", run_block(block, kind="probe-duplicate", shim=True), "C1-C7: PASS.", None, "SBPL_PROBE: NOT RUN"),
         ("probe-invalid", run_block(block, kind="probe-invalid", shim=True), "C1-C7: PASS.", None, "SBPL_PROBE: NOT RUN"),
+        ("exec-a-delay22", run_block(block, kind="exec-a-delay22", shim=True, linger=8), "C1-C7: PASS.", None, None),
+        ("nohup-exec-a-delay22", run_block(block, kind="nohup-exec-a-delay22", shim=True, linger=8), "C1-C7: PASS.", None, None),
+        ("reopen-fd-22", run_block(block, kind="reopen-fd-22", shim=True, linger=8), "C1-C7: PASS.", None, None),
+        ("hardlink-delay22", run_block(block, kind="hardlink-delay22", shim=True, linger=8), "C1-C7: PASS.", None, None),
+        ("summary-rewrite", run_block(block, kind="summary-rewrite", shim=True, linger=3), "C1-C7: FAIL.", None, None),
+        (
+            "mtime-preserve",
+            run_block(
+                block,
+                kind="mtime-preserve",
+                shim=True,
+                fake_home=True,
+                existing_elastos=True,
+            ),
+            "C1-C7: FAIL.",
+            ".elastos",
+            None,
+        ),
+        (
+            "probe-stale-allowed",
+            run_block(block, kind="probe-stale-allowed", shim=True),
+            "C1-C7: PASS.",
+            None,
+            "SBPL_PROBE: NOT RUN",
+        ),
+        ("mds-reader", run_block(block, kind="mds-reader", shim=True), "C1-C7: PASS.", None, None),
+        ("argv-hang", run_block(block, kind="argv-hang", shim=True, timeout=40), "C1-C7: PASS.", None, None),
+        ("clean-uchg", run_block(block, kind="happy", shim=True, c17_clean="1"), "C1-C7: PASS.", None, None),
     ]
 
     missed = 0 if static_ok else 1
@@ -594,7 +846,19 @@ def main() -> int:
         probe_ok = True
         if want_probe:
             probe_ok = result["probe"] == want_probe
-        ok = last_ok and reason_ok and probe_ok
+        extra_ok = True
+        evidence = result.get("evidence") or ""
+        if name in ("exec-a-delay22", "nohup-exec-a-delay22", "reopen-fd-22", "hardlink-delay22"):
+            extra_ok = "wallet/confined_outside_write_is_denied: FAIL" not in evidence
+        elif name == "summary-rewrite":
+            extra_ok = result["last"] == "C1-C7: FAIL."
+        elif name == "mtime-preserve":
+            extra_ok = result.get("home_after") == "plante\n"
+        elif name == "argv-hang":
+            extra_ok = not result.get("timeout")
+        elif name == "clean-uchg":
+            extra_ok = not result.get("workdir_exists", True)
+        ok = last_ok and reason_ok and probe_ok and extra_ok
         tag = caught(ok)
         if not ok:
             missed += 1
