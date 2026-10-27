@@ -1,6 +1,6 @@
 id: xattr-copy-reuse
 must: CAUGHT
-journey: A writes and host-unlinks. B's create reuses (dev,ino). B copies
-  A's leftover user.owned-storage.nonce onto that inode. Host-rename into A.
-  Store::read(&a, "stolen.txt") must refuse (ctime/btime still differ).
-survivor: the read returns B's bytes.
+result: CAUGHT (stolen.txt path mismatch)
+sibling: xattr-copy-host-plant SURVIVED when the path stayed note.txt
+  and the leftover nonce was copied onto the reused inode. ctime/btime
+  collided (same_time=true).

@@ -386,12 +386,15 @@ fn newline_inject_owned() {
         return;
     };
     let nonce_hex = hex_encode(&nonce);
+    // save_owned appends this file's own stamp after `path`. A trailing
+    // `\n# ...` makes that leftover a comment so the injected line stays 9 fields.
     let crafted = format!(
-        "x 0 0 0 0 00000000000000000000000000000000\n{dev} {ino} agent-a stolen.txt {ctime_sec} {ctime_nsec} {btime_sec} {btime_nsec} {nonce_hex}"
+        "x 0 0 0 0 00000000000000000000000000000000\n{dev} {ino} agent-a stolen.txt {ctime_sec} {ctime_nsec} {btime_sec} {btime_nsec} {nonce_hex}\n#"
     );
     let write = store.write(&a, &crafted, b"inject");
     let a_root = store.host_root(&a).unwrap().to_path_buf();
     let owned_after_write = fs::read_to_string(ownership_path(&a_root)).unwrap_or_default();
+    let owned_lines = owned_after_write.lines().count();
     let stolen = a_root.join("stolen.txt");
     let renamed = fs::rename(&b_file, &stolen);
     let read = store.read(&a, "stolen.txt");
@@ -407,7 +410,7 @@ fn newline_inject_owned() {
         },
         "Store::write of a newline name injects a second .owned line for B's inode",
         format!(
-            "write={write:?} renamed={renamed:?} read={read:?} granted={granted} owned_has_stolen={} crafted_len={}",
+            "write={write:?} renamed={renamed:?} read={read:?} granted={granted} owned_has_stolen={} owned_lines={owned_lines} crafted_len={}",
             owned_after_write.contains("stolen.txt"),
             crafted.len()
         ),
@@ -578,13 +581,26 @@ fn host_hardlink_then_unlink() {
 fn dir_nonce_only() {
     let parent = Parent::new("dir-nonce");
     let (store, a, b) = pair(&parent);
-    store.write(&a, "sub/file.txt", b"hello-a").unwrap();
     let a_sub = store.host_root(&a).unwrap().join("sub");
+    let _ = fs::create_dir(&a_sub);
+    let write_a = store.write(&a, "sub/file.txt", b"hello-a");
     let dir_nonce = read_nonce(&a_sub).ok();
-    let dir_meta = fs::symlink_metadata(&a_sub).unwrap();
-    store.unlink(&a, "sub/file.txt").ok();
+    let dir_meta = fs::symlink_metadata(&a_sub).ok();
+    let _ = store.unlink(&a, "sub/file.txt");
+    let _ = fs::remove_file(a_sub.join("file.txt"));
     let _ = fs::remove_dir(&a_sub);
-    store.write(&b, "other/file.txt", b"from-b").unwrap();
+    let b_other = store.host_root(&b).unwrap().join("other");
+    let _ = fs::create_dir(&b_other);
+    let _ = store.write(&b, "other/file.txt", b"from-b");
+    let Some(dir_meta) = dir_meta else {
+        finding(
+            "dir-nonce-only",
+            "NOT RUN",
+            "A's sub directory was not created",
+            format!("write_a={write_a:?}"),
+        );
+        return;
+    };
     let reused_dir = {
         let start = std::time::Instant::now();
         let mut index = 0u32;
@@ -592,8 +608,9 @@ fn dir_nonce_only() {
         while start.elapsed() < std::time::Duration::from_secs(REUSE_SECS) {
             let name = format!("d{index}");
             index += 1;
-            let _ = store.write(&b, &format!("{name}/x.txt"), b"from-b");
             let path = store.host_root(&b).unwrap().join(&name);
+            let _ = fs::create_dir(&path);
+            let _ = store.write(&b, &format!("{name}/x.txt"), b"from-b");
             if let Ok(meta) = fs::symlink_metadata(&path) {
                 if meta.dev() == dir_meta.dev() && meta.ino() == dir_meta.ino() {
                     found = Some(path);
