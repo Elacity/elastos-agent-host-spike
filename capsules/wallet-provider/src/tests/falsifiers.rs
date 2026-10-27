@@ -211,7 +211,7 @@ use std::process::Command;
 /// from it, so the journey fails at did's launched-profile check for each. The
 /// generator text test reads `generate_profile`'s own text and the suite runs
 /// neither change, so only the launched file's comparison catches them.
-const EXPECTED_FALSIFIERS: usize = 132;
+const EXPECTED_FALSIFIERS: usize = 135;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
