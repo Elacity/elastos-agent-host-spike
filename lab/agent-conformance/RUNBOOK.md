@@ -723,3 +723,5 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 `standin_stopped_run_leaves_no_live_grant` is this stand-in, and a PASS there gives the Runtime no A12 credit for a pending request.
 
 `standin_shell_deny_fails_the_waiting_sibling` is this stand-in, and a PASS there gives the Runtime no A6 credit.
+
+`standin_shell_grant_makes_one_live_grant` is this stand-in, and a PASS there gives the Runtime no A6 credit.

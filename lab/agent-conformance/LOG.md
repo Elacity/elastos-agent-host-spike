@@ -8606,3 +8606,202 @@ After the restores, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` a
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The change adds no capsule code or import; `authorise` at `:357` still refuses the sibling with `wrong capsule` at `:2740`. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:2632` and `:2781`; the three plants above fail their named test and the restored tests pass. |
 | 8. Identity, admission and allowance stay separate? | Yes | The deny writes only the request record at `:517` and the instance phase at `:329`; `seed_grant` at `:212` is untouched, so the live set stays exactly `req-g` at `:2721`, and the sibling still fails presentation at `:2740`. |
+
+## 061 — A6: shell grant turns a pending request live
+
+061: `StandIn` gains `post_capability_grant` at `standin-runtime/mod.rs:348`, the answer for `POST /api/capability/grant`. It calls `require_shell` at `:353` before the body is read, parses the body once in `grant_body` at `:890`, refuses an unknown id at `:361` or a non-pending record at `:365`, calls the one writer `settle_record` at `:565` with `granted` and `shell` at `:369`, and calls the unchanged `seed_grant` at `:371` for one `Live` grant. `settle_record` now takes the status as its second argument; the deny route at `:326` and `settle_pending` at `:597` still pass `denied`, so `stop_one` and the failed-start arm keep their behaviour and there is no second writer. The route changes no instance phase or cause and returns only `{"success": true}`. Two named lib tests, three hand-run plants, no new `falsifiers.json` id. `GAPS.md`, `falsify.py`, `src/census.rs`, `tests/effects.rs`, `src/harness.rs`, `Cargo.toml` and `Cargo.lock` are unchanged.
+
+### Quote from the resident SPEC (read only at `35697329be0aad89eb68d0adf78aa94d24751317`)
+
+The grant sentences this task takes:
+
+```text
+Grant instance 1 only, and wait until it is `running`. The live-grant view shows
+exactly one grant, bound to instance 1. Instance 2's request for the same
+resource is still pending, in its own session.
+```
+
+The deny sentence stays 060, and the census sentence stays 049 and 059.
+
+### Quote of the route facts (read only)
+
+`elastos/crates/elastos-server/src/api/handlers/capability.rs:270-279`:
+
+```rust
+pub struct GrantRequestInput {
+    /// Request ID to grant
+    pub request_id: String,
+    /// Duration: "once" or "session"
+    #[serde(default = "default_duration")]
+    pub duration: String,
+    /// Shell's rationale for granting (passed to PolicyEvaluator audit)
+    #[serde(default)]
+    pub rationale: Option<String>,
+}
+```
+
+`:281-283` gives the missing-duration default, and `:328` gives the missing-rationale default:
+
+```rust
+fn default_duration() -> String {
+    "session".to_string()
+}
+```
+
+```rust
+    let rationale = input.rationale.as_deref().unwrap_or("Shell auto-grant");
+```
+
+`elastos/crates/elastos-runtime/src/capability/pending.rs:84-92` accepts `once` and `session`, ignoring case, and refuses any other word with the given text:
+
+```rust
+        match s.to_lowercase().as_str() {
+            "once" => Ok(GrantDuration::Once),
+            "session" => Ok(GrantDuration::Session),
+            _ => Err(format!(
+                "Invalid duration: {}. Expected 'once' or 'session'",
+                s
+            )),
+        }
+```
+
+`pending.rs:368-370` changes only a pending request, and `capability.rs:303-306` parses the duration before it reads the request.
+
+The five functions re-found after 060 and left as found, apart from the writer's added status argument: `post_capability_deny` at `:308`, `seed_request` at `:242`, `get_capability_requests` at `:283`, `seed_grant` at `:216` and `authorise` at `:403`. `finish_start` keeps its one `settle_pending` call on the `Failed` arm, and `stop_one` keeps its call after `revoke_live`. `authorise` and `seed_grant`'s body are unchanged. Grepping `request.status =`, `request.decision_reason =` and `request.settled_by =` finds only `settle_record` at `:577-579`, so the one writer remains the only function that sets those three fields.
+
+### The route
+
+`post_capability_grant` answers `POST /api/capability/grant`. `require_shell` runs before the body is read; a client is status 403 with `This endpoint requires shell privileges`. `grant_body` accepts only `request_id`, `duration` and `rationale`. A missing `request_id`, or a body that is not an object, is `grant body needs request_id`; a non-string field is `grant request_id must be a string`, `grant duration must be a string` or `grant rationale must be a string`; any other key is `grant body rejects ` plus that key. A missing duration is `session`, and a lowercased `once` or `session` is stored as that lowercase word. Any other duration is `Invalid duration: ` plus the given text plus `. Expected 'once' or 'session'`. A missing rationale is `Shell auto-grant`; a present string, including empty, is stored as given. An unknown id is `unknown request: ` plus it; a non-pending record is `request is not pending: ` plus it. Each refusal returns before the writer and before `seed_grant`, so no record, grant or instance changes. On success the one writer stores `granted`, the rationale and `shell`; `seed_grant` stores the same `request_id` and `session_id`, the record's `resource` and `action`, the canonical duration, `granted_at` from the test instant, `Life::Live` and `session_ended` false. The Ok body has no token. No instance phase or cause changes.
+
+### Tests
+
+Two named tests in `standin_runtime::tests`:
+
+- `standin_shell_grant_makes_one_live_grant` at `:3074` admits `/capsules/read-shared` as `read-shared` with `Start::Ok`, launches twice as `component-1` and `component-2` (both `starting`), seeds `req-1` and `req-2`, sets instant 4, and grants `req-1` with `duration: "Session"` and rationale `grant shared read`. The shell record for `component-1` is the `granted_request` tuple; `component-2`'s `req-2` stays pending with a null settler. The live set is exactly `req-1`, with `session_id` `component-1`, `resource` the seeded Public path, `action` `read`, `duration` `session` and `granted_at` 4. The client list for `component-2` is empty. `authorise` accepts the `component-1` client for `req-1` and refuses the `component-2` client with `wrong capsule`. Both entries stay `starting` with cause `""`. After `finish_start("component-1")` it is `running` with cause `""`, the record and the one live grant stay, and the sibling stays `starting` with `req-2` pending.
+- `standin_shell_grant_refuses_a_bad_request` at `:3239` covers the client 403, `{}` and a non-object for `grant body needs request_id`, non-string `request_id`, `duration` and `rationale`, an unknown id, an extra `token` key, `duration: "minutes"`, and asserts every refusal leaves the pending record, no grant and the `starting` instance. A grant with only `request_id` stores `Shell auto-grant` and the `session` duration. A second grant is `request is not pending:`. A later grant of a stopped instance's `req-s` is `request is not pending:`, its record stays `denied` with `settled_by` `runtime` and cause `stopped: stop one`, and the live view has no `req-s`.
+
+No operator starts and no probe is built.
+
+### Hand-run falsifiers
+
+No list id. Each plant ran alone and was restored before the next. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_grant_makes_one_live_grant -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. Each planted crate compiled. After the last restore the file matched its pre-plant bytes (`sha256 8748c69a308f7451a1c6e786264d57b9dd310ad2d0ed8b63d7edfb7e98c3ce7f`) and `git diff -- lab/agent-conformance/standin-runtime/mod.rs` showed no plant expression.
+
+F-standin-a6-grant-stub. Planted exit 101 in 1.89 seconds. Restored exit 0 in 0.13 seconds. Assertion: `standin-runtime/mod.rs:3121:9` `assertion left == right failed: the stand-in grants req-1 with the shell as settler and the rationale as decision`; the record stayed `pending` with a null settler.
+
+Old:
+
+```text
+    ) -> Result<Value, (u16, String)> {
+        require_shell(caller)?;
+        let (request_id, duration, rationale) = grant_body(body)?;
+```
+
+New:
+
+```text
+    ) -> Result<Value, (u16, String)> {
+        return Ok(json!({ "success": true }));
+        require_shell(caller)?;
+        let (request_id, duration, rationale) = grant_body(body)?;
+```
+
+F-standin-a6-grant-no-live. Planted exit 101 in 1.06 seconds. Restored exit 0 in 0.13 seconds. Assertion: `standin-runtime/mod.rs:3126:9` `assertion left == right failed: the stand-in shows exactly the granted request as live`; the live set was empty.
+
+Old:
+
+```text
+        self.settle_record(&request_id, RequestStatus::Granted, rationale, "shell");
+        let instant = self.instant;
+        self.seed_grant(
+            &request_id,
+            &session_id,
+            &resource,
+            &action,
+            duration,
+            instant,
+            Life::Live,
+            false,
+        );
+        Ok(json!({ "success": true }))
+```
+
+New:
+
+```text
+        self.settle_record(&request_id, RequestStatus::Granted, rationale, "shell");
+        Ok(json!({ "success": true }))
+```
+
+F-standin-a6-grant-sibling. Planted exit 101 in 1.05 seconds. Restored exit 0 in 0.13 seconds. Assertion: `standin-runtime/mod.rs:3151:9` `assertion left == right failed: the stand-in leaves the sibling request pending with no settler`; `req-2` was `granted` with `settled_by` `shell`.
+
+Old:
+
+```text
+            Life::Live,
+            false,
+        );
+        Ok(json!({ "success": true }))
+```
+
+New:
+
+```text
+            Life::Live,
+            false,
+        );
+        let siblings = self
+            .requests
+            .iter()
+            .filter(|request| request.status == RequestStatus::Pending)
+            .map(|request| {
+                (
+                    request.request_id.clone(),
+                    request.session_id.clone(),
+                    request.resource.clone(),
+                    request.action.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (sibling_id, sibling_session, sibling_resource, sibling_action) in siblings {
+            self.settle_record(&sibling_id, RequestStatus::Granted, rationale, "shell");
+            self.seed_grant(
+                &sibling_id,
+                &sibling_session,
+                &sibling_resource,
+                &sibling_action,
+                duration,
+                instant,
+                Life::Live,
+                false,
+            );
+        }
+        Ok(json!({ "success": true }))
+```
+
+### Docs
+
+`standin-runtime/README.md:45` adds the grant route before `## Callers`: the route, its three body keys and refusals, the one writer storing `status` `granted` and `settled_by` `shell`, `seed_grant` storing the one `Live` grant the RA-1 view shows, the token-free Ok body, a `once` grant staying in that view until a stop revokes it, `authorise` as the presentation check, and the unchanged deny using `settled_by` `shell` with `status` `denied`. It says this value is the lab stand-in and the real route can replace it later because the JSON matches (M1-R), and a PASS gives the Runtime no A6 credit for this grant. The RA-1 section and the existing request sections stay. `RUNBOOK.md` gains one paragraph after the last stand-in paragraph naming `standin_shell_grant_makes_one_live_grant` and the absence of A6 credit; every other paragraph is unchanged.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.15 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 252.36 seconds, inside the 600-second bound. Lib 52; report binary 1; artifact 7; build 1; effects 59 passed with 12 ignored; harness 9; report 23; runtime 10 passed with 2 ignored; standin_contract 2; probe 3. That is 167 passed, 0 failed and 14 ignored. Both new grant tests passed. The earlier ignores stay: `run_leaves_no_live_grant` on `AC-021-GRANTS`, `parallel_capsules_complete_independently` on `RT4`, and `instance_grant_does_not_authorise_sibling`. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+- Proof after the restores: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.15 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_grant_makes_one_live_grant -- --exact` exit 0, real 0.13 seconds, 1 passed.
+- `git diff` for `src/harness.rs`, `src/census.rs`, `tests/effects.rs`, `tests/common/grants.rs`, `GAPS.md`, `Cargo.toml` and `Cargo.lock` is empty. Only `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md` change.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The route identifies the request and grant by its stored `request_id` at `:361`; `seed_grant` stores the seeded Public resource path at `:371`; no code or content identity is added. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `standin-runtime/mod.rs:353` refuses every client with `This endpoint requires shell privileges`; the route reads no file, network, clock or hardware and imports no `wasi:*`. |
+| 3. A second path or a second copy of one rule? | No | One body parser `grant_body` at `:890`, one writer `settle_record` at `:565`; `get_capability_requests` at `:283` and `get_capability_list` at `:384` stay the reads, and `seed_grant` at `:216` stays the one grant store call. |
+| 4. Runtime core grows? | No | No `elastos/`, `capsules/` or `scripts/` edit; the diff touches only `lab/agent-conformance/`. |
+| 5. Refusals deny by default with a clear reason? | Yes | `standin-runtime/mod.rs:353` gives 403; `:361`, `:365` and `grant_body` at `:890-945` give 400 with a reason that names the refused id, status or key. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The change is a lab route with no capsule code or import; the real capability call still returns the grant and the stand-in only records the permitted effect. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:3074` and `:3239`; the stub, no-live and sibling plants fail the named test at `:3121`, `:3126` and `:3151`, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | The grant writes one request record and one grant at `:369-380`; it changes no instance phase, so `finish_start` remains the admission decision and `duration` stays an allowance value; `authorise` at `:403` stays the presentation check. |
+
+The real A6 row stays open: the real route returns a token and the Runtime still owns the admission decision. A PASS here gives the Runtime no A6 credit for this grant.
