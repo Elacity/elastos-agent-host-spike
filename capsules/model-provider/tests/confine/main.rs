@@ -3770,21 +3770,25 @@ fn generated_model_profile_matches_the_oracle() {
     );
 }
 
-/// The file `Launch::Profile` applies has the oracle's sorted allow lines.
+/// The file `Launch::Profile` applies has the oracle's sorted allow lines
+/// and its sorted non-comment lines.
 ///
 /// `standin_profile` builds the text from the approved declared rights.
 /// `write_standin_profile` writes it at `storage.base.join("standin.sb")`.
 /// The written file has no `;;` line. Before `Provider::start`, that file's
-/// sorted allow lines equal the oracle's. `Launch::Profile` applies that
+/// sorted allow lines equal the oracle's, and its sorted non-comment lines
+/// equal the oracle's. `Launch::Profile` applies that
 /// file with `canonical_bindings`. Hosted `init` passes `assert_serving` and
 /// creates `runs/`. `applied_profile()` is that path, and the bytes there
-/// have the same sorted allow lines.
+/// have the same sorted allow lines and the same sorted non-comment lines.
 ///
 /// Falsifier: F-cc51a appends
 /// `(allow file-read-data (literal "/tmp/cc-launched-extra"))` inside
 /// `sandboxed` after the path is recorded, so
 /// `generated_profile_launch_matches_the_oracle` fails at the post-start
-/// allow-line compare.
+/// allow-line compare. F-cc52a drops `(deny network*)` inside `sandboxed`
+/// after the path is recorded, so the same test fails at the post-start
+/// non-comment compare.
 #[test]
 fn generated_profile_launch_matches_the_oracle() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
@@ -3819,6 +3823,14 @@ fn generated_profile_launch_matches_the_oracle() {
         written_lines, oracle_lines,
         "the stand-in file's allow lines must equal the oracle's before start"
     );
+    let mut written_non_comment = non_comment_lines(&written);
+    let mut oracle_non_comment = non_comment_lines(&oracle);
+    written_non_comment.sort();
+    oracle_non_comment.sort();
+    assert_eq!(
+        written_non_comment, oracle_non_comment,
+        "the stand-in file's non-comment lines must equal the oracle's before start"
+    );
     let binary = resolved(Path::new(PROVIDER_BINARY));
     let bindings = canonical_bindings(&storage, &binary);
     let mut provider = Provider::start(Launch::Profile {
@@ -3842,6 +3854,14 @@ fn generated_profile_launch_matches_the_oracle() {
     assert_eq!(
         launched_lines, oracle_lines,
         "the launched file's allow lines must equal the oracle's"
+    );
+    let mut launched_non_comment = non_comment_lines(&launched);
+    let mut launched_oracle_non_comment = non_comment_lines(&oracle);
+    launched_non_comment.sort();
+    launched_oracle_non_comment.sort();
+    assert_eq!(
+        launched_non_comment, launched_oracle_non_comment,
+        "the launched file's non-comment lines must equal the oracle's"
     );
     provider.shutdown();
 }
