@@ -968,7 +968,7 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "fn names_falsifier_id(section: &str, id: &str) -> bool {\n    falsifier_id_tokens(section)\n        .iter()\n        .any(|token| *token == id)\n}",
+          "old": "fn names_falsifier_id(section: &str, id: &str) -> bool {\n    falsifier_id_tokens(section).contains(&id)\n}",
           "new": "fn names_falsifier_id(section: &str, id: &str) -> bool {\n    section.contains(id)\n}"
         }
       ],
