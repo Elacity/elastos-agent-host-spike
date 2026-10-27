@@ -63,19 +63,39 @@ find "$EVIDENCE" -maxdepth 1 -type f \
     \( -name '*.status' -o -name '*.exit' -o -name '*.txt' -o -name 'LABEL.txt' \) \
     -delete
 # Hash the nonce on the host before any guest-writable evidence is written.
-# The guest 9p share never sees this file.
-python3 - "$NONCE" "$WORK/host-preboot.txt" <<'PY'
+# The guest 9p share never sees this file. Bind it to this $WORK and run_id.
+RUN_ID="$(
+python3 - "$NONCE" "$WORK/host-preboot.txt" "$WORK" <<'PY'
 import hashlib
+import secrets
 import sys
 import time
 from pathlib import Path
 
-nonce, path = sys.argv[1], sys.argv[2]
+nonce, path, work = sys.argv[1], sys.argv[2], sys.argv[3]
+run_id = secrets.token_hex(16)
 Path(path).write_text(
     f"nonce_sha256={hashlib.sha256(nonce.encode()).hexdigest()}\n"
     f"run_start={int(time.time())}\n"
+    f"run_id={run_id}\n"
+    f"work={Path(work).resolve()}\n"
 )
+print(run_id)
 PY
+)"
+# Pin the host ledger to a fixed /var/tmp path. Do not follow the user runtime dir.
+# Record the minted nonce before qemu so a timeout or early exit cannot
+# leave an unused nonce for a later forged PASS.
+BOOT_ID="$(tr -d '-' < /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)"
+export LC_USED_NONCES="/var/tmp/linux-confine/used-nonces-${BOOT_ID}.txt"
+mkdir -m 700 -p /var/tmp/linux-confine
+python3 "$LAB/guest/check-guest-results.py" --mint-nonce "$LC_USED_NONCES" "$NONCE" "$RUN_ID"
+consume_minted_run() {
+    if [ -n "${LC_USED_NONCES:-}" ] && [ -n "${RUN_ID:-}" ]; then
+        python3 "$LAB/guest/check-guest-results.py" --consume-run "$LC_USED_NONCES" "$RUN_ID" || true
+    fi
+}
+trap consume_minted_run EXIT
 echo "$LABEL" > "$EVIDENCE/LABEL.txt"
 # Nonce stays off the 9p share until qemu has exited. The guest test uid
 # must not be able to read it from evidence/ or from /etc/lc-guest.env.
@@ -383,6 +403,11 @@ cp "$QEMU_LOG" "$EVIDENCE/qemu-console.txt"
 # Guest has halted. Host-only record of the nonce may now land on 9p.
 echo "$NONCE" > "$EVIDENCE/nonce.txt"
 echo "nonce=$NONCE" >> "$EVIDENCE/host-context.txt"
+# Host appends last so a guest-written work=/run_id= line cannot win.
+{
+    echo "work=$(cd "$WORK" && pwd)"
+    echo "run_id=$RUN_ID"
+} | tee -a "$EVIDENCE/host-context.txt"
 
 # Console always stays; 9p files are a bonus.
 echo "=== guest console tail ==="

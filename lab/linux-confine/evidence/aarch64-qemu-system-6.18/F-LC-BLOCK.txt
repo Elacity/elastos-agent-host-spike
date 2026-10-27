@@ -1,7 +1,7 @@
 
 running 1 test
 test production_launcher_rejects_block_switches ... 
-thread 'production_launcher_rejects_block_switches' (827) panicked at tests/confine.rs:646:9:
+thread 'production_launcher_rejects_block_switches' (819) panicked at tests/confine.rs:646:9:
 the production launcher accepted a block switch: --block-landlock: linux confinement refused: the kernel has no Landlock
 
 stack backtrace:
@@ -10,9 +10,9 @@ stack backtrace:
    1: core::panicking::panic_fmt
              at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/panicking.rs:75:14
    2: confine::production_launcher_rejects_block_switches
-             at ./tmp/lc-wt-c9-r3/lab/linux-confine/tests/confine.rs:646:9
+             at ./workspace/lab/linux-confine/tests/confine.rs:646:9
    3: confine::production_launcher_rejects_block_switches::{{closure}}
-             at ./tmp/lc-wt-c9-r3/lab/linux-confine/tests/confine.rs:630:48
+             at ./workspace/lab/linux-confine/tests/confine.rs:630:48
    4: core::ops::function::FnOnce::call_once
              at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/ops/function.rs:250:5
    5: core::ops::function::FnOnce::call_once
@@ -25,5 +25,5 @@ failures:
 failures:
     production_launcher_rejects_block_switches
 
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.37s
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.43s
 

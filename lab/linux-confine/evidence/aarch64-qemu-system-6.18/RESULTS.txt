@@ -1,6 +1,6 @@
 # GENERATED from this guest run. Not a hand write-up.
-# nonce=b2f657486859b29d6f4395c8215e68ac
-# source=/tmp/lc-wt-c9-r3/lab/linux-confine/evidence/aarch64-qemu-system-6.18
+# nonce=18ba9f35c99288cb1a677bb9e500d062
+# source=/workspace/lab/linux-confine/evidence/aarch64-qemu-system-6.18
 # mode=full
 
 C9 linux-confine on aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
@@ -34,7 +34,7 @@ Never native aarch64. Never Jetson.
 
 ## Guest markers
 
-nonce=b2f657486859b29d6f4395c8215e68ac
+nonce=18ba9f35c99288cb1a677bb9e500d062
 guest_exit=0
 qemu_exit=0
 
