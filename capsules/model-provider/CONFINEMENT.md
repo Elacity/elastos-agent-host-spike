@@ -198,7 +198,10 @@ half"). `byte_different_file_at_bound_path_starts` shows the profile binds
 `PROVIDER_EXECUTABLE` by path: a byte-different file at the bound path, in a
 temporary directory, gets past the profile's exec refusal. The show is not
 exit 65, because exit 65 means the profile did not apply, and it is not exit
-71 with `execvp()` and `Operation not permitted`. A process still running
+71 with `execvp()` and `Operation not permitted`. `F-cc36a` removes the
+last parenthesis of the `STORAGE_ROOT` allow, so this launch exits 65 and
+`byte_different_file_at_bound_path_starts` fails because the profile did not
+apply. A process still running
 after 2 seconds, or any other exit, is the outcome the test allows. The
 launch helper records the sha256
 when it binds `PROVIDER_EXECUTABLE` and refuses with a digest-mismatch reason
@@ -520,6 +523,9 @@ profile does not grant".
   `PROVIDER_EXECUTABLE` and started. The copy's digest differs from the real
   binary. The show is not exit 65, because exit 65 means the profile did not
   apply, and it is not exit 71 with `execvp()` and `Operation not permitted`.
+  `F-cc36a` removes the last parenthesis of the `STORAGE_ROOT` allow, so this
+  launch exits 65 and `byte_different_file_at_bound_path_starts` fails because
+  the profile did not apply.
   A process still running after 2 seconds, or any other exit, is the outcome
   the test allows. The real binary's digest is
   unchanged. It runs under `sandbox-exec`, as the other confined tests do.
@@ -679,6 +685,7 @@ allow_rules_trace_to_declared_rights.
 | F-cc35e | One line, `(allow file-read-data (literal "/tmp/PROVIDER_EXECUTABLE-leak"))`, is added after the root pin; both startup pins stay | `platform_baseline_rules_stay_narrow` | The wider literal path still reaches the baseline check when its filename contains `PROVIDER_EXECUTABLE`. |
 | F-cc35f | Both startup pins stay. One line, `(allow file-write* (literal "/tmp/cc35-write-only"))`, is added to the profile and to `startup-root-directory` in the declared-rights fixture | `platform_baseline_rules_stay_narrow` | The added file write is a wider operation while both pins remain. |
 | F-cc35g | Both startup pins stay. One line, `(allow file* (literal "/tmp/cc35-wildcard"))`, is added to the profile and to `startup-root-directory` in the declared-rights fixture | `platform_baseline_rules_stay_narrow` | The file wildcard is a wider operation while both pins remain, even with a matching declaration. |
+| F-cc36a | The last parenthesis of the `STORAGE_ROOT` allow is removed | `byte_different_file_at_bound_path_starts` | The launch exits 65 and the test fails because the profile did not apply. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
@@ -693,6 +700,7 @@ F-cc35b needs no rebuild: the test reads confine.sb at runtime.
 F-cc35c, F-cc35d and F-cc35e also read confine.sb at runtime and need no rebuild.
 F-cc35f needs no rebuild: the test reads confine.sb at runtime.
 F-cc35g needs no rebuild: the test reads confine.sb at runtime.
+F-cc36a needs no rebuild: sandbox-exec reads confine.sb at launch.
 
 The list is a Mac gate. On a Mac without `/usr/bin/sandbox-exec` the unmutated
 suite fails, so a list run there is no evidence. Off macOS, when
