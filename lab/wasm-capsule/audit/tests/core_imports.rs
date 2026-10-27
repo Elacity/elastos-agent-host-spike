@@ -2,7 +2,7 @@ use std::{fs, path::Path};
 use wasm_capsule_audit::{
     audit, audit_component, memories, DeclaredImport, MemoryLimits, Refusal, AUDIT_API,
 };
-use wasmparser::{Parser, Payload, Validator};
+use wasmparser::{Parser, Payload, Validator, WasmFeatures};
 
 fn import(module: &str, name: &str) -> DeclaredImport {
     DeclaredImport {
@@ -45,6 +45,13 @@ fn zero_import_module_passes() {
     )
     .unwrap();
     assert_eq!(audit(&wasm, &[]), Ok(vec![]));
+    assert!(Validator::new().validate_all(&wasm).is_ok());
+    assert!(Validator::new_with_features(WasmFeatures::default())
+        .validate_all(&wasm)
+        .is_ok());
+    assert!(Validator::new_with_features(WasmFeatures::WASM1)
+        .validate_all(&wasm)
+        .is_err());
 }
 
 #[test]

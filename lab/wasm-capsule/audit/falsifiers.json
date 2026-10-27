@@ -9,8 +9,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/audit/Cargo.toml",
-          "old": "wasmparser = \"=0.258.0\"",
-          "new": "wasmparser = \"0.258.0\""
+          "old": "version = \"=0.258.0\"",
+          "new": "version = \"0.258.0\""
         }
       ],
       "tests": [
