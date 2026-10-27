@@ -81,15 +81,15 @@ AC-006-STORAGE remains the separate `run` blocker above.
 
 | Ignored test | Blocker ID | Runtime change that enables acceptance |
 | --- | --- | --- |
-| `capsule_named_by_hash` | AC-025-CID | Provider-resolvable directory CID and a measured offline content backend for the existing launch path. |
+| `capsule_named_by_hash` | AC-025-CID | Measured match between the lab CID of the staged probe bundle and a real Kubo v0.40.1 import of the same directory; the offline content fixture (installed, checksum-verified `ipfs-provider`, a local-only Kubo policy and a socket census); `--cid` reaching the same activation as the directory launch. |
 
 Verdict: **blocked: AC-025-CID** for the full `capsule_named_by_hash` journey.
-The fixture needs a provider-resolvable directory CID and a measured offline
-content backend before that row can run. The existing CLI accepts `--cid` and
+The directory-root half of this blocker is met. What remains is named in the
+row above and in the flip paragraph below. The existing CLI accepts `--cid` and
 resolves it before manifest loading and the operator step
 (`elastos/crates/elastos-server/src/run_cmd.rs:31,127-139`). Historical RT1,
 the name-only-launch blocker, therefore does not describe this CLI. AC-025-CID
-owns the remaining content fixture and identity work.
+owns the remaining Kubo match, offline content fixture and launch comparison.
 
 The two refusal tests exercise the real Runtime through the one bounded
 `ThrowawayHome::launch` primitive. A fresh Home gives `ipfs-provider not found`.
@@ -141,27 +141,37 @@ a socket census; local blocks alone do not establish that policy. Task 013's
 Carrier setting covers `serve`; it does not configure this content backend.
 Neither the real `ipfs-provider` nor Kubo was run for 025.
 
-In this checkout the lab CID is a framed-stream SHA-256, printed by `LabCid`
-(`lab/capsule-identity/src/lib.rs:170-177,600-621`). Content instead parses an
-IPFS CID and fetches paths below it
-(`elastos/crates/elastos-server/src/content.rs:8784-8785,3027,3070`). The
-current lab value therefore is not that resolvable identifier. The task's
-cc-capsule-identity 010 handoff assigns the move to a CIDv1 directory root to
-the identity lane. After it lands, the fixture must prove that importing the
-same directory yields the encoder's CID and that both required paths resolve
-offline. The refusal tests use the encoder API and retain their pre-validation
-scope across that change.
+In this checkout the lab CID is a CIDv1 dag-pb UnixFS directory root
+(cc-capsule-identity 018, PR #226). `LabCid` prints 59 characters that start
+`bafybei` (`lab/capsule-identity/src/lib.rs:7-13,236-238`). The lab computes
+that root from Kubo v0.40.1's import profile, which
+`capsules/ipfs-provider/src/directory_hash.rs:21-43` sends on Kubo's HTTP
+`add` (`directory_hash.rs:818-831`). `verify_profile` refuses any other Kubo
+version (`directory_hash.rs:526-528`). This lane parses a printed value only
+through `LabCid` (`src/report.rs:384-387`, the receipt). The 025 refusal
+tests make a value only through `encode_entries`
+(`lab/capsule-identity/src/lib.rs:793`; `tests/runtime.rs:67`). The lab runs
+no Kubo (`lab/capsule-identity/src/lib.rs:21-24`), so "Kubo would print the
+same CID for this directory" is not yet measured (cc-capsule-identity 023).
+A lab that uses the lab CID follows
+[For a lab that uses the lab CID](../capsule-identity/README.md#for-a-lab-that-uses-the-lab-cid).
 
-AC-025-CID flips when the identity owner's directory CID is integrated and a
-fixture stages the probe, makes those exact bytes available offline through
-verified installed components, runs `--cid`, and sees the same activation as
-the directory launch. The content/provider owner must supply a bounded,
-local-only backend policy if the existing fixture configuration cannot prove
-it; protocol policy stays with that owner. The fixture must also stop its
-owned Kubo process, since provider shutdown keeps shared Kubo alive
-(`capsules/ipfs-provider/src/main.rs:1619-1621,2422-2423`). Identity, admission,
-resource grants and resource budgets remain separate decisions; this row
-does not claim signed-bundle admission or a grant.
+The directory-root half of AC-025-CID is met, as the paragraph above records.
+AC-025-CID stays the blocker. It flips when three remaining conditions are
+met, in this order. (a) A measured match between the lab CID of the staged
+probe bundle and a real Kubo v0.40.1 import of the same directory. The
+provider obtains that directory CID by calling a running Kubo over HTTP
+(`capsules/ipfs-provider/src/directory_hash.rs:485-548,818-831`). (b) The
+offline content fixture: an installed, checksum-verified `ipfs-provider`, a
+local-only Kubo policy and a socket census, as this section already states.
+The content owner supplies that bounded local-only policy; protocol policy
+stays with that owner. The fixture also stops its owned Kubo process,
+because provider shutdown keeps shared Kubo alive
+(`capsules/ipfs-provider/src/main.rs:1619-1621,2422-2423`). (c) `--cid`
+reaching the same activation as the directory launch. Identity, admission,
+resource grants and resource budgets remain separate decisions. A valid CID
+gives no grant (Flint's 10:40 note, lane backlog). Signed-bundle admission
+stays its own decision.
 
 Item 15's census must include the materialized `elastos-capsule-*` directory:
 Runtime creates it under TMPDIR and returns `temp_dir.keep()` after writing
