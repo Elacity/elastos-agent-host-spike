@@ -1,0 +1,22 @@
+label=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+native=0
+jetson=0
+emulated_cpu=1
+qemu_accel=tcg
+host_uname=Linux 6.12.94+ x86_64
+qemu=QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)
+cross_cc=aarch64-linux-gnu-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+rustc=rustc 1.91.0 (f8297e351 2025-10-28)
+mode=fail-closed
+repo=/tmp/review-c9-442-r6-src
+head=862f4c881313163c8071286c8172806436d8e1ca
+kernel=/tmp/review-c9-442-r6-work/kernel/boot/vmlinuz-virt
+helper_dir=/tmp/review-c9-442-r6-src/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-c224bc819a663556/out
+worktree_under_tmp=1 baked helpers must stay visible after guest /tmp tmpfs
+-rw-r--r-- 1 ubuntu ubuntu 63M Oct 27 01:43 /tmp/review-c9-442-r6-work/guest.cpio.gz
+qemu_timeout_sec=600
+qemu_exit=0
+nonce=4e056326e6c56245fb0af2eb957ba471
+work=/tmp/review-c9-442-r6-work
+run_id=ecea2fe2e1432669d0ff0243812e9777
+fail-closed: host exited non-zero as required (check_rc=1)

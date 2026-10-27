@@ -1,0 +1,208 @@
+label=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+native=0
+jetson=0
+emulated_cpu=1
+qemu_accel=tcg
+host_uname=Linux 6.12.94+ x86_64
+qemu=QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)
+cross_cc=aarch64-linux-gnu-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+rustc=rustc 1.91.0 (f8297e351 2025-10-28)
+mode=fail-closed
+repo=/tmp/review-c9-442-r6-src
+head=862f4c881313163c8071286c8172806436d8e1ca
+=== rust targets ===
+info: component rust-std for target aarch64-unknown-linux-gnu is up to date
+=== download Alpine kernel 6.18.58-0-virt and minirootfs 3.23.5 ===
+kernel=/tmp/review-c9-442-r6-work/kernel/boot/vmlinuz-virt
+d1876369b061ef3bc33314f490240efcd32b031393cb34c6f81134fa862fe472  /tmp/review-c9-442-r6-work/kernel/boot/vmlinuz-virt
+=== cross-build linux-confine tests ===
+   Compiling linux-confine v0.0.0 (/tmp/review-c9-442-r6-src/lab/linux-confine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.64s
+  Executable unittests src/lib.rs (target-build/aarch64-unknown-linux-gnu/debug/deps/linux_confine-580dc432279d06e5)
+  Executable tests/aarch64.rs (target-build/aarch64-unknown-linux-gnu/debug/deps/aarch64-f95b9d55d58d808a)
+  Executable tests/confine.rs (target-build/aarch64-unknown-linux-gnu/debug/deps/confine-db6e2a959f30fd61)
+  Executable tests/elf.rs (target-build/aarch64-unknown-linux-gnu/debug/deps/elf-352ae884474e9c6f)
+  Executable tests/providers.rs (target-build/aarch64-unknown-linux-gnu/debug/deps/providers-975cb7e215216ebf)
+=== cross-build shipping provider binaries ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.16s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
+=== compile guest helpers ===
+=== snapshot standing test binaries ===
+/tmp/review-c9-442-r6-src/lab/linux-confine/guest-bins/confine EM_AARCH64=183
+/tmp/review-c9-442-r6-src/lab/linux-confine/guest-bins/providers EM_AARCH64=183
+/tmp/review-c9-442-r6-src/lab/linux-confine/guest-bins/elf EM_AARCH64=183
+/tmp/review-c9-442-r6-src/lab/linux-confine/guest-bins/aarch64 EM_AARCH64=183
+/tmp/review-c9-442-r6-src/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-c224bc819a663556/out/lc-setup EM_AARCH64=183
+/tmp/review-c9-442-r6-src/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-c224bc819a663556/out/lc-setup-test EM_AARCH64=183
+/tmp/review-c9-442-r6-src/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-c224bc819a663556/out/lc-probe EM_AARCH64=183
+/tmp/review-c9-442-r6-src/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-c224bc819a663556/out/lc-witness.so EM_AARCH64=183
+helper_dir=/tmp/review-c9-442-r6-src/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-c224bc819a663556/out
+worktree_under_tmp=1 baked helpers must stay visible after guest /tmp tmpfs
+=== assemble initramfs ===
+packed_mod=kernel/net/core/failover.ko.gz
+packed_mod=kernel/drivers/net/net_failover.ko.gz
+packed_mod=kernel/drivers/net/dummy.ko.gz
+packed_mod=kernel/drivers/net/virtio_net.ko.gz
+=== pack initramfs ===
+419540 blocks
+-rw-r--r-- 1 ubuntu ubuntu 63M Oct 27 01:43 /tmp/review-c9-442-r6-work/guest.cpio.gz
+=== boot qemu-system-aarch64 TCG ===
+qemu_timeout_sec=600
+qemu_exit=0
+work=/tmp/review-c9-442-r6-work
+run_id=ecea2fe2e1432669d0ff0243812e9777
+=== guest console tail ===
+[    1.599231] Serial: 8250/16550 driver, 4 ports, IRQ sharing enabled
+[    1.651321] hv_vmbus: registering driver hyperv_keyboard
+[    1.664094] rtc-pl031 9010000.pl031: registered as rtc0
+[    1.664896] rtc-pl031 9010000.pl031: setting system clock to 2026-10-27T01:43:44 UTC (1793065424)
+[    1.674007] NET: Registered PF_INET6 protocol family
+[    1.690063] Segment Routing with IPv6
+[    1.690655] In-situ OAM (IOAM) with IPv6
+[    1.873397] registered taskstats version 1
+[    1.881065] Loading compiled-in X.509 certificates
+[    7.522356] Freeing initrd memory: 64220K
+[    7.702345] Loaded X.509 cert 'alpinelinux.org: Alpine Linux kernel key: 87fa969a47f3e2a6aa35859eb932a17c95abcd82'
+[    7.879090] Demotion targets for Node 0: null
+[    7.883489] Key type .fscrypt registered
+[    7.883554] Key type fscrypt-provisioning registered
+[    7.917765] clk: Disabling unused clocks
+[    7.918326] PM: genpd: Disabling unused power domains
+[    8.210560] Freeing unused kernel memory: 2048K
+[    8.212088] Run /init as init process
+tmp_mount=tmpfs+baked
+[    8.742387] netfs: FS-Cache loaded
+insmod_ok=kernel/fs/netfs/netfs.ko
+[    8.791242] 9pnet: Installing 9P2000 support
+insmod_ok=kernel/net/9p/9pnet.ko
+insmod_ok=kernel/net/9p/9pnet_virtio.ko
+[    8.875759] 9p: Installing v9fs 9p2000 file system support
+insmod_ok=kernel/fs/9p/9p.ko
+insmod_ok=kernel/net/core/failover.ko
+insmod_ok=kernel/drivers/net/net_failover.ko
+insmod_ok=kernel/drivers/net/dummy.ko
+insmod_absent=kernel/net/dummy.ko
+insmod_ok=kernel/drivers/net/virtio_net.ko
+guest_nic=dummy0
+guest_nic=eth0
+guest_nics=dummy0 eth0 lo 
+evidence_mount=9p
+helpers_visible=/tmp/review-c9-442-r6-src/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-c224bc819a663556/out
+============================================================
+LABEL=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+native=0
+jetson=0
+emulated_cpu=1
+qemu_accel=tcg
+============================================================
+Linux (none) 6.18.58-0-virt #1-Alpine SMP PREEMPT_DYNAMIC 2026-10-21 13:45:15 aarch64 Linux
+uid=0 gid=0
+--- landlock probe ---
+mode=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+native=0
+jetson=0
+emulated_cpu=1
+qemu_accel=tcg
+uname.sysname=Linux
+uname.nodename=(none)
+uname.release=6.18.58-0-virt
+uname.version=#1-Alpine SMP PREEMPT_DYNAMIC 2026-10-21 13:45:15
+uname.machine=aarch64
+landlock_create_ruleset nr=444 ret=7 errno=0 (ok)
+landlock_abi=7
+ioctl_dev_ready=yes
+landlock_add_rule nr=445 ret=-1 errno=9 (Bad file descriptor)
+landlock_restrict_self nr=446 ret=-1 errno=9 (Bad file descriptor)
+SYS_landlock_create_ruleset=444 SYS_landlock_add_rule=445 SYS_landlock_restrict_self=446
+--- nonce isolation ---
+nonce_file_mode=400
+env_has_nonce=0
+evidence_nonce_during_run=0
+cat: can't open '/etc/lc-nonce': Permission denied
+tester_nonce_readable=0
+--- C9 suites ---
+LABEL=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+FAIL-CLOSED: run elf with a name that matches nothing
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+--- guest finished status=1 ---
+LC_MARK nonce=4e056326e6c56245fb0af2eb957ba471 suite=elf exit=0 passed=0 failed=0 ignored=0 status=SHORT
+LC_MARK nonce=4e056326e6c56245fb0af2eb957ba471 suite=aarch64 exit=-1 passed=0 failed=0 ignored=0 status=MISSING
+LC_MARK nonce=4e056326e6c56245fb0af2eb957ba471 suite=confine exit=-1 passed=0 failed=0 ignored=0 status=MISSING
+LC_MARK nonce=4e056326e6c56245fb0af2eb957ba471 suite=providers exit=-1 passed=0 failed=0 ignored=0 status=MISSING
+LC_MARK nonce=4e056326e6c56245fb0af2eb957ba471 suite=guest exit=1 passed=0 failed=0 ignored=0 status=DONE
+[   11.034974] sysrq: Power Off
+[   11.040848] reboot: Power down
+=== host check of guest results ===
+HOST CHECK FAILED:
+  elf: passed 0 != expected 6
+  elf: status=SHORT exit=0
+  aarch64: missing status file
+  aarch64: missing exit file
+  aarch64: passed 0 != expected 2
+  aarch64: ignored 0 != expected 1
+  aarch64: status=MISSING exit=MISSING
+  confine: missing status file
+  confine: missing exit file
+  confine: passed 0 != expected 25
+  confine: status=MISSING exit=MISSING
+  providers: missing status file
+  providers: missing exit file
+  providers: passed 0 != expected 4
+  providers: status=MISSING exit=MISSING
+# GENERATED from this guest run. Not a hand write-up.
+# nonce=4e056326e6c56245fb0af2eb957ba471
+# source=/tmp/review-c9-442-r6-src/lab/linux-confine/evidence/aarch64-qemu-system-6.18-fail-closed
+# mode=fail-closed
+
+C9 linux-confine on aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+
+Never native aarch64. Never Jetson.
+
+## Standing suites (live rust output)
+
+| suite | status | exit | passed | failed | ignored | expected passed |
+| --- | --- | --- | --- | --- | --- | --- |
+| elf | SHORT | 0 | 0 | 0 | 0 | 6 |
+| aarch64 | MISSING | MISSING | 0 | 0 | 0 | 2 |
+| confine | MISSING | MISSING | 0 | 0 | 0 | 25 |
+| providers | MISSING | MISSING | 0 | 0 | 0 | 4 |
+
+## In-guest plants (live status files)
+
+| id | result |
+| --- | --- |
+
+## Guest markers
+
+nonce=4e056326e6c56245fb0af2eb957ba471
+guest_exit=1
+qemu_exit=0
+
+Host-only plants F-LC-WRONG-ARCH-CC and F-LC-QEMU-USER-LANDLOCK stay NOT RUN.
+make-char / make-block stay NOT PROVEN (no CAP_MKNOD).
+socketpair(AF_UNIX) stays the named C9 departure.
+
+This is an emulated CPU (qemu-system TCG) with a real aarch64 kernel.
+It is not a Jetson and not any other aarch64 board.
+
+## Host check FAILED
+
+- elf: passed 0 != expected 6
+- elf: status=SHORT exit=0
+- aarch64: missing status file
+- aarch64: missing exit file
+- aarch64: passed 0 != expected 2
+- aarch64: ignored 0 != expected 1
+- aarch64: status=MISSING exit=MISSING
+- confine: missing status file
+- confine: missing exit file
+- confine: passed 0 != expected 25
+- confine: status=MISSING exit=MISSING
+- providers: missing status file
+- providers: missing exit file
+- providers: passed 0 != expected 4
+- providers: status=MISSING exit=MISSING
+fail-closed: host exited non-zero as required (check_rc=1)
+wrote /tmp/review-c9-442-r6-src/lab/linux-confine/evidence/aarch64-qemu-system-6.18-fail-closed
+FAIL_CLOSED_HOST_EXIT=1

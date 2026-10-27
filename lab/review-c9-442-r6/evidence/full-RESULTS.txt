@@ -1,0 +1,53 @@
+# GENERATED from this guest run. Not a hand write-up.
+# nonce=91f098f9d6c88356717b9def20054abc
+# source=/tmp/review-c9-442-r6-src/lab/linux-confine/evidence/aarch64-qemu-system-6.18
+# mode=full
+
+C9 linux-confine on aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+
+Never native aarch64. Never Jetson.
+
+## Standing suites (live rust output)
+
+| suite | status | exit | passed | failed | ignored | expected passed |
+| --- | --- | --- | --- | --- | --- | --- |
+| elf | PASS | 0 | 6 | 0 | 0 | 6 |
+| aarch64 | PASS | 0 | 2 | 0 | 1 | 2 |
+| confine | PASS | 0 | 25 | 0 | 0 | 25 |
+| providers | PASS | 0 | 4 | 0 | 0 | 4 |
+
+## In-guest plants (live status files)
+
+| id | result |
+| --- | --- |
+| F-LC-CAPBND | CAUGHT |
+| F-LC-BLOCK | CAUGHT |
+| F-LC-STORAGE | CAUGHT |
+| F-LC-PROVIDER-SOCKET | CAUGHT |
+| F-LC-SOCKET | CAUGHT |
+| F-LC-ANY-ERRNO | CAUGHT |
+| F-LC-SKIP-NETNS | CAUGHT |
+| F-LC-DROP-SECCOMP | CAUGHT |
+| F-LC-WIDE-ROOT | CAUGHT |
+| F-LC-WRONG-ARCH-CC | NOT_RUN |
+| F-LC-QEMU-USER-LANDLOCK | NOT_RUN |
+
+## Guest markers
+
+nonce=91f098f9d6c88356717b9def20054abc
+guest_exit=0
+qemu_exit=0
+
+Host-only plants F-LC-WRONG-ARCH-CC and F-LC-QEMU-USER-LANDLOCK stay NOT RUN.
+make-char / make-block stay NOT PROVEN (no CAP_MKNOD).
+socketpair(AF_UNIX) stays the named C9 departure.
+
+This is an emulated CPU (qemu-system TCG) with a real aarch64 kernel.
+It is not a Jetson and not any other aarch64 board.
+
+## Host check PASSED
+
+Every standing suite matched its expected counts.
+Every suite had an LC_MARK serial line that matched the 9p files.
+Every official in-guest plant was CAUGHT.
+qemu exited 0 without a timeout.
