@@ -4,5 +4,5 @@ test: tests::a12_new_file_under_original_tmpdir_is_found
 --- old
         let roots = writable_temp_roots();
 --- new
-        let roots = Vec::new();
+        let roots = Vec::<PathBuf>::new();
 --- end
