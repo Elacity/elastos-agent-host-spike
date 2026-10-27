@@ -959,6 +959,10 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `provider_storage_root` (WP129):
   `provider_storage_root_refuses_an_unknown_provider_name` fails because no
   refusal comes for `model-provider`.
+- Skip the kind check in the one build-output reader (WP130):
+  `did_binary_is_the_executable_the_build_reports` fails because the reader
+  returns the non-bin artifact's executable, which comes before the bin
+  artifact.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
