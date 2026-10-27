@@ -1681,6 +1681,22 @@
       "tests": [
         "declared_rights_trace_refuses_each_bad_input"
       ]
+    },
+    {
+      "id": "WP105",
+      "title": "the lab generator emits an allow rule that neither declared-rights file names",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    for form in PROFILE_HEAD {\n        profile.push_str(form);\n        profile.push('\\n');\n    }",
+          "new": "    for form in PROFILE_HEAD {\n        profile.push_str(form);\n        profile.push('\\n');\n    }\n    profile.push_str(\"(allow file-read* (literal \\\"/private/var/cc-confine-generated\\\"))\\n\");"
+        }
+      ],
+      "tests": [
+        "generated_did_and_wallet_profiles_match_their_committed_oracles"
+      ]
     }
   ]
 }
