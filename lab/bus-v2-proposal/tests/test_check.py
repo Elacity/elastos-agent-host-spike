@@ -100,6 +100,12 @@ MINT_THIRD = "/// no grant. A second answer does not replace the first, and it d
 MINT_FOURTH = "/// authorize another step. A child cannot be answered with the parent's"
 MINT_LAST = "/// grant. The answer name is kept in the log. The grant string is not."
 
+JOURNAL_REL = OWNED_REL
+JOURNAL_NUMBER = 3757
+JOURNAL_SPAN = "examples/agent-host/src/lib.rs:3757"
+JOURNAL_CFG = '#[cfg(any(test, target_arch = "wasm32"))]'
+JOURNAL_CONST = 'const JOURNAL_ROOT: &str = "localhost://Users/self/.AppData/Agents/";'
+
 
 class CitationCheckTests(unittest.TestCase):
     def _temp_root(self):
@@ -347,6 +353,49 @@ class CitationCheckTests(unittest.TestCase):
         """A draft that cites the mint span and indents its five lines below it."""
         lines = [first, second, MINT_THIRD, MINT_FOURTH, last]
         body = "`" + MINT_SPAN + "` states that the guest does not mint one.\n\n"
+        body += "".join("    " + line + "\n" for line in lines[:count])
+        return body + "\n"
+
+    def _journal_source(
+        self,
+        first=JOURNAL_CFG,
+        second=JOURNAL_CONST,
+        owned=OWNED_QUOTE,
+        following=NEXT_QUOTE,
+        third=ASKS_THIRD,
+        marker_last=MARKER_CONST,
+        launching_last=LAUNCHING_CONST,
+    ):
+        """A committed file with line 3757 below 3755 and above the asks block."""
+        rows = ["// filler"] * (OWNED_NUMBER - 1) + [owned, following]
+        rows += [first, second]
+        rows += ["// filler"] * (ASKS_NUMBER - 3 - len(rows))
+        rows += [
+            ASKS_FIRST,
+            ASKS_SECOND,
+            third,
+            ASKS_FOURTH,
+            ASKS_FIFTH,
+            ASKS_SIXTH,
+            ASKS_CFG,
+            ASKS_CONST,
+        ]
+        rows += ["// filler"] * (MARKER_NUMBER - 4 - len(rows))
+        rows += [MARKER_HEAD, MARKER_TAIL, MARKER_CFG, marker_last]
+        rows += ["// filler"] * (LAUNCHING_NUMBER - len(rows) - 5)
+        rows += [
+            LAUNCHING_HEAD,
+            LAUNCHING_SECOND,
+            LAUNCHING_THIRD,
+            LAUNCHING_CFG,
+            launching_last,
+        ]
+        return ("\n".join(rows) + "\n").encode("utf-8")
+
+    def _journal_block(self, first=JOURNAL_CFG, second=JOURNAL_CONST, count=2):
+        """A draft that cites the journal span and indents its two lines below it."""
+        lines = [first, second]
+        body = "`" + JOURNAL_SPAN + "` sets `JOURNAL_ROOT`.\n\n"
         body += "".join("    " + line + "\n" for line in lines[:count])
         return body + "\n"
 
@@ -1308,6 +1357,179 @@ class CitationCheckTests(unittest.TestCase):
             ["refuse: pinned commit is not a commit: " + "f" * 40],
         )
 
+    def test_live_draft_journal_quote_matches_its_pinned_line(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        self.assertEqual(check.journal_quote(text), JOURNAL_CONST)
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        self.assertEqual(
+            check.pinned_line(root, sha, JOURNAL_REL, JOURNAL_NUMBER),
+            JOURNAL_CONST,
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_journal_quote_is_absent_below_two_indented_lines(self):
+        self.assertIsNone(check.journal_quote(self._journal_block(count=1)))
+        self.assertIsNone(check.journal_quote("No journal span here.\n"))
+
+    def test_journal_fixture_keeps_line_3757_between_3755_and_8149(self):
+        root = self._draft(self._journal_block(), {JOURNAL_REL: self._journal_source()})
+        sha = check.pin_sha(check.load_draft(root))
+        self.assertIsNotNone(sha)
+        self.assertEqual(
+            check.pinned_line(root, sha, JOURNAL_REL, NEXT_NUMBER), NEXT_QUOTE
+        )
+        self.assertEqual(
+            check.pinned_line(root, sha, JOURNAL_REL, JOURNAL_NUMBER - 1),
+            JOURNAL_CFG,
+        )
+        self.assertEqual(
+            check.pinned_line(root, sha, JOURNAL_REL, JOURNAL_NUMBER), JOURNAL_CONST
+        )
+        self.assertEqual(
+            check.pinned_line(root, sha, JOURNAL_REL, ASKS_NUMBER), ASKS_THIRD
+        )
+        self.assertEqual(
+            check.pinned_line(root, sha, JOURNAL_REL, LAUNCHING_NUMBER),
+            LAUNCHING_CONST,
+        )
+        self.assertIsNone(
+            check.pinned_line(root, sha, JOURNAL_REL, LAUNCHING_NUMBER + 1)
+        )
+
+    def test_journal_quoted_line_mismatch_is_refused(self):
+        expected = "refuse: quoted line does not match " + JOURNAL_SPAN
+        root = self._draft(
+            self._journal_block(second=JOURNAL_CONST + "x"),
+            {JOURNAL_REL: self._journal_source()},
+        )
+        self.assertEqual(check.problems(root), [expected])
+        (root / JOURNAL_REL).write_bytes(
+            self._journal_source(second="// edited in the worktree")
+        )
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_journal_quoted_line_match_ignores_the_worktree_file(self):
+        root = self._draft(
+            self._journal_block(), {JOURNAL_REL: self._journal_source()}
+        )
+        self.assertEqual(check.problems(root), [])
+        (root / JOURNAL_REL).write_bytes(
+            self._journal_source(second="// edited in the worktree")
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_journal_first_line_does_not_stand_for_line_3757(self):
+        root = self._draft(
+            self._journal_block(first=JOURNAL_CFG + "x"),
+            {JOURNAL_REL: self._journal_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_journal_span_without_two_indented_lines_adds_no_refusal(self):
+        got, reads = self._pinned_reads(
+            self._journal_block(count=1), {JOURNAL_REL: self._journal_source()}
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [])
+
+    def test_journal_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        expected = "refuse: quoted line is not in the pinned commit: " + JOURNAL_SPAN
+        short = ("// filler\n" * 10).encode("utf-8")
+        root = self._draft(self._journal_block(), {JOURNAL_REL: short})
+        (root / JOURNAL_REL).write_bytes(self._journal_source())
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_two_journal_spans_are_refused(self):
+        expected = "refuse: quoted line is not one line: " + JOURNAL_SPAN
+        body = self._journal_block() + "\nAgain `" + JOURNAL_SPAN + "`.\n"
+        got, reads = self._pinned_reads(body, {JOURNAL_REL: self._journal_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [])
+
+    def test_draft_without_the_journal_span_adds_no_journal_refusal(self):
+        root = self._draft(self._asks_block(), {JOURNAL_REL: self._journal_source()})
+        self.assertEqual(check.problems(root), [])
+
+    def test_mint_line_mismatch_adds_no_journal_refusal(self):
+        expected = "refuse: quoted line does not match " + MINT_SPAN
+        body = self._mint_block(second=MINT_SECOND + "x") + self._journal_block(
+            second=JOURNAL_CONST + "y"
+        )
+        got, reads = self._pinned_reads(body, {MINT_REL: self._mint_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [MINT_NUMBER])
+
+    def test_next_line_mismatch_adds_no_journal_refusal(self):
+        expected = "refuse: quoted line does not match " + NEXT_SPAN
+        body = self._quote_body(OWNED_QUOTE, NEXT_QUOTE + "x") + self._journal_block(
+            second=JOURNAL_CONST + "y"
+        )
+        got, reads = self._pinned_reads(body, {JOURNAL_REL: self._journal_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [OWNED_NUMBER, NEXT_NUMBER])
+
+    def test_draft_without_the_owned_span_still_refuses_a_journal_mismatch(self):
+        expected = "refuse: quoted line does not match " + JOURNAL_SPAN
+        got, reads = self._pinned_reads(
+            self._journal_block(second=JOURNAL_CONST + "x"),
+            {JOURNAL_REL: self._journal_source()},
+        )
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [JOURNAL_NUMBER])
+
+    def test_journal_line_mismatch_adds_no_asks_refusal(self):
+        expected = "refuse: quoted line does not match " + JOURNAL_SPAN
+        body = (
+            self._quote_body(OWNED_QUOTE, NEXT_QUOTE)
+            + self._journal_block(second=JOURNAL_CONST + "x")
+            + self._asks_block(third=ASKS_THIRD + "y")
+        )
+        got, reads = self._pinned_reads(body, {JOURNAL_REL: self._journal_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [OWNED_NUMBER, NEXT_NUMBER, JOURNAL_NUMBER])
+
+    def test_journal_line_match_follows_to_the_asks_refusal(self):
+        expected = "refuse: quoted line does not match " + ASKS_SPAN
+        body = (
+            self._quote_body(OWNED_QUOTE, NEXT_QUOTE)
+            + self._journal_block()
+            + self._asks_block(third=ASKS_THIRD + "x")
+        )
+        got, reads = self._pinned_reads(body, {JOURNAL_REL: self._journal_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [OWNED_NUMBER, NEXT_NUMBER, JOURNAL_NUMBER, ASKS_NUMBER])
+
+    def test_draft_without_the_journal_span_still_refuses_a_mint_mismatch(self):
+        expected = "refuse: quoted line does not match " + MINT_SPAN
+        root = self._draft(
+            self._mint_block(second=MINT_SECOND + "x")
+            + self._quote_body(OWNED_QUOTE, NEXT_QUOTE),
+            {MINT_REL: self._mint_source()},
+        )
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_journal_quote_refusal_waits_for_a_known_pin(self):
+        body = self._journal_block(second=JOURNAL_CONST + "x")
+        files = {JOURNAL_REL: self._journal_source()}
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+        bad_pin = "Pinned commit: HEAD\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(bad_pin, files)),
+            ["refuse: pinned commit is not one 40-hex commit"],
+        )
+        unknown = "Pinned commit: " + "f" * 40 + "\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(unknown, files, commit=True)),
+            ["refuse: pinned commit is not a commit: " + "f" * 40],
+        )
+
     def test_falsifier_missing_path_is_caught(self):
         self._caught(
             "read_file",
@@ -1450,6 +1672,30 @@ class CitationCheckTests(unittest.TestCase):
             self.test_mint_quoted_line_mismatch_is_refused,
             "refuse: quoted line does not match",
             "CAUGHT mint-quoted-line",
+        )
+
+    def test_falsifier_journal_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_journal_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT journal-quoted-line",
+        )
+
+    def test_falsifier_journal_first_line_is_caught(self):
+        def planted(text):
+            remainders = check._remainders(text, check.JOURNAL_MARKER)
+            if len(remainders) < 2:
+                return None
+            return remainders[0]
+
+        self._caught(
+            "journal_quote",
+            planted,
+            self.test_journal_first_line_does_not_stand_for_line_3757,
+            "refuse: quoted line does not match",
+            "CAUGHT journal-first-line",
         )
 
     def test_worktree_root_contains_checker(self):
