@@ -23,10 +23,20 @@ BUNDLE = pathlib.Path(__file__).resolve().parent / "bundle"
 # (name, file under bundle/src, [(exact old text, new text)], tests that must fail)
 CASES = [
     # This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    ("stand-in F4 selected viewer comparison is bypassed", "admit.rs",
+     [("if resolved_viewer.cid != selected_viewer {",
+       "if false && resolved_viewer.cid != selected_viewer {")],
+     ["stand_in_refuses_another_viewer_cid"]),
+    ("stand-in F12 resolved selection check is bypassed", "admit.rs",
+     [("if resolved_cid != selected_cid || admitted_role != role || execution != required_execution {",
+       "if false {")],
+     ["stand_in_checks_resolved_roles_and_core_selection"]),
+    # This test code stands in for the Runtime's launch by CID, which does not exist yet.
     ("stand-in F9 staged content admits without its claim", "admit.rs",
      [("        return Err(Refusal::ClaimMissing {\n            cid: loaded.cid.clone(),\n        });",
        "        return Ok(Admitted { cid: loaded.cid.clone(), name: String::new(), version: String::new(), role: String::new(), publisher_did: String::new(), path: loaded.path.clone() });")],
-     ["stand_in_refuses_a_staged_capsule_without_a_claim"]),
+     ["stand_in_refuses_a_staged_capsule_without_a_claim",
+      "stand_in_selects_the_pinned_viewer_and_its_core"]),
     ("stand-in F20 binding reads staged files again", "admit.rs",
      [("loaded.bytes.get(path).cloned()", "std::fs::read(loaded.path.join(path)).ok()")],
      ["stand_in_binds_verified_content_bytes"]),

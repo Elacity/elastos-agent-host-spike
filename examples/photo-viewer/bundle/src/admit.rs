@@ -218,6 +218,97 @@ pub fn admit_staged_for_stand_in(
     admit(&loaded.path, claim, policy, installed, store, now)
 }
 
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StandInDependencies {
+    pub viewer: Admitted,
+    pub core: Admitted,
+}
+
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// Resolve and re-admit the pinned viewer and core before any launch.
+#[allow(clippy::too_many_arguments)]
+pub fn select_stand_in_dependencies(
+    content: &Loaded,
+    selected_viewer: &str,
+    selected_core: &str,
+    claims: &BTreeMap<String, SignedClaim>,
+    policy: &TrustPolicy,
+    installed: &[Installed],
+    store: &Path,
+    now: u64,
+) -> Result<StandInDependencies, Refusal> {
+    let viewers = resolve_requires((&content.manifest, content.cid.as_str()), installed)?;
+    if viewers.len() != 1 {
+        return Err(Refusal::LaunchBindingInvalid {
+            cid: content.cid.clone(),
+            role: "viewer".to_string(),
+        });
+    }
+    let resolved_viewer = &viewers[0];
+    if resolved_viewer.cid != selected_viewer {
+        return Err(Refusal::ViewerMismatch {
+            cid: content.cid.clone(),
+            actual: resolved_viewer.cid.clone(),
+            expected: selected_viewer.to_string(),
+        });
+    }
+    let viewer_loaded = load(store, &resolved_viewer.cid)?;
+    let viewer = admit_staged_for_stand_in(&viewer_loaded, claims, policy, installed, store, now)?;
+    stand_in_selection_holds(
+        &resolved_viewer.cid,
+        &resolved_viewer.cid,
+        "viewer",
+        &viewer.role,
+        viewer_loaded.manifest["execution"]
+            .as_str()
+            .unwrap_or_default(),
+    )?;
+
+    let cores = resolve_requires(&viewer_loaded.manifest, installed)?;
+    if cores.len() != 1 {
+        return Err(Refusal::LaunchBindingInvalid {
+            cid: resolved_viewer.cid.clone(),
+            role: "app".to_string(),
+        });
+    }
+    let resolved_core = &cores[0];
+    let core_loaded = load(store, &resolved_core.cid)?;
+    let core = admit_staged_for_stand_in(&core_loaded, claims, policy, installed, store, now)?;
+    stand_in_selection_holds(
+        &resolved_core.cid,
+        selected_core,
+        "app",
+        &core.role,
+        core_loaded.manifest["execution"]
+            .as_str()
+            .unwrap_or_default(),
+    )?;
+    Ok(StandInDependencies { viewer, core })
+}
+
+// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+fn stand_in_selection_holds(
+    resolved_cid: &str,
+    selected_cid: &str,
+    role: &str,
+    admitted_role: &str,
+    execution: &str,
+) -> Result<(), Refusal> {
+    let required_execution = if role == "viewer" {
+        "web-projection"
+    } else {
+        "component"
+    };
+    if resolved_cid != selected_cid || admitted_role != role || execution != required_execution {
+        return Err(Refusal::LaunchBindingInvalid {
+            cid: resolved_cid.to_string(),
+            role: role.to_string(),
+        });
+    }
+    Ok(())
+}
+
 // This test code stands in for the Runtime's launch by CID, which does not exist yet.
 // Compile the kit's URI owner directly: this slice adds no dependency or copied rule.
 #[path = "../../../capsule-kit/guest/src/uri.rs"]
