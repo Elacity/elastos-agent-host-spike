@@ -399,6 +399,18 @@ impl Kernel for RealKernel {
             }
             TRACE_PID.store(provider, Ordering::Relaxed);
             wait_for_identity_ack();
+            let mut status = 0;
+            let stopped = unsafe { libc::waitpid(provider, &mut status, libc::WNOHANG) };
+            if stopped == provider && libc::WIFSTOPPED(status) {
+                unsafe {
+                    libc::ptrace(
+                        libc::PTRACE_CONT,
+                        provider,
+                        std::ptr::null_mut::<libc::c_void>(),
+                        std::ptr::null_mut::<libc::c_void>(),
+                    )
+                };
+            }
             reap_namespace();
         }
         close_ack();
