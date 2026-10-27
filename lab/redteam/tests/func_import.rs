@@ -1,5 +1,8 @@
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read};
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -24,6 +27,7 @@ const COMPILE_ERROR: &str = "compile failed";
 const LAUNCH_ERROR: &str = "launch failed";
 const TIMEOUT_ERROR: &str = "timeout";
 const PLANT_TIMEOUT: Duration = Duration::from_secs(360);
+const OUTPUT_LIMIT: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Plant {
@@ -120,8 +124,32 @@ fn finding_uses_live_head_and_bytes() {
     let args = git_log_args();
     assert!(args.contains(&"HEAD"));
     assert!(!args.iter().any(|arg| arg.contains("spike/agent-host")));
-    let commit = git_commit();
-    let digest = sha256_file(&audit_lib());
+    // The oracle calls the tools directly so a frozen implementation helper
+    // cannot also freeze the expected value.
+    let expected_commit = Command::new("git")
+        .args(["log", "-1", "--format=%H", "HEAD", "--", LIVE_LIB_REL])
+        .current_dir(repo_root())
+        .output()
+        .expect("independent HEAD lookup");
+    assert!(expected_commit.status.success());
+    let commit = String::from_utf8(expected_commit.stdout)
+        .expect("commit utf-8")
+        .trim()
+        .to_string();
+    assert_eq!(commit.len(), 40);
+    let expected_digest = Command::new("shasum")
+        .args(["-a", "256"])
+        .arg(audit_lib())
+        .output()
+        .expect("independent file digest");
+    assert!(expected_digest.status.success());
+    let digest = String::from_utf8(expected_digest.stdout)
+        .expect("digest utf-8")
+        .split_whitespace()
+        .next()
+        .expect("digest")
+        .to_string();
+    assert_eq!(digest.len(), 64);
     let line = read_live_attribution();
     assert_live_attribution(&line, &commit, &digest);
     let frozen = frozen_attribution();
@@ -129,6 +157,59 @@ fn finding_uses_live_head_and_bytes() {
         assert_live_attribution(&frozen, &commit, &digest);
     }));
     assert!(caught.is_err(), "frozen attribution was accepted");
+}
+
+#[test]
+fn frozen_attribution_helpers_are_caught() {
+    let dir = isolated_temp("frozen-attribution");
+    let _hold = TempCopy { dir: dir.clone() };
+    let lane = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = fs::read_to_string(lane.join("Cargo.toml"))
+        .expect("lane manifest")
+        .replace(
+            "\"../wasm-capsule/audit\"",
+            &format!("{:?}", audit_root().canonicalize().expect("audit path")),
+        );
+    fs::write(dir.join("Cargo.toml"), manifest).expect("mutant manifest");
+    copy_file(&lane.join("Cargo.lock"), &dir.join("Cargo.lock")).expect("locked dependencies");
+    fs::create_dir_all(dir.join("src")).expect("mutant src");
+    copy_file(&lane.join("src/lib.rs"), &dir.join("src/lib.rs")).expect("empty library");
+    fs::create_dir_all(dir.join("tests")).expect("mutant tests");
+    let source = fs::read_to_string(lane.join("tests/func_import.rs"))
+        .expect("probe source")
+        .replace("env!(\"CARGO_MANIFEST_DIR\")", &format!("{lane:?}"));
+    let mut args = test_args(&dir.join("Cargo.toml"));
+    *args.last_mut().expect("test name") = "finding_uses_live_head_and_bytes".into();
+    for (helper, parameters, width) in [("git_commit", "", 40), ("sha256_file", "path: &Path", 64)]
+    {
+        let anchor = format!("fn {helper}({parameters}) -> String {{");
+        assert_eq!(source.matches(&anchor).count(), 1, "{helper} anchor");
+        let frozen = format!("{anchor}\n    return {:?}.to_string();", "0".repeat(width));
+        fs::write(
+            dir.join("tests/redteam_func_import.rs"),
+            source.replacen(&anchor, &frozen, 1),
+        )
+        .expect("freeze attribution helper");
+        let output = run_cargo(&args, &dir.join("target"), PLANT_TIMEOUT);
+        assert!(!output.spawn_error, "{}", output.output);
+        assert!(!output.timed_out, "{}", tail(&output.output));
+        assert_eq!(output.exit_code, Some(101), "{}", tail(&output.output));
+        assert!(
+            !output.output.contains(COULD_NOT_COMPILE),
+            "{}",
+            output.output
+        );
+        assert!(
+            output
+                .output
+                .contains("test finding_uses_live_head_and_bytes ... FAILED"),
+            "frozen {helper} escaped the named test: {}",
+            output.output
+        );
+        assert!(output.output.contains("assertion `left == right` failed"));
+    }
+    finish_plant(&dir, b"unchanged", b"unchanged").expect("mutant cleanup");
+    assert!(!dir.exists(), "mutant directory remains");
 }
 
 #[test]
@@ -588,6 +669,88 @@ fn real_timeout() -> Step {
     Step::Test(output)
 }
 
+#[test]
+fn command_timeout_bounds_descendants_and_cleanup() {
+    // Cover a waiting parent, an exited parent with inherited output handles,
+    // and a recorded descendant whose termination is checked independently.
+    for script in [
+        "sleep 2 & wait",
+        "sleep 2 &",
+        "sleep 2 & echo $! > child.pid; wait",
+    ] {
+        let dir = isolated_temp("descendant-timeout");
+        let _hold = TempCopy { dir: dir.clone() };
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", script]).current_dir(&dir);
+        let started = Instant::now();
+        let output = run_command(command, Duration::from_millis(200));
+        let child_pid = fs::read_to_string(dir.join("child.pid")).ok();
+        let result = apply_guard(&dir, b"same", b"same", classify(&Step::Test(output)));
+        assert_is_error(&result, TIMEOUT_ERROR);
+        assert!(!dir.exists(), "temp directory remains");
+        assert!(
+            started.elapsed() < Duration::from_millis(1500),
+            "timeout and cleanup waited for the descendant: {script}"
+        );
+        if script.contains("child.pid") {
+            let pid = child_pid.expect("descendant started before timeout");
+            let reaping = Instant::now();
+            let state = loop {
+                let state = Command::new("/bin/kill")
+                    .args(["-0", pid.trim()])
+                    .env("LC_ALL", "C")
+                    .output()
+                    .expect("inspect descendant");
+                if !state.status.success() || reaping.elapsed() >= Duration::from_millis(200) {
+                    break state;
+                }
+                thread::sleep(Duration::from_millis(5));
+            };
+            assert!(
+                !state.status.success(),
+                "descendant still runs after cleanup"
+            );
+            let error = String::from_utf8_lossy(&state.stderr);
+            assert!(
+                error.contains("No such process"),
+                "descendant termination was not proven: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn command_collects_both_output_streams() {
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "printf stdout; printf stderr >&2"]);
+    let output = run_command(command, Duration::from_secs(2));
+    assert!(!output.spawn_error, "{}", output.output);
+    assert!(!output.timed_out);
+    assert_eq!(output.exit_code, Some(0));
+    assert_eq!(output.output, "stdoutstderr");
+}
+
+#[test]
+fn command_output_limit_is_an_error() {
+    let mut command = Command::new("/bin/dd");
+    command.args([
+        "if=/dev/zero",
+        "bs=65536",
+        &format!("count={}", OUTPUT_LIMIT / 65536 + 1),
+    ]);
+    let output = run_command(command, Duration::from_secs(10));
+    assert!(
+        output.spawn_error,
+        "output limit was accepted: exit {:?}, timed out {}, collected {} bytes",
+        output.exit_code,
+        output.timed_out,
+        output.output.len()
+    );
+    assert!(!output.timed_out);
+    assert!(output.output.starts_with("command output limit exceeded\n"));
+    assert_is_error(&classify(&Step::Test(output)), LAUNCH_ERROR);
+}
+
 fn compile_fault_args(manifest: &Path) -> Vec<String> {
     vec![
         "test".into(),
@@ -642,7 +805,21 @@ fn manifest_parent(args: &[String]) -> Option<&Path> {
 }
 
 fn run_command(mut command: Command, timeout: Duration) -> CommandOutput {
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Nonblocking sockets avoid reader threads that can outlive the timeout
+    // when a descendant keeps stdout or stderr open.
+    let (mut stdout_reader, stdout_writer) = UnixStream::pair().expect("stdout socket");
+    let (mut stderr_reader, stderr_writer) = UnixStream::pair().expect("stderr socket");
+    stdout_reader
+        .set_nonblocking(true)
+        .expect("stdout nonblocking");
+    stderr_reader
+        .set_nonblocking(true)
+        .expect("stderr nonblocking");
+    command
+        .process_group(0)
+        .stdout(Stdio::from(OwnedFd::from(stdout_writer)))
+        .stderr(Stdio::from(OwnedFd::from(stderr_writer)));
+    let started = Instant::now();
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
@@ -654,56 +831,82 @@ fn run_command(mut command: Command, timeout: Duration) -> CommandOutput {
             };
         }
     };
-    let mut stdout = child.stdout.take().expect("stdout");
-    let mut stderr = child.stderr.take().expect("stderr");
-    let out_thread = thread::spawn(move || read_all(&mut stdout));
-    let err_thread = thread::spawn(move || read_all(&mut stderr));
-    let started = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if started.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break Err(());
+    // Command retains its configured descriptors after spawn.
+    drop(command);
+    let group = format!("-{}", child.id());
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut status = None;
+    let result = (|| -> io::Result<bool> {
+        loop {
+            if started.elapsed() >= timeout {
+                return Ok(true);
             }
-            Ok(None) => thread::sleep(Duration::from_millis(50)),
-            Err(err) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let stdout = out_thread.join().unwrap_or_default();
-                let stderr = err_thread.join().unwrap_or_default();
-                return CommandOutput {
-                    exit_code: None,
-                    output: format!("{err}\n{}", combine(&stdout, &stderr)),
-                    timed_out: false,
-                    spawn_error: true,
-                };
+            if status.is_none() {
+                status = child.try_wait()?;
+            }
+            let collected = stdout.len() + stderr.len();
+            let out_closed = read_available(&mut stdout_reader, &mut stdout)?;
+            let err_closed = read_available(&mut stderr_reader, &mut stderr)?;
+            if status.is_some() && out_closed && err_closed {
+                return Ok(false);
+            }
+            if collected == stdout.len() + stderr.len() {
+                thread::sleep(Duration::from_millis(5));
             }
         }
-    };
-    let stdout = out_thread.join().unwrap_or_default();
-    let stderr = err_thread.join().unwrap_or_default();
-    match status {
-        Err(()) => CommandOutput {
-            exit_code: None,
-            output: combine(&stdout, &stderr),
-            timed_out: true,
-            spawn_error: false,
+    })();
+    // The group belongs to this invocation. Clean it on success, timeout and
+    // read/wait errors, including when the direct child has already exited.
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", "--", &group])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = child.kill();
+    let reaping = Instant::now();
+    while matches!(child.try_wait(), Ok(None)) && reaping.elapsed() < Duration::from_millis(200) {
+        thread::sleep(Duration::from_millis(5));
+    }
+    let output = combine(&stdout, &stderr);
+    CommandOutput {
+        exit_code: if matches!(result, Ok(false)) {
+            status.and_then(|status| status.code())
+        } else {
+            None
         },
-        Ok(status) => CommandOutput {
-            exit_code: status.code(),
-            output: combine(&stdout, &stderr),
-            timed_out: false,
-            spawn_error: false,
+        timed_out: matches!(result, Ok(true)),
+        spawn_error: result.is_err(),
+        output: match result {
+            Err(err) => format!("{err}\n{output}"),
+            Ok(_) => output,
         },
     }
 }
 
-fn read_all(reader: &mut dyn Read) -> Vec<u8> {
-    let mut buf = Vec::new();
-    let _ = reader.read_to_end(&mut buf);
-    buf
+fn read_available(reader: &mut UnixStream, output: &mut Vec<u8>) -> io::Result<bool> {
+    // One bounded read per stream keeps a busy writer from starving the
+    // deadline check. A limit failure remains a harness error.
+    let mut buf = [0; 16 * 1024];
+    match reader.read(&mut buf) {
+        Ok(0) => Ok(true),
+        Ok(count) => {
+            if output.len() + count > OUTPUT_LIMIT {
+                return Err(io::Error::other("command output limit exceeded"));
+            }
+            output.extend_from_slice(&buf[..count]);
+            Ok(false)
+        }
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn combine(stdout: &[u8], stderr: &[u8]) -> String {
