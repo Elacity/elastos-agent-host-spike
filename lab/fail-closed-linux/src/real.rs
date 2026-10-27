@@ -986,6 +986,20 @@ fn ptrace_event(status: libc::c_int) -> libc::c_int {
 }
 
 fn resume_traced_stop(pid: libc::pid_t) -> bool {
+    // Peek only ptrace/signal stops. waitpid(WNOHANG) would also reap an
+    // exit, and then the reaper would report 0 instead of the provider code.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let peeked = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WSTOPPED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if peeked != 0 || unsafe { info.si_pid() } != pid {
+        return false;
+    }
     let mut status = 0;
     let stopped = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
     if stopped == pid && libc::WIFSTOPPED(status) {
