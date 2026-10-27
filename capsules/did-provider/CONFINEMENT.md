@@ -361,7 +361,10 @@ for did before wallet, `standin_launcher_starts_did_confined_under_the_generated
 runs did's start and outside-write journey, and
 `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
 compares did's permitted and denied suite on the committed `confine.sb` and on
-a stand-in start. The stand-in is test code and not the Runtime.
+a stand-in start. That suite holds both targets of `outside_write_denied`, so
+the sibling write beneath the same base separates a write grant on `did/` from
+one on its parent in the comparison too. The stand-in is test code and not the
+Runtime.
 
 ## Falsifiers
 

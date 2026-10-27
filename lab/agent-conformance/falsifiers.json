@@ -1,5 +1,5 @@
 {
-  "about": "Agent conformance falsifiers. Paths are relative to lab/agent-conformance. Replace each old text exactly once; every named test must run and fail, then pass after restoring the original bytes. command: lab is reserved for the provider-owned shared runner; run these by hand until that arm exists. Run F-ac1d with a synthetic parent environment so the planted bug only captures fixture values. F-probe-a through F-probe-f were F-ac2a through F-ac2f in task 002.",
+  "about": "Agent conformance falsifiers. Paths are relative to examples/agent-host. Replace each old text exactly once; every named test must run and fail, then pass after restoring the original bytes. The command is agent-conformance. Run F-ac1d with a synthetic parent environment so the planted bug only captures fixture values. F-probe-a through F-probe-f were F-ac2a through F-ac2f in task 002.",
   "retired": {
     "F-ac2a": "Retired: UsersAI binding; AC-002-ARGS. Returns to the falsifiers list once agent_cannot_read_other_agent_memory is live. Mutation remains described in GAPS.md and RUNBOOK.md.",
     "F-ac2b": "Retired: UsersAI binding; AC-002-ARGS. Returns to the falsifiers list once agent_memory_under_own_principal is live. Mutation remains described in GAPS.md and RUNBOOK.md.",
@@ -9,11 +9,11 @@
     {
       "id": "F-ac1c",
       "title": "take HOME from the parent instead of the fresh root",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "fixtures/home-source.txt",
+          "file": "../../lab/agent-conformance/fixtures/home-source.txt",
           "old": "throwaway\n",
           "new": "inherited\n"
         }
@@ -25,11 +25,11 @@
     {
       "id": "F-ac1d",
       "title": "pass inherited variables to the child",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/harness.rs",
+          "file": "../../lab/agent-conformance/src/harness.rs",
           "old": "            .env_clear()\n",
           "new": ""
         }
@@ -41,11 +41,11 @@
     {
       "id": "F-ac1e",
       "title": "let a child run past its time bound",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/harness.rs",
+          "file": "../../lab/agent-conformance/src/harness.rs",
           "old": "            if started.elapsed() >= bound {",
           "new": "            if false && started.elapsed() >= bound {"
         }
@@ -57,11 +57,11 @@
     {
       "id": "F-probe-a",
       "title": "accept activation without a launch argument channel",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "probe/src/lib.rs",
+          "file": "../../lab/agent-conformance/probe/src/lib.rs",
           "old": "pub fn run_probe() -> Result<(), &'static str> {\n    Err(\"probe launch arguments are unavailable in elastos:bus@v1\")\n}",
           "new": "pub fn run_probe() -> Result<(), &'static str> {\n    Ok(())\n}"
         }
@@ -74,11 +74,11 @@
     {
       "id": "F-probe-b",
       "title": "accept imports outside the supported Bus subset",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/artifact.rs",
+          "file": "../../lab/agent-conformance/tests/artifact.rs",
           "old": "        _ => Err(\"probe import is outside the supported ElastOS Bus interfaces\"),",
           "new": "        _ => Ok(()),"
         }
@@ -90,11 +90,11 @@
     {
       "id": "F-probe-c",
       "title": "remove the component encoding guard",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/artifact.rs",
+          "file": "../../lab/agent-conformance/tests/artifact.rs",
           "old": "    if !Parser::is_component(bytes) {\n        return Err(\"probe artifact is not a component\");\n    }\n",
           "new": ""
         }
@@ -106,11 +106,11 @@
     {
       "id": "F-probe-d",
       "title": "name a different WIT world in the manifest",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "probe/capsule.json",
+          "file": "../../lab/agent-conformance/probe/capsule.json",
           "old": "\"wit_world_sha256\": \"7a026e0a641c8c04214576dc85a677e0b52c9f02866d231119f9a3ba609d49e2\"",
           "new": "\"wit_world_sha256\": \"0000000000000000000000000000000000000000000000000000000000000000\""
         }
@@ -122,11 +122,11 @@
     {
       "id": "F-probe-e",
       "title": "change only the second independent artifact",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/probe.rs",
+          "file": "../../lab/agent-conformance/tests/common/probe.rs",
           "old": "    artifact\n}",
           "new": "    if round == 2 {\n        let mut changed = artifact;\n        changed.push(0);\n        changed\n    } else {\n        artifact\n    }\n}"
         }
@@ -138,11 +138,11 @@
     {
       "id": "F-probe-f",
       "title": "accept a structurally invalid component",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/artifact.rs",
+          "file": "../../lab/agent-conformance/tests/artifact.rs",
           "old": "    Validator::new()\n        .validate_all(bytes)\n        .map_err(|_| \"probe component is invalid\")?;",
           "new": "    let _ = Validator::new();"
         }
@@ -154,11 +154,11 @@
     {
       "id": "F-report-a",
       "title": "grade any result other than ok as PASS",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/report.rs",
+          "file": "../../lab/agent-conformance/src/report.rs",
           "old": "    if result == \"ok\" {",
           "new": "    if result != \"ok\" {"
         }
@@ -170,11 +170,11 @@
     {
       "id": "F-ac1f",
       "title": "use the Linux data-dir rule on the Mac",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/harness.rs",
+          "file": "../../lab/agent-conformance/src/harness.rs",
           "old": "    Ok(home.join(\"Library/Application Support/elastos\"))",
           "new": "    Ok(home.join(\".local/share/elastos\"))"
         }
@@ -186,11 +186,11 @@
     {
       "id": "F-ac1g",
       "title": "select a non-component Runtime ABI for the probe",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "probe/capsule.json",
+          "file": "../../lab/agent-conformance/probe/capsule.json",
           "old": "\"runtime_abi\": \"elastos.component/v1\"",
           "new": "\"runtime_abi\": \"wasi-preview1\""
         }
@@ -202,11 +202,11 @@
     {
       "id": "F-ac1i",
       "title": "install the provider under a different name while keeping the manifest path",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/mod.rs",
+          "file": "../../lab/agent-conformance/tests/common/mod.rs",
           "old": "    let installed = home.data().join(\"bin/localhost-provider\");",
           "new": "    let installed = home.data().join(\"bin/localhost-provider-copy\");"
         }
@@ -218,11 +218,11 @@
     {
       "id": "F-ac1j",
       "title": "bind the fixture API to a wildcard so the real socket census refuses it",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "fixtures/operator-api-host.txt",
+          "file": "../../lab/agent-conformance/fixtures/operator-api-host.txt",
           "old": "127.0.0.1\n",
           "new": "0.0.0.0\n"
         }
@@ -234,11 +234,11 @@
     {
       "id": "F-ac1k",
       "title": "drop the fixed mDNS-off environment entry; run only the environment test",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/harness.rs",
+          "file": "../../lab/agent-conformance/src/harness.rs",
           "old": "            .env(\"ELASTOS_CARRIER_MDNS\", \"0\")\n",
           "new": ""
         }
@@ -250,11 +250,11 @@
     {
       "id": "F-census-a",
       "title": "accept socket samples without the API listener positive control",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/operator.rs",
+          "file": "../../lab/agent-conformance/tests/common/operator.rs",
           "old": "    if count == 0 || !api_seen {",
           "new": "    if false && (count == 0 || !api_seen) {"
         }
@@ -266,11 +266,11 @@
     {
       "id": "F-managed-stop",
       "title": "omit SIGTERM and require the stop bound to refuse and clean up",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/harness.rs",
+          "file": "../../lab/agent-conformance/src/harness.rs",
           "old": "            self.signal(\"-TERM\", false)?;",
           "new": "            // planted: omit SIGTERM"
         }
@@ -282,11 +282,11 @@
     {
       "id": "F-managed-drop",
       "title": "discard the root after dropping an unstopped managed child",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/harness.rs",
+          "file": "../../lab/agent-conformance/src/harness.rs",
           "old": "        if !self.stopped {\n            self.home.keep.set(true);",
           "new": "        if !self.stopped {\n            // planted: allow root removal"
         }
@@ -298,11 +298,11 @@
     {
       "id": "F-ac1h",
       "title": "discard the Bus refusal in the read build",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "probe/src/lib.rs",
+          "file": "../../lab/agent-conformance/probe/src/lib.rs",
           "old": "        Err(error) => Err(error),",
           "new": "        Err(error) => {\n            if cfg!(feature = \"read\") {\n                return Ok(());\n            }\n            Err(error)\n        },"
         }
@@ -314,11 +314,11 @@
     {
       "id": "F-ac1n",
       "title": "discard the Bus refusal in the network build",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "probe/src/lib.rs",
+          "file": "../../lab/agent-conformance/probe/src/lib.rs",
           "old": "        Err(error) => Err(error),",
           "new": "        Err(error) => {\n            if cfg!(feature = \"network\") {\n                return Ok(());\n            }\n            Err(error)\n        },"
         }
@@ -330,11 +330,11 @@
     {
       "id": "F-probe-exclusive",
       "title": "accept two effect selectors in one probe build",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "probe/src/lib.rs",
+          "file": "../../lab/agent-conformance/probe/src/lib.rs",
           "old": "const _: () = assert!(\n    cfg!(feature = \"read\") as u8\n        + cfg!(feature = \"network\") as u8\n        + cfg!(feature = \"task\") as u8\n        + cfg!(feature = \"runaway\") as u8\n        + cfg!(feature = \"granted-read\") as u8\n        + cfg!(feature = \"sibling-read\") as u8\n        + cfg!(feature = \"memory-write\") as u8\n        + cfg!(feature = \"host-key-read\") as u8\n        <= 1,\n    \"select exactly one probe effect\"\n);\n",
           "new": ""
         }
@@ -346,11 +346,11 @@
     {
       "id": "F-ac3a",
       "title": "let the runaway build return inside Runtime fuel instead of exhausting it; bounded-trap evidence only, stop reason remains AC-005-REASON",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "probe/src/lib.rs",
+          "file": "../../lab/agent-conformance/probe/src/lib.rs",
           "old": "    loop {\n        std::hint::black_box(0_u32);\n    }",
           "new": "    for _ in 0..1000 {\n        std::hint::black_box(0_u32);\n    }\n    Ok(())"
         }
@@ -362,11 +362,11 @@
     {
       "id": "F-parallel-result",
       "title": "replace task-b with task-a so two clients return the same diagnostic",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "fixtures/parallel-tasks.txt",
+          "file": "../../lab/agent-conformance/fixtures/parallel-tasks.txt",
           "old": "task-b,29,37",
           "new": "task-a,17,23"
         }
@@ -379,11 +379,11 @@
     {
       "id": "F-parallel-capture",
       "title": "read stdout in place of the completed child stderr",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/harness.rs",
+          "file": "../../lab/agent-conformance/src/harness.rs",
           "old": "            stderr: capture(&mut self.spawned.stderr)?,",
           "new": "            stderr: capture(&mut self.spawned.stdout)?,"
         }
@@ -395,11 +395,11 @@
     {
       "id": "F-parallel-bound",
       "title": "omit the shared wall-clock deadline",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/harness.rs",
+          "file": "../../lab/agent-conformance/src/harness.rs",
           "old": "            if self.started.elapsed() >= bound {",
           "new": "            if false && self.started.elapsed() >= bound {"
         }
@@ -411,11 +411,11 @@
     {
       "id": "F-parallel-operator-guard",
       "title": "skip validation of the borrowed operator Home",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/harness.rs",
+          "file": "../../lab/agent-conformance/src/harness.rs",
           "old": "            operator.guard(operator.home(), operator.data())?;",
           "new": "            // planted: skip operator guard"
         }
@@ -427,11 +427,11 @@
     {
       "id": "F-parallel-coordinates",
       "title": "rename the fixture coordinates environment entry",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/harness.rs",
+          "file": "../../lab/agent-conformance/src/harness.rs",
           "old": "                \"ELASTOS_RUNTIME_COORDS_FILE\",",
           "new": "                \"AC_UNUSED_COORDS_PATH\","
         }
@@ -443,11 +443,11 @@
     {
       "id": "F-parallel-start",
       "title": "start only the first member of a requested group",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/harness.rs",
+          "file": "../../lab/agent-conformance/src/harness.rs",
           "old": "        for launch in launches {",
           "new": "        for launch in launches.iter().take(1) {"
         }
@@ -459,11 +459,11 @@
     {
       "id": "F-parallel-drain",
       "title": "accept completion while a descendant is still alive",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/harness.rs",
+          "file": "../../lab/agent-conformance/src/harness.rs",
           "old": "        if self.home.group_is_alive(self.pgid())? {\n            return Err(\"completed child left a live process group\");\n        }\n",
           "new": ""
         }
@@ -475,11 +475,11 @@
     {
       "id": "F-versions-required",
       "title": "accept a receipt without the Runtime identity",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/report.rs",
+          "file": "../../lab/agent-conformance/src/report.rs",
           "old": "        if self.identities.runtime.is_none() {",
           "new": "        if false && self.identities.runtime.is_none() {"
         }
@@ -491,11 +491,11 @@
     {
       "id": "F-versions-lab-cid",
       "title": "accept any nonempty string as a bundle lab CID",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/report.rs",
+          "file": "../../lab/agent-conformance/src/report.rs",
           "old": "probe\n            .bundle_lab_cid\n            .parse::<capsule_identity::LabCid>()\n            .is_ok()",
           "new": "(!probe.bundle_lab_cid.is_empty())"
         }
@@ -507,11 +507,11 @@
     {
       "id": "F-versions-bundle",
       "title": "serialize the component hash as the complete bundle identity",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/report.rs",
+          "file": "../../lab/agent-conformance/src/report.rs",
           "old": "        \"probes\": evidence.identities.launched.values().collect::<Vec<_>>(),",
           "new": "        \"probes\": evidence.identities.launched.values().map(|probe| { let mut probe = probe.clone(); probe.bundle_lab_cid = probe.component_sha256.clone(); probe }).collect::<Vec<_>>(),"
         }
@@ -523,11 +523,11 @@
     {
       "id": "F-versions-boundary",
       "title": "omit the receipt authority boundary",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/report.rs",
+          "file": "../../lab/agent-conformance/src/report.rs",
           "old": "        \"description\": \"Version evidence only. The bundle lab CID and any separate signed record give zero admission or permission credit. Runtime decides admission; resource authority requires a Runtime grant for the requesting session. Only the observed Runtime journey supplies that evidence.\",\n",
           "new": ""
         }
@@ -539,11 +539,11 @@
     {
       "id": "F-ac1a",
       "title": "grant both fixture children of the parent through exact entries",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "fixtures/grants.json",
+          "file": "../../lab/agent-conformance/fixtures/grants.json",
           "old": "{\n  \"deny_reason\": \"fixture denies unlisted read\",\n  \"grants\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/granted.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: fixture read\",\n      \"duration\": \"once\"\n    }\n  ]\n}\n",
           "new": "{\n  \"deny_reason\": \"fixture denies unlisted read\",\n  \"grants\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/granted.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: fixture read\",\n      \"duration\": \"once\"\n    },\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/sibling.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: fixture read\",\n      \"duration\": \"once\"\n    }\n  ]\n}\n"
         }
@@ -555,11 +555,11 @@
     {
       "id": "F-ac1b",
       "title": "seed file bytes different from the guest expectation",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "fixtures/granted-bytes.txt",
+          "file": "../../lab/agent-conformance/fixtures/granted-bytes.txt",
           "old": "grant-fixture-bytes",
           "new": "wrong-fixture-data!"
         }
@@ -571,11 +571,11 @@
     {
       "id": "F-report-b",
       "title": "grade a SKIPPED row as PASS",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/report.rs",
+          "file": "../../lab/agent-conformance/src/report.rs",
           "old": "format!(\"SKIPPED ({})\", reasons[0])",
           "new": "\"PASS\".into()"
         }
@@ -588,11 +588,11 @@
     {
       "id": "F-grant-match",
       "title": "ignore the exact resource action and reason match",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "entry[\"resource\"] == resource && entry[\"action\"] == action && entry[\"reason\"] == reason",
           "new": "{ let _ = (entry, resource, action, reason); true }"
         }
@@ -604,11 +604,11 @@
     {
       "id": "F-grant-ambiguous",
       "title": "choose requests even when one fixture entry matches twice",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "if used.contains(index) || matched.iter().filter(|m| **m == Some(*index)).count() != 1 {",
           "new": "if false && (used.contains(index) || matched.iter().filter(|m| **m == Some(*index)).count() != 1) {"
         }
@@ -620,11 +620,11 @@
     {
       "id": "F-grant-credentials",
       "title": "use an empty fallback for a missing attach secret",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "    field(&value, \"attach_secret\")\n        .map(str::to_owned)\n        .map_err(|_| \"fixture coordinates require attach_secret\")",
           "new": "    Ok(value[\"attach_secret\"].as_str().unwrap_or(\"\").to_owned())"
         }
@@ -636,11 +636,11 @@
     {
       "id": "F-grant-capture",
       "title": "accept a capture containing a fixture credential",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "        if self.credentials.iter().any(|value| {",
           "new": "        if false && self.credentials.iter().any(|value| {"
         }
@@ -653,11 +653,11 @@
     {
       "id": "F-grant-http",
       "title": "accept a refused HTTP status",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "    if !lines\n        .next()\n        .is_some_and(|line| line.starts_with(\"HTTP/1.1 200 \"))",
           "new": "    if false && !lines\n        .next()\n        .is_some_and(|line| line.starts_with(\"HTTP/1.1 200 \"))"
         }
@@ -669,11 +669,11 @@
     {
       "id": "F-grant-service",
       "title": "stop servicing approvals while the probe waits",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/harness.rs",
+          "file": "../../lab/agent-conformance/src/harness.rs",
           "old": "            service(&mut self)?;",
           "new": "            let _ = &mut service;"
         }
@@ -686,11 +686,11 @@
     {
       "id": "F-grant-content",
       "title": "accept every provider result as the expected file bytes",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "probe/src/lib.rs",
+          "file": "../../lab/agent-conformance/probe/src/lib.rs",
           "old": "    body == br#\"{\"data\":{\"content\":\"grant-fixture-bytes\",\"encoding\":\"utf8\",\"size\":19},\"status\":\"ok\"}\"#",
           "new": "    let _ = body;\n    true"
         }
@@ -702,11 +702,11 @@
     {
       "id": "F-probe-rebuild",
       "title": "reuse a compiled probe instead of compiling the next round",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/probe.rs",
+          "file": "../../lab/agent-conformance/tests/common/probe.rs",
           "old": "    let cleaned = offline_build(\"cargo\", &target)",
           "new": "    let cleaned = offline_build(\"true\", &target)"
         }
@@ -718,11 +718,11 @@
     {
       "id": "F-capture-inventory",
       "title": "accept an empty harness capture inventory",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/harness.rs",
+          "file": "../../lab/agent-conformance/src/harness.rs",
           "old": "        if self.captures.borrow().is_empty() {",
           "new": "        if false && self.captures.borrow().is_empty() {"
         }
@@ -734,11 +734,11 @@
     {
       "id": "F-output-inventory",
       "title": "accept missing source or report evidence",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "            if !inventory\n                .iter()",
           "new": "            if false && !inventory\n                .iter()"
         }
@@ -749,14 +749,14 @@
     },
     {
       "id": "F-ac2c",
-      "title": "add the absent policy file and allow every attempted effect (one fixture read)",
-      "command": "lab",
+      "title": "a missing policy file is treated as a grant of the one read",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "fixtures/no-policy.json",
-          "old": "",
-          "new": "{\n  \"deny_reason\": \"fixture denies unlisted read\",\n  \"grants\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/granted.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: fixture read\",\n      \"duration\": \"once\"\n    }\n  ]\n}\n"
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
+          "old": "            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((\n                Self {\n                    deny_reason: \"fixture policy absent\".into(),\n                    entries: Vec::new(),\n                    files: Vec::new(),\n                },\n                false,\n            )),",
+          "new": "            Err(_error) if _error.kind() == std::io::ErrorKind::NotFound => Ok((Self::parse(r#\"{\n  \"deny_reason\": \"fixture denies unlisted read\",\n  \"grants\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/granted.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: fixture read\",\n      \"duration\": \"once\"\n    }\n  ]\n}\n\"#)?, true)),"
         }
       ],
       "tests": [
@@ -766,11 +766,11 @@
     {
       "id": "F-ac2-human",
       "title": "make the human-space refusal activation succeed",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "probe/src/lib.rs",
+          "file": "../../lab/agent-conformance/probe/src/lib.rs",
           "old": "    #[cfg(feature = \"read\")]\n    let (resource, action)",
           "new": "    #[cfg(feature = \"read\")]\n    if option_env!(\"AC_PROBE_READ_RESOURCE\").is_some_and(|r| r.starts_with(\"localhost://Users/\")) {\n        return Ok(());\n    }\n    #[cfg(feature = \"read\")]\n    let (resource, action)"
         }
@@ -782,11 +782,11 @@
     {
       "id": "F-ac2-write",
       "title": "make the memory-write activation succeed before its Bus request",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "probe/src/lib.rs",
+          "file": "../../lab/agent-conformance/probe/src/lib.rs",
           "old": "fn write_memory() -> Result<(), elastos::bus::types::BusError> {\n    use",
           "new": "fn write_memory() -> Result<(), elastos::bus::types::BusError> {\n    if std::hint::black_box(true) { return Ok(()); }\n    use"
         }
@@ -798,16 +798,16 @@
     {
       "id": "F-ac8a",
       "title": "grant the exact fake host-file request and its manifest bound",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "fixtures/grants.json",
+          "file": "../../lab/agent-conformance/fixtures/grants.json",
           "old": "{\n  \"deny_reason\": \"fixture denies unlisted read\",\n  \"grants\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/granted.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: fixture read\",\n      \"duration\": \"once\"\n    }\n  ]\n}\n",
           "new": "{\n  \"deny_reason\": \"fixture denies unlisted read\",\n  \"grants\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/granted.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: fixture read\",\n      \"duration\": \"once\"\n    },\n    {\n      \"resource\": \"localhost://Public/../../../../.ssh/id_ed25519\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: fixture read\",\n      \"duration\": \"once\"\n    }\n  ]\n}\n"
         },
         {
-          "file": "probe/capsule.json",
+          "file": "../../lab/agent-conformance/probe/capsule.json",
           "old": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\"]",
           "new": "\"capabilities\": [\"localhost://Public/agent-conformance-grants/*\", \"localhost://Public/../../../../.ssh/id_ed25519\"]"
         }
@@ -820,11 +820,11 @@
     {
       "id": "F-ac8-fixture",
       "title": "use the wrong relative depth for the fake file",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "fixtures/host-key-read.txt",
+          "file": "../../lab/agent-conformance/fixtures/host-key-read.txt",
           "old": "localhost://Public/../../../../.ssh/id_ed25519",
           "new": "localhost://Public/../../../.ssh/id_ed25519"
         }
@@ -836,11 +836,11 @@
     {
       "id": "F-ac8-receipt",
       "title": "accept the host read without its launched bundle identity",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/report.rs",
+          "file": "../../lab/agent-conformance/src/report.rs",
           "old": "\"host_key_read_is_refused\" => &[\"host-key-read\"],",
           "new": "\"host_key_read_is_refused\" => &[],"
         }
@@ -852,11 +852,11 @@
     {
       "id": "F-cleanup-temp",
       "title": "plant a TMPDIR file after the run children finish",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/effects.rs",
+          "file": "../../lab/agent-conformance/tests/effects.rs",
           "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());",
           "new": "    std::fs::write(home.temp().join(\"planted-cleanup\"), b\"fixture\").unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());"
         }
@@ -868,16 +868,16 @@
     {
       "id": "F-cleanup-process",
       "title": "leave a separate bounded process group holding the root through the census",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/effects.rs",
+          "file": "../../lab/agent-conformance/tests/effects.rs",
           "old": "    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());",
           "new": "    let _leftover = home.start(std::path::Path::new(\"/bin/sleep\"), &[\"20\"]).unwrap();\n    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());"
         },
         {
-          "file": "tests/effects.rs",
+          "file": "../../lab/agent-conformance/tests/effects.rs",
           "old": "    if require_live_grants {",
           "new": "    drop(_leftover);\n    if require_live_grants {"
         }
@@ -889,11 +889,11 @@
     {
       "id": "F-cleanup-pending",
       "title": "accept a pending request after the journey",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "    if !requests.is_empty() {",
           "new": "    if false && !requests.is_empty() {"
         }
@@ -905,11 +905,11 @@
     {
       "id": "F-cleanup-scope",
       "title": "count a shell-local grant list as global live evidence",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "    if response[\"scope\"] != \"all_sessions_live\" {",
           "new": "    if false && response[\"scope\"] != \"all_sessions_live\" {"
         }
@@ -921,11 +921,11 @@
     {
       "id": "F-cleanup-socket",
       "title": "ignore a successful connection after stop",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/census.rs",
+          "file": "../../lab/agent-conformance/src/census.rs",
           "old": "            Ok(_) => 1,",
           "new": "            Ok(_) => 0,"
         }
@@ -937,11 +937,11 @@
     {
       "id": "F-cleanup-captures",
       "title": "discard the census capture inventory",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/census.rs",
+          "file": "../../lab/agent-conformance/src/census.rs",
           "old": "    home.collect_captures_from(&tool_home)?;",
           "new": "    // Planted: discard tool captures."
         }
@@ -953,11 +953,11 @@
     {
       "id": "F-cleanup-earlier",
       "title": "skip roots left by earlier runs",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/census.rs",
+          "file": "../../lab/agent-conformance/src/census.rs",
           "old": "    let holders = root_holders(&home, &roots)?;",
           "new": "    let holders = Vec::new();"
         }
@@ -969,11 +969,11 @@
     {
       "id": "F-cleanup-report",
       "title": "omit the cleanup scope from the existing table",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/report.rs",
+          "file": "../../lab/agent-conformance/src/report.rs",
           "old": "                text.push_str(\" | cleanup census, lab half of A10/A11/A12; cancel and kill-worker have separate journey rows\");",
           "new": "                text.push_str(\"\");"
         }
@@ -985,11 +985,11 @@
     {
       "id": "F-report-blocker-list",
       "title": "keep only the first whitespace word of a blocker reason",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/report.rs",
+          "file": "../../lab/agent-conformance/src/report.rs",
           "old": "        let parts: Vec<_> = reason.split(';').map(str::trim).collect();",
           "new": "        let parts: Vec<_> = reason.split_whitespace().take(1).collect();"
         }
@@ -1001,11 +1001,11 @@
     {
       "id": "F-ac3b",
       "title": "grant instance 2 a read of instance 1 file",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "fixtures/instance-grants.json",
+          "file": "../../lab/agent-conformance/fixtures/instance-grants.json",
           "old": "  \"grants\": [\n",
           "new": "  \"grants\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/instance-1/own.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: instance-2 sibling\",\n      \"duration\": \"session\"\n    },\n"
         }
@@ -1018,16 +1018,16 @@
     {
       "id": "F-ac3c",
       "title": "move instance 2 own file into instance 1 directory",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "fixtures/instance-grants.json",
+          "file": "../../lab/agent-conformance/fixtures/instance-grants.json",
           "old": "{\n  \"deny_reason\": \"fixture denies unlisted read\",\n  \"grants\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/instance-1/own.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: instance-1 own\",\n      \"duration\": \"session\"\n    },\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/instance-2/own.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: instance-2 own\",\n      \"duration\": \"session\"\n    }\n  ],\n  \"files\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/instance-1/own.txt\",\n      \"content\": \"instance-one-bytes\"\n    },\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/instance-2/own.txt\",\n      \"content\": \"instance-two-bytes\"\n    }\n  ]\n}\n",
           "new": "{\n  \"deny_reason\": \"fixture denies unlisted read\",\n  \"grants\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/instance-1/own.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: instance-1 own\",\n      \"duration\": \"session\"\n    },\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/instance-1/other.txt\",\n      \"action\": \"read\",\n      \"reason\": \"agent conformance: instance-2 own\",\n      \"duration\": \"session\"\n    }\n  ],\n  \"files\": [\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/instance-1/own.txt\",\n      \"content\": \"instance-one-bytes\"\n    },\n    {\n      \"resource\": \"localhost://Public/agent-conformance-grants/instance-1/other.txt\",\n      \"content\": \"instance-two-bytes\"\n    }\n  ]\n}\n"
         },
         {
-          "file": "probe/src/lib.rs",
+          "file": "../../lab/agent-conformance/probe/src/lib.rs",
           "old": "    \"localhost://Public/agent-conformance-grants/instance-2/own.txt\",",
           "new": "    \"localhost://Public/agent-conformance-grants/instance-1/other.txt\","
         }
@@ -1040,11 +1040,11 @@
     {
       "id": "F-ac3d",
       "title": "start the second client only after the first exits",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/harness.rs",
+          "file": "../../lab/agent-conformance/src/harness.rs",
           "old": "        for launch in launches {\n            group.children.push(RunningChild {",
           "new": "        for launch in launches {\n            if launches.len() == 2 {\n                if let Some(first) = group.children.first_mut() {\n                    while first.is_alive()? {\n                        std::thread::sleep(Duration::from_millis(10));\n                    }\n                }\n            }\n            group.children.push(RunningChild {"
         }
@@ -1057,11 +1057,11 @@
     {
       "id": "F-instance-receipt",
       "title": "accept an instance journey without its second launched identity",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/report.rs",
+          "file": "../../lab/agent-conformance/src/report.rs",
           "old": "| \"killed_worker_settlement_recorded_without_retry\" => &[\"instance-1\", \"instance-2\"],",
           "new": "| \"killed_worker_settlement_recorded_without_retry\" => &[\"instance-1\"],"
         }
@@ -1073,11 +1073,11 @@
     {
       "id": "F-instance-bytes",
       "title": "accept only an instance file response prefix",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "probe/src/lib.rs",
+          "file": "../../lab/agent-conformance/probe/src/lib.rs",
           "old": "body == *expected",
           "new": "body.starts_with(&expected[..12])"
         }
@@ -1089,11 +1089,11 @@
     {
       "id": "F-instance-selector",
       "title": "allow an instance selector without the granted-read effect",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "probe/src/lib.rs",
+          "file": "../../lab/agent-conformance/probe/src/lib.rs",
           "old": "            || cfg!(feature = \"granted-read\"),",
           "new": "            || true,"
         }
@@ -1105,11 +1105,11 @@
     {
       "id": "F-instance-evidence",
       "title": "accept missing printed instance evidence",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "if !printed.lines().any(|line| line.starts_with(prefix)) {",
           "new": "if false && !printed.lines().any(|line| line.starts_with(prefix)) {"
         }
@@ -1121,11 +1121,11 @@
     {
       "id": "F-cid-provider",
       "title": "stamp the content provider script with its own hash so Runtime spawns it",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/runtime.rs",
+          "file": "../../lab/agent-conformance/tests/runtime.rs",
           "old": "Sha256::digest(b\"uninstalled content provider fixture\\n\")",
           "new": "Sha256::digest(script)"
         }
@@ -1137,11 +1137,11 @@
     {
       "id": "F-cancel-sibling",
       "title": "cancel every pending first request instead of instance-1 only",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "&& request[\"session_id\"] == overlap.first[0][\"session_id\"]",
           "new": "&& true"
         }
@@ -1153,11 +1153,11 @@
     {
       "id": "F-cleanup-live-wiring",
       "title": "bypass the live census call while its control request is pending",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/effects.rs",
+          "file": "../../lab/agent-conformance/tests/effects.rs",
           "old": "controller.check_cleanup_wiring(|controller| controller.cleanup_state())",
           "new": "controller.check_cleanup_wiring(|_controller| Ok(\"pending:0 grants:BLOCKED(AC-021-GRANTS)\"))"
         }
@@ -1169,11 +1169,11 @@
     {
       "id": "F-cancel-retry",
       "title": "accept every request after cancellation",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "    fn ready_after_cancel(&self, pending: &[Value]) -> Result<bool> {",
           "new": "    fn ready_after_cancel(&self, pending: &[Value]) -> Result<bool> {\n        if self.cancel { return Ok(!pending.is_empty()); }"
         }
@@ -1185,11 +1185,11 @@
     {
       "id": "F-cancel-reason",
       "title": "deliver a different cancellation reason",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "            self.deny(request, CANCEL_REASON)?;",
           "new": "            self.deny(request, \"fixture wrong cancellation reason\")?;"
         }
@@ -1201,11 +1201,11 @@
     {
       "id": "F-cancel-receipt",
       "title": "omit both launched identities for the cancel row",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/report.rs",
+          "file": "../../lab/agent-conformance/src/report.rs",
           "old": "\n        | \"cancelled_instance_settles_with_reason_sibling_completes\"",
           "new": ""
         }
@@ -1217,11 +1217,11 @@
     {
       "id": "F-kill-retry",
       "title": "start the killed worker once more through the existing spawn path",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/effects.rs",
+          "file": "../../lab/agent-conformance/tests/effects.rs",
           "old": "            controller.poll(running)?;",
           "new": "            controller.poll(running)?;\n            if outcome == ReadOutcome::Kill && running.kill_recorded(0) && launch_homes[0].run_starts() == 1 {\n                let _retry = RunningInstances::start(&launches[..1], Some(&home))?;\n            }"
         }
@@ -1233,11 +1233,11 @@
     {
       "id": "F-kill-sibling",
       "title": "kill instance-2 along with instance-1",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "                running.kill_worker(0)?;",
           "new": "                running.kill_worker(0)?;\n                running.kill_worker(1)?;"
         }
@@ -1249,11 +1249,11 @@
     {
       "id": "F-kill-record",
       "title": "lose the harness record of the requested kill",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/harness.rs",
+          "file": "../../lab/agent-conformance/src/harness.rs",
           "old": "        self.kills[index] = Some(self.started.elapsed());",
           "new": "        self.kills[index] = None;"
         }
@@ -1265,11 +1265,11 @@
     {
       "id": "F-kill-monitor",
       "title": "accept a request from any session after the worker kill",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "    fn ready_after_cancel(&self, pending: &[Value]) -> Result<bool> {",
           "new": "    fn ready_after_cancel(&self, pending: &[Value]) -> Result<bool> {\n        if self.kill { return Ok(!pending.is_empty()); }"
         }
@@ -1281,11 +1281,11 @@
     {
       "id": "F-orphan-settlement",
       "title": "omit the shared orphan denial after client exit",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "        for request in pending {\n            self.deny(request, reason)?;\n        }\n        let after = self.pending()?;",
           "new": "        let _ = (pending, reason);\n        let after = self.pending()?;"
         }
@@ -1298,11 +1298,11 @@
     {
       "id": "F-kill-receipt",
       "title": "omit the killed worker journey from launched identity requirements",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "src/report.rs",
+          "file": "../../lab/agent-conformance/src/report.rs",
           "old": "\n        | \"killed_worker_settlement_recorded_without_retry\"",
           "new": ""
         }
@@ -1314,11 +1314,11 @@
     {
       "id": "F-overlap-second-barrier",
       "title": "decide a lone sibling request before the second barrier",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "        if self.stage == 2 {\n",
           "new": "        if self.stage == 1 { return Ok(!pending.is_empty()); }\n        if self.stage == 2 {\n"
         }
@@ -1331,11 +1331,11 @@
     {
       "id": "F-overlap-sessions",
       "title": "allow both instance requests in one client session",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "    if field(ordered[0], \"session_id\")? == field(ordered[1], \"session_id\")? {\n        return Err(\"overlap: two distinct client sessions required\");\n    }\n",
           "new": ""
         }
@@ -1347,11 +1347,11 @@
     {
       "id": "F-overlap-sibling-new",
       "title": "allow a sibling read to reuse an own-read request id",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "!first\n            .iter()\n            .any(|first| first[\"request_id\"] == request[\"request_id\"])",
           "new": "true"
         }
@@ -1365,11 +1365,11 @@
     {
       "id": "F-sibling-one-rule",
       "title": "drop the resource comparison from the one sibling-read rule",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "request[\"resource\"] == first[1 - index][\"resource\"]",
           "new": "true"
         }
@@ -1383,16 +1383,16 @@
     {
       "id": "F-overlap-alive",
       "title": "decide the overlap barrier after a client exits",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "        if !running.all_alive(2)? {\n            return Err(\"overlap: both clients must remain alive through both barriers\");\n        }\n",
           "new": ""
         },
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "        if self.barrier_started.elapsed() >= OVERLAP_BOUND || !running.all_alive(2)? {",
           "new": "        if self.barrier_started.elapsed() >= OVERLAP_BOUND {"
         }
@@ -1404,11 +1404,11 @@
     {
       "id": "F-seed-dotdot",
       "title": "accept a parent-directory segment in a seed resource",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/common/grants.rs",
+          "file": "../../lab/agent-conformance/tests/common/grants.rs",
           "old": "            if resource.split('/').any(|segment| segment == \"..\") {\n                return Err(\"seed fixture refuses a parent-directory segment\");\n            }\n",
           "new": ""
         }
@@ -1420,11 +1420,11 @@
     {
       "id": "F-agent-host-p7",
       "title": "run the real agent-host P7 manifest gap before the UsersAI binding lands",
-      "command": "lab",
+      "command": "agent-conformance",
       "expect": "caught",
       "edits": [
         {
-          "file": "tests/effects.rs",
+          "file": "../../lab/agent-conformance/tests/effects.rs",
           "old": "#[ignore = \"blocked: UsersAI binding\"]\nfn real_agent_host_journal_under_usersai_principal()",
           "new": "fn real_agent_host_journal_under_usersai_principal()"
         }

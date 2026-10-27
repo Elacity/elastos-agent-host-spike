@@ -6690,3 +6690,46 @@ The shared heavy-build lease was free (`fcntl.flock` acquired in 0.000 s) and re
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `standin-runtime/mod.rs:176` applies the test-supplied `Start`. This change adds no capsule import. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:823` starts the ten resident tests. Each plant above fails its named assertion and passes after restore. |
 | 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:144` admits a path. Launch mints `component-N` and does not call `seed_grant`. |
+
+## 042 — Point the falsifier list at the one runner
+
+042: Every live entry in `falsifiers.json` uses command `agent-conformance`, and every edit path is `../../lab/agent-conformance/` plus the same relative path. The list still has 87 ids. `F-ac2c` plants the `NotFound` arm of `Fixture::no_policy` so a missing policy file is treated as a grant of the one read. `fixtures/no-policy.json` stays absent. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Path check, resolved from `examples/agent-host`: target_count 19; edits 91; distinct_files 19; missing 0; outside 0. Every edit path is an existing file, and its path relative to the repo is one of those 19 recovery targets.
+
+`python3 -I examples/agent-host/falsify.py --from lab/agent-conformance/falsifiers.json --list` exited 0 and listed 87 ids.
+
+One invocation of `python3 -I examples/agent-host/falsify.py --from lab/agent-conformance/falsifiers.json F-report-blocker-list F-ac1c F-ac2c F-agent-host-p7` took 184.915 seconds and exited 1. The runner's exit is the ignored test: `not as expected: F-agent-host-p7`. Verdict lines:
+
+```text
+baseline: 3 named tests pass without an edit, 1 do not
+F-ac1c CAUGHT                            25s  take HOME from the parent instead of the fresh root
+F-ac2c CAUGHT                            49s  a missing policy file is treated as a grant of the one read
+F-report-blocker-list CAUGHT                            18s  keep only the first whitespace word of a blocker reason
+F-agent-host-p7 NOT RUN                            0s  run the real agent-host P7 manifest gap before the UsersAI binding lands
+       did not run without the edit: real_agent_host_journal_under_usersai_principal
+summary: 3 CAUGHT, 1 NOT RUN of 4
+not as expected: F-agent-host-p7
+```
+
+The first three are CAUGHT. `F-agent-host-p7` is NOT RUN with `did not run without the edit`. The other 83 ids were not run. There was no census rerun of `F-ac2c`.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`. The shared heavy-build lease wait was 0.000 seconds before the falsifier run and 46.819 seconds before the gates. Both gate commands stayed inside 600 seconds. The locked suite passed on the first run, so there was no census rerun.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.294 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 465.326 seconds. 127 passed, 0 failed, 14 ignored.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `falsifiers.json:2` names the runner command and paths relative to `examples/agent-host`. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `tests/common/grants.rs:45` still returns `false` when the policy file is missing. |
+| 3. A second path or a second copy of one rule? | No | `RUNBOOK.md:412` applies `F-ac2c` with the one `agent-conformance` command. |
+| 4. Runtime core grows? | No | The edit is `falsifiers.json`, `RUNBOOK.md`, `GAPS.md` and `LOG.md`. `elastos/` is unchanged. |
+| 5. Refusals deny by default with a clear reason? | Yes | `tests/common/grants.rs:39` keeps the `NotFound` arm and supplies zero entries. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `tests/effects.rs:275` calls `poll` only when `apply_policy` is true. This change adds no capsule import. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `falsifiers.json:763` names `no_policy_file_does_not_mean_allow`. The runner reported `F-ac2c` CAUGHT. |
+| 8. Identity, admission and allowance stay separate? | Yes | `tests/common/grants.rs:39` treats a missing file as zero entries. A grant still requires the flag at `tests/effects.rs:275`. |
