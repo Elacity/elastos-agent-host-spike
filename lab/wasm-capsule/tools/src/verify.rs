@@ -58,8 +58,8 @@
 //! needs. [`verify_checked`] refuses a module import with no typed entry, even
 //! when it is granted. The table is lab input for a typed-operations model, a
 //! lab stand-in, not admission; no manifest field is added, and the module's
-//! own import section stays the declaration. The import's Wasm type is not
-//! checked against its entry: the audit's v1 API returns names only.
+//! own import section stays the declaration. Imports are not type-checked;
+//! see README's typed lab operations gap.
 
 use std::fmt;
 use std::fs;

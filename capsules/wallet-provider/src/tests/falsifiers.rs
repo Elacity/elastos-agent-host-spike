@@ -161,8 +161,14 @@ use std::process::Command;
 /// (b), (e) and (d); WP114 replaces the stand-in's generated-profile start
 /// with a bare start, so
 /// `standin_launcher_starts_wallet_confined_under_the_generated_profile` fails
-/// at its outside `init`.
-const EXPECTED_FALSIFIERS: usize = 113;
+/// at its outside `init`. Task 095's WP116 binds the stand-in's `STORAGE_ROOT`
+/// to the base instead of the wallet directory, so
+/// `standin_start_matches_the_oracle_on_the_permitted_and_denied_suite` fails
+/// on a denied case the widened grant permits, and WP117 writes the generated
+/// profile but starts under the committed `confine.sb`, so
+/// `standin_start_runs_under_the_generated_profile_not_the_committed_file`
+/// fails because the start is then Started.
+const EXPECTED_FALSIFIERS: usize = 115;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

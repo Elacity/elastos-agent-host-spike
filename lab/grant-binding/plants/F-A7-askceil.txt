@@ -1,0 +1,8 @@
+id: F-A7-askceil
+file: src/ask.rs
+test: ask::model_forged_ceiling_does_not_replace_the_admitted_amount
+--- old
+        self.admit(ask.amount);
+--- new
+        self.admit(if request.forged_ceiling == 0 { ask.amount } else { request.forged_ceiling });
+--- end
