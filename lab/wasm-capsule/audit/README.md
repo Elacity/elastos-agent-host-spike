@@ -31,9 +31,10 @@ cargo fmt --manifest-path lab/wasm-capsule/audit/Cargo.toml -- --check
 cargo test --locked --manifest-path lab/wasm-capsule/audit/Cargo.toml
 ```
 
-The nine `core_imports` tests cover default features, named refusals, exact
+The eleven `core_imports` tests cover default features, named refusals, exact
 declarations, malformed bytes, custom-section content, compact import groups,
-refusal order and API v1. The two retained `skeleton` tests pin the manifest
+refusal order and API v1, and memory page limits for a defined memory and an absent maximum.
+The two retained `skeleton` tests pin the manifest
 and workspace boundary. The nine `component_imports` tests cover exact names
 and versions (including same-major, pre-release and build-metadata versions;
 a declared pre-release or build version does not match the release;
@@ -118,6 +119,7 @@ apply and verify each entry by hand in this workspace.
 | F-CWA17a | Match the name by a declared suffix while the module matches exactly | `declared_import_passes_and_only_that_one` |
 | F-CWA17b | Match the module by a declared suffix while the name matches exactly | `declared_import_passes_and_only_that_one` |
 | F-CWA18a | Match an interface name that ends with a declared interface | `a_different_version_of_a_declared_interface_is_refused` |
+| F-CWA20a | Drop every memory maximum | `defined_memory_reports_its_page_limits` |
 
 Start with passing checks. Save the original bytes of the edited file and its
 SHA-256, then apply one entry's exact edits. With the check environment above,
@@ -425,3 +427,18 @@ and locked-test checks passed before the first mutation and after the catches,
 with all 20 tests passing offline under `RUST_TEST_THREADS=2` and
 `CARGO_INCREMENTAL=0`. The implementation, API document, other tests, audit
 manifest, workspace manifest and workspace lockfile stayed unchanged.
+
+The cwa-020d in-tree run replaced `maximum: ty.maximum,` with `maximum: None,`
+for F-CWA20a. `defined_memory_reports_its_page_limits` built and failed at
+`assert_eq`. It returned
+`Ok([MemoryLimits { minimum: 16, maximum: None, memory64: false, shared: false }, MemoryLimits { minimum: 1, maximum: None, memory64: false, shared: false }])`
+where the expected first maximum was `Some(1024)`. Under that same edit,
+`memory_without_a_maximum_reports_none` passed. `src/lib.rs` restored
+byte-identical, SHA-256
+`11dcea24b726781d4399136ff6ce5d36ed5bb1294e8c4fb1f5971b3a2bdc1c2b`. F-CWA0e
+still failed `public_api_is_v1` at its assertion,
+`unexpected public item: pub fn audit_all() {}`, and the same SHA-256 matched
+after that restore. All 55 falsifier `old` texts occurred exactly once. The
+clean format check and locked tests passed before the mutation and after the
+restores: 22 tests (11 `core_imports`, 9 `component_imports`, 2 `skeleton`)
+offline under `RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`.
