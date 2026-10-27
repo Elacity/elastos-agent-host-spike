@@ -344,6 +344,223 @@ COVER_LINES = (
 )
 COVER_QUOTE = COVER_LINES[5]
 
+NO_PROVIDER_NUMBER = 3339
+NO_PROVIDER_SPAN = "examples/agent-host/src/lib.rs:3339"
+PARENT_GRANT_DOC_NUMBER = 3360
+PARENT_GRANT_DOC_SPAN = "examples/agent-host/src/lib.rs:3360"
+NARROWER_NUMBER = 3370
+NARROWER_SPAN = "examples/agent-host/src/lib.rs:3370"
+CHILD_GRANT_NONE_NUMBER = 3382
+CHILD_GRANT_NONE_SPAN = "examples/agent-host/src/lib.rs:3382"
+INIT_GUARD_NUMBER = 3387
+INIT_GUARD_SPAN = "examples/agent-host/src/lib.rs:3387"
+PROJECT_RESOURCE_NUMBER = 3403
+PROJECT_RESOURCE_SPAN = "examples/agent-host/src/lib.rs:3403"
+PARENT_COMPARE_NUMBER = 3449
+PARENT_COMPARE_SPAN = "examples/agent-host/src/lib.rs:3449"
+
+# The one propose_hosted walk, as the live draft indents it.
+HOSTED_WALK_LINES = (
+    "/// Record a hosted model proposal. The resource names the model. There is",
+    "/// no secret field. This does not call a provider.",
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    "fn propose_hosted(journal: &mut Journal, resource: &str) -> Result<u64, &'static str> {",
+    '    if !resource.starts_with("localhost://")',
+    '        || resource.chars().any(char::is_whitespace)',
+    '        || host_path(resource)',
+    '    {',
+    '        return Err("host path");',
+    '    }',
+    '    let id = propose_step(journal);',
+    '    let step = journal',
+    '        .steps',
+    '        .iter_mut()',
+    '        .find(|step| step.id == id)',
+    '        .expect("just pushed");',
+    '    step.kind = ProposalKind::Hosted;',
+    '    step.resource = resource.to_string();',
+    '    Ok(id)',
+    '}',
+)
+NO_PROVIDER_QUOTE = HOSTED_WALK_LINES[1]
+
+# The one propose_child walk, as the live draft indents it.
+CHILD_WALK_LINES = (
+    "/// A child is a separate step. Its resource must sit under the parent's",
+    "/// resource. It does not copy the parent's grant.",
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    'fn propose_child(',
+    '    journal: &mut Journal,',
+    '    parent_id: u64,',
+    '    resource: &str,',
+    ") -> Result<u64, &'static str> {",
+    '    let Some(parent) = journal.steps.iter().find(|step| step.id == parent_id) else {',
+    '        return Err("no parent");',
+    '    };',
+    '    if parent.resource.is_empty() || !narrower_resource(&parent.resource, resource) {',
+    '        return Err("not a subset");',
+    '    }',
+    '    let id = propose_step(journal);',
+    '    let step = journal',
+    '        .steps',
+    '        .iter_mut()',
+    '        .find(|step| step.id == id)',
+    '        .expect("just pushed");',
+    '    step.kind = ProposalKind::Child;',
+    '    step.resource = resource.to_string();',
+    '    step.parent_id = Some(parent_id);',
+    '    step.grant = None;',
+    '    Ok(id)',
+    '}',
+)
+PARENT_GRANT_DOC_QUOTE = CHILD_WALK_LINES[1]
+NARROWER_QUOTE = CHILD_WALK_LINES[11]
+CHILD_GRANT_NONE_QUOTE = CHILD_WALK_LINES[23]
+
+# The one propose_init walk, as the live draft indents it.
+INIT_WALK_LINES = (
+    '/// Record a project proposal. The resource is a `localhost://` project name.',
+    '/// A host path or a slash inside the root or the name creates no step.',
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    "fn propose_init(journal: &mut Journal, root: &str, name: &str) -> Result<u64, &'static str> {",
+    '    if root.is_empty()',
+    '        || name.is_empty()',
+    '        || root',
+    '            .chars()',
+    "            .any(|ch| ch.is_whitespace() || ch == '/' || ch == '\\\\')",
+    '        || name',
+    '            .chars()',
+    "            .any(|ch| ch.is_whitespace() || ch == '/' || ch == '\\\\')",
+    '        || host_path(root)',
+    '        || host_path(name)',
+    '    {',
+    '        return Err("host path");',
+    '    }',
+    '    let resource = format!("localhost://Users/{root}/Projects/{name}");',
+    '    let id = propose_step(journal);',
+    '    let step = journal',
+    '        .steps',
+    '        .iter_mut()',
+    '        .find(|step| step.id == id)',
+    '        .expect("just pushed");',
+    '    step.kind = ProposalKind::Init;',
+    '    step.resource = resource;',
+    '    Ok(id)',
+    '}',
+)
+INIT_GUARD_QUOTE = INIT_WALK_LINES[1]
+PROJECT_RESOURCE_QUOTE = INIT_WALK_LINES[17]
+
+# The one authorize_child walk, as the live draft indents it.
+COMPARE_WALK_LINES = (
+    "/// Give a child its own grant. The parent's grant string is refused, and the",
+    '/// child stays prepared. This does not start a process.',
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    'fn authorize_child(journal: &mut Journal, child_id: u64, grant: Option<&str>) -> bool {',
+    '    let Some(child) = journal.steps.iter().find(|step| step.id == child_id) else {',
+    '        return false;',
+    '    };',
+    '    if child.kind != ProposalKind::Child {',
+    '        return false;',
+    '    }',
+    '    let parent_grant = child.parent_id.and_then(|parent_id| {',
+    '        journal',
+    '            .steps',
+    '            .iter()',
+    '            .find(|step| step.id == parent_id)',
+    '            .and_then(|step| step.grant.clone())',
+    '    });',
+    '    if grant.is_none() || grant == Some("") || parent_grant.as_deref() == grant {',
+    '        return false;',
+    '    }',
+    '    authorize(journal, child_id, grant)',
+    '}',
+)
+PARENT_COMPARE_QUOTE = COMPARE_WALK_LINES[17]
+
+# The seven model quotes, their pinned lines, their walk and their index.
+MODEL_CASES = (
+    ("no_provider", NO_PROVIDER_NUMBER, NO_PROVIDER_SPAN, HOSTED_WALK_LINES, 1),
+    (
+        "parent_grant_doc",
+        PARENT_GRANT_DOC_NUMBER,
+        PARENT_GRANT_DOC_SPAN,
+        CHILD_WALK_LINES,
+        1,
+    ),
+    ("narrower", NARROWER_NUMBER, NARROWER_SPAN, CHILD_WALK_LINES, 11),
+    (
+        "child_grant_none",
+        CHILD_GRANT_NONE_NUMBER,
+        CHILD_GRANT_NONE_SPAN,
+        CHILD_WALK_LINES,
+        23,
+    ),
+    ("init_guard", INIT_GUARD_NUMBER, INIT_GUARD_SPAN, INIT_WALK_LINES, 1),
+    (
+        "project_resource",
+        PROJECT_RESOURCE_NUMBER,
+        PROJECT_RESOURCE_SPAN,
+        INIT_WALK_LINES,
+        17,
+    ),
+    (
+        "parent_compare",
+        PARENT_COMPARE_NUMBER,
+        PARENT_COMPARE_SPAN,
+        COMPARE_WALK_LINES,
+        17,
+    ),
+)
+
+# The groups one model body cites, in the order it emits them.
+MODEL_GROUPS = ("hosted", "child", "init", "compare")
+
+# The one block each model decision walks.
+MODEL_BLOCK = {
+    "no_provider": "hosted",
+    "parent_grant_doc": "child",
+    "narrower": "child",
+    "child_grant_none": "child",
+    "init_guard": "init",
+    "project_resource": "init",
+    "parent_compare": "compare",
+}
+
+# The order in which the model decisions read their pinned lines.
+MODEL_DECISION_ORDER = (
+    NO_PROVIDER_NUMBER,
+    PARENT_GRANT_DOC_NUMBER,
+    NARROWER_NUMBER,
+    CHILD_GRANT_NONE_NUMBER,
+    INIT_GUARD_NUMBER,
+    PROJECT_RESOURCE_NUMBER,
+    PARENT_COMPARE_NUMBER,
+)
+
+# One correct pinned line for every model decision the body cites.
+MODEL_LINES = {
+    NO_PROVIDER_NUMBER: NO_PROVIDER_QUOTE,
+    PARENT_GRANT_DOC_NUMBER: PARENT_GRANT_DOC_QUOTE,
+    NARROWER_NUMBER: NARROWER_QUOTE,
+    CHILD_GRANT_NONE_NUMBER: CHILD_GRANT_NONE_QUOTE,
+    INIT_GUARD_NUMBER: INIT_GUARD_QUOTE,
+    PROJECT_RESOURCE_NUMBER: PROJECT_RESOURCE_QUOTE,
+    PARENT_COMPARE_NUMBER: PARENT_COMPARE_QUOTE,
+}
+
+UNCHECKED_3455_SPAN = "examples/agent-host/src/lib.rs:3455"
+
+# The spans on each model prose line, in walk order.
+MODEL_GROUP_SPANS = {
+    "hosted": (NO_PROVIDER_SPAN,),
+    "child": (PARENT_GRANT_DOC_SPAN, NARROWER_SPAN, CHILD_GRANT_NONE_SPAN),
+    "init": (INIT_GUARD_SPAN, PROJECT_RESOURCE_SPAN),
+    "compare": (PARENT_COMPARE_SPAN,),
+}
+
+SPAN_NUMBER = {case[2]: case[1] for case in MODEL_CASES}
+
 EDIT_RANGE_SPAN = "examples/agent-host/src/lib.rs:2421-2422"
 EDIT_START_NUMBER = 2421
 EDIT_START_SPAN = "examples/agent-host/src/lib.rs:2421"
@@ -6845,4 +7062,497 @@ class CitationCheckTests(unittest.TestCase):
             WRITE_INVOKE_SPAN,
             self.test_outcome_held_line_does_not_stand_for_line_4061,
             "CAUGHT outcome-held-as-invoke",
+        )
+
+    def _model_source(self, count=COVER_NUMBER, lines=None):
+        """A committed file with one correct line for every cited model quote."""
+        return self._file_ask_source(
+            count=count,
+            lines={**FILE_ASK_LINES, **MODEL_LINES, **(lines or {})},
+        )
+
+    def _model_body(
+        self,
+        hosted=HOSTED_WALK_LINES,
+        child=CHILD_WALK_LINES,
+        init=INIT_WALK_LINES,
+        compare=COMPARE_WALK_LINES,
+        groups=None,
+        copies=None,
+        span_copies=None,
+        indented=True,
+        omit=(),
+    ):
+        """A draft that cites the model spans and indents their walks."""
+        copies = copies or {}
+        span_copies = span_copies or {}
+        chosen = MODEL_GROUPS if groups is None else tuple(groups)
+        blocks = (
+            ("hosted", [NO_PROVIDER_SPAN], list(hosted)),
+            (
+                "child",
+                [PARENT_GRANT_DOC_SPAN, NARROWER_SPAN, CHILD_GRANT_NONE_SPAN],
+                list(child),
+            ),
+            ("init", [INIT_GUARD_SPAN, PROJECT_RESOURCE_SPAN], list(init)),
+            ("compare", [PARENT_COMPARE_SPAN], list(compare)),
+        )
+        parts = []
+        for name, spans, lines in blocks:
+            if name not in chosen:
+                continue
+            prose = " ".join(
+                self._cited(span, span_copies.get(span, copies.get(name, 1)))
+                for span in spans
+                if span not in omit
+            )
+            if not prose:
+                continue
+            parts.append(prose + "\n")
+            if indented:
+                parts.append("".join("    " + line + "\n" for line in lines))
+            parts.append("\n")
+        return "".join(parts)
+
+    def _model_case(self, name):
+        for case in MODEL_CASES:
+            if case[0] == name:
+                return case
+        raise KeyError(name)
+
+    def _model_group_body(self, name, walk):
+        """A draft whose one model prose line walks WALK."""
+        group = MODEL_BLOCK[name]
+        return self._model_body(groups=(group,), **{group: walk})
+
+    def _assert_model_group_clean(self, name, walk):
+        _, _, span, _, _ = self._model_case(name)
+        group = MODEL_BLOCK[name]
+        got, reads = self._pinned_reads(
+            self._model_group_body(name, walk), {OWNED_REL: self._model_source()}
+        )
+        self.assertEqual(got, [], span)
+        self.assertEqual(
+            reads,
+            [SPAN_NUMBER[other] for other in MODEL_GROUP_SPANS[group]],
+            span,
+        )
+
+    def _assert_model_line_not_cited(self, name, index):
+        _, _, span, lines, _ = self._model_case(name)
+        self._assert_model_group_clean(name, self._changed(lines, index))
+
+    def test_live_draft_model_quotes_match_their_pinned_lines(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        quotes = {
+            "no_provider": NO_PROVIDER_QUOTE,
+            "parent_grant_doc": PARENT_GRANT_DOC_QUOTE,
+            "narrower": NARROWER_QUOTE,
+            "child_grant_none": CHILD_GRANT_NONE_QUOTE,
+            "init_guard": INIT_GUARD_QUOTE,
+            "project_resource": PROJECT_RESOURCE_QUOTE,
+            "parent_compare": PARENT_COMPARE_QUOTE,
+        }
+        for name, quote in quotes.items():
+            self.assertEqual(getattr(check, name + "_quote")(text), quote, name)
+        self.assertEqual(check.no_write_quote(text), NO_WRITE_QUOTE)
+        self.assertEqual(check.deny_quote(text), DENY_QUOTE)
+        self.assertEqual(check.write_invoke_quote(text), WRITE_INVOKE_QUOTE)
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        for name, number, _, _, _ in MODEL_CASES:
+            self.assertEqual(
+                check.pinned_line(root, sha, OWNED_REL, number),
+                quotes[name],
+                name,
+            )
+        self.assertEqual(check.problems(root), [])
+
+    def _assert_model_mismatch(self, name):
+        _, number, span, lines, index = self._model_case(name)
+        expected = "refuse: quoted line does not match " + span
+        body = self._model_body(**{MODEL_BLOCK[name]: self._changed(lines, index)})
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._model_source()})
+        self.assertEqual(got, [expected], span)
+        self.assertEqual(
+            reads,
+            list(MODEL_DECISION_ORDER[: MODEL_DECISION_ORDER.index(number) + 1]),
+            span,
+        )
+        root = self._draft(body, {OWNED_REL: self._model_source()})
+        (root / OWNED_REL).write_bytes(
+            self._model_source(lines={number: "// edited in the worktree"})
+        )
+        self.assertEqual(check.problems(root), [expected], span)
+
+    def test_no_provider_quoted_line_mismatch_is_refused(self):
+        self._assert_model_mismatch("no_provider")
+
+    def test_parent_grant_doc_quoted_line_mismatch_is_refused(self):
+        self._assert_model_mismatch("parent_grant_doc")
+
+    def test_narrower_quoted_line_mismatch_is_refused(self):
+        self._assert_model_mismatch("narrower")
+
+    def test_child_grant_none_quoted_line_mismatch_is_refused(self):
+        self._assert_model_mismatch("child_grant_none")
+
+    def test_init_guard_quoted_line_mismatch_is_refused(self):
+        self._assert_model_mismatch("init_guard")
+
+    def test_project_resource_quoted_line_mismatch_is_refused(self):
+        self._assert_model_mismatch("project_resource")
+
+    def test_parent_compare_quoted_line_mismatch_is_refused(self):
+        self._assert_model_mismatch("parent_compare")
+
+    def test_model_quote_match_ignores_the_worktree_file(self):
+        root = self._draft(self._model_body(), {OWNED_REL: self._model_source()})
+        self.assertEqual(check.problems(root), [])
+        for name, number, _, _, _ in MODEL_CASES:
+            (root / OWNED_REL).write_bytes(
+                self._model_source(lines={number: "// edited in the worktree"})
+            )
+            self.assertEqual(check.problems(root), [], name)
+
+    def test_hosted_doc_start_does_not_stand_for_line_3339(self):
+        self._assert_model_line_not_cited("no_provider", 0)
+
+    def test_child_doc_start_does_not_stand_for_line_3360(self):
+        self._assert_model_line_not_cited("parent_grant_doc", 0)
+
+    def test_parent_grant_doc_does_not_stand_for_line_3370(self):
+        self._assert_model_group_clean("narrower", CHILD_WALK_LINES)
+
+    def test_narrower_line_does_not_stand_for_line_3382(self):
+        self._assert_model_group_clean("child_grant_none", CHILD_WALK_LINES)
+
+    def test_init_doc_start_does_not_stand_for_line_3387(self):
+        self._assert_model_line_not_cited("init_guard", 0)
+
+    def test_init_guard_line_does_not_stand_for_line_3403(self):
+        self._assert_model_group_clean("project_resource", INIT_WALK_LINES)
+
+    def test_authorize_false_line_does_not_stand_for_line_3449(self):
+        self._assert_model_group_clean("parent_compare", COMPARE_WALK_LINES)
+
+    def test_model_block_lines_do_not_stand_for_the_cited_lines(self):
+        cases = (
+            ("no_provider", 8),
+            ("no_provider", 19),
+            ("parent_grant_doc", 12),
+            ("parent_grant_doc", 25),
+            ("init_guard", 15),
+            ("init_guard", 27),
+            ("parent_compare", 0),
+            ("parent_compare", 5),
+            ("parent_compare", 8),
+            ("parent_compare", 21),
+        )
+        for name, index in cases:
+            self._assert_model_line_not_cited(name, index)
+
+    def _assert_model_two_spans(self, name):
+        _, number, span, _, _ = self._model_case(name)
+        spans = MODEL_GROUP_SPANS[MODEL_BLOCK[name]]
+        position = spans.index(span)
+        expected = "refuse: quoted line is not one line: " + span
+        body = self._model_body(
+            groups=(MODEL_BLOCK[name],),
+            omit=spans[position + 1:],
+            span_copies={span: 2},
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._model_source()})
+        self.assertEqual(got, [expected], span)
+        self.assertEqual(reads, [SPAN_NUMBER[other] for other in spans[:position]], span)
+
+    def test_two_model_spans_are_refused(self):
+        for name, _, _, _, _ in MODEL_CASES:
+            self._assert_model_two_spans(name)
+
+    def test_model_quotes_are_absent_below_their_index(self):
+        for name, number, span, lines, index in MODEL_CASES:
+            selector = getattr(check, name + "_quote")
+            self.assertIsNone(
+                selector(self._model_body(groups=(MODEL_BLOCK[name],), indented=False)),
+                span,
+            )
+            self.assertIsNone(selector("No model span here.\n"), span)
+            self.assertIsNone(
+                selector(self._model_body(groups=(MODEL_BLOCK[name],), **{MODEL_BLOCK[name]: lines[:index]})),
+                span,
+            )
+
+    def test_model_span_without_an_indented_line_adds_no_refusal(self):
+        got, reads = self._pinned_reads(
+            self._model_body(indented=False), {OWNED_REL: self._model_source()}
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [])
+
+    def test_draft_without_a_model_span_adds_no_refusal(self):
+        for name, number, span, _, _ in MODEL_CASES:
+            body = self._model_body(omit=(span,))
+            got, reads = self._pinned_reads(body, {OWNED_REL: self._model_source()})
+            self.assertEqual(got, [], span)
+            self.assertEqual(
+                reads,
+                [other for other in MODEL_DECISION_ORDER if other != number],
+                span,
+            )
+
+    def test_model_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        for name, number, span, lines, _ in MODEL_CASES:
+            expected = "refuse: quoted line is not in the pinned commit: " + span
+            group = MODEL_BLOCK[name]
+            got, reads = self._pinned_reads(
+                self._model_group_body(name, lines),
+                {OWNED_REL: self._model_source(count=number - 1)},
+                {OWNED_REL: self._model_source()},
+            )
+            self.assertEqual(got, [expected], span)
+            spans = MODEL_GROUP_SPANS[group]
+            position = spans.index(span)
+            self.assertEqual(
+                reads, [SPAN_NUMBER[other] for other in spans[: position + 1]], span
+            )
+
+    def test_3308_mismatch_does_not_read_line_3339(self):
+        body = self._file_ask_body(
+            groups=("no_write",), no_write=self._changed(NO_WRITE_LINES, 4)
+        ) + self._model_body(
+            groups=("hosted",), hosted=self._changed(HOSTED_WALK_LINES, 1)
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._model_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + NO_WRITE_SPAN]
+        )
+        self.assertEqual(reads, [NO_WRITE_NUMBER])
+
+    def test_3339_mismatch_without_the_3308_span_is_refused(self):
+        body = self._model_body(
+            groups=("hosted",), hosted=self._changed(HOSTED_WALK_LINES, 1)
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._model_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + NO_PROVIDER_SPAN]
+        )
+        self.assertEqual(reads, [NO_PROVIDER_NUMBER])
+
+    def test_3339_match_then_3360_mismatch_does_not_read_line_3370(self):
+        body = self._model_body(
+            child=self._changed(CHILD_WALK_LINES, 1)
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._model_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + PARENT_GRANT_DOC_SPAN]
+        )
+        self.assertEqual(reads, [NO_PROVIDER_NUMBER, PARENT_GRANT_DOC_NUMBER])
+
+    def test_3360_and_3370_match_then_3382_mismatch_does_not_read_line_3387(self):
+        body = self._model_body(child=self._changed(CHILD_WALK_LINES, 23))
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._model_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + CHILD_GRANT_NONE_SPAN]
+        )
+        self.assertEqual(
+            reads,
+            [
+                NO_PROVIDER_NUMBER,
+                PARENT_GRANT_DOC_NUMBER,
+                NARROWER_NUMBER,
+                CHILD_GRANT_NONE_NUMBER,
+            ],
+        )
+
+    def test_without_the_model_spans_the_3526_mismatch_stays(self):
+        body = self._file_ask_body(groups=("deny",), deny=DENY_QUOTE + "x")
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._model_source()})
+        self.assertEqual(got, ["refuse: quoted line does not match " + DENY_SPAN])
+        self.assertEqual(reads, [DENY_NUMBER])
+
+    def test_model_matches_then_3526_mismatch_does_not_read_line_3549(self):
+        body = self._model_body() + self._file_ask_body(
+            groups=("deny",), deny=DENY_QUOTE + "x"
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._model_source()})
+        self.assertEqual(got, ["refuse: quoted line does not match " + DENY_SPAN])
+        self.assertEqual(reads, list(MODEL_DECISION_ORDER) + [DENY_NUMBER])
+
+    def test_3455_block_after_the_model_match_adds_no_refusal(self):
+        body = self._model_body()
+        body += "`" + UNCHECKED_3455_SPAN + "` cites a later slice.\n\n"
+        body += "".join(
+            "    " + line + "\n"
+            for line in self._changed(HOSTED_WALK_LINES, 1)
+        )
+        body += "\n"
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._model_source()})
+        self.assertEqual(got, [])
+        self.assertEqual(reads, list(MODEL_DECISION_ORDER))
+
+    def test_8488_mismatch_after_the_model_matches_does_not_read_line_123(self):
+        body = (
+            self._model_body()
+            + self._file_ask_body(
+                groups=("cover",), cover=self._changed(COVER_LINES, 5)
+            )
+            + self._provider_body(groups=("scheme",))
+        )
+        got, reads = self._pinned_reads(
+            body,
+            {OWNED_REL: self._model_source(), PROVIDER_REL: self._provider_source()},
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + COVER_SPAN])
+        self.assertEqual(reads, list(MODEL_DECISION_ORDER) + [COVER_NUMBER])
+
+    def test_model_quote_refusal_waits_for_a_known_pin(self):
+        body = self._model_body(
+            groups=("hosted",), hosted=self._changed(HOSTED_WALK_LINES, 1)
+        )
+        files = {OWNED_REL: self._model_source()}
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+        self.assertEqual(
+            check.problems(self._raw_draft("Pinned commit: HEAD\n" + body, files)),
+            ["refuse: pinned commit is not one 40-hex commit"],
+        )
+        self.assertEqual(
+            check.problems(
+                self._raw_draft(
+                    "Pinned commit: " + "f" * 40 + "\n" + body, files, commit=True
+                )
+            ),
+            ["refuse: pinned commit is not a commit: " + "f" * 40],
+        )
+
+    def test_falsifier_no_provider_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_no_provider_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT no-provider-quoted-line",
+        )
+
+    def test_falsifier_hosted_doc_start_is_caught(self):
+        self._caught_walk_index(
+            "no_provider_quote",
+            0,
+            "`" + NO_PROVIDER_SPAN + "`",
+            self.test_hosted_doc_start_does_not_stand_for_line_3339,
+            "CAUGHT hosted-doc-start",
+        )
+
+    def test_falsifier_parent_grant_doc_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_parent_grant_doc_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT parent-grant-doc-quoted-line",
+        )
+
+    def test_falsifier_child_doc_start_is_caught(self):
+        self._caught_walk_index(
+            "parent_grant_doc_quote",
+            0,
+            "`" + PARENT_GRANT_DOC_SPAN + "`",
+            self.test_child_doc_start_does_not_stand_for_line_3360,
+            "CAUGHT child-doc-start",
+        )
+
+    def test_falsifier_narrower_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_narrower_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT narrower-quoted-line",
+        )
+
+    def test_falsifier_parent_grant_doc_as_narrower_is_caught(self):
+        self._caught_walk_index(
+            "narrower_quote",
+            1,
+            "`" + NARROWER_SPAN + "`",
+            self.test_parent_grant_doc_does_not_stand_for_line_3370,
+            "CAUGHT parent-grant-doc-as-narrower",
+        )
+
+    def test_falsifier_child_grant_none_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_child_grant_none_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT child-grant-none-quoted-line",
+        )
+
+    def test_falsifier_narrower_as_grant_none_is_caught(self):
+        self._caught_walk_index(
+            "child_grant_none_quote",
+            11,
+            "`" + CHILD_GRANT_NONE_SPAN + "`",
+            self.test_narrower_line_does_not_stand_for_line_3382,
+            "CAUGHT narrower-as-grant-none",
+        )
+
+    def test_falsifier_init_guard_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_init_guard_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT init-guard-quoted-line",
+        )
+
+    def test_falsifier_init_doc_start_is_caught(self):
+        self._caught_walk_index(
+            "init_guard_quote",
+            0,
+            "`" + INIT_GUARD_SPAN + "`",
+            self.test_init_doc_start_does_not_stand_for_line_3387,
+            "CAUGHT init-doc-start",
+        )
+
+    def test_falsifier_project_resource_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_project_resource_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT project-resource-quoted-line",
+        )
+
+    def test_falsifier_init_guard_as_resource_is_caught(self):
+        self._caught_walk_index(
+            "project_resource_quote",
+            1,
+            "`" + PROJECT_RESOURCE_SPAN + "`",
+            self.test_init_guard_line_does_not_stand_for_line_3403,
+            "CAUGHT init-guard-as-resource",
+        )
+
+    def test_falsifier_parent_compare_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_parent_compare_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT parent-compare-quoted-line",
+        )
+
+    def test_falsifier_authorize_false_as_compare_is_caught(self):
+        self._caught_walk_index(
+            "parent_compare_quote",
+            18,
+            "`" + PARENT_COMPARE_SPAN + "`",
+            self.test_authorize_false_line_does_not_stand_for_line_3449,
+            "CAUGHT authorize-false-as-compare",
         )

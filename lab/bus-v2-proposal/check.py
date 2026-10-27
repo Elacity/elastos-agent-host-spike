@@ -166,6 +166,34 @@ SEAT_MARKER = "`" + SEAT_SPAN + "`"
 NO_WRITE_SPAN = "examples/agent-host/src/lib.rs:3308"
 NO_WRITE_MARKER = "`" + NO_WRITE_SPAN + "`"
 
+# Its quotation is remainder 1 after the hosted span, source line 3339.
+HOSTED_SPAN = "examples/agent-host/src/lib.rs:3339"
+HOSTED_MARKER = "`" + HOSTED_SPAN + "`"
+
+# Its quotation is remainder 1 after the child span, source line 3360.
+CHILD_SPAN = "examples/agent-host/src/lib.rs:3360"
+CHILD_MARKER = "`" + CHILD_SPAN + "`"
+
+# Its quotation is remainder 11 after the child span, source line 3370.
+NARROWER_SPAN = "examples/agent-host/src/lib.rs:3370"
+NARROWER_MARKER = "`" + NARROWER_SPAN + "`"
+
+# Its quotation is remainder 23 after the child span, source line 3382.
+CHILD_GRANT_NONE_SPAN = "examples/agent-host/src/lib.rs:3382"
+CHILD_GRANT_NONE_MARKER = "`" + CHILD_GRANT_NONE_SPAN + "`"
+
+# Its quotation is remainder 1 after the init span, source line 3387.
+INIT_SPAN = "examples/agent-host/src/lib.rs:3387"
+INIT_MARKER = "`" + INIT_SPAN + "`"
+
+# Its quotation is remainder 17 after the init span, source line 3403.
+PROJECT_RESOURCE_SPAN = "examples/agent-host/src/lib.rs:3403"
+PROJECT_RESOURCE_MARKER = "`" + PROJECT_RESOURCE_SPAN + "`"
+
+# Its quotation is remainder 17 after the compare span, source line 3449.
+PARENT_COMPARE_SPAN = "examples/agent-host/src/lib.rs:3449"
+PARENT_COMPARE_MARKER = "`" + PARENT_COMPARE_SPAN + "`"
+
 # Its quotation is remainder 5 after the declaration span, source line 8488.
 COVER_SPAN = "examples/agent-host/src/lib.rs:8488"
 COVER_MARKER = "`" + COVER_SPAN + "`"
@@ -625,6 +653,62 @@ def no_write_quote(text):
     return remainders[4]
 
 
+def no_provider_quote(text):
+    """Return remainder 1 after the hosted span, or None when it is absent."""
+    remainders = _remainders(text, HOSTED_MARKER)
+    if len(remainders) <= 1:
+        return None
+    return remainders[1]
+
+
+def parent_grant_doc_quote(text):
+    """Return remainder 1 after the child span, or None when it is absent."""
+    remainders = _remainders(text, CHILD_MARKER)
+    if len(remainders) <= 1:
+        return None
+    return remainders[1]
+
+
+def narrower_quote(text):
+    """Return remainder 11 after the narrower span, or None when it is absent."""
+    remainders = _remainders(text, NARROWER_MARKER)
+    if len(remainders) <= 11:
+        return None
+    return remainders[11]
+
+
+def child_grant_none_quote(text):
+    """Return remainder 23 after the grant-none span, or None when it is absent."""
+    remainders = _remainders(text, CHILD_GRANT_NONE_MARKER)
+    if len(remainders) <= 23:
+        return None
+    return remainders[23]
+
+
+def init_guard_quote(text):
+    """Return remainder 1 after the init span, or None when it is absent."""
+    remainders = _remainders(text, INIT_MARKER)
+    if len(remainders) <= 1:
+        return None
+    return remainders[1]
+
+
+def project_resource_quote(text):
+    """Return remainder 17 after the resource span, or None when it is absent."""
+    remainders = _remainders(text, PROJECT_RESOURCE_MARKER)
+    if len(remainders) <= 17:
+        return None
+    return remainders[17]
+
+
+def parent_compare_quote(text):
+    """Return remainder 17 after the compare span, or None when it is absent."""
+    remainders = _remainders(text, PARENT_COMPARE_MARKER)
+    if len(remainders) <= 17:
+        return None
+    return remainders[17]
+
+
 def cover_quote(text):
     """Return remainder 5 after the cover span, or None when it is absent."""
     remainders = _remainders(text, COVER_MARKER)
@@ -919,6 +1003,127 @@ def _no_write_quote_refusal(root, text, sha):
         return "refuse: quoted line is not in the pinned commit: " + NO_WRITE_SPAN
     if not quoted_line_matches(quoted, source):
         return "refuse: quoted line does not match " + NO_WRITE_SPAN
+    return None
+
+
+def _no_provider_quote_refusal(root, text, sha):
+    """Return the 3339 refusal, or None when that quote is absent or matches."""
+    if text.count(HOSTED_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + HOSTED_SPAN
+    quoted = no_provider_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(HOSTED_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + HOSTED_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + HOSTED_SPAN
+    return None
+
+
+def _parent_grant_doc_quote_refusal(root, text, sha):
+    """Return the 3360 refusal, or None when that quote is absent or matches."""
+    if text.count(CHILD_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + CHILD_SPAN
+    quoted = parent_grant_doc_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(CHILD_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + CHILD_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + CHILD_SPAN
+    return None
+
+
+def _narrower_quote_refusal(root, text, sha):
+    """Return the 3370 refusal, or None when that quote is absent or matches."""
+    if text.count(NARROWER_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + NARROWER_SPAN
+    quoted = narrower_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(NARROWER_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + NARROWER_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + NARROWER_SPAN
+    return None
+
+
+def _child_grant_none_quote_refusal(root, text, sha):
+    """Return the 3382 refusal, or None when that quote is absent or matches."""
+    if text.count(CHILD_GRANT_NONE_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + CHILD_GRANT_NONE_SPAN
+    quoted = child_grant_none_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(CHILD_GRANT_NONE_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return (
+            "refuse: quoted line is not in the pinned commit: "
+            + CHILD_GRANT_NONE_SPAN
+        )
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + CHILD_GRANT_NONE_SPAN
+    return None
+
+
+def _init_guard_quote_refusal(root, text, sha):
+    """Return the 3387 refusal, or None when that quote is absent or matches."""
+    if text.count(INIT_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + INIT_SPAN
+    quoted = init_guard_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(INIT_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + INIT_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + INIT_SPAN
+    return None
+
+
+def _project_resource_quote_refusal(root, text, sha):
+    """Return the 3403 refusal, or None when that quote is absent or matches."""
+    if text.count(PROJECT_RESOURCE_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + PROJECT_RESOURCE_SPAN
+    quoted = project_resource_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(PROJECT_RESOURCE_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return (
+            "refuse: quoted line is not in the pinned commit: "
+            + PROJECT_RESOURCE_SPAN
+        )
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + PROJECT_RESOURCE_SPAN
+    return None
+
+
+def _parent_compare_quote_refusal(root, text, sha):
+    """Return the 3449 refusal, or None when that quote is absent or matches."""
+    if text.count(PARENT_COMPARE_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + PARENT_COMPARE_SPAN
+    quoted = parent_compare_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(PARENT_COMPARE_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return (
+            "refuse: quoted line is not in the pinned commit: "
+            + PARENT_COMPARE_SPAN
+        )
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + PARENT_COMPARE_SPAN
     return None
 
 
@@ -1385,7 +1590,7 @@ def _default_action_quote_refusal(root, text, sha):
 
 
 def _quote_refusals(root, text, sha):
-    """Return the quote refusals in source order: 2067, 2421, 2422, 2720, 2741, 2749, 2958, 2981, 3290, 3308, 3526, 3549, 3754, 3755, 3757, 3767, 3849, 3850, 3935, 3936, 3947, 3961, 3966, 3967, 4023, 4032, 4033, 4061, 8149, 8162, 8168, 8187, 8188, 8189, 8190, 8191, 8192, 8193, 8194, 8488, then 123, 189, 190, 192."""
+    """Return the quote refusals in source order: 2067, 2421, 2422, 2720, 2741, 2749, 2958, 2981, 3290, 3308, 3339, 3360, 3370, 3382, 3387, 3403, 3449, 3526, 3549, 3754, 3755, 3757, 3767, 3849, 3850, 3935, 3936, 3947, 3961, 3966, 3967, 4023, 4032, 4033, 4061, 8149, 8162, 8168, 8187, 8188, 8189, 8190, 8191, 8192, 8193, 8194, 8488, then 123, 189, 190, 192."""
     observe = _observe_quote_refusal(root, text, sha)
     if observe is not None:
         return [observe]
@@ -1416,6 +1621,27 @@ def _quote_refusals(root, text, sha):
     no_write = _no_write_quote_refusal(root, text, sha)
     if no_write is not None:
         return [no_write]
+    no_provider = _no_provider_quote_refusal(root, text, sha)
+    if no_provider is not None:
+        return [no_provider]
+    parent_grant_doc = _parent_grant_doc_quote_refusal(root, text, sha)
+    if parent_grant_doc is not None:
+        return [parent_grant_doc]
+    narrower = _narrower_quote_refusal(root, text, sha)
+    if narrower is not None:
+        return [narrower]
+    child_grant_none = _child_grant_none_quote_refusal(root, text, sha)
+    if child_grant_none is not None:
+        return [child_grant_none]
+    init_guard = _init_guard_quote_refusal(root, text, sha)
+    if init_guard is not None:
+        return [init_guard]
+    project_resource = _project_resource_quote_refusal(root, text, sha)
+    if project_resource is not None:
+        return [project_resource]
+    parent_compare = _parent_compare_quote_refusal(root, text, sha)
+    if parent_compare is not None:
+        return [parent_compare]
     deny = _deny_quote_refusal(root, text, sha)
     if deny is not None:
         return [deny]
