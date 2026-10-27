@@ -251,7 +251,10 @@ exit 65, because exit 65 means the profile did not apply, and it is not exit
 last parenthesis of the `STORAGE_ROOT` allow, so this launch exits 65 and
 `byte_different_file_at_bound_path_starts` fails because the profile did not
 apply. A process still running
-after 2 seconds, or any other exit, is the outcome the test allows. The
+after 2 seconds, or any other exit, is the outcome the test allows.
+`generated_profile_starts_a_byte_different_file` runs the same show under
+the stand-in file: the launched file has no `;;` line, the recorded path is
+that file, and the evidence is for the lab launcher. The
 launch helper records the sha256
 when it binds `PROVIDER_EXECUTABLE` and refuses with a digest-mismatch reason
 when the file changes (`bound_executable_digest_mismatch_refuses_start`).
@@ -628,7 +631,10 @@ profile does not grant".
   The profile binds PROVIDER_EXECUTABLE by path.
   A process still running after 2 seconds, or any other exit, is the outcome
   the test allows. The real binary's digest is
-  unchanged. It runs under `sandbox-exec`, as the other confined tests do.
+  unchanged. `generated_profile_starts_a_byte_different_file` runs the same
+  show under the stand-in file: the launched file has no `;;` line, the
+  recorded path is that file, and the evidence is for the lab launcher.
+  It runs under `sandbox-exec`, as the other confined tests do.
 - `bound_executable_digest_mismatch_refuses_start`: the launch helper records
   the sha256 of a copy of `/usr/bin/true`, one byte is appended, and the
   start that passes the recorded digest panics with `PROVIDER_EXECUTABLE

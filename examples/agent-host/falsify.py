@@ -279,8 +279,9 @@ def load(path=DATA):
 # - capsules/model-provider/falsifiers.json: the model provider's
 #   src/local_memory.rs, src/journal.rs, src/contract.rs, src/state.rs,
 #   tests/process.rs, src/local_llama.rs and src/adapters.rs.
-#   tests/process.rs is named here ahead of the model list's entries that
-#   will edit it; no list edits it at this base. Its `selftest` entries edit
+#   tests/process.rs is named here because the model list's MP30-MP34 edit
+#   it: MP30, MP31, MP33 and MP34 change the relay request, and MP32 the
+#   record of a closed provider socket. Its `selftest` entries edit
 #   falsify.py, which recovery finds under examples/agent-host.
 # - capsules/model-provider/confine-falsifiers.json: the model `confine.sb`
 #   and tests/confine/main.rs.
@@ -299,8 +300,8 @@ def load(path=DATA):
 #   tools/src/bundle.rs, tools/src/lib.rs, tools/src/receipt.rs,
 #   tools/src/run.rs and tools/src/verify.rs, the lab's run log LOG.md, and
 #   the audit crate's Cargo.toml, INTERFACE.md and src/lib.rs.
-#   tests/lab_cid.rs is named here ahead of the wasm lab's planned entry that
-#   edits it; no list edits it at this base. tools/src/lab_name.rs is gone
+#   tests/lab_cid.rs is named here because the wasm lab's own list edits it
+#   in F-WC3-LANE-FILES-QUOTED. tools/src/lab_name.rs is gone
 #   from the tree and keeps its line because two entries of the model list
 #   anchor on it.
 # - examples/agent-host/falsifiers.json: asks.json, falsify.py and src/lib.rs,

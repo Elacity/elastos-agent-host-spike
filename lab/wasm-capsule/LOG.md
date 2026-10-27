@@ -1318,3 +1318,36 @@
   --locked --workspace` (155 passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools
   -- --check` exit 0. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and
   `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 050 (shared file writer refusal names no fixed file; M1 A7 lab half, P11). Base `db4be8812`. The shared
+  writer's two reasons in `tools/src/bundle.rs` are renamed `ManifestNotCreated` -> `FileNotCreated` and
+  `ManifestNotWritten` -> `FileNotWritten`, with texts that name no file: `cannot be created as a new file: <cause>` and
+  `was created, but its bytes cannot be written: <cause>`. So a receipt the writer cannot create reads `<receipt path>:
+  cannot be created as a new file: File exists (os error 17)`, not `<receipt path>: capsule.json cannot be created:
+  ...` (044's PASS review, claude, round 1). `write_new_file` stays the one writer; `write_receipt` and
+  `write_refused_receipt` still return its refusal unchanged; `run.rs`'s `module_refusal` only renames its two match
+  arms (the runner's `ModuleNotCreated`/`ModuleNotWritten` texts are unchanged). Tests: `bundle_io_refusals_keep_path_and_cause`
+  checks each variant and the new exact texts (the `<tmp>/missing/capsule.json` case keeps its full-text check, so the
+  manifest is named by its path); `runner_io_refusals_keep_path_and_cause` uses the new names;
+  `receipt_write_refuses_an_existing_path` and `refusal_receipt_write_refuses_an_existing_path` assert the new variant
+  and text and that the refusal holds no `capsule.json`. README: "Writing it." and the refusal receipt's write
+  sentence say the writer's reason names no file, with the new example line; `tools/bundle` step 4 shows both new
+  texts; the run budget's known limits add that after the kill `joined` waits for end-of-file on the engine's stdout
+  and stderr, so an engine whose child holds those pipes open would keep the runner past the budget (the pinned engines
+  start no child; no test covers it; 043's PASS review, claude, round 1). New falsifier F-WC5-WRITER-NAMES-MANIFEST
+  (`capsule.json ` put back at the front of the create reason). Five entries re-anchored to the new names and texts,
+  each the same bug: F-WC3-IO-CAUSE-MANIFEST, F-WC3-IO-CAUSE-WRITE, F-WC5-IO-MODULE-CREATE, F-WC5-IO-MODULE-WRITE,
+  F-WC5-RECEIPT-OVERWRITE (its plant now builds `crate::bundle::Reason::FileNotCreated`). Canonical runner, from the
+  repo root, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py --from
+  lab/wasm-capsule/falsifiers.json F-WC3-IO-CAUSE-MANIFEST F-WC3-IO-CAUSE-WRITE F-WC5-IO-MODULE-CREATE
+  F-WC5-IO-MODULE-WRITE F-WC5-RECEIPT-OVERWRITE F-WC5-WRITER-NAMES-MANIFEST`: "baseline: 4 named tests pass without an
+  edit, 0 do not", "F-WC3-IO-CAUSE-MANIFEST CAUGHT", "F-WC3-IO-CAUSE-WRITE CAUGHT", "F-WC5-IO-MODULE-CREATE CAUGHT",
+  "F-WC5-IO-MODULE-WRITE CAUGHT", "F-WC5-RECEIPT-OVERWRITE CAUGHT", "F-WC5-WRITER-NAMES-MANIFEST CAUGHT", "summary: 6
+  CAUGHT of 6". Then the same command with F-WC-README-COUNT (re-anchored to 185): "baseline: 1 named tests pass without
+  an edit, 0 do not", "F-WC-README-COUNT CAUGHT", "summary: 1 CAUGHT of 1". `git status --short` after the runs listed
+  only this task's six edited files, with no `*.falsify-original` left. README: total 184 -> 185, runner-caught 120 ->
+  121; hand-proven stays 68 (no label changes; F-WC3-IO-CAUSE-MANIFEST and -WRITE stay in task 009's hand-proven
+  count). All 185 entries' 194 anchors found exactly once. Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2
+  CARGO_INCREMENTAL=0`: `cargo test --locked` (128 passed, 3 ignored, 0 failed), `cargo test --locked --workspace` (155
+  passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0.
+  Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn
+  --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.

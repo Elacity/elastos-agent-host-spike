@@ -138,8 +138,9 @@ The stand-in refuses in the order of these steps:
 4. A `binary_path` that is not a file is refused with a reason that names the
    provider and that path, before any profile is written.
 5. A refusal of `write_generated_profile` is returned unchanged.
-6. A start that `sandbox-exec` refuses, or an `init` that does not answer
-   `ok`, is refused with the `try_send` failure or the answer.
+6. A start that `sandbox-exec` refuses is refused with the `try_send`
+   failure.
+7. An `init` that does not answer `ok` is refused with the answer.
 
 Otherwise the stand-in writes the profile that the lab generator builds from
 the declared rights, creates the shared ancestors, and starts the named binary
@@ -935,6 +936,11 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Use wallet's root layout for a did start in the stand-in (WP124):
   `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
   fails because the did start is refused at its first `init`.
+- Make the stand-in's absent-tool check never fire (WP125):
+  `standin_launcher_refuses_a_start_it_cannot_confine` fails on case (c),
+  which then reads the wrong-tool reason and lacks `is absent`.
+- Drop the OS from the stand-in's wrong-tool reason (WP126): the same test
+  fails on case (c2), whose reason then lacks `macos`.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
