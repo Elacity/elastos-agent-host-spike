@@ -9,7 +9,7 @@
 //! Bus session before `finish_start`. A stop stores `stopped` and revokes
 //! that session's `Live` grants. One map names the five statuses. One age
 //! compare keeps a `failed` or `stopped` entry. One check refuses a client
-//! on a shell-only route.
+//! on a shell-only route. `authorise` is a lab seam on that same filter.
 
 use serde_json::{json, Map, Value};
 
@@ -141,6 +141,27 @@ impl StandIn {
 
     /// Lab test seam, not a route.
     ///
+    /// `Ok(())` means the grant authorises that caller. This method reads no
+    /// clock, no disk and no WIT file.
+    pub fn authorise(&self, caller: Caller<'_>, request_id: &str) -> Result<(), (u16, String)> {
+        let Some(grant) = self
+            .grants
+            .iter()
+            .find(|grant| grant.request_id == request_id)
+        else {
+            return Err(unknown_grant(request_id));
+        };
+        if !is_live(grant.life) {
+            return Err(grant_not_live(grant.life));
+        }
+        if !session_authorises(grant, caller) {
+            return Err(wrong_capsule(grant, caller));
+        }
+        Ok(())
+    }
+
+    /// Lab test seam, not a route.
+    ///
     /// Stores one resident guest for `path`. This method reads no directory.
     pub fn admit_resident(
         &mut self,
@@ -264,7 +285,7 @@ impl StandIn {
     /// Writes `Revoked` on `Live` grants of one session. Other lives stay.
     fn revoke_live(&mut self, session_id: &str) {
         for grant in &mut self.grants {
-            if grant.session_id == session_id && grant.life == Life::Live {
+            if grant.session_id == session_id && is_live(grant.life) {
                 grant.life = Life::Revoked;
             }
         }
@@ -331,7 +352,12 @@ impl StandIn {
 fn keep(grant: &Grant, caller: Caller<'_>) -> bool {
     // Ending a session leaves a live grant in this view.
     let _ended = grant.session_ended;
-    grant.life == Life::Live && visible(grant, caller)
+    is_live(grant.life) && visible(grant, caller)
+}
+
+/// One life test. `keep`, `revoke_live` and `authorise` use it.
+fn is_live(life: Life) -> bool {
+    life == Life::Live
 }
 
 fn visible(grant: &Grant, caller: Caller<'_>) -> bool {
@@ -339,6 +365,12 @@ fn visible(grant: &Grant, caller: Caller<'_>) -> bool {
         Caller::Shell => true,
         Caller::Client { session_id } => grant.session_id == session_id,
     }
+}
+
+/// Session decision for `authorise`. A shell sees every grant and still does
+/// not hold it. The session compare stays in `visible`.
+fn session_authorises(grant: &Grant, caller: Caller<'_>) -> bool {
+    !matches!(caller, Caller::Shell) && visible(grant, caller)
 }
 
 fn entry(grant: &Grant, include_session: bool) -> Value {
@@ -450,6 +482,31 @@ fn keeps_instance(instance: &Instance, instant: u64) -> bool {
 /// One unknown-instance reason. `delete_capsule` and `finish_start` both use it.
 fn unknown_instance(id: &str) -> (u16, String) {
     (400, format!("unknown instance: {id}"))
+}
+
+fn unknown_grant(request_id: &str) -> (u16, String) {
+    (400, format!("unknown grant: {request_id}"))
+}
+
+fn life_text(life: Life) -> &'static str {
+    match life {
+        Life::Live => "Live",
+        Life::Exhausted => "Exhausted",
+        Life::Revoked => "Revoked",
+        Life::Expired => "Expired",
+    }
+}
+
+fn grant_not_live(life: Life) -> (u16, String) {
+    (400, format!("grant is not live: {}", life_text(life)))
+}
+
+fn wrong_capsule(grant: &Grant, caller: Caller<'_>) -> (u16, String) {
+    let mut reason = format!("wrong capsule: expected {}", grant.session_id);
+    if let Caller::Client { session_id } = caller {
+        reason.push_str(&format!(", got {session_id}"));
+    }
+    (403, reason)
 }
 
 /// One not-live reason. `delete_capsule` and `finish_start` both use it.
@@ -2034,5 +2091,326 @@ mod tests {
             "the stand-in leaves the running instance after the shell refusals",
         );
         assert_next_launch(&mut standin, "component-2");
+    }
+
+    fn launch_two_running(standin: &mut StandIn) {
+        admit_shared(standin, Start::Ok);
+        launch_finished(standin);
+        launch_finished(standin);
+    }
+
+    fn assert_unknown(result: &Result<(), (u16, String)>, request_id: &str, who: &str) {
+        let expected = format!("unknown grant: {request_id}");
+        assert!(
+            matches!(
+                result,
+                Err((400, reason)) if reason.starts_with("unknown grant:") && reason == &expected
+            ),
+            "the stand-in refuses unknown grant {request_id:?} for {who}: {result:?}"
+        );
+    }
+
+    fn assert_not_live(result: &Result<(), (u16, String)>, life_name: &str, message: &str) {
+        let expected = format!("grant is not live: {life_name}");
+        assert!(
+            matches!(
+                result,
+                Err((400, reason))
+                    if reason.starts_with("grant is not live:")
+                        && reason.contains(life_name)
+                        && reason == &expected
+            ),
+            "{message}: {result:?}"
+        );
+    }
+
+    fn assert_wrong_capsule(
+        result: &Result<(), (u16, String)>,
+        grant_session: &str,
+        caller_session: Option<&str>,
+        message: &str,
+    ) {
+        assert!(
+            matches!(
+                result,
+                Err((403, reason))
+                    if reason.contains("wrong capsule")
+                        && reason.contains(grant_session)
+                        && caller_session.is_none_or(|session_id| reason.contains(session_id))
+            ),
+            "{message}: {result:?}"
+        );
+    }
+
+    #[test]
+    fn standin_sibling_cannot_use_the_grant() {
+        let mut standin = StandIn::new();
+        launch_two_running(&mut standin);
+        standin.seed_grant(
+            "req-1",
+            "component-1",
+            "res",
+            "read",
+            "once",
+            1,
+            Life::Live,
+            true,
+        );
+        let (plain, query) = shell_pair(&standin);
+        assert_eq!(
+            plain, query,
+            "the stand-in returns one shell body for both route forms"
+        );
+        assert_eq!(
+            request_ids(&plain),
+            BTreeSet::from(["req-1".to_owned()]),
+            "the stand-in lists exactly the one live grant"
+        );
+        assert_eq!(
+            plain["capabilities"][0]["session_id"], "component-1",
+            "the stand-in binds that grant to component-1"
+        );
+        let sibling_list = standin
+            .get_capability_list(
+                Caller::Client {
+                    session_id: "component-2",
+                },
+                None,
+            )
+            .expect("the stand-in client view");
+        assert_eq!(
+            request_ids(&sibling_list),
+            BTreeSet::new(),
+            "the stand-in client list for component-2 is empty"
+        );
+        let refused = standin.authorise(
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "req-1",
+        );
+        assert_wrong_capsule(
+            &refused,
+            "component-1",
+            Some("component-2"),
+            "the stand-in refuses instance 1's grant for instance 2",
+        );
+        let owner = standin.authorise(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "req-1",
+        );
+        assert!(
+            owner.is_ok(),
+            "the stand-in authorises the owning client: {owner:?}"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in leaves instance 1 running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in leaves instance 2 running",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-1"),
+            (Life::Live, true),
+            "the stand-in leaves the seeded grant unchanged"
+        );
+    }
+
+    #[test]
+    fn standin_stop_clears_that_sessions_grant() {
+        let mut standin = StandIn::new();
+        launch_two_running(&mut standin);
+        seed_at(&mut standin, "req-1", "component-1", Life::Live);
+        seed_at(&mut standin, "req-2", "component-2", Life::Live);
+        let stopped = standin
+            .delete_capsule(Caller::Shell, "component-1", &stop_body())
+            .expect("the stand-in stops component-1");
+        assert!(
+            stopped.is_null(),
+            "the stand-in answers null when it stops one instance"
+        );
+        let owner = standin.authorise(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "req-1",
+        );
+        assert_not_live(
+            &owner,
+            "Revoked",
+            "the stand-in refuses the stopped session's grant",
+        );
+        let (plain, query) = shell_pair(&standin);
+        assert_eq!(
+            plain, query,
+            "the stand-in returns one shell body for both route forms"
+        );
+        assert_eq!(
+            request_ids(&plain),
+            BTreeSet::from(["req-2".to_owned()]),
+            "the stand-in lists exactly the sibling grant"
+        );
+        let sibling_own = standin.authorise(
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "req-2",
+        );
+        assert!(
+            sibling_own.is_ok(),
+            "the stand-in authorises instance 2's own grant: {sibling_own:?}"
+        );
+        let sibling_other = standin.authorise(
+            Caller::Client {
+                session_id: "component-2",
+            },
+            "req-1",
+        );
+        assert_not_live(
+            &sibling_other,
+            "Revoked",
+            "the stand-in refuses the stopped grant before the caller check",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in leaves instance 2 running",
+        );
+    }
+
+    #[test]
+    fn standin_authorise_unknown_grant() {
+        let mut standin = StandIn::new();
+        standin.seed_grant(
+            "req-1",
+            "component-1",
+            "res",
+            "read",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        let callers = [
+            ("shell", Caller::Shell),
+            (
+                "owner",
+                Caller::Client {
+                    session_id: "component-1",
+                },
+            ),
+            (
+                "sibling",
+                Caller::Client {
+                    session_id: "component-2",
+                },
+            ),
+        ];
+        for (who, caller) in callers {
+            for request_id in ["", "req-missing"] {
+                let result = standin.authorise(caller, request_id);
+                assert_unknown(&result, request_id, who);
+            }
+        }
+        let owner = standin.authorise(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "req-1",
+        );
+        assert!(
+            owner.is_ok(),
+            "the stand-in authorises the owning client of a known live grant: {owner:?}"
+        );
+    }
+
+    #[test]
+    fn standin_authorise_dead_grants() {
+        let mut standin = StandIn::new();
+        let rows = [
+            ("req-exhausted", Life::Exhausted, "Exhausted"),
+            ("req-revoked", Life::Revoked, "Revoked"),
+            ("req-expired", Life::Expired, "Expired"),
+        ];
+        for (request_id, life, _) in rows {
+            standin.seed_grant(
+                request_id,
+                "component-1",
+                "res",
+                "read",
+                "once",
+                1,
+                life,
+                false,
+            );
+        }
+        let callers = [
+            Caller::Client {
+                session_id: "component-1",
+            },
+            Caller::Client {
+                session_id: "component-2",
+            },
+            Caller::Shell,
+        ];
+        for (request_id, life, life_name) in rows {
+            for caller in callers {
+                let result = standin.authorise(caller, request_id);
+                assert_not_live(
+                    &result,
+                    life_name,
+                    "the stand-in refuses a grant that is not live before the caller check",
+                );
+            }
+            assert_eq!(
+                grant_record(&standin, request_id),
+                (life, false),
+                "the stand-in leaves a {life_name} grant unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn standin_shell_cannot_authorise() {
+        let mut standin = StandIn::new();
+        standin.seed_grant(
+            "req-1",
+            "component-1",
+            "res",
+            "read",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        let shell = standin.authorise(Caller::Shell, "req-1");
+        assert_wrong_capsule(
+            &shell,
+            "component-1",
+            None,
+            "the stand-in refuses a shell presentation of a live grant",
+        );
+        let owner = standin.authorise(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "req-1",
+        );
+        assert!(
+            owner.is_ok(),
+            "the stand-in authorises the owning client of that live grant: {owner:?}"
+        );
     }
 }

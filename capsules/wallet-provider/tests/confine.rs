@@ -851,10 +851,13 @@ impl StandinPrimitive {
 
 /// The one host report the stand-in reads, in place of a bare OS name.
 ///
-/// `unavailable` is test input: a simulated Linux host names the primitive its
-/// report leaves out. A real host reports nothing missing, so
-/// `reporting(std::env::consts::OS)` is the constructor every existing call
-/// site uses and those cases keep their behaviour.
+/// `unavailable` is test input a simulated host on any OS can carry: the
+/// Linux C0 rows carry Landlock, user namespaces or the seccomp filter
+/// missing, and the `macos` row carries Landlock missing.
+/// `standin_host_refusal` refuses such a host before it reads the OS list,
+/// `DECLARED_CONFINED_OS`, so a host that carries a missing primitive is
+/// refused whatever its OS. `reporting` names no missing primitive, so cases
+/// that call `reporting(std::env::consts::OS)` keep their behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StandinHost {
     os: &'static str,
@@ -872,10 +875,7 @@ impl StandinHost {
 
     /// A simulated Linux host whose report leaves `primitive` unavailable.
     fn linux_missing(primitive: StandinPrimitive) -> Self {
-        Self {
-            os: "linux",
-            unavailable: Some(primitive),
-        }
+        Self::missing("linux", primitive)
     }
 
     /// A simulated host on `os` whose report leaves `primitive` unavailable.
@@ -926,6 +926,12 @@ fn standin_host_refusal(name: &str, host: StandinHost) -> Result<(), String> {
 }
 
 /// Lab stand-in for the Runtime's provider launch, not the Runtime.
+///
+/// This function is a lane copy that is to move under the one shared stand-in,
+/// `lab/agent-conformance/standin-runtime/` (owned by cx-agent-conformance),
+/// per Flint and Rong, 2026-10-27 19:25; the move is not done. Draft PR #309
+/// at `513988ebd` names no provider-launch ask, a gap routed to Flint, so this
+/// function copies `ProviderBridge::spawn`'s inputs instead of an RA route.
 ///
 /// It copies the inputs of `ProviderBridge::spawn(binary_path, config)` with
 /// `ProviderConfig.base_path` (read only, in `elastos/`), plus the provider
@@ -4308,6 +4314,7 @@ fn suite_entry(case: &'static str, class: SuiteClass, answer: &Value) -> SuiteEn
 /// that is not `ok` or that does not bind to its request fails the test,
 /// because the one wallet request path always answers a bound response.
 fn wallet_suite_entry(
+    label: &str,
     case: &'static str,
     class: SuiteClass,
     request: &WalletProviderRequestV2,
@@ -4315,14 +4322,17 @@ fn wallet_suite_entry(
 ) -> SuiteEntry {
     assert_eq!(
         answer["status"], "ok",
-        "{case}: wallet_contract must answer through the protocol: {answer}"
+        "{label}: {case}: wallet_contract must answer through the protocol: {answer}"
     );
     let data = answer.get("data").unwrap_or_else(|| {
-        panic!("{case}: wallet_contract answer must carry a bound response: {answer}")
+        panic!("{label}: {case}: wallet_contract answer must carry a bound response: {answer}")
     });
-    let bytes = serde_json::to_vec(data).expect("bound response must serialize");
+    let bytes = serde_json::to_vec(data)
+        .unwrap_or_else(|err| panic!("{label}: {case}: the bound response must serialize: {err}"));
     let result = WalletProviderResponseV2::decode_for_request(&bytes, request)
-        .unwrap_or_else(|err| panic!("{case}: provider response must bind to its request: {err}"))
+        .unwrap_or_else(|err| {
+            panic!("{label}: {case}: provider response must bind to its request: {err}")
+        })
         .result;
     let outcome = match result {
         WalletResultV2::Ok { .. } => SuiteOutcome::Ok,
@@ -4356,8 +4366,14 @@ fn wallet_suite_entry(
 /// cannot read as a permitted case. A refusal keeps the answer's `status`, its
 /// `code` and the stable start of its `message`, so two records from different
 /// roots compare equal. Both callers drive one started provider through this
-/// function; it starts none.
-fn wallet_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteEntry> {
+/// function; it starts none. `label` names the provider, the `B3 journey` and
+/// the start this call drives, and every refusal this function raises starts
+/// with it, so a failed step names the provider and the step.
+fn wallet_standin_suite(
+    provider: &mut ConfinedProvider,
+    root: &Path,
+    label: &str,
+) -> Vec<SuiteEntry> {
     let mut record = Vec::new();
 
     let init = provider.init(root);
@@ -4377,13 +4393,16 @@ fn wallet_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<Sui
             create_new: false,
         });
     record.push(wallet_suite_entry(
+        label,
         "create_managed_account",
         SuiteClass::Permitted,
         &request,
         &answer,
     ));
 
-    let outside = tempfile::tempdir().expect("temporary outside directory");
+    let outside = tempfile::tempdir().unwrap_or_else(|err| {
+        panic!("{label}: the temporary outside directory must be created: {err}")
+    });
     let outside = resolved(outside.path());
     for (case, denied_base) in &outside_write_cases(root, &outside) {
         prepare_outside_write_case(case, denied_base);
@@ -4428,8 +4447,10 @@ fn wallet_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<Sui
 /// case it was pushed for. A refusal keeps the answer's `status`, its `code`
 /// and the stable start of its `message`, so two records from different roots
 /// compare equal. Both callers drive one started provider through this
-/// function; it starts none.
-fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteEntry> {
+/// function; it starts none. `label` names the provider, the `B3 journey` and
+/// the start this call drives, and every refusal this function raises starts
+/// with it, so a failed step names the provider and the step.
+fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path, label: &str) -> Vec<SuiteEntry> {
     let mut record = Vec::new();
 
     let init = provider.send(&json!({
@@ -4445,7 +4466,7 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteE
     let did_data = provider.send(&json!({ "op": "get_did" }));
     let did = did_data["data"]["did"]
         .as_str()
-        .expect("get_did must name the DID")
+        .unwrap_or_else(|| panic!("{label}: get_did must name the DID: {did_data}"))
         .to_string();
     record.push(suite_entry("get_did", SuiteClass::Permitted, &did_data));
 
@@ -4455,7 +4476,7 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteE
     let nickname = provider.send(&json!({ "op": "get_nickname" }));
     assert_eq!(
         nickname["data"]["nickname"], "Confined",
-        "the confined provider must return the stored nickname: {nickname}"
+        "{label}: the confined provider must return the stored nickname: {nickname}"
     );
     record.push(suite_entry(
         "get_nickname",
@@ -4466,7 +4487,7 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteE
     let persona = provider.send(&json!({ "op": "get_persona_did", "name": "fixture" }));
     assert_eq!(
         persona["data"]["owner_did"], did,
-        "the persona must belong to the provider's DID: {persona}"
+        "{label}: the persona must belong to the provider's DID: {persona}"
     );
     record.push(suite_entry(
         "get_persona_did",
@@ -4480,37 +4501,44 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteE
     let granted = provider_storage_root(DID_PROVIDER, root).join("nickname.enc");
     assert!(
         granted.is_file(),
-        "set_nickname must have written the granted file: {}",
+        "{label}: set_nickname must have written the granted file: {}",
         granted.display()
     );
-    let outside = tempfile::tempdir().expect("temporary outside directory");
+    let outside = tempfile::tempdir().unwrap_or_else(|err| {
+        panic!("{label}: the temporary outside directory must be created: {err}")
+    });
     let outside = resolved(outside.path());
     let target = outside.join("nickname.enc");
-    fs::remove_file(&granted).expect("remove the granted nickname file");
-    std::os::unix::fs::symlink(&target, &granted).expect("point the granted path outside");
+    fs::remove_file(&granted)
+        .unwrap_or_else(|err| panic!("{label}: the granted nickname file must be removed: {err}"));
+    std::os::unix::fs::symlink(&target, &granted)
+        .unwrap_or_else(|err| panic!("{label}: the granted path must point outside: {err}"));
     let denied = provider.send(&json!({ "op": "set_nickname", "nickname": "Outside" }));
     assert_eq!(
         denied["status"], "error",
-        "the outside write must be denied: {denied}"
+        "{label}: the outside write must be denied: {denied}"
     );
-    assert_eq!(denied["code"], "storage_error");
+    assert_eq!(
+        denied["code"], "storage_error",
+        "{label}: the outside write must refuse with storage_error: {denied}"
+    );
     assert!(
         denied["message"]
             .as_str()
             .is_some_and(|message| message.starts_with("did-provider: failed to save nickname:")),
-        "the denial must name the failed write: {denied}"
+        "{label}: the denial must name the failed write: {denied}"
     );
     assert!(
         !target.exists(),
-        "nothing may land outside the storage root: {}",
+        "{label}: nothing may land outside the storage root: {}",
         target.display()
     );
     assert_eq!(
         fs::read_dir(&outside)
-            .expect("the outside directory must be readable")
+            .unwrap_or_else(|err| panic!("{label}: the outside directory must be readable: {err}"))
             .count(),
         0,
-        "the outside directory must stay empty: {}",
+        "{label}: the outside directory must stay empty: {}",
         outside.display()
     );
     record.push(suite_entry(
@@ -4518,7 +4546,8 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteE
         SuiteClass::Denied,
         &denied,
     ));
-    fs::remove_file(&granted).expect("remove the outside symlink");
+    fs::remove_file(&granted)
+        .unwrap_or_else(|err| panic!("{label}: the outside symlink must be removed: {err}"));
 
     // The second `outside_write_denied` target: a sibling of `did/` under the
     // same base. The test creates it before it links, so the refusal comes from
@@ -4527,36 +4556,43 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteE
     let restored = provider.send(&json!({ "op": "set_nickname", "nickname": "Sibling source" }));
     assert_eq!(
         restored["status"], "ok",
-        "the granted write must recover the file: {restored}"
+        "{label}: the granted write must recover the file: {restored}"
     );
     let sibling = storage_parent(DID_PROVIDER, root).join("sibling");
-    fs::create_dir_all(&sibling).expect("sibling directory under the same base");
+    fs::create_dir_all(&sibling).unwrap_or_else(|err| {
+        panic!("{label}: the sibling directory under the same base must be created: {err}")
+    });
     let target = sibling.join("nickname.enc");
-    fs::remove_file(&granted).expect("remove the granted nickname file");
-    std::os::unix::fs::symlink(&target, &granted).expect("point the granted path at its sibling");
+    fs::remove_file(&granted)
+        .unwrap_or_else(|err| panic!("{label}: the granted nickname file must be removed: {err}"));
+    std::os::unix::fs::symlink(&target, &granted)
+        .unwrap_or_else(|err| panic!("{label}: the granted path must point at its sibling: {err}"));
     let denied = provider.send(&json!({ "op": "set_nickname", "nickname": "Sibling" }));
     assert_eq!(
         denied["status"], "error",
-        "the sibling write must be denied: {denied}"
+        "{label}: the sibling write must be denied: {denied}"
     );
-    assert_eq!(denied["code"], "storage_error");
+    assert_eq!(
+        denied["code"], "storage_error",
+        "{label}: the sibling write must refuse with storage_error: {denied}"
+    );
     assert!(
         denied["message"]
             .as_str()
             .is_some_and(|message| message.starts_with("did-provider: failed to save nickname:")),
-        "the denial must name the failed write: {denied}"
+        "{label}: the denial must name the failed write: {denied}"
     );
     assert!(
         !target.exists(),
-        "nothing may land beside the storage root: {}",
+        "{label}: nothing may land beside the storage root: {}",
         target.display()
     );
     assert_eq!(
         fs::read_dir(&sibling)
-            .expect("the sibling directory must be readable")
+            .unwrap_or_else(|err| panic!("{label}: the sibling directory must be readable: {err}"))
             .count(),
         0,
-        "the sibling directory must stay empty: {}",
+        "{label}: the sibling directory must stay empty: {}",
         sibling.display()
     );
     record.push(suite_entry(
@@ -4564,7 +4600,8 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteE
         SuiteClass::Denied,
         &denied,
     ));
-    fs::remove_file(&granted).expect("remove the sibling symlink");
+    fs::remove_file(&granted)
+        .unwrap_or_else(|err| panic!("{label}: the sibling symlink must be removed: {err}"));
 
     // The read half of `planted_file_beneath_storage_parent_is_neither_read_nor_written`:
     // the provider's own encrypted nickname is copied beneath STORAGE_PARENT,
@@ -4572,44 +4609,55 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path) -> Vec<SuiteE
     let restored = provider.send(&json!({ "op": "set_nickname", "nickname": "Planted source" }));
     assert_eq!(
         restored["status"], "ok",
-        "the granted write must recover the file: {restored}"
+        "{label}: the granted write must recover the file: {restored}"
     );
     let planted = storage_parent(DID_PROVIDER, root)
         .join("sibling")
         .join("did");
-    fs::create_dir_all(&planted).expect("planted directory beneath STORAGE_PARENT");
+    fs::create_dir_all(&planted).unwrap_or_else(|err| {
+        panic!("{label}: the planted directory beneath STORAGE_PARENT must be created: {err}")
+    });
     let planted_path = planted.join("nickname.enc");
-    fs::copy(&granted, &planted_path).expect("copy the encrypted nickname beneath the parent");
-    let planted_bytes = fs::read(&planted_path).expect("read the planted file");
-    fs::remove_file(&granted).expect("remove the granted nickname file");
+    fs::copy(&granted, &planted_path).unwrap_or_else(|err| {
+        panic!("{label}: the encrypted nickname must be copied beneath the parent: {err}")
+    });
+    let planted_bytes = fs::read(&planted_path)
+        .unwrap_or_else(|err| panic!("{label}: the planted file must be readable: {err}"));
+    fs::remove_file(&granted)
+        .unwrap_or_else(|err| panic!("{label}: the granted nickname file must be removed: {err}"));
     std::os::unix::fs::symlink(&planted_path, &granted)
-        .expect("point the granted path at the plant");
+        .unwrap_or_else(|err| panic!("{label}: the granted path must point at the plant: {err}"));
     let denied = provider.send(&json!({
         "op": "init",
         "config": provider_init_config(DID_PROVIDER, root),
     }));
     assert_eq!(
         denied["status"], "error",
-        "the planted read must be denied: {denied}"
+        "{label}: the planted read must be denied: {denied}"
     );
-    assert_eq!(denied["code"], "storage_error");
+    assert_eq!(
+        denied["code"], "storage_error",
+        "{label}: the planted read must refuse with storage_error: {denied}"
+    );
     assert!(
         denied["message"]
             .as_str()
             .is_some_and(|message| message.starts_with("did-provider: failed to read nickname:")),
-        "the refusal must reach the nickname loader: {denied}"
+        "{label}: the refusal must reach the nickname loader: {denied}"
     );
     assert_eq!(
-        fs::read(&planted_path).expect("the planted file must stay readable"),
+        fs::read(&planted_path)
+            .unwrap_or_else(|err| panic!("{label}: the planted file must stay readable: {err}")),
         planted_bytes,
-        "the planted file must stay unchanged"
+        "{label}: the planted file must stay unchanged"
     );
     record.push(suite_entry(
         "planted nickname beneath STORAGE_PARENT",
         SuiteClass::Denied,
         &denied,
     ));
-    fs::remove_file(&granted).expect("remove the planted symlink");
+    fs::remove_file(&granted)
+        .unwrap_or_else(|err| panic!("{label}: the planted symlink must be removed: {err}"));
 
     let after = provider.send(&json!({ "op": "get_did" }));
     record.push(suite_entry(
@@ -4694,7 +4742,7 @@ fn assert_standin_matches_oracle(
 struct B3Provider {
     name: &'static str,
     binary: &'static Path,
-    suite: fn(&mut ConfinedProvider, &Path) -> Vec<SuiteEntry>,
+    suite: fn(&mut ConfinedProvider, &Path, &str) -> Vec<SuiteEntry>,
     cases: &'static [(&'static str, SuiteClass)],
 }
 
@@ -4724,9 +4772,11 @@ fn standin_oracle_start(name: &str, binary: &Path, root: &Path) -> ConfinedProvi
 /// through `compare_profile_to_its_oracle`. The provider's suite then drives
 /// the stand-in start and a second start under the committed file, each on its
 /// own fresh root; both records must hold every case of `provider.cases` in
-/// order with its class, and the two records must agree entry by entry. Every
-/// refusal names the provider and the step it failed. The stand-in is test
-/// code and not the Runtime.
+/// order with its class, and the two records must agree entry by entry. Each
+/// suite step's failure starts with the provider, `B3 journey` and the start it
+/// drives. A refusal of `standin_oracle_start`'s own launch comes from
+/// `ConfinedProvider::start_under`, which this journey does not change. The
+/// stand-in is test code and not the Runtime.
 fn standin_b3_journey(provider: &B3Provider) {
     let name = provider.name;
     let declared = read_declared_rights(name, &declared_rights_path(name))
@@ -4761,12 +4811,14 @@ fn standin_b3_journey(provider: &B3Provider) {
         panic!("{name} B3 journey: the launched profile and its oracle disagree: {err}")
     });
 
-    let standin_record = (provider.suite)(&mut standin, &standin_root);
+    let standin_label = format!("{name} B3 journey (the stand-in start)");
+    let standin_record = (provider.suite)(&mut standin, &standin_root, &standin_label);
 
     let oracle_fixture = tempfile::tempdir().expect("temporary provider root");
     let oracle_root = resolved(oracle_fixture.path());
     let mut oracle = standin_oracle_start(name, provider.binary, &oracle_root);
-    let oracle_record = (provider.suite)(&mut oracle, &oracle_root);
+    let oracle_label = format!("{name} B3 journey (the start under the committed confine.sb)");
+    let oracle_record = (provider.suite)(&mut oracle, &oracle_root, &oracle_label);
 
     standin.shutdown();
     oracle.shutdown();
@@ -4794,23 +4846,31 @@ fn standin_b3_journey(provider: &B3Provider) {
 /// runs on the stand-in start and on a start under the committed file, and
 /// both records must hold their provider's cases in order and agree entry by
 /// entry. A stand-in that changes the launched profile after the writer, in a
-/// way the suite does not exercise, fails at the launched-profile check. The
-/// stand-in is test code and not the Runtime.
+/// way the suite does not exercise, fails at the launched-file checks, and a
+/// deny form there fails only at the oracle comparison. The stand-in is test
+/// code and not the Runtime.
 ///
 /// Falsifier: WP116 binds the stand-in's `STORAGE_ROOT` to the base instead of
-/// the wallet directory; the widened grant permits `<root>/sibling`, so
-/// wallet's stand-in record holds `ok` where the committed profile refuses and
-/// the journey fails on that case. WP121 removes the planted-key push, so
-/// wallet's stand-in record holds eight entries where `SUITE_CASES` holds nine
-/// and the journey fails naming the missing case. WP124 makes the stand-in use
-/// wallet's root layout for did, so did's start is refused at its first `init`.
-/// WP127 appends a write grant on `STORAGE_PARENT` to did's launched profile,
-/// so the journey fails at did's launched-profile check on the form only the
-/// launched file holds. WP133 appends one allow form the suite does not
-/// exercise to the launched file, and WP134 removes `(deny network*)` from the
-/// launched file; the journey fails at that same check for each, because the
-/// writer-generated text test reads `generate_profile`'s own text and the suite
-/// exercises neither change.
+/// the provider's storage root; the widened grant permits did's sibling write
+/// beneath the base, so did's suite step fails at the sibling write where the
+/// record must refuse it. WP121 removes the planted-key push, so wallet's
+/// stand-in record holds eight entries where `SUITE_CASES` holds nine and the
+/// journey fails naming the missing case. WP124 makes the stand-in use wallet's
+/// root layout for did, so did's start is refused at its first `init`. WP127
+/// appends a write grant on `STORAGE_PARENT` to did's launched profile, so the
+/// journey fails at did's launched-profile check, where `check_declared_rights`
+/// refuses the appended allow form because no declared right names it. WP133
+/// appends one allow form the suite does not exercise to the launched file, so
+/// the journey fails at that same check, where `check_declared_rights` refuses
+/// the appended allow form because no declared right names it. WP134 removes
+/// `(deny network*)` from the launched file, so the journey fails at that same
+/// check, where `check_profile_contract` refuses the profile without its
+/// explicit network denial. WP138 appends
+/// `(deny file-write* (literal "/private/var/cc-confine-launched"))` to the
+/// launched file; only `compare_profile_to_its_oracle` catches it, because the
+/// head keeps its order, the contract checks read only allow forms and no suite
+/// case reads that literal, so the journey fails at its launched profile and
+/// its oracle disagree panic, which names the planted form.
 #[test]
 fn standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
@@ -4927,6 +4987,7 @@ fn wallet_suite_entry_records_an_inner_refusal_as_refused() {
         "the outer answer stays ok for an inner refusal: {answer}"
     );
     let entry = wallet_suite_entry(
+        "wallet_suite_entry test",
         "create_managed_account",
         SuiteClass::Denied,
         &request,
