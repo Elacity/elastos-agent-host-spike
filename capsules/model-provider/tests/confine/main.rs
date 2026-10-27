@@ -2337,6 +2337,10 @@ fn standin_profile(declared: &Value) -> Result<String, String> {
     Ok(profile)
 }
 
+fn write_standin_profile(path: &Path, generated: &str) {
+    fs::write(path, generated).expect("write the generated profile");
+}
+
 /// A launch whose profile cannot be applied never starts the provider.
 ///
 /// The one launcher starts the real binary three ways: a profile path under
@@ -2527,6 +2531,84 @@ fn generated_model_profile_matches_the_oracle() {
         standin_profile(&rule_not_a_string).expect_err("a rule that is not a string is refused"),
         "model-provider declares a rule that is not a string"
     );
+}
+
+/// The profile the stand-in builds is the file `Launch::Profile` applies.
+///
+/// A hosted `init` answers through `assert_serving` and creates `runs/`
+/// under `STORAGE_ROOT`. A local-offer `init` answers `internal_error`
+/// with message `model provider failed`, the log contains
+/// `base_path is unavailable`, and `STORAGE_ROOT` does not exist. The
+/// same provider then accepts a hosted `init`, `offers_list` answers, and
+/// `shutdown` exits cleanly.
+///
+/// Falsifier: F-cc42a makes `write_standin_profile` write an allow-default
+/// profile and ignore the generated text, so the local offer's `init`
+/// answers ok.
+#[test]
+fn generated_profile_permits_init_and_denies_the_local_offer() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+
+    let storage = Storage::prepare("standin-permit");
+    let profile = storage.base.join("standin.sb");
+    write_standin_profile(&profile, &generated);
+    let bindings = canonical_bindings(&storage, &binary);
+    let mut provider = Provider::start(Launch::Profile {
+        profile: &profile,
+        bindings: &bindings,
+    });
+    assert_serving(&provider.ok(&init_request(&storage, None)));
+    assert!(
+        storage.root.join("runs").is_dir(),
+        "init must create runs/ under STORAGE_ROOT"
+    );
+    provider.shutdown();
+
+    let local = LocalEngine::prepare("standin-local-offer");
+    let profile = local.storage.base.join("standin.sb");
+    write_standin_profile(&profile, &generated);
+    let bindings = canonical_bindings(&local.storage, &binary);
+    let mut provider = Provider::start(Launch::Profile {
+        profile: &profile,
+        bindings: &bindings,
+    });
+    let refused = provider.request(&local.request);
+    assert_eq!(
+        refused,
+        json!({
+            "status": "error",
+            "code": "internal_error",
+            "message": "model provider failed"
+        }),
+        "the local offer's init must fail closed"
+    );
+    let logged = provider
+        .logged_fault("internal_error")
+        .expect("the provider must log the internal_error detail");
+    assert!(
+        logged.contains("invalid model provider init config: base_path is unavailable"),
+        "init must stop where it resolves base_path: {logged}"
+    );
+    assert!(
+        !local.storage.root.exists(),
+        "the refused init must create no STORAGE_ROOT"
+    );
+    assert_serving(&provider.ok(&init_request(&local.storage, None)));
+    provider.ok(&json!({ "op": "offers_list" }));
+    provider.shutdown();
 }
 
 fn collect_allow_lines(profile: &str) -> Vec<&str> {
