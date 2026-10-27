@@ -193,8 +193,11 @@ use std::process::Command;
 /// because the guessed file exists after did's build; and WP129 returns
 /// `wallet_dir(base)` for the unknown-name arm of `provider_storage_root`, so
 /// `provider_storage_root_refuses_an_unknown_provider_name` fails because no
-/// refusal comes.
-const EXPECTED_FALSIFIERS: usize = 127;
+/// refusal comes. Task 103's WP130 disables the kind check in
+/// `did_binary_executable`, so
+/// `did_binary_is_the_executable_the_build_reports` fails because the non-bin
+/// artifact's executable is read first.
+const EXPECTED_FALSIFIERS: usize = 128;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -280,16 +280,17 @@ def load(path=DATA):
 #   src/local_memory.rs, src/journal.rs, src/contract.rs, src/state.rs,
 #   tests/process.rs, src/local_llama.rs and src/adapters.rs.
 #   tests/process.rs is named here because the model list's MP30-MP34 edit
-#   it: MP30, MP31, MP33 and MP34 change the relay request, and MP32 the
-#   record of a closed provider socket. Its `selftest` entries edit
-#   falsify.py, which recovery finds under examples/agent-host.
+#   it: MP30, MP31 and MP34 change the relay request, MP33 sends it a second
+#   time, and MP32 changes the record of a closed provider socket. The model
+#   list's `selftest` entries edit falsify.py, which recovery finds under
+#   examples/agent-host.
 # - capsules/model-provider/confine-falsifiers.json: the model `confine.sb`
 #   and tests/confine/main.rs.
 # - capsules/did-provider/falsifiers.json: did's src/main.rs, did's
 #   confine.sb and did's tests/confine.rs.
 # - capsules/wallet-provider/falsifiers.json: wallet's src/main.rs, wallet's
 #   confine.sb, wallet's tests/confine.rs and src/tests/falsifiers.rs, and
-#   did's confine.sb.
+#   did's src/main.rs, did's confine.sb and did's tests/confine.rs.
 # - lab/capsule-identity/falsifiers.json: capsule-identity's .gitignore,
 #   README.md, src/lib.rs, tests/common/mod.rs and
 #   fixtures/wc001-core/capsule.json.
@@ -308,17 +309,17 @@ def load(path=DATA):
 #   all under examples/agent-host, which this runner's own search restores, so
 #   the tuple needs no line for it.
 # - lab/agent-conformance/falsifiers.json: the 19 files its entries edit,
-#   named relative to its own folder: fixtures/granted-bytes.txt,
-#   fixtures/grants.json, fixtures/home-source.txt, fixtures/host-key-read.txt,
-#   fixtures/instance-grants.json, fixtures/operator-api-host.txt,
-#   fixtures/parallel-tasks.txt, probe/capsule.json, probe/src/lib.rs,
-#   src/census.rs, src/harness.rs, src/report.rs, tests/artifact.rs,
-#   tests/common/grants.rs, tests/common/mod.rs, tests/common/operator.rs,
-#   tests/common/probe.rs, tests/effects.rs and tests/runtime.rs. The list
-#   still uses the old paths until its owning lane rewrites it to this
-#   runner's rule. Its F-ac2c entry edits fixtures/no-policy.json, which does
-#   not exist, so it gets no line: the runner refuses an edit to a missing
-#   file, and recutting that entry is that lane's job.
+#   named here relative to its own folder lab/agent-conformance:
+#   fixtures/granted-bytes.txt, fixtures/grants.json, fixtures/home-source.txt,
+#   fixtures/host-key-read.txt, fixtures/instance-grants.json,
+#   fixtures/operator-api-host.txt, fixtures/parallel-tasks.txt,
+#   probe/capsule.json, probe/src/lib.rs, src/census.rs, src/harness.rs,
+#   src/report.rs, tests/artifact.rs, tests/common/grants.rs,
+#   tests/common/mod.rs, tests/common/operator.rs, tests/common/probe.rs,
+#   tests/effects.rs and tests/runtime.rs. Its values are
+#   `../../lab/agent-conformance/...`, relative to examples/agent-host, the
+#   folder the runner resolves every list's edit against, so recovery finds
+#   each of these files under lab/agent-conformance.
 # A killed run therefore restores an exact file instead of leaving a weakened
 # confinement test, profile or fixture behind.
 PROVIDER_TARGETS = (

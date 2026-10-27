@@ -944,9 +944,11 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Append a write grant on `STORAGE_PARENT` to the stand-in's generated profile
   for did (WP127):
   `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
-  fails on the sibling write beneath the base, which answers `ok` where the
-  committed `confine.sb` refuses it. The unrelated outside write and the
-  planted read still pass, so only that case catches it.
+  fails inside the stand-in start's suite, at its `the sibling write must be
+  denied` assertion, because that write answers `ok`; the failure comes before
+  the two starts' records are compared. The unrelated outside write passes
+  before it, and the planted read runs after it and needs a read grant WP127
+  does not add.
 - Return `did_provider_dir().join("target/debug/did-provider")` from the one
   build-output reader instead of the reported `executable` (WP128):
   `did_binary_is_the_executable_the_build_reports` fails because its fixture
@@ -957,6 +959,10 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `provider_storage_root` (WP129):
   `provider_storage_root_refuses_an_unknown_provider_name` fails because no
   refusal comes for `model-provider`.
+- Skip the kind check in the one build-output reader (WP130):
+  `did_binary_is_the_executable_the_build_reports` fails because the reader
+  returns the non-bin artifact's executable, which comes before the bin
+  artifact.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

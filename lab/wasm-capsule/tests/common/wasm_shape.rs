@@ -1,12 +1,21 @@
-//! A minimal reader for the three shape facts wc-001 pins: that the artifact is
-//! a core Wasm module, that it imports nothing, and that its `digest` export has
-//! the signature `(param i32) -> (result i64)`.
+//! A minimal reader for the two shape facts wc-001 pins that the audit API
+//! does not give: that the artifact is a core Wasm module, and that its
+//! `digest` export has the signature `(param i32) -> (result i64)`.
+//!
+//! It reads no imports (task 053). The capsule's zero-import claim (P3) is read
+//! only through `wasm_capsule_audit::audit`, the lab's one module reader (P10),
+//! and a module with an import section is refused here with one exact reason,
+//! so this reader never maps an export index past imports it did not read.
 //!
 //! It is deliberately tiny and dependency-free, and it is NOT a validator: it
 //! reads only the sections those facts need and fails closed with a named
 //! reason (PRINCIPLES P11) on anything it cannot read. Keeping it in the lane's
 //! own tooling, with no external crate, keeps the surface minimal (P18) and
 //! adds nothing to the lane's Cargo.lock.
+
+/// The one reason a module with an import section is refused (task 053).
+pub const IMPORT_SECTION_REFUSED: &str =
+    "the shape reader reads no imports: a module's imports are read only through wasm_capsule_audit::audit";
 
 /// A Wasm value type, as far as wc-001 needs to tell them apart.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -33,18 +42,16 @@ pub struct Shape {
     /// True only when the file begins with the core Wasm magic and version 1.
     /// A Component (or anything else) is not core Wasm.
     pub is_core_wasm: bool,
-    /// The number of entries in the import section (0 when it is absent).
-    pub import_count: usize,
     /// The signature of the exported function named `digest`, if present.
     pub digest: Option<FuncType>,
 }
 
 impl Shape {
-    /// The exact shape wc-001 requires: core Wasm, nothing imported, and a
-    /// `digest` export of `(param i32) -> (result i64)`.
+    /// The shape facts wc-001 requires from this reader: core Wasm and a
+    /// `digest` export of `(param i32) -> (result i64)`. Imports are not one of
+    /// them: `wasm_capsule_audit::audit` reads those (task 053).
     pub fn is_the_required_capsule_shape(&self) -> bool {
         self.is_core_wasm
-            && self.import_count == 0
             && self.digest
                 == Some(FuncType {
                     params: vec![ValType::I32],
@@ -137,16 +144,14 @@ pub fn read(bytes: &[u8]) -> Result<Shape, String> {
     if !is_core_wasm {
         return Ok(Shape {
             is_core_wasm: false,
-            import_count: 0,
             digest: None,
         });
     }
 
     let mut func_types: Vec<FuncType> = Vec::new();
-    // Type index for each function, imported functions first, then defined.
+    // Type index for each defined function. With no import section, the
+    // function index space holds only these.
     let mut function_type_indices: Vec<u32> = Vec::new();
-    let mut imported_function_count: u32 = 0;
-    let mut import_count: usize = 0;
     // (export name, is a function, index in the function index space)
     let mut exports: Vec<(Vec<u8>, bool, u32)> = Vec::new();
 
@@ -174,42 +179,9 @@ pub fn read(bytes: &[u8]) -> Result<Shape, String> {
                     }
                 }
             }
-            // Import section: count them, and track imported functions so a
-            // later export index maps to the right function.
-            2 => {
-                let count = sec.uleb()?;
-                import_count = count as usize;
-                for _ in 0..count {
-                    let module_len = sec.uleb()? as usize;
-                    sec.take(module_len)?;
-                    let name_len = sec.uleb()? as usize;
-                    sec.take(name_len)?;
-                    match sec.byte()? {
-                        0x00 => {
-                            // Imported function: it carries a type index.
-                            sec.uleb()?;
-                            imported_function_count += 1;
-                        }
-                        0x01 => {
-                            // Table: element type then limits.
-                            sec.val_type()?;
-                            read_limits(&mut sec)?;
-                        }
-                        0x02 => {
-                            // Memory: limits.
-                            read_limits(&mut sec)?;
-                        }
-                        0x03 => {
-                            // Global: value type then a mutability flag.
-                            sec.val_type()?;
-                            sec.byte()?;
-                        }
-                        other => {
-                            return Err(format!("unexpected import kind 0x{other:02x}"));
-                        }
-                    }
-                }
-            }
+            // Import section: never read here (task 053). Refused whole, so
+            // no import is counted, walked or skipped past.
+            2 => return Err(IMPORT_SECTION_REFUSED.to_string()),
             // Function section: the type index of each defined function.
             3 => {
                 let count = sec.uleb()?;
@@ -233,39 +205,22 @@ pub fn read(bytes: &[u8]) -> Result<Shape, String> {
         }
     }
 
-    let digest = resolve_digest(
-        &exports,
-        &function_type_indices,
-        &func_types,
-        imported_function_count,
-    )?;
+    let digest = resolve_digest(&exports, &function_type_indices, &func_types)?;
 
     Ok(Shape {
         is_core_wasm: true,
-        import_count,
         digest,
     })
 }
 
-/// Limits are a flag byte then one or two LEB128 values. wc-001 only needs to
-/// step over them.
-fn read_limits(sec: &mut Cursor) -> Result<(), String> {
-    let flag = sec.byte()?;
-    sec.uleb()?; // minimum
-    if flag & 0x01 != 0 {
-        sec.uleb()?; // maximum
-    }
-    Ok(())
-}
-
 /// Find the `digest` function export and return its signature, or `None` when
-/// there is no such function export. A function index that points past the
+/// there is no such function export. A module read here imports nothing, so a
+/// function index is a defined function's index; one that points past the
 /// known functions fails closed.
 fn resolve_digest(
     exports: &[(Vec<u8>, bool, u32)],
     function_type_indices: &[u32],
     func_types: &[FuncType],
-    imported_function_count: u32,
 ) -> Result<Option<FuncType>, String> {
     for (name, is_function, index) in exports {
         if name != b"digest" {
@@ -274,12 +229,8 @@ fn resolve_digest(
         if !is_function {
             return Err("the `digest` export is not a function".to_string());
         }
-        if *index < imported_function_count {
-            return Err("the `digest` export is an imported function".to_string());
-        }
-        let defined = (*index - imported_function_count) as usize;
         let type_index = *function_type_indices
-            .get(defined)
+            .get(*index as usize)
             .ok_or_else(|| "the `digest` function index is out of range".to_string())?
             as usize;
         let sig = func_types
