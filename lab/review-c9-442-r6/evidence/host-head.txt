@@ -1,0 +1,6 @@
+HEAD=862f4c881313163c8071286c8172806436d8e1ca
+checker=ee67ed2feb1caf6b96a5b027809a84fe3472f7a650012caec9eb6db1bf81cffe
+uname=Linux 6.12.94+ x86_64
+rustc=rustc 1.91.0 (f8297e351 2025-10-28)
+qemu=QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)
+cc=aarch64-linux-gnu-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0

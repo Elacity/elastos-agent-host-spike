@@ -402,7 +402,6 @@ def main() -> int:
         xdg = root / "xdg-sym"
         real = ev / "guest-ledger-dir"
         real.mkdir()
-        (xdg / "linux-confine").parent.mkdir(parents=True, exist_ok=True)
         xdg.mkdir()
         os.symlink(real, xdg / "linux-confine")
         rc1, _ = run_check(

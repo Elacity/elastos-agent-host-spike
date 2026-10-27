@@ -1,0 +1,31 @@
+checker=/tmp/review-c9-442-r6-src/lab/linux-confine/guest/check-guest-results.py
+head_src=/tmp/review-c9-442-r6-src/lab/linux-confine/guest
+CAUGHT	R6-honest-pass	rc=0	complete live-format fixture. 
+CAUGHT	R6-missing-ledger-first-run	rc=0	LC_USED_NONCES path does not exist yet. 
+CAUGHT	R6-missing-xdg-ledger-first-run	rc=0	fresh XDG_RUNTIME_DIR, no ledger file. 
+CAUGHT	R6-stale-lock-no-hang	rc=0	stale lock file present, elapsed=0.024s hung=False. 
+CAUGHT	R6-r5-1-nonce-new-work-pinned	rc=1	new $WORK, pinned LC_USED_NONCES, first_rc=0. HOST CHECK FAILED: |   nonce was already recorded for this host boot
+CAUGHT	R6-r5-1-wipe-work-used-nonces	rc=1	unlink $WORK/used-nonces.txt, first_rc=0. HOST CHECK FAILED: |   nonce was already recorded for this host boot
+SURVIVED	R6-fresh-xdg-resets-ledger	rc=0	same nonce after new XDG_RUNTIME_DIR, first_rc=0. 
+CAUGHT	R6-fresh-home-same-xdg	rc=1	new HOME, same XDG, first_rc=0. HOST CHECK FAILED: |   nonce was already recorded for this host boot
+SURVIVED	R6-delete-host-ledger	rc=0	unlinked 1 host ledger file(s), first_rc=0. 
+SURVIVED	R6-ledger-inside-evidence	rc=0	LC_USED_NONCES under 9p evidence, unlinked, first_rc=0. 
+SURVIVED	R6-world-writable-ledger-wipe	rc=0	pre-created 0666 ledger, mode_after_check=0o600, truncated, first_rc=0. 
+SURVIVED	R6-symlinked-ledger-dir	rc=0	XDG linux-confine -> evidence, wiped via guest path, first_rc=0. 
+CAUGHT	R6-parallel-same-nonce	rc=1	two concurrent checks rc=(0,1) err_a= err_b=HOST CHECK FAILED: |   nonce was already recorded for this host boot
+SURVIVED	R6-partial-ledger-write	rc=0	ledger truncated to 17 bytes after first_rc=0. 
+SURVIVED	R6-empty-ledger-after-crash	rc=0	ledger emptied after first_rc=0. 
+SURVIVED	R6-rmw-lost-update	rc=0	RMW lost nonce aaa after rc_a=0 rc_b=0. 
+CAUGHT	R6-ledger-not-oappend-locked	rc=0	checker record_used_nonce is read-modify-write with write_text; no flock/O_APPEND
+CAUGHT	R6-clock-run-start-one-hour-past	rc=0	run_start = now-3600, files now. 
+CAUGHT	R6-clock-step-back-false-fail	rc=1	run_start=now+30 models a clock step-back. HOST CHECK FAILED: |   pre-boot run_start is implausible
+CAUGHT	R6-preboot-rename-toctou	rc=1	swaps=1 nlink_after=2 rc=1. HOST CHECK FAILED: |   pre-boot nonce record is a hardlink
+CAUGHT	R6-serial-forged-guest-exit	rc=1	guest-exit.txt is 1; console has guest_exit=0 + guest mark. HOST CHECK FAILED: |   guest_exit.txt did not report 0: 'guest_exit=1'
+CAUGHT	R6-qemu137-rewrite-same-ledger	rc=1	rewrite 137->0, same ledger, first_rc=1. HOST CHECK FAILED: |   nonce was already recorded for this host boot
+SURVIVED	R6-qemu137-rewrite-fresh-xdg	rc=0	rewrite 137->0 after new XDG, first_rc=1. 
+SURVIVED	R6-timeout-skip-then-forged-pass	rc=0	wrapper timeout exits before checker, so this first checker-only call on a forged PASS tree is rc=0. 
+CAUGHT	R6-wrapper-timeout-skips-checker	rc=0	run-aarch64-guest.sh exits 1 on missing LABEL before the checker, so the nonce is never recorded
+CAUGHT	R6-wrapper-does-not-pin-ledger	rc=0	live wrapper never sets LC_USED_NONCES; ledger follows XDG_RUNTIME_DIR or /var/tmp
+CAUGHT	R6-stale-symlink-ledger-false-fail	rc=1	honest tree, ledger path is a dangling symlink. HOST CHECK FAILED: |   used-nonces path is a symlink or hardlink
+CAUGHT	R6-alias-ignores-parent-dir	rc=0	path_is_alias checks the ledger file only, not a symlinked parent
+summary: 18 CAUGHT, 10 SURVIVED, 28 plants

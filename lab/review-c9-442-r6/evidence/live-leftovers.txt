@@ -1,0 +1,5 @@
+CAUGHT	LIVE-timeout-nonce-forged-pass	rc=1	HOST CHECK FAILED:
+  nonce was already recorded for this host boot
+SURVIVED	LIVE-fail-closed-nonce-fresh-xdg-pass	rc=0	
+timeout_digest_in_ledger_before=False
+SURVIVED	LIVE-timeout-nonce-forged-pass-default-ledger	rc=0	

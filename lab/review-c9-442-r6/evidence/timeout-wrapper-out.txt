@@ -1,0 +1,136 @@
+label=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
+native=0
+jetson=0
+emulated_cpu=1
+qemu_accel=tcg
+host_uname=Linux 6.12.94+ x86_64
+qemu=QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)
+cross_cc=aarch64-linux-gnu-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+rustc=rustc 1.91.0 (f8297e351 2025-10-28)
+mode=smoke
+repo=/tmp/review-c9-442-r6-src
+head=862f4c881313163c8071286c8172806436d8e1ca
+=== rust targets ===
+info: component rust-std for target aarch64-unknown-linux-gnu is up to date
+=== download Alpine kernel 6.18.58-0-virt and minirootfs 3.23.5 ===
+kernel=/tmp/review-c9-442-r6-work/kernel/boot/vmlinuz-virt
+d1876369b061ef3bc33314f490240efcd32b031393cb34c6f81134fa862fe472  /tmp/review-c9-442-r6-work/kernel/boot/vmlinuz-virt
+=== cross-build linux-confine tests ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+  Executable unittests src/lib.rs (target-build/aarch64-unknown-linux-gnu/debug/deps/linux_confine-580dc432279d06e5)
+  Executable tests/aarch64.rs (target-build/aarch64-unknown-linux-gnu/debug/deps/aarch64-f95b9d55d58d808a)
+  Executable tests/confine.rs (target-build/aarch64-unknown-linux-gnu/debug/deps/confine-db6e2a959f30fd61)
+  Executable tests/elf.rs (target-build/aarch64-unknown-linux-gnu/debug/deps/elf-352ae884474e9c6f)
+  Executable tests/providers.rs (target-build/aarch64-unknown-linux-gnu/debug/deps/providers-975cb7e215216ebf)
+=== cross-build shipping provider binaries ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.04s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
+=== compile guest helpers ===
+=== snapshot standing test binaries ===
+/tmp/review-c9-442-r6-src/lab/linux-confine/guest-bins/confine EM_AARCH64=183
+/tmp/review-c9-442-r6-src/lab/linux-confine/guest-bins/providers EM_AARCH64=183
+/tmp/review-c9-442-r6-src/lab/linux-confine/guest-bins/elf EM_AARCH64=183
+/tmp/review-c9-442-r6-src/lab/linux-confine/guest-bins/aarch64 EM_AARCH64=183
+/tmp/review-c9-442-r6-src/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-c224bc819a663556/out/lc-setup EM_AARCH64=183
+/tmp/review-c9-442-r6-src/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-c224bc819a663556/out/lc-setup-test EM_AARCH64=183
+/tmp/review-c9-442-r6-src/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-c224bc819a663556/out/lc-probe EM_AARCH64=183
+/tmp/review-c9-442-r6-src/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-c224bc819a663556/out/lc-witness.so EM_AARCH64=183
+helper_dir=/tmp/review-c9-442-r6-src/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-c224bc819a663556/out
+worktree_under_tmp=1 baked helpers must stay visible after guest /tmp tmpfs
+=== assemble initramfs ===
+packed_mod=kernel/net/core/failover.ko.gz
+packed_mod=kernel/drivers/net/net_failover.ko.gz
+packed_mod=kernel/drivers/net/dummy.ko.gz
+packed_mod=kernel/drivers/net/virtio_net.ko.gz
+=== pack initramfs ===
+419539 blocks
+-rw-r--r-- 1 ubuntu ubuntu 63M Oct 27 01:44 /tmp/review-c9-442-r6-work/guest.cpio.gz
+=== boot qemu-system-aarch64 TCG ===
+qemu_timeout_sec=2
+qemu_exit=137
+work=/tmp/review-c9-442-r6-work
+run_id=37c90c3e072733d9b6b36883970ff11c
+=== guest console tail ===
+[    0.173679] CPU features: detected: RCpc load-acquire (LDAPR)
+[    0.174014] CPU features: detected: 52-bit Virtual Addressing for KVM (LPA2)
+[    0.174192] CPU features: detected: LSE atomic instructions
+[    0.174341] CPU features: detected: Memory Copy and Memory Set instructions
+[    0.174506] CPU features: detected: Privileged Access Never
+[    0.174659] CPU features: detected: RAS Extension Support
+[    0.174868] CPU features: detected: RASv1p1 Extension Support
+[    0.175144] CPU features: detected: Random Number Generator
+[    0.175287] CPU features: detected: Speculation barrier (SB)
+[    0.175426] CPU features: detected: Stage-2 Force Write-Back
+[    0.175568] CPU features: detected: Trap EL0 IMPLEMENTATION DEFINED functionality
+[    0.175726] CPU features: detected: TLB range maintenance instructions
+[    0.175966] CPU features: detected: Scalable Matrix Extension
+[    0.176187] CPU features: detected: FA64
+[    0.176317] CPU features: detected: Speculative Store Bypassing Safe (SSBS)
+[    0.176470] CPU features: detected: Scalable Vector Extension
+[    0.190848] alternatives: applying system-wide alternatives
+[    0.208051] CPU features: detected: Hardware dirty bit management on CPU0-1
+[    0.209218] SVE: maximum available vector length 256 bytes per vector
+[    0.209443] SVE: default vector length 64 bytes per vector
+[    0.210864] SME: minimum available vector length 16 bytes per vector
+[    0.211148] SME: maximum available vector length 256 bytes per vector
+[    0.211312] SME: default vector length 32 bytes per vector
+[    0.229920] Memory: 3940224K/4194304K available (13312K kernel code, 1994K rwdata, 8460K rodata, 2048K init, 9282K bss, 249612K reserved, 0K cma-reserved)
+[    0.264994] devtmpfs: initialized
+[    0.352343] posixtimers hash table entries: 1024 (order: 2, 16384 bytes, linear)
+[    0.352966] futex hash table entries: 512 (32768 bytes on 1 NUMA nodes, total 32 KiB, linear).
+[    0.354573] 23904 pages in range for non-PLT usage
+[    0.354685] 515424 pages in range for PLT usage
+[    0.358467] pinctrl core: initialized pinctrl subsystem
+[    0.364046] DMI not present or invalid.
+[    0.390497] NET: Registered PF_NETLINK/PF_ROUTE protocol family
+[    0.400867] DMA: preallocated 512 KiB GFP_KERNEL pool for atomic allocations
+[    0.403698] DMA: preallocated 512 KiB GFP_KERNEL|GFP_DMA pool for atomic allocations
+[    0.404713] DMA: preallocated 512 KiB GFP_KERNEL|GFP_DMA32 pool for atomic allocations
+[    0.405490] audit: initializing netlink subsys (disabled)
+[    0.408448] audit: type=2000 audit(0.324:1): state=initialized audit_enabled=0 res=1
+[    0.415063] thermal_sys: Registered thermal governor 'step_wise'
+[    0.416978] cpuidle: using governor ladder
+[    0.418205] cpuidle: using governor menu
+[    0.420058] hw-breakpoint: found 6 breakpoint and 4 watchpoint registers.
+[    0.421171] ASID allocator initialised with 65536 entries
+[    0.424367] Serial: AMBA PL011 UART driver
+[    0.532107] 9000000.pl011: ttyAMA0 at MMIO 0x9000000 (irq = 13, base_baud = 0) is a PL011 rev1
+[    0.534436] printk: console [ttyAMA0] enabled
+[    0.534436] printk: console [ttyAMA0] enabled
+[    0.535721] printk: legacy bootconsole [pl11] disabled
+[    0.535721] printk: legacy bootconsole [pl11] disabled
+[    0.566505] HugeTLB: registered 1.00 GiB page size, pre-allocated 0 pages
+[    0.566710] HugeTLB: 0 KiB vmemmap can be freed for a 1.00 GiB page
+[    0.566992] HugeTLB: registered 32.0 MiB page size, pre-allocated 0 pages
+[    0.567040] HugeTLB: 0 KiB vmemmap can be freed for a 32.0 MiB page
+[    0.567097] HugeTLB: registered 2.00 MiB page size, pre-allocated 0 pages
+[    0.567136] HugeTLB: 0 KiB vmemmap can be freed for a 2.00 MiB page
+[    0.567194] HugeTLB: registered 64.0 KiB page size, pre-allocated 0 pages
+[    0.567232] HugeTLB: 0 KiB vmemmap can be freed for a 64.0 KiB page
+[    0.601517] ACPI: Interpreter disabled.
+[    0.602650] iommu: Default domain type: Translated
+[    0.602725] iommu: DMA domain TLB invalidation policy: lazy mode
+[    0.641789] clocksource: Switched to clocksource arch_sys_counter
+[    0.729279] VFS: Disk quotas dquot_6.6.0
+[    0.729691] VFS: Dquot-cache hash table entries: 512 (order 0, 4096 bytes)
+[    0.735052] pnp: PnP ACPI: disabled
+[    0.839914] NET: Registered PF_INET protocol family
+[    0.841587] IP idents hash table entries: 65536 (order: 7, 524288 bytes, linear)
+[    1.141143] tcp_listen_portaddr_hash hash table entries: 2048 (order: 3, 32768 bytes, linear)
+[    1.141519] Table-perturb hash table entries: 65536 (order: 6, 262144 bytes, linear)
+[    1.141720] TCP established hash table entries: 32768 (order: 6, 262144 bytes, linear)
+[    1.142207] TCP bind hash table entries: 32768 (order: 8, 1048576 bytes, linear)
+[    1.142778] TCP: Hash tables configured (established 32768 bind 32768)
+[    1.145967] MPTCP token hash table entries: 4096 (order: 5, 98304 bytes, linear)
+[    1.147934] UDP hash table entries: 2048 (order: 5, 131072 bytes, linear)
+[    1.148494] UDP-Lite hash table entries: 2048 (order: 5, 131072 bytes, linear)
+[    1.150888] NET: Registered PF_UNIX/PF_LOCAL protocol family
+[    1.151597] NET: Registered PF_XDP protocol family
+[    1.151988] PCI: CLS 0 bytes, default 64
+[    1.154866] kvm [1]: HYP mode not available
+[    1.160037] Unpacking initramfs...
+[    1.167910] Initialise system trusted keyrings
+[    1.179227] workingset: timestamp_bits=44 max_order=20 bucket_order=0
+guest did not print the required TCG label
+TIMEOUT_HOST_EXIT=1
