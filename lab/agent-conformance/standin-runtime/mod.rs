@@ -101,6 +101,7 @@ impl StandIn {
     /// Lab test seam, not a route.
     ///
     /// `granted_at` is the seeded value. This method reads no clock.
+    #[allow(clippy::too_many_arguments)]
     pub fn seed_grant(
         &mut self,
         request_id: &str,
