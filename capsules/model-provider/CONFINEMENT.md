@@ -476,7 +476,10 @@ The Right column uses the approved right ids of
 `tests/fixtures/confine/declared-rights.json`, the same ids
 `allow_rules_trace_to_declared_rights` traces, and this section advances the
 macOS half only. `operations_section_cites_existing_tests` checks that each
-cited `model_` test name in this section is a function in `tests/confine/main.rs`.
+cited `model_` or `generated_` test name, and
+`allow_rules_trace_to_declared_rights`, is a function in
+`tests/confine/main.rs`. The check covers `model_` names, `generated_` names,
+and `allow_rules_trace_to_declared_rights`.
 
 | Operation | Inputs | Outputs | Right | Effect | macOS rule and test | Linux |
 | --- | --- | --- | --- | --- | --- | --- |

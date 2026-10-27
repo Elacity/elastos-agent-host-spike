@@ -837,27 +837,91 @@ fn wait_for_terminal(
     panic!("the run must settle within {within:?}: no terminal reply came before the deadline")
 }
 
-/// Every cited `model_` test in "Operations and the rights they need" is a
-/// function in this file.
+/// Every cited test in "Operations and the rights they need" is a function
+/// in this file. The check covers `model_` names, `generated_` names, and
+/// `allow_rules_trace_to_declared_rights`.
 ///
 /// The section is `CONFINEMENT.md` from that heading through the next heading
-/// line. A cited test name is a backtick span of `model_` plus lowercase
-/// letters, digits and underscores. Each span must occur as `fn <name>(` in
-/// this file. The failure names the missing test. This test starts no process
-/// and needs no sandbox.
+/// line. `cited_test_name` is true for that exact span. Otherwise a backtick
+/// span needs a `model_` or `generated_` prefix and a non-empty tail of
+/// lowercase letters, digits and underscores, so the spans `model_` and
+/// `generated_` stay uncited. `cited_test_names` is the only scan of backtick
+/// spans. `missing_cited_tests` is that list filtered to names the source
+/// does not contain as `fn <name>(`. An in-memory section whose only span is
+/// `generated_profile_denies_the_hosted_connect`, read against a source that
+/// has no such function, fails first. The panic contains
+/// `the stand-in citation must be a required test name`. The same shape for
+/// `allow_rules_trace_to_declared_rights` fails with
+/// `the trace citation must be a required test name`. The same shape for
+/// `model_provider_ops_under_profile` fails with
+/// `missing test: model_provider_ops_under_profile`. A span `not_a_test` is
+/// not cited. This test starts no process and needs no sandbox.
 ///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
 /// test no longer finds that function.
 #[test]
 fn operations_section_cites_existing_tests() {
-    fn cited_model_test(span: &str) -> bool {
-        let Some(tail) = span.strip_prefix("model_") else {
+    fn cited_test_name(span: &str) -> bool {
+        if span == "allow_rules_trace_to_declared_rights" {
+            return true;
+        }
+        let Some(tail) = span
+            .strip_prefix("model_")
+            .or_else(|| span.strip_prefix("generated_"))
+        else {
             return false;
         };
         !tail.is_empty()
             && tail
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    }
+    fn cited_test_names(section: &str) -> Vec<&str> {
+        let mut cited = Vec::new();
+        let mut rest = section;
+        while let Some(start) = rest.find('`') {
+            rest = &rest[start + 1..];
+            let Some(end) = rest.find('`') else {
+                break;
+            };
+            let span = &rest[..end];
+            rest = &rest[end + 1..];
+            if cited_test_name(span) && !cited.contains(&span) {
+                cited.push(span);
+            }
+        }
+        cited
+    }
+    fn missing_cited_tests<'a>(cited: &[&'a str], source: &str) -> Vec<&'a str> {
+        cited
+            .iter()
+            .copied()
+            .filter(|name| !source.contains(&format!("fn {name}(")))
+            .collect()
+    }
+    // The stand-in and trace names fail before the generic missing-test
+    // report, so dropping either acceptance is this test's failure.
+    fn require_cited_tests(section: &str, source: &str) {
+        let missing = missing_cited_tests(&cited_test_names(section), source);
+        if missing
+            .iter()
+            .any(|name| *name == "generated_profile_denies_the_hosted_connect")
+        {
+            panic!("the stand-in citation must be a required test name");
+        }
+        if missing
+            .iter()
+            .any(|name| *name == "allow_rules_trace_to_declared_rights")
+        {
+            panic!("the trace citation must be a required test name");
+        }
+        assert!(missing.is_empty(), "missing test: {}", missing.join(", "));
+    }
+    fn caught_citation_failure(section: &str, source: &str) -> String {
+        match catch_unwind(AssertUnwindSafe(|| require_cited_tests(section, source))) {
+            Err(payload) => panic_text(payload),
+            Ok(()) => String::new(),
+        }
     }
     fn operations_section_text(doc: &str) -> &str {
         const HEADING: &str = "## Operations and the rights they need";
@@ -876,6 +940,45 @@ fn operations_section_cites_existing_tests() {
         &doc[start..line_end]
     }
 
+    let source_without_the_function = "";
+    let stand_in_failure = caught_citation_failure(
+        "`generated_profile_denies_the_hosted_connect`",
+        source_without_the_function,
+    );
+    assert!(
+        stand_in_failure.contains("the stand-in citation must be a required test name"),
+        "the stand-in citation must be a required test name: {stand_in_failure}"
+    );
+    let trace_failure = caught_citation_failure(
+        "`allow_rules_trace_to_declared_rights`",
+        source_without_the_function,
+    );
+    assert!(
+        trace_failure.contains("the trace citation must be a required test name"),
+        "the trace citation must be a required test name: {trace_failure}"
+    );
+    let model_failure = caught_citation_failure(
+        "`model_provider_ops_under_profile`",
+        source_without_the_function,
+    );
+    assert!(
+        model_failure.contains("missing test: model_provider_ops_under_profile"),
+        "{model_failure}"
+    );
+    assert!(
+        cited_test_names("`not_a_test`").is_empty(),
+        "a span not_a_test is not cited"
+    );
+    assert!(!cited_test_name("not_a_test"));
+    assert!(!cited_test_name("model_"));
+    assert!(!cited_test_name("generated_"));
+    assert!(cited_test_names("`model_`").is_empty());
+    assert!(cited_test_names("`generated_`").is_empty());
+    assert!(cited_test_name("allow_rules_trace_to_declared_rights"));
+    require_cited_tests("`not_a_test`", source_without_the_function);
+    require_cited_tests("`model_`", source_without_the_function);
+    require_cited_tests("`generated_`", source_without_the_function);
+
     let doc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("CONFINEMENT.md");
     let doc = fs::read_to_string(&doc_path).unwrap_or_else(|err| {
         panic!(
@@ -891,25 +994,16 @@ fn operations_section_cites_existing_tests() {
         )
     });
     let section = operations_section_text(&doc);
-    let mut cited = Vec::new();
-    let mut rest = section;
-    while let Some(start) = rest.find('`') {
-        rest = &rest[start + 1..];
-        let Some(end) = rest.find('`') else {
-            break;
-        };
-        let span = &rest[..end];
-        rest = &rest[end + 1..];
-        if cited_model_test(span) && !cited.contains(&span) {
-            cited.push(span);
-        }
-    }
-    let missing: Vec<&str> = cited
-        .iter()
-        .copied()
-        .filter(|name| !source.contains(&format!("fn {name}(")))
-        .collect();
-    assert!(missing.is_empty(), "missing test: {}", missing.join(", "));
+    let cited = cited_test_names(section);
+    assert!(
+        cited.contains(&"generated_profile_denies_the_hosted_connect"),
+        "the stand-in citation must be a required test name"
+    );
+    assert!(
+        cited.contains(&"allow_rules_trace_to_declared_rights"),
+        "the trace citation must be a required test name"
+    );
+    require_cited_tests(section, &source);
 }
 
 /// The Id cells in `section` are the same set as `ids`.
