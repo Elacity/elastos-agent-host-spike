@@ -174,6 +174,36 @@ async function assertDialogCopyFeedbackBehavior() {
   }
 }
 
+async function assertPropertiesOfferNoElastosCopy() {
+  const dialogModuleUrl = `${pathToFileURL(path.resolve("capsules/library/browser/src/dialog.js")).href}?library-smoke-elastos=${Date.now()}`;
+  const { createLibraryDialog } = await import(dialogModuleUrl);
+  const dialog = createFakeDialog();
+  const api = createLibraryDialog({
+    copyText: async () => {},
+    dialog,
+    hideMenu: () => {},
+    objectByUri: () => null,
+    onBeforeClose: () => {},
+  });
+  api.showProperties({
+    uri: "localhost://WebSpaces/Elastos/content/bafy-smoke-content",
+    name: "Guide.md",
+    kind: "file",
+    published: true,
+    published_cid: "bafy-smoke-published",
+    metadata: { resolver: "webspace", target_uri: "elastos://bafy-smoke-content" },
+  });
+  assert(
+    dialog.innerHTML.includes("elastos://bafy-smoke-published") &&
+      dialog.innerHTML.includes("elastos://bafy-smoke-content"),
+    "Library Properties must still show elastos:// URIs as technical text.",
+  );
+  assert(
+    !dialog.innerHTML.includes('data-prop-copy="elastos://'),
+    "Library Properties must not offer to copy an elastos:// link while a recipient cannot open it in Home.",
+  );
+}
+
 async function run() {
   const index = await read("capsules/library/browser/index.html");
   const app = await read("capsules/library/browser/src/app.js");
@@ -297,6 +327,7 @@ async function run() {
     "Library UIUX CSS must include the donor search, motion, and resizer presentation behavior.",
   );
   await assertDialogCopyFeedbackBehavior();
+  await assertPropertiesOfferNoElastosCopy();
 
   console.log("PASS Library product behavior smoke");
 }

@@ -22,9 +22,11 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   serves, so copies saved by earlier versions are not used, and a single file
   larger than 100 MiB is refused.
 - Library no longer offers Share or Copy Published Link, and Properties no
-  longer shows a Published Link. Documents no longer offers Copy Published Link
-  or Copy link on a revision. Home cannot yet open an `elastos://` link someone
-  sends you, so it stops offering one. Publish and Unpublish still work.
+  longer shows a Published Link or a copy button for an `elastos://` link.
+  Documents no longer offers Copy Published Link or Copy link on a revision. In
+  the default Community mode, posts and direct messages show `elastos://` links
+  as plain text, so the person you send one to cannot open it in Home yet.
+  Publish and Unpublish still work.
 
 ### Fixed
 

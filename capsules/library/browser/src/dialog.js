@@ -62,7 +62,7 @@ export function createLibraryDialog({
       ["Published CID", copyableValue(identity.publishedId, "published CID", "resource.identifier")],
       ["Service", identity.provider],
       ["Object URI", copyableValue(object.uri || "-", "object URI")],
-      ["Content URI", copyableValue(identity.contentUri, "content URI")],
+      ["Content URI", identity.contentUri],
       ["Head", copyableValue(identity.headId, "object head", "resource.identifier")],
       ["Revision", object.revision || "-"],
       ["Resolver", identity.resolver],
@@ -170,7 +170,10 @@ export function createLibraryDialog({
     return { title: text, html: escapeHtml(text) };
   }
 
+  // An elastos:// link stays plain text: Home cannot yet open one that someone
+  // sends, so Library offers no way to copy it (a resolver target can be one).
   function copyableValue(value, label, purpose = "resource.uri") {
+    if (String(value || "").startsWith("elastos://")) return value;
     return { kind: "copyable", value, label, purpose };
   }
 

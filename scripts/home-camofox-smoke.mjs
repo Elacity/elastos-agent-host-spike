@@ -543,7 +543,7 @@ async function deleteDocumentWorkingCopy(tabId, docDid) {
     return { ok: true, skipped: true };
   }
   return frameState(tabId, "documents", `(async () => {
-    const homeToken = new URL(win.location.href).searchParams.get("home_token") || "";
+    const homeToken = new URLSearchParams(win.location.hash.replace(/^#/, "")).get("home_token") || "";
     const response = await fetch("/api/provider/documents/delete", {
       method: "POST",
       headers: {
@@ -1428,7 +1428,7 @@ async function main() {
       assert(publishResolved && isDocumentPublished(publishState), "Documents did not publish a revision", publishState);
 
       const publishedRecord = await frameState(tabId, "documents", `(async () => {
-        const homeToken = new URL(win.location.href).searchParams.get("home_token") || "";
+        const homeToken = new URLSearchParams(win.location.hash.replace(/^#/, "")).get("home_token") || "";
         const response = await fetch("/api/provider/documents/get", {
           method: "POST",
           headers: {
