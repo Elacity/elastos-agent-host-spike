@@ -4666,6 +4666,163 @@ fn generated_did_and_wallet_profiles_match_their_committed_oracles() {
     }
 }
 
+/// Fails when a file outside test code names the lab generator or writer.
+///
+/// A file may name `generate_profile` or `write_generated_profile` only when
+/// its path relative to `root` has a component exactly `tests`, its file name
+/// is exactly `falsifiers.json`, or its extension is `md`. Every other file
+/// fails. The walk reads every regular file as bytes, so a non-UTF-8 file is
+/// read, not skipped, and matches each name as a plain byte substring, so a
+/// longer name that contains one also fails (P11). It does not follow symbolic
+/// links. It skips `.git` (git data), `node_modules` (dependency build output)
+/// and a directory whose name starts with `target` (cargo's `target/` and the
+/// lane's `target-build/`); each skip is build output or git data, not source.
+///
+/// Returns the number of files it read, or one refusal that lists every
+/// offending path, relative to `root` and sorted, with the reason.
+fn check_lab_generator_names(root: &Path) -> Result<usize, String> {
+    const NAMES: [&[u8]; 2] = [b"generate_profile", b"write_generated_profile"];
+    let mut pending = vec![root.to_path_buf()];
+    let mut read = 0usize;
+    let mut offending: Vec<PathBuf> = Vec::new();
+    while let Some(dir) = pending.pop() {
+        let entries = fs::read_dir(&dir)
+            .map_err(|err| format!("{} must be readable: {err}", dir.display()))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|err| format!("{} must be readable: {err}", dir.display()))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|err| format!("{} must be readable: {err}", path.display()))?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                let name = entry.file_name();
+                let name = name.to_str().unwrap_or_default();
+                if name == ".git" || name == "node_modules" || name.starts_with("target") {
+                    continue;
+                }
+                pending.push(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let bytes = fs::read(&path)
+                .map_err(|err| format!("{} must be readable: {err}", path.display()))?;
+            read += 1;
+            let relative = path.strip_prefix(root).unwrap_or(path.as_path());
+            let in_tests = relative
+                .components()
+                .any(|component| component.as_os_str().to_str() == Some("tests"));
+            let file_name = path.file_name().and_then(|name| name.to_str());
+            let extension = path.extension().and_then(|extension| extension.to_str());
+            if in_tests || file_name == Some("falsifiers.json") || extension == Some("md") {
+                continue;
+            }
+            if NAMES
+                .iter()
+                .any(|name| bytes.windows(name.len()).any(|window| window == *name))
+            {
+                offending.push(relative.to_path_buf());
+            }
+        }
+    }
+    if offending.is_empty() {
+        return Ok(read);
+    }
+    offending.sort();
+    Err(offending
+        .iter()
+        .map(|path| {
+            format!(
+                "{} names the lab generator, which is test code only",
+                path.display()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// The lab generator and its writer are named only in test code.
+///
+/// The test walks the whole repository from `capsules/`'s parent and requires
+/// that no file outside test code names `generate_profile` or
+/// `write_generated_profile`. It prints how many files it read.
+#[test]
+fn lab_generator_is_named_only_in_test_code() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|capsules| capsules.parent())
+        .expect("capsules/wallet-provider must sit under the repository root");
+    let read = check_lab_generator_names(root).unwrap_or_else(|err| panic!("{err}"));
+    println!("lab generator name check read {read} files");
+}
+
+/// A non-test file that names the lab generator is refused, and the exempt
+/// files and build output are not.
+///
+/// The fixture holds `src/main.rs` and `elastos/x.py` naming the generator and
+/// writer, the exempt `tests`, `falsifiers.json` and `md` names, and a
+/// `target/` file naming it. The refusal names exactly the first two, sorted;
+/// after they are removed the check returns `Ok`. A longer name that contains
+/// `generate_profile` and a non-UTF-8 file naming it are then each refused,
+/// because the check matches plain bytes and reads every file as bytes.
+#[test]
+fn lab_generator_name_check_refuses_a_non_test_file() {
+    let root = tempfile::tempdir().expect("temporary repository root");
+    let root = root.path();
+    let files = [
+        ("src/main.rs", "fn main() { generate_profile(); }\n"),
+        ("elastos/x.py", "write_generated_profile(path)\n"),
+        ("crate/tests/a.rs", "generate_profile\n"),
+        ("crate/src/tests/b.rs", "write_generated_profile\n"),
+        (
+            "crate/falsifiers.json",
+            "{\"about\": \"generate_profile\"}\n",
+        ),
+        ("crate/README.md", "generate_profile\n"),
+        ("target/debug/planted.rs", "generate_profile\n"),
+    ];
+    for (path, contents) in files {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().expect("a fixture file has a parent"))
+            .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+        fs::write(&path, contents).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+    }
+    let refusal = check_lab_generator_names(root)
+        .expect_err("a non-test file that names the generator must be refused");
+    assert_eq!(
+        refusal,
+        "elastos/x.py names the lab generator, which is test code only\n\
+         src/main.rs names the lab generator, which is test code only"
+    );
+    fs::remove_file(root.join("elastos/x.py")).expect("remove the python fixture");
+    fs::remove_file(root.join("src/main.rs")).expect("remove the rust fixture");
+    assert_eq!(
+        check_lab_generator_names(root).expect("only test code and build output remain"),
+        4
+    );
+    fs::write(root.join("crate/longer.rs"), "regenerate_profile\n")
+        .expect("a fixture file under crate/");
+    assert_eq!(
+        check_lab_generator_names(root)
+            .expect_err("a longer name that contains the generator name must be refused"),
+        "crate/longer.rs names the lab generator, which is test code only"
+    );
+    fs::remove_file(root.join("crate/longer.rs")).expect("remove the longer-name fixture");
+    fs::write(root.join("crate/binary.bin"), b"\xffgenerate_profile\xfe")
+        .expect("a non-UTF-8 fixture file");
+    assert_eq!(
+        check_lab_generator_names(root)
+            .expect_err("a non-UTF-8 file that names the generator must be read, not skipped"),
+        "crate/binary.bin names the lab generator, which is test code only"
+    );
+    fs::remove_file(root.join("crate/binary.bin")).expect("remove the binary fixture");
+}
+
 /// The model provider's declared-rights file uses the same template as did and
 /// wallet, and the one check reads it unchanged.
 ///
