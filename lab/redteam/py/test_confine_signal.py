@@ -498,11 +498,15 @@ def plant_pty_finding(repo):
     return body
 
 
+PTY_CRITICAL_IDS = tuple(name[:-3] for name in PTY_FINDING_NAMES)
+
+
 def assert_pty_critical_preserved(start, end):
     """Keep a 061 ``CRITICAL.md`` that was already present.
 
     ``unchanged_findings`` owns byte preservation for the whole snapshot.
-    Present content must name 061 and must be free of signal findings.
+    Present content must name ``CRITICAL-confine-061`` or
+    ``CRITICAL-cc-model-confine-061`` and must be free of signal findings.
     """
     unchanged_findings(start, end)
     end_critical = end.get("/CRITICAL.md")
@@ -511,8 +515,11 @@ def assert_pty_critical_preserved(start, end):
     text = end_critical.decode("utf-8")
     if "CRITICAL-confine-044" in text or "CRITICAL-cc-model-confine-044" in text:
         raise AssertionError("lab/redteam/CRITICAL.md contains a signal finding while signals are denied")
-    if "061" not in text:
-        raise AssertionError("lab/redteam/CRITICAL.md lacks a 061 PTY finding")
+    if all(finding_id not in text for finding_id in PTY_CRITICAL_IDS):
+        raise AssertionError(
+            "lab/redteam/CRITICAL.md lacks CRITICAL-confine-061 or "
+            "CRITICAL-cc-model-confine-061"
+        )
 
 
 def _git(repo, *args):
@@ -1053,7 +1060,8 @@ class SignalRules(unittest.TestCase):
                 b"CRITICAL CRITICAL-cc-model-confine-061", 1
             )[0])
             self.assertEqual(after_pty["/CRITICAL.md"], body)
-            self.assertIn(b"061", after_pty["/CRITICAL.md"])
+            self.assertIn(b"CRITICAL-confine-061", after_pty["/CRITICAL.md"])
+            self.assertIn(b"CRITICAL-cc-model-confine-061", after_pty["/CRITICAL.md"])
             self.assertNotIn(b"CRITICAL-confine-044", after_pty["/CRITICAL.md"])
             self.assertFalse((Path(pty_repo) / FINDINGS["wallet"]).exists())
             removed = dict(after_pty)
@@ -1487,6 +1495,8 @@ class SignalRules(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="ccrt-sig-pty-deny-") as pty_repo:
             body = plant_pty_finding(pty_repo)
             start = findings_snapshot(pty_repo)
+            for name in ("wallet", "did", "model"):
+                self.assertIsNone(note_signal(pty_repo, name, "deny"))
             kept = findings_snapshot(pty_repo)
             assert_pty_critical_preserved(start, kept)
             self.assertEqual(kept["/CRITICAL.md"], body)
@@ -1511,7 +1521,8 @@ class SignalRules(unittest.TestCase):
     def test_pty_critical_preservation_checks_all_snapshot_bytes(self):
         """The shared checker catches additions, edits and removals before content checks."""
         pty = b"CRITICAL CRITICAL-confine-061 pty open preserved\n"
-        for critical in (None, pty):
+        model = b"CRITICAL CRITICAL-cc-model-confine-061 pty open preserved\n"
+        for critical in (None, pty, model):
             start = {name: pty for name in PTY_FINDING_NAMES}
             start["/CRITICAL.md"] = critical
             assert_pty_critical_preserved(start, dict(start))
@@ -1538,6 +1549,10 @@ class SignalRules(unittest.TestCase):
     def test_pty_critical_content_refusal_reasons(self):
         """Equal snapshots reach each content refusal independently of preservation."""
         pty = b"CRITICAL CRITICAL-confine-061 pty open preserved\n"
+        missing = (
+            "lab/redteam/CRITICAL.md lacks CRITICAL-confine-061 or "
+            "CRITICAL-cc-model-confine-061"
+        )
         cases = (
             (
                 pty + b"CRITICAL-confine-044.md leaked\n",
@@ -1547,11 +1562,10 @@ class SignalRules(unittest.TestCase):
                 pty + b"CRITICAL-cc-model-confine-044.md leaked\n",
                 "lab/redteam/CRITICAL.md contains a signal finding while signals are denied",
             ),
-            (
-                b"CRITICAL unrelated finding\n",
-                "lab/redteam/CRITICAL.md lacks a 061 PTY finding",
-            ),
-            (b"", "lab/redteam/CRITICAL.md lacks a 061 PTY finding"),
+            (b"CRITICAL unrelated finding\n", missing),
+            (b"", missing),
+            (b"061\n", missing),
+            (b"task 061\n", missing),
         )
         for content, expected in cases:
             with self.subTest(content=content):

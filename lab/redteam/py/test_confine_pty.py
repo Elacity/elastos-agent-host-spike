@@ -5,6 +5,7 @@ Grade row 12 rests on those seatbelt profiles. No merged probe calls
 live ``confine.sb``. Confined launches go through ``sbx.run`` only. The
 helper prints one line and returns 0. A deny is stdout ``pty fd=-1 errno=1``
 and empty stderr. An allow is stdout ``pty fd=3 errno=0`` and empty stderr.
+A fd or errno spelling other than that decimal form is its own harness error.
 
 The three profiles are the live files. ``setUpModule`` records each sha256.
 ``tearDownModule`` and the falsifier's end check call ``require_unchanged``,
@@ -183,13 +184,23 @@ def require_storage_path(path):
         raise HarnessError(str(caught)) from caught
 
 
+def canonical_decimal(text):
+    """True when ``text`` is the helper's ``%d`` spelling.
+
+    ``int`` accepts ``03``, ``-01``, ``00``, and ``-0``. Those spellings are
+    not the printed line, so they are not a wrong fd and not a wrong errno.
+    """
+    return str(int(text)) == text
+
+
 def classify(result):
     """``deny``, ``allow``, or a harness error.
 
     Asks ``sbx.profile_error`` before it reads a deny or an allow. Exit 65
     is a profile error even when stderr says ``Operation not permitted``.
-    A pty fd other than 3 or -1, a wrong errno, a nonempty stderr, and a
-    malformed line each have their own reason.
+    A non-canonical fd, a pty fd other than 3 or -1, a non-canonical errno,
+    a wrong errno, a nonempty stderr, and a malformed line each have their
+    own reason.
     """
     problem = sbx.profile_error(result)
     if problem is not None:
@@ -222,13 +233,31 @@ def classify(result):
     if result.stdout == ALLOW_STDOUT:
         return "allow"
     match = _FD_LINE.fullmatch(result.stdout)
-    if match is not None:
-        fd = int(match.group(1))
-        if fd != -1 and fd != 3:
-            raise HarnessError(
-                "pty fd other than 3 or -1 is a harness error, "
-                "not a deny and not an allow: " + repr(result.stdout)
-            )
+    if match is None:
+        raise HarnessError(
+            "malformed stdout is a harness error, not a deny and not an allow: "
+            + repr(result.stdout)
+        )
+    fd_text = match.group(1)
+    errno_text = match.group(2)
+    if not canonical_decimal(fd_text):
+        raise HarnessError(
+            "malformed pty fd is a harness error, not a deny and not an allow: "
+            + repr(result.stdout)
+        )
+    fd = int(fd_text)
+    if fd != -1 and fd != 3:
+        raise HarnessError(
+            "pty fd other than 3 or -1 is a harness error, "
+            "not a deny and not an allow: " + repr(result.stdout)
+        )
+    if not canonical_decimal(errno_text):
+        raise HarnessError(
+            "malformed errno is a harness error, not a deny and not an allow: "
+            + repr(result.stdout)
+        )
+    expected_errno = 1 if fd == -1 else 0
+    if int(errno_text) != expected_errno:
         raise HarnessError(
             "wrong errno is a harness error, not a deny and not an allow: "
             + repr(result.stdout)
@@ -810,7 +839,8 @@ class PtyProbe(unittest.TestCase):
 
         The deny test carries the finding-linked expected failure. The live
         file is not edited. One exact plant line is removed from the copy
-        so the append is still that one line.
+        so the append is still that one line. A plant phrase with no
+        trailing newline is its own harness error.
         """
         finding = type(self).recorded_allows.get(name)
         if finding is None:
@@ -829,6 +859,8 @@ class PtyProbe(unittest.TestCase):
             )
         if occurrences == 1:
             text = text.replace(ALLOW_PTY, "", 1)
+        if PLANT_PHRASE in text:
+            raise HarnessError(f"{name} plant line has no trailing newline")
         return text
 
 
@@ -1009,6 +1041,22 @@ class PtyRules(unittest.TestCase):
             )
         finally:
             Twice.doClassCleanups()
+
+        class BareLine(PtyProbe):
+            recorded_allows = {"wallet": FINDINGS["wallet"]}
+
+        mark_expected(BareLine, "test_wallet_pty_open_is_denied", FINDINGS["wallet"])
+        try:
+            bare_line = BareLine("test_falsifier_allow_pty_is_caught")
+            missing_newline = "wallet plant line has no trailing newline"
+            with self.assertRaises(HarnessError) as bare:
+                bare_line._source_for_plant("wallet", clean + PLANT_PHRASE)
+            self.assertEqual(str(bare.exception), missing_newline)
+            with self.assertRaises(HarnessError) as mixed:
+                bare_line._source_for_plant("wallet", clean + ALLOW_PTY + PLANT_PHRASE)
+            self.assertEqual(str(mixed.exception), missing_newline)
+        finally:
+            BareLine.doClassCleanups()
 
         class Clean(PtyProbe):
             recorded_allows = {}
@@ -1346,6 +1394,20 @@ class PtyRules(unittest.TestCase):
         other_fd = "pty fd=4 errno=0\n"
         wrong_errno = "pty fd=-1 errno=2\n"
         malformed = "pty fd=3 errno=0"
+        padded_allow_fd = "pty fd=03 errno=0\n"
+        padded_deny_fd = "pty fd=-01 errno=1\n"
+        padded_other_fd = "pty fd=04 errno=0\n"
+        padded_allow_errno = "pty fd=3 errno=00\n"
+        padded_deny_errno = "pty fd=-1 errno=01\n"
+        signed_zero_errno = "pty fd=3 errno=-0\n"
+        padded_wrong_errno = "pty fd=-1 errno=02\n"
+
+        def field_reason(kind, stdout):
+            return (
+                f"malformed {kind} is a harness error, not a deny and not an allow: "
+                + repr(stdout)
+            )
+
         return (
             (
                 "wrong exit",
@@ -1370,6 +1432,55 @@ class PtyRules(unittest.TestCase):
                 ),
                 "wrong errno is a harness error, not a deny and not an allow: "
                 + repr(wrong_errno),
+            ),
+            (
+                "pty fd=03 errno=0",
+                sbx.Result(
+                    exit_code=0, stdout=padded_allow_fd, stderr="", argv=["/private/pty"],
+                ),
+                field_reason("pty fd", padded_allow_fd),
+            ),
+            (
+                "pty fd=-01 errno=1",
+                sbx.Result(
+                    exit_code=0, stdout=padded_deny_fd, stderr="", argv=["/private/pty"],
+                ),
+                field_reason("pty fd", padded_deny_fd),
+            ),
+            (
+                "pty fd=04 errno=0",
+                sbx.Result(
+                    exit_code=0, stdout=padded_other_fd, stderr="", argv=["/private/pty"],
+                ),
+                field_reason("pty fd", padded_other_fd),
+            ),
+            (
+                "pty fd=3 errno=00",
+                sbx.Result(
+                    exit_code=0, stdout=padded_allow_errno, stderr="", argv=["/private/pty"],
+                ),
+                field_reason("errno", padded_allow_errno),
+            ),
+            (
+                "pty fd=-1 errno=01",
+                sbx.Result(
+                    exit_code=0, stdout=padded_deny_errno, stderr="", argv=["/private/pty"],
+                ),
+                field_reason("errno", padded_deny_errno),
+            ),
+            (
+                "pty fd=3 errno=-0",
+                sbx.Result(
+                    exit_code=0, stdout=signed_zero_errno, stderr="", argv=["/private/pty"],
+                ),
+                field_reason("errno", signed_zero_errno),
+            ),
+            (
+                "pty fd=-1 errno=02",
+                sbx.Result(
+                    exit_code=0, stdout=padded_wrong_errno, stderr="", argv=["/private/pty"],
+                ),
+                field_reason("errno", padded_wrong_errno),
             ),
             (
                 "nonempty deny stderr",
@@ -1418,6 +1529,9 @@ class PtyRules(unittest.TestCase):
 
         These results are built here. Nothing is launched. Exit 65 stays a
         profile error when stderr says ``Operation not permitted``.
+        ``pty fd=03`` and ``pty fd=-01`` keep the expected errno and are
+        malformed fd spellings, not a wrong errno. A padded errno is not a
+        wrong errno either.
         """
         self.assertEqual(
             classify(sbx.Result(
