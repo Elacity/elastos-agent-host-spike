@@ -1080,7 +1080,9 @@ class ExtensionRules(unittest.TestCase):
             ) as compiled, patch.object(
                 sbx, "run",
                 side_effect=AssertionError("missing-tool probe launched a helper"),
-            ) as launched:
+            ) as launched, patch.dict(START_SHA):
+                # A fresh TestResult runs this module's setUpModule and
+                # tearDownModule. patch.dict keeps the true start digest.
                 class MissingTools(ExtensionProbe):
                     pass
 
@@ -1105,6 +1107,31 @@ class ExtensionRules(unittest.TestCase):
                 compiled.assert_not_called()
                 launched.assert_not_called()
                 self.launch_guard.assert_not_called()
+
+    def test_missing_tools_run_keeps_the_start_digest(self):
+        """``START_SHA`` is the same before and after the missing-tools run.
+
+        That run starts a nested suite, which calls ``setUpModule`` again.
+        Each start digest is set to a value no live profile hashes to. A
+        nested ``setUpModule`` that rewrites ``START_SHA`` replaces it, and
+        this test fails. Without the guard, an owner edit made while the
+        probe class ran would pass the end check.
+        """
+        sentinel = {
+            profile["path"].relative_to(ROOT).as_posix(): "0" * 64
+            for profile in PROFILES
+        }
+        with patch.dict(START_SHA, sentinel, clear=True):
+            before = dict(START_SHA)
+            nested = unittest.TestResult()
+            type(self)("test_missing_tools_skip_only_probe_class").run(nested)
+            self.assertEqual(nested.errors, [])
+            self.assertEqual(nested.failures, [])
+            self.assertEqual(nested.skipped, [])
+            self.assertTrue(nested.wasSuccessful())
+            self.assertEqual(START_SHA, before)
+            self.assertEqual(START_SHA, sentinel)
+        self.launch_guard.assert_not_called()
 
     def test_recorded_allow_does_not_skip(self):
         """A recorded allow is a finding-linked expected failure, not a skip.
