@@ -995,11 +995,14 @@ Two refusals use it, both before any engine starts:
   env.g`.
 
 No manifest field is added: the module's own import section stays the
-declaration (https://github.com/Elacity/elastos-runtime/issues/464). The lab
-does not check an import's Wasm type against its entry, since the audit's v1
-API returns names only. The table and the grants are a lab stand-in, not
-admission: input for Anders's typed-operations model, not the Runtime's rights
-model.
+declaration (https://github.com/Elacity/elastos-runtime/issues/464).
+Gap: the lab does not check an import's Wasm type against its typed lab operation, so a typed lab operation is not a type check; this blocks the type half of M1 B4 (one permission model).
+The audit's v1 API returns each import's module and name only
+(`audit/INTERFACE.md`), so the check above matches by name; task 046 keeps
+this as ADOPTION's "Gaps for Anders" item 4, and
+`import_type_gap_is_a_named_row_and_nothing_claims_a_type_check` holds it.
+The table and the grants are a lab stand-in, not admission: input for
+Anders's typed-operations model, not the Runtime's rights model.
 
 ## Memory cap discovery (wc-010a)
 
@@ -2162,6 +2165,18 @@ Task 031's README guard, in `tests/docs.rs`:
   in order, exactly one line per `LAB_OPERATIONS` entry, rendered from the
   table's own fields. It fails showing both lists.
 
+Task 046's gap guard, in `tests/docs.rs` (reusing `lane_file`, `sections`,
+`lines_at` and `OPERATIONS_SECTION`):
+
+- `import_type_gap_is_a_named_row_and_nothing_claims_a_type_check` — README
+  holds the import type gap sentence (`TYPE_GAP`) exactly once, inside "###
+  Typed lab operations (M1 B4 lab half)"; ADOPTION holds it exactly once, on
+  the numbered item of "## Gaps for Anders" whose first line starts
+  `**Import Wasm types are not checked.**`; and in README, ADOPTION and
+  `tools/src/verify.rs`, each line that names a check by type (the five
+  spellings in `TYPE_CHECK_WORDS`, ignoring case) also holds the word "not".
+  The last check fails naming each `file:line` with its text.
+
 wc-010b's run tests (task 027), in `tests/run.rs`. The grow modules are
 hand-written bytes: one memory of 1 page with (since task 033) a maximum of
 1024 pages, the declared 64 MB, no import, and one
@@ -2428,28 +2443,28 @@ gives `67108864` on both (`real_receipt_names_both_installed_engines`).
 
 ## Falsifiers
 
-`falsifiers.json` holds 182 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 184 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
 seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
 031, two task 032, one task 035, three task 036, five task 038, three task
 039, one task 040, one task 041, two task 043, one task 044, one task
-033, two task 034 and one task 045.
+033, two task 034, one task 045 and two task 046.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 118, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 120, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034 and 045: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
-+ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1), each run by the canonical runner with its summary
+029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045 and 046: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
++ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2), each run by the canonical runner with its summary
 line quoted.
 Hand-proven, pending R1: 66, each counted once: the 64 entries of the sections
 marked so (wc-001, tasks 010 and 009, wc-004 and wc-008: 9 + 7 + 23 + 21 + 4),
-and two proofs with no `falsifiers.json` entry, outside the 182 (task 036's
+and two proofs with no `falsifiers.json` entry, outside the 184 (task 036's
 `/bin/bash` 3.2 guard in `tests/reproducible.rs` and task 042's killed-run
 stop in `tests/run.rs`; neither file is a recovery target, so a proof that
 edits one is a hand proof), each proved by the repo's break →
@@ -3200,3 +3215,20 @@ Task 045 also re-anchors F-WC-README-COUNT to the new total, the same bug as
 before, and keeps its runner-caught label above. `RunControl::new` is no
 longer a `const fn` (a control now holds its cancel flag), so the test file's
 two shared controls are made on first use (`LazyLock`); no anchor changed.
+
+Task 046's two, runner-caught (the canonical runner's summary line is in
+LOG.md, task 046). Both anchors are in `README.md`, a recovery target, each
+found exactly once, and the one named test fails at its assertion:
+
+- F-WC-B4-TYPE-GAP-HIDDEN — README's import type gap loses its word "not",
+  so the sentence claims what the lab does not do
+  (`import_type_gap_is_a_named_row_and_nothing_claims_a_type_check`, at its
+  README count assertion: 0 times, not once).
+- F-WC-B4-TYPE-CHECK-CLAIMED — a claim with no word "not" is appended to the
+  `env.f` line of "### Typed lab operations (M1 B4 lab half)", saying it is
+  checked by type (that test, at its line assertion, which names `README.md`,
+  the line number and the line). This README line holds the id, so it says
+  "not" too.
+
+Task 046 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before, and keeps its runner-caught label above.

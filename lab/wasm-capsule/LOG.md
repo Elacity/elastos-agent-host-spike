@@ -1265,3 +1265,25 @@
   ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0. Retired-label
   greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target
   'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 046 (M1 B4 lab half: the import type gap is a named row and no text claims a type check). Base
+  `f2d9235fe`. Docs: ADOPTION "## Gaps for Anders" gets item 4, `**Import Wasm types are not checked.**`, holding the
+  one gap sentence (`TYPE_GAP` in `tests/docs.rs`) and the facts (the audit's v1 API returns module and name only,
+  `audit/INTERFACE.md`; closing it needs each import's function type from cx-wasm-audit's one module reader and a
+  check against `LAB_OPERATIONS`; until then an `env.f` import of another Wasm type than `() -> ()` passes
+  `verify_checked`'s typed-operation check); item 3's trailing type sentence now points to item 4. README's "### Typed
+  lab operations (M1 B4 lab half)" holds the same sentence in place of its old one; `tools/src/verify.rs`'s module
+  doc keeps only a pointer (doc comment only). No code, no `LAB_OPERATIONS` change, no new dependency. Test
+  `import_type_gap_is_a_named_row_and_nothing_claims_a_type_check` (reuses `lane_file`, `sections`, `lines_at`,
+  `OPERATIONS_SECTION`; `readme_lists_each_typed_lab_operation` now reads the section through the shared
+  `operations_lines`). Falsifiers (anchors in `README.md`, each found once): by hand, F-WC-B4-TYPE-GAP-HIDDEN panicked
+  at `tests/docs.rs:411` "README.md holds the import type gap 0 times, not once", and F-WC-B4-TYPE-CHECK-CLAIMED at
+  `tests/docs.rs:454` "a line names a type check without the word \"not\": [\"README.md:980: - `env.f`: ... effect
+  `none` (type-checked)\"]"; README copied back, `cmp` clean. Hand check outside the counts (ADOPTION is no recovery
+  target): item 4's number dropped, the test panicked at `tests/docs.rs:439` "has no numbered item starting". Canonical
+  runner, from the repo root, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py
+  --from lab/wasm-capsule/falsifiers.json F-WC-B4-TYPE-GAP-HIDDEN F-WC-B4-TYPE-CHECK-CLAIMED F-WC-README-COUNT`:
+  "baseline: 2 named tests pass without an edit, 0 do not", "summary: 3 CAUGHT of 3" (F-WC-README-COUNT re-anchored
+  to 184). All 184 anchors found exactly once. Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2
+  CARGO_INCREMENTAL=0`: `cargo test --locked` (128 passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt
+  -p wasm-capsule-tools -- --check` exit 0. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
+  lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.

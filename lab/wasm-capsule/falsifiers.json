@@ -1992,8 +1992,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/README.md",
-          "old": "`falsifiers.json` holds 182 planted bugs",
-          "new": "`falsifiers.json` holds 181 planted bugs"
+          "old": "`falsifiers.json` holds 184 planted bugs",
+          "new": "`falsifiers.json` holds 183 planted bugs"
         }
       ],
       "tests": [
@@ -2993,6 +2993,38 @@
       ],
       "tests": [
         "cancelled_run_settles_as_cancelled_and_leaves_nothing_on_both_engines"
+      ]
+    },
+    {
+      "id": "F-WC-B4-TYPE-GAP-HIDDEN",
+      "title": "README's import type gap loses its not, so it calls a typed lab operation a type check",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/README.md",
+          "old": "so a typed lab operation is not a type check; this blocks",
+          "new": "so a typed lab operation is a type check; this blocks"
+        }
+      ],
+      "tests": [
+        "import_type_gap_is_a_named_row_and_nothing_claims_a_type_check"
+      ]
+    },
+    {
+      "id": "F-WC-B4-TYPE-CHECK-CLAIMED",
+      "title": "README's typed lab operations list calls env.f type-checked",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/README.md",
+          "old": "- `env.f`: inputs `()`, outputs `()`, right `call`, effect `none`\n",
+          "new": "- `env.f`: inputs `()`, outputs `()`, right `call`, effect `none` (type-checked)\n"
+        }
+      ],
+      "tests": [
+        "import_type_gap_is_a_named_row_and_nothing_claims_a_type_check"
       ]
     }
   ]
