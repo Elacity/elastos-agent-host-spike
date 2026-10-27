@@ -2305,6 +2305,38 @@ fn assert_startup_is_refused(case: &str, launch: Launch<'_>, storage: &Storage, 
     );
 }
 
+/// Joins this provider's profile text from the approved declared rights.
+///
+/// The text is `(version 1)`, then `(deny default)`, then `(deny network*)`,
+/// then each rule of each rights entry, then each rule of each
+/// platform-baseline entry. It reads no file and checks no right id.
+fn standin_profile(declared: &Value) -> Result<String, String> {
+    let Some(rights) = declared.get("rights").and_then(Value::as_array) else {
+        return Err("model-provider declared rights must hold a rights list".to_string());
+    };
+    let Some(baseline) = declared
+        .get("platform_baseline")
+        .and_then(|baseline| baseline.get("rules"))
+        .and_then(Value::as_array)
+    else {
+        return Err("model-provider platform baseline must hold a rules list".to_string());
+    };
+    let mut profile = String::from("(version 1)\n(deny default)\n(deny network*)\n");
+    for entry in rights.iter().chain(baseline) {
+        let Some(rules) = entry.get("rules").and_then(Value::as_array) else {
+            return Err("model-provider declares an entry without a rules list".to_string());
+        };
+        for rule in rules {
+            let Some(rule) = rule.as_str() else {
+                return Err("model-provider declares a rule that is not a string".to_string());
+            };
+            profile.push_str(rule);
+            profile.push('\n');
+        }
+    }
+    Ok(profile)
+}
+
 /// A launch whose profile cannot be applied never starts the provider.
 ///
 /// The one launcher starts the real binary three ways: a profile path under
@@ -2375,6 +2407,125 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
         },
         &storage,
         "invalid data type of path filter",
+    );
+}
+
+/// The lab stand-in builds this provider's profile from the approved declared
+/// rights, and that text's head and allow lines match the oracle.
+///
+/// The first three non-comment lines are `(version 1)`, `(deny default)` and
+/// `(deny network*)`. The sorted allow lines equal the oracle. A changed
+/// `bound-executable` rule is reflected. A declared value with no rights
+/// list, a platform baseline with no rules list, an entry with no rules list,
+/// and a rule that is not a string are each refused with their reason. The
+/// test starts no process and needs no sandbox.
+///
+/// Falsifier: F-cc41a makes `standin_profile` return the oracle file and
+/// ignore the declared value, so a changed declared rule still matches the
+/// oracle.
+#[test]
+fn generated_model_profile_matches_the_oracle() {
+    fn non_comment_head(profile: &str) -> Vec<&str> {
+        profile
+            .lines()
+            .filter(|line| !line.starts_with(";;"))
+            .take(3)
+            .collect()
+    }
+
+    let head = vec!["(version 1)", "(deny default)", "(deny network*)"];
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let oracle = fs::read_to_string(PROFILE_PATH)
+        .unwrap_or_else(|err| panic!("the profile oracle must be readable: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    assert_eq!(non_comment_head(&generated), head);
+    assert_eq!(non_comment_head(&oracle), head);
+    let mut generated_lines = collect_allow_lines(&generated);
+    let mut oracle_lines = collect_allow_lines(&oracle);
+    generated_lines.sort();
+    oracle_lines.sort();
+    assert_eq!(generated_lines, oracle_lines);
+    assert!(
+        generated.lines().all(|line| !line.starts_with(";;")),
+        "the stand-in profile emits no comment line"
+    );
+
+    let original_exec = "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))";
+    let stub_exec = "(allow process-exec (literal \"/tmp/cc-standin-stub\"))";
+    let mut changed = fixture.clone();
+    let rights = changed
+        .get_mut("rights")
+        .and_then(Value::as_array_mut)
+        .expect("declared rights must hold a rights list");
+    let mut replaced = false;
+    for entry in rights {
+        if entry.get("id").and_then(Value::as_str) != Some("bound-executable") {
+            continue;
+        }
+        let rules = entry
+            .get_mut("rules")
+            .and_then(Value::as_array_mut)
+            .expect("bound-executable holds a rules list");
+        for rule in rules {
+            if rule.as_str() == Some(original_exec) {
+                *rule = json!(stub_exec);
+                replaced = true;
+            }
+        }
+    }
+    assert!(replaced, "the bound-executable rule is replaced in memory");
+    let changed_profile =
+        standin_profile(&changed).expect("the changed declared value builds a profile");
+    let changed_lines = collect_allow_lines(&changed_profile);
+    assert_eq!(
+        changed_lines
+            .iter()
+            .filter(|line| **line == stub_exec)
+            .count(),
+        1,
+        "the stub exec rule is present once"
+    );
+    assert!(
+        changed_lines.iter().all(|line| *line != original_exec),
+        "the original exec rule is absent"
+    );
+
+    let mut rights_not_a_list = fixture.clone();
+    rights_not_a_list["rights"] = json!("not-a-list");
+    assert_eq!(
+        standin_profile(&rights_not_a_list).expect_err("rights that are not a list are refused"),
+        "model-provider declared rights must hold a rights list"
+    );
+    let mut baseline_not_a_list = fixture.clone();
+    baseline_not_a_list["platform_baseline"]["rules"] = json!("not-a-list");
+    assert_eq!(
+        standin_profile(&baseline_not_a_list)
+            .expect_err("a platform baseline that is not a rules list is refused"),
+        "model-provider platform baseline must hold a rules list"
+    );
+    let mut entry_without_rules = fixture.clone();
+    entry_without_rules["rights"][0]
+        .as_object_mut()
+        .expect("a rights entry is an object")
+        .remove("rules");
+    assert_eq!(
+        standin_profile(&entry_without_rules)
+            .expect_err("an entry without a rules list is refused"),
+        "model-provider declares an entry without a rules list"
+    );
+    let mut rule_not_a_string = fixture.clone();
+    rule_not_a_string["rights"][0]["rules"][0] = json!(1);
+    assert_eq!(
+        standin_profile(&rule_not_a_string).expect_err("a rule that is not a string is refused"),
+        "model-provider declares a rule that is not a string"
     );
 }
 
