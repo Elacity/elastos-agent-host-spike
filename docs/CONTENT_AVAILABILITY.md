@@ -552,11 +552,20 @@ its payload/CID binding before trusting the admission decision. When a live
 multi-peer proof is required, Carrier keeps at least one remote provider
 invocation in the candidate budget when quota permits it, even if the reported
 local replica count already satisfies `min_replicas`.
+A Home offers replicas only to peers in its operator peer store and to its
+trusted sources. The receiving node admits `admission`, `ensure`, `status` and
+imports only from peers its owner granted `content.replica`
+(`elastos node peer add --did <home-did> --allow content.replica`). In this
+release a seed refuses them from every peer; copies a node already holds stay.
+An import adds content unpinned and pins only the expected CID, so a mismatch
+changes no pin. A granted `ensure` and `import_object` announce the CID and
+join its topic; `import_exact` pins without announcing. Peers cannot publish,
+unpublish or repair content on another node.
 Verified remote content-provider receipts are summarized with safe
 peer-selection replica counts plus capped redacted score/reason/local
 reputation rows with explicit cap/truncation metadata, admission, quota,
 repair-worker, accounting, and abuse-control posture. This is
-provider-mediated autonomous cross-peer repair for announced Carrier peers; it
+provider-mediated autonomous cross-peer repair for registered Carrier peers; it
 is not yet a complete global storage market.
 External availability providers still own production peer admission across
 independent provider networks, production independent provider-network

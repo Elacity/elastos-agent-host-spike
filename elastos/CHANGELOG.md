@@ -27,6 +27,11 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   the default Community mode, posts and direct messages show `elastos://` links
   as plain text, so the person you send one to cannot open it in Home yet.
   Publish and Unpublish still work.
+- In this release the seed accepts no new copies of a Home's files; copies it
+  already holds stay. Your own devices accept new copies of a Home's files only
+  when you allow it: on each device, run
+  `elastos node peer add --did <home-did> --allow content.replica` and repeat
+  every `--allow` that Home already had. Copies a device already holds stay.
 
 ### Fixed
 

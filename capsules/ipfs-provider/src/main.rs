@@ -299,6 +299,11 @@ enum Request {
         #[serde(default, rename = "_runtime_invocation")]
         _runtime_invocation: Option<serde_json::Value>,
     },
+    PinStatus {
+        cid: String,
+        #[serde(default, rename = "_runtime_invocation")]
+        _runtime_invocation: Option<serde_json::Value>,
+    },
     Health,
     Status,
     Shutdown,
@@ -817,6 +822,7 @@ impl IpfsProvider {
             Request::DownloadDirectory { cid, dest } => self.download_directory(&cid, &dest),
             Request::Pin { cid, .. } => self.pin(&cid),
             Request::Unpin { cid, .. } => self.unpin(&cid),
+            Request::PinStatus { cid, .. } => self.pin_status(&cid),
             Request::Health => self.health(),
             Request::Status => self.status(),
             Request::Shutdown => self.shutdown(),
@@ -1598,6 +1604,45 @@ impl IpfsProvider {
             Ok(resp) if resp.status() == 200 => Response::ok_empty(),
             Ok(resp) => Response::error("unpin_failed", &format!("HTTP {}", resp.status())),
             Err(e) => Response::error("unpin_failed", &e.to_string()),
+        }
+    }
+
+    /// Whether this node pins `cid` recursively. Kubo answers from the local
+    /// pin set offline, so the question never fetches the CID.
+    fn pin_status(&mut self, cid: &str) -> Response {
+        if let Err(e) = self.ensure_kubo() {
+            return Response::error("kubo_unavailable", &e);
+        }
+        let url = kubo_rpc_url(
+            self.api_port,
+            "pin/ls",
+            &[("arg", cid), ("type", "recursive"), ("offline", "true")],
+        );
+        match ureq::post(&url).timeout(HTTP_TIMEOUT).call() {
+            Ok(resp) if resp.status() == 200 => {
+                // A pin answer names the pin: one recursive entry under `Keys`.
+                let recursive = resp
+                    .into_string()
+                    .ok()
+                    .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+                    .and_then(|body| body.get("Keys")?.as_object().cloned())
+                    .is_some_and(|keys| keys.values().any(|pin| pin["Type"] == "recursive"));
+                if recursive {
+                    Response::ok(serde_json::json!({ "pinned": true }))
+                } else {
+                    Response::error("pin_status_failed", "Kubo returned no recursive pin")
+                }
+            }
+            Ok(resp) => Response::error("pin_status_failed", &format!("HTTP {}", resp.status())),
+            Err(ureq::Error::Status(_, resp)) => {
+                let body = resp.into_string().unwrap_or_default();
+                if body.contains("is not pinned") || body.contains("not found locally") {
+                    Response::ok(serde_json::json!({ "pinned": false }))
+                } else {
+                    Response::error("pin_status_failed", "Kubo could not read the pin set")
+                }
+            }
+            Err(e) => Response::error("pin_status_failed", &e.to_string()),
         }
     }
 
@@ -4236,6 +4281,61 @@ mod tests {
         assert!(headers.contains("offline=true"));
         assert!(!headers.contains("/api/v0/pin/add"));
         assert_eq!(std::fs::read(&dest).unwrap(), b"GGUF");
+    }
+
+    #[test]
+    fn pin_status_reads_the_local_pin_set_offline() {
+        let root = tempfile::tempdir().unwrap();
+        for (status, body, pinned) in [
+            (
+                "200 OK",
+                r#"{"Keys":{"bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku":{"Type":"recursive","Name":""}}}"#,
+                Some(true),
+            ),
+            ("200 OK", r#"{"Keys":{}}"#, None),
+            (
+                "500 Internal Server Error",
+                r#"{"Message":"path 'bafy' is not pinned","Code":0,"Type":"error"}"#,
+                Some(false),
+            ),
+            (
+                "500 Internal Server Error",
+                r#"{"Message":"context deadline exceeded","Code":0,"Type":"error"}"#,
+                None,
+            ),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let reply = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let backend = std::thread::spawn(move || {
+                let mut socket = accept_bounded_fixture(&listener);
+                let headers = read_bounded_fixture_headers(&mut socket);
+                socket.write_all(reply.as_bytes()).unwrap();
+                headers
+            });
+            let mut provider = bounded_cat_fixture_provider(root.path(), port);
+            let response = provider.handle(
+                parse_request(
+                    r#"{"op":"pin_status","cid":"bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku"}"#,
+                )
+                .unwrap(),
+            );
+            let headers = backend.join().unwrap();
+            assert!(headers.starts_with("POST /api/v0/pin/ls?"), "{headers}");
+            assert!(headers.contains("offline=true") && headers.contains("type=recursive"));
+            match pinned {
+                Some(pinned) => assert_eq!(
+                    serde_json::to_value(&response).unwrap()["data"]["pinned"],
+                    pinned,
+                    "{response:?}"
+                ),
+                None => assert!(matches!(response, Response::Error { .. }), "{response:?}"),
+            }
+        }
     }
 
     #[test]

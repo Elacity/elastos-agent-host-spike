@@ -68,16 +68,33 @@ key and revocation state are committed atomically, operators must verify the
 persisted key and restart result instead of treating command completion as a
 durable rotation receipt.
 
-### Host-plane Carrier providers use Runtime admission
+### Runtime owns Carrier admission
 
 **Severity:** Medium
-**Files:** `elastos/crates/elastos-server/src/carrier_service.rs`
-**Status:** Open
+**Files:** `elastos/crates/elastos-server/src/carrier.rs`, `elastos/crates/elastos-server/src/carrier_service.rs`
+**Status:** Open (host-plane envelope)
 
-Host-plane Carrier service requests use a raw operation/path envelope without
-a capsule capability-token field. Runtime owns admission for this trusted
-provider class. Its trust boundary must remain explicit in manifests and audit
-output; the envelope is not an independent grant of capsule authority.
+Runtime identifies each Carrier peer by its endpoint key. A key alone gives no
+authority. Any peer can read content that this Home holds locally. In this
+release a seed accepts no new copies from other Homes; copies it already holds
+stay. A Home accepts a new copy from a peer only if the owner gave that peer
+the `content.replica` permission; copies it already holds stay. The owner
+trusts such a peer like an own device: it can ask the Home to pin content,
+import complete content and read storage status. An import pins only the CID
+it was asked for and never removes an existing pin. No peer can publish,
+remove or repair content on a Home or a seed. Peers cannot use the
+availability provider. A Home signs an availability announcement only from its
+own pin state. Peers cannot push or read gossip messages directly. Only topics
+that a Home joins keep messages, to a maximum of 100 topics. A granted peer's
+`ensure` (once the pin succeeds) and `import_object` announce the CID and join
+its topic, so a granted peer shares that limit with the Home's own topics. A
+granted peer's `import_exact`, `admission` and `status`, and any peer's
+`fetch`, join no topic.
+
+Host-process provider capsules use a raw operation and path envelope without a
+capsule capability token. Runtime owns admission for this trusted provider
+class. Manifests and audit output must show this boundary. The envelope does
+not grant capsule authority.
 
 ### I/O bridge line reads are not bounded while reading
 
