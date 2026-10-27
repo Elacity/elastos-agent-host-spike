@@ -55,7 +55,7 @@ GUEST = [
     ),
     (
         "unknown shelf fields allowed",
-        "src/shelf.rs",
+        "../capsule-kit/guest/src/list.rs",
         '.find(|key| !matches!(key.as_str(), "schema" | "items"))',
         '.find(|key| !matches!(key.as_str(), "schema" | "items" | "x"))',
         [("core", "malformed_shelves_stop_before_any_document_is_read")],

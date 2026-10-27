@@ -32,6 +32,7 @@ under `elastos/`, `capsules/` or `examples/agent-host/`, and nothing in the Runt
 |---|---|---|
 | `bus` | The `Bus` trait, the read window, the write and its body, the one-pass answer parser | the links (A1); the write from the documents viewer |
 | `read` | `Refusal` (`NoGrant`, `Call`, `InputTooLarge`, `Input`), `App` (name, input noun, input cap), `grant`, `read_at`, `read_bounded`, `read_counted`, `READ_CHUNK_BYTES` | both viewers' `lib.rs` (about 120 lines each); `read_counted` from the documents viewer (M1) |
+| `list` | `ListRules` (noun, schema, cap, prefix, extra item fields) and `parse`: only `schema` and `items`, a fixed schema, a non-empty capped list, items that are objects with `uri` under the caller's prefix plus the caller's own fields | `album.rs` and `shelf.rs` (task 012) |
 | `uri` | `check_object_uri(uri, prefix)` | `album.rs` and `shelf.rs` |
 | `text` | `check_head`, `check_whole` | the documents model (M2); `docs-model` re-exports it |
 | `image` | `sniff`, `header_dimensions`, `jpeg_dimensions`, `HEADER_BYTES` | the photo viewer (M3) |
@@ -39,8 +40,9 @@ under `elastos/`, `capsules/` or `examples/agent-host/`, and nothing in the Runt
 | `wit`, `component` (feature `wit`, wasm32) | the `product-capsule-v1` bindings, generated once; `WitBus`; `lifecycle_run(app, run)`, which checks the ABI and turns a refusal into the `bus-error`; the export macro | the links and both viewers' export blocks |
 
 Features keep each user to what it needs: a Bus v1 component turns on `wit`, its tests `fake`; `docs-model`
-(and through it the Bus v2 guest) takes the crate with no features, so it gets the text checks and no Bus v1
-binding at all. The Bus v2 guest's tests (which check it imports only `elastos:bus/*@2.0.0`) still pass.
+(and through it the Bus v2 guest) takes the crate with no features, so it gets the list and text checks and no
+Bus v1 binding at all. The list module has no feature gate, so `serde_json` is a plain dependency of the crate.
+The Bus v2 guest's tests (which check it imports only `elastos:bus/*@2.0.0`) still pass.
 
 A viewer now says only what is its own: `pub const APP: App = App { name, input, max_input_bytes }`, its
 limits, its input schema, its run order and checks, and a nine-line export:
@@ -54,7 +56,7 @@ impl capsule_kit_guest::wit::exports::elastos::bus::lifecycle::Guest for PhotoVi
 capsule_kit_guest::wit::export_lifecycle!(PhotoViewer with_types_in capsule_kit_guest::wit);
 ```
 
-The crate has its own tests (18), falsifiers (21) and `verify.sh` (fmt, clippy with each feature set, tests,
+The crate has its own tests (28), falsifiers (30) and `verify.sh` (fmt, clippy with each feature set, tests,
 the runner's self-test, falsifiers). Both viewers' `verify.sh` run it first.
 
 ## The photo hash
@@ -63,6 +65,7 @@ the runner's self-test, falsifiers). Both viewers' `verify.sh` run it first.
 |---|---|---|
 | Before (`3ecb8ae9`) | `add93842bb7253bdab18d27067d0976558913fda6bd354f772f04c5e9fc9dd22` | 64.9% |
 | After, in the container | `053b198d14e0b2abf1a2d911f3513e2d5bc9280b7202af806f56c71b86529cfc` | 59.1% (measured on the native build, `5a284f2f…`) |
+| After task 012, native in this worktree | `31e9576a7b97dacf1dc1cdc219c6f9dd34888ff8be39abe12c1f54b9058cc691` | not measured |
 
 Why it changed: the guest's code now comes from another crate (every symbol's crate name and the link order
 change, and that crate is hashed by its absolute path), the WIT bindings are generated in that crate, and the
@@ -72,14 +75,22 @@ same; the tests that check them did not change. Rerun after the change: every ph
 component rebuilt for each runtime one), the page set (13), the bundle set (60), the whole seam set (21), and
 both container builds (below).
 
+Task 012 moved the list rules out of `album.rs` into `guest/src/list.rs`, so the photo core changed once more;
+its container hash above is stale until a cloud container run.
+
 ## Reproducible build
 
 The container build is now the only reference, and the container recipe changed to keep it one:
 
 | | Photo core | Documents core |
 |---|---|---|
-| Pinned container (twice the same for the photo core) | `053b198d14e0b2abf1a2d911f3513e2d5bc9280b7202af806f56c71b86529cfc` | `c946ad9e0959f8ef985e978d30d0543e0d2bb7b17883f621ef61167366a3a7cf` |
-| Native, this checkout (`/home/user/...`) | `5a284f2f…a516` | `a479a911…066b` |
+| Pinned container, recorded before task 012 (stale: not rerun, the Mac has no Docker) | `053b198d14e0b2abf1a2d911f3513e2d5bc9280b7202af806f56c71b86529cfc` | `c946ad9e0959f8ef985e978d30d0543e0d2bb7b17883f621ef61167366a3a7cf` |
+| Native, this worktree (`/Users/sash/code/wt-lane-photo`), after task 012 | `31e9576a7b97dacf1dc1cdc219c6f9dd34888ff8be39abe12c1f54b9058cc691` | `9eef034ffba27f156f1922fef9dafb20483d1e1e1bcf30302bfc1ab161c67fc1` |
+| Native, the old checkout (`/home/user/...`) | `5a284f2f…a516` | `a479a911…066b` |
+
+The native hashes are the sha256 line that `scripts/build-component-capsule.sh <viewer>` prints for
+`<viewer>.component.wasm` built in that checkout. They depend on the checkout path (see point 2 below), so they
+are the hash of this worktree's path, not a reference other machines can match.
 
 Two things came with the crate:
 
@@ -144,7 +155,7 @@ lone braces.
 
 | Pair | Lines that match (not trivial) | What, and why it stays |
 |---|---|---|
-| `album.rs` / `shelf.rs` | 31 | The strict input-list parser: a JSON object with only `schema` and `items`, a fixed schema, a non-empty capped list, unknown item fields refused. The item fields differ (an album item has a duration). It could be a kit `parse_list(bytes, schema, cap, item)`; not asked for here, and the next app (archive) has a single URI, not a list |
+| `album.rs` / `shelf.rs` | 0 | The strict input-list parser moved to the kit (`guest/src/list.rs`, task 012): a JSON object with only `schema` and `items`, a fixed schema, a non-empty capped list, unknown item fields refused. Each app keeps its own noun, schema, cap, prefix and extra item fields |
 | `lib.rs` | 45 | Module docs, the fixed-path comments, the run skeleton (grant, bounded read, parse, check each item, write), the export block. The checks between are each app's own |
 | `tests.rs` | 60 | Test helpers (`granted`, `written`, `skipped`, `assert_nothing_written`) and the shape of the authority tests, each against its own run |
 | `host-test/tests/component.rs` | 70 | App paths, names, fixtures and the fuel-gate wrapper around the kit harness (`v1-host-test`) |
@@ -157,14 +168,14 @@ because the Runtime's gateway test installs exactly four Photos page files (unch
 
 | | Before (`3ecb8ae9`) | Now |
 |---|---|---|
-| Kit guest crate | (links, no own tests) | 18 tests, 21/21 falsifiers |
+| Kit guest crate | (links, no own tests) | 28 tests, 30/30 falsifiers (task 012 added 10 list tests and 9 list falsifiers) |
 | Photo core | 29 guest, 13 host, 18/18 | 24 guest, 13 host, 17/17 (5 tests and 1 falsifier moved to the kit) |
 | Photo page | 12 tests, 13/13 | the same |
 | Bundle tool | 47 tests, 60/60 | 48 tests, 63/63 (the #32 fix for a trailing `/` or `/.`, merged in) |
 | Photo seam (`falsify-seam.py`, whole set) | 21/21 | 21/21 |
 | Documents viewer | 71 Rust, 14 page, 57/57 | 66 Rust (11 model, 27 guest, 12 host, 7 bundle, 9 Bus v2), 14 page, 52/52 (36 + 16; 5 tests and 5 falsifiers moved to the kit) |
-| Photo core hash | `add93842…dd22` | container `053b198d…9cfc`; native here `5a284f2f…a516` |
-| Documents core hash | `8765e790…da40` | container `c946ad9e…a7cf`; native here `a479a911…066b` |
+| Photo core hash | `add93842…dd22` | container `053b198d…9cfc` (stale); native here `5a284f2f…a516` before task 012, `31e9576a…c691` after |
+| Documents core hash | `8765e790…da40` | container `c946ad9e…a7cf` (stale); native here `a479a911…066b` before task 012, `9eef034f…7fc1` after |
 | Documents worst shelf | 62.2% | 50.2% |
 | Photo worst album | 64.9% | 59.1% |
 
@@ -184,7 +195,9 @@ Written on 23 Oct 2026, when the Photo track moved to its own lane. The archive 
   component. Delete the `.wasm` first when you check a build by hand; `verify.sh` stops on the failure.
 - **Only the pinned-container hash counts.** The kit's crate is a path dependency outside each viewer's
   workspace, so native builds differ with the checkout path. The container mounts the repository at
-  `/build/elastos-runtime`, not at the builder's remap target (see "Reproducible build").
+  `/build/elastos-runtime`, not at the builder's remap target (see "Reproducible build"). After task 012 the
+  recorded container hashes are stale: the Mac cannot rebuild them, and the native hashes above belong to this
+  worktree's path.
 - **One build folder for the whole repository** (`.cargo/config.toml` points every workspace at
   `target-build/`). Two Cargo runs wait on its lock. Do not run a container build or another `verify.sh` while a
   falsifier set runs: the falsifiers edit kit and viewer sources in place, and a build at that moment compiles a
@@ -205,7 +218,8 @@ Written on 23 Oct 2026, when the Photo track moved to its own lane. The archive 
 
 ### Open kit gaps
 
-- **The strict input-list parser** is still in each viewer (`album.rs`, `shelf.rs`).
+- **The strict input-list parser** is done (task 012): one copy, `guest/src/list.rs`, used by `album.rs` and
+  `shelf.rs`, with its kit tests and falsifiers.
 - **The typed blocks** (markdown to blocks) are `docs-model`, not the kit; only the text checks moved.
 - **Page code** (`launchToken`, the client, `cut`) is still per page, because the Runtime's gateway test installs
   exactly four Photos page files.
@@ -220,6 +234,8 @@ Written on 23 Oct 2026, when the Photo track moved to its own lane. The archive 
 
 - Run both `verify.sh` (each runs `capsule-kit/guest/verify.sh` first), the photo page and bundle checks, and
   the whole `falsify-seam.py`.
-- Run both container builds: photo `053b198d…`, documents `c946ad9e…` (the native hashes differ by checkout path; see "Reproducible build").
+- Run both container builds when a cloud machine is available: the recorded photo `053b198d…` and documents
+  `c946ad9e…` hashes are stale after task 012, so a cloud run must replace them (the native hashes differ by
+  checkout path; see "Reproducible build").
 - Check that `capsule-kit/guest` builds with the Mac's toolchain for `wasm32-unknown-unknown` with `--features
   wit`, and with no features (the Bus v2 guest uses it that way, on Rust 1.95.0).
