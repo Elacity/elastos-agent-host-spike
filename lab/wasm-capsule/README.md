@@ -1091,12 +1091,19 @@ No memory cap flag in its help. Searched `wasmer run --help` and
 `wasmer --help` (both exit 0) case-insensitively for `memory`, `grow`, `trap`,
 `limit`, `pages`, `max`, `heap`, `size`, `resource`, `rlimit` and `bytes`.
 `wasmer --help` matched none. `wasmer run --help` matched only lines about
-other things: `--enable-experimental-unaligned-memory-accesses`,
+other things, each in the help of one of these flags:
+`--enable-experimental-unaligned-memory-accesses`,
 `--enable-bulk-memory`, `--enable-multi-memory`, `--enable-memory64` (Wasm
-features), `--with-compact-on-growth` (journal compaction), a CPU back-off
-"maximum amount of time", and `--stack-size <STACK_SIZE>` with "Set the default
-stack size (default is 1048576)" (the stack, not linear memory). So this CLI
-gives no way to cap a module's linear memory, and a cap cannot be claimed for
+features), `--with-compact-on-growth` (journal compaction; its `grow` and
+`size` matches), `--enable-cpu-backoff`'s CPU back-off "maximum amount of
+time", `--stack-size <STACK_SIZE>` with "Set the default stack size (default
+is 1048576)" (the stack, not linear memory), `--skip-journal-stdio` with "Skip
+writes to stdout and stderr when replying journal events to bootstrap a
+module" (journal replay; `trap` matches inside "bootstrap"), and
+`--COREDUMP_PATH <COREDUMP_PATH>` with "Generate a coredump at this path if a
+WebAssembly trap occurs" (where to write a crash dump after a trap; it sets no
+limit). Task 060 re-ran each search and lists every matched line in LOG. So
+this CLI gives no way to cap a module's linear memory, and a cap cannot be claimed for
 wasmer. The contrast and start runs, engine path `/opt/homebrew/bin/wasmer`,
 from the same folder (stderr empty, 0 bytes, on each):
 
@@ -1501,13 +1508,32 @@ Searched `/opt/homebrew/bin/wasmer run --help` and
 `/opt/homebrew/bin/wasmer --help` (both exit 0) case-insensitively for
 `preload`, `import`, `link`, `module`, `host`, `use` and `env`. `wasmer --help`
 matched none of `preload`, `import`, `link`, `module` or `host`; its `use` and
-`env` matches are about logs, config and the registry login. In
+`env` matches are about logs (`--log-format`, `--log-events`), the `config`
+command and the `whoami` command (the registry login). In
 `wasmer run --help` no line matched `preload`; `import` matched only "Require
-WASI modules to only import 1 version of WASI" and "Enable experimental N-API
-imports for modules that require them"; the `module`, `host`, `use` and `env`
-matches are about other things (compile threads, folders and the CWD, network,
-journals, the cache, the webc entrypoint, and `--env <KEY=VALUE>`, "Pass
-custom environment variables", which is ambient, not an import). Two lines
+WASI modules to only import 1 version of WASI" (`--deny-multiple-wasi-versions`)
+and "Enable experimental N-API imports for modules that require them"
+(`--experimental-napi`); `link` matched only `--enable-module-linking`. The
+`module`, `host`, `use` and `env` matches are about other things than
+supplying an import, each in the help of one of these flags: Wasmer's own
+home and cache folders (`--wasmer-dir`, `--cache-dir`, `--disable-cache`), the
+registry and its token (`--registry`, `--token`), logs (`--log-format`,
+`--log-events`), the compiler and compile threads (`--cranelift`,
+`--experimental-artifact`, `--compiler-threads`), Wasm features
+(`--enable-multi-value`, whose text names host functions returning multiple
+values, and `--enable-module-linking`), folders and the CWD (`--volume`,
+`--cwd`), containers (`--use`), network (`--net`), threads and CPU back-off
+(`--enable-async-threads`, `--enable-cpu-backoff`), journals and snapshots
+(`--journal`, `--journal-writable`, `--snapshot-on`, `--stop-after-snapshot`,
+`--skip-journal-stdio`), the webc entrypoint (`--entrypoint`), the two
+`import` flags above, and the guest environment (the three flags below). Each
+`[env: NAME=]` line says which host variable sets that wasmer option, not a
+guest variable. Three flags give the guest environment variables:
+`--env <KEY=VALUE>`, "Pass custom environment variables"; `--env-file <PATH>`,
+"Load environment variables from a dotenv file"; and `--forward-host-env`,
+"Forward all host env variables to guest".
+All three are ambient, not imports: they hand the guest host environment.
+Task 060 re-ran each search and lists every matched line in LOG. Two lines
 look close, and each was tried once:
 
 ```text
