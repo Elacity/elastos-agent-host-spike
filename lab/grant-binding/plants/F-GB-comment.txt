@@ -1,0 +1,21 @@
+id: F-GB-comment
+file: src/link.rs
+test: link::model_comment_is_not_a_path_link
+--- old
+            b'#' => {
+                let end = bytes[index..]
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or(bytes.len(), |offset| index + offset);
+                index = end;
+            }
+--- new
+            b'#' => {
+                let end = bytes[index..]
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or(bytes.len(), |offset| index + offset);
+                decoded.extend_from_slice(&bytes[index..end]);
+                index = end;
+            }
+--- end
