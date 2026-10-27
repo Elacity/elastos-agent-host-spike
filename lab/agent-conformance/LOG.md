@@ -6801,3 +6801,50 @@ Planted `ungranted_network_is_refused` exited 101 in 19.210 seconds. The row saw
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `probe/src/lib.rs:260` returns `Ok(())` from `capabilities::request` and does not call `providers::invoke`. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/effects.rs:106` is `ungranted_network_is_refused`. Hand-run `F-net-grant` exited 101 planted and 0 restored. |
 | 8. Identity, admission and allowance stay separate? | Yes | `probe/capsule.json:15` lets the request become pending. `tests/effects.rs:534` still requires a separate deny. |
+
+## 051 — Land the reviewed stand-in stop past the stdout leftover
+
+051: `standin-runtime/mod.rs` and `standin-runtime/README.md` are the bytes from `438fb71f9bcdad43457746c7f3e20c0f83beedbb`, which match `3d8511be8269f446bf0726b049c64494cb12ad42` and `6b073a4710ee056b7007b8fb989d91238c51f413`. `git show 438fb71f9bcdad43457746c7f3e20c0f83beedbb:lab/agent-conformance/<path> | cmp - lab/agent-conformance/<path>` succeeded for both paths. `StandIn::delete_capsule` answers `DELETE /api/capsules/:id`. `stop_one`, `revoke_live`, `stop_reason`, `unknown_instance`, `not_live` and `keeps_instance` are present. `keep` is the one life filter. `fn delete_capsule` was absent on this base before the copy. `tests/runtime.rs`, `tests/effects.rs`, `tests/common/operator.rs`, `src/census.rs`, `RUNBOOK.md`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` stay as the base has them. A search of `lab/agent-conformance` finds none of `drain_capture_holders`, `capture_holder_only`, or `capture_holder_drain_retries_a_stdout_leftover`. There is no new `falsifiers.json` id. After the restore, `git diff 438fb71f9bcdad43457746c7f3e20c0f83beedbb -- lab/agent-conformance/standin-runtime` is empty.
+
+### Hand-run falsifier
+
+No list id. One plant, then the restore, before the gates. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_stop_sets_stopped -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. The shared heavy-build lease wait was 0.000 seconds before the run.
+
+F-standin-stop-stub. Named test `standin_stop_sets_stopped`. Planted exit 101 in 12.784 seconds. Restored exit 0 in 1.721 seconds. Assertion: `src/../standin-runtime/mod.rs:982:9` `the stand-in stores stopped with the stop reason`. Left status `running` with an empty cause. Right status `stopped` with cause `stopped: stop one`.
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let reason = stop_reason(body)?;
+```
+
+New:
+
+```text
+        return Ok(Value::Null);
+        require_shell(caller)?;
+        let reason = stop_reason(body)?;
+```
+
+The plant is the start of `delete_capsule`. It returns `Ok` of null before any instance is read. After the restore, that return is absent.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. The shared heavy-build lease wait was 0.000 seconds. `Cargo.toml` and `Cargo.lock` are unchanged. There was no second test run.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.205 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, real 266.246 seconds. The lib target passed 26 tests. The effects target finished 55 passed, 2 failed, 12 ignored, in 217.65 seconds. The failed tests were `runaway_trap_is_bounded_while_siblings_finish` at `tests/common/parallel.rs:88` and `ungranted_sibling_read_is_refused` at `tests/effects.rs:446`. Both census lines were `process leftover; processes:1 paths:["home/Library/Application Support/elastos/host-process.lock"]`. That path includes `host-process.lock`. The task stops on that shape. The stand-in files stayed the restored bytes. `operator.rs`, `src/census.rs`, `tests/effects.rs` and `tests/runtime.rs` stayed as the base has them.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `standin-runtime/mod.rs:235` `delete_capsule` takes the instance id. It does not name code or content by a URL. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `standin-runtime/mod.rs:265` `revoke_live` changes stored grant life. It opens no file, network, or `wasi` import. |
+| 3. A second path or a second copy of one rule? | No | `standin-runtime/mod.rs:331` `keep` is the one life filter. `src/census.rs:79` `cleanup` stays the one cleanup. |
+| 4. Runtime core grows? | No | The edit is `standin-runtime/mod.rs`, `standin-runtime/README.md` and `LOG.md`. `src/lib.rs:9` still points the lab module there. |
+| 5. Refusals deny by default with a clear reason? | Yes | `standin-runtime/mod.rs:451` returns 400 `unknown instance`. `:456` returns 400 `instance is not live`. `:372` returns 403 `This endpoint requires shell privileges`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `standin-runtime/mod.rs:247` `stop_one` updates stand-in state. This change adds no capsule import. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:1449` `standin_stop_sets_stopped`. The planted return of null fails that assertion at `:982` and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:235` stops an instance and does not admit a path. `keep` at `:331` filters life and grants nothing. |
