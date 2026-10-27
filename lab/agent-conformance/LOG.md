@@ -9068,3 +9068,132 @@ New:
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The change adds tests and documentation only; no capsule code or import changes, and the stand-in keeps the one shell view the real route answers. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_cancel_survivor_reaches_running` at `tests/effects.rs:1476` and `standin_failed_survivor_reaches_running` at `:1734`; the session and ended-denial plants fail those named tests on their assertions, and the restored tests pass. |
 | 8. Identity, admission and allowance stay separate? | Yes | The unchanged grant route writes one request record and one `Live` grant and changes no phase at `standin-runtime/mod.rs:416-429`; `finish_start` at `:494` stays the admission decision, and `duration` stays the allowance value. A PASS gives the Runtime no A10 or A11 credit for the survivor. |
+
+## 064 — A10/A11: an unanswered request expires
+
+064: `standin-runtime/mod.rs` gains `REQUEST_TIMEOUT_SECS` (300), `RequestStatus::Expired`, the `requested_at` field on `Request`, the private `expire_due`, the `set_instant` call to it, the `expired_request` helper and `standin_unanswered_request_expires`; `set_instant` stores the instant then expires the due pending requests through the one writer. `standin-runtime/README.md` gains the expiry paragraph before `## Callers`, and `RUNBOOK.md` gains one paragraph after the last stand-in paragraph. `elastos/`, `capsules/`, `scripts/`, `examples/`, `GAPS.md`, `falsifiers.json`, `Cargo.toml`, `Cargo.lock`, `src/harness.rs`, `src/census.rs`, `tests/effects.rs` and `tests/common/grants.rs` are unchanged.
+
+### Quote from the resident SPEC (read only at `35697329be0aad89eb68d0adf78aa94d24751317`)
+
+The status and settler sentences this task takes, from "RI-5 Runtime settlement and the request record":
+
+```text
+`status` is `pending`, `granted`, `denied` or `expired`. `settled_by` is
+`shell` or `runtime`, and `null` only while pending.
+```
+
+This task takes `expired` only. The stop and the failed start stay 052 and 058.
+
+### Quotes from the Runtime (read only, not imported)
+
+`elastos/crates/elastos-runtime/src/capability/pending.rs:16-17` states the default and its value:
+
+```text
+/// Default request timeout in seconds (5 minutes)
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 300;
+```
+
+`elastos/crates/elastos-server/src/api/handlers/capability.rs:215-219` states the expired answer:
+
+```text
+        elastos_runtime::capability::RequestStatus::Expired => Ok(Json(RequestStatusOutput {
+            status: "expired".to_string(),
+            token: None,
+            reason: Some("Request timed out".to_string()),
+        })),
+```
+
+### Code
+
+- `REQUEST_TIMEOUT_SECS` is 300 at `standin-runtime/mod.rs:35`, beside `FAILED_KEEP_SECS` at `:34`.
+- `RequestStatus` gains `Expired` at `:105`. `request_status_text` at `:807` maps it to `expired` at `:812` and still maps `granted` to `granted` at `:810`. The shell JSON keeps its eight keys `request_id`, `session_id`, `resource`, `action`, `reason`, `status`, `decision_reason` and `settled_by` at `:793-802`; `requested_at` is not a JSON field.
+- `Request` gains `requested_at: u64` at `:114`. `seed_request` at `:250` stores `requested_at: self.instant` at `:281` and its validation stays as found. The `Request` literal in `standin_stop_preserves_settled_requests` sets `requested_at` to 0 at `:3720`; its body is otherwise unchanged.
+- `set_instant` at `:535` stores the argument and then calls `self.expire_due()` at `:537`; it reads no clock.
+- `expire_due` at `:666-685` is private, and its doc comment starts `Not a route.` It selects the `Pending` records whose stored instant minus that record's `requested_at` is at least 300 at `:671-674`, then calls the one writer `settle_record` at `:624` with `expired`, `Request timed out` and `runtime` at `:678-683`. The writer's body is as found, so a second writer does not exist.
+- No new public method. `post_capability_grant` at `:404`, `post_capability_deny` at `:364`, `settle_pending` at `:646`, `get_capability_requests` at `:292` (`&self`) and `watch_ended` at `:317` are unchanged.
+
+### Tests
+
+`standin_unanswered_request_expires` at `:3749`, in the module's `#[cfg(test)]`, passes with no operator and no probe build. Every assertion message starts `the stand-in`. The `expired_request` helper sits beside `denied_request` at `:1637`; it expects `status` `expired`, `decision_reason` `Request timed out` and `settled_by` `runtime`.
+
+- The test admits `/capsules/read-shared` as `read-shared` with `Start::Ok`, launches twice and finishes both starts, so `component-1` and `component-2` are `running` with cause `""`. It seeds `req-1` on `component-1` and `req-2` on `component-2` at the Public resource, action `read`, reason `read shared`.
+- The shell grant of `req-2` with `{"request_id":"req-2","duration":"session","rationale":"grant shared read"}` is Ok `{"success": true}` at instant 0.
+- At instant 299 the shell record for `component-1` is `req-1` still `pending` with `settled_by` null.
+- At instant 300 that record is `expired_request("req-1", "component-1")`, and `component-1` stays `running` with cause `""`. `component-2`'s record is `req-2` `granted`, `settled_by` `shell`, `decision_reason` `grant shared read`. The shell live-grant `request_id` set is exactly `req-2`.
+- A deny of `req-1` with reason `too late` is status 400 with the reason `request is not pending: req-1`, and a grant of `req-1` is that same 400. The expired record stays and the live set stays exactly `req-2`.
+- `req-3` is seeded on `component-1` at instant 300 with the same resource, action and reason. At 599 it is still `pending` with `settled_by` null and `req-1` is still the expired record. At 600 `req-3` is `expired_request("req-3", "component-1")` and `req-1` stays the first expired record.
+- A denied `req-old` is pushed the way `standin_stop_preserves_settled_requests` does, with `requested_at` 0, and `set_instant(300)` runs. That record stays `denied` with `decision_reason` `denied earlier` and `settled_by` `shell`.
+
+### Hand-run falsifiers
+
+No `falsifiers.json` id and no new id. Each plant ran alone and was restored before the next. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_unanswered_request_expires -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. Each planted crate compiled. Before the plants `sha256sum standin-runtime/mod.rs` was `0b3192cbcf010ce8fe168afe15e1599b52a771ebc64b064ebcb50d64a4a88889`; after the last restore it was the same value, and `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows no plant.
+
+F-standin-expire-stub: the start of `expire_due` returns before any request is read. Planted run failed on the assertion at `standin-runtime/mod.rs:3802:9`: `the stand-in expires the unanswered request at 300 seconds with the runtime as settler`; the record was `pending` with `settled_by` null against the expected `expired` record.
+
+Old:
+
+```text
+    fn expire_due(&mut self) {
+        let instant = self.instant;
+```
+
+New:
+
+```text
+    fn expire_due(&mut self) {
+        return;
+        let instant = self.instant;
+```
+
+F-standin-expire-late: the age comparison is `>` `REQUEST_TIMEOUT_SECS`. Planted run failed on the same assertion at `standin-runtime/mod.rs:3801:9`; the record at instant 300 stayed `pending` with `settled_by` null.
+
+Old:
+
+```text
+                    && instant.saturating_sub(request.requested_at) >= REQUEST_TIMEOUT_SECS
+```
+
+New:
+
+```text
+                    && instant.saturating_sub(request.requested_at) > REQUEST_TIMEOUT_SECS
+```
+
+F-standin-expire-settled: the filter also selects `Denied` records. Planted run failed on the final assertion at `standin-runtime/mod.rs:3891:9`: `the stand-in leaves the settled denied record as its own test stores it`; `req-old` became `expired` with `decision_reason` `Request timed out` and `settled_by` `runtime`.
+
+Old:
+
+```text
+                request.status == RequestStatus::Pending
+```
+
+New:
+
+```text
+                request.status != RequestStatus::Granted
+```
+
+### Docs
+
+`standin-runtime/README.md:51` adds the expiry paragraph immediately before `## Callers`: `set_instant` calls `expire_due`, a pending request ages from the instant `seed_request` stored in `requested_at`, and at 300 seconds the one writer sets `expired`, `Request timed out` and `settled_by` `runtime`. A granted or denied record stays, the instance stays, an expired request is not pending, this value is the lab stand-in and the real timeout can replace it later because the status matches (M1-R), and a PASS gives the Runtime no A10 or A11 credit for expiry. The RA-1 section, the RI-1 to RI-4 section, the 061 grant paragraph, the 062 watch paragraph and the 063 survivor paragraph stay as found. `RUNBOOK.md:733` adds one paragraph after the last stand-in paragraph: `standin_unanswered_request_expires` is this stand-in, and a PASS there gives the Runtime no A10 or A11 credit for expiry. No other RUNBOOK paragraph changes.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. `Cargo.toml` and `Cargo.lock` are unchanged, and the protected diff is empty: `git diff` for `src/harness.rs`, `src/census.rs`, `tests/effects.rs`, `tests/common/grants.rs`, `GAPS.md`, `Cargo.toml` and `Cargo.lock` printed nothing. The only changed files are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: real 261.21 seconds, inside the 600-second bound. The observed targets were lib 55 passed 0 failed, runtime 10 passed with 2 ignored, standin_contract 2 passed, probe 3 passed and doc-tests 0; the new test passed in the lib target and no `error: test failed` line appeared. Cargo stops at the first failing target, so reaching the last doc-tests target means every earlier target passed. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.15 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_unanswered_request_expires -- --exact` exit 0, real 0.07 seconds, 1 passed and 0 failed.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The change adds one status string and a lab age field at `standin-runtime/mod.rs:105,114`; the test seeds stored request ids on the existing Public resource path at `:3749`. No code or content identity is added. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `expire_due` at `standin-runtime/mod.rs:666` changes lab request records only; `set_instant` at `:535` is a test seam, and the shell-only routes keep their refusal, so no capsule, Home or UI call path changes. |
+| 3. A second path or a second copy of one rule? | No | `expire_due` calls the one writer `settle_record` at `standin-runtime/mod.rs:624`; the writer body is as found and no second writer, route or public method exists. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`; `elastos/`, `capsules/` and `scripts/` are untouched, and the Runtime timeout is quoted only. |
+| 5. Refusals deny by default with a clear reason? | Yes | The expiry selects only `Pending` records at `standin-runtime/mod.rs:671-674`, and a deny or grant of the expired request is 400 `request is not pending: req-1` through the unchanged route checks at `:379,419`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | No capsule code or import changes; the stand-in keeps the one shell request record the real route answers. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_unanswered_request_expires` at `standin-runtime/mod.rs:3749`; the stub, late and settled plants each fail that named test on its assertion, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | Expiry writes one request record at `standin-runtime/mod.rs:678-683` and leaves the instance phase and grants as they were; `finish_start` at `:503` and `delete_capsule` at `:578` stay the admission and stop decisions, and a granted record and its `Live` grant stay. A PASS gives the Runtime no A10 or A11 credit for expiry. |

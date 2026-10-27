@@ -48,6 +48,8 @@ This value is the lab stand-in and the real route can replace it later because t
 
 After one instance has ended, `post_capability_grant` of the survivor's pending request stores one `Live` grant for the survivor's session, and `finish_start` then stores `running`. The ended request stays `denied` with `settled_by` `runtime`. Stopping the survivor makes `standin_a12_census` return success. The grant does not change phase. This value is the lab stand-in and the real route can replace it later because the JSON matches (M1-R). A PASS gives the Runtime no A10 or A11 credit for the survivor.
 
+`set_instant` calls `expire_due`, and a pending request ages from the instant `seed_request` stored in `requested_at`. At 300 seconds the one writer sets `status` `expired`, `decision_reason` `Request timed out` and `settled_by` `runtime`. A granted or denied record stays, and the instance stays. An expired request is not pending, so deny and grant refuse it. This value is the lab stand-in and the real timeout can replace it later because the status matches (M1-R). A PASS gives the Runtime no A10 or A11 credit for expiry.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.

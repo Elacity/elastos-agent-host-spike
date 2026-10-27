@@ -21,6 +21,10 @@
 //! `post_capability_grant` answers `POST /api/capability/grant` through the
 //! same writer with `granted` and `shell`, then `seed_grant` stores the one
 //! `Live` grant. A grant body carries no token.
+//!
+//! `set_instant` calls `expire_due`, which passes the one writer `expired`,
+//! `Request timed out` and `runtime` for each pending request at least 300
+//! seconds old. A granted or denied record and its instance stay.
 
 use serde_json::{json, Map, Value};
 use std::path::{Component, Path, PathBuf};
@@ -28,6 +32,7 @@ use std::path::{Component, Path, PathBuf};
 const LIVE_SCOPE: &str = "all_sessions_live";
 const RESIDENT_WORLD: &str = "resident-capsule";
 const FAILED_KEEP_SECS: u64 = 60;
+const REQUEST_TIMEOUT_SECS: u64 = 300;
 
 /// Authenticated caller. A method argument, not a JSON field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,12 +96,13 @@ struct Instance {
     ended_at: Option<u64>,
 }
 
-/// Three request statuses this slice stores. `expired` is later.
+/// Four request statuses this slice stores.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RequestStatus {
     Pending,
     Granted,
     Denied,
+    Expired,
 }
 
 struct Request {
@@ -105,6 +111,7 @@ struct Request {
     resource: String,
     action: String,
     reason: String,
+    requested_at: u64,
     status: RequestStatus,
     decision_reason: String,
     settled_by: Option<&'static str>,
@@ -238,7 +245,8 @@ impl StandIn {
 
     /// Lab test seam, not a route.
     ///
-    /// Stores one pending request. This method reads no clock and no disk.
+    /// Stores one pending request at the current instant. This method reads no
+    /// clock and no disk.
     pub fn seed_request(
         &mut self,
         request_id: &str,
@@ -270,6 +278,7 @@ impl StandIn {
             resource: resource.to_owned(),
             action: action.to_owned(),
             reason: reason.to_owned(),
+            requested_at: self.instant,
             status: RequestStatus::Pending,
             decision_reason: String::new(),
             settled_by: None,
@@ -520,9 +529,12 @@ impl StandIn {
 
     /// Lab test seam, not a route.
     ///
-    /// Replaces the instant used for ended-entry age. This method reads no clock.
+    /// Replaces the instant used for ended-entry age and request age. It then
+    /// expires the due pending requests through `expire_due`. This method reads
+    /// no clock.
     pub fn set_instant(&mut self, secs: u64) {
         self.instant = secs;
+        self.expire_due();
     }
 
     /// `POST /api/capsules`.
@@ -645,6 +657,33 @@ impl StandIn {
         }
     }
 
+    /// Not a route. Expires the pending requests whose age is at least
+    /// `REQUEST_TIMEOUT_SECS`.
+    ///
+    /// Age is the stored instant minus that request's `requested_at`. Only
+    /// `Pending` records change. The one writer stores `expired`,
+    /// `Request timed out` and `runtime` as settler. This method reads no clock.
+    fn expire_due(&mut self) {
+        let instant = self.instant;
+        let due = self
+            .requests
+            .iter()
+            .filter(|request| {
+                request.status == RequestStatus::Pending
+                    && instant.saturating_sub(request.requested_at) >= REQUEST_TIMEOUT_SECS
+            })
+            .map(|request| request.request_id.clone())
+            .collect::<Vec<_>>();
+        for request_id in due {
+            self.settle_record(
+                &request_id,
+                RequestStatus::Expired,
+                "Request timed out",
+                "runtime",
+            );
+        }
+    }
+
     fn mint_id(&mut self) -> String {
         let id = format!("component-{}", self.next_id);
         self.next_id += 1;
@@ -764,12 +803,13 @@ fn request_entry(request: &Request) -> Value {
     })
 }
 
-/// The three request status strings this slice stores.
+/// The four request status strings this slice stores.
 fn request_status_text(status: RequestStatus) -> &'static str {
     match status {
         RequestStatus::Pending => "pending",
         RequestStatus::Granted => "granted",
         RequestStatus::Denied => "denied",
+        RequestStatus::Expired => "expired",
     }
 }
 
@@ -1590,6 +1630,19 @@ mod tests {
             "reason": "read shared",
             "status": "denied",
             "decision_reason": cause,
+            "settled_by": "runtime",
+        })
+    }
+
+    fn expired_request(request_id: &str, session_id: &str) -> Value {
+        json!({
+            "request_id": request_id,
+            "session_id": session_id,
+            "resource": SHARED_RESOURCE,
+            "action": "read",
+            "reason": "read shared",
+            "status": "expired",
+            "decision_reason": "Request timed out",
             "settled_by": "runtime",
         })
     }
@@ -3664,6 +3717,7 @@ mod tests {
             resource: SHARED_RESOURCE.to_owned(),
             action: "read".to_owned(),
             reason: "earlier".to_owned(),
+            requested_at: 0,
             status: RequestStatus::Denied,
             decision_reason: "denied earlier".to_owned(),
             settled_by: Some("shell"),
@@ -3688,6 +3742,169 @@ mod tests {
                 }),
             ],
             "the stand-in denies only pending requests and leaves the settled record"
+        );
+    }
+
+    #[test]
+    fn standin_unanswered_request_expires() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        let first = launch_finished(&mut standin);
+        let second = launch_finished(&mut standin);
+        assert_eq!(
+            (first.as_str(), second.as_str()),
+            ("component-1", "component-2"),
+            "the stand-in numbers the two finished launches component-1 and component-2"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in runs the first instance",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in runs the second instance",
+        );
+        seed_shared_request(&mut standin, "req-1", "component-1");
+        seed_shared_request(&mut standin, "req-2", "component-2");
+        let granted = standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({
+                    "request_id": "req-2",
+                    "duration": "session",
+                    "rationale": "grant shared read",
+                }),
+            )
+            .expect("the stand-in grants the second instance's request");
+        assert_eq!(
+            granted,
+            json!({ "success": true }),
+            "the stand-in answers success true for the shell grant"
+        );
+        standin.set_instant(299);
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![pending_request("req-1", "component-1")],
+            "the stand-in keeps the unanswered request pending below 300 seconds"
+        );
+        assert!(
+            request_entries(&standin, "component-1")[0]["settled_by"].is_null(),
+            "the stand-in leaves the unanswered settler null below 300 seconds"
+        );
+        standin.set_instant(300);
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![expired_request("req-1", "component-1")],
+            "the stand-in expires the unanswered request at 300 seconds with the runtime as settler"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in leaves the instance running when its request expires",
+        );
+        assert_eq!(
+            request_entries(&standin, "component-2"),
+            vec![granted_request("req-2", "component-2", "grant shared read")],
+            "the stand-in leaves the granted record from the shell"
+        );
+        let live = standin
+            .get_capability_list(Caller::Shell, None)
+            .expect("the stand-in shell live view after the expiry");
+        assert_eq!(
+            request_ids(&live),
+            BTreeSet::from(["req-2".to_owned()]),
+            "the stand-in shows exactly the granted request as live after the expiry"
+        );
+        let denied = standin.post_capability_deny(
+            Caller::Shell,
+            &json!({ "request_id": "req-1", "reason": "too late" }),
+        );
+        assert_delete(
+            &denied,
+            400,
+            "request is not pending: req-1",
+            "the stand-in refuses a deny of the expired request",
+        );
+        let late = standin.post_capability_grant(Caller::Shell, &json!({ "request_id": "req-1" }));
+        assert_delete(
+            &late,
+            400,
+            "request is not pending: req-1",
+            "the stand-in refuses a grant of the expired request",
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![expired_request("req-1", "component-1")],
+            "the stand-in leaves the expired record after both refusals"
+        );
+        let live = standin
+            .get_capability_list(Caller::Shell, None)
+            .expect("the stand-in shell live view after both refusals");
+        assert_eq!(
+            request_ids(&live),
+            BTreeSet::from(["req-2".to_owned()]),
+            "the stand-in leaves exactly the granted request live after both refusals"
+        );
+        seed_shared_request(&mut standin, "req-3", "component-1");
+        standin.set_instant(599);
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![
+                expired_request("req-1", "component-1"),
+                pending_request("req-3", "component-1"),
+            ],
+            "the stand-in keeps a request seeded at 300 pending below its own 300 seconds"
+        );
+        assert!(
+            request_entries(&standin, "component-1")[1]["settled_by"].is_null(),
+            "the stand-in leaves the new request's settler null at 599 seconds"
+        );
+        standin.set_instant(600);
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![
+                expired_request("req-1", "component-1"),
+                expired_request("req-3", "component-1"),
+            ],
+            "the stand-in expires the second request at 600 seconds and keeps the first expired record"
+        );
+        standin.requests.push(Request {
+            request_id: "req-old".to_owned(),
+            session_id: "component-1".to_owned(),
+            resource: SHARED_RESOURCE.to_owned(),
+            action: "read".to_owned(),
+            reason: "earlier".to_owned(),
+            requested_at: 0,
+            status: RequestStatus::Denied,
+            decision_reason: "denied earlier".to_owned(),
+            settled_by: Some("shell"),
+        });
+        standin.set_instant(300);
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![
+                expired_request("req-1", "component-1"),
+                expired_request("req-3", "component-1"),
+                json!({
+                    "request_id": "req-old",
+                    "session_id": "component-1",
+                    "resource": SHARED_RESOURCE,
+                    "action": "read",
+                    "reason": "earlier",
+                    "status": "denied",
+                    "decision_reason": "denied earlier",
+                    "settled_by": "shell",
+                }),
+            ],
+            "the stand-in leaves the settled denied record as its own test stores it"
         );
     }
 
