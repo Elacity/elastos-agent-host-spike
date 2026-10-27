@@ -104,11 +104,7 @@ fn ungranted_effect_is_refused() {
 
 #[test]
 fn ungranted_network_is_refused() {
-    let resource = include_str!("../fixtures/ungranted-network.txt").trim();
-    assert_refusal(
-        Effect::Network,
-        &format!("Internal(\"capsule manifest does not declare authority for {resource}\")"),
-    );
+    exercise_fixture_read(Effect::Network, false);
 }
 
 #[test]
@@ -530,11 +526,16 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
         assert_eq!(
             output.status.code(),
             Some(1),
-            "ungranted sibling must be refused; zero means its bytes were read"
+            "ungranted {} must be refused; exit 0 means the fixture granted it",
+            effect.name()
         );
         assert_eq!(controller.decisions.matched, 0);
         assert_eq!(controller.decisions.granted, 0);
         assert_eq!(controller.decisions.denied, 1);
+        assert!(
+            !stderr.contains("capsule manifest does not declare authority"),
+            "the pending request is refused by the fixture"
+        );
         assert_output_refusal(
             output,
             effect,
@@ -553,7 +554,11 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
         .check_report(
             match outcome {
                 ReadOutcome::Granted => "granted_read_succeeds",
-                ReadOutcome::Denied => "ungranted_sibling_read_is_refused",
+                ReadOutcome::Denied => match effect {
+                    Effect::SiblingRead => "ungranted_sibling_read_is_refused",
+                    Effect::Network => "ungranted_network_is_refused",
+                    _ => unreachable!("denied report name follows the effect"),
+                },
                 ReadOutcome::NoPolicy => "no_policy_file_does_not_mean_allow",
                 ReadOutcome::Instances | ReadOutcome::Cancel | ReadOutcome::Kill => {
                     unreachable!("instances checked above")
