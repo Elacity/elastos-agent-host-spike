@@ -123,8 +123,8 @@ test code, and it is not the Runtime. It copies the inputs of the Runtime's
 provider launch entry, `ProviderBridge::spawn(binary_path, config)` with
 `ProviderConfig.base_path`, because draft PR #309 names no provider-launch ask
 that this stand-in could map to. The stand-in owns the start decision for the
-lab proofs: a start it cannot confine is refused with a reason and starts
-nothing.
+lab proofs: a start it cannot confine is refused with a reason and returns no
+provider.
 
 The stand-in refuses in the order of these steps:
 
@@ -132,8 +132,13 @@ The stand-in refuses in the order of these steps:
    names that OS and the list where the stand-in applies confinement.
 2. An absent `sandbox-exec` is refused with a reason that names the OS and the
    path.
-3. A refusal of `write_generated_profile` is returned unchanged.
-4. A start that `sandbox-exec` refuses, or an `init` that does not answer
+3. A present confinement tool that is not `SANDBOX_EXEC` is refused with a
+   reason that names the OS, the given path and `SANDBOX_EXEC`, because the
+   tool the stand-in checks is the one `start_under` runs.
+4. A `binary_path` that is not a file is refused with a reason that names the
+   provider and that path, before any profile is written.
+5. A refusal of `write_generated_profile` is returned unchanged.
+6. A start that `sandbox-exec` refuses, or an `init` that does not answer
    `ok`, is refused with the `try_send` failure or the answer.
 
 Otherwise the stand-in writes the profile that the lab generator builds from
@@ -893,6 +898,13 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Write the generated profile but start under the committed `confine.sb`
   (WP117): `standin_start_runs_under_the_generated_profile_not_the_committed_file`
   fails because the start is then Started instead of refused.
+- Remove the stand-in's check that the confinement tool is `SANDBOX_EXEC`
+  (WP118): `standin_launcher_refuses_a_start_it_cannot_confine` fails on case
+  (c2), which runs the real `sandbox-exec` and returns Started.
+- Remove the stand-in's binary-file check (WP119): the same test fails on case
+  (c3), which panics in `resolved` with "wallet directory must resolve".
+- Return `Ok(provider)` for an `init` answer that is not `ok` (WP120): the same
+  test fails on case (f), which returns Started instead of the answer.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
