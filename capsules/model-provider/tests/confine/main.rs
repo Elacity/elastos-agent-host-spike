@@ -2483,6 +2483,41 @@ fn allow_rules_trace_to_declared_rights() {
             && !unclosed_message.contains("startup-root-directory widened"),
         "{unclosed_message}"
     );
+    // A line that trims to `(` and whose next line starts `allow` and then a
+    // space or a tab is in memory. Neither call reads the fixture or the
+    // profile file.
+    let split_space = [
+        "(allow file-read-data (literal \"/\"))",
+        "(",
+        "allow file-read* (literal \"/tmp/cc-split-allow\"))",
+        "(allow sysctl-read)",
+    ]
+    .join("\n");
+    let split_space_message = allow_form_closes(&split_space)
+        .expect_err("a line ( whose next line starts allow must fail before check 2");
+    assert!(
+        split_space_message.contains("allow form does not close")
+            && split_space_message.contains("(")
+            && !split_space_message.contains("allow rule has no declared right")
+            && !split_space_message.contains("startup-root-directory widened"),
+        "{split_space_message}"
+    );
+    let split_tab = [
+        "(allow file-read-data (literal \"/\"))",
+        "(",
+        "allow\tfile-read* (literal \"/tmp/cc-split-allow-tab\"))",
+        "(allow sysctl-read)",
+    ]
+    .join("\n");
+    let split_tab_message = allow_form_closes(&split_tab)
+        .expect_err("a line ( whose next line starts allow must fail before check 2");
+    assert!(
+        split_tab_message.contains("allow form does not close")
+            && split_tab_message.contains("(")
+            && !split_tab_message.contains("allow rule has no declared right")
+            && !split_tab_message.contains("startup-root-directory widened"),
+        "{split_tab_message}"
+    );
     if let Err(reason) = allow_form_closes(&profile) {
         panic!("{reason}");
     }

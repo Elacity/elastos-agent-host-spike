@@ -87,14 +87,15 @@ fn the_claim_wording_check_names_each_gap() {
 }
 
 /// The scan reads a claim however it is written: in any case, over a line
-/// break, over two comment, blockquote or block-comment lines, with a
-/// typographic apostrophe, with emphasis or code marks around a word. It names
+/// break, over two comment, blockquote, nested blockquote or block-comment
+/// lines, with a typographic apostrophe, with emphasis (`*` or `_`) or code
+/// marks around a word. It names
 /// the file, the line where the claim starts and the phrase, and a negation is
 /// not a claim, quoted or not. A file it cannot read or decode is refused with
 /// its cause.
 #[test]
 fn the_claim_scan_finds_a_claim_however_it_is_written() {
-    let cases: [(&str, &str, &[&str]); 11] = [
+    let cases: [(&str, &str, &[&str]); 13] = [
         (
             "case.md",
             "One line.\nThe lab CID EQUALS THE RUNTIME'S CID.\n",
@@ -152,6 +153,16 @@ fn the_claim_scan_finds_a_claim_however_it_is_written() {
             "quoted-negation.md",
             "> It is not the Runtime's CID.\n",
             &[],
+        ),
+        (
+            "underscore.md",
+            "It is the same as the _Runtime's_ CID.\n",
+            &["underscore.md:1: \"same as the runtime's cid\""],
+        ),
+        (
+            "nested-quote.md",
+            "> > The lab CID matches\n> > Kubo.\n",
+            &["nested-quote.md:1: \"matches kubo\""],
         ),
     ];
     for (path, text, expected) in cases {
