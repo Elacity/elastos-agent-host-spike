@@ -851,10 +851,13 @@ impl StandinPrimitive {
 
 /// The one host report the stand-in reads, in place of a bare OS name.
 ///
-/// `unavailable` is test input: a simulated Linux host names the primitive its
-/// report leaves out. A real host reports nothing missing, so
-/// `reporting(std::env::consts::OS)` is the constructor every existing call
-/// site uses and those cases keep their behaviour.
+/// `unavailable` is test input a simulated host on any OS can carry: the
+/// Linux C0 rows carry Landlock, user namespaces or the seccomp filter
+/// missing, and the `macos` row carries Landlock missing.
+/// `standin_host_refusal` refuses such a host before it reads the OS list,
+/// `DECLARED_CONFINED_OS`, so a host that carries a missing primitive is
+/// refused whatever its OS. `reporting` names no missing primitive, so cases
+/// that call `reporting(std::env::consts::OS)` keep their behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StandinHost {
     os: &'static str,
@@ -872,10 +875,7 @@ impl StandinHost {
 
     /// A simulated Linux host whose report leaves `primitive` unavailable.
     fn linux_missing(primitive: StandinPrimitive) -> Self {
-        Self {
-            os: "linux",
-            unavailable: Some(primitive),
-        }
+        Self::missing("linux", primitive)
     }
 
     /// A simulated host on `os` whose report leaves `primitive` unavailable.
@@ -926,6 +926,12 @@ fn standin_host_refusal(name: &str, host: StandinHost) -> Result<(), String> {
 }
 
 /// Lab stand-in for the Runtime's provider launch, not the Runtime.
+///
+/// This function is a lane copy that is to move under the one shared stand-in,
+/// `lab/agent-conformance/standin-runtime/` (owned by cx-agent-conformance),
+/// per Flint and Rong, 2026-10-27 19:25; the move is not done. Draft PR #309
+/// at `513988ebd` names no provider-launch ask, a gap routed to Flint, so this
+/// function copies `ProviderBridge::spawn`'s inputs instead of an RA route.
 ///
 /// It copies the inputs of `ProviderBridge::spawn(binary_path, config)` with
 /// `ProviderConfig.base_path` (read only, in `elastos/`), plus the provider
