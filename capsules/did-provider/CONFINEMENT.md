@@ -356,9 +356,10 @@ OS is read, so that run is no evidence for the OS argument.
 
 In the lab, did-provider also starts through the stand-in launcher in
 `../wallet-provider/tests/confine.rs`.
-`standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` runs
-did's start and outside-write journey first and then wallet's, before every
-host and process refusal the stand-in must make for each provider.
+`standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` runs,
+for did and then for wallet, that provider's macOS start and outside-write
+journey and then that provider's host and process refusals, before the next
+provider starts.
 `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
 holds M1 check B3 for did first and then wallet: it reads the provider's
 committed declared-rights file, starts the binary through the stand-in into a
@@ -370,11 +371,12 @@ same base separates a write grant on `did/` from one on its parent in the
 comparison too.
 
 The stand-in's input is one host report, not a bare OS name. The report holds
-the OS name and, for a simulated Linux host, which of Landlock, user namespaces
-or the seccomp filter it reports unavailable. Each refusal starts
+the OS name and which of Landlock, user namespaces or the seccomp filter it
+reports unavailable. A host that reports a missing primitive is refused
+whatever its OS. Each refusal starts
 `{name} start on {os} is refused:` and carries only its own case's words: an OS
 with no confinement design names that OS and the list where the stand-in
-applies confinement; a simulated Linux host with a missing primitive carries
+applies confinement; a host with a missing primitive carries
 the design's exact words for it from
 `../wallet-provider/CONFINEMENT-LINUX.md`; and a simulated Linux host that
 reports nothing missing says Linux is designed, not enforced, in this lab, so
