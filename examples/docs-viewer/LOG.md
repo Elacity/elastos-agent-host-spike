@@ -7,3 +7,4 @@
 - 2026-10-27 task 027: the kit owns the launch client and the docs page ships the copy.
 - 2026-10-27 task 027 round 2: the kit owns the launch client and the docs page ships the copy; refreshed the archive renderer copy from its kit owner so the existing byte check passes.
 - 2026-10-27 task 029: the kit reports name `page-client.js` as the one owner of `launchToken` and `pageClient`.
+- 2026-10-27 task 030: the container component hash is recorded in `recorded-hashes.txt`, and this Mac does not rebuild it.

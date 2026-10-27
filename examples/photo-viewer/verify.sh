@@ -16,6 +16,9 @@ python3 -I "${VIEWER_DIR}/verify_gate_test.py" --falsify
 python3 -I "${VIEWER_DIR}/repro/pins_test.py"
 python3 -I "${VIEWER_DIR}/repro/pins_test.py" --falsify
 
+python3 -I "${VIEWER_DIR}/repro/recorded_hash_test.py"
+python3 -I "${VIEWER_DIR}/repro/recorded_hash_test.py" --falsify
+
 GATE=0
 case "${GATE_LIST:-}" in
     *gates-photo* | *photo-gates*) GATE=1 ;;
