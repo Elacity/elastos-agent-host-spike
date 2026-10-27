@@ -1,0 +1,7 @@
+id: F-A7-lastadmit
+file: src/ledger.rs
+test: ledger::model_unasked_agent_reads_the_last_admit
+--- old
+        ledger.ceiling = ledger.admitted;
+--- new
+--- end
