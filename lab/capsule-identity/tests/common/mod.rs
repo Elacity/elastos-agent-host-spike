@@ -1098,33 +1098,50 @@ pub fn read_lane_files(paths: &[String]) -> Result<Vec<(String, Vec<u8>)>, Strin
     Ok(files)
 }
 
-/// The text of a line without a leading `//!`, `///` or `//`, so a claim
-/// that runs over two comment lines is read as one sentence.
+/// The text of a line without a leading `//!`, `///` or `//`, and then
+/// without a run of leading Markdown quote markers (`>`, each with the white
+/// space around it), so a claim that runs over two comment or quote lines is
+/// read as one sentence.
 fn comment_body(line: &str) -> &str {
     let line = line.trim_start();
-    ["//!", "///", "//"]
+    let body = ["//!", "///", "//"]
         .iter()
         .find_map(|marker| line.strip_prefix(marker))
-        .unwrap_or(line)
+        .unwrap_or(line);
+    body.trim_start_matches(|c: char| c == '>' || c.is_whitespace())
 }
 
+/// The marks the claim scan trims from each end of a word, so emphasis or
+/// code marks around a word never hide a claim. A mark inside a word stays.
+const WORD_MARKS: &[char] = &[
+    '`', // inline code
+    '*', // emphasis, and a block comment's ` * ` line start
+    '_', // emphasis
+];
+
 /// One word as the claim scan compares it: lowercase, with a typographic
-/// apostrophe read as `'`.
+/// apostrophe read as `'`, and without [`WORD_MARKS`] at its ends. A word
+/// that is only marks, such as a lone `*`, comes back empty.
 fn claim_word(word: &str) -> String {
+    let word = word.trim_matches(WORD_MARKS);
     word.to_lowercase().replace('\u{2019}', "'")
 }
 
 /// Each [`EQUALITY_CLAIMS`] phrase in the file `path` with `bytes`, as
-/// `path:line: "phrase"` at the line where it starts. Case, comment markers
-/// and line breaks do not hide one. Bytes that are not UTF-8 are refused with
-/// the path and cause.
+/// `path:line: "phrase"` at the line where it starts. Case, comment and quote
+/// markers, emphasis and code marks around a word, and line breaks do not
+/// hide one. Bytes that are not UTF-8 are refused with the path and cause.
 pub fn equality_claims_in(path: &str, bytes: &[u8]) -> Result<Vec<String>, String> {
     let text =
         std::str::from_utf8(bytes).map_err(|error| format!("{path} is not UTF-8: {error}"))?;
     let mut words = Vec::new();
     for (index, line) in text.lines().enumerate() {
         for word in comment_body(line).split_whitespace() {
-            words.push((claim_word(word), index + 1));
+            let word = claim_word(word);
+            // A word that was only marks is dropped, so it never splits a phrase.
+            if !word.is_empty() {
+                words.push((word, index + 1));
+            }
         }
     }
     let mut joined = String::new();

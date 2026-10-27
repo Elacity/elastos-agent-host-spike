@@ -1,0 +1,8 @@
+id: F-B2-keepappend
+file: src/ops.rs
+test: ops::model_forged_append_does_not_remove_the_right
+--- old
+            Operation::Append if !grant.rights.append => Err(OperateRefuse::AppendNotGranted),
+--- new
+            Operation::Append if !grant.rights.append || request.forged_append => Err(OperateRefuse::AppendNotGranted),
+--- end
