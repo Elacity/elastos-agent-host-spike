@@ -118,7 +118,8 @@ pub struct MemoryLimits {
 pub fn memories(wasm: &[u8]) -> Result<Vec<MemoryLimits>, Refusal>;
 ```
 
-On success the vec is every memory the module defines, in memory-section order.
+On success the vec is every imported memory in `into_imports()` order, then every defined memory in memory-section order.
+A function, table, global or tag import is left out.
 `minimum` and `maximum` are 64 KiB page counts. `maximum` is `None` when that
 memory declares no maximum. `memory64` and `shared` are that memory's flags.
 Invalid core-module bytes return the existing `Malformed` with the string
