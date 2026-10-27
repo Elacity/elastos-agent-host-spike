@@ -6,3 +6,5 @@ pub mod harness;
 pub mod identity;
 pub mod report;
 pub mod runtime;
+#[path = "../standin-runtime/mod.rs"]
+pub mod standin_runtime;

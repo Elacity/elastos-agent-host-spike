@@ -6255,3 +6255,148 @@ On the planted run, `versions_receipt (A14) | FAIL` used the same GAPS sentence.
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The probe source is unchanged. `GAPS.md:1024` says a valid record gives no grant. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/runtime.rs:151` is the ignored row. The planted ID cell above fails in `./run.sh`. There is no new list id. |
 | 8. Identity, admission and allowance stay separate? | Yes | `GAPS.md:179` keeps record-to-launch apart from the CID row. `GAPS.md:1023` says an unsigned refusal is not this row. |
+
+## 044 — RA-1 stand-in lists every live grant
+
+044: `StandIn::get_capability_list` is the lab stand-in for `GET /api/capability/list` on both route forms. A shell sees every live grant and `scope` `all_sessions_live`. A client sees only its own grants. A client that asks for the global view is refused. Exhausted, revoked and expired grants stay out. `run_leaves_no_live_grant` stays blocked on the real Runtime. There is no new `falsifiers.json` id. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+The ask at `513988ebd:lab/runtime-asks/01-live-grant-view.md` cites `tests/common/grants.rs:788` and `:1220`. Those lines moved. The text followed is `tests/common/grants.rs:856` `let grants = self.call("GET", "/api/capability/list", &Value::Null)?;` and `live_grant_state` at `tests/common/grants.rs:1628-1641`, whose marker check is `if response["scope"] != "all_sessions_live"`. `parse_live_grants` at `35697329b:lab/resident-instances/src/http.rs:338` requires `scope` `all_sessions_live` and, on each entry, `request_id`, `session_id`, `resource` and `action`.
+
+### Hand-run falsifiers
+
+No list id. Each plant was restored before the next. Lib tests are `standin_runtime::tests::NAME`; a bare name with `--exact` runs nothing. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::NAME -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true` and lane `target/host` plus `target/host-build`. After the last restore, the stand-in file matched its pre-plant bytes (`sha256 84750ac5b78f6b94359a475fb5fc7c6825bb5788010c775fa7e88eec89544be6`). `git diff -- lab/agent-conformance/standin-runtime/mod.rs` prints nothing because the new file is untracked, and the plant expressions are absent from that file.
+
+F-standin-grant-stub. Named test `standin_shell_sees_every_live_grant`. Planted exit 101 in 7.659 s. Restored exit 0 in 1.028 s. A second plant of the same bytes, also restored, panicked at the same assertion. Assertion: `src/../standin-runtime/mod.rs:259:9` `assertion left == right failed: the stand-in lists every live grant` left `{}` right `{"req-a", "req-b", "req-z"}`.
+
+Old:
+
+```text
+    ) -> Result<Value, (u16, String)> {
+        if let Some(scope) = scope {
+```
+
+New:
+
+```text
+    ) -> Result<Value, (u16, String)> {
+        return Ok(json!({ "scope": LIVE_SCOPE, "capabilities": [] }));
+        if let Some(scope) = scope {
+```
+
+F-standin-empty-marker. Named test `standin_empty_shell_view_has_the_scope_marker`. Planted exit 101 in 1.344 s. Restored exit 0 in 0.652 s. Assertion: `src/../standin-runtime/mod.rs:328:9` `the stand-in empty shell view has the scope marker` left `{"capabilities"}` right `{"capabilities", "scope"}`.
+
+Old:
+
+```text
+fn body(shell: bool, capabilities: Vec<Value>) -> Value {
+    if shell {
+```
+
+New:
+
+```text
+fn body(shell: bool, capabilities: Vec<Value>) -> Value {
+    if shell && capabilities.is_empty() {
+        return json!({ "capabilities": capabilities });
+    }
+    if shell {
+```
+
+F-standin-own-session. Named test `standin_client_sees_only_its_own_grant`. Planted exit 101 in 0.886 s. Restored exit 0 in 1.057 s. Assertion: `src/../standin-runtime/mod.rs:382:9` `the stand-in lists the caller's live grants and leaves the sibling out` left `{"req-a", "req-b", "req-s"}` right `{"req-a", "req-b"}`.
+
+Old:
+
+```text
+        Caller::Client { session_id } => grant.session_id == session_id,
+```
+
+New:
+
+```text
+        Caller::Client { .. } => true,
+```
+
+F-standin-shell-only. Named test `standin_client_global_view_is_refused`. Planted exit 101 in 0.877 s. Restored exit 0 in 0.563 s. Assertion: `src/../standin-runtime/mod.rs:461:9` `the stand-in refuses a client global view: Ok(... "scope": String("all_sessions_live"))`.
+
+Old:
+
+```text
+            if let Caller::Client { .. } = caller {
+                return Err((403, "This endpoint requires shell privileges".to_owned()));
+            }
+```
+
+New:
+
+```text
+            if let Caller::Client { .. } = caller {
+                return Ok(self.render(Caller::Shell));
+            }
+```
+
+F-standin-unknown-scope. Named test `standin_unknown_scope_is_refused`. Planted exit 101 in 0.906 s. Restored exit 0 in 0.592 s. Assertion: `src/../standin-runtime/mod.rs:483:17` `the stand-in refuses unknown scope "session": Ok(Object {"capabilities": Array [], "scope": String("all_sessions_live")})`.
+
+Old:
+
+```text
+            if scope != LIVE_SCOPE {
+                return Err((400, format!("unknown capability list scope: {scope}")));
+            }
+```
+
+New:
+
+```text
+            if scope != LIVE_SCOPE {
+                return Ok(self.render(Caller::Shell));
+            }
+```
+
+F-standin-live-filter. Named test `standin_dead_grants_stay_out`. Planted exit 101 in 0.843 s. Restored exit 0 in 0.515 s. Assertion: `src/../standin-runtime/mod.rs:545:9` `the stand-in leaves exhausted, revoked and expired grants out` left `{"req-exhausted", "req-expired", "req-live", "req-revoked"}` right `{"req-live"}`.
+
+Old:
+
+```text
+    grant.life == Life::Live && visible(grant, caller)
+```
+
+New:
+
+```text
+    visible(grant, caller)
+```
+
+F-standin-ended-session. Named test `standin_shell_sees_every_live_grant`. Planted exit 101 in 0.749 s. Restored exit 0 in 0.733 s. Assertion: `src/../standin-runtime/mod.rs:257:9` `the stand-in lists every live grant` left `{"req-b", "req-z"}` right `{"req-a", "req-b", "req-z"}`.
+
+Old:
+
+```text
+    let _ended = grant.session_ended;
+    grant.life == Life::Live && visible(grant, caller)
+```
+
+New:
+
+```text
+    grant.life == Life::Live && !grant.session_ended && visible(grant, caller)
+```
+
+### Gates
+
+The shared heavy-build lease was free (`fcntl.flock` acquired in 0.000 s) and released after the commands. `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`. Both commands stayed inside 600 seconds. The locked suite passed on the first run, so there was no census rerun.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.18 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 292.28 seconds. 117 passed, 0 failed, 14 ignored. The lib target passed 6 tests. The effects target passed 57 tests, with 12 ignored, in 220.72 seconds. The runtime target passed 10 tests, with 2 ignored, in 13.91 seconds.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `standin-runtime/mod.rs:3` names the list route as an operation. Grant rows stay seeded fields. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `standin-runtime/mod.rs:50` stores a seeded row and reads no clock, file, network or env. |
+| 3. A second path or a second copy of one rule? | No | `standin-runtime/mod.rs:74` is the only list method. `kept` at line 110 is the one filter. |
+| 4. Runtime core grows? | No | `src/lib.rs:9` points the lab module at `standin-runtime/`. `elastos/` is unchanged. |
+| 5. Refusals deny by default with a clear reason? | Yes | `standin-runtime/mod.rs:81` returns 400 for an unknown scope. Line 84 returns 403 for a client global view. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `standin-runtime/mod.rs:118` keeps the view in the lab value. This change adds no capsule import. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:221` starts the six tests. Each plant above fails its named assertion and passes after restore. |
+| 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:20` is the life the filter reads. `Caller` at line 12 is only the session argument. |
