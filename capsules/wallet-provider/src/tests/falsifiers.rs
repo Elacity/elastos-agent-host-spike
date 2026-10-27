@@ -130,21 +130,28 @@ use std::process::Command;
 /// the missing-rules-list refusal with an empty list, so the right without its
 /// rules list reads "with no rules"; WP103 skips a rule that is not a string,
 /// so the right with a non-string rule passes the check; and WP104 drops only
-/// the pin table's `startup-sysctl` row, so the sysctl read claimed by
-/// `storage`. `declared_rights_trace_refuses_each_bad_input` fails on
-/// each case. Task 089's WP105 makes the lab generator `generate_profile` emit
+/// the pin table's `startup-sysctl` row, so the sysctl read claimed by `storage` passes the check.
+/// `declared_rights_trace_refuses_each_bad_input` fails on each case. Task 089's
+/// WP105 makes the lab generator `generate_profile` emit
 /// `(allow file-read* (literal "/private/var/cc-confine-generated"))` after the
 /// contract head, so
 /// `generated_did_and_wallet_profiles_match_their_committed_oracles` fails
 /// because neither declared-rights file names that rule. Task 090's WP106
 /// makes the rights-list id refusal in `declared_entries` never fire, so case
-/// (a) writes a profile for the unnamed right, WP107 makes the
+/// (a) writes a profile for the unnamed right, and WP107 makes the
 /// platform-baseline id refusal never fire, so case (b) writes one for the
-/// unnamed baseline rule, and WP108 makes `write_generated_profile` create the
-/// path before it calls `generate_profile`; each makes
-/// `generator_refuses_an_unnamed_right_and_the_start_is_refused` fail on its
-/// no-file assertion.
-const EXPECTED_FALSIFIERS: usize = 106;
+/// unnamed baseline rule; `generator_refuses_an_unnamed_right_and_the_start_is_refused`
+/// then panics at its refusal check in the did case, and the panic names
+/// `did-provider` and the case. WP108 makes `write_generated_profile` create the
+/// path before it calls `generate_profile`, so both cases fail the no-file
+/// assertion in the did case. Task 091's WP109 makes `generate_profile` append
+/// `(deny file-write* (literal "/private/var/cc-confine-generated"))` after the
+/// declared rules; only the oracle comparison catches it, because the head
+/// keeps its order, the contract checks read only allow forms, and the
+/// comparison's sorted tail then differs, so
+/// `generated_did_and_wallet_profiles_match_their_committed_oracles` fails on
+/// its `differs from its committed oracle` panic.
+const EXPECTED_FALSIFIERS: usize = 107;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

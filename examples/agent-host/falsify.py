@@ -796,20 +796,24 @@ def baseline_line(base, chosen):
 def judged(entry, base, how_for):
     """One entry's result, held to the unmutated baseline first. An edit is
     evidence for a test only when that test passes without it: a test that
-    fails, or cannot run, without the edit proves nothing (P11). A command
-    whose unmutated build fails proves nothing for any entry of it,
-    compile_error included."""
+    fails, or cannot run, without the edit proves nothing (P11). The reason
+    names each kind a named test showed; when both are present it names
+    both. A command whose unmutated build fails proves nothing for any entry
+    of it, compile_error included."""
     build_failed, outcomes = base.get(entry["command"], (False, {}))
     if build_failed:
         return False, "NOT RUN", "the unmutated build fails"
     if entry["expect"] != "compile_error":
         failed = [name for name in entry["tests"] if outcomes.get(name) == "failed"]
-        if failed:
-            return False, "NOT RUN", "fails without the edit: " + ", ".join(failed)
         missing = [name for name in entry["tests"]
                    if outcomes.get(name, "not run") == "not run"]
+        reasons = []
+        if failed:
+            reasons.append("fails without the edit: " + ", ".join(failed))
         if missing:
-            return False, "NOT RUN", "did not run without the edit: " + ", ".join(missing)
+            reasons.append("did not run without the edit: " + ", ".join(missing))
+        if reasons:
+            return False, "NOT RUN", "; ".join(reasons)
     return reported(entry, how_for(entry["command"]))
 
 
@@ -1710,6 +1714,89 @@ def a_survivor_requires_a_passing_baseline():
         print(f"self-test: survivor with a baseline that did not run: {got[1]} ({got[2]})")
         if got != (False, "NOT RUN",
                    "did not run without the edit: tests::planted_check"):
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def the_with_repo_check_holds_its_entries_to_the_baseline():
+    """The with-repo check runs both of its entries through one run_chosen()
+    call, so both share the unmutated baseline: a named test that already
+    fails without the edit reads NOT RUN with that reason, never CAUGHT, and
+    no edit is applied (task 047)."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        how = real_crate()
+        path = SELF_TEST_DIR / "harmless.txt"
+        path.write_text("original bytes\n", encoding="utf-8")
+        entry = {"id": "ST", "command": "host", "expect": "caught",
+                 "edits": [{"file": "harmless.txt", "old": "original bytes",
+                            "new": "mutated bytes"}],
+                 "tests": ["tests::fails_plainly"]}
+        entered = []
+        printed = []
+        calls = []
+        results = []
+        real_mutation = Mutation
+        real_run_chosen = run_chosen
+
+        def recording_mutation(item, base=HERE):
+            entered.append(item["id"])
+            return real_mutation(item, base)
+
+        def recording_run_chosen(chosen, how_for=None, on_baseline=None):
+            calls.append([list(item["tests"]) for item in chosen])
+            for item in real_run_chosen(chosen, how_for=how_for, on_baseline=on_baseline):
+                results.append(item)
+                yield item
+
+        with mock.patch.dict(globals(),
+                             Mutation=lambda item: recording_mutation(item, SELF_TEST_DIR),
+                             run_chosen=recording_run_chosen), \
+             mock.patch("builtins.print", side_effect=printed.append):
+            got_ok = with_repo_check([entry], still_passing="tests::genuinely_passing",
+                                     how_for=lambda _command: how)
+        listed = results[1][1] if len(results) == 2 else None
+        print(f"self-test: the with-repo check: {printed[-1] if printed else 'no line'}"
+              f"{f'; listed reason={listed[2]!r}' if listed else ''}; entered={entered}")
+        if got_ok:
+            ok = False
+        if entered:
+            ok = False
+        if calls != [[["tests::fails_plainly", "tests::genuinely_passing"],
+                      ["tests::fails_plainly"]]]:
+            ok = False
+        if listed != (False, "NOT RUN", "fails without the edit: tests::fails_plainly"):
+            ok = False
+        if printed != [
+                "self-test: ST with tests::genuinely_passing added -> "
+                "NOT RUN (fails without the edit: tests::fails_plainly)",
+                "self-test: ST as listed -> NOT RUN"]:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def a_baseline_reason_names_failed_and_missing_tests():
+    """When one named test fails without the edit and another cannot run
+    there, the NOT RUN reason names both kinds (task 047)."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        how = real_crate()
+        entry = {"id": "ST", "command": "host", "expect": "caught", "edits": [],
+                 "tests": ["tests::fails_plainly", "tests::absent_test"]}
+        real_mutation = Mutation
+        with mock.patch.dict(globals(),
+                             Mutation=lambda item: real_mutation(item, SELF_TEST_DIR)):
+            got = list(run_chosen([entry], how_for=lambda _command: how))[0][1]
+        reason = ("fails without the edit: tests::fails_plainly; "
+                  "did not run without the edit: tests::absent_test")
+        print(f"self-test: a baseline reason with both kinds: {got[1]} ({got[2]})")
+        if got != (False, "NOT RUN", reason):
             ok = False
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
@@ -3272,6 +3359,10 @@ SELF_TEST_CASES = {
     "an unmutated build failure is not a catch": an_unmutated_build_failure_is_not_a_catch,
     "a baseline test that cannot run is refused": a_baseline_test_that_cannot_run_is_refused,
     "a survivor requires a passing baseline": a_survivor_requires_a_passing_baseline,
+    "the with-repo check holds its entries to the baseline":
+        the_with_repo_check_holds_its_entries_to_the_baseline,
+    "a baseline reason names failed and missing tests":
+        a_baseline_reason_names_failed_and_missing_tests,
     "baseline batches chosen pairs before edits": baseline_batches_chosen_pairs_before_edits,
     "baseline checks free space before building": baseline_checks_free_space_before_building,
     "entry durations include execution": entry_durations_include_execution,
@@ -3311,6 +3402,24 @@ SELF_TEST_CASES = {
 }
 
 
+def with_repo_check(entries, still_passing="tests::compaction_keeps_a_skill_node",
+                    how_for=None):
+    """The with-repo check: one real host entry run with a passing test added
+    and as listed. Both entries go through one run_chosen() call, so both
+    share the unmutated baseline (P11): a named test that already fails
+    without the edit reads NOT RUN, never CAUGHT. Returns whether both
+    checks hold."""
+    real = next(entry for entry in entries
+                if entry["command"] == "host" and entry["expect"] == "caught")
+    added = dict(real, tests=real["tests"] + [still_passing])
+    got_added, got_listed = [result for _entry, result, _duration
+                             in run_chosen([added, real], how_for=how_for)]
+    print(f"self-test: {real['id']} with {still_passing} added -> {got_added[1]} ({got_added[2]})")
+    print(f"self-test: {real['id']} as listed -> {got_listed[1]}")
+    ok = got_added[:2] == (False, "SURVIVED") and still_passing in got_added[2]
+    return ok and got_listed[:2] == (True, "CAUGHT")
+
+
 def self_test(entries, with_repo, only=None):
     """Run the named self-test cases, or only `only`; with the repo, also one
     real falsifier with a passing name added and as listed."""
@@ -3325,15 +3434,7 @@ def self_test(entries, with_repo, only=None):
     finally:
         shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
     if with_repo and only is None:
-        real = next(entry for entry in entries if entry["command"] == "host" and entry["expect"] == "caught")
-        still_passing = "tests::compaction_keeps_a_skill_node"
-        got = falsify(dict(real, tests=real["tests"] + [still_passing]))
-        print(f"self-test: {real['id']} with {still_passing} added -> {got[1]} ({got[2]})")
-        if got[:2] != (False, "SURVIVED") or still_passing not in got[2]:
-            ok = False
-        got = falsify(real)
-        print(f"self-test: {real['id']} as listed -> {got[1]}")
-        if got[:2] != (True, "CAUGHT"):
+        if not with_repo_check(entries):
             ok = False
     if only is not None:
         print(case_marker(only, "OK" if ok else "FAILED"))

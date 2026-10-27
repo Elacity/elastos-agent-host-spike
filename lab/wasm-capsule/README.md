@@ -457,7 +457,11 @@ entrypoint and returns its exit status (as the OS reported it; only a success
 is returned) and its stdout. In order, the first refusal is the answer:
 
 0. task 043: a zero run budget (`RunControl::new(Duration::ZERO)`) is refused
-   before anything is made or started;
+   before anything is made or started; task 033: then the verified module's
+   memory is checked (`check_module_memory`, "The runner checks the module's
+   maximum (task 033)"), and a module with more than one memory, a memory with
+   no maximum or a maximum above the declared size is refused before anything
+   is made or started;
 1. `program` must be absolute (`./wasmtime` or a bare `wasmtime` is refused),
    so it is never looked up on PATH; the same path is the one started;
 2. `work_root` must be absolute, resolve, be byte for byte its own
@@ -622,6 +626,10 @@ first refusal is the answer:
    is called once, with the caller's granted imports unchanged (wc-009a). A
    refusal comes back unchanged as `TwoEngineRefusal::Verify`, printing exactly
    as the verifier prints it; nothing is written and no engine is started;
+   task 033: then the same `check_module_memory` `run_engine` calls checks the
+   verified module's memory once; a refusal comes back as
+   `TwoEngineRefusal::Memory`, printing the runner's `Refusal` unchanged, and
+   no engine process starts, not even a `--version` query;
 2. task 016: each engine is asked `--version`, `wasmtime` and then `wasmer`
    (the next section). Task 038: the first line must name the pinned version,
    `wasmtime 45.0.1` or `wasmer 7.5.0` (the next section). A refusal comes
@@ -1083,7 +1091,8 @@ the capsule's declared or used linear memory.
 ## Memory cap (wc-010b)
 
 [Proposal] The claim, exactly: "a self-contained capsule in a fixed flat space
-with a host-enforced cap", on wasmtime only, on this one Mac; not the ~4 GB
+with a host-enforced cap", on wasmtime by its flag (task 027) and, since task
+033, on both engines by the module's own maximum, on this one Mac; not the ~4 GB
 DigitCapsule, not any-RTOS loading. The memory flag is a test-only limit, never an engine choice; the engine choice is Anders's.
 Phase 2 groundwork; it claims no spike grade row.
 
@@ -1113,7 +1122,8 @@ only with `max-memories=1` ("Maximum number of WebAssembly linear memories
 allowed to be created", `wasmtime -W help`): a module with a second memory is
 refused at start with "resource limit exceeded: memory count too high at 2"
 (task 027 round 2, from the Codex review; the verifier's import audit accepts
-such a module). With `trap-on-grow-failure=y` a `memory.grow`
+such a module). Since task 033 such a module never reaches wasmtime: `run`
+refuses a second memory before any start. With `trap-on-grow-failure=y` a `memory.grow`
 past the cap traps (exit 1, "forcing trap when growing memory to 67174400
 bytes") instead of returning -1, so the runner refuses the run with
 `EngineFailed` and wasmtime's stderr. The `--version` query is unchanged.
@@ -1125,9 +1135,11 @@ module under a 2 MB cap exits 1 with the memory count line (exit 0 and `64`
 without it).
 
 **wasmer 7.5.0: SKIPPED.** No memory cap flag in `wasmer run --help` or
-`wasmer --help` (wc-010a), so its argv is unchanged and no cap is claimed for
-wasmer. `memory_cap_on_wasmer_is_skipped` is an `#[ignore]` test with that
-reason, never counted as a PASS. No other route (an rlimit, a wrapper, an
+`wasmer --help` (wc-010a), so its argv is unchanged and it gets no cap flag.
+Since task 033 its cap is the module's own memory maximum, which `run` checks
+against the declared size before any start ("The runner checks the module's
+maximum (task 033)"). `memory_cap_on_wasmer_is_skipped` is an `#[ignore]` test
+for the flag, with that reason, never counted as a PASS. No other route (an rlimit, a wrapper, an
 engine inside an engine, a VM) is used. No test name says "on_both" for the
 cap.
 
@@ -1287,12 +1299,57 @@ ask goes to cx-wasm-audit through Flint, not into a second reader here.
 1024 pages, its declared `memory_mb` (64) × 2^20 bytes; its minimum is still 16
 pages and its `digest` output is unchanged. Both engines apply a module's own
 maximum with no flag ((w2) and (m2) above): wasmer returns -1 to a grow past
-it, where wasmtime with `run`'s flag traps. `run` does not yet check a
-module's maximum (C0 step iii waits for the audit crate's reader), and its
-argv and the receipt's cap lines are unchanged, so wasmer's receipt line still
-says SKIPPED: it reports the flag `run` passed. The claim stays "a
+it, where wasmtime with `run`'s flag traps. Since task 033, `run` checks a
+module's maximum before any start (next part); its argv and the receipt's cap
+lines are unchanged, so wasmer's receipt line still says SKIPPED: it reports
+the flag `run` passed. The claim stays "a
 self-contained capsule in a fixed flat space with a host-enforced cap", on
 this one Mac only: not the ~4 GB DigitCapsule and not any-RTOS loading.
+
+### The runner checks the module's maximum (task 033)
+
+[Proposal] M1 C0 lab half, step (iii): the runner never starts an engine that
+cannot apply the capsule's declared memory size. The one cap both engines
+apply with no flag is the module's own memory maximum ((w2) and (m2) above),
+so `run` and `run_engine` check it, with no fallback:
+
+- the verified entrypoint's memory limits are read only through
+  `wasm_capsule_audit::memories` (`audit/INTERFACE.md`, "Additive under v1"),
+  the lab's one module reader (P10); `tools/` has no reader of its own;
+- one private function in `tools/src/run.rs`, `check_module_memory`, holds the
+  rule; `run_engine` calls it right after the zero-budget check, before any
+  folder is made, and `run` calls it once right after `verify_bundle`, before
+  the two `--version` queries. A refused module starts no engine process;
+- a module with no memory passes: it has no linear memory to grow (the 8-byte
+  `MODULE` and `IMPORTING_MODULE` fixtures);
+- more than one memory, imported or defined, is refused
+  (`MemoryCountAboveOne`): `the module has 2 memories: the declared size caps
+  one linear memory, so the module is not run uncapped`;
+- a memory with no maximum is refused (`MemoryMaximumMissing`): `the module's
+  memory (minimum 1 × 64 KiB) declares no maximum: the module is not run
+  uncapped`;
+- a maximum whose bytes (pages × 65536, in `u64`, saturating) are above the
+  declared size (`memory_mb × 1048576`, the one conversion) is refused
+  (`MemoryMaximumAboveDeclared`): `the module's memory maximum, 33 × 64 KiB,
+  is above the declared 2 MB (32 × 64 KiB): the module is not run uncapped`;
+- a `memories` refusal is carried unchanged (`MemoryNotRead`). The verifier's
+  `audit` parses the same bytes first, so a verified module is not expected to
+  meet it;
+- each refusal's path is the entrypoint's path in the bundle, `capsule.wasm`;
+  `run` returns it as `TwoEngineRefusal::Memory`, and the refusal receipt names
+  its reason (`memory_count_above_one`, `memory_maximum_missing`,
+  `memory_maximum_above_declared`, `memory_not_read`; `engine: none`, since it
+  names the module, not an engine). A 64-bit or shared memory is not refused
+  as such; its maximum is checked like any other.
+
+The check returns the checked maximum in pages; nothing records it yet (the
+receipt's maximum lines are task 034's). On a grow past the maximum, wasmer
+returns -1 and keeps running (`memory_grow_past_the_module_maximum_returns_minus_one_on_wasmer`);
+wasmtime traps, because task 027 gives it `trap-on-grow-failure=y`, so the
+runner refuses that run as `EngineFailed`. wasmtime's argv is unchanged. The
+claim stays "a self-contained capsule in a fixed flat space with a
+host-enforced cap", on this one Mac only. Both engines stay test-only; the
+engine choice is Anders's.
 
 ## Granted import hosting discovery (wc-009b0)
 
@@ -1855,7 +1912,10 @@ puts it under the `/var` link):
   walk or lower-level verify call, no grants read or parse, exactly one
   `verify_bundle` call (task 015's `run`, passing `input.granted`, task 020),
   `input.granted` used nowhere else, and `entrypoint()` is its one source of
-  module bytes.
+  module bytes. Task 033: `entrypoint()` is read twice, for the module write
+  and the memory check; the audit crate is named once, in the import of
+  `memories` and its `Refusal`; `memories(` is called once; and no `audit(` or
+  `audit_component` call is made.
 - `runner_reuses_shared_writer` — the runner writes through
   `bundle::write_new_file` once and has no writer of its own (`OpenOptions`,
   `fs::write`, `create_new` and the like).
@@ -2009,7 +2069,8 @@ Task 031's README guard, in `tests/docs.rs`:
   table's own fields. It fails showing both lists.
 
 wc-010b's run tests (task 027), in `tests/run.rs`. The grow modules are
-hand-written bytes: one memory of 1 page with no maximum, no import, and one
+hand-written bytes: one memory of 1 page with (since task 033) a maximum of
+1024 pages, the declared 64 MB, no import, and one
 export `digest (i32) -> i32` that ignores its argument and runs `memory.grow`
 by a constant. Each bundle is signed with a fresh key and verified. A real
 engine not found prints SKIPPED and gives no result, never PASS:
@@ -2024,20 +2085,21 @@ engine not found prints SKIPPED and gives no result, never PASS:
 - `memory_grow_past_the_declared_cap_traps_on_wasmtime` — the real `wasmtime`:
   a grow by 1024 pages is refused with `EngineFailed`, and its stderr holds
   `forcing trap when growing memory to 67174400 bytes`.
-- `second_memory_cannot_double_the_declared_cap_on_wasmtime` — the real
-  `wasmtime`: a hand-written module with two memories of 32 pages (2 MB) each,
-  no maximum and no import, whose `digest` returns the two sizes added, in a
-  bundle that declares `"memory_mb": 2`, is verified and then refused with
-  `EngineFailed`, and its stderr holds `resource limit exceeded: memory count
-  too high at 2`. Without `max-memories=1` it runs and prints `64` pages, 4 MB.
 - `built_capsule_runs_under_the_declared_cap_on_wasmtime` — the real
   `tools/build` capsule through `run` on both real engines prints
   `FIXED_OUTPUT` on both. A recording program at `wasmtime`'s path appends its
   arguments to a file and then `exec`s the real `wasmtime` (one process, the
   shell is replaced), so the test sees the cap on `wasmtime`'s module-run argv.
 - `memory_cap_on_wasmer_is_skipped` — `#[ignore = "SKIPPED: wasmer 7.5.0 has no
-  memory cap flag in wasmer run --help or wasmer --help (wc-010a); no cap is
-  claimed for wasmer"]`, never run, never counted as a PASS.
+  memory cap flag in wasmer run --help or wasmer --help (wc-010a); its cap is
+  the module's own memory maximum, checked by run (task 033)"]`, never run,
+  never counted as a PASS.
+
+Task 033 removed `second_memory_cannot_double_the_declared_cap_on_wasmtime`
+(the real `wasmtime` refused a two-memory module at start under
+`max-memories=1`): `run` now refuses that module before any engine starts, so
+it can no longer reach wasmtime; `run_refuses_a_second_memory_before_any_engine_start`
+replaces it.
 
 `runner_passes_no_directory_env_or_network_flags` and `verified_bundle_is_sealed`
 (the new private field and its accessor) were updated for the cap.
@@ -2181,29 +2243,65 @@ Task 044, the refusal receipt (`tests/run.rs`; README "Run receipt
   planted file, a live link and a dangling link are each refused with the
   shared writer's own reason and cause, and nothing changes.
 
+Task 033, the module memory check (`tests/run.rs`; README "The runner checks
+the module's maximum (task 033)"). The stand-in tests use `marked` or
+`counting` stand-ins, each bundle signed with a fresh key and verified:
+
+- `run_refuses_a_module_memory_with_no_maximum_on_both_engines` — one memory,
+  minimum 1 page, no maximum: `run_engine` on `wasmtime` and on `wasmer`, and
+  `run` (as `TwoEngineRefusal::Memory`), each refuse it with
+  `MemoryMaximumMissing { minimum: 1 }` and its exact text at
+  `capsule.wasm`; no run folder in any work root, no module run start and no
+  `--version` query.
+- `run_refuses_a_memory_maximum_above_the_declared_size_on_both_engines` — the
+  same three refusals, `MemoryMaximumAboveDeclared`, for a maximum of 33 pages
+  under a declared 2 MB (32 pages) and of 1025 pages under this capsule's
+  default 64 MB (1024 pages).
+- `run_refuses_a_second_memory_before_any_engine_start` — `TWO_MEMORY_MODULE`,
+  each memory with a maximum of 32 pages, under a declared 2 MB: the same three
+  refusals, `MemoryCountAboveOne { count: 2 }`.
+- `run_starts_a_module_whose_maximum_fits_the_declared_size` — one memory with
+  a maximum of exactly 32 pages under a declared 2 MB, and the zero-memory
+  `MODULE`, each run through `run_engine` on both stand-ins and through `run`:
+  two module runs and one `--version` query per engine, as before.
+- `capsule_grows_within_its_module_maximum_on_wasmer` — the real `wasmer`,
+  through `run_engine`: `grow_module`'s grow to exactly its 1024-page maximum
+  prints `1`.
+- `memory_grow_past_the_module_maximum_returns_minus_one_on_wasmer` — the real
+  `wasmer`, through `run_engine`: a grow to 1025 pages prints `-1` and exits 0
+  (wasmer has no trap flag).
+
+The two wasmtime grow tests pass unchanged on the new `grow_module` (within:
+`1`; past: the run traps and stderr still holds `forcing trap when growing
+memory to 67174400 bytes`), and `refusal_receipt_ids_are_distinct_and_named`
+has one example per new `Reason` variant, each as `TwoEngineRefusal::Memory`,
+each with its own id and `engine: none`, plus a check that a memory reason
+from `run_engine` has the same id.
+
 ## Falsifiers
 
-`falsifiers.json` holds 178 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 179 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
 seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
 031, two task 032, one task 035, three task 036, five task 038, three task
-039, one task 040, one task 041, two task 043 and one task 044.
+039, one task 040, one task 041, two task 043, one task 044 and one task
+033.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 114, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 115, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031, 032, 035, 036, 038, 039, 040, 041, 043 and 044: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
-+ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1), each run by the canonical runner with its summary
+029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044 and 033: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
++ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1), each run by the canonical runner with its summary
 line quoted.
 Hand-proven, pending R1: 66, each counted once: the 64 entries of the sections
 marked so (wc-001, tasks 010 and 009, wc-004 and wc-008: 9 + 7 + 23 + 21 + 4),
-and two proofs with no `falsifiers.json` entry, outside the 178 (task 036's
+and two proofs with no `falsifiers.json` entry, outside the 179 (task 036's
 `/bin/bash` 3.2 guard in `tests/reproducible.rs` and task 042's killed-run
 stop in `tests/run.rs`; neither file is a recovery target, so a proof that
 edits one is a hand proof), each proved by the repo's break →
@@ -2593,9 +2691,10 @@ assertion:
   (`runner_passes_no_directory_env_or_network_flags` and
   `declared_memory_cap_comes_from_the_manifest` at their argv comparison;
   `memory_grow_past_the_declared_cap_traps_on_wasmtime`, where wasmtime is
-  present, because the grow past 64 MB succeeds and the run is not refused;
-  `second_memory_cannot_double_the_declared_cap_on_wasmtime`, because the
-  two-memory module runs).
+  present, because the grow past 64 MB is not trapped and the run is not
+  refused; task 033 dropped
+  `second_memory_cannot_double_the_declared_cap_on_wasmtime`, which it
+  removed, from the named tests, the same bug and anchor).
 - F-WC10-CAP-FIXED — the runner caps at a fixed 64 MB, not the declared
   `memory_mb` (`declared_memory_cap_comes_from_the_manifest`, at its 2 MB argv
   comparison).
@@ -2607,8 +2706,9 @@ assertion:
   linear memory on its own and a module with a second memory gets twice its
   declared size (round 2 of task 027, from the Codex review) (the argv test
   and `declared_memory_cap_comes_from_the_manifest` at their argv comparison;
-  `second_memory_cannot_double_the_declared_cap_on_wasmtime`, where wasmtime
-  is present, because the module runs and is not refused).
+  task 033 dropped `second_memory_cannot_double_the_declared_cap_on_wasmtime`,
+  which it removed, from the named tests, the same bug and anchor; since task
+  033 `run` refuses a second memory itself, before any start).
 - F-WC10-CAP-OVERFLOW — the MB to bytes product is taken in `u32`
   (`wrapping_mul`), so `u32::MAX` MB wraps
   (`declared_memory_cap_comes_from_the_manifest`, at its `u32::MAX` argv
@@ -2894,3 +2994,25 @@ assertion:
 
 Task 044 also re-anchors F-WC-README-COUNT to the new total, the same bug as
 before, and keeps its runner-caught label above.
+
+Task 033's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 033). Its anchor is a new line of `tools/src/run.rs`, a recovery
+target, found exactly once, and each named test fails at its assertion:
+
+- F-WC10E-CAP-CHECK-DROPPED — `check_module_memory` returns success at its
+  first line, so no module is checked and a module with no memory maximum, a
+  maximum above the declared size or a second memory reaches an engine
+  (`run_refuses_a_module_memory_with_no_maximum_on_both_engines`,
+  `run_refuses_a_memory_maximum_above_the_declared_size_on_both_engines` and
+  `run_refuses_a_second_memory_before_any_engine_start`, each at `refused`'s
+  panic, `the runner ran, stdout "same\n", not a refusal`, on `run_engine`'s
+  first call).
+
+Task 033 also drops `second_memory_cannot_double_the_declared_cap_on_wasmtime`,
+which it removes, from F-WC10-CAP-IGNORED's and F-WC10-TWO-MEMORIES's named
+tests (same bug, same anchor; each is still caught by its other tests),
+re-anchors F-WC5-QUERY-BEFORE-VERIFY (its anchor now holds the memory check
+line between `verify_bundle` and the queries, and its planted edit moves the
+two queries above both; the same bug as before) and re-anchors
+F-WC-README-COUNT to the new total, the same bug as before. All four were re-run
+by the canonical runner and keep their runner-caught label above.
