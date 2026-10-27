@@ -18,17 +18,30 @@
 //! `capsules/ipfs-provider/src/directory_hash.rs` sends them: CIDv1, sha2-256,
 //! raw leaves, chunker `size-262144`, no inline, no HAMT shard below its
 //! threshold. The lab CID follows the
-//! Kubo v0.40.1 profile, computed by the lab: no Kubo has computed any pin,
-//! so until an offline Kubo cross-check prints the same value as a committed
-//! pin, it is not called equal to the Runtime's CID or to Kubo's output.
-//! This crate runs no Kubo and pins only the single-block, non-sharded
-//! subset of that profile:
+//! Kubo v0.40.1 profile, computed by the lab: one offline Kubo v0.40.1
+//! hash-only cross-check with the Runtime's profile flags was run by hand on
+//! this Mac (task 050) and printed every committed pin, and the claim stays
+//! these words until Rong or Flint changes them. This crate runs no Kubo
+//! and pins only the non-sharded subset of that profile, with files at any
+//! tree depth:
 //!
 //! 1. Each regular file of at most 262144 bytes (`CHUNK_SIZE`) is one raw
 //!    leaf: its block is the file's bytes (an empty file is an empty block),
 //!    its CID is the bytes `01 55 12 20` and the SHA-256 of the block (CID
 //!    version 1, raw codec `0x55`, multihash sha2-256 of 32 bytes), and its
-//!    Tsize is its length. A larger file is refused: no chunked file DAG.
+//!    Tsize is its length. A larger file is split into 262144-byte raw
+//!    leaves, the last one shorter, under Kubo's balanced dag-pb file tree
+//!    (trickle off) at any depth: the depth is the smallest `d >= 1` with
+//!    `174^d >= leaves` (`max-file-links` 174). A node at depth 1 links up to
+//!    174 leaves; a node at depth `k > 1` links up to 174 nodes of depth
+//!    `k - 1`. Nodes are filled left to right, each full before the next, so
+//!    only a level's last node can be short, and a last node that holds one
+//!    leaf is still a node of one link. Each node's block has, for each child
+//!    in order, a link with the child's CID, an empty name and the child's
+//!    Tsize; then the UnixFS data `08 02` (type file), the bytes under it
+//!    (filesize, field 3) and each child's filesize (blocksizes, field 4, one
+//!    tag per value). Its CID is `01 70 12 20` and the SHA-256 of that block,
+//!    and its Tsize is the block's length plus its children's Tsizes.
 //! 2. A bundle path such as `browser/app.js` is a directory `browser` that
 //!    links `app.js`. Each directory's block is dag-pb: one link per child,
 //!    sorted by name bytes, each as protobuf field 2 holding the child's CID
@@ -37,11 +50,33 @@
 //!    is `01 70 12 20` and the SHA-256 of its block (dag-pb codec `0x70`).
 //!    The Tsize of a link to a directory is that directory's block length
 //!    plus the Tsizes of its links. A block over 262144 bytes is refused: no
-//!    HAMT shard.
+//!    HAMT shard. Kubo shards later, by an estimate of its links' size, so
+//!    this refusal comes first and fails closed. The largest root block the
+//!    lab names (262144 bytes) got the same CID from Kubo with the
+//!    provider's HAMT config, unsharded (task 053,
+//!    `directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused`).
 //! 3. The root is the directory of the bundle's entries. Its CID prints as
 //!    `b` and the RFC 4648 base32 of its 36 bytes, lowercase, no padding.
 //!
-//! No empty directory is emitted. Nothing else enters a block: no folder
+//! A path with a part that starts with `.` (a hidden name, such as the
+//! `.DS_Store` macOS Finder writes, or the folder in `.well-known/a.txt`) is
+//! refused with [`Refusal::HiddenName`]: Kubo's `add` without `--hidden`,
+//! and neither Runtime flag list gives it, leaves such a name out of the
+//! CID, so skipping it would leave bytes out of the name, and keeping it
+//! would print a name Kubo does not give. The lab names every byte or
+//! refuses. A dot inside or at the end of a name (`a.b`, `x.`) is a plain
+//! name.
+//!
+//! A folder that holds no file, at any depth (an empty folder, or one that
+//! holds only such folders), is refused with [`Refusal::EmptyFolder`].
+//! Kubo's import with the Runtime's flags (`--empty-dirs=false`) leaves out
+//! an empty folder but keeps a folder that holds only empty folders (task
+//! 052's hand run), so the lab names no folder without a file rather than
+//! print a name Kubo may not give. So no empty directory is ever encoded.
+//! Only the walk sees folders, so the check is in the walk, once; a caller of
+//! the encoder gives file paths, which hold no empty folder.
+//!
+//! Nothing else enters a block: no folder
 //! name, absolute path, mtime, mode, owner or symlink target. The CIDv1 bytes
 //! and the base32 text are one marked lab copy in this crate, so the lab adds
 //! no crate (the Runtime's `cid` crate lives only in server crates the lab
@@ -50,9 +85,14 @@
 //! # One naming path
 //!
 //! [`checked_bundle`] walks a bundle, checks its root manifest, and hands its
-//! entries to [`encode_entries`], the encoder. Together the walk and the
-//! encoder are the only code that names a bundle; tests and tools call them
-//! and re-implement neither. [`lab_cid`] is the same walk and returns only
+//! entries to [`encode_entries`]. That makes each entry's node from its bytes
+//! (one raw leaf, or a file root over its leaves) and hands the nodes to the
+//! one tree builder. [`encode_listed_files`], which a caller with its own
+//! walk calls directly with a closure listing ([`ListedFile`]: path, size,
+//! SHA-256), makes one raw leaf per listed file with the same leaf rule and
+//! hands them to the same builder. Together the walk and these two calls are
+//! the only code that names a bundle; tests and tools call them and
+//! re-implement none. [`lab_cid`] is the same walk and returns only
 //! its lab CID. [`check_name`] checks a claimed name, such as one a URL or a
 //! Store row gives, by recomputing the name with [`lab_cid`]: it computes no
 //! name of its own. [`CheckedBundle::check_name`] is its checked form: the
@@ -91,12 +131,17 @@
 //! names the signer and binds the printed lab CID. Its bytes are
 //! [`PackageRecord::package_record_payload`], compact JSON with the keys
 //! `cid`, `schema` ([`PACKAGE_RECORD_SCHEMA`]) and `signer_did`, and no name
-//! field. [`sign_package_record`] signs [`domain_separated_digest`] of
-//! [`PACKAGE_RECORD_DOMAIN`] and that payload; it writes nothing.
-//! [`verify_checked_package_record`] checks, in order, the signer's
-//! `did:key`, the explicit accepted list, the record's CID against the
-//! checked bundle's, then the Ed25519 signature. [`verify_package_record`]
-//! is [`checked_bundle`] and then that check. Both signatures share one
+//! field. The record binds a lab CID however it was computed: a folder walk,
+//! a checked bundle, entries or a closure listing. [`sign_cid_record`] signs
+//! [`domain_separated_digest`] of [`PACKAGE_RECORD_DOMAIN`] and the payload
+//! for one [`LabCid`]; it writes nothing. [`verify_cid_record`] checks, in
+//! order, the signer's `did:key`, the explicit accepted list, the record's
+//! CID against that lab CID, then the Ed25519 signature.
+//! [`sign_package_record`] is [`lab_cid`] and then [`sign_cid_record`];
+//! [`verify_checked_package_record`] is [`verify_cid_record`] over the
+//! checked bundle's CID; [`verify_package_record`] is [`checked_bundle`] and
+//! then the checked call. So a record is built, signed and checked in one
+//! place each. Both signatures share one
 //! digest, one DID encoder and decoder, one accepted-list check and one
 //! Ed25519 verification. `Ok(())` grants nothing.
 //!
@@ -209,7 +254,8 @@ pub const VARIANT_RECIPE_ENTRY: &str = "provider-variant.recipe";
 
 // The profile: Kubo v0.40.1's import flags as
 // `capsules/ipfs-provider/src/directory_hash.rs` `ADD_OPTIONS` sends them, for
-// one chunk and no HAMT shard, computed by the lab (no Kubo runs here). Each
+// files at any tree depth and no HAMT shard, computed by the lab (no
+// Kubo runs here). Each
 // one changes the CID or the refusal, and each has a falsifier. There is no
 // inline setting: no CID here uses the identity multihash, whatever the size of the block.
 
@@ -224,10 +270,15 @@ const RAW_CODEC: u8 = 0x55;
 /// The codec of a directory block, dag-pb.
 const DAG_PB_CODEC: u8 = 0x70;
 /// The largest file one raw leaf holds (`chunker: size-262144`). A larger
-/// file would need a chunked file DAG, which the lab refuses.
+/// file is split into leaves of this size under one file root.
 const CHUNK_SIZE: usize = 262_144;
+/// The most children one node of a file's tree links, at every level
+/// (`max-file-links: 174`). A file of more leaves gets a deeper tree.
+const MAX_FILE_LINKS: usize = 174;
 /// The UnixFS data type of a directory, written in its block as `08 01`.
 const DIRECTORY_TYPE: u8 = 1;
+/// The UnixFS data type of a file root, written in its block as `08 02`.
+const FILE_TYPE: u8 = 2;
 /// The longest directory block the lab names. Kubo shards a directory into a
 /// HAMT once its links' estimated size passes 256KiB; the lab refuses a block
 /// over this length instead, which is earlier, so it fails closed.
@@ -405,11 +456,25 @@ pub enum Refusal {
     /// An entry given to the encoder has a path with an empty, `.` or `..`
     /// part, so it names no UnixFS link. The walk never makes one.
     BadPathPart { path: String },
+    /// An entry given to the encoder has a path with a part that starts with
+    /// `.` (and is not `.` or `..`), such as `.DS_Store` or `.well-known/a`.
+    /// Kubo's import with the Runtime's flags has no `--hidden`, so it leaves
+    /// such a name out of the CID; the lab names every byte or refuses.
+    HiddenName { path: String },
+    /// A folder below the bundle root holds no file at any depth: it is
+    /// empty, or holds only folders that hold no file. Kubo's import with the
+    /// Runtime's flags (`--empty-dirs=false`) leaves out an empty folder but
+    /// keeps a folder that holds only empty folders, so the lab refuses any
+    /// folder with no file rather than print a name Kubo may not give. Only
+    /// the walk sees folders; `path` is the folder's bundle path.
+    EmptyFolder { path: String },
     /// One path given to the encoder is both a file and a directory, as
     /// `a` and `a/b` would be. The walk never makes one.
     FileAndDirectory { path: String },
-    /// A file is longer than one raw leaf holds, 262144 bytes. The lab names
-    /// no chunked file DAG. `length` is the file's length.
+    /// A listed file ([`encode_listed_files`]) is longer than one raw leaf
+    /// holds, 262144 bytes. Its one SHA-256 names a single raw leaf, so a
+    /// larger file is named from its bytes, by [`encode_entries`] or
+    /// [`lab_cid`]. `length` is the listed size.
     FileOverChunkLimit { path: String, length: usize },
     /// A directory's encoded block is longer than 262144 bytes; `.` is the
     /// bundle root. The lab names no HAMT-sharded directory. `length` is the
@@ -508,13 +573,21 @@ impl fmt::Display for Refusal {
                 f,
                 "the path {path:?} has an empty, . or .. part: each part names one UnixFS link"
             ),
+            Refusal::HiddenName { path } => write!(
+                f,
+                "the path {path:?} has a part that starts with .: Kubo's import with the Runtime's flags (no --hidden) leaves a name starting with . out of the CID, and the lab names every byte or refuses"
+            ),
+            Refusal::EmptyFolder { path } => write!(
+                f,
+                "the folder {path:?} holds no file: Kubo's import with the Runtime's flags (--empty-dirs=false) leaves out an empty folder but keeps a folder that holds only empty folders, so the lab refuses any folder with no file rather than print a name Kubo may not give"
+            ),
             Refusal::FileAndDirectory { path } => write!(
                 f,
                 "{path} is both a file and a directory: a bundle path names one or the other"
             ),
             Refusal::FileOverChunkLimit { path, length } => write!(
                 f,
-                "{path} is {length} bytes, over the {CHUNK_SIZE}-byte limit of one raw leaf: the lab names no chunked file"
+                "{path} is {length} bytes, over the {CHUNK_SIZE}-byte limit of one raw leaf: a listed file's one SHA-256 names a single raw leaf, so a larger file is named from its bytes (encode_entries or lab_cid)"
             ),
             Refusal::DirectoryOverBlockLimit { path, length } => write!(
                 f,
@@ -794,40 +867,164 @@ fn decode_base32(text: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// The encoder: the lab CID of `entries`, given in any order. It is the one
-/// naming hash; every leaf and every directory block is hashed by the one
-/// SHA-256 it holds.
+/// One file of a closure listing: its bundle path, its length in bytes and
+/// the SHA-256 of its bytes. A raw leaf needs nothing else, so a listing of
+/// these is enough to name a bundle of single-block files. A file over one
+/// leaf is not: its file root needs each leaf's SHA-256, so it is named from
+/// its bytes by [`encode_entries`].
 ///
-/// Each entry is a raw leaf: a file over [`CHUNK_SIZE`] bytes is refused,
-/// and its CID is CIDv1, raw codec, sha2-256 of its bytes, with its length as
-/// Tsize. The entry paths make the directories: a path with an empty, `.` or
-/// `..` part, two entries with one path, and one path that is both a file and
-/// a directory are refused. Then each directory, deepest first, becomes one
-/// dag-pb block whose links are sorted by name bytes, a block over
-/// [`DIRECTORY_BLOCK_LIMIT`] bytes is refused, and the root block's SHA-256
-/// is the lab CID.
+/// A listed file names bytes only if its `sha256` and `size` are those of
+/// the bytes: the caller's walk owns that. The encoder reads no file and
+/// checks no manifest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListedFile {
+    pub path: String,
+    pub size: u64,
+    pub sha256: [u8; 32],
+}
+
+/// The lab CID of `entries`, given in any order: each entry's node made from
+/// its bytes by `file_node` (one raw leaf, or the balanced file tree over its
+/// leaves, at any depth), then `encode_tree`, the one
+/// tree builder, which [`encode_listed_files`] shares. Leaves, file roots and
+/// directory blocks all hash with the one naming hash, `naming_hash`.
 pub fn encode_entries(entries: &[BundleEntry]) -> Result<LabCid, Refusal> {
-    let sha256 = |block: &[u8]| -> [u8; 32] {
-        let mut hasher = Sha256::new();
-        hasher.update(block);
-        hasher.finalize().into()
-    };
-    let mut root = Directory::default();
-    for entry in entries {
-        if entry.content.len() > CHUNK_SIZE {
+    let files = entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), file_node(entry)))
+        .collect();
+    encode_tree(files)
+}
+
+/// The lab CID of a closure listing, given in any order. It reads no file
+/// and checks no manifest. The lab CID names the bytes only if each file's
+/// `sha256` and `size` are those of its bytes; the caller's walk owns that,
+/// as [`checked_bundle`]'s walk does for [`encode_entries`].
+///
+/// Each file is one raw leaf, made by the leaf rule [`encode_entries`] uses:
+/// a `size` over [`CHUNK_SIZE`] bytes is refused, because one SHA-256 names
+/// a single raw leaf and a file root needs each leaf's; its CID is CIDv1,
+/// raw codec, its `sha256`, with its `size` as Tsize. Then `encode_tree`, the
+/// one tree builder: the paths make the directories, and a path with an
+/// empty, `.` or `..` part, a path with a part that starts with `.`, two
+/// files with one path, and one path that is both a file and a directory
+/// are refused. Each directory, deepest first,
+/// becomes one dag-pb block whose links are sorted by name bytes, a block
+/// over [`DIRECTORY_BLOCK_LIMIT`] bytes is refused, and the root block's
+/// SHA-256 is the lab CID.
+pub fn encode_listed_files(files: &[ListedFile]) -> Result<LabCid, Refusal> {
+    let mut leaves = Vec::new();
+    for file in files {
+        if file.size > CHUNK_SIZE as u64 {
             return Err(Refusal::FileOverChunkLimit {
-                path: entry.path.clone(),
-                length: entry.content.len(),
+                path: file.path.clone(),
+                length: usize::try_from(file.size).unwrap_or(usize::MAX),
             });
         }
-        let leaf = Child::File {
-            cid: cid_bytes(RAW_CODEC, &sha256(&entry.content)),
-            tsize: entry.content.len() as u64,
-        };
-        root.insert(&entry.path, leaf)?;
+        let (cid, tsize) = raw_leaf(&file.sha256, file.size);
+        leaves.push((file.path.as_str(), Child::File { cid, tsize }));
     }
-    let (digest, _) = encode_directory(&root, "", &sha256)?;
+    encode_tree(leaves)
+}
+
+/// The one tree builder both public calls feed: it puts each file's node at
+/// its bundle path with `Directory::insert`, then encodes the root with
+/// `encode_directory`. The root block's SHA-256 is the lab CID.
+fn encode_tree(files: Vec<(&str, Child)>) -> Result<LabCid, Refusal> {
+    let mut root = Directory::default();
+    for (path, file) in files {
+        root.insert(path, file)?;
+    }
+    let (digest, _) = encode_directory(&root, "", &naming_hash)?;
     Ok(LabCid(digest))
+}
+
+/// The node a directory links for `entry`, made from its bytes: one raw leaf
+/// for at most [`CHUNK_SIZE`] bytes (an empty file is an empty leaf), else
+/// the balanced file root over its leaves.
+fn file_node(entry: &BundleEntry) -> Child {
+    let content = &entry.content;
+    let (cid, tsize) = if content.len() <= CHUNK_SIZE {
+        raw_leaf(&naming_hash(content), content.len() as u64)
+    } else {
+        file_root(content)
+    };
+    Child::File { cid, tsize }
+}
+
+/// A raw leaf's CID bytes and Tsize: CIDv1, raw codec and `sha256`, the
+/// SHA-256 of its block, and its length `size`. Every leaf is made here: a
+/// listed file's, a one-leaf file's and each leaf under a file root.
+fn raw_leaf(sha256: &[u8; 32], size: u64) -> (Vec<u8>, u64) {
+    (cid_bytes(RAW_CODEC, sha256), size)
+}
+
+/// One node of a file's tree, as its parent links it: its CID bytes, its
+/// Tsize (its block and everything under it) and its filesize (the file's
+/// bytes under it). A raw leaf's Tsize and filesize are both its length.
+struct FileTreeNode {
+    cid: Vec<u8>,
+    tsize: u64,
+    filesize: u64,
+}
+
+/// The CID bytes and Tsize of the balanced file root of `content`, a file
+/// over one leaf (trickle off), at any depth. The bytes are split into
+/// [`CHUNK_SIZE`]-byte raw leaves, the last one shorter. Then each pass makes
+/// the next level up: the nodes, left to right, in groups of
+/// [`MAX_FILE_LINKS`], each group one dag-pb node, so only a level's last
+/// node can be short, and a last group of one node is still a node of one
+/// link. The pass that makes one node made the root. A node's links have
+/// empty names, each child's CID and Tsize; its data has the bytes under it
+/// as filesize and each child's filesize as one blocksize; its Tsize is its
+/// block's length plus its children's Tsizes.
+fn file_root(content: &[u8]) -> (Vec<u8>, u64) {
+    let mut level: Vec<FileTreeNode> = content
+        .chunks(CHUNK_SIZE)
+        .map(|chunk| {
+            let (cid, tsize) = raw_leaf(&naming_hash(chunk), chunk.len() as u64);
+            FileTreeNode {
+                cid,
+                tsize,
+                filesize: tsize,
+            }
+        })
+        .collect();
+    while level.len() > 1 {
+        level = level
+            .chunks(MAX_FILE_LINKS)
+            .map(|children| {
+                let links: Vec<Link<'_>> = children
+                    .iter()
+                    .map(|child| Link {
+                        name: "",
+                        cid: child.cid.clone(),
+                        tsize: child.tsize,
+                    })
+                    .collect();
+                let blocksizes: Vec<u64> = children.iter().map(|child| child.filesize).collect();
+                let filesize = children.iter().map(|child| child.filesize).sum();
+                let block = file_root_block(&links, &blocksizes, filesize);
+                let tsize =
+                    block.len() as u64 + children.iter().map(|child| child.tsize).sum::<u64>();
+                FileTreeNode {
+                    cid: cid_bytes(DAG_PB_CODEC, &naming_hash(&block)),
+                    tsize,
+                    filesize,
+                }
+            })
+            .collect();
+    }
+    let root = level.pop().expect("a file over one leaf has a root");
+    (root.cid, root.tsize)
+}
+
+/// The one naming hash: the SHA-256 of a leaf, of a file root block or of a
+/// directory block.
+fn naming_hash(block: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(block);
+    hasher.finalize().into()
 }
 
 /// A directory as the encoder builds it: each child with its name, in the
@@ -839,21 +1036,28 @@ struct Directory {
 
 /// One child of a [`Directory`].
 enum Child {
-    /// A raw leaf: its CID bytes and its Tsize, the file's length.
+    /// A file's node, a raw leaf or a file root: its CID bytes and its Tsize.
     File { cid: Vec<u8>, tsize: u64 },
     /// A directory below this one.
     Directory(Directory),
 }
 
 impl Directory {
-    /// Put the leaf `file` at the bundle path `path`, making each directory
-    /// on the way. A path with an empty, `.` or `..` part is refused; so is
-    /// a path already given, and a path that is a file and a directory, in
-    /// either order.
+    /// Put the file node `file` at the bundle path `path`, making each directory
+    /// on the way. A path with an empty, `.` or `..` part is refused; then a
+    /// path with any other part that starts with `.`, which Kubo without
+    /// `--hidden` leaves out of the CID; so is a path already given, and a
+    /// path that is a file and a directory, in either order. Every naming
+    /// call reaches this one path check.
     fn insert(&mut self, path: &str, file: Child) -> Result<(), Refusal> {
         let parts: Vec<&str> = path.split('/').collect();
         if parts.iter().any(|part| matches!(*part, "" | "." | "..")) {
             return Err(Refusal::BadPathPart {
+                path: path.to_owned(),
+            });
+        }
+        if parts.iter().any(|part| part.starts_with('.')) {
+            return Err(Refusal::HiddenName {
                 path: path.to_owned(),
             });
         }
@@ -897,7 +1101,8 @@ impl Directory {
     }
 }
 
-/// One link of a directory block: the child's name, CID bytes and Tsize.
+/// One link of a directory block or a file root: the child's name (empty
+/// under a file root), CID bytes and Tsize.
 struct Link<'a> {
     name: &'a str,
     cid: Vec<u8>,
@@ -908,7 +1113,7 @@ struct Link<'a> {
 /// path `path` (empty for the root). Each child directory is encoded first,
 /// and its link's Tsize is its block's length plus its links' Tsizes. The
 /// links are sorted by name bytes. A block over [`DIRECTORY_BLOCK_LIMIT`]
-/// bytes is refused with its path. `sha256` is the encoder's one hash.
+/// bytes is refused with its path. `sha256` is the one naming hash.
 fn encode_directory(
     directory: &Directory,
     path: &str,
@@ -942,22 +1147,50 @@ fn encode_directory(
     Ok((sha256(&block), tsize))
 }
 
-/// A directory's dag-pb block: each link in the order given, as protobuf
-/// field 2 holding the child's CID (field 1), its name (field 2) and its
-/// Tsize (field 3, a varint); then the UnixFS data as field 1, which is only
-/// its type (field 1, a varint): `08 01`, a directory.
+/// A directory's dag-pb block: its links (`put_links`), then the UnixFS data
+/// as field 1, which is only its type (field 1, a varint): `08 01`, a
+/// directory.
 fn directory_block(links: &[Link<'_>]) -> Vec<u8> {
     let mut block = Vec::new();
+    put_links(&mut block, links);
+    put_length_delimited(&mut block, 1, &[1 << 3, DIRECTORY_TYPE]);
+    block
+}
+
+/// The dag-pb block of one node of a file's tree, the root or one below it:
+/// its children as links (`put_links`, each name empty), then the UnixFS
+/// data as field 1: its type `08 02`, a file, the `length` of the bytes under
+/// it as filesize (field 3, `0x18`), and each child's filesize, from
+/// `blocksizes`, as one blocksize (field 4, `0x20`, one tag per value, not
+/// packed). A blocksize is never a child's Tsize. The data has no Data field
+/// (field 2): the bytes are in the leaves.
+fn file_root_block(children: &[Link<'_>], blocksizes: &[u64], length: u64) -> Vec<u8> {
+    let mut block = Vec::new();
+    put_links(&mut block, children);
+    let mut data = vec![1 << 3, FILE_TYPE];
+    data.push(3 << 3);
+    put_varint(&mut data, length);
+    for blocksize in blocksizes {
+        data.push(4 << 3);
+        put_varint(&mut data, *blocksize);
+    }
+    put_length_delimited(&mut block, 1, &data);
+    block
+}
+
+/// The links of a dag-pb block, each in the order given, as protobuf field 2
+/// holding the child's CID (field 1), its name (field 2, so an empty name is
+/// `12 00`) and its Tsize (field 3, a varint). Directory blocks and file
+/// roots write their links here alone.
+fn put_links(block: &mut Vec<u8>, links: &[Link<'_>]) {
     for link in links {
         let mut pb_link = Vec::new();
         put_length_delimited(&mut pb_link, 1, &link.cid);
         put_length_delimited(&mut pb_link, 2, link.name.as_bytes());
         pb_link.push(3 << 3);
         put_varint(&mut pb_link, link.tsize);
-        put_length_delimited(&mut block, 2, &pb_link);
+        put_length_delimited(block, 2, &pb_link);
     }
-    put_length_delimited(&mut block, 1, &[1 << 3, DIRECTORY_TYPE]);
-    block
 }
 
 /// Protobuf field `field` of wire type 2: its tag, the length of `bytes` as a
@@ -1019,10 +1252,14 @@ struct Listed {
     file_type: FileType,
 }
 
-/// A folder the walk is in: its checked handle and the rest of its listing.
+/// A folder the walk is in: its checked handle, the rest of its listing, its
+/// bundle path (empty for the root) and how many files the walk had read
+/// when it opened the folder.
 struct Folder {
     handle: OwnedFd,
     listing: std::vec::IntoIter<Listed>,
+    path: String,
+    first_entry: usize,
 }
 
 /// Every regular file under `bundle`, each with its bundle-relative path.
@@ -1030,8 +1267,11 @@ struct Folder {
 /// The walk opens `bundle` once, as a folder. After that it reaches each
 /// entry through its folder's handle: it checks the listed type, opens the
 /// entry, checks the open handle, and only then reads or lists that handle.
-/// It goes depth first, so it holds one handle per folder level. The first
-/// refusal stops the walk. Listing order does not matter: the encoder sorts.
+/// It goes depth first, so it holds one handle per folder level. When a
+/// folder below the root is done and the walk read no file since it opened
+/// that folder, the folder holds no file at any depth and is refused. The
+/// first refusal stops the walk. Listing order does not matter: the encoder
+/// sorts.
 fn collect_entries(
     bundle: &Path,
     observe: &mut dyn FnMut(Moment, &str),
@@ -1041,6 +1281,8 @@ fn collect_entries(
     let mut folders = vec![Folder {
         handle: root,
         listing,
+        path: String::new(),
+        first_entry: 0,
     }];
     let mut entries = Vec::new();
     while let Some(folder) = folders.last_mut() {
@@ -1050,7 +1292,10 @@ fn collect_entries(
             file_type,
         }) = folder.listing.next()
         else {
-            folders.pop();
+            let done = folders.pop().expect("the loop holds a folder");
+            if !done.path.is_empty() && entries.len() == done.first_entry {
+                return Err(Refusal::EmptyFolder { path: done.path });
+            }
             continue;
         };
         let kind = match entry_kind(file_type) {
@@ -1062,7 +1307,12 @@ fn collect_entries(
         observe(Moment::AfterCheck, &path);
         if kind == EntryKind::Directory {
             let listing = list_folder(handle.as_fd(), &path)?;
-            folders.push(Folder { handle, listing });
+            folders.push(Folder {
+                handle,
+                listing,
+                path,
+                first_entry: entries.len(),
+            });
         } else {
             let content = read_file(handle, &path)?;
             entries.push(BundleEntry { path, content });
@@ -1210,7 +1460,8 @@ fn unreadable(path: &str, reason: impl Into<io::Error>) -> Refusal {
 /// Runtime server, which this lab does not link, so the lab keeps this one
 /// marked copy and calls it a lab proposal. It is the one message hash: the
 /// name signature and the package record both call it, each with its own
-/// domain. [`encode_entries`] remains the one naming hash.
+/// domain. [`naming_hash`], which the encoder calls, remains the one naming
+/// hash.
 pub fn domain_separated_digest(domain: &str, payload: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(domain.as_bytes());
@@ -1363,15 +1614,19 @@ fn package_record_message(record: &PackageRecord) -> [u8; 32] {
     domain_separated_digest(PACKAGE_RECORD_DOMAIN, &record.package_record_payload())
 }
 
-/// Sign a package record for `bundle` with `key`.
+/// Sign a package record for the lab CID `cid` with `key`.
 ///
-/// The CID is [`lab_cid`]'s printed form; a bundle [`lab_cid`] refuses gets no
-/// record, and the refusal is [`lab_cid`]'s own. `signer_did` is
+/// This is the one place a record is built and signed. The record's CID is
+/// `cid`'s printed form, and `signer_did` is
 /// `elastos_identity::encode_signing_key_did` of `key`. The signature is
 /// Ed25519 over [`domain_separated_digest`] of [`PACKAGE_RECORD_DOMAIN`] and
-/// the record's payload. It writes no file and changes no bundle byte.
-pub fn sign_package_record(key: &SigningKey, bundle: &Path) -> Result<PackageRecord, Refusal> {
-    let cid = lab_cid(bundle)?.to_string();
+/// the record's payload. It writes no file and reads none.
+///
+/// It signs a name, not bytes: `cid` must come from [`encode_listed_files`],
+/// [`encode_entries`], [`lab_cid`] or [`checked_bundle`], so it names the
+/// bytes that call read or was given. It grants nothing.
+pub fn sign_cid_record(key: &SigningKey, cid: LabCid) -> PackageRecord {
+    let cid = cid.to_string();
     let signer_did = signer_did_of(key);
     let mut record = PackageRecord {
         cid,
@@ -1379,32 +1634,45 @@ pub fn sign_package_record(key: &SigningKey, bundle: &Path) -> Result<PackageRec
         signature: [0; 64],
     };
     record.signature = key.sign(&package_record_message(&record)).to_bytes();
-    Ok(record)
+    record
 }
 
-/// Check `record` against the bytes `checked` holds.
+/// Sign a package record for `bundle` with `key`.
 ///
-/// The checks run in this order, and the first refusal is the answer:
+/// This is [`lab_cid`] and then [`sign_cid_record`]; it builds and signs
+/// nothing itself. A bundle [`lab_cid`] refuses gets no record, and the
+/// refusal is [`lab_cid`]'s own. It writes no file and changes no bundle byte.
+pub fn sign_package_record(key: &SigningKey, bundle: &Path) -> Result<PackageRecord, Refusal> {
+    let cid = lab_cid(bundle)?;
+    Ok(sign_cid_record(key, cid))
+}
+
+/// Check `record` against the lab CID `cid`.
+///
+/// This is the one place a record is checked. The checks run in this order,
+/// and the first refusal is the answer:
 ///
 /// 1. `elastos_identity::decode_did_key` on `record.signer_did`, with the name
 ///    signature's reason.
 /// 2. `record.signer_did` is an exact member of `accepted`, with the name
 ///    signature's reason. An empty list refuses every signer.
-/// 3. `record.cid` is `checked.cid()`'s printed form. Otherwise it is refused
-///    naming both. This reads nothing from disk.
+/// 3. `record.cid` is `cid`'s printed form. Otherwise it is refused naming
+///    both. This reads nothing from disk.
 /// 4. Ed25519 verification of `record.signature` over the record's digest,
 ///    with the key from step 1 and the name signature's reason.
 ///
-/// `Ok(())` means all four passed. It is not a trust, admission or launch
-/// value, and it grants nothing.
-pub fn verify_checked_package_record(
-    checked: &CheckedBundle,
+/// It checks a signature over a name, not bytes: `cid` must come from
+/// [`encode_listed_files`], [`encode_entries`], [`lab_cid`] or
+/// [`checked_bundle`]. `Ok(())` means all four passed. It is not a trust,
+/// admission or launch value, and it grants nothing.
+pub fn verify_cid_record(
+    cid: LabCid,
     record: &PackageRecord,
     accepted: &[String],
 ) -> Result<(), Refusal> {
     let key = decode_signer(&record.signer_did)?;
     require_accepted(&record.signer_did, accepted)?;
-    require_record_cid(checked, record)?;
+    require_record_cid(cid, record)?;
     let message = package_record_message(record);
     verify_ed25519(
         &key,
@@ -1414,6 +1682,18 @@ pub fn verify_checked_package_record(
         &record.cid,
     )?;
     Ok(())
+}
+
+/// Check `record` against the bytes `checked` holds.
+///
+/// This is [`verify_cid_record`] over `checked.cid()`, so it holds no check
+/// of its own and reads nothing from disk. `Ok(())` grants nothing.
+pub fn verify_checked_package_record(
+    checked: &CheckedBundle,
+    record: &PackageRecord,
+    accepted: &[String],
+) -> Result<(), Refusal> {
+    verify_cid_record(checked.cid(), record, accepted)
 }
 
 /// Check `record` against the bundle at `bundle`.
@@ -1430,12 +1710,12 @@ pub fn verify_package_record(
     verify_checked_package_record(&held, record, accepted)
 }
 
-/// Check (c) of a package record: it binds the checked bundle's printed CID.
-fn require_record_cid(checked: &CheckedBundle, record: &PackageRecord) -> Result<(), Refusal> {
-    if record.cid != checked.cid().to_string() {
+/// Check (c) of a package record: it binds `cid`'s printed form.
+fn require_record_cid(cid: LabCid, record: &PackageRecord) -> Result<(), Refusal> {
+    if record.cid != cid.to_string() {
         return Err(Refusal::RecordNamesAnotherCid {
             record: record.cid.clone(),
-            bundle: checked.cid(),
+            bundle: cid,
         });
     }
     Ok(())
@@ -1481,9 +1761,9 @@ fn variant_binding_message(payload: &[u8]) -> [u8; 32] {
     domain_separated_digest(VARIANT_BINDING_DOMAIN, payload)
 }
 
-/// The lab CID of a variant recipe: [`encode_entries`], the one encoder, of
-/// one entry at [`VARIANT_RECIPE_ENTRY`] holding `recipe`. Nothing here reads
-/// the recipe from disk; the caller gives its bytes.
+/// The lab CID of a variant recipe: [`encode_entries`], which calls the one
+/// encoder, of one entry at [`VARIANT_RECIPE_ENTRY`] holding `recipe`.
+/// Nothing here reads the recipe from disk; the caller gives its bytes.
 fn recipe_cid(recipe: &[u8]) -> Result<LabCid, Refusal> {
     encode_entries(&[BundleEntry {
         path: VARIANT_RECIPE_ENTRY.to_owned(),

@@ -3,7 +3,8 @@
 //! that change a bundle while it is named, a driver for wc-001's own build,
 //! the library's code for tests that read it, the refusal asserts both
 //! signature checks share, the one key-material scan, the run of README's
-//! Python rule, the scan for lab crates that use this one, read through
+//! Python rule, the photo stand-in consumer copy and its pin, the scan for
+//! lab crates that use this one, read through
 //! `cargo metadata`, the scan of the lane's docs and code for what they
 //! claim about the lab CID, the check of the falsifier list's inventory, and
 //! the lab stand-in launcher (all six kept here, a file the falsifier runner
@@ -61,6 +62,96 @@ pub const EMPTY_FILE_LAB_CID: &str = "bafybeic2y3c3met6txd62reatxwqjnodhfejchfml
 /// protobuf lengths take two varint bytes.
 pub const LONG_UTF8_NAME_LAB_CID: &str =
     "bafybeih6g5cy7asndjexb7bazovwryqyj4faxvababcjrbe4jxayhzvgmy";
+
+/// content-sample with `sample.example` as 262145 zero bytes, one over the
+/// chunk limit: a balanced file root over two raw leaves, 262144 and 1
+/// bytes. Built in a temp dir and never committed.
+pub const TWO_LEAF_FILE_LAB_CID: &str =
+    "bafybeidbd7gfhommypeks66twpnbbb3lwovdqe6iwtmdxptgcq5jqbaaby";
+/// content-sample with one more file, `core/big.bin`, holding
+/// [`big_bin_bytes`]: a file root over three raw leaves (262144, 262144 and
+/// 75712 bytes) one directory down, so its Tsize reaches the root through
+/// `core/`. Built in a temp dir and never committed.
+pub const THREE_LEAF_NESTED_LAB_CID: &str =
+    "bafybeidpgwbsi22cbsmthqupvn37xphujhs6fnzyuy64uc6nsauc6bftqe";
+/// The path of the three-leaf file.
+pub const BIG_BIN: &str = "core/big.bin";
+
+/// The 600000 bytes of [`BIG_BIN`]: byte `i` is `i % 251`, so no two leaves
+/// hold the same bytes.
+pub fn big_bin_bytes() -> Vec<u8> {
+    (0..600_000u32).map(|i| (i % 251) as u8).collect()
+}
+
+/// content-sample with `sample.example` as [`two_level_bytes`]: 175 raw
+/// leaves, one more than one file node links, so a root over a node of 174
+/// leaves and a node of one leaf. Built in memory and never committed.
+pub const TWO_LEVEL_FILE_LAB_CID: &str =
+    "bafybeia6jmw5u4ns4zxsglupvm25hkmxy6tr5m2a6irt5kapton6vgduee";
+
+/// The 45613057 bytes of the two-level file, 174 leaves of 262144 bytes and
+/// one byte more: byte `i` is `i % 251`, so no two leaves hold the same
+/// bytes.
+pub fn two_level_bytes() -> Vec<u8> {
+    (0..45_613_057u32).map(|i| (i % 251) as u8).collect()
+}
+
+/// content-sample with the empty files of [`directory_at_limit_files`]`(0)`
+/// added: its root block is exactly 262144 bytes, the largest directory block
+/// the lab names. Built in a temp dir and in memory and never committed.
+pub const DIRECTORY_AT_LIMIT_LAB_CID: &str =
+    "bafybeifv7ypq27zanvn46j4q5jnm5akr55flfzne3zszdbbolt2dtgevc4";
+
+/// The empty files that bring content-sample's root block to 262144 bytes
+/// and `longer` more: 1064 named by 200 digits and one by 235 + `longer`
+/// digits. An empty file's link is 46 bytes and its name (its 36-byte CID, the
+/// name and Tsize 0, each with its tag and length, all inside field 2);
+/// content-sample's two links and the UnixFS data `0a 02 08 01` are 119
+/// bytes. So 1064 x 246 + (46 + 235) + 119 = 262144.
+pub fn directory_at_limit_files(longer: usize) -> Vec<BundleEntry> {
+    let empty = |path: String| BundleEntry {
+        path,
+        content: Vec::new(),
+    };
+    let mut files: Vec<BundleEntry> = (0..1064)
+        .map(|number| empty(format!("{number:0>200}")))
+        .collect();
+    files.push(empty(format!("{:0>width$}", 1064, width = 235 + longer)));
+    files
+}
+
+/// The photo lane's PH6 stand-in photo set, a consumer copy and not a
+/// fixture: its five files, copied byte for byte from
+/// `examples/photo-viewer/host-test/fixtures/stand-in-photo-set/` at
+/// `d047a069a`. It sits outside `fixtures/` because its `capsule.json` has a
+/// `viewer` object, which the Runtime's manifest type refuses.
+pub const PHOTO_STAND_IN: &str = "consumer-fixtures/photo-stand-in-photo-set";
+pub const PHOTO_STAND_IN_FILES: [&str; 5] = [
+    "README.md",
+    "capsule.json",
+    "images/01.png",
+    "images/02.jpg",
+    "images/03.webp",
+];
+/// The lab CID of those five files. README pins the same value.
+pub const PHOTO_STAND_IN_LAB_CID: &str =
+    "bafybeiepelczjykxjbhpwaqjnmxx346l52alcxfzgg52ip2ejf5yijiuna";
+
+/// The committed bytes of the photo stand-in copy, one entry per file.
+pub fn photo_stand_in_entries() -> Vec<BundleEntry> {
+    PHOTO_STAND_IN_FILES
+        .iter()
+        .map(|file| {
+            let path = lane_dir().join(PHOTO_STAND_IN).join(file);
+            let content =
+                fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            BundleEntry {
+                path: (*file).to_owned(),
+                content,
+            }
+        })
+        .collect()
+}
 
 /// SHA-256 of `domain || 0x00 || content-sample's printed lab CID`. README
 /// pins the same digest.
@@ -1022,10 +1113,12 @@ pub const COMPUTED_BY_THE_LAB: &str = "Kubo v0.40.1 profile, computed by the lab
 pub const CLAIM_SCOPE_HEADING: &str = "## Claim scope\n";
 
 /// The gate README's "Claim scope" states, as written (white space aside):
-/// what must happen before the lab CID may be called anything more.
-pub const KUBO_GATE: &str = "No offline Kubo cross-check has been run (Kubo v0.40.1, the same \
-     profile flags, hash-only import, no network). Until one prints the same value as a \
-     committed pin, the lab CID is not called equal to the Runtime's CID or to Kubo's output.";
+/// what Kubo has checked (task 050), and that the claim words do not change
+/// until Rong or Flint changes them.
+pub const KUBO_GATE: &str = "One offline Kubo v0.40.1 hash-only cross-check with the Runtime's \
+     profile flags was run by hand on this Mac (task 050) and printed every committed pin, and \
+     the claim words stay \"Kubo v0.40.1 profile, computed by the lab\" until Rong or Flint \
+     changes them.";
 
 /// Words that would claim the lab CID equals the Runtime's CID or Kubo's
 /// output, in lowercase. No lane doc and no file under `src/` holds one, in
@@ -1366,33 +1459,42 @@ pub fn published(folder: &Path) -> (String, PathBuf) {
 /// Lab stand-in for the Runtime's launch route, not the Runtime. It lives in
 /// test code and runs nothing: a launched instance is a record.
 ///
-/// Its two methods are named for the two routes of draft PR #309's RA-6 at
-/// `513988ebd`, `POST /api/capsules` ([`StandInRuntime::post_capsules`],
-/// RI-2) and `GET /api/capsules` ([`StandInRuntime::get_capsules`], RI-3),
-/// and take and return JSON bodies. It holds a store (printed lab CID ->
-/// bundle folder, filled at publish time by [`published`]), the publishers'
-/// package records and an explicit list of accepted publisher DIDs. A launch
-/// ends in one of two states: "launched", with one new instance, or
-/// "refused", status 400 with the reason and no instance. The one request
-/// field, `cid`, is a lab field, not in #309: today's route takes `path`.
+/// [`StandInRuntime::new`] builds it. Each other public method is named for a
+/// route of draft PR #309 at `513988ebd`, or is a lab test seam, not a route:
+/// - [`StandInRuntime::post_capsules`]: RA-6's `POST /api/capsules` (RI-2);
+/// - [`StandInRuntime::get_capsules`]: RA-6's `GET /api/capsules` (RI-3);
+/// - [`StandInRuntime::get_capability_list_all_sessions_live`]: RA-1's
+///   `GET /api/capability/list?scope=all_sessions_live`, the grant view;
+/// - [`StandInRuntime::seed_grant`]: Lab test seam, not a route;
+/// - [`StandInRuntime::asks_of`]: Lab test seam, not a route;
+/// - [`StandInRuntime::set_after_walk`]: Lab test seam, not a route.
 ///
-/// Its grant view is named for #309 RA-1's
-/// `GET /api/capability/list?scope=all_sessions_live`
-/// ([`StandInRuntime::get_capability_list_all_sessions_live`]). A launch adds
-/// no grant: a valid publisher signature alone yields none. No shell approval
-/// is modelled; a grant exists only through the test seam
+/// The route methods take and return JSON bodies. It holds a store (printed
+/// lab CID -> bundle folder, filled at publish time by [`published`]), the
+/// publishers' package records and an explicit list of accepted publisher
+/// DIDs. A launch ends in one of two states: "launched", with one new
+/// instance, or "refused", status 400 with the reason and no instance. The
+/// one request field, `cid`, is a lab field, not in #309: today's route takes
+/// `path`.
+///
+/// The grant view lists every held grant of every session. A launch adds no
+/// grant: a valid publisher signature alone yields none. No shell approval is
+/// modelled; a grant exists only through the test seam
 /// [`StandInRuntime::seed_grant`].
 ///
 /// A launched instance is handed its asks only as the `asks.json` bytes of
 /// the checked bundle it was launched from, read through the test seam
 /// [`StandInRuntime::asks_of`]: a change on disk after launch does not reach
-/// it. The bytes are never parsed, and #309 has no asks field.
+/// it. The bytes are never parsed, and #309 has no asks field. A change on
+/// disk between the walk and the launch does not reach it either, shown
+/// through the test seam [`StandInRuntime::set_after_walk`].
 pub struct StandInRuntime {
     store: BTreeMap<String, PathBuf>,
     records: Vec<PackageRecord>,
     accepted: Vec<String>,
     instances: Vec<Instance>,
     grants: Vec<Grant>,
+    after_walk: Option<fn(&Path)>,
 }
 
 /// One launched instance: a record, never a running program.
@@ -1445,6 +1547,7 @@ impl StandInRuntime {
             accepted,
             instances: Vec::new(),
             grants: Vec::new(),
+            after_walk: None,
         }
     }
 
@@ -1518,6 +1621,15 @@ impl StandInRuntime {
             .and_then(|instance| instance.asks.clone())
     }
 
+    /// Lab test seam, not a route: every later launch calls `hook` once, on
+    /// the stored bundle folder, right after the one walk and before the name
+    /// compare (e). A test uses it to change the bytes on disk between the
+    /// walk and the launch, and shows that the instance is still handed the
+    /// bytes the walk read. With no hook set, nothing is called.
+    pub fn set_after_walk(&mut self, hook: fn(&Path)) {
+        self.after_walk = Some(hook);
+    }
+
     /// The checks of a launch, in this order, each library refusal as its own
     /// text: (a) the body, (b) the one parse of a printed lab CID, (c) the
     /// store, (d) the one walk, (e) the one name compare against the stored
@@ -1525,7 +1637,9 @@ impl StandInRuntime {
     /// (a), (b) and (c) come before the CID check. The answer is the stored
     /// manifest's `name`, from [`CheckedBundle::manifest_name`], and the
     /// bundle's `asks.json` bytes, both from the one checked bundle that
-    /// passed every check.
+    /// passed every check. The hook of [`StandInRuntime::set_after_walk`], if
+    /// set, runs on the stored folder right after (d); no check after (d)
+    /// and no part of the answer reads the folder.
     fn checked_launch(&self, body: &Value) -> Result<(String, Option<Vec<u8>>), String> {
         let cid = self.launch_cid(body)?;
         cid.parse::<LabCid>().map_err(said)?;
@@ -1534,6 +1648,9 @@ impl StandInRuntime {
             .get(&cid)
             .ok_or_else(|| format!("no bundle is stored under {cid}"))?;
         let checked = checked_bundle(folder).map_err(said)?;
+        if let Some(hook) = self.after_walk {
+            hook(folder);
+        }
         checked.check_name(&cid).map_err(said)?;
         self.check_records(&checked, &cid)?;
         Ok((checked.manifest_name().to_owned(), signed_asks(&checked)))
