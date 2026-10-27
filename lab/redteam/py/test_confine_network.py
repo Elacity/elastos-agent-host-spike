@@ -7,25 +7,14 @@ model lane's ``model_hosted_run_fails_closed_under_profile`` drives the
 provider binary. This probe is the stock-binary check: ``/usr/bin/nc``
 connects to a TCP listener the test opens on ``127.0.0.1``.
 
-Pins (guard a), re-measured on HEAD
-``95ab22afb58226163a11286748acb372507662db`` with
-``git log -1 --format='%H %s' HEAD -- <file>`` and ``shasum -a 256``.
-The profile commits and digests match the pins below.
+The three profiles are the live confine.sb files. This module records
+each sha256 at start and compares it at the end through changed from
+test_confine_mach. An owner commit that changes the bytes is not a
+failure. A difference between the start and the end raises the probe
+changed <rel>. An allow on a real profile is still CRITICAL, in the
+finding file this module already names.
 
-- wallet ``capsules/wallet-provider/confine.sb``
-  ``959b104022bd0e8ae55636f69f6f06b8eb028e2b``, merge PR #157
-  ``801da55edb9323905882a550c008a19a1ade790f`` (confine 037),
-  sha256 ``fbac35b5ec505eca4f80963b81783273377dc019c4719aab5957346e4dd64d4b``
-- did ``capsules/did-provider/confine.sb``
-  same commit and PR as wallet,
-  sha256 ``79ec0289fc1a886aa5231586b007d17382b37648b24e64844376827268b84950``
-- model ``capsules/model-provider/confine.sb``
-  ``e324708ce42235d816821f9e5b0570d8999f4b80``, merge PR #542
-  ``c66ab9b682841c7debf674adb43cda011bbf08cd`` (cc-model-confine 054),
-  sha256 ``399d0dc9d6381555c0f132d339146aed1420cc6d0395ba0ba475801b9a34bb17``
-
-A clean run says only that these probes did not break the network deny on
-those pinned commits. An allow on a real profile is CRITICAL. Wallet or did:
+An allow on a real profile is CRITICAL. Wallet or did:
 ``findings/CRITICAL-confine-011.md``. Model:
 ``findings/CRITICAL-cc-model-confine-011.md``. With no allow, this module
 writes no finding.
@@ -35,7 +24,6 @@ or ``/usr/bin/nc`` is missing. ``NetworkConnectClassifier`` launches nothing,
 so those tests run either way.
 """
 
-import hashlib
 import os
 import shutil
 import socket
@@ -46,6 +34,7 @@ import unittest
 from pathlib import Path
 
 import sbx
+from test_confine_mach import changed, sha256_file
 
 # Repo root from this file. lab/redteam/py/<this> -> parents[3].
 # Profile paths below come from sbx.REPO_ROOT, which is the same rule.
@@ -57,36 +46,39 @@ NC_TIMEOUT = 5
 DENY_NETWORK = "(deny network*)"
 ALLOW_NETWORK = "(allow network*)"
 
-# Last change of each profile's bytes, and the merge that brought it in.
 PROFILES = (
     {
         "name": "wallet",
         "provider": "wallet-provider",
         "path": sbx.WALLET_CONFINE_SB,
-        "sha256": "fbac35b5ec505eca4f80963b81783273377dc019c4719aab5957346e4dd64d4b",
-        "commit": "959b104022bd0e8ae55636f69f6f06b8eb028e2b",
-        "merge": "801da55edb9323905882a550c008a19a1ade790f",
-        "pr": 157,
     },
     {
         "name": "did",
         "provider": "did-provider",
         "path": sbx.REPO_ROOT / "capsules" / "did-provider" / "confine.sb",
-        "sha256": "79ec0289fc1a886aa5231586b007d17382b37648b24e64844376827268b84950",
-        "commit": "959b104022bd0e8ae55636f69f6f06b8eb028e2b",
-        "merge": "801da55edb9323905882a550c008a19a1ade790f",
-        "pr": 157,
     },
     {
         "name": "model",
         "provider": "model-provider",
         "path": sbx.REPO_ROOT / "capsules" / "model-provider" / "confine.sb",
-        "sha256": "399d0dc9d6381555c0f132d339146aed1420cc6d0395ba0ba475801b9a34bb17",
-        "commit": "e324708ce42235d816821f9e5b0570d8999f4b80",
-        "merge": "c66ab9b682841c7debf674adb43cda011bbf08cd",
-        "pr": 542,
     },
 )
+
+START_SHA = {}
+
+
+def setUpModule():
+    """Record the three live profile digests. A missing file is an error."""
+    for profile in PROFILES:
+        rel = profile["path"].relative_to(ROOT).as_posix()
+        START_SHA[rel] = sha256_file(profile["path"])
+
+
+def tearDownModule():
+    """The digest at the end equals the digest from setUpModule."""
+    for profile in PROFILES:
+        rel = profile["path"].relative_to(ROOT).as_posix()
+        changed(rel, START_SHA[rel], sha256_file(profile["path"]))
 
 
 class NotDenied(AssertionError):
@@ -420,22 +412,19 @@ class LoopbackNetworkProbe(unittest.TestCase):
 class NetworkConnectClassifier(unittest.TestCase):
     """Classifier and byte pins. They launch nothing, so a missing nc does not skip them."""
 
-    def test_profile_sha256_matches_the_recorded_pin(self):
-        """``hashlib.sha256`` of each profile equals the digest recorded for it."""
+    def test_profile_bytes_match_the_start(self):
+        """Each profile path is that provider's confine.sb, and the end digest matches the start."""
         self.assertEqual(ROOT, sbx.REPO_ROOT)
         self.assertEqual(ROOT, Path(__file__).resolve().parents[3])
+        self.assertEqual([profile["name"] for profile in PROFILES], ["wallet", "did", "model"])
         for profile in PROFILES:
-            expected_path = sbx.REPO_ROOT / "capsules" / profile["provider"] / "confine.sb"
-            self.assertEqual(profile["path"], expected_path)
+            expected = sbx.REPO_ROOT / "capsules" / profile["provider"] / "confine.sb"
+            self.assertEqual(profile["path"], expected)
             if profile["name"] == "wallet":
                 self.assertEqual(profile["path"], sbx.WALLET_CONFINE_SB)
-            digest = hashlib.sha256(profile["path"].read_bytes()).hexdigest()
-            self.assertEqual(
-                digest,
-                profile["sha256"],
-                f"{profile['name']} at {profile['commit']} PR #{profile['pr']} "
-                f"merge {profile['merge']}",
-            )
+            rel = profile["path"].relative_to(ROOT).as_posix()
+            self.assertIn(rel, START_SHA, rel)
+            changed(rel, START_SHA[rel], sha256_file(profile["path"]))
 
     def test_empty_stderr_is_not_a_deny(self):
         """Empty stderr is a harness error, including when the accept flag is set."""
