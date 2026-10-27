@@ -1018,19 +1018,17 @@ fn instance_receipt_requires_both_launches_and_scope() {
         };
         let complete = render(&observations);
         assert!(complete.passed);
+        let process_isolation = "process isolation, not A3 (A3 needs resident instances in one Runtime); lab half of A6 and A9";
         let scope = if name == "cancelled_instance_settles_with_reason_sibling_completes" {
             "cancel at the pending-request point, lab half of A10 (A12 census)"
         } else if name == "killed_worker_settlement_recorded_without_retry" {
             "kill-worker settlement, lab half of A11 (A12 census); orphan settled by the fixture (AC-027-ORPHAN)"
         } else {
-            "process-isolation lab half of A3, A6 and A9"
+            process_isolation
         };
         assert!(complete.table.contains(&format!("{name} | PASS | {scope}")));
         let receipt: Value = serde_json::from_slice(&complete.receipt_bytes).unwrap();
-        assert_eq!(
-            receipt["instance_grants_scope"],
-            "process-isolation lab half of A3, A6 and A9"
-        );
+        assert_eq!(receipt["instance_grants_scope"], process_isolation);
         assert!(receipt["report"]["table"].as_str().unwrap().contains(scope));
         for missing in ["instance-1", "instance-2"] {
             let changed: Vec<_> = observations.iter().filter(|observation| {
@@ -1074,6 +1072,16 @@ test grant_record_names_agent_identity ... ignored, blocked: AC-038-GRANT-PRINCI
         );
     }
     assert!(text.contains("grant_record_names_agent_identity | BLOCKED (AC-038-GRANT-PRINCIPAL)\n"));
+}
+
+#[test]
+fn owned_root_row_is_blocked_in_gaps() {
+    let listed = "instance_writes_only_under_own_storage_root: test\n";
+    let output = "test instance_writes_only_under_own_storage_root ... ignored, blocked: AC-039-OWNED-ROOT\n";
+    let (text, passed) = table(listed, output, true, Some(include_str!("../GAPS.md")));
+    assert!(passed, "{text}");
+    assert!(text
+        .contains("instance_writes_only_under_own_storage_root | BLOCKED (AC-039-OWNED-ROOT)\n"));
 }
 
 #[test]

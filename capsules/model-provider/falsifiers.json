@@ -2454,6 +2454,22 @@
       "tests": [
         "hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect"
       ]
+    },
+    {
+      "id": "MP29",
+      "title": "a hosted run with no grant passes the binding check and is refused only as a corrupt journal",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "        request\n            .runtime_binding\n            .validate(&request.offer_id, &request.operation, &request.input)\n            .map_err(|_| ProviderFault::invalid_request(\"invalid runtime binding\"))?;",
+          "new": "        let _ = request\n            .runtime_binding\n            .validate(&request.offer_id, &request.operation, &request.input);"
+        }
+      ],
+      "tests": [
+        "hosted_run_with_no_grant_is_refused_before_any_send"
+      ]
     }
   ]
 }

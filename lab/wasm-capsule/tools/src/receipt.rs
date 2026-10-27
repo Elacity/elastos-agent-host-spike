@@ -122,13 +122,16 @@ pub fn write_receipt(run: &TwoEngineRun, path: &Path) -> Result<(), RunRefusal> 
 /// Task 044: the stable reason id of `refusal`, and the engine its reason
 /// names, if any. One exhaustive `match` per level, with no wildcard arm: a
 /// new [`TwoEngineRefusal`] or [`Reason`] variant has no id until one is
-/// written here, so it does not build. A version query's refusal and a module
-/// run's carry the same [`Reason`] type, so each [`Reason`] has one id.
+/// written here, so it does not build. A version query's refusal, a memory
+/// check's (task 033, [`TwoEngineRefusal::Memory`]) and a module run's carry
+/// the same [`Reason`] type, so each [`Reason`] has one id.
 pub fn refusal_reason(refusal: &TwoEngineRefusal) -> (&'static str, Option<Engine>) {
     let reason = match refusal {
         TwoEngineRefusal::Verify(_) => return ("verify_refused", None),
         TwoEngineRefusal::OutputsDiffer { .. } => return ("outputs_differ", None),
-        TwoEngineRefusal::Version(refusal) | TwoEngineRefusal::Engine(refusal) => &refusal.reason,
+        TwoEngineRefusal::Version(refusal)
+        | TwoEngineRefusal::Memory(refusal)
+        | TwoEngineRefusal::Engine(refusal) => &refusal.reason,
     };
     match reason {
         Reason::EngineNotAbsolute => ("engine_not_absolute", None),
@@ -155,6 +158,10 @@ pub fn refusal_reason(refusal: &TwoEngineRefusal) -> (&'static str, Option<Engin
         Reason::EngineNotStopped { engine, .. } => ("engine_not_stopped", Some(*engine)),
         Reason::EngineNotWaited { engine, .. } => ("engine_not_waited", Some(*engine)),
         Reason::OutputNotRead { engine, .. } => ("output_not_read", Some(*engine)),
+        Reason::MemoryNotRead(_) => ("memory_not_read", None),
+        Reason::MemoryCountAboveOne { .. } => ("memory_count_above_one", None),
+        Reason::MemoryMaximumMissing { .. } => ("memory_maximum_missing", None),
+        Reason::MemoryMaximumAboveDeclared { .. } => ("memory_maximum_above_declared", None),
     }
 }
 

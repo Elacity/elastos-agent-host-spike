@@ -961,3 +961,97 @@ fn grant_record_names_agent_identity() {
         record.capsule_id == record.session_id
     );
 }
+
+fn bind_owned_roots(controller: &mut grants::Controller) -> Result<(), &'static str> {
+    let session_a = controller.client_session()?;
+    let session_b = controller.client_session()?;
+    if session_a.session_id() == session_b.session_id() {
+        return Err("owned roots reused one client session");
+    }
+    let grant_a = controller.open_session_write(
+        &session_a,
+        grants::INSTANCE_A_FILE,
+        "agent conformance: instance-a own root",
+    )?;
+    controller.write_granted(&session_a, grants::INSTANCE_A_FILE, &grant_a, b"instance-a")?;
+    let grant_b = controller.open_session_write(
+        &session_b,
+        grants::INSTANCE_B_FILE,
+        "agent conformance: instance-b own root",
+    )?;
+    controller.write_granted(&session_b, grants::INSTANCE_B_FILE, &grant_b, b"instance-b")?;
+    controller.settle_sibling_root_request(
+        &session_b,
+        grants::INSTANCE_A_SIBLING_FILE,
+        "agent conformance: sibling root",
+    )
+}
+
+fn exercise_owned_roots() -> Result<(), &'static str> {
+    let _serial = EFFECT_RUN.lock().unwrap_or_else(|error| error.into_inner());
+    let runtime = runtime_under_test().unwrap_or_else(|reason| probe::skipped(reason));
+    let provider = agent_conformance::runtime::localhost_provider_under_test()
+        .unwrap_or_else(|reason| probe::skipped(reason));
+    let home = ThrowawayHome::new().unwrap_or_else(|reason| probe::skipped(reason));
+    let mut operator = common::operator::Operator::start(&home)
+        .unwrap_or_else(|reason| probe::skipped(&format!("operator prerequisite: {reason}")));
+    let sampled = operator
+        .begin_check()
+        .expect("operator ready and first census");
+    let mut controller = grants::Controller::attach(
+        &home,
+        operator.port,
+        grants::Fixture::committed().expect("valid committed grant fixture"),
+    )
+    .expect("fixture shell controller attaches once");
+    let outcome = bind_owned_roots(&mut controller);
+    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());
+    let finished = operator.finish_check(sampled);
+    let line = match &finished {
+        Ok(line) | Err(line) => line.clone(),
+    };
+    let state = match &cleanup_state {
+        Ok(state) => (*state).to_owned(),
+        Err(reason) => format!("FAIL {reason}"),
+    };
+    controller
+        .print_checked(&format!("{line}; {state}"))
+        .expect("cleanup evidence excludes fixture credentials");
+    controller
+        .check_captures(&home)
+        .expect("captures exclude fixture credentials");
+    controller
+        .check_sources()
+        .expect("lane sources exclude fixture credentials");
+    if outcome.is_ok() {
+        let observations = [
+            Observation::Native {
+                role: "elastos".into(),
+                sha256: runtime.sha256.clone(),
+            },
+            Observation::Native {
+                role: "localhost-provider".into(),
+                sha256: provider.sha256.clone(),
+            },
+        ];
+        controller
+            .check_journey(
+                "instance_writes_only_under_own_storage_root",
+                &observations,
+                true,
+            )
+            .expect("report and receipt exclude fixture credentials");
+    }
+    finished.expect("cleanup census refused leftovers; see checked reason");
+    cleanup_state.expect("cleanup grant census failed; see checked reason");
+    let removed = home.finish();
+    outcome?;
+    removed?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "blocked: AC-039-OWNED-ROOT"]
+fn instance_writes_only_under_own_storage_root() {
+    exercise_owned_roots().expect("Runtime refuses a sibling write under the other owned root");
+}
