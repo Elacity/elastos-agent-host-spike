@@ -858,7 +858,8 @@ fn wait_for_terminal(
 /// not cited. This test starts no process and needs no sandbox.
 ///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
-/// test no longer finds that function.
+/// test no longer finds that function. F-cc49a drops the `generated_`
+/// acceptance, so the in-memory stand-in citation fails.
 #[test]
 fn operations_section_cites_existing_tests() {
     fn cited_test_name(span: &str) -> bool {
