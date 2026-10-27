@@ -10,7 +10,7 @@ use elastos_model_contract::{
     RUNTIME_ACCESS_BINDING_SCHEMA, RUNTIME_CREATE_BINDING_SCHEMA,
 };
 use serde_json::{json, Value};
-use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::io::{BufRead as _, BufReader, Read, Write as _};
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -761,16 +761,24 @@ fn push_runtime_hosted_stream_frame(answer: &mut Vec<u8>, frame: &[u8]) {
     answer.extend_from_slice(b"\r\n");
 }
 
+/// The three `data:` frames a whole backend stream carries: the two backend
+/// events and the end marker. The Runtime's accepted answer writes each one as
+/// an HTTP chunk, and the local relay backend writes them as one plain
+/// `text/event-stream` body, so the frames have one copy (P10).
+fn runtime_hosted_stream_frames() -> [String; 3] {
+    [
+        format!("data: {}\n\n", RUNTIME_HOSTED_STREAM_EVENTS[0]),
+        format!("data: {}\n\n", RUNTIME_HOSTED_STREAM_EVENTS[1]),
+        "data: [DONE]\n\n".to_string(),
+    ]
+}
+
 /// The Runtime's answer when it accepts a hosted effect and copies the whole
 /// backend stream: the head, each backend chunk, and the end `0\r\n\r\n`
 /// (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:1650`).
 fn runtime_hosted_stream_answer() -> Vec<u8> {
     let mut answer = runtime_hosted_stream_head();
-    for frame in [
-        format!("data: {}\n\n", RUNTIME_HOSTED_STREAM_EVENTS[0]),
-        format!("data: {}\n\n", RUNTIME_HOSTED_STREAM_EVENTS[1]),
-        "data: [DONE]\n\n".to_string(),
-    ] {
+    for frame in runtime_hosted_stream_frames() {
         push_runtime_hosted_stream_frame(&mut answer, frame.as_bytes());
     }
     answer.extend_from_slice(b"0\r\n\r\n");
@@ -1092,8 +1100,9 @@ const RELAY_FAILURE_BYTES: usize = 1024;
 /// one HTTP chunk, and the end `0\r\n\r\n`, the same framing
 /// `runtime_hosted_stream_answer` builds
 /// (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:1644-1648`,
-/// `:1650`, `:1662-1670`). It adds no field, no header and no key, so the
-/// backend sees exactly the body the provider sent.
+/// `:1650`, `:1662-1670`). It adds no field and no key, so the backend's body
+/// is exactly the body the provider sent. Its only header of its own is
+/// `content-type`; the client adds its own defaults.
 fn relay_hosted_effect(stream: &UnixStream, body: &[u8], backend_url: &str) -> RelayOutcome {
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1169,10 +1178,14 @@ async fn relay_turn(stream: &UnixStream, body: &[u8], backend_url: &str) -> Rela
         };
         frame.clear();
         push_runtime_hosted_stream_frame(&mut frame, &chunk);
-        if (&*stream).write_all(&frame).is_err() {
-            return RelayOutcome::Answered {
-                status: status.as_u16(),
-                first_bytes: Vec::new(),
+        if let Err(err) = (&*stream).write_all(&frame) {
+            // The provider closed its end of the Runtime socket, so the answer
+            // stops here: the record says which socket failed, not that the
+            // backend answered (P11).
+            return RelayOutcome::Unreachable {
+                reason: format!(
+                    "the provider closed its Runtime socket before the stream ended: {err}"
+                ),
             };
         }
     }
@@ -1217,7 +1230,14 @@ fn read_hosted_effect_request(stream: &UnixStream) -> RecordedRequest {
     // On macOS an accepted socket keeps the listener's non-blocking mode.
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(FIXTURE_EVENT_TIMEOUT));
-    let mut reader = BufReader::new(stream);
+    read_request(stream)
+}
+
+/// Reads one request head and its body to the end from any reader, waiting at
+/// most `FIXTURE_EVENT_TIMEOUT` for each read. The Runtime socket stand-in and
+/// the local relay backend read a request this same way (P10).
+fn read_request(reader: impl Read) -> RecordedRequest {
+    let mut reader = BufReader::new(reader);
     let mut request_line = String::new();
     let _ = reader.read_line(&mut request_line);
     let mut headers = Vec::new();
@@ -1252,6 +1272,70 @@ fn read_hosted_effect_request(stream: &UnixStream) -> RecordedRequest {
         headers,
         colonless,
         body,
+    }
+}
+
+/// A local loopback backend for the relaying stand-in. It accepts one
+/// connection, reads that connection's one request to its end, records it, and
+/// answers `200` with the backend stream (`runtime_hosted_stream_frames`) as
+/// one plain `text/event-stream` body and `Connection: close`. The relay test
+/// uses it to read the bytes the relay actually sent, and no network leaves
+/// the loopback interface.
+struct LocalRelayBackend {
+    url: String,
+    requests: Receiver<RecordedRequest>,
+    accept: Option<thread::JoinHandle<()>>,
+}
+
+impl LocalRelayBackend {
+    fn bind() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind the local relay backend");
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (request_tx, requests) = mpsc::channel();
+        let accept = thread::spawn(move || {
+            let Ok((stream, _)) = listener.accept() else {
+                return;
+            };
+            let _ = stream.set_read_timeout(Some(FIXTURE_EVENT_TIMEOUT));
+            let recorded = read_request(&stream);
+            let _ = request_tx.send(recorded);
+            let body = runtime_hosted_stream_frames().concat();
+            let mut answer = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                 content-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            )
+            .into_bytes();
+            answer.extend_from_slice(body.as_bytes());
+            let _ = (&stream).write_all(&answer);
+        });
+        Self {
+            url,
+            requests,
+            accept: Some(accept),
+        }
+    }
+
+    fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Every request the backend read, waiting `FIXTURE_EVENT_TIMEOUT` for the
+    /// first one, then joining the accept thread so the test ends after the
+    /// answer. A relay that reaches the backend twice records two requests.
+    fn observe(mut self) -> Vec<RecordedRequest> {
+        let first = self
+            .requests
+            .recv_timeout(FIXTURE_EVENT_TIMEOUT)
+            .expect("the relay must reach the local backend");
+        if let Some(accept) = self.accept.take() {
+            let _ = accept.join();
+        }
+        let mut recorded = vec![first];
+        while let Ok(request) = self.requests.recv_timeout(Duration::from_millis(20)) {
+            recorded.push(request);
+        }
+        recorded
     }
 }
 
@@ -2293,7 +2377,7 @@ fn hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect() {
 /// A hosted run whose Runtime binding names no grant is refused before the
 /// provider opens the Runtime socket. The binding check is the first step of
 /// `handle_runs_create` after `reject_untrusted_binding_fields`
-/// (`src/state.rs:506-510`); it reads `grant_id` through
+/// (`src/state.rs:507-510`); it reads `grant_id` through
 /// `validate_bounded_trimmed`
 /// (`elastos/crates/elastos-model-contract/src/lib.rs:136`) and maps every
 /// failure to `invalid_request` with `invalid runtime binding`. The control
@@ -2411,6 +2495,288 @@ const REAL_TURN_MODEL: &str = "deepseek-v4-flash";
 /// this test's settle deadline share one longer value.
 const REAL_TURN_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// A settled run's status and its error code, for a failure message that names
+/// what happened without printing the run's answer text (049 review). A
+/// completed run carries no error, so its code prints as `null`.
+fn run_status_and_error_code(run: &Value) -> String {
+    format!(
+        "status {}, error code {}",
+        run["data"]["status"], run["data"]["terminal"]["error"]["code"]
+    )
+}
+
+/// One granted hosted run through the relaying stand-in: the stand-in, the
+/// settled run, the backend's own outcome, and the provider. The opt-in real
+/// turn and the loopback relay test both call
+/// `run_granted_hosted_turn_through_relay`, so the run steps have one copy
+/// (P10) and each test keeps its own checks.
+struct RelayedHostedTurn {
+    stand_in: HostedEffectStandIn,
+    settled: Value,
+    backend: RelayOutcome,
+    provider: ProviderProcess,
+}
+
+/// One granted hosted run through the relaying stand-in, from the fixture root
+/// to the settled run. The offer pins `model` and `runtime_ms_limit`, the input
+/// carries `prompt`, and the run settles within `settle_deadline`. The run
+/// carries a grant: the Runtime owns it, and the stand-in only relays. 048's
+/// `MP29` is the paired refusal of a run with no grant.
+fn run_granted_hosted_turn_through_relay(
+    label: &str,
+    backend_url: &str,
+    model: &str,
+    runtime_ms_limit: u64,
+    settle_deadline: Duration,
+    prompt: &str,
+) -> RelayedHostedTurn {
+    let root = test_support::temp_root_path("model-provider-process", label);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind_relaying(label, backend_url);
+    let init = hosted_effect_init(&root, &stand_in, model, runtime_ms_limit);
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": prompt
+    });
+    let create_request = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": "session:test",
+            "capsule_id": "assistant",
+            "grant_id": "grant:test",
+            "request_id": test_support::fixture_model_request_id(&format!("request:{label}")),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": model_input_hash(&input).unwrap()
+        }
+    });
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    assert_eq!(
+        create["data"]["run_id"], expected_run_id,
+        "runs_create must return the contract run id"
+    );
+
+    let settled = wait_for_run_terminal_within(
+        &mut provider,
+        &expected_run_id,
+        &access_binding(&create_request),
+        settle_deadline,
+    );
+
+    // The backend's own status explains a failed run before the run's error
+    // code does.
+    let backend = {
+        let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
+        loop {
+            if let Some(outcome) = stand_in.relay_outcome() {
+                break outcome;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the relaying stand-in recorded no backend answer: {}",
+                run_status_and_error_code(&settled)
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    };
+
+    RelayedHostedTurn {
+        stand_in,
+        settled,
+        backend,
+        provider,
+    }
+}
+
+/// The header names the relay's own client sends to the backend, in lower case
+/// and sorted: the client's defaults (`accept`, `content-length`, `host`) and
+/// the relay's one header of its own (`content-type`). The first passing run
+/// shows this exact set, so any other name is a header the relay added.
+const RELAY_BACKEND_HEADER_NAMES: [&str; 4] = ["accept", "content-length", "content-type", "host"];
+
+/// The relay forwards the provider's hosted body to the backend byte for byte
+/// and adds no key. The stand-in plays the Runtime, and the backend is a
+/// loopback listener inside this test, so the run completes from the backend's
+/// own three event frames with no model, no key and no network beyond loopback.
+/// This test runs on every gate: a relay that changes the body fails the
+/// byte-equality check (`MP30`), and a relay that adds an `authorization`
+/// header fails the no-key check (`MP31`). It books no M1 check, because the
+/// stand-in is not the Runtime and a loopback backend is not the A4 path.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_relay_forwards_the_provider_body_unchanged_and_no_key() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted relay: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let backend = LocalRelayBackend::bind();
+    let turn = run_granted_hosted_turn_through_relay(
+        "hosted-relay",
+        backend.url(),
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+        FIXTURE_EVENT_TIMEOUT,
+        "a relayed hosted turn",
+    );
+    let RelayedHostedTurn {
+        stand_in,
+        settled,
+        backend: relay,
+        mut provider,
+    } = turn;
+    match &relay {
+        RelayOutcome::Answered { status: 200, .. } => {}
+        RelayOutcome::Answered {
+            status,
+            first_bytes,
+        } => panic!(
+            "the local backend answered {status}, not 200: {}",
+            String::from_utf8_lossy(first_bytes)
+        ),
+        RelayOutcome::Unreachable { reason } => {
+            panic!("the local backend is unreachable: {reason}")
+        }
+    }
+
+    assert_eq!(
+        settled["data"]["status"],
+        "completed",
+        "the relayed turn must complete the run: {}",
+        run_status_and_error_code(&settled)
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["output"],
+        json!({"schema": RUN_OUTPUT_TEXT_SCHEMA, "text": "ready"}),
+        "the relayed run must carry the streamed text: {}",
+        run_status_and_error_code(&settled)
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["backend_report"],
+        json!({
+            "schema": BACKEND_REPORT_SCHEMA,
+            "resolved_model": {"status": "reported", "value": "resolved-model"},
+            "usage": {
+                "status": "reported",
+                "value": {"input_tokens": 7, "output_tokens": 1, "total_tokens": 8},
+            },
+            // The usage event carries no `cost` or `cost_unit`, so the worker
+            // observes cost only when one is present and the report says
+            // unknown (`src/adapters.rs:416-418`, `:437-443`).
+            "cost": {"status": "unknown"},
+        }),
+        "the relayed run must carry the backend's evidence: {}",
+        run_status_and_error_code(&settled)
+    );
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "the relayed run must open exactly one connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "the relayed run must send exactly one request"
+    );
+    let forwarded = &requests[0];
+    assert_eq!(forwarded.request_line, "POST /v1/hosted-effect HTTP/1.1");
+
+    let backend_requests = backend.observe();
+    assert_eq!(
+        backend_requests.len(),
+        1,
+        "the relay must reach the backend exactly once"
+    );
+    let backend_request = &backend_requests[0];
+    assert_eq!(
+        backend_request.request_line,
+        "POST /v1/chat/completions HTTP/1.1"
+    );
+    assert_eq!(
+        backend_request.body, forwarded.body,
+        "the relay must forward the provider's body byte for byte"
+    );
+    // The no-key check runs before the header-name set, so an added
+    // `authorization` header fails here and not on the set comparison (MP31).
+    assert_eq!(
+        backend_request.value("authorization"),
+        None,
+        "the relay must add no authorization header"
+    );
+    let mut names: Vec<String> = backend_request
+        .headers
+        .iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names, RELAY_BACKEND_HEADER_NAMES,
+        "the relay sends only its own content-type and the client's defaults: {:?}",
+        backend_request.headers
+    );
+
+    provider.shutdown();
+}
+
+/// The relay records a provider socket that closed mid-stream as unreachable,
+/// naming the closed socket. The provider can close its end of the Runtime
+/// socket while the relay copies the backend stream, and the relay must not
+/// record that as an answer: `Answered` would claim a status the provider never
+/// received (P11). The relay end here has no peer, so its head and first frame
+/// writes fail, while the loopback backend answers.
+#[test]
+fn relay_reports_a_closed_provider_socket_as_unreachable() {
+    let backend = LocalRelayBackend::bind();
+    let (provider_end, stand_in_end) = UnixStream::pair().expect("a relay socket pair");
+    drop(provider_end);
+    let outcome = relay_hosted_effect(&stand_in_end, b"{}", backend.url());
+    assert_eq!(
+        backend.observe().len(),
+        1,
+        "the local backend must answer the closed provider's one request"
+    );
+    match outcome {
+        RelayOutcome::Unreachable { reason } => assert!(
+            reason.starts_with("the provider closed its Runtime socket before the stream ended:"),
+            "the outcome must name the closed provider socket: {reason}"
+        ),
+        RelayOutcome::Answered {
+            status,
+            first_bytes,
+        } => panic!(
+            "a closed provider socket must not record an answer: status {status}, \
+             {} answer bytes",
+            first_bytes.len()
+        ),
+    }
+}
+
 /// The opt-in real model turn through the provider's hosted half. The stand-in
 /// plays the Runtime: it accepts the hosted effect, relays the provider's body
 /// unchanged to the Sparks engine at `SPARKS_MODEL_URL`, and answers in the
@@ -2419,7 +2785,12 @@ const REAL_TURN_TIMEOUT: Duration = Duration::from_secs(180);
 /// stand-in is not the Runtime, and a Sparks engine reached by URL is not
 /// Anders's A4 path
 /// (`examples/agent-host/handoff/reports/provider-a4-deepseek-turn-gaps.md`,
-/// "The A4 path, as Anders states it").
+/// "The A4 path, as Anders states it"). The relay itself is checked on every
+/// gate by `hosted_relay_forwards_the_provider_body_unchanged_and_no_key`
+/// (`MP30`, `MP31`); this test is the real Sparks run only.
+///
+/// Its failure messages print the run's status and error code, never the run,
+/// so a failed real turn prints no answer text (049 review).
 ///
 /// It needs the network, so it is ignored by default and no falsifier runs it.
 /// Its paired falsifier is 048's `MP29`: a run with no grant is refused before
@@ -2445,82 +2816,22 @@ fn opt_in_real_deepseek_turn_through_the_runtime_socket_completes_with_text_and_
         return;
     };
 
-    let root = test_support::temp_root_path("model-provider-process", "real-deepseek-turn");
-    std::fs::create_dir_all(&root).unwrap();
-    let root = std::fs::canonicalize(root).unwrap();
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let stand_in = HostedEffectStandIn::bind_relaying("real-deepseek-turn", &backend_url);
-    let init = hosted_effect_init(
-        &root,
-        &stand_in,
+    let turn = run_granted_hosted_turn_through_relay(
+        "real-deepseek-turn",
+        &backend_url,
         REAL_TURN_MODEL,
         REAL_TURN_TIMEOUT.as_millis() as u64,
-    );
-    let mut provider = ProviderProcess::start();
-    let started = provider.request(init);
-    assert_eq!(
-        started["status"], "ok",
-        "unexpected init response: {started}"
-    );
-
-    let input = json!({
-        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
-        "prompt": "Reply with the single word ready"
-    });
-    let create_request = json!({
-        "op": "runs_create",
-        "offer_id": HOSTED_EFFECT_OFFER,
-        "operation": "text.generate",
-        "input": input,
-        "runtime_binding": {
-            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
-            "principal_id": "person:local:test",
-            "session_id": "session:test",
-            "capsule_id": "assistant",
-            "grant_id": "grant:test",
-            "request_id": test_support::fixture_model_request_id("request:real-deepseek-turn"),
-            "offer_id": HOSTED_EFFECT_OFFER,
-            "operation": "text.generate",
-            "input_hash": model_input_hash(&input).unwrap()
-        }
-    });
-    let binding: RuntimeCreateBinding =
-        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
-    let expected_run_id = model_run_id(&binding);
-    let create = provider.request(create_request.clone());
-    assert_eq!(
-        create["status"], "ok",
-        "unexpected create response: {create}"
-    );
-    assert_eq!(
-        create["data"]["run_id"], expected_run_id,
-        "runs_create must return the contract run id"
-    );
-
-    // The grant is the Runtime's, not the stand-in's: this run carries a grant
-    // and the stand-in only relays. MP29 is the paired refusal.
-    let settled = wait_for_run_terminal_within(
-        &mut provider,
-        &expected_run_id,
-        &access_binding(&create_request),
         REAL_TURN_TIMEOUT + FIXTURE_EVENT_TIMEOUT,
+        "Reply with the single word ready",
     );
-
+    let RelayedHostedTurn {
+        stand_in,
+        settled,
+        backend,
+        mut provider,
+    } = turn;
     // The backend's own status explains a failed run before the run's error
     // code does.
-    let backend = {
-        let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
-        loop {
-            if let Some(outcome) = stand_in.relay_outcome() {
-                break outcome;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "the relaying stand-in recorded no backend answer: {settled}"
-            );
-            thread::sleep(Duration::from_millis(5));
-        }
-    };
     match &backend {
         RelayOutcome::Answered { status: 200, .. } => {}
         RelayOutcome::Answered {
@@ -2536,25 +2847,32 @@ fn opt_in_real_deepseek_turn_through_the_runtime_socket_completes_with_text_and_
     }
 
     assert_eq!(
-        settled["data"]["status"], "completed",
-        "the permitted real turn must complete the run: {settled}"
+        settled["data"]["status"],
+        "completed",
+        "the permitted real turn must complete the run: {}",
+        run_status_and_error_code(&settled)
     );
     let output = &settled["data"]["terminal"]["output"];
     assert_eq!(
-        output["schema"], RUN_OUTPUT_TEXT_SCHEMA,
-        "the run must carry the text output schema: {settled}"
+        output["schema"],
+        RUN_OUTPUT_TEXT_SCHEMA,
+        "the run must carry the text output schema: {}",
+        run_status_and_error_code(&settled)
     );
     let text = output["text"]
         .as_str()
         .expect("the completed run carries text");
     assert!(
         !text.trim().is_empty(),
-        "the DeepSeek answer must not be empty: {settled}"
+        "the DeepSeek answer must not be empty: {}",
+        run_status_and_error_code(&settled)
     );
     let report = &settled["data"]["terminal"]["backend_report"];
     assert_eq!(
-        report["usage"]["status"], "reported",
-        "the run must record the backend's usage: {settled}"
+        report["usage"]["status"],
+        "reported",
+        "the run must record the backend's usage: {}",
+        run_status_and_error_code(&settled)
     );
     let input_tokens = report["usage"]["value"]["input_tokens"]
         .as_u64()
@@ -2567,11 +2885,13 @@ fn opt_in_real_deepseek_turn_through_the_runtime_socket_completes_with_text_and_
         .expect("reported usage carries total_tokens");
     assert!(
         input_tokens > 0,
-        "the real turn must report input tokens: {settled}"
+        "the real turn must report input tokens: {}",
+        run_status_and_error_code(&settled)
     );
     assert!(
         output_tokens > 0,
-        "the real turn must report output tokens: {settled}"
+        "the real turn must report output tokens: {}",
+        run_status_and_error_code(&settled)
     );
 
     let (connections, requests) = stand_in.observe();
