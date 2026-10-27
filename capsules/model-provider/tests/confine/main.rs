@@ -2437,9 +2437,8 @@ fn allow_rules_trace_to_declared_rights() {
 /// after the sysctl pin. F-cc35c, F-cc35d and F-cc35e append literal reads
 /// whose filenames contain STORAGE_ROOT, STORAGE_PARENT or PROVIDER_EXECUTABLE.
 /// F-cc35f keeps both pins and appends
-/// `(allow file-write* (literal "/tmp/cc35-write-only"))` to the profile and
-/// to `startup-root-directory` in the declared-rights fixture.
-/// F-cc35g adds `(allow file* (literal "/tmp/cc35-wildcard"))` to both files
+/// `(allow file-write* (literal "/tmp/cc35-write-only"))` to the profile only.
+/// F-cc35g adds `(allow file* (literal "/tmp/cc35-wildcard"))` to the profile only
 /// while keeping both pins.
 #[test]
 fn platform_baseline_rules_stay_narrow() {

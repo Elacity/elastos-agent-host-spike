@@ -624,9 +624,7 @@ python3 -I examples/agent-host/falsify.py --from capsules/model-provider/confine
 runner. Every entry uses `expect: caught`. F-cc12a uses command `wallet`,
 because the one shape check is in the wallet crate, and every other entry
 uses command `provider`. Each mutates `confine.sb` only, except the eighteen
-entries that edit `tests/confine/main.rs` and except F-cc35f and F-cc35g,
-which each mutate `confine.sb` and also append their added grant to
-`startup-root-directory` in `tests/fixtures/confine/declared-rights.json`.
+entries that edit `tests/confine/main.rs`.
 The eighteen are: F-cc1e removes the outside-read
 fixture rule, F-cc8-rm-journal removes the outside-create fixture grant,
 F-cc15a, F-cc15b and F-cc15c each undo one part of how the Runtime socket
@@ -687,8 +685,8 @@ allow_rules_trace_to_declared_rights.
 | F-cc35c | One line, `(allow file-read-data (literal "/tmp/STORAGE_ROOT-leak"))`, is added after the root pin; both startup pins stay | `platform_baseline_rules_stay_narrow` | The wider literal path still reaches the baseline check when its filename contains `STORAGE_ROOT`. |
 | F-cc35d | One line, `(allow file-read-data (literal "/tmp/STORAGE_PARENT-leak"))`, is added after the root pin; both startup pins stay | `platform_baseline_rules_stay_narrow` | The wider literal path still reaches the baseline check when its filename contains `STORAGE_PARENT`. |
 | F-cc35e | One line, `(allow file-read-data (literal "/tmp/PROVIDER_EXECUTABLE-leak"))`, is added after the root pin; both startup pins stay | `platform_baseline_rules_stay_narrow` | The wider literal path still reaches the baseline check when its filename contains `PROVIDER_EXECUTABLE`. |
-| F-cc35f | Both startup pins stay. One line, `(allow file-write* (literal "/tmp/cc35-write-only"))`, is added to the profile and to `startup-root-directory` in the declared-rights fixture | `platform_baseline_rules_stay_narrow` | The added file write is a wider operation while both pins remain. |
-| F-cc35g | Both startup pins stay. One line, `(allow file* (literal "/tmp/cc35-wildcard"))`, is added to the profile and to `startup-root-directory` in the declared-rights fixture | `platform_baseline_rules_stay_narrow` | The file wildcard is a wider operation while both pins remain, even with a matching declaration. |
+| F-cc35f | Both startup pins stay. One line, `(allow file-write* (literal "/tmp/cc35-write-only"))`, is added to the profile | `platform_baseline_rules_stay_narrow` | The added file write is a wider operation while both pins remain. |
+| F-cc35g | Both startup pins stay. One line, `(allow file* (literal "/tmp/cc35-wildcard"))`, is added to the profile | `platform_baseline_rules_stay_narrow` | The file wildcard is a wider operation while both pins remain. |
 | F-cc36a | The last parenthesis of the `STORAGE_ROOT` allow is removed | `byte_different_file_at_bound_path_starts` | The launch exits 65 and the test fails because the profile did not apply. |
 | F-cc37a | `(allow file-read-data (literal "/tmp/cc-same-line-allow"))` is written after `(deny network*)` on the same line | `allow_rules_trace_to_declared_rights` | That allow has no declared right and no platform baseline. |
 
