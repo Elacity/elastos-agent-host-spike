@@ -6690,3 +6690,846 @@ The shared heavy-build lease was free (`fcntl.flock` acquired in 0.000 s) and re
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `standin-runtime/mod.rs:176` applies the test-supplied `Start`. This change adds no capsule import. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:823` starts the ten resident tests. Each plant above fails its named assertion and passes after restore. |
 | 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:144` admits a path. Launch mints `component-N` and does not call `seed_grant`. |
+
+## 046 — RA-6 stand-in stops one instance and revokes its grants
+
+046: `StandIn::delete_capsule` extends the same `StandIn` for `DELETE /api/capsules/:id`. A shell body whose only key is a non-empty string `reason` stores `stopped` with cause `stopped: ` joined to that reason, revokes that session's `Live` grants through the one life filter, and leaves the sibling. A stopped entry stays until the test instant is 60 seconds after the stop. A client is refused with `This endpoint requires shell privileges`. Pending-request settlement is a later slice. `parallel_capsules_complete_independently` stays `#[ignore = "blocked: RT4"]`. `run_leaves_no_live_grant` stays blocked on the real Runtime. A PASS here leaves the real Runtime's resident rows blocked. There is no new `falsifiers.json` id. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Re-found. `35697329be0aad89eb68d0adf78aa94d24751317:lab/resident-instances/src/journey.rs:226` `if !stopped.cause.contains(reason) {`. `35697329be0aad89eb68d0adf78aa94d24751317:lab/resident-instances/src/http.rs:640` `"cause": "stopped: reason"`. `513988ebd:lab/runtime-asks/06-resident-instances-core.md` names RI-4 as `DELETE /api/capsules/:id` with a reason, ending that instance and revoking its grants. Today's `elastos/crates/elastos-server/src/api/server.rs:465` is `.route("/api/capsules/:id", delete(routes::stop_capsule))`. `elastos/crates/elastos-server/src/api/routes.rs:203` is `format!("Capsule {} stopped", id)` and `:204` is `format!("Capsule {} not found", id)`. The real route takes no body. `elastos/crates/elastos-server/src/runtime.rs:497` is `info.status = "stopped".to_string();` and `:502` is `self.unregister_capsule(id).await;`, so the real list drops the entry at once. `elastos/crates/elastos-compute/src/providers/component.rs:232` is `component/v1 is a bounded activation contract and has no resident stop operation`. `elastos/crates/elastos-server/src/api/middleware.rs:93` is `This endpoint requires shell privileges`.
+
+### Hand-run falsifiers
+
+No list id. Each plant was restored before the next. Lib tests are `standin_runtime::tests::NAME`; a bare name with `--exact` runs nothing. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::NAME -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true` and lane `target/host` plus `target/host-build`. After the last restore, `standin-runtime/mod.rs` matched its pre-plant bytes (`sha256 2aa6aa8d9cfdb4a830cb863934f0eb5965e53b303bf1a70ba74357fce663dbc6`). `git diff -- lab/agent-conformance/standin-runtime/mod.rs` is the candidate only. The plant expressions are absent from that file.
+
+F-standin-stop-stub. Named test `standin_stop_sets_stopped`. Planted exit 101 in 19.697 s. Restored exit 0 in 1.602 s. Assertion: `src/../standin-runtime/mod.rs:982:9` the stand-in stores stopped with the stop reason
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let reason = stop_reason(body)?;
+```
+
+New:
+
+```text
+        return Ok(Value::Null);
+        require_shell(caller)?;
+        let reason = stop_reason(body)?;
+```
+
+F-standin-stop-drops-reason. Named test `standin_stop_sets_stopped`. Planted exit 101 in 1.835 s. Restored exit 0 in 1.667 s. Assertion: `src/../standin-runtime/mod.rs:981:9` the stand-in stores stopped with the stop reason
+
+Old:
+
+```text
+        self.instances[index].cause = format!("stopped: {reason}");
+```
+
+New:
+
+```text
+        self.instances[index].cause = "stopped".to_owned();
+```
+
+F-standin-stop-keeps-grants. Named test `standin_stop_revokes_that_sessions_grants`. Planted exit 101 in 3.083 s. Restored exit 0 in 2.053 s. Assertion: `src/../standin-runtime/mod.rs:1626:9` the stand-in revokes that session's live grant
+
+Old:
+
+```text
+            if grant.session_id == session_id && grant.life == Life::Live {
+                grant.life = Life::Revoked;
+            }
+```
+
+New:
+
+```text
+            if grant.session_id == session_id && grant.life == Life::Live {
+                grant.life = Life::Live;
+            }
+```
+
+F-standin-stop-all-grants. Named test `standin_stop_leaves_the_sibling`. Planted exit 101 in 2.248 s. Restored exit 0 in 2.145 s. Assertion: `src/../standin-runtime/mod.rs:1703:9` the stand-in leaves the sibling grant live
+
+Old:
+
+```text
+            if grant.session_id == session_id && grant.life == Life::Live {
+```
+
+New:
+
+```text
+            if grant.life == Life::Live {
+```
+
+F-standin-stop-all. Named test `standin_stop_leaves_the_sibling`. Planted exit 101 in 1.602 s. Restored exit 0 in 1.893 s. Assertion: `src/../standin-runtime/mod.rs:985:9` the stand-in leaves the sibling running
+
+Old:
+
+```text
+        let session_id = self.instances[index].id.clone();
+        self.instances[index].phase = ResidentStatus::Stopped;
+        self.instances[index].cause = format!("stopped: {reason}");
+        self.instances[index].ended_at = Some(instant);
+        self.revoke_live(&session_id);
+```
+
+New:
+
+```text
+        let session_id = self.instances[index].id.clone();
+        for instance in &mut self.instances {
+            if instance.id == id || instance.phase == ResidentStatus::Running {
+                instance.phase = ResidentStatus::Stopped;
+                instance.cause = format!("stopped: {reason}");
+                instance.ended_at = Some(instant);
+            }
+        }
+        self.revoke_live(&session_id);
+```
+
+F-standin-drop-stopped. Named test `standin_stopped_stays_for_sixty_seconds`. Planted exit 101 in 1.498 s. Restored exit 0 in 1.225 s. Assertion: `src/../standin-runtime/mod.rs:984:9` the stand-in lists a stopped instance at instant 0
+
+Old:
+
+```text
+            Some(at) => instant.saturating_sub(at) < FAILED_KEEP_SECS,
+```
+
+New:
+
+```text
+            Some(at) => {
+                instant.saturating_sub(at) > 0
+                    && instant.saturating_sub(at) < FAILED_KEEP_SECS
+            },
+```
+
+F-standin-keep-stopped. Named test `standin_stopped_stays_for_sixty_seconds`. Planted exit 101 in 1.736 s. Restored exit 0 in 1.489 s. Assertion: `src/../standin-runtime/mod.rs:1764:9` the stand-in omits a stopped instance at instant 60 and keeps the running sibling
+
+Old:
+
+```text
+            Some(at) => instant.saturating_sub(at) < FAILED_KEEP_SECS,
+```
+
+New:
+
+```text
+            Some(at) => instant.saturating_sub(at) <= FAILED_KEEP_SECS,
+```
+
+F-standin-stop-body. Named test `standin_stop_body_is_reason_only`. Planted exit 101 in 1.317 s. Restored exit 0 in 1.038 s. Assertion: `src/../standin-runtime/mod.rs:916:9` the stand-in refuses this stop body: stop body needs reason: Ok(Null)
+
+Old:
+
+```text
+fn stop_reason(body: &Value) -> Result<&str, (u16, String)> {
+    let Some(object) = body.as_object() else {
+```
+
+New:
+
+```text
+fn stop_reason(body: &Value) -> Result<&str, (u16, String)> {
+    return Ok("stop one");
+    let Some(object) = body.as_object() else {
+```
+
+F-standin-stop-unknown. Named test `standin_unknown_stop_is_refused`. Planted exit 101 in 1.353 s. Restored exit 0 in 1.371 s. Assertion: `src/../standin-runtime/mod.rs:915:9` the stand-in refuses an unknown stop: Ok(Null)
+
+Old:
+
+```text
+        let Some(index) = self.instances.iter().position(|instance| instance.id == id) else {
+            return Err(unknown_instance(id));
+        };
+```
+
+New:
+
+```text
+        let Some(index) = self.instances.iter().position(|instance| instance.id == id) else {
+            return Ok(());
+        };
+```
+
+F-standin-stop-failed. Named test `standin_stop_refuses_a_failed_instance`. Planted exit 101 in 1.787 s. Restored exit 0 in 0.993 s. Assertion: `src/../standin-runtime/mod.rs:918:9` the stand-in refuses to stop a failed instance: Ok(Null)
+
+Old:
+
+```text
+        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
+            return Err(not_live(phase));
+        }
+```
+
+New:
+
+```text
+        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
+            self.instances[index].phase = ResidentStatus::Stopped;
+            self.instances[index].cause = format!("stopped: {reason}");
+            self.instances[index].ended_at = Some(instant);
+            return Ok(());
+        }
+```
+
+F-standin-stop-then-start. Named test `standin_stop_during_start_blocks_finish`. Planted exit 101 in 2.149 s. Restored exit 0 in 2.424 s. Assertion: `src/../standin-runtime/mod.rs:1872:9` the stand-in refuses finish_start after a stop during start: Ok(())
+
+Old:
+
+```text
+        if matches!(
+            instance.phase,
+            ResidentStatus::Stopped | ResidentStatus::Stopping
+        ) {
+            return Err(not_live(instance.phase));
+        }
+```
+
+New:
+
+```text
+        if matches!(
+            instance.phase,
+            ResidentStatus::Stopped | ResidentStatus::Stopping
+        ) {
+            let (phase, cause, ended_at) = apply_start(&instance.start, instant);
+            instance.phase = phase;
+            instance.cause = cause;
+            instance.ended_at = ended_at;
+            return Ok(());
+        }
+```
+
+F-standin-stop-twice. Named test `standin_second_stop_is_refused`. Planted exit 101 in 1.341 s. Restored exit 0 in 1.660 s. Assertion: `src/../standin-runtime/mod.rs:919:9` the stand-in refuses a second stop: Ok(Null)
+
+Old:
+
+```text
+        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
+            return Err(not_live(phase));
+        }
+```
+
+New:
+
+```text
+        if phase == ResidentStatus::Stopped {
+            self.instances[index].cause.clear();
+            return Ok(());
+        }
+        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
+            return Err(not_live(phase));
+        }
+```
+
+F-standin-client-stop. Named test `standin_client_cannot_stop`. Planted exit 101 in 1.238 s. Restored exit 0 in 1.033 s. Assertion: `src/../standin-runtime/mod.rs:918:9` the stand-in refuses a client stop: Ok(Null)
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let reason = stop_reason(body)?;
+```
+
+New:
+
+```text
+        if matches!(caller, Caller::Client { .. }) {
+            return Ok(Value::Null);
+        }
+        require_shell(caller)?;
+        let reason = stop_reason(body)?;
+```
+
+F-standin-stop-body-object. Named test `standin_stop_body_is_reason_only`. Planted exit 101 in 1.808 s. Restored exit 0 in 1.834 s. Assertion: `src/../standin-runtime/mod.rs:915:9` the stand-in refuses this stop body: stop body needs reason: Ok(Null)
+
+Old:
+
+```text
+    let Some(object) = body.as_object() else {
+        return Err((400, "stop body needs reason".to_owned()));
+    };
+```
+
+New:
+
+```text
+    let Some(object) = body.as_object() else {
+        return Ok("stop one");
+    };
+```
+
+F-standin-stop-body-missing. Named test `standin_stop_body_is_reason_only`. Planted exit 101 in 1.630 s. Restored exit 0 in 1.494 s. Assertion: `src/../standin-runtime/mod.rs:915:9` the stand-in refuses this stop body: stop body misses reason: Ok(Null)
+
+Old:
+
+```text
+    reason.ok_or_else(|| (400, "stop body misses reason".to_owned()))
+```
+
+New:
+
+```text
+    Ok(reason.unwrap_or("stop one"))
+```
+
+F-standin-stop-body-type. Named test `standin_stop_body_is_reason_only`. Planted exit 101 in 1.887 s. Restored exit 0 in 1.840 s. Assertion: `src/../standin-runtime/mod.rs:915:9` the stand-in refuses this stop body: stop reason must be a string: Ok(Null)
+
+Old:
+
+```text
+    if reason_not_string {
+        return Err((400, "stop reason must be a string".to_owned()));
+    }
+```
+
+New:
+
+```text
+    if reason_not_string {
+        return Ok("stop one");
+    }
+```
+
+F-standin-stop-body-empty. Named test `standin_stop_body_is_reason_only`. Planted exit 101 in 2.961 s. Restored exit 0 in 5.308 s. Assertion: `src/../standin-runtime/mod.rs:912:9` the stand-in refuses this stop body: stop needs a reason: Ok(Null)
+
+Old:
+
+```text
+            Value::String(text) if text.is_empty() => {
+                return Err((400, "stop needs a reason".to_owned()));
+            }
+            Value::String(text) => reason = Some(text.as_str()),
+```
+
+New:
+
+```text
+            Value::String(text) => reason = Some(text.as_str()),
+```
+
+F-standin-stop-body-extra. Named test `standin_stop_body_is_reason_only`. Planted exit 101 in 4.834 s. Restored exit 0 in 2.784 s. Assertion: `src/../standin-runtime/mod.rs:915:9` the stand-in refuses this stop body: stop body rejects cid: Ok(Null)
+
+Old:
+
+```text
+        if key != "reason" {
+            return Err((400, format!("stop body rejects {key}")));
+        }
+```
+
+New:
+
+```text
+        if key != "reason" {
+            continue;
+        }
+```
+
+F-standin-stop-body-before-shell. Named test `standin_client_cannot_stop`. Planted exit 101 in 1.294 s. Restored exit 0 in 1.850 s. Assertion: `src/../standin-runtime/mod.rs:915:9` the stand-in refuses a client stop when the body is not an object: Err((400, "stop body needs reason"))
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let reason = stop_reason(body)?;
+```
+
+New:
+
+```text
+        let reason = stop_reason(body)?;
+        require_shell(caller)?;
+```
+
+F-standin-stop-id-before-shell. Named test `standin_client_cannot_stop`. Planted exit 101 in 1.902 s. Restored exit 0 in 1.842 s. Assertion: `src/../standin-runtime/mod.rs:918:9` the stand-in refuses a client stop of an unknown id: Err((400, "unknown instance: component-9"))
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let reason = stop_reason(body)?;
+```
+
+New:
+
+```text
+        if !self.instances.iter().any(|instance| instance.id == id) {
+            return Err(unknown_instance(id));
+        }
+        require_shell(caller)?;
+        let reason = stop_reason(body)?;
+```
+
+F-standin-stop-body-mutates-cause. Named test `standin_stop_body_is_reason_only`. Planted exit 101 in 1.505 s. Restored exit 0 in 0.963 s. Assertion: `src/../standin-runtime/mod.rs:990:9` the stand-in leaves the running instance unchanged
+
+Old:
+
+```text
+        let reason = stop_reason(body)?;
+```
+
+New:
+
+```text
+        let reason = match stop_reason(body) {
+            Ok(reason) => reason,
+            Err(err) => {
+                if let Some(instance) = self.instances.iter_mut().find(|instance| instance.id == id)
+                {
+                    instance.cause = "mutated".to_owned();
+                }
+                return Err(err);
+            }
+        };
+```
+
+F-standin-stop-body-mutates-grant. Named test `standin_stop_body_is_reason_only`. Planted exit 101 in 1.268 s. Restored exit 0 in 0.957 s. Assertion: `src/../standin-runtime/mod.rs:1523:13` the stand-in leaves the live grant unchanged
+
+Old:
+
+```text
+        let reason = stop_reason(body)?;
+```
+
+New:
+
+```text
+        let reason = match stop_reason(body) {
+            Ok(reason) => reason,
+            Err(err) => {
+                if let Some(grant) = self.grants.iter_mut().find(|grant| grant.life == Life::Live) {
+                    grant.life = Life::Revoked;
+                }
+                return Err(err);
+            }
+        };
+```
+
+F-standin-stop-body-mutates-id. Named test `standin_stop_body_is_reason_only`. Planted exit 101 in 1.554 s. Restored exit 0 in 1.101 s. Assertion: `src/../standin-runtime/mod.rs:994:9` the stand-in does not spend an id on a refused stop
+
+Old:
+
+```text
+        let reason = stop_reason(body)?;
+```
+
+New:
+
+```text
+        let reason = match stop_reason(body) {
+            Ok(reason) => reason,
+            Err(err) => {
+                self.next_id += 1;
+                return Err(err);
+            }
+        };
+```
+
+F-standin-stop-unknown-mutates-cause. Named test `standin_unknown_stop_is_refused`. Planted exit 101 in 2.126 s. Restored exit 0 in 1.530 s. Assertion: `src/../standin-runtime/mod.rs:984:9` the stand-in leaves the known instance unchanged
+
+Old:
+
+```text
+        let Some(index) = self.instances.iter().position(|instance| instance.id == id) else {
+            return Err(unknown_instance(id));
+        };
+```
+
+New:
+
+```text
+        let Some(index) = self.instances.iter().position(|instance| instance.id == id) else {
+            if let Some(instance) = self.instances.first_mut() {
+                instance.cause = "mutated".to_owned();
+            }
+            return Err(unknown_instance(id));
+        };
+```
+
+F-standin-stop-unknown-mutates-grant. Named test `standin_unknown_stop_is_refused`. Planted exit 101 in 1.459 s. Restored exit 0 in 1.352 s. Assertion: `src/../standin-runtime/mod.rs:1554:9` the stand-in leaves the seeded grant live
+
+Old:
+
+```text
+        let Some(index) = self.instances.iter().position(|instance| instance.id == id) else {
+            return Err(unknown_instance(id));
+        };
+```
+
+New:
+
+```text
+        let Some(index) = self.instances.iter().position(|instance| instance.id == id) else {
+            if let Some(grant) = self.grants.iter_mut().find(|grant| grant.life == Life::Live) {
+                grant.life = Life::Revoked;
+            }
+            return Err(unknown_instance(id));
+        };
+```
+
+F-standin-stop-unknown-mutates-id. Named test `standin_unknown_stop_is_refused`. Planted exit 101 in 1.757 s. Restored exit 0 in 1.447 s. Assertion: `src/../standin-runtime/mod.rs:989:9` the stand-in does not spend an id on a refused stop
+
+Old:
+
+```text
+        let Some(index) = self.instances.iter().position(|instance| instance.id == id) else {
+            return Err(unknown_instance(id));
+        };
+```
+
+New:
+
+```text
+        let Some(index) = self.instances.iter().position(|instance| instance.id == id) else {
+            self.next_id += 1;
+            return Err(unknown_instance(id));
+        };
+```
+
+F-standin-stop-failed-mutates-cause. Named test `standin_stop_refuses_a_failed_instance`. Planted exit 101 in 1.862 s. Restored exit 0 in 1.668 s. Assertion: `src/../standin-runtime/mod.rs:982:9` the stand-in keeps the failed cause
+
+Old:
+
+```text
+        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
+            return Err(not_live(phase));
+        }
+```
+
+New:
+
+```text
+        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
+            self.instances[index].cause = "mutated".to_owned();
+            return Err(not_live(phase));
+        }
+```
+
+F-standin-stop-failed-mutates-grant. Named test `standin_stop_refuses_a_failed_instance`. Planted exit 101 in 1.390 s. Restored exit 0 in 1.317 s. Assertion: `src/../standin-runtime/mod.rs:1592:9` the stand-in leaves a live grant on a refused stop
+
+Old:
+
+```text
+        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
+            return Err(not_live(phase));
+        }
+```
+
+New:
+
+```text
+        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
+            if let Some(grant) = self.grants.iter_mut().find(|grant| grant.life == Life::Live) {
+                grant.life = Life::Revoked;
+            }
+            return Err(not_live(phase));
+        }
+```
+
+F-standin-stop-failed-mutates-id. Named test `standin_stop_refuses_a_failed_instance`. Planted exit 101 in 2.381 s. Restored exit 0 in 1.807 s. Assertion: `src/../standin-runtime/mod.rs:989:9` the stand-in does not spend an id on a refused stop
+
+Old:
+
+```text
+        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
+            return Err(not_live(phase));
+        }
+```
+
+New:
+
+```text
+        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
+            self.next_id += 1;
+            return Err(not_live(phase));
+        }
+```
+
+F-standin-stop-first-grant. Named test `standin_stop_revokes_that_sessions_grants`. Planted exit 101 in 1.548 s. Restored exit 0 in 1.578 s. Assertion: `src/../standin-runtime/mod.rs:1633:9` the stand-in revokes every live grant of that session
+
+Old:
+
+```text
+    fn revoke_live(&mut self, session_id: &str) {
+        for grant in &mut self.grants {
+            if grant.session_id == session_id && grant.life == Life::Live {
+                grant.life = Life::Revoked;
+            }
+        }
+    }
+```
+
+New:
+
+```text
+    fn revoke_live(&mut self, session_id: &str) {
+        if let Some(grant) = self
+            .grants
+            .iter_mut()
+            .find(|grant| grant.session_id == session_id && grant.life == Life::Live)
+        {
+            grant.life = Life::Revoked;
+        }
+    }
+```
+
+F-standin-stop-overwrite-life. Named test `standin_stop_revokes_that_sessions_grants`. Planted exit 101 in 2.304 s. Restored exit 0 in 1.404 s. Assertion: `src/../standin-runtime/mod.rs:1636:9` the stand-in leaves an exhausted grant exhausted
+
+Old:
+
+```text
+            if grant.session_id == session_id && grant.life == Life::Live {
+                grant.life = Life::Revoked;
+            }
+```
+
+New:
+
+```text
+            if grant.session_id == session_id {
+                grant.life = Life::Revoked;
+            }
+```
+
+F-standin-stop-ends-session. Named test `standin_stop_revokes_that_sessions_grants`. Planted exit 101 in 1.618 s. Restored exit 0 in 1.684 s. Assertion: `src/../standin-runtime/mod.rs:1627:9` the stand-in revokes that session's live grant
+
+Old:
+
+```text
+                grant.life = Life::Revoked;
+```
+
+New:
+
+```text
+                grant.life = Life::Revoked;
+                grant.session_ended = true;
+```
+
+F-standin-stop-age-zero. Named test `standin_stopped_stays_for_sixty_seconds`. Planted exit 101 in 1.535 s. Restored exit 0 in 1.636 s. Assertion: `src/../standin-runtime/mod.rs:981:9` the stand-in lists a stopped instance at the stop instant
+
+Old:
+
+```text
+            Some(at) => instant.saturating_sub(at) < FAILED_KEEP_SECS,
+```
+
+New:
+
+```text
+            Some(_at) => instant < FAILED_KEEP_SECS,
+```
+
+F-standin-stop-starting-keeps-grant. Named test `standin_stop_during_start_blocks_finish`. Planted exit 101 in 1.741 s. Restored exit 0 in 1.393 s. Assertion: `src/../standin-runtime/mod.rs:1848:9` the stand-in revokes the starting instance's live grant
+
+Old:
+
+```text
+        let session_id = self.instances[index].id.clone();
+        self.instances[index].phase = ResidentStatus::Stopped;
+        self.instances[index].cause = format!("stopped: {reason}");
+        self.instances[index].ended_at = Some(instant);
+        self.revoke_live(&session_id);
+```
+
+New:
+
+```text
+        let session_id = self.instances[index].id.clone();
+        let was_running = phase == ResidentStatus::Running;
+        self.instances[index].phase = ResidentStatus::Stopped;
+        self.instances[index].cause = format!("stopped: {reason}");
+        self.instances[index].ended_at = Some(instant);
+        if was_running {
+            self.revoke_live(&session_id);
+        }
+```
+
+F-standin-stop-starting-sibling. Named test `standin_stop_during_start_blocks_finish`. Planted exit 101 in 1.442 s. Restored exit 0 in 1.164 s. Assertion: `src/../standin-runtime/mod.rs:988:9` the stand-in leaves the starting sibling
+
+Old:
+
+```text
+        let session_id = self.instances[index].id.clone();
+        self.instances[index].phase = ResidentStatus::Stopped;
+        self.instances[index].cause = format!("stopped: {reason}");
+        self.instances[index].ended_at = Some(instant);
+        self.revoke_live(&session_id);
+```
+
+New:
+
+```text
+        let session_id = self.instances[index].id.clone();
+        self.instances[index].phase = ResidentStatus::Stopped;
+        self.instances[index].cause = format!("stopped: {reason}");
+        self.instances[index].ended_at = Some(instant);
+        for instance in &mut self.instances {
+            if instance.phase == ResidentStatus::Starting {
+                instance.phase = ResidentStatus::Stopped;
+                instance.cause = format!("stopped: {reason}");
+                instance.ended_at = Some(instant);
+            }
+        }
+        self.revoke_live(&session_id);
+```
+
+F-standin-stop-finish-already. Named test `standin_stop_sets_stopped`. Planted exit 101 in 1.426 s. Restored exit 0 in 1.407 s. Assertion: `src/../standin-runtime/mod.rs:1466:9` the stand-in refuses finish_start after a stop: Err((400, "start already returned"))
+
+Old:
+
+```text
+        if matches!(
+            instance.phase,
+            ResidentStatus::Stopped | ResidentStatus::Stopping
+        ) {
+            return Err(not_live(instance.phase));
+        }
+```
+
+New:
+
+```text
+
+```
+
+F-standin-stop-failed-finish. Named test `standin_start_returns_once`. Planted exit 101 in 1.947 s. Restored exit 0 in 1.417 s. Assertion: `src/../standin-runtime/mod.rs:1399:9` the stand-in accepts start once on a failed instance: Err((400, "instance is not live: failed"))
+
+Old:
+
+```text
+        if instance.phase != ResidentStatus::Starting {
+```
+
+New:
+
+```text
+        if instance.phase == ResidentStatus::Failed {
+            return Err(not_live(instance.phase));
+        }
+        if instance.phase != ResidentStatus::Starting {
+```
+
+F-standin-client-stop-mutates-cause. Named test `standin_client_cannot_stop`. Planted exit 101 in 1.992 s. Restored exit 0 in 2.192 s. Assertion: `src/../standin-runtime/mod.rs:986:9` the stand-in leaves the running instance after a client stop
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let reason = stop_reason(body)?;
+```
+
+New:
+
+```text
+        if let Err(err) = require_shell(caller) {
+            if let Some(instance) = self.instances.iter_mut().find(|instance| instance.id == id) {
+                instance.cause = "mutated".to_owned();
+            }
+            return Err(err);
+        }
+        let reason = stop_reason(body)?;
+```
+
+F-standin-client-stop-mutates-grant. Named test `standin_client_cannot_stop`. Planted exit 101 in 1.638 s. Restored exit 0 in 1.393 s. Assertion: `src/../standin-runtime/mod.rs:2014:13` the stand-in leaves the live grant after a client stop
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let reason = stop_reason(body)?;
+```
+
+New:
+
+```text
+        if let Err(err) = require_shell(caller) {
+            if let Some(grant) = self.grants.iter_mut().find(|grant| grant.life == Life::Live) {
+                grant.life = Life::Revoked;
+            }
+            return Err(err);
+        }
+        let reason = stop_reason(body)?;
+```
+
+F-standin-client-stop-mutates-id. Named test `standin_client_cannot_stop`. Planted exit 101 in 1.939 s. Restored exit 0 in 1.398 s. Assertion: `src/../standin-runtime/mod.rs:991:9` the stand-in does not spend an id on a refused stop
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let reason = stop_reason(body)?;
+```
+
+New:
+
+```text
+        if let Err(err) = require_shell(caller) {
+            self.next_id += 1;
+            return Err(err);
+        }
+        let reason = stop_reason(body)?;
+```
+
+### Gates
+
+The shared heavy-build lease was busy for the first gate (`fcntl.flock` waited 141.833 s) and free for the rerun (acquired in 0.000 s). It was released after the commands. `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`. Both test commands stayed inside 600 seconds. The volume had about 31 GiB free. The first test failure was a process leftover on `granted_read_succeeds` (`paths:["stdout-111"]`), not the `ca.key` / `device.key` / `tls.key` pair. The rerun passed.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.14 seconds.
+- First `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, real 295.46 seconds. The lib target passed 26 tests. The effects target then failed `granted_read_succeeds` after 56 passed and 12 ignored, in 255.76 seconds. Fail-fast stopped the later targets.
+- Rerun of that test command: exit 0, real 549.61 seconds. 137 passed, 0 failed, 14 ignored. The lib target passed 26 tests. The effects target passed 57 tests, with 12 ignored, in 359.91 seconds. The runtime target passed 10 tests, with 2 ignored, in 25.82 seconds. The report target passed 23 tests. The harness target passed 9 tests. The artifact target passed 7 tests.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `standin-runtime/mod.rs:235` `delete_capsule` takes the instance id. It does not name code or content by a URL. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `standin-runtime/mod.rs:248` reads the stored instant. The method reads no clock, file, network, or env. |
+| 3. A second path or a second copy of one rule? | No | `standin-runtime/mod.rs:451` `unknown_instance` and `:456` `not_live` are the one copy of each reason. `:443` is the one age compare for `failed` and `stopped`. `require_shell` at `:369` is the one client refusal. `keep` at `:331` is the one life filter. |
+| 4. Runtime core grows? | No | The edit is `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and `LOG.md`. `src/lib.rs:9` still points the lab module there. `elastos/` is unchanged. |
+| 5. Refusals deny by default with a clear reason? | Yes | `standin-runtime/mod.rs:241` calls `require_shell` before the body or the id. `stop_reason` at `:464` returns 400. Unknown and not-live return 400. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `standin-runtime/mod.rs:265` `revoke_live` stays in the stand-in. This change adds no capsule import. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:1449` `standin_stop_sets_stopped` is the first new stop test. Each plant above fails its named assertion and passes after restore. |
+| 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:268` writes `Life::Revoked` and does not admit a path. A refused stop leaves the grant `Live`. |
+
+### Round 2 gate
+
+The supervisor suite failed `process_isolation::runaway_trap_is_bounded_while_siblings_finish` on a process leftover whose path was `home/Library/Application Support/elastos/host-process.lock`. The stand-in source stayed as restored. The shared heavy-build lease was held for both local commands (`fcntl.flock` waited 294.058 s, then 2.768 s) and released after each command. `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`. The volume had about 30 GiB free. Both test commands stayed inside 600 seconds.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.31 seconds, then exit 0, real 0.33 seconds.
+- First local rerun of `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, real 342.50 seconds. The lib target passed 26 tests. The effects target failed `agent_cannot_read_human_space_without_grant` on the same `host-process.lock` leftover and `grants::tests::runtime_root_refusal_makes_no_shell_decision` with `could not bound fixture read`, after 55 passed and 12 ignored, in 261.24 seconds. Fail-fast stopped the later targets.
+- Second local rerun of that test command: exit 0, real 394.21 seconds. 137 passed, 0 failed, 14 ignored. The lib target passed 26 tests. The effects target passed 57 tests, with 12 ignored, in 256.51 seconds. `runaway_trap_is_bounded_while_siblings_finish` passed. The runtime target passed 10 tests, with 2 ignored, in 14.98 seconds. The report target passed 23 tests. The harness target passed 9 tests. The artifact target passed 7 tests.
+
+### Round 3 gate
+
+The supervisor suite failed `grant_refused_from_a_new_session` after the journey had passed. The census line was `process leftover; processes:1 paths:["stdout-81"]`. That is a harness capture, not the `ca.key` / `device.key` / `tls.key` pair. The effects target reported that failure after 56 passed and 12 ignored, in 393.31 seconds. `StandIn::delete_capsule` stayed as restored. `RUNBOOK.md` already has the one 046 paragraph at line 696, from `cb633f98e`. An extra copy of that same paragraph was removed from the worktree, so `git diff` shows no `RUNBOOK.md` change.
+
+`Operator::finish_check` still calls `census::cleanup`. `drain_capture_holders` asks for one more look only when every held path is `stdout-N` or `stderr-N`. A path that stays, a home directory, a lock file, `ca.key`, an API socket, or a temp file is refused on the first look. There is no new `falsifiers.json` id.
+
+F-standin-stop-capture-drain. Named test `common::operator::tests::capture_holder_drain_retries_a_stdout_leftover`. Planted exit 101 in 2.12 s. Restored exit 0 in 1.77 s. Assertion: `tests/common/operator.rs:227` the drain accepts a capture holder that the next look releases. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects common::operator::tests::capture_holder_drain_retries_a_stdout_leftover -- --exact`.
+
+Old:
+
+```text
+            Err(line) if capture_holder_only(&line) && attempts < CAPTURE_DRAIN_ATTEMPTS => {
+```
+
+New:
+
+```text
+            Err(line) if capture_holder_only(&line) && attempts < 0 => {
+```
+
+The shared heavy-build lease was held for each local command and released after it. `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`. The volume had about 29 GiB free. The passing test command stayed inside 600 seconds. `grant_refused_from_a_new_session` passed on every local rerun.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.14 seconds.
+- First local rerun, before the drain: exit 101, real 430.66 seconds. Lease wait 330.357 seconds. The lib target passed 26 tests. The effects target failed `grants::tests::attach_refusal_names_the_scope` with `fixture shell attach failed` where the test expects `fixture shell attach returned an invalid token`, after 56 passed and 12 ignored, in 337.16 seconds.
+- Second local rerun, before the drain: exit 101, real 514.23 seconds. Lease wait 392.827 seconds. The effects target failed `grants::tests::pending_sibling_root_is_denied_before_it_fails` with `could not bound fixture read`, after 56 passed and 12 ignored, in 407.70 seconds.
+- Third local rerun, before the drain: exit 101, real 346.82 seconds. Lease wait 293.886 seconds. The effects target failed `two_instances_overlap_with_separate_grants` on `paths:["stdout-217"]`, after the overlap journey had passed, in 252.57 seconds.
+- Passing `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` after the drain was restored: exit 0, real 324.30 seconds. Lease wait 378.346 seconds. 143 passed, 0 failed, 14 ignored. The lib target passed 26 tests. The effects target passed 60 tests, with 12 ignored, in 232.54 seconds. `grant_refused_from_a_new_session` and `two_instances_overlap_with_separate_grants` passed. The runtime target passed 13 tests, with 2 ignored, in 16.85 seconds. The report target passed 23 tests. The harness target passed 9 tests. The artifact target passed 7 tests.
