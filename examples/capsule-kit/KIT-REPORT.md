@@ -219,8 +219,9 @@ verified copy instead of carrying a second renderer.
 
 page-client.js is the one owner of launchToken and pageClient.
 The docs build copies it to `surface/browser/page-client.js`, and `the shipped client matches the kit owner`
-compares the bytes. The client imports `cut` from the sibling `docs-render.js`. The archive page still has
-its own client copy. The Photos page keeps its client copy until the Runtime's four-file gateway test allows
+compares the bytes. The client imports `cut` from the sibling `docs-render.js`.
+The archive build copies `page-client.js` to `surface/browser/page-client.js`.
+The Photos page keeps its client copy until the Runtime's four-file gateway test allows
 a fifth file.
 
 ## How to check it

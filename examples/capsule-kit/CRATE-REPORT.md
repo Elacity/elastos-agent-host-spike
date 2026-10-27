@@ -222,8 +222,8 @@ Written on 23 Oct 2026, when the Photo track moved to its own lane. The archive 
 - **The strict input-list parser** is done (task 012): one copy, `guest/src/list.rs`, used by `album.rs` and
   `shelf.rs`, with its kit tests and falsifiers.
 - **The typed blocks** (markdown to blocks) are `docs-model`, not the kit; only the text checks moved.
-- **Page code**: The docs page ships the kit `page-client.js`. The archive page and the Photos page still
-  keep their own client copies. The Photos page keeps its copy until the Runtime's four-file gateway test
+- **Page code**: The docs page ships the kit `page-client.js`. The archive page ships the kit `page-client.js`.
+  The Photos page keeps its copy until the Runtime's four-file gateway test
   allows a fifth file; the docs client imports `cut` from the kit's `docs-render.js` copy.
 - **One shared `examples/` workspace** would make native builds path-free again: a proposed slice, above.
 - **From the archive design:** M4 (lying-archive fixtures) is the app's; M5, M6 and M7 need Anders, the Runtime
