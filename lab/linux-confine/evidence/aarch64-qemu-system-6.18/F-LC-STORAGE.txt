@@ -1,7 +1,7 @@
 
 running 1 test
 test did_profile_permits_its_operations_and_refuses_the_rest ... 
-thread 'did_profile_permits_its_operations_and_refuses_the_rest' (833) panicked at tests/confine.rs:172:5:
+thread 'did_profile_permits_its_operations_and_refuses_the_rest' (832) panicked at tests/confine.rs:172:5:
 assertion `left == right` failed: storage root rights drifted
   left: 49598
  right: 16830

@@ -2,7 +2,7 @@
 # Host exit must be non-zero.
 
 # GENERATED from this guest run. Not a hand write-up.
-# nonce=636bafe285dfdf6105ca4525f5b1a09f
+# nonce=637aa807dd10d718c7b74d7e1a79faca
 # source=/workspace/lab/linux-confine/evidence/aarch64-qemu-system-6.18-fail-closed
 # mode=fail-closed
 # host_exit=1
@@ -27,7 +27,7 @@ Never native aarch64. Never Jetson.
 
 ## Guest markers
 
-nonce=636bafe285dfdf6105ca4525f5b1a09f
+nonce=637aa807dd10d718c7b74d7e1a79faca
 guest_exit=1
 qemu_exit=0
 
@@ -37,21 +37,3 @@ socketpair(AF_UNIX) stays the named C9 departure.
 
 This is an emulated CPU (qemu-system TCG) with a real aarch64 kernel.
 It is not a Jetson and not any other aarch64 board.
-
-## Host check FAILED
-
-- elf: passed 0 != expected 6
-- elf: status=SHORT exit=0
-- aarch64: missing status file
-- aarch64: missing exit file
-- aarch64: passed 0 != expected 2
-- aarch64: ignored 0 != expected 1
-- aarch64: status=MISSING exit=MISSING
-- confine: missing status file
-- confine: missing exit file
-- confine: passed 0 != expected 25
-- confine: status=MISSING exit=MISSING
-- providers: missing status file
-- providers: missing exit file
-- providers: passed 0 != expected 4
-- providers: status=MISSING exit=MISSING

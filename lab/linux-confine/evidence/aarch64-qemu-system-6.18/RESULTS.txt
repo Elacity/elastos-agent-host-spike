@@ -1,5 +1,5 @@
 # GENERATED from this guest run. Not a hand write-up.
-# nonce=c11deb8b7f72f2fca90e87be325ed42e
+# nonce=18ba9f35c99288cb1a677bb9e500d062
 # source=/workspace/lab/linux-confine/evidence/aarch64-qemu-system-6.18
 # mode=full
 
@@ -34,7 +34,7 @@ Never native aarch64. Never Jetson.
 
 ## Guest markers
 
-nonce=c11deb8b7f72f2fca90e87be325ed42e
+nonce=18ba9f35c99288cb1a677bb9e500d062
 guest_exit=0
 qemu_exit=0
 

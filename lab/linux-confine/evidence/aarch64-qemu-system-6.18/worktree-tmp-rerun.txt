@@ -1,5 +1,5 @@
-# C9 r4 leftover rerun at 7ad5d7ad
-# LC_GUEST_WORK=/tmp/linux-confine-aarch64-r4
+# C9 r5 leftover rerun at 4396d77e
+# LC_GUEST_WORK=/tmp/linux-confine-aarch64-r5
 # label=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
 # qemu=QEMU emulator version 8.2.2
 # cross_cc=aarch64-linux-gnu-gcc 13.3.0
@@ -11,11 +11,14 @@
 #   guest_exit=0 qemu_exit=0
 #   work= and run_id= appended after qemu
 # fail-closed: HOST_EXIT=1 (check_rc=1)
+#   elf SHORT 0/0/0
+#   guest_exit=1 qemu_exit=0
 # LC_QEMU_TIMEOUT=2 smoke: HOST_EXIT=1 qemu_exit=137
 #   guest did not print the required TCG label
 #
-# checker: 52 passed (34 kept + 9 r4 tests + M12-M20)
+# checker: 65 passed (52 kept + r5 fixtures + M21-M25)
 # plants-r4.py: 10 CAUGHT, 0 SURVIVED
+# plants.py: 43 CAUGHT, 0 SURVIVED
 #
 # Native aarch64 / Jetson: NOT RUN
 # make-char / make-block: NOT RUN

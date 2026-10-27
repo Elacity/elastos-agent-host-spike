@@ -1,7 +1,7 @@
 
 running 1 test
 test provider_filter_refuses_socket ... 
-thread 'provider_filter_refuses_socket' (851) panicked at tests/confine.rs:448:5:
+thread 'provider_filter_refuses_socket' (850) panicked at tests/confine.rs:448:5:
 provider filter socket denial did not hold: enforced abi=7 uid=0 caps=empty nnp=1 netns=lo storage_rights=0x41be
 op=in-memory result=ok reason=no file and no socket
 op=storage-write result=ok reason=wrote under STORAGE_ROOT
@@ -63,5 +63,5 @@ failures:
 failures:
     provider_filter_refuses_socket
 
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.48s
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.58s
 

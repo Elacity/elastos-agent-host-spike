@@ -1,7 +1,7 @@
 
 running 1 test
 test did_profile_permits_its_operations_and_refuses_the_rest ... 
-thread 'did_profile_permits_its_operations_and_refuses_the_rest' (900) panicked at tests/confine.rs:179:5:
+thread 'did_profile_permits_its_operations_and_refuses_the_rest' (899) panicked at tests/confine.rs:179:5:
 assertion `left == right` failed: enforced abi=7 uid=0 caps=empty nnp=1 netns=host storage_rights=0x41be
 op=in-memory result=ok reason=no file and no socket
 op=storage-write result=ok reason=wrote under STORAGE_ROOT
@@ -70,5 +70,5 @@ failures:
 failures:
     did_profile_permits_its_operations_and_refuses_the_rest
 
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.50s
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.60s
 
