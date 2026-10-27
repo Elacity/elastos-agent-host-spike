@@ -555,6 +555,8 @@ profile does not grant".
   or a carriage return. A form feed or a vertical tab directly after `allow`
   is not a match. The baseline file scan calls that same function and keeps
   no second `(allow ` filter.
+  A line that trims to `(` and whose next line starts with `allow` and then
+  a space or a tab fails with `allow form does not close`.
 - `platform_baseline_rules_stay_narrow`: `startup-root-directory` stays
   `(allow file-read-data (literal "/"))` and `startup-sysctl` stays
   `(allow sysctl-read)`. Each pin is written in the test. A wider path or
@@ -708,7 +710,7 @@ allow_rules_trace_to_declared_rights.
 | F-cc36a | The last parenthesis of the `STORAGE_ROOT` allow is removed | `byte_different_file_at_bound_path_starts` | The launch exits 65 and the test fails because the profile did not apply. |
 | F-cc37a | `(allow file-read-data (literal "/tmp/cc-same-line-allow"))` is written after `(deny network*)` on the same line | `allow_rules_trace_to_declared_rights` | That allow has no declared right and no platform baseline. |
 | F-cc38a | `(allow` is written on its own line after the root pin, then `file-read* (literal "/tmp/cc-unclosed"))` on the next line | `platform_baseline_rules_stay_narrow` | The allow form does not close. |
-| F-cc39a | A line `(` is written after the root pin, then `allow file-read* (literal "/tmp/cc-split-allow"))` on the next line | `platform_baseline_rules_stay_narrow` | The allow form does not close. |
+| F-cc39a | A line `(` is written after the root pin, then `allow file-read* (literal "/tmp/cc-split-allow"))` on the next line | `platform_baseline_rules_stay_narrow` and `allow_rules_trace_to_declared_rights` | The allow form does not close. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
