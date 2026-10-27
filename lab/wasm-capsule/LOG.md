@@ -1384,3 +1384,41 @@
   --locked --workspace` (155 passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools
   -- --check` exit 0. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and
   `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, Task 053 (the capsule shape test reads imports through the one audit reader; P3, P10, P11). Base
+  `c305ca5a2f9e3c36cab728c9c3b28b572e4821ab`. `built_capsule_has_the_required_wasm_shape` (`tests/shape.rs`) first
+  asserts `audit(&bytes, &[])`, its refusal mapped to its Display string, equals `Ok(Vec::new())`, with the message
+  "the capsule must import nothing: the one audit reader's import list or refusal is {imports:?}"; its doc says the
+  imports are read only through `wasm_capsule_audit::audit`, the lab's one module reader (P10). The shape reader
+  (`tests/common/wasm_shape.rs`) reads no imports: `Shape` lost its import count field, the section-2 arm is
+  `2 => return Err(IMPORT_SECTION_REFUSED.to_string())` with the one reason "the shape reader reads no imports: a
+  module's imports are read only through wasm_capsule_audit::audit", `imported_function_count` and `read_limits` are
+  gone, and `resolve_digest` maps the `digest` index straight to the defined functions. Module and
+  `is_the_required_capsule_shape` docs no longer say it checks "imports nothing". `tests/wasm_shape.rs`: the crafted
+  required-shape test lost its import count assert; `counts_an_import_and_is_not_the_required_shape` became
+  `refuses_a_module_with_an_import_section`, which asserts that exact reason on the same one-import (`env.f`) module.
+  Hand proof (acceptance 4; `tests/common/wasm_shape.rs` is no recovery target): the file's sha256 `a2c614b37fc0...`
+  was saved, line 184 edited to `            2 => {}` with `sed`, and `cargo test --locked --test wasm_shape
+  refuses_a_module_with_an_import_section` exited 101, panicking at `tests/wasm_shape.rs:91:5` with "assertion `left
+  == right` failed: a module with an import section must be refused, not read" (`left: Ok(Shape { is_core_wasm:
+  true, digest: None })`, `right: Err("the shape reader reads no imports: a module's imports are read only through
+  wasm_capsule_audit::audit")`). The saved copy was put back, and the sha256 again read
+  `a2c614b37fc0fdc42f51bf24f1b8f273d9f3c577c7cb9760b2dd5a4effa7f81f` (the file equals its pre-proof state). Canonical
+  runner, from the repo root, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py --from
+  lab/wasm-capsule/falsifiers.json F-WC1-IMPORT F-WC1-SIG`: "baseline: 1 named tests pass without an edit, 0 do not",
+  "F-WC1-IMPORT CAUGHT", "F-WC1-SIG CAUGHT", "summary: 2 CAUGHT of 2", exit 0; `git status --short` then listed only
+  this task's files, with no `*.falsify-original` left. F-WC1-IMPORT's assertion, quoted by running the named test
+  inside the runner's own `falsify.Mutation` (exit 101; `capsule/src/lib.rs` sha256 `4b37b0da16d2...` before and
+  after): `tests/shape.rs:25:5` "the capsule must import nothing: the one audit reader's import list or refusal is
+  Err("undeclared import env.host_entropy")" (`left: Err("undeclared import env.host_entropy")`, `right: Ok([])`), so
+  the audit assertion catches it, not the shape reader's refusal and not a panic in `read`. `falsifiers.json` is
+  unchanged. ADOPTION's shape-reader item now says it checks core Wasm and the `digest` signature, reads no imports,
+  and the zero-import check reads through `audit/` (task 053); its open item for Flint is gone. README: the layout
+  lines and the named-test list say the same; "## Falsifiers" names the hand proof (task 053's one, kept out of the
+  runner-caught total), hand-proven 68 -> 69, total (188) and runner-caught (124) unchanged, and no label changes
+  (F-WC1-IMPORT and F-WC1-SIG stay in wc-001's hand-proven count). From `lab/wasm-capsule/`, `grep -n` for the removed
+  field name `-r . --exclude-dir=target` printed nothing (exit 1). Gates in `lab/wasm-capsule/`, with
+  `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (128 passed, 3 ignored, 0 failed), `cargo test
+  --locked --workspace` (155 passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools
+  -- --check` exit 0. No dependency, `Cargo.toml`, `Cargo.lock`, `capsule/`, `tools/`, `audit/` or `falsifiers.json`
+  change. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn
+  --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
