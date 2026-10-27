@@ -1,7 +1,4 @@
 import { createHomeNavigationClient } from "/apps/home/home-navigation-client.js";
-import {
-  createHomeClipboardClient,
-} from "/apps/home/home-clipboard-client.js?v=home-20260726a";
 
 const state = {
   homeToken: new URLSearchParams(window.location.hash.replace(/^#/, "")).get("home_token") || "",
@@ -34,12 +31,6 @@ const DOCUMENTS_WINDOW_CLOSE_REQUEST_TYPE =
   "elastos.documents.window-close.request/v1";
 const DOCUMENTS_WINDOW_CLOSE_RESULT_TYPE =
   "elastos.documents.window-close.result/v1";
-const homeClipboard = createHomeClipboardClient({
-  targetId: "documents",
-  homeOrigin,
-  homeToken: state.homeToken,
-});
-homeClipboard.start();
 
 const elements = {
   documentsShell: document.getElementById("documents-shell"),
@@ -61,7 +52,6 @@ const elements = {
   findNext: document.getElementById("find-next"),
   findClose: document.getElementById("find-close"),
   contextMenu: document.getElementById("context-menu"),
-  copyPublishedLink: document.getElementById("copy-published-link"),
   editor: document.getElementById("editor"),
   preview: document.getElementById("preview"),
   previewPanel: document.getElementById("preview-panel"),
@@ -717,7 +707,6 @@ function openContextMenu(x, y, docDid) {
     actions.push({ action: "duplicate", label: "Duplicate" });
     if (documentItem.latest_published_cid) {
       actions.push({ action: "unpublish", label: "Unpublish" });
-      actions.push({ action: "copy-published-link", label: "Copy Published Link" });
     } else {
       actions.push({ action: "publish", label: "Publish" });
     }
@@ -1061,33 +1050,6 @@ function setDirty(dirty) {
   renderDocumentsList();
 }
 
-function setPublishedUri(uri) {
-  const cleanUri = typeof uri === "string" ? uri.trim() : "";
-  if (!cleanUri) {
-    elements.copyPublishedLink.classList.add("hidden");
-    elements.copyPublishedLink.disabled = true;
-    delete elements.copyPublishedLink.dataset.copyUri;
-    return;
-  }
-  elements.copyPublishedLink.classList.remove("hidden");
-  elements.copyPublishedLink.disabled = false;
-  elements.copyPublishedLink.dataset.copyUri = cleanUri;
-}
-
-async function copyTextToClipboard(text) {
-  await homeClipboard.writeText(text, { purpose: "resource.uri" });
-}
-
-async function copyPublishedUri(uri) {
-  const cleanUri = typeof uri === "string" ? uri.trim() : "";
-  if (!cleanUri.startsWith("elastos://")) {
-    return;
-  }
-  await copyTextToClipboard(cleanUri);
-  setStatus("Copied link.");
-  scheduleStatusClear();
-}
-
 function renderHistory() {
   elements.historyPanel.innerHTML = "";
   const revisions = state.current && Array.isArray(state.current.publish_history)
@@ -1100,20 +1062,10 @@ function renderHistory() {
   revisions.forEach((revision, index) => {
     const item = window.document.createElement("div");
     item.className = "history-item";
-    const uri = "elastos://" + revision.cid;
     item.innerHTML =
       '<span class="history-kicker">Revision ' + escapeHtml(String(revisions.length - index)) + "</span>" +
       '<span class="history-title">' + escapeHtml(shortCid(revision.cid)) + "</span>" +
-      '<span class="history-meta">' + escapeHtml(formatTime(revision.published_at)) + "</span>" +
-      '<button class="history-link" type="button" data-copy-uri="' + escapeHtml(uri) + '">Copy link</button>';
-    item.querySelector(".history-link").addEventListener("click", async (event) => {
-      try {
-        await copyPublishedUri(event.currentTarget.dataset.copyUri || "");
-      } catch (error) {
-        console.error("documents copy history link failed", error);
-        setStatus(readableDocumentsError(error, "Copy failed."), "warning");
-      }
-    });
+      '<span class="history-meta">' + escapeHtml(formatTime(revision.published_at)) + "</span>";
     elements.historyPanel.appendChild(item);
   });
 }
@@ -1156,7 +1108,6 @@ function renderCurrentDocument() {
     elements.editor.value = "";
     elements.editor.disabled = true;
     elements.preview.innerHTML = '<div class="empty-state">Create or open a document.</div>';
-    setPublishedUri("");
     renderHistory();
     renderOutline([]);
     setStatus("No document selected.");
@@ -1169,12 +1120,6 @@ function renderCurrentDocument() {
   elements.titleInput.value = state.current.title;
   elements.editor.value = state.current.body;
   refreshPreviewFromEditor();
-
-  if (state.current.latest_published_cid) {
-    setPublishedUri("elastos://" + state.current.latest_published_cid);
-  } else {
-    setPublishedUri("");
-  }
 
   renderHistory();
   clearStatus();
@@ -1943,11 +1888,10 @@ async function publishCurrent() {
       throw new Error("Save the document before publishing.");
     }
     setStatus("Publishing…");
-    const response = await documentsProviderApi("publish", {
+    await documentsProviderApi("publish", {
       doc_did: state.current.doc_did,
     });
     await selectDocument(state.current.doc_did, { force: true });
-    setPublishedUri(response.uri);
     setStatus("Published.");
     scheduleStatusClear();
   } catch (error) {
@@ -2054,10 +1998,6 @@ async function runContextMenuAction(action) {
   }
   if (action === "unpublish") {
     await unpublishCurrent();
-    return;
-  }
-  if (action === "copy-published-link" && current.latest_published_cid) {
-    await copyPublishedUri("elastos://" + current.latest_published_cid);
     return;
   }
   if (action === "delete") {
@@ -2539,12 +2479,3 @@ function loadLockedMode() {
     await loadShareMode();
   }
 })();
-
-elements.copyPublishedLink.addEventListener("click", async () => {
-  try {
-    await copyPublishedUri(elements.copyPublishedLink.dataset.copyUri || "");
-  } catch (error) {
-    console.error("documents copy link failed", error);
-    setStatus(readableDocumentsError(error, "Copy failed."), "warning");
-  }
-});

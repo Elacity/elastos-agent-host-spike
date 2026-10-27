@@ -30,9 +30,10 @@ assert(
   "Documents view controls must use donor icon-segment markup with exact labels and pressed state.",
 );
 assert(
-  source.includes('id="copy-published-link" class="action-secondary action-icon-button copy-link-button hidden"') &&
-    !source.includes('<span>Copy link</span>'),
-  "Documents Copy Published Link must stay an icon button.",
+  !source.includes("copy-published-link") &&
+    !source.includes("Copy Published Link") &&
+    !source.includes("Copy link"),
+  "Documents must not offer to copy a published link while a recipient cannot open it in Home.",
 );
 assert(
   source.includes('id="status-row" class="status-row hidden"') &&
@@ -127,12 +128,11 @@ assert(
   "Documents autosave must stay caught, quiet, dirty-preserving, and single-queue.",
 );
 assert(
-  source.includes('await homeClipboard.writeText(text, { purpose: "resource.uri" });') &&
-    !source.includes("navigator.clipboard") &&
+  !source.includes("navigator.clipboard") &&
     !source.includes("localStorage") &&
     !source.includes("sessionStorage") &&
     !source.includes("IndexedDB"),
-  "Documents must keep trusted Home Clipboard only and avoid browser storage authority.",
+  "Documents must avoid direct Clipboard and browser storage authority.",
 );
 
 console.log("documents-product-behavior-smoke: OK");

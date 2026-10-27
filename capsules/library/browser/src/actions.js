@@ -41,8 +41,6 @@ export function createLibraryActions({
   showObjectStatus,
   showProtectAndListDialog,
   showProperties,
-  showShareDialog,
-  showShareReceipt,
   showSharedAccessReceipt,
   startCreateObject,
   state,
@@ -436,19 +434,6 @@ export function createLibraryActions({
     setStatus(`Availability ready for ${object.name}.`);
   }
 
-  async function shareObject(object) {
-    const decision = await showShareDialog(object);
-    if (!decision) return;
-    const payload = { uri: object.uri, policy: decision.policy };
-    if (decision.policy === "recipient_scoped") {
-      payload.recipients = decision.recipients;
-    }
-    const share = await providerApi("share", payload);
-    await copyText(share.uri, "share URI");
-    showShareReceipt(share);
-    await loadCurrentFolder();
-  }
-
   async function checkMyAccess(object) {
     const principalId = principalIdFromHomeToken(state.homeToken);
     if (!principalId) {
@@ -733,7 +718,6 @@ export function createLibraryActions({
     restoreObject,
     restoreSelectedObjects,
     setClipboard,
-    shareObject,
     showStatusObject,
     trashObject,
     trashSelectedObjects,

@@ -46,13 +46,8 @@ function isDocumentPublishUnavailable(state) {
   return /publishing is unavailable/i.test(String(state?.status || ""));
 }
 
-function isPublishedDocumentLinkReady(state) {
-  return state?.ok
-    && state.status === "Published."
-    && String(state.uri || "").startsWith("elastos://")
-    && state.text === "Copy link"
-    && state.hidden === false
-    && state.disabled === false;
+function isDocumentPublished(state) {
+  return state?.ok && state.published === true;
 }
 
 async function request(path, options = {}) {
@@ -1415,45 +1410,39 @@ async function main() {
 
       const published = await clickInFrame(tabId, "documents", "#publish-button");
       assert(published.ok, "Documents Publish action was not clickable", published);
-      let publishedLink = null;
+      let publishState = null;
       const publishResolved = await waitFor(async () => {
-        publishedLink = await frameState(tabId, "documents", `({
+        publishState = await frameState(tabId, "documents", `({
           ok: true,
           status: doc.querySelector("#status-text")?.textContent?.trim() || "",
-          uri: doc.querySelector("#copy-published-link")?.dataset.copyUri || "",
-          text: doc.querySelector("#copy-published-link")?.textContent?.trim() || "",
-          hidden: doc.querySelector("#copy-published-link")?.classList.contains("hidden") ?? true,
-          disabled: doc.querySelector("#copy-published-link")?.disabled ?? true,
+          published: !!doc.querySelector(".document-list-item.active.published"),
         })`);
-        return isPublishedDocumentLinkReady(publishedLink) || isDocumentPublishUnavailable(publishedLink);
+        return isDocumentPublished(publishState) || isDocumentPublishUnavailable(publishState);
       }, 45_000, 1000);
-      if (isDocumentPublishUnavailable(publishedLink)) {
+      if (isDocumentPublishUnavailable(publishState)) {
         const deletedLocal = await deleteDocumentWorkingCopy(tabId, savedDocument.activeDocDid);
         assert(deletedLocal.ok, "Documents smoke could not remove its local working copy", deletedLocal);
-        assert(!REQUIRE_DOCUMENT_PUBLISH, "Documents publishing is unavailable in strict publish mode", publishedLink);
-        throw new SkipCase("document publishing is unavailable on this device", publishedLink);
+        assert(!REQUIRE_DOCUMENT_PUBLISH, "Documents publishing is unavailable in strict publish mode", publishState);
+        throw new SkipCase("document publishing is unavailable on this device", publishState);
       }
-      assert(publishResolved && isPublishedDocumentLinkReady(publishedLink), "Documents did not publish an elastos:// revision", publishedLink);
+      assert(publishResolved && isDocumentPublished(publishState), "Documents did not publish a revision", publishState);
 
-      const uri = publishedLink.uri;
-      const cid = uri.slice("elastos://".length);
-      const copied = await frameState(tabId, "documents", `(() => {
-        const button = doc.querySelector("#copy-published-link");
-        if (!button) return { ok: false, reason: "missing-copy-button" };
-        button.click();
-        return { ok: true };
+      const publishedRecord = await frameState(tabId, "documents", `(async () => {
+        const homeToken = new URL(win.location.href).searchParams.get("home_token") || "";
+        const response = await fetch("/api/provider/documents/get", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-elastos-home-token": homeToken,
+          },
+          body: JSON.stringify({ doc_did: ${JSON.stringify(savedDocument.activeDocDid)} }),
+        });
+        const body = response.ok ? await response.json() : null;
+        return { ok: response.ok, cid: body?.data?.document?.latest_published_cid || "" };
       })()`);
-      assert(copied.ok, "Documents Copy link action could not be started", copied);
-      let copiedState = null;
-      const didCopy = await waitFor(async () => {
-        copiedState = await frameState(tabId, "documents", `({
-          ok: true,
-          copiedUri: doc.querySelector("#copy-published-link")?.dataset.copyUri || "",
-          status: doc.querySelector("#status-text")?.textContent?.trim() || "",
-        })`);
-        return copiedState.ok && copiedState.copiedUri === uri && copiedState.status === "Copied link.";
-      }, 4000, 250);
-      assert(didCopy, "Documents Copy link did not copy the elastos:// URI", copiedState);
+      assert(publishedRecord.ok && publishedRecord.cid, "Documents did not record the published revision", publishedRecord);
+      const cid = publishedRecord.cid;
+      const uri = "elastos://" + cid;
 
       await openShellTarget(tabId, "chat-room");
       await waitFor(async () => {

@@ -27,8 +27,6 @@ function makeActions(overrides = {}) {
     showObjectStatus() {},
     showProtectAndListDialog: async () => false,
     showProperties() {},
-    showShareDialog() {},
-    showShareReceipt() {},
     showSharedAccessReceipt() {},
     startCreateObject() {},
     state: {},
@@ -61,8 +59,8 @@ test("Library routes identifiers and resource URIs through distinct closed write
     "resource.identifier",
   );
   await actions.copyText(
-    "elastos://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
-    "published link",
+    "localhost://Users/smoke/Documents/Guide.md",
+    "object URI",
     "resource.uri",
   );
 
@@ -70,11 +68,11 @@ test("Library routes identifiers and resource URIs through distinct closed write
     "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",
   ]);
   assert.deepEqual(uris, [
-    "elastos://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+    "localhost://Users/smoke/Documents/Guide.md",
   ]);
   assert.deepEqual(statuses, [
     "Copied content CID.",
-    "Copied published link.",
+    "Copied object URI.",
   ]);
   await assert.rejects(
     actions.copyText("arbitrary text", "value", "browser.text"),

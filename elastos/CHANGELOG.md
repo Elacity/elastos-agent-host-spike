@@ -21,6 +21,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
   opens from such a link. The gateway no longer keeps its own copy of what it
   serves, so copies saved by earlier versions are not used, and a single file
   larger than 100 MiB is refused.
+- Library no longer offers Share or Copy Published Link, and Properties no
+  longer shows a Published Link. Documents no longer offers Copy Published Link
+  or Copy link on a revision. Home cannot yet open an `elastos://` link someone
+  sends you, so it stops offering one. Publish and Unpublish still work.
 
 ### Fixed
 

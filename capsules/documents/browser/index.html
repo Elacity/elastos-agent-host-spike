@@ -624,20 +624,6 @@ a {
   stroke-linejoin: round;
 }
 
-.copy-link-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.42rem;
-  min-height: 2.35rem;
-  padding: 0 0.82rem;
-  color: var(--accent-deep);
-}
-
-.copy-link-button .action-icon {
-  width: 1rem;
-  height: 1rem;
-}
-
 .action-danger {
   border-color: rgba(255, 143, 143, 0.35);
   color: var(--danger);
@@ -989,20 +975,6 @@ a {
   font-size: 0.8rem;
 }
 
-.history-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  margin-top: 0.45rem;
-  padding: 0;
-  background: transparent;
-  color: var(--accent);
-  font-size: 0.82rem;
-  font-weight: 700;
-  text-decoration: none;
-}
-
-.history-link:hover,
 .outline-link:hover {
   text-decoration: underline;
 }
@@ -1460,8 +1432,7 @@ a {
   font-weight: 500;
 }
 
-:root[data-el-form-factor="phone"] .action-icon-button,
-:root[data-el-form-factor="phone"] .copy-link-button {
+:root[data-el-form-factor="phone"] .action-icon-button {
   width: var(--el-touch-target);
   height: var(--el-touch-target);
   min-height: var(--el-touch-target);
@@ -1556,9 +1527,6 @@ a {
                 </button>
               </div>
               <div class="toolbar-group">
-                <button id="copy-published-link" class="action-secondary action-icon-button copy-link-button hidden" type="button" aria-label="Copy Published Link" title="Copy Published Link" disabled>
-                  <svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1"></path><path d="M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20.1l1.1-1.1"></path></svg>
-                </button>
                 <button id="delete-button" class="action-secondary action-danger action-icon-button" type="button" aria-label="Delete" title="Delete">
                   <svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14"></path><path d="M9 7V5h6v2"></path><path d="M8 7l1 13h6l1-13"></path><path d="M10.5 11v5"></path><path d="M13.5 11v5"></path></svg>
                 </button>

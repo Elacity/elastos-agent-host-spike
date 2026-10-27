@@ -12,7 +12,6 @@ import {
   isTrashUri,
   isWebSpaceUri,
   parentUri,
-  publishedCid,
   viewerOptions,
 } from "./model.js";
 import { createLibraryRuntime } from "./api.js?v=library-20260711c";
@@ -145,7 +144,6 @@ import {
     let restoreObject = async () => {};
     let restoreSelectedObjects = async () => {};
     let setClipboard = () => {};
-    let shareObject = async () => {};
     let showStatusObject = async () => {};
     let trashObject = async () => {};
     let trashSelectedObjects = async () => {};
@@ -218,8 +216,6 @@ import {
       showObjectStatus,
       showProtectAndListDialog,
       showProperties,
-      showShareDialog,
-      showShareReceipt,
       showSharedAccessReceipt,
     } = createLibraryDialog({
       allVisible,
@@ -304,7 +300,6 @@ import {
       restoreObject,
       restoreSelectedObjects,
       setClipboard,
-      shareObject,
       showStatusObject,
       trashObject,
       trashSelectedObjects,
@@ -333,8 +328,6 @@ import {
       showObjectStatus,
       showProtectAndListDialog,
       showProperties,
-      showShareDialog,
-      showShareReceipt,
       showSharedAccessReceipt,
       startCreateObject,
       state,
@@ -1026,7 +1019,6 @@ import {
               actions.push(menuAction("Status", () => showStatusObject(object)));
               if (hasCapability(object, "repair")) actions.push(menuAction("Repair", () => repairObject(object)));
               if (object.shared) actions.push(menuAction("Check My Access", () => checkMyAccess(object)));
-              if (hasCapability(object, "share")) actions.push(menuAction("Share", () => shareObject(object)));
               if (hasCapability(object, "unpublish")) actions.push(menuAction("Unpublish", () => unpublishObject(object)));
           } else if (hasCapability(object, "publish")) {
             actions.push(menuAction("Publish", () => publishObject(object)));
@@ -1052,7 +1044,6 @@ import {
       }
       actions.push("-");
       const localContentCid = contentCid(object);
-      const publicCid = publishedCid(object);
       if (localContentCid) {
         actions.push(
           menuAction("Copy Content CID", () =>
@@ -1062,13 +1053,6 @@ import {
               "resource.identifier",
             )),
         );
-      }
-      if (object.published && publicCid) {
-        actions.push(menuAction("Copy Published Link", () => copyText(
-          "elastos://" + publicCid,
-          "published link",
-          "resource.uri",
-        )));
       }
       actions.push(menuAction("Properties", () => showProperties(object)));
       renderMenu(actions, x, y, [object.uri]);

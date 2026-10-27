@@ -100,7 +100,6 @@ const canonicalClientImports = Object.freeze({
   "capsules/wallet-walletconnect/browser/wallet-walletconnect.js":
     "targetId: CONNECTOR_ID",
   "capsules/library/browser/src/app.js": 'targetId: "library"',
-  "capsules/documents/browser/documents.js": 'targetId: "documents"',
   "capsules/system/browser/system.js": 'targetId: "system"',
   "capsules/chat-room/browser/chat-room.js": 'targetId: "chat-room"',
   "capsules/assistant/browser/home-agent.js": 'targetId: "assistant"',

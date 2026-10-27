@@ -522,12 +522,10 @@ async function run() {
     await page.locator(".document-list-item").first().click();
     await page.waitForFunction(() => document.getElementById("title-input")?.value === "Alpha");
     const selected = await page.evaluate(() => ({
-      copyHidden: document.getElementById("copy-published-link")?.classList.contains("hidden") || false,
-      copyText: document.getElementById("copy-published-link")?.textContent?.trim() || "",
+      copyButton: !!document.getElementById("copy-published-link"),
       titleValue: document.getElementById("title-input")?.value || "",
     }));
-    assert(!selected.copyHidden, "Published documents must expose Copy Published Link.");
-    assert(selected.copyText === "", "Copy Published Link must stay icon-only.");
+    assert(!selected.copyButton, "Published documents must not offer Copy Published Link.");
     assert(selected.titleValue === "Alpha", "Documents layout fixture must load the selected document.");
 
     await page.locator(".document-list-item").first().click({ button: "right" });
@@ -536,7 +534,7 @@ async function run() {
       nodes.map((node) => node.textContent?.trim() || ""),
     );
     assert(
-      JSON.stringify(contextItems) === JSON.stringify(["Duplicate", "Unpublish", "Copy Published Link", "Delete"]),
+      JSON.stringify(contextItems) === JSON.stringify(["Duplicate", "Unpublish", "Delete"]),
       `Documents published row context menu must stay item-aware. Got ${JSON.stringify(contextItems)}`,
     );
     await page.evaluate(() => {

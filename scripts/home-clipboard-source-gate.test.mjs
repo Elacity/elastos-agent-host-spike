@@ -23,7 +23,6 @@ const files = [
   "capsules/library/browser/src/app.js",
   "capsules/library/browser/src/actions.js",
   "capsules/library/browser/src/dialog.js",
-  "capsules/documents/browser/documents.js",
   "capsules/system/browser/system.js",
   "capsules/assistant/browser/home-agent.js",
   chat,

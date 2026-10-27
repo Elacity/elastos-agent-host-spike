@@ -1010,46 +1010,6 @@ function handleProvider(op, payload, res) {
       } : null,
     }));
   }
-  if (op === "share") {
-    const found = findObject(payload.uri);
-    if (!found) return sendJson(res, 404, JSON.stringify({ status: "error", message: "not found" }));
-    found.shared = true;
-    touch(found);
-    const recipients = Array.isArray(payload.recipients) ? payload.recipients.filter(Boolean) : [];
-    const policy = recipients.length ? "recipient_scoped" : "public_link";
-    return sendJson(res, 200, ok({
-      schema: "elastos.library.share/v1",
-      object: found,
-      uri: `elastos://${found.published_cid || "share/smoke"}`,
-      cid: found.published_cid || "share/smoke",
-      policy,
-      recipients,
-      grants: recipients.map((recipient, index) => ({
-        schema: "elastos.library.share-grant/v1",
-        grant_id: `share:smoke:${index + 1}`,
-        recipient,
-        policy,
-        key_release: {
-          schema: "elastos.library.key-release/v1",
-          required: false,
-          status: "not_required_for_plain_published_content",
-        },
-      })),
-      key_release: {
-        schema: "elastos.library.key-release/v1",
-        required: false,
-        status: "not_required_for_plain_published_content",
-      },
-      content_security: {
-        schema: "elastos.library.published-content-security/v1",
-        published_payload: "plain_content",
-        status: "not_required_for_plain_published_content",
-      },
-      availability: { status: found.availability || "local_pinned" },
-      shared_at: 1780000003,
-      object_uri: found.uri,
-    }));
-  }
   if (op === "extract_archive") {
     const found = findObject(payload.uri);
     if (!found) return sendJson(res, 404, JSON.stringify({ status: "error", message: "not found" }));
@@ -2357,13 +2317,11 @@ async function run() {
       "Compress to ZIP",
       "Status",
       "Repair",
-      "Share",
       "Unpublish",
       "Copy Content CID",
-      "Copy Published Link",
       "Properties",
     ], "published file menu");
-    excludesAll(publishedRows, ["Publish"], "published file menu");
+    excludesAll(publishedRows, ["Publish", "Share", "Copy Published Link"], "published file menu");
     await clickMenu(page, "Status");
     await page.locator(".dialog-card").filter({ hasText: "Availability" }).first().waitFor();
     await page.locator(".dialog-card details").filter({ hasText: "Technical details" }).first().locator("summary").click();
@@ -2644,54 +2602,8 @@ async function run() {
     await page.waitForFunction(() => document.querySelector("#footer-left")?.textContent?.includes("item"));
     assert(ops.some((entry) => entry.op === "publish" && entry.payload.uri.endsWith("/Guide.md")), "Publish must call publish");
     const guidePublishedRows = await openItemMenu(page, "Guide.md");
-    includesAll(guidePublishedRows, ["Status", "Repair", "Unpublish", "Share", "Copy Content CID", "Copy Published Link"], "published Guide menu");
-    await clickMenu(page, "Share");
-    await page.locator(".dialog-card").filter({ hasText: "Choose who can access this item" }).first().waitFor();
-    await page.locator(".dialog-card button").filter({ hasText: "Share" }).first().click();
-    assert(
-      ops.some((entry) => entry.op === "share" && entry.payload.uri.endsWith("/Guide.md") && entry.payload.policy === "public_link"),
-      "Share must call share with the public_link policy",
-    );
-    await page.locator(".dialog-card").filter({ hasText: "public_link" }).first().waitFor();
-    await page.locator(".dialog-card").filter({ hasText: "Recipients" }).first().waitFor();
-    assert(
-      await page.evaluate(() => window.__clipboardText) === `elastos://${SMOKE_PUBLISHED_CID}`,
-      "Share must copy the published elastos:// link",
-    );
-    await page.locator(".dialog-card button").filter({ hasText: "Copy Link" }).first().click();
-    assert(
-      await page.evaluate(() => window.__clipboardText) === `elastos://${SMOKE_PUBLISHED_CID}`,
-      "Share receipt Copy Link must copy the published elastos:// link",
-    );
-    assert(
-      await page.evaluate(() => window.__clipboardPurposes.at(-1)) ===
-        "resource.uri",
-      "Share receipt must use the resource URI Clipboard purpose",
-    );
-    await page.locator("[data-dialog-close]").click();
-
-    await openItemMenu(page, "Guide.md");
-    await clickMenu(page, "Share");
-    await page.locator(".dialog-card").filter({ hasText: "Choose who can access this item" }).first().waitFor();
-    await page.locator('input[name="sharePolicy"][value="recipient_scoped"]').check();
-    await page.locator('textarea[name="shareRecipients"]').fill("did:key:recipient-one\nperson:recipient-two");
-    await page.locator(".dialog-card button").filter({ hasText: "Share" }).first().click();
-    assert(
-      ops.some((entry) =>
-        entry.op === "share" &&
-        entry.payload.uri.endsWith("/Guide.md") &&
-        entry.payload.policy === "recipient_scoped" &&
-        entry.payload.recipients?.length === 2 &&
-        entry.payload.recipients.includes("did:key:recipient-one") &&
-        entry.payload.recipients.includes("person:recipient-two")),
-      "Recipient-scoped Share must call share with explicit recipients",
-    );
-    await page.locator(".dialog-card").filter({ hasText: "recipient_scoped" }).first().waitFor();
-    await page.locator(".dialog-card").filter({ hasText: "Grants" }).first().waitFor();
-    await page.locator(".dialog-card details").filter({ hasText: "Technical details" }).first().locator("summary").click();
-    await page.locator(".dialog-card").filter({ hasText: "Share Receipt Summary" }).first().waitFor();
-    await page.locator(".dialog-card").filter({ hasText: "not_required_for_plain_published_content" }).first().waitFor();
-    await page.locator("[data-dialog-close]").click();
+    includesAll(guidePublishedRows, ["Status", "Repair", "Unpublish", "Copy Content CID"], "published Guide menu");
+    excludesAll(guidePublishedRows, ["Share", "Copy Published Link"], "published Guide menu");
 
     await openItemMenu(page, "Guide.md");
     await clickMenu(page, "Copy Content CID");
@@ -2704,17 +2616,6 @@ async function run() {
       await page.evaluate(() => window.__clipboardPurposes.at(-1)) ===
         "resource.identifier",
       "Copy Content CID must use the identifier Clipboard purpose",
-    );
-    await openItemMenu(page, "Guide.md");
-    await clickMenu(page, "Copy Published Link");
-    assert(
-      await page.evaluate(() => window.__clipboardText) === `elastos://${SMOKE_PUBLISHED_CID}`,
-      "Copy Published Link must write the elastos:// link to clipboard",
-    );
-    assert(
-      await page.evaluate(() => window.__clipboardPurposes.at(-1)) ===
-        "resource.uri",
-      "Copy Published Link must use the resource URI Clipboard purpose",
     );
     await openItemMenu(page, "Guide.md");
     await clickMenu(page, "Unpublish");

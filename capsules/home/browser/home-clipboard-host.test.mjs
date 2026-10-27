@@ -210,7 +210,6 @@ test("closed target and purpose policy accepts only approved writes", async () =
     ["wallet-walletconnect", "wallet.address", "0x3456"],
     ["library", "resource.uri", "object:private/document-1"],
     ["library", "resource.identifier", "bafy-library-content"],
-    ["documents", "resource.uri", "elastos://bafy-document"],
     ["assistant", "transcript.markdown", "# Assistant transcript\n\n## User\n\nHello"],
     ["assistant", "message.text", "**Reply** with `code`\n\n```js\nconst x = 1;\n```"],
   ];
