@@ -3342,7 +3342,10 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
 ///
 /// Falsifier: F-cc41a makes `standin_profile` return the oracle file and
 /// ignore the declared value, so a changed declared rule still matches the
-/// oracle.
+/// oracle. F-cc48a appends
+/// `(allow file-read-data (literal "/tmp/cc-standin-extra"))` after the
+/// joined rules, so `generated_model_profile_matches_the_oracle` fails at
+/// the sorted allow-line compare.
 #[test]
 fn generated_model_profile_matches_the_oracle() {
     fn non_comment_head(profile: &str) -> Vec<&str> {
@@ -3373,10 +3376,6 @@ fn generated_model_profile_matches_the_oracle() {
     generated_lines.sort();
     oracle_lines.sort();
     assert_eq!(generated_lines, oracle_lines);
-    assert!(
-        generated.lines().all(|line| !line.starts_with(";;")),
-        "the stand-in profile emits no comment line"
-    );
 
     let original_exec = "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))";
     let stub_exec = "(allow process-exec (literal \"/tmp/cc-standin-stub\"))";
@@ -3416,6 +3415,10 @@ fn generated_model_profile_matches_the_oracle() {
     assert!(
         changed_lines.iter().all(|line| *line != original_exec),
         "the original exec rule is absent"
+    );
+    assert!(
+        generated.lines().all(|line| !line.starts_with(";;")),
+        "the stand-in profile emits no comment line"
     );
 
     let mut rights_not_a_list = fixture.clone();
