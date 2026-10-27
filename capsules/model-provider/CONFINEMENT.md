@@ -553,7 +553,9 @@ profile does not grant".
   exempts only the exact parameter-bound storage grants. Literal filenames
   that contain parameter names still fail. Each refusal reason is asserted.
   The test reads `confine.sb` from disk. It starts no process and needs no
-  sandbox.
+  sandbox. An allow form that contains `(allow` and does not close on that
+  line fails, even when both pins remain. The failure contains `allow form
+  does not close`.
 - `startup_is_refused_when_the_profile_cannot_be_applied`: a missing profile,
   a copy of `confine.sb` with its last `)` removed, and `confine.sb` with
   `STORAGE_ROOT` unbound each refuse the start. It runs under
