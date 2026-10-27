@@ -91,6 +91,15 @@ DENY_QUOTE = DENY_LINES[0]
 DENY_SECOND = DENY_LINES[1]
 DENY_LAST = DENY_LINES[-1]
 
+MINT_REL = OWNED_REL
+MINT_NUMBER = 3549
+MINT_SPAN = "examples/agent-host/src/lib.rs:3549"
+MINT_FIRST = "/// An inbox answer. Allow once, allow for the session, and standing all fail"
+MINT_SECOND = "/// closed when no grant id was sent. The guest does not mint one. Deny stores"
+MINT_THIRD = "/// no grant. A second answer does not replace the first, and it does not"
+MINT_FOURTH = "/// authorize another step. A child cannot be answered with the parent's"
+MINT_LAST = "/// grant. The answer name is kept in the log. The grant string is not."
+
 
 class CitationCheckTests(unittest.TestCase):
     def _temp_root(self):
@@ -304,6 +313,41 @@ class CitationCheckTests(unittest.TestCase):
         lines = [first, second] + list(DENY_LINES[2:-1]) + [last]
         body = "`" + DENY_SPAN + "` states that a missing grant denies the step.\n\n"
         body += "".join("    " + line + "\n" for line in lines)
+        return body + "\n"
+
+    def _mint_source(self, first=MINT_FIRST, second=MINT_SECOND):
+        """A committed file with line 3526, line 3548, line 3549, then the other blocks."""
+        rows = ["// filler"] * (DENY_NUMBER - 1) + [DENY_QUOTE]
+        rows += ["// filler"] * (MINT_NUMBER - 2 - len(rows)) + [first, second]
+        rows += ["// filler"] * (OWNED_NUMBER - 1 - len(rows)) + [OWNED_QUOTE, NEXT_QUOTE]
+        rows += ["// filler"] * (ASKS_NUMBER - 3 - len(rows))
+        rows += [
+            ASKS_FIRST,
+            ASKS_SECOND,
+            ASKS_THIRD,
+            ASKS_FOURTH,
+            ASKS_FIFTH,
+            ASKS_SIXTH,
+            ASKS_CFG,
+            ASKS_CONST,
+        ]
+        rows += ["// filler"] * (MARKER_NUMBER - 4 - len(rows))
+        rows += [MARKER_HEAD, MARKER_TAIL, MARKER_CFG, MARKER_CONST]
+        rows += ["// filler"] * (LAUNCHING_NUMBER - len(rows) - 5)
+        rows += [
+            LAUNCHING_HEAD,
+            LAUNCHING_SECOND,
+            LAUNCHING_THIRD,
+            LAUNCHING_CFG,
+            LAUNCHING_CONST,
+        ]
+        return ("\n".join(rows) + "\n").encode("utf-8")
+
+    def _mint_block(self, first=MINT_FIRST, second=MINT_SECOND, last=MINT_LAST, count=5):
+        """A draft that cites the mint span and indents its five lines below it."""
+        lines = [first, second, MINT_THIRD, MINT_FOURTH, last]
+        body = "`" + MINT_SPAN + "` states that the guest does not mint one.\n\n"
+        body += "".join("    " + line + "\n" for line in lines[:count])
         return body + "\n"
 
     def _caught(self, global_name, planted, named_test, prefix, label):
@@ -1121,6 +1165,149 @@ class CitationCheckTests(unittest.TestCase):
             ["refuse: pinned commit is not a commit: " + "f" * 40],
         )
 
+    def test_live_draft_mint_quote_matches_its_pinned_line(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        self.assertEqual(check.mint_quote(text), MINT_SECOND)
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        self.assertEqual(
+            check.pinned_line(root, sha, MINT_REL, MINT_NUMBER),
+            MINT_SECOND,
+        )
+
+    def test_mint_quote_is_absent_with_one_indented_line(self):
+        body = self._mint_block(count=1)
+        self.assertIsNone(check.mint_quote(body))
+        self.assertIsNone(check.mint_quote("No mint span here.\n"))
+
+    def test_mint_quoted_line_mismatch_is_refused(self):
+        expected = "refuse: quoted line does not match " + MINT_SPAN
+        root = self._draft(
+            self._mint_block(second=MINT_SECOND + "x"),
+            {MINT_REL: self._mint_source()},
+        )
+        self.assertEqual(check.problems(root), [expected])
+        (root / MINT_REL).write_bytes(self._mint_source(second="// edited in the worktree"))
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_mint_quoted_line_match_ignores_the_worktree_file(self):
+        root = self._draft(self._mint_block(), {MINT_REL: self._mint_source()})
+        self.assertEqual(check.problems(root), [])
+        (root / MINT_REL).write_bytes(self._mint_source(second="// edited in the worktree"))
+        self.assertEqual(check.problems(root), [])
+
+    def test_mint_first_line_does_not_stand_for_line_3549(self):
+        root = self._draft(
+            self._mint_block(first=MINT_FIRST + "x"),
+            {MINT_REL: self._mint_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_mint_last_line_does_not_stand_for_line_3549(self):
+        root = self._draft(
+            self._mint_block(last=MINT_LAST + "x"),
+            {MINT_REL: self._mint_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_mint_span_without_two_indented_lines_adds_no_refusal(self):
+        got, reads = self._pinned_reads(
+            self._mint_block(count=1), {MINT_REL: self._mint_source()}
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [])
+
+    def test_mint_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        expected = "refuse: quoted line is not in the pinned commit: " + MINT_SPAN
+        short = ("// filler\n" * 10).encode("utf-8")
+        root = self._draft(self._mint_block(), {MINT_REL: short})
+        (root / MINT_REL).write_bytes(self._mint_source())
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_two_mint_spans_are_refused(self):
+        expected = "refuse: quoted line is not one line: " + MINT_SPAN
+        body = self._mint_block() + "\nAgain `" + MINT_SPAN + "`.\n"
+        got, reads = self._pinned_reads(body, {MINT_REL: self._mint_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [])
+
+    def test_draft_without_the_mint_span_adds_no_mint_refusal(self):
+        root = self._draft(
+            self._quote_body(OWNED_QUOTE, NEXT_QUOTE),
+            {MINT_REL: self._mint_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_deny_line_mismatch_adds_no_mint_refusal(self):
+        expected = "refuse: quoted line does not match " + DENY_SPAN
+        body = self._deny_block(first=DENY_QUOTE + "x") + self._mint_block(
+            second=MINT_SECOND + "y"
+        )
+        got, reads = self._pinned_reads(body, {MINT_REL: self._mint_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [DENY_NUMBER])
+
+    def test_mint_line_mismatch_adds_no_owned_refusal(self):
+        expected = "refuse: quoted line does not match " + MINT_SPAN
+        body = (
+            self._deny_block()
+            + self._mint_block(second=MINT_SECOND + "y")
+            + self._quote_body(OWNED_QUOTE + "z", NEXT_QUOTE)
+        )
+        got, reads = self._pinned_reads(body, {MINT_REL: self._mint_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [DENY_NUMBER, MINT_NUMBER])
+
+    def test_mint_line_match_follows_to_the_owned_refusal(self):
+        expected = "refuse: quoted line does not match " + OWNED_SPAN
+        body = (
+            self._deny_block()
+            + self._mint_block()
+            + self._quote_body(OWNED_QUOTE + "x", NEXT_QUOTE)
+        )
+        got, reads = self._pinned_reads(body, {MINT_REL: self._mint_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [DENY_NUMBER, MINT_NUMBER, OWNED_NUMBER])
+
+    def test_draft_without_the_mint_span_still_refuses_a_deny_mismatch(self):
+        expected = "refuse: quoted line does not match " + DENY_SPAN
+        root = self._draft(
+            self._deny_block(first=DENY_QUOTE + "x")
+            + self._quote_body(OWNED_QUOTE, NEXT_QUOTE),
+            {MINT_REL: self._mint_source()},
+        )
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_draft_without_the_deny_span_still_refuses_a_mint_mismatch(self):
+        expected = "refuse: quoted line does not match " + MINT_SPAN
+        root = self._draft(
+            self._mint_block(second=MINT_SECOND + "x")
+            + self._quote_body(OWNED_QUOTE, NEXT_QUOTE),
+            {MINT_REL: self._mint_source()},
+        )
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_mint_quote_refusal_waits_for_a_known_pin(self):
+        body = self._mint_block(second=MINT_SECOND + "x")
+        files = {MINT_REL: self._mint_source()}
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+        bad_pin = "Pinned commit: HEAD\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(bad_pin, files)),
+            ["refuse: pinned commit is not one 40-hex commit"],
+        )
+        unknown = "Pinned commit: " + "f" * 40 + "\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(unknown, files, commit=True)),
+            ["refuse: pinned commit is not a commit: " + "f" * 40],
+        )
+
     def test_falsifier_missing_path_is_caught(self):
         self._caught(
             "read_file",
@@ -1254,6 +1441,15 @@ class CitationCheckTests(unittest.TestCase):
             self.test_deny_quoted_line_mismatch_is_refused,
             "refuse: quoted line does not match",
             "CAUGHT deny-quoted-line",
+        )
+
+    def test_falsifier_mint_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_mint_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT mint-quoted-line",
         )
 
     def test_worktree_root_contains_checker(self):
