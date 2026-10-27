@@ -15,6 +15,34 @@ pub fn lane_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// Every file git lists in `lane` (tracked, or new and not ignored), relative
+/// to `lane`, in git's order. This is the lane tests' one file lister
+/// (PRINCIPLES P10). The listing is NUL-separated (`-z`), so git never quotes
+/// a path and every name returned is the file's real name. Nothing is left
+/// out and nothing is read: each caller decides what a listed file that is
+/// gone from the work tree, or a falsifier runner's backup, means for it.
+pub fn lane_paths(lane: &Path) -> Vec<String> {
+    let output = Command::new("git")
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
+        .current_dir(lane)
+        .output()
+        .expect("run git ls-files in the lane");
+    assert!(
+        output.status.success(),
+        "git ls-files failed ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let listing = String::from_utf8(output.stdout).expect("git lists UTF-8 paths");
+    listing.split_terminator('\0').map(str::to_owned).collect()
+}
+
 /// The source entries `tools/build` needs, never a `target/` directory.
 /// `audit` is a workspace member: Cargo loads every member's manifest, so the
 /// build fails without it even though `tools/build` compiles only `capsule`.

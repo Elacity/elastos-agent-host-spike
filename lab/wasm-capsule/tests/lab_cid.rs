@@ -9,7 +9,7 @@
 
 mod common;
 
-use common::build::{lane_dir, TempDir};
+use common::build::{lane_dir, lane_paths, TempDir};
 use common::MODULE_BUNDLE_LAB_CID;
 use elastos_common::{CapsuleManifest, CapsuleType};
 use std::fs;
@@ -74,38 +74,19 @@ fn this_capsule_bundle_has_the_pinned_lab_cid() {
     assert_eq!(named.to_string(), MODULE_BUNDLE_LAB_CID);
 }
 
-/// The lane's own files, as git lists them (tracked, or new and not ignored),
-/// relative to the lane. The listing is NUL-separated (`-z`), so git never
-/// quotes a path and every name read is the file's real name. A listed file
-/// that is gone from the work tree is left out: it holds nothing. So is the
-/// falsifier runner's backup (`<file>.falsify-original`): a transient copy of a
-/// file that is already listed under its own name.
+/// The lane's own files with their text, from the one lister, [`lane_paths`]
+/// (which lists NUL-separated, so every name is the file's real name). A
+/// listed file that is gone from the work tree is left out: it holds nothing.
+/// So is the falsifier runner's backup (`<file>.falsify-original`): a
+/// transient copy of a file that is already listed under its own name.
 fn lane_files(lane: &Path) -> Vec<(String, String)> {
-    let output = Command::new("git")
-        .args([
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ])
-        .current_dir(lane)
-        .output()
-        .expect("run git ls-files in the lane");
-    assert!(
-        output.status.success(),
-        "git ls-files failed ({}): {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let listing = String::from_utf8(output.stdout).expect("git lists UTF-8 paths");
     let mut files = Vec::new();
-    for path in listing.split_terminator('\0') {
+    for path in lane_paths(lane) {
         if path.ends_with(".falsify-original") {
             continue;
         }
-        match fs::read(lane.join(path)) {
-            Ok(bytes) => files.push((path.to_owned(), String::from_utf8_lossy(&bytes).into())),
+        match fs::read(lane.join(&path)) {
+            Ok(bytes) => files.push((path, String::from_utf8_lossy(&bytes).into())),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => panic!("read {path}: {error}"),
         }
@@ -146,6 +127,36 @@ fn lane_files_reads_names_git_would_quote() {
     assert_eq!(
         listed, expected,
         "lane_files did not list every file under its real name"
+    );
+}
+
+#[test]
+fn the_lane_tests_list_files_in_one_place() {
+    // Built at run time, so this file does not match itself. `audit/` is the
+    // cx-wasm-audit lane's crate, so only this lane's `tests/` and `tools/`
+    // are read.
+    let quoted = format!("\"{}\"", ["ls", "-files"].concat());
+    let mut found = Vec::new();
+    for (path, text) in lane_files(&lane_dir()) {
+        let ours = path.starts_with("tests/") || path.starts_with("tools/");
+        if !ours || !path.ends_with(".rs") {
+            continue;
+        }
+        for (number, line) in text.lines().enumerate() {
+            found.extend(
+                line.matches(quoted.as_str())
+                    .map(|_| format!("{path}:{}", number + 1)),
+            );
+        }
+    }
+    let places: Vec<&str> = found
+        .iter()
+        .map(|place| place.split(':').next().unwrap_or(place))
+        .collect();
+    assert_eq!(
+        places,
+        ["tests/common/build.rs"],
+        "the lane tests must run {quoted} in one place, lane_paths; found at: {found:?}"
     );
 }
 
