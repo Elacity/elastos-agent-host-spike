@@ -62,8 +62,16 @@ Cyrillic `аda` are different plans. A 256-byte field is refused, never
 truncated. Approving `[notes, journal]` does not execute `[journal, notes]`.
 A grant for `.../journal` does not cover `.../journal/foo/..`,
 `.../journal/`, `.../Agents/Ada/...`, or `.../journa%6c`.
-A Review from `host-1` does not run on `host-10`. An empty or NUL `host_id`
-is `ForeignHost` before any bus call.
+A Review from `host-1` does not run on `host-10`. An empty, NUL, `.`, `..`,
+`a..b`, or `...` `host_id` is `ForeignHost` before any bus call.
+`plan()` and `execute()` share one strict ASCII name grammar. A constructed
+principal `_ada`, `ada.`, or `.ada` is `BadPrincipal` at execute. A NUL in
+the intent is `BadIntent`. `notes/foo/..` is `OutsidePlan` at execute.
+An empty or zero-step plan cannot be approved: the recorded choice is
+Reject, no grant is minted, and execute returns `the plan has no steps`.
+Duplicate steps in one plan (`[journal, journal]`) are refused at approval:
+no grants, no bus calls, and execute returns
+`the plan lists a step more than once`.
 A bus reply `stored`, or any reply other than the exact storage BLOCKED
 token, returns `the bus bridge did not answer` and does not spend the grant.
 A failed execute leaves the grant unused, so a retry is not `GrantSpent`.
@@ -92,20 +100,24 @@ bus is NEEDS RUNTIME. See `RUNTIME-ASK.md`.
 ## What stays in this lab
 
 The planner table, the preview text, and the approval gate stay here. The gate
-is the plan binding: the Host that minted the Review, a grammar check of
-names and paths before any compare (refuse, never fold or truncate),
-length-prefixed canonical bytes in plan step order (including the principal,
-compared as exact bytes), the exact ordered step list, `covers` by exact
-path components on validated forms, `validate_journal_write` on that Host's
-manager after the in-process library call confirms the exact BLOCKED token,
-and one use of the recorded token. A parent path, a `..` segment, a trailing
+is the plan binding: the Host that minted the Review, `host_id` grammar
+before the host_id compare, empty and duplicate step lists before mint or
+bind, then the raw length-prefixed bind in plan step order. A matched
+constructed principal that `plan()` would refuse (`_ada`, `ada.`, `.ada`),
+a NUL intent, or a path that fails the segment grammar (including
+`notes/foo/..` and embedded `..`) is then refused, never folded or
+truncated. Differing invalid principals stay `PlanAltered` so the r3
+collision plants stay CAUGHT. `covers` compares exact path components on
+validated forms. `validate_journal_write` runs on that Host's manager after
+the in-process library call confirms the exact BLOCKED token, and the
+recorded token has one use. A parent path, a `..` segment, a trailing
 slash, ASCII case, or percent-encoding does not cover a child journal.
-`host-1` does not match `host-10`. Empty and NUL `host_id` are
-`ForeignHost` before invoke. A `stored` bus reply, or any reply other than
-the exact storage BLOCKED token, fails the run and does not spend the grant.
-The Runtime has no plan object. `UsersAI` notes stay BLOCKED (RA-5). A
-stored journal stays BLOCKED (RA-4). Session grants and standing mandates
-stay outside this check.
+`host-1` does not match `host-10`. Empty, NUL, `.`, `..`, `a..b`, and `...`
+`host_id` are `ForeignHost` before invoke. A `stored` bus reply, or any
+reply other than the exact storage BLOCKED token, fails the run and does
+not spend the grant. The Runtime has no plan object. `UsersAI` notes stay
+BLOCKED (RA-5). A stored journal stays BLOCKED (RA-4). Session grants and
+standing mandates stay outside this check.
 
 `Grants::mint_journal_write` and `invoke_journal` stay callable as test
 helpers. They skip preview and `Host::execute`.
@@ -115,8 +127,9 @@ helpers. They skip preview and `Host::execute`.
 `plants/F-A15-approval.txt` replaces `approval_check` with a body that returns
 a fresh grant for every presented step. `plants/M1-approve-check.txt` through
 `plants/M8-principal.txt`, `plants/N1-length-prefix.txt` through
-`plants/N10-used-before-bus.txt`, and `plants/R3-1-nfc.txt` through
-`plants/R3-12-constant-host.txt` each remove one guard.
+`plants/N10-used-before-bus.txt`, `plants/R3-1-nfc.txt` through
+`plants/R3-12-constant-host.txt`, and `plants/R4-1-host-dot.txt` through
+`plants/R4-7-nul-intent.txt` each remove one guard.
 `model_planted_bugs_are_caught` requires every named test to fail, then
 restores the planted file:
 
@@ -154,6 +167,13 @@ restores the planted file:
 | R3-10 | `covers` percent-decodes | `percent_encoded_path_does_not_cover_journal` |
 | R3-11 | mark `used` before `validate` | `failed_execute_does_not_spend_the_grant` |
 | R3-12 | `new_host_id` always `host-1` | `unused_review_does_not_run_on_a_second_host` |
+| R4-1 | `validated_name` drops exact `.` / `..` | `dot_or_dotdot_host_id_is_foreign` |
+| R4-2 | delete the `execute` path loop | `dotdot_notes_path_is_refused_at_execute` |
+| R4-3 | execute uses `validated_name` not `plain_principal` | `constructed_plain_principal_is_refused_at_execute` |
+| R4-4 | empty step list allowed | `empty_plan_cannot_be_approved` |
+| R4-5 | duplicate steps allowed | `duplicate_journal_steps_are_refused` |
+| R4-6 | `validated_name` keeps embedded `..` | `embedded_dotdot_host_id_is_foreign` |
+| R4-7 | NUL in intent skipped | `nul_intent_is_refused_at_execute` |
 
 ## Checks
 

@@ -12,13 +12,21 @@
 //! A rejected plan, a plan whose bytes changed after approval, a constructed
 //! plan whose length-prefixed bytes collide only if the prefix is dropped, a
 //! run list that is not the approved ordered list, a review from another Host
-//! (`host-1` is not `host-10`), an empty or NUL `host_id`, and a second use
-//! of the same grant all stop before a grant is spent. Names and paths are
-//! checked against a grammar before any compare and refused, never folded or
-//! truncated. `canonical()` keeps the plan step order. A failed execute does
-//! not spend. A step the Runtime cannot express is BLOCKED with the missing
-//! capability. The public entry does not store a journal. A `stored` bus
-//! reply, or any reply other than the exact BLOCKED token, fails the run.
+//! (`host-1` is not `host-10`), an empty, NUL, `.`, `..`, `a..b`, or `...`
+//! `host_id`, and a second use of the same grant all stop before a grant is
+//! spent. The same strict ASCII name grammar `plan()` applies is applied at
+//! `execute()` to every name field (principal, including the `plain_principal`
+//! start and end rules, intent, path segments, and `host_id`). A constructed
+//! `_ada`, `ada.`, or `.ada` principal, a NUL in the intent, and those
+//! `host_id` values are refused with a named error. An empty or zero-step plan
+//! cannot be approved. Duplicate steps in one plan are refused at approval, so
+//! the result is never two grants or two bus calls. Names and paths are
+//! checked against that grammar before any compare or hash and refused, never
+//! folded or truncated. `canonical()` keeps the plan step order. A failed
+//! execute does not spend. A step the Runtime cannot express is BLOCKED with
+//! the missing capability. The public entry does not store a journal. A
+//! `stored` bus reply, or any reply other than the exact BLOCKED token, fails
+//! the run.
 
 #[cfg(test)]
 mod plant;
@@ -117,6 +125,9 @@ pub enum Choice {
 pub enum Refuse {
     BadPrincipal,
     UnknownIntent,
+    BadIntent,
+    EmptyPlan,
+    DuplicateStep,
     NotApproved,
     PlanAltered,
     OutsidePlan,
@@ -130,6 +141,9 @@ impl fmt::Display for Refuse {
         formatter.write_str(match self {
             Refuse::BadPrincipal => "principal is not a single plain name",
             Refuse::UnknownIntent => "the planner has no steps for this intent",
+            Refuse::BadIntent => "intent is not a single plain field",
+            Refuse::EmptyPlan => "the plan has no steps",
+            Refuse::DuplicateStep => "the plan lists a step more than once",
             Refuse::NotApproved => "the plan was not approved",
             Refuse::PlanAltered => "the plan was altered after approval",
             Refuse::OutsidePlan => "a step is outside the approved plan",
@@ -256,7 +270,13 @@ impl Host {
 
     /// Records the person's choice. Approve mints one lab token for each
     /// step the Runtime can name. Reject mints none. A blocked step gets no token.
+    /// An empty or duplicate-step plan cannot be approved: the recorded choice
+    /// is Reject and no grant is minted.
     pub fn review(&mut self, plan: &Plan, choice: Choice) -> Review {
+        let choice = match plan_steps_admissible(&plan.steps) {
+            Ok(()) => choice,
+            Err(_) => Choice::Reject,
+        };
         let grants = if choice == Choice::Approve {
             plan.steps
                 .iter()
@@ -278,9 +298,14 @@ impl Host {
     /// that approved ordered list. A refused call leaves the effect list
     /// unchanged.
     pub fn execute(&mut self, review: &Review, plan: &Plan, steps: &[Step]) -> Result<(), Refuse> {
+        plan_steps_admissible(&plan.steps)?;
+        plan_steps_admissible(steps)?;
         let allowed = self.approval_check(review, plan, steps)?;
-        if validated_name(&plan.principal).is_none() {
+        if !plain_principal(&plan.principal) {
             return Err(Refuse::BadPrincipal);
+        }
+        if !plain_intent(&plan.intent) {
+            return Err(Refuse::BadIntent);
         }
         if steps
             .iter()
@@ -400,12 +425,14 @@ const NAME_MAX: usize = 64;
 const RESOURCE_MAX: usize = 255;
 
 /// A name is one grammar segment: ASCII `[a-z0-9._-]`, no empty value, no
-/// `.` or `..`, no `%`, no NUL, no uppercase. Over-length is refused.
+/// `.` or `..`, no embedded `..` (`a..b`, `...`), no `%`, no NUL, no
+/// uppercase. Over-length is refused.
 fn validated_name(raw: &str) -> Option<&str> {
     if raw.is_empty()
         || raw.len() > NAME_MAX
         || raw.contains('\0')
         || raw.contains('%')
+        || raw.contains("..")
         || raw == "."
         || raw == ".."
     {
@@ -423,9 +450,10 @@ fn validated_name(raw: &str) -> Option<&str> {
 /// A resource path is refused (not normalised) when it fails the grammar.
 /// The Runtime guest URI keeps its existing `localhost://Users/...` alphabet
 /// (ASCII letters in either case). Segments are `[A-Za-z0-9._-]`, `/`
-/// separated, with no empty, `.`, or `..` segment, no trailing slash, no
-/// `%`, no NUL. Over-length is refused. The value returned is the original
-/// bytes. Nothing is folded, decoded, or truncated.
+/// separated, with no empty, `.`, or `..` segment, no embedded `..`
+/// (`a..b`, `...`), no trailing slash, no `%`, no NUL. Over-length is
+/// refused. The value returned is the original bytes. Nothing is folded,
+/// decoded, or truncated.
 fn validated_path(raw: &str) -> Option<&str> {
     if raw.is_empty()
         || raw.len() > RESOURCE_MAX
@@ -451,6 +479,7 @@ fn valid_path_segment(segment: &str) -> bool {
     !segment.is_empty()
         && segment != "."
         && segment != ".."
+        && !segment.contains("..")
         && segment
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
@@ -514,6 +543,9 @@ pub fn plan(principal: &str, intent: &str) -> Result<Plan, Refuse> {
     if !plain_principal(principal) {
         return Err(Refuse::BadPrincipal);
     }
+    if !plain_intent(intent) {
+        return Err(Refuse::BadIntent);
+    }
     let rows = planned(intent)?;
     let mut steps = Vec::with_capacity(rows.len());
     for (index, row) in rows.iter().enumerate() {
@@ -531,6 +563,7 @@ pub fn plan(principal: &str, intent: &str) -> Result<Plan, Refuse> {
             },
         });
     }
+    plan_steps_admissible(&steps)?;
     Ok(Plan {
         principal: principal.to_owned(),
         intent: intent.to_owned(),
@@ -575,7 +608,8 @@ pub fn preview(plan: &Plan) -> String {
 }
 
 /// Agent id rule used for a task id: 1 to 64 bytes, `[a-z0-9][a-z0-9._-]*`,
-/// and it does not end in `.`.
+/// and it does not end in `.`. `_ada`, `ada.`, `.ada`, `a..b`, and `...`
+/// are refused.
 fn plain_principal(name: &str) -> bool {
     validated_name(name).is_some()
         && name
@@ -583,6 +617,31 @@ fn plain_principal(name: &str) -> bool {
             .next()
             .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
         && !name.ends_with('.')
+}
+
+/// Intent bytes are refused, never folded. A NUL is a named refusal.
+fn plain_intent(intent: &str) -> bool {
+    !intent.contains('\0')
+}
+
+/// An empty step list, or a repeated `step.id` or resource, cannot be
+/// approved and cannot execute.
+fn plan_steps_admissible(steps: &[Step]) -> Result<(), Refuse> {
+    if steps.is_empty() {
+        return Err(Refuse::EmptyPlan);
+    }
+    if has_duplicate_steps(steps) {
+        return Err(Refuse::DuplicateStep);
+    }
+    Ok(())
+}
+
+fn has_duplicate_steps(steps: &[Step]) -> bool {
+    steps.iter().enumerate().any(|(index, step)| {
+        steps[..index]
+            .iter()
+            .any(|prior| prior.id == step.id || prior.resource == step.resource)
+    })
 }
 
 fn planned(intent: &str) -> Result<&'static [PlannedStep], Refuse> {
@@ -790,6 +849,14 @@ fn unknown_intent_and_bad_principal_are_refused() {
     assert_eq!(
         plan("ada.", INTENT).unwrap_err().to_string(),
         "principal is not a single plain name"
+    );
+    assert_eq!(plan("_ada", INTENT).unwrap_err(), Refuse::BadPrincipal);
+    assert_eq!(plan(".ada", INTENT).unwrap_err(), Refuse::BadPrincipal);
+    assert_eq!(plan("a..b", INTENT).unwrap_err(), Refuse::BadPrincipal);
+    assert_eq!(plan("...", INTENT).unwrap_err(), Refuse::BadPrincipal);
+    assert_eq!(
+        plan("ada", &format!("{INTENT}\0extra")).unwrap_err(),
+        Refuse::BadIntent
     );
 }
 
@@ -1361,6 +1428,147 @@ fn percent_encoded_path_does_not_cover_journal() {
         "percent-encoding must not cover the journal"
     );
     assert!(review.grants()[0].covers(&plan.steps[0]));
+}
+
+#[test]
+fn constructed_plain_principal_is_refused_at_execute() {
+    for name in ["_ada", "ada.", ".ada"] {
+        let mut plan = sample();
+        plan.principal = name.to_owned();
+        let mut host = Host::new();
+        let review = host.review(&plan, Choice::Approve);
+        assert_eq!(review.choice(), Choice::Approve);
+        assert_eq!(review.grants().len(), 1);
+        let error = host.execute(&review, &plan, &plan.steps).expect_err(name);
+        assert_eq!(error, Refuse::BadPrincipal, "{name}");
+        assert_eq!(error.to_string(), "principal is not a single plain name");
+        assert!(host.effects().is_empty(), "{name}");
+        assert!(
+            runtime_bridge::component_invoke_audit(host.audit_dir()).is_empty(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn nul_intent_is_refused_at_execute() {
+    let mut plan = sample();
+    plan.intent = format!("{INTENT}\0extra");
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    assert_eq!(review.choice(), Choice::Approve);
+    let error = host
+        .execute(&review, &plan, &plan.steps)
+        .expect_err("nul intent");
+    assert_eq!(error, Refuse::BadIntent);
+    assert_eq!(error.to_string(), "intent is not a single plain field");
+    assert!(host.effects().is_empty());
+    assert!(runtime_bridge::component_invoke_audit(host.audit_dir()).is_empty());
+}
+
+#[test]
+fn empty_plan_cannot_be_approved() {
+    let empty = Plan {
+        principal: "ada".to_owned(),
+        intent: INTENT.to_owned(),
+        steps: Vec::new(),
+    };
+    let mut host = Host::new();
+    let review = host.review(&empty, Choice::Approve);
+    assert_eq!(review.choice(), Choice::Reject);
+    assert!(review.grants().is_empty());
+    let error = host
+        .execute(&review, &empty, &empty.steps)
+        .expect_err("empty plan");
+    assert_eq!(error, Refuse::EmptyPlan);
+    assert_eq!(error.to_string(), "the plan has no steps");
+    assert!(host.effects().is_empty());
+    assert!(runtime_bridge::component_invoke_audit(host.audit_dir()).is_empty());
+}
+
+#[test]
+fn duplicate_journal_steps_are_refused() {
+    let plan = Plan {
+        principal: "ada".to_owned(),
+        intent: INTENT.to_owned(),
+        steps: vec![journal_write_step(1, "ada"), journal_write_step(2, "ada")],
+    };
+    let mut host = Host::new();
+    let review = host.review(&plan, Choice::Approve);
+    assert_eq!(review.choice(), Choice::Reject);
+    assert!(
+        review.grants().is_empty(),
+        "duplicate journal steps must not mint two grants"
+    );
+    let error = host
+        .execute(&review, &plan, &plan.steps)
+        .expect_err("duplicate steps");
+    assert_eq!(error, Refuse::DuplicateStep);
+    assert_eq!(error.to_string(), "the plan lists a step more than once");
+    assert!(host.effects().is_empty());
+    assert!(runtime_bridge::component_invoke_audit(host.audit_dir()).is_empty());
+}
+
+#[test]
+fn dot_or_dotdot_host_id_is_foreign() {
+    let plan = sample();
+    for id in [".", ".."] {
+        let mut host = Host::new();
+        host.id = id.to_owned();
+        let review = host.review(&plan, Choice::Approve);
+        assert_eq!(review.host_id, id);
+        let error = host.execute(&review, &plan, &plan.steps).expect_err(id);
+        assert_eq!(error, Refuse::ForeignHost, "{id}");
+        assert_eq!(error.to_string(), "the review was minted by another host");
+        assert!(host.effects().is_empty(), "{id}");
+        assert!(
+            runtime_bridge::component_invoke_audit(host.audit_dir()).is_empty(),
+            "{id}"
+        );
+    }
+}
+
+#[test]
+fn embedded_dotdot_host_id_is_foreign() {
+    let plan = sample();
+    for id in ["a..b", "..."] {
+        let mut host = Host::new();
+        host.id = id.to_owned();
+        let review = host.review(&plan, Choice::Approve);
+        assert_eq!(review.host_id, id);
+        let error = host.execute(&review, &plan, &plan.steps).expect_err(id);
+        assert_eq!(error, Refuse::ForeignHost, "{id}");
+        assert!(host.effects().is_empty(), "{id}");
+        assert!(
+            runtime_bridge::component_invoke_audit(host.audit_dir()).is_empty(),
+            "{id}"
+        );
+    }
+}
+
+#[test]
+fn dotdot_notes_path_is_refused_at_execute() {
+    let mut walk = sample();
+    walk.steps[0].resource.push_str("/foo/..");
+    let mut host = Host::new();
+    let review = host.review(&walk, Choice::Approve);
+    assert_eq!(review.grants().len(), 1);
+    let error = host
+        .execute(&review, &walk, &walk.steps)
+        .expect_err("notes/foo/..");
+    assert_eq!(error, Refuse::OutsidePlan);
+    assert_eq!(error.to_string(), "a step is outside the approved plan");
+    assert!(host.effects().is_empty());
+    assert!(runtime_bridge::component_invoke_audit(host.audit_dir()).is_empty());
+
+    let mut embedded = sample();
+    embedded.steps[0].resource.push_str("/a..b");
+    let review = host.review(&embedded, Choice::Approve);
+    let error = host
+        .execute(&review, &embedded, &embedded.steps)
+        .expect_err("notes/a..b");
+    assert_eq!(error, Refuse::OutsidePlan);
+    assert!(host.effects().is_empty());
 }
 
 #[cfg(test)]

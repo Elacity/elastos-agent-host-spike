@@ -1,0 +1,9 @@
+id: R4-7
+file: src/lib.rs
+test: nul_intent_is_refused_at_execute
+--- old
+        if !plain_intent(&plan.intent) {
+            return Err(Refuse::BadIntent);
+        }
+--- new
+--- end

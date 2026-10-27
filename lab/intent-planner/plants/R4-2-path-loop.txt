@@ -1,0 +1,12 @@
+id: R4-2
+file: src/lib.rs
+test: dotdot_notes_path_is_refused_at_execute
+--- old
+        if steps
+            .iter()
+            .any(|step| validated_path(&step.resource).is_none())
+        {
+            return Err(Refuse::OutsidePlan);
+        }
+--- new
+--- end

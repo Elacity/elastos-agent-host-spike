@@ -1,0 +1,12 @@
+id: R4-3
+file: src/lib.rs
+test: constructed_plain_principal_is_refused_at_execute
+--- old
+        if !plain_principal(&plan.principal) {
+            return Err(Refuse::BadPrincipal);
+        }
+--- new
+        if validated_name(&plan.principal).is_none() {
+            return Err(Refuse::BadPrincipal);
+        }
+--- end
