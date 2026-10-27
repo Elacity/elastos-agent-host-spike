@@ -1,0 +1,46 @@
+   Compiling version_check v0.9.5
+   Compiling serde_core v1.0.229
+   Compiling typenum v1.20.1
+   Compiling zmij v1.0.23
+   Compiling generic-array v0.14.7
+   Compiling serde v1.0.229
+   Compiling foldhash v0.2.0
+   Compiling serde_json v1.0.154
+   Compiling equivalent v1.0.3
+   Compiling memchr v2.8.3
+   Compiling cfg-if v1.0.5
+   Compiling itoa v1.0.18
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling semver v1.0.28
+   Compiling digest v0.10.7
+   Compiling bitflags v2.13.2
+   Compiling cpufeatures v0.2.17
+   Compiling sha2 v0.10.9
+   Compiling hashbrown v0.17.1
+   Compiling indexmap v2.14.2
+   Compiling wasmparser v0.247.0
+   Compiling a1-a8-hardening v0.1.0 (/tmp/pr-301-a8-r4/lab/a1-a8-hardening)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.77s
+     Running tests/a8_agent_host_host_key.rs (lab/a1-a8-hardening/target/host-build/debug/deps/a8_agent_host_host_key-a923056801d94aa1)
+
+running 2 tests
+
+thread 'shipped_agent_host_bytes_read_host_key' (3710) panicked at tests/a8_agent_host_host_key.rs:265:5:
+blocked: elastos:bus@v1 has no launch-argument channel (AC-002-ARGS), and the shipped agent-host asks only for localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal and refuses '..' itself, so its unmodified bytes cannot ask for a host key
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'shipped_wasm_bus_prints_internal_sentence' (3711) panicked at tests/a8_agent_host_host_key.rs:254:5:
+needs runtime: request_journal_grants uses WasmBus, which maps BusError::Internal to BusFailure::Other; the guest then fails closed as Invalid("the journal append did not follow its grants"). The Runtime authorship proof is the host-side manifest_capability_denied record, not this sentence
+test shipped_agent_host_bytes_read_host_key ... FAILED
+test shipped_wasm_bus_prints_internal_sentence ... FAILED
+
+failures:
+
+failures:
+    shipped_agent_host_bytes_read_host_key
+    shipped_wasm_bus_prints_internal_sentence
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test a8_agent_host_host_key`

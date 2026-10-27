@@ -1,11 +1,11 @@
 # Adversarial review r4 of draft PR #301 (M1 A1/A8)
 
-Independent review of [PR #301](https://github.com/Elacity/elastos-agent-host-spike/pull/301)
-at `b0cc24c2a6ba5088e15146990c89cbbc1435769f`. Writes only under
-`lab/review-a8-301-r4/`. #301's branch was left untouched.
+**Author r3 claims hold. Ten new hunts SURVIVED as later PASS holes. A1 PASS. A8 stays NEEDS RUNTIME / BLOCKED. Lab half `VERDICT: FIX`.**
 
-Prior reviews: [PR #356](https://github.com/Elacity/elastos-agent-host-spike/pull/356) (r1),
-[PR #388](https://github.com/Elacity/elastos-agent-host-spike/pull/388) (r2),
-[PR #408](https://github.com/Elacity/elastos-agent-host-spike/pull/408) (r3).
+- Reviewed PR: https://github.com/Elacity/elastos-agent-host-spike/pull/301
+- Reviewed commit: `b0cc24c2a6ba5088e15146990c89cbbc1435769f`
+- Prior reviews: #356 (r1), #388 (r2), #408 (r3)
+- Report: [REVIEW.md](REVIEW.md)
 
-Report: [REVIEW.md](REVIEW.md) (filled after the rerun and the new hunts).
+The reviewed branch was not edited. Suite, falsifiers, attacks, and
+binding mutants ran from a detached worktree at the reviewed commit.

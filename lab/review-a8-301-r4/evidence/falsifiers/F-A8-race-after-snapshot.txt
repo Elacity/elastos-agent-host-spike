@@ -1,0 +1,8 @@
+F-A8-race-after-snapshot agent_host_host_key_read_is_refused: exit 101, caught
+  a8 runtime: elastos sha256 de9f9b9ff6faed144f35791dbdf9087cc23b1caad4eb46d1e19888612e1929df
+  a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 injected agent-host: sha256 7d81d0cb5a34064b4e8df7ca17eb75255b5973af89836e9493bf9c375f174acf imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+  a8 receipt cursor: size:0 inode:None path:/tmp/a8-home.POUYCY/home/.local/share/elastos/runtime/capability-requests.jsonl
+restored lab/a1-a8-hardening/tests/a8_agent_host_host_key.rs sha256 a68223187680161cf2021f8e4e0a3f48469c0de580f6fc02d1252cba8a8b2a1b
+F-A8-race-after-snapshot: CAUGHT (expected caught)
