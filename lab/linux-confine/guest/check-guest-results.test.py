@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -132,11 +133,65 @@ def populate(
     (ev / "summary.txt").write_text("\n".join(console) + "\n")
 
 
-def write_preboot(path: pathlib.Path, nonce: str, run_start: int | None = None) -> None:
+def write_preboot(
+    path: pathlib.Path,
+    nonce: str,
+    run_start: int | None = None,
+    work: pathlib.Path | None = None,
+    run_id: str | None = None,
+) -> str:
     if run_start is None:
         run_start = int(time.time()) - 60
+    if work is None:
+        work = path.resolve().parent
+    if run_id is None:
+        run_id = hashlib.sha256(f"{nonce}:{path}".encode()).hexdigest()[:16]
+    path.parent.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256(nonce.encode()).hexdigest()
-    path.write_text(f"nonce_sha256={digest}\nrun_start={run_start}\n")
+    path.write_text(
+        f"nonce_sha256={digest}\n"
+        f"run_start={run_start}\n"
+        f"run_id={run_id}\n"
+        f"work={pathlib.Path(work).resolve()}\n"
+    )
+    return run_id
+
+
+def _sync_host_from_preboot(ev: pathlib.Path, preboot: pathlib.Path) -> None:
+    target = preboot
+    if preboot.is_symlink():
+        try:
+            target = preboot.resolve()
+        except OSError:
+            return
+    if not target.is_file():
+        return
+    run_id = None
+    work = None
+    for raw in target.read_text().splitlines():
+        if raw.startswith("run_id="):
+            run_id = raw.split("=", 1)[1]
+        elif raw.startswith("work="):
+            work = raw.split("=", 1)[1]
+    hc = ev / "host-context.txt"
+    lines = hc.read_text() if hc.is_file() else ""
+    extra = ""
+    if work and last_field(lines, "work") != work:
+        extra += f"work={work}\n"
+    if run_id and last_field(lines, "run_id") != run_id:
+        extra += f"run_id={run_id}\n"
+    if extra:
+        with hc.open("a") as handle:
+            handle.write(extra)
+
+
+def last_field(text: str, key: str) -> str | None:
+    value = None
+    prefix = f"{key}="
+    for raw in text.splitlines():
+        if raw.startswith(prefix):
+            value = raw.split("=", 1)[1]
+    return value
 
 
 def run_check(
@@ -144,14 +199,17 @@ def run_check(
     nonce: str,
     checker: pathlib.Path = CHECK,
     preboot: pathlib.Path | None = None,
+    *,
+    sync_host: bool = True,
 ) -> int:
     cleanup = None
     if preboot is None:
-        handle, name = tempfile.mkstemp(prefix="lc-host-preboot-", suffix=".txt")
-        os.close(handle)
-        preboot = pathlib.Path(name)
-        cleanup = preboot
-        write_preboot(preboot, nonce)
+        work = pathlib.Path(tempfile.mkdtemp(prefix="lc-host-work-"))
+        cleanup = work
+        preboot = work / "host-preboot.txt"
+        write_preboot(preboot, nonce, work=work)
+    if sync_host:
+        _sync_host_from_preboot(ev, preboot)
     try:
         return subprocess.run(
             [
@@ -169,7 +227,7 @@ def run_check(
         ).returncode
     finally:
         if cleanup is not None:
-            cleanup.unlink(missing_ok=True)
+            shutil.rmtree(cleanup, ignore_errors=True)
 
 
 def apply_mutant(src: str, mutant_id: str) -> str:
@@ -196,8 +254,35 @@ def apply_mutant(src: str, mutant_id: str) -> str:
         old = "    lines = text.splitlines()\n    if len(lines) != 1:\n        return None\n    match = GUEST_EXIT_LINE.fullmatch(lines[0])\n    if match is None:\n        return None\n    return int(match.group(1))"
         new = '    if "guest_exit=0" in text:\n        return 0\n    return None'
     elif mutant_id == "M11":
-        old = "    problems.extend(collect_preboot_problems(evidence, nonce, preboot))"
+        old = "    problems.extend(collect_preboot_problems(evidence, nonce, preboot, host_context))"
         new = "    problems.extend([])"
+    elif mutant_id == "M12":
+        old = '    if preboot.is_symlink():\n        problems.append("pre-boot path is a symlink")\n        return problems'
+        new = '    if False and preboot.is_symlink():\n        problems.append("pre-boot path is a symlink")\n        return problems'
+    elif mutant_id == "M13":
+        old = '    if ".." in preboot.parts:\n        problems.append("pre-boot path contains ..")\n        return problems'
+        new = '    if False and ".." in preboot.parts:\n        problems.append("pre-boot path contains ..")\n        return problems'
+    elif mutant_id == "M14":
+        old = "    if digest is not None and work_real is not None and not bind_problems:\n        used_problem = nonce_already_recorded(work_real, digest)\n        if used_problem:\n            problems.append(used_problem)"
+        new = "    if False and digest is not None and work_real is not None and not bind_problems:\n        used_problem = nonce_already_recorded(work_real, digest)\n        if used_problem:\n            problems.append(used_problem)"
+    elif mutant_id == "M15":
+        old = "            elif mtime > now + MTIME_SKEW_SEC:\n                problems.append(f\"{child.name}: evidence file mtime is in the future\")"
+        new = "            elif False and mtime > now + MTIME_SKEW_SEC:\n                problems.append(f\"{child.name}: evidence file mtime is in the future\")"
+    elif mutant_id == "M16":
+        old = "    problems.extend(collect_unexpected_mark_problems(marks, expected))"
+        new = "    problems.extend([])"
+    elif mutant_id == "M17":
+        old = '    if "\\r" in text or "\\0" in text:\n        return None\n    lines = text.splitlines()'
+        new = "    lines = text.splitlines()"
+    elif mutant_id == "M18":
+        old = "    problems.extend(collect_unexpected_status_problems(evidence, expected))"
+        new = "    problems.extend([])"
+    elif mutant_id == "M19":
+        old = "    problems.extend(bind_problems)"
+        new = "    problems.extend([])"
+    elif mutant_id == "M20":
+        old = 'PREBOOT_START_LINE = re.compile(r"^run_start=([1-9][0-9]*)$")'
+        new = 'PREBOOT_START_LINE = re.compile(r"^run_start=(0|[1-9][0-9]*)$")'
     elif mutant_id == "M6":
         old = "    passed, failed, ignored = (int(x) for x in matches[-1])"
         new = "    passed, failed, ignored = (int(x) for x in matches[0])"
@@ -411,6 +496,124 @@ class CheckGuestResults(unittest.TestCase):
             )
             self.assertEqual(missing.returncode, 1)
 
+    def test_r4_1b_preboot_symlink_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            ev.mkdir()
+            work = root / "work"
+            work.mkdir()
+            populate(ev, NONCE)
+            write_preboot(work / "host-preboot.txt", NONCE, work=work)
+            link = ev / "host-preboot.txt"
+            link.symlink_to(work / "host-preboot.txt")
+            self.assertEqual(run_check(ev, NONCE, preboot=link), 1)
+
+    def test_r4_1d_preboot_dotdot_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            ev.mkdir()
+            work = root / "work"
+            work.mkdir()
+            populate(ev, NONCE)
+            write_preboot(work / "host-preboot.txt", NONCE, work=work)
+            escape = ev / ".." / "work" / "host-preboot.txt"
+            self.assertEqual(run_check(ev, NONCE, preboot=escape), 1)
+
+    def test_r4_2_nonce_reuse_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            ev.mkdir()
+            work = root / "work"
+            work.mkdir()
+            populate(ev, NONCE)
+            write_preboot(work / "host-preboot.txt", NONCE, work=work, run_id="a" * 16)
+            self.assertEqual(run_check(ev, NONCE, preboot=work / "host-preboot.txt"), 0)
+            now = int(time.time())
+            for child in ev.iterdir():
+                if child.is_file() and child.name != "RESULTS.txt":
+                    os.utime(child, (now, now))
+            write_preboot(work / "host-preboot.txt", NONCE, work=work, run_id="b" * 16)
+            self.assertEqual(run_check(ev, NONCE, preboot=work / "host-preboot.txt"), 1)
+
+    def test_r4_3_future_mtime_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            ev.mkdir()
+            work = root / "work"
+            work.mkdir()
+            populate(ev, NONCE)
+            now = int(time.time())
+            future = now + 86400
+            for child in ev.iterdir():
+                if child.is_file():
+                    os.utime(child, (future, future))
+            write_preboot(work / "host-preboot.txt", NONCE, now - 60, work=work)
+            self.assertEqual(run_check(ev, NONCE, preboot=work / "host-preboot.txt"), 1)
+
+    def test_r4_4a_unexpected_zero_suite_mark_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = pathlib.Path(tmp)
+            populate(ev, NONCE)
+            console = (ev / "qemu-console.txt").read_text().rstrip()
+            console += "\n" + mark_line(NONCE, "empty-suite", 0, 0, 0)
+            (ev / "qemu-console.txt").write_text(console + "\n")
+            self.assertEqual(run_check(ev, NONCE), 1)
+
+    def test_r4_5a_guest_exit_crlf_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = pathlib.Path(tmp)
+            populate(ev, NONCE, guest_exit="guest_exit=0\r\n")
+            self.assertEqual(run_check(ev, NONCE), 1)
+
+    def test_r4_7a_confine2_extra_fail_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = pathlib.Path(tmp)
+            populate(ev, NONCE)
+            write_suite(ev, "confine2", 0, 25, 0, status="FAIL", rc=1)
+            console = (ev / "qemu-console.txt").read_text().rstrip()
+            console += "\n" + mark_line(NONCE, "confine2", 0, 25, 0, status="FAIL", rc=1)
+            (ev / "qemu-console.txt").write_text(console + "\n")
+            self.assertEqual(run_check(ev, NONCE), 1)
+
+    def test_r4_8a_other_work_matching_hash_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            ev.mkdir()
+            work_a = root / "work-a"
+            work_b = root / "work-b"
+            work_a.mkdir()
+            work_b.mkdir()
+            populate(ev, NONCE)
+            write_preboot(work_a / "host-preboot.txt", NONCE, work=work_a, run_id="c" * 16)
+            write_preboot(work_b / "host-preboot.txt", NONCE, work=work_b, run_id="c" * 16)
+            hc = ev / "host-context.txt"
+            with hc.open("a") as handle:
+                handle.write(f"work={work_a.resolve()}\nrun_id={'c' * 16}\n")
+            self.assertEqual(
+                run_check(ev, NONCE, preboot=work_b / "host-preboot.txt", sync_host=False),
+                1,
+            )
+
+    def test_r4_9b_run_start_zero_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            ev.mkdir()
+            work = root / "work"
+            work.mkdir()
+            populate(ev, NONCE)
+            now = int(time.time())
+            for child in ev.iterdir():
+                if child.is_file():
+                    os.utime(child, (now, now))
+            write_preboot(work / "host-preboot.txt", NONCE, run_start=0, work=work)
+            self.assertEqual(run_check(ev, NONCE, preboot=work / "host-preboot.txt"), 1)
+
 
 class MutantsAreCaught(unittest.TestCase):
     """Each r2 mutant lets one extra-probe fixture through. The live checker does not."""
@@ -546,6 +749,147 @@ class MutantsAreCaught(unittest.TestCase):
             self.assertEqual(run_check(ev, NONCE, preboot=preboot), 1)
             self.assertEqual(run_check(ev, NONCE, mutant, preboot=preboot), 0)
 
+    def test_m12_skip_preboot_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            ev.mkdir()
+            work = root / "work"
+            work.mkdir()
+            populate(ev, NONCE)
+            write_preboot(work / "host-preboot.txt", NONCE, work=work)
+            link = ev / "host-preboot.txt"
+            link.symlink_to(work / "host-preboot.txt")
+            mutant = self._mutant_checker(root, "M12")
+            self.assertEqual(run_check(ev, NONCE, preboot=link), 1)
+            self.assertEqual(run_check(ev, NONCE, mutant, preboot=link), 0)
+
+    def test_m13_skip_preboot_dotdot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            ev.mkdir()
+            work = root / "work"
+            work.mkdir()
+            populate(ev, NONCE)
+            write_preboot(work / "host-preboot.txt", NONCE, work=work)
+            escape = ev / ".." / "work" / "host-preboot.txt"
+            mutant = self._mutant_checker(root, "M13")
+            self.assertEqual(run_check(ev, NONCE, preboot=escape), 1)
+            self.assertEqual(run_check(ev, NONCE, mutant, preboot=escape), 0)
+
+    def test_m14_skip_used_nonce(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            ev.mkdir()
+            work = root / "work"
+            work.mkdir()
+            populate(ev, NONCE)
+            write_preboot(work / "host-preboot.txt", NONCE, work=work, run_id="a" * 16)
+            self.assertEqual(run_check(ev, NONCE, preboot=work / "host-preboot.txt"), 0)
+            now = int(time.time())
+            for child in ev.iterdir():
+                if child.is_file() and child.name != "RESULTS.txt":
+                    os.utime(child, (now, now))
+            write_preboot(work / "host-preboot.txt", NONCE, work=work, run_id="b" * 16)
+            mutant = self._mutant_checker(root, "M14")
+            self.assertEqual(run_check(ev, NONCE, preboot=work / "host-preboot.txt"), 1)
+            self.assertEqual(run_check(ev, NONCE, mutant, preboot=work / "host-preboot.txt"), 0)
+
+    def test_m15_skip_future_mtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            ev.mkdir()
+            work = root / "work"
+            work.mkdir()
+            populate(ev, NONCE)
+            now = int(time.time())
+            future = now + 86400
+            for child in ev.iterdir():
+                if child.is_file():
+                    os.utime(child, (future, future))
+            write_preboot(work / "host-preboot.txt", NONCE, now - 60, work=work)
+            mutant = self._mutant_checker(root, "M15")
+            self.assertEqual(run_check(ev, NONCE, preboot=work / "host-preboot.txt"), 1)
+            self.assertEqual(run_check(ev, NONCE, mutant, preboot=work / "host-preboot.txt"), 0)
+
+    def test_m16_skip_unexpected_mark(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = pathlib.Path(tmp) / "ev"
+            ev.mkdir()
+            populate(ev, NONCE)
+            console = (ev / "qemu-console.txt").read_text().rstrip()
+            console += "\n" + mark_line(NONCE, "empty-suite", 0, 0, 0)
+            (ev / "qemu-console.txt").write_text(console + "\n")
+            mutant = self._mutant_checker(pathlib.Path(tmp), "M16")
+            self.assertEqual(run_check(ev, NONCE), 1)
+            self.assertEqual(run_check(ev, NONCE, mutant), 0)
+
+    def test_m17_skip_guest_exit_crlf(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = pathlib.Path(tmp) / "ev"
+            ev.mkdir()
+            populate(ev, NONCE, guest_exit="guest_exit=0\r\n")
+            mutant = self._mutant_checker(pathlib.Path(tmp), "M17")
+            self.assertEqual(run_check(ev, NONCE), 1)
+            self.assertEqual(run_check(ev, NONCE, mutant), 0)
+
+    def test_m18_skip_unexpected_status_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = pathlib.Path(tmp) / "ev"
+            ev.mkdir()
+            populate(ev, NONCE)
+            write_suite(ev, "confine2", 0, 25, 0, status="FAIL", rc=1)
+            mutant = self._mutant_checker(pathlib.Path(tmp), "M18")
+            self.assertEqual(run_check(ev, NONCE), 1)
+            self.assertEqual(run_check(ev, NONCE, mutant), 0)
+
+    def test_m19_skip_work_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            ev.mkdir()
+            work_a = root / "work-a"
+            work_b = root / "work-b"
+            work_a.mkdir()
+            work_b.mkdir()
+            populate(ev, NONCE)
+            write_preboot(work_a / "host-preboot.txt", NONCE, work=work_a, run_id="c" * 16)
+            write_preboot(work_b / "host-preboot.txt", NONCE, work=work_b, run_id="c" * 16)
+            hc = ev / "host-context.txt"
+            with hc.open("a") as handle:
+                handle.write(f"work={work_a.resolve()}\nrun_id={'c' * 16}\n")
+            mutant = self._mutant_checker(root, "M19")
+            self.assertEqual(
+                run_check(ev, NONCE, preboot=work_b / "host-preboot.txt", sync_host=False),
+                1,
+            )
+            self.assertEqual(
+                run_check(
+                    ev, NONCE, mutant, preboot=work_b / "host-preboot.txt", sync_host=False
+                ),
+                0,
+            )
+
+    def test_m20_allow_run_start_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            ev.mkdir()
+            work = root / "work"
+            work.mkdir()
+            populate(ev, NONCE)
+            now = int(time.time())
+            for child in ev.iterdir():
+                if child.is_file():
+                    os.utime(child, (now, now))
+            write_preboot(work / "host-preboot.txt", NONCE, run_start=0, work=work)
+            mutant = self._mutant_checker(root, "M20")
+            self.assertEqual(run_check(ev, NONCE, preboot=work / "host-preboot.txt"), 1)
+            self.assertEqual(run_check(ev, NONCE, mutant, preboot=work / "host-preboot.txt"), 0)
+
 
 class HostScriptNonceIsolation(unittest.TestCase):
     def test_wrapper_keeps_nonce_off_guest_paths_until_after_qemu(self):
@@ -560,8 +904,12 @@ class HostScriptNonceIsolation(unittest.TestCase):
         self.assertIn('"$WORK/host-preboot.txt"', before)
         self.assertIn("nonce_sha256=", before)
         self.assertIn("run_start=", before)
+        self.assertIn("run_id=", before)
+        self.assertIn("work=", before)
         self.assertNotIn('echo "$NONCE" > "$WORK/host-preboot.txt"', before)
         self.assertIn('"$WORK/host-preboot.txt"', after)
+        self.assertIn('echo "run_id=$RUN_ID"', after)
+        self.assertIn('echo "work=$(cd "$WORK" && pwd)"', after)
         self.assertIn("timeout --foreground --signal=KILL", after)
         self.assertIn("< /dev/null", after)
         self.assertIn('QEMU_LOG="$WORK/qemu-console.txt"', after)

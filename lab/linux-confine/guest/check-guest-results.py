@@ -5,11 +5,14 @@ Exit 0 only when every standing suite passed with the exact expected
 counts, every official plant is CAUGHT, every suite has exactly one
 LC_MARK serial line that matches the 9p files and the host nonce, qemu
 exited 0 without a timeout, guest_exit.txt is exactly one canonical
-line, the nonce matches the host pre-boot hash, evidence files do not
-predate that run, and the guest proved the test uid could not read the
-nonce. Duplicate marks, a substring guest_exit, a replayed tree, missing
-files, stale files, a short or inflated suite, or an abnormal qemu exit
-are a failure.
+LF line, the nonce matches the host pre-boot hash and has not been
+recorded for this work dir, evidence files sit in [run_start, now+skew],
+the pre-boot path is the regular file $WORK/host-preboot.txt bound to
+this run, LC_MARK names are exactly the expected set, and the guest
+proved the test uid could not read the nonce. A symlink or '..' PREBOOT
+path, a reused nonce, a future mtime, an unexpected mark, CR/CRLF in
+guest_exit, a colliding extra fail, a preboot from another $WORK, or an
+implausible run_start is a failure.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import json
 import pathlib
 import re
 import sys
+import time
 
 RESULT_LINE = re.compile(
     r"test result:\s+\S+\.\s+(\d+) passed;\s+(\d+) failed;\s+(\d+) ignored"
@@ -30,7 +34,104 @@ MARK_LINE = re.compile(
 )
 GUEST_EXIT_LINE = re.compile(r"^guest_exit=(0|[1-9][0-9]*)$")
 PREBOOT_HASH_LINE = re.compile(r"^nonce_sha256=([0-9a-f]{64})$")
-PREBOOT_START_LINE = re.compile(r"^run_start=(0|[1-9][0-9]*)$")
+PREBOOT_START_LINE = re.compile(r"^run_start=([1-9][0-9]*)$")
+PREBOOT_RUN_LINE = re.compile(r"^run_id=([0-9a-f]{16,64})$")
+PREBOOT_WORK_LINE = re.compile(r"^work=(/\S+)$")
+MTIME_SKEW_SEC = 2
+
+
+def last_field(text: str, key: str) -> str | None:
+    value = None
+    prefix = f"{key}="
+    for raw in text.splitlines():
+        if raw.startswith(prefix):
+            value = raw.split("=", 1)[1]
+    return value
+
+
+def run_start_is_implausible(run_start: int, now: int) -> bool:
+    # 0 is refused by PREBOOT_START_LINE. This catches a future stamp.
+    return run_start > now + MTIME_SKEW_SEC
+
+
+def used_nonce_path(work_real: pathlib.Path) -> pathlib.Path:
+    return work_real / "used-nonces.txt"
+
+
+def nonce_already_recorded(work_real: pathlib.Path, digest: str) -> str | None:
+    used = used_nonce_path(work_real)
+    if used.is_symlink():
+        return "used-nonces path is a symlink"
+    if not used.is_file():
+        return None
+    seen = [line for line in used.read_text(errors="replace").splitlines() if line]
+    if digest in seen:
+        return "nonce was already recorded for this work dir"
+    return None
+
+
+def record_used_nonce(work_real: pathlib.Path, digest: str) -> None:
+    used = used_nonce_path(work_real)
+    if used.is_symlink():
+        return
+    seen = []
+    if used.is_file():
+        seen = [line for line in used.read_text(errors="replace").splitlines() if line]
+    if digest not in seen:
+        used.write_text("\n".join(seen + [digest]) + "\n")
+
+
+def work_binding_problems(
+    preboot: pathlib.Path, work_real: pathlib.Path | None, host_context: str
+) -> list[str]:
+    problems = []
+    if work_real is None:
+        return problems
+    if preboot.resolve() != work_real / "host-preboot.txt":
+        problems.append("pre-boot path is not the host-preboot file under the bound work dir")
+    host_work = last_field(host_context, "work")
+    if host_work is None:
+        problems.append("host-context work path missing")
+    else:
+        try:
+            host_work_real = pathlib.Path(host_work).resolve()
+        except OSError:
+            host_work_real = None
+        if host_work_real != work_real:
+            problems.append("pre-boot work path does not match host-context")
+    return problems
+
+
+def allowed_mark_names(expected: dict) -> set[str]:
+    allowed = set(expected["suites"]) | {"guest"}
+    allowed |= set(expected.get("plants_caught", []))
+    allowed |= set(expected.get("plants_not_run", []))
+    return allowed
+
+
+def collect_unexpected_mark_problems(marks: dict, expected: dict) -> list[str]:
+    allowed = allowed_mark_names(expected)
+    problems = []
+    for name in marks:
+        if name not in allowed:
+            problems.append(f"{name}: unexpected LC_MARK suite")
+    return problems
+
+
+def collect_unexpected_status_problems(evidence: pathlib.Path, expected: dict) -> list[str]:
+    allowed = set(expected["suites"])
+    allowed |= set(expected.get("plants_caught", []))
+    allowed |= set(expected.get("plants_not_run", []))
+    problems = []
+    for child in sorted(evidence.iterdir()):
+        if child.suffix != ".status" or not child.is_file():
+            continue
+        if child.stem in allowed:
+            continue
+        status = child.read_text(errors="replace").strip()
+        if status and status != "NOT_RUN":
+            problems.append(f"{child.stem}: unexpected status file {status}")
+    return problems
 
 
 def load_json(path: pathlib.Path):
@@ -95,6 +196,8 @@ def collect_marks(console: str) -> tuple[dict, list[str]]:
 
 
 def parse_guest_exit(text: str):
+    if "\r" in text or "\0" in text:
+        return None
     lines = text.splitlines()
     if len(lines) != 1:
         return None
@@ -105,10 +208,22 @@ def parse_guest_exit(text: str):
 
 
 def collect_preboot_problems(
-    evidence: pathlib.Path, nonce: str, preboot: pathlib.Path | None
+    evidence: pathlib.Path,
+    nonce: str,
+    preboot: pathlib.Path | None,
+    host_context: str = "",
 ) -> list[str]:
     problems = []
-    if preboot is None or not preboot.is_file():
+    if preboot is None:
+        problems.append("pre-boot nonce record missing")
+        return problems
+    if ".." in preboot.parts:
+        problems.append("pre-boot path contains ..")
+        return problems
+    if preboot.is_symlink():
+        problems.append("pre-boot path is a symlink")
+        return problems
+    if not preboot.is_file():
         problems.append("pre-boot nonce record missing")
         return problems
     evidence_real = evidence.resolve()
@@ -122,25 +237,71 @@ def collect_preboot_problems(
         return problems
     digest = None
     run_start = None
+    run_id = None
+    work_text = None
     for raw in preboot.read_text(errors="replace").splitlines():
         hashed = PREBOOT_HASH_LINE.fullmatch(raw)
         started = PREBOOT_START_LINE.fullmatch(raw)
+        run_line = PREBOOT_RUN_LINE.fullmatch(raw)
+        work_line = PREBOOT_WORK_LINE.fullmatch(raw)
         if hashed:
             digest = hashed.group(1)
         elif started:
             run_start = int(started.group(1))
+        elif run_line:
+            run_id = run_line.group(1)
+        elif work_line:
+            work_text = work_line.group(1)
     if digest is None:
         problems.append("pre-boot nonce hash missing or not sha256 hex")
     elif hashlib.sha256(nonce.encode()).hexdigest() != digest:
         problems.append("nonce does not match the pre-boot record")
+    now = int(time.time())
     if run_start is None:
         problems.append("pre-boot run_start missing")
+    elif run_start_is_implausible(run_start, now):
+        problems.append("pre-boot run_start is implausible")
+        run_start = None
+    work_real = None
+    if work_text is None:
+        problems.append("pre-boot work path missing")
     else:
+        work_path = pathlib.Path(work_text)
+        if work_path.is_symlink() or not work_path.is_dir():
+            problems.append("bound work dir is not a regular directory")
+        else:
+            work_real = work_path.resolve()
+            try:
+                work_real.relative_to(evidence_real)
+            except ValueError:
+                pass
+            else:
+                problems.append("bound work dir is inside the guest-writable evidence dir")
+                work_real = None
+    bind_problems = work_binding_problems(preboot, work_real, host_context)
+    problems.extend(bind_problems)
+    host_run_id = last_field(host_context, "run_id")
+    if run_id is None:
+        problems.append("pre-boot run_id missing")
+    elif host_run_id is None:
+        problems.append("host-context run_id missing")
+    elif run_id != host_run_id:
+        problems.append("pre-boot run_id does not match host-context")
+    if digest is not None and work_real is not None and not bind_problems:
+        used_problem = nonce_already_recorded(work_real, digest)
+        if used_problem:
+            problems.append(used_problem)
+    if run_start is not None:
         for child in sorted(evidence.iterdir()):
             if not child.is_file() or child.name == "RESULTS.txt":
                 continue
-            if int(child.stat().st_mtime) < run_start:
+            mtime = int(child.stat().st_mtime)
+            if mtime < run_start:
                 problems.append(f"{child.name}: evidence file predates the run start")
+            elif mtime > now + MTIME_SKEW_SEC:
+                problems.append(f"{child.name}: evidence file mtime is in the future")
+    if digest is not None and work_real is not None and not problems:
+        record_used_nonce(work_real, digest)
     return problems
 
 
@@ -173,8 +334,10 @@ def main() -> int:
 
     marks, mark_problems = collect_marks(console)
     problems.extend(mark_problems)
+    problems.extend(collect_unexpected_mark_problems(marks, expected))
+    problems.extend(collect_unexpected_status_problems(evidence, expected))
     problems.extend(collect_nonce_problems(nonce, guest_results, console, marks))
-    problems.extend(collect_preboot_problems(evidence, nonce, preboot))
+    problems.extend(collect_preboot_problems(evidence, nonce, preboot, host_context))
 
     if mode == "full":
         if "tester_nonce_readable=1" in console:
@@ -258,7 +421,12 @@ def main() -> int:
             if status and status != "NOT_RUN":
                 problems.append(f"{plant}: status={status} (want NOT_RUN)")
 
-    guest_exit = read(evidence / "guest-exit.txt")
+    guest_exit_path = evidence / "guest-exit.txt"
+    if guest_exit_path.is_file():
+        # Text mode would swallow CR. Guest_exit is a byte-exact token.
+        guest_exit = guest_exit_path.read_bytes().decode("utf-8", errors="replace")
+    else:
+        guest_exit = ""
     guest_exit_value = parse_guest_exit(guest_exit)
     if mode == "full" and guest_exit_value != 0:
         problems.append(f"guest_exit.txt did not report 0: {guest_exit.strip()!r}")
