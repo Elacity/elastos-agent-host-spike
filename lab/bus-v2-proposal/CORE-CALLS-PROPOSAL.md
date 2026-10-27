@@ -224,7 +224,7 @@ The guest denies a step with no grant id and does not mint one.
 
 ## 3. Grant requests and A5 binding
 
-This section is design input for A5. A5 stays open. This section cites no lab/grant-binding test.
+This section is design input for A5. A5 stays open.
 
 The verified agent identity is who the launch runs as. The grant is the Runtime's admission of one step. A budget stays a separate Runtime decision.
 
@@ -531,6 +531,8 @@ The required binding is a grant bound to the verified agent identity, the sessio
       actions: list<action>,
       expires-at-ms: option<u64>,
     }
+
+This citation is design input for A5. For the identity, `lab/grant-binding/src/lib.rs::model_different_identity_is_refused` changes the registry identity after the bind and expects the use to fail. The body calls bind_grant, then host_set_identity, then use_grant. The expect_err line is `expect_err("different identity")` and the assert_eq of the refusal string is `identity does not match the grant`. For the session, `lab/grant-binding/src/lib.rs::model_new_session_is_refused` changes the registry session after the bind and expects the use to fail. The body calls bind_grant, then host_set_session, then use_grant. The expect_err line is `expect_err("new session")` and the assert_eq of the refusal string is `session does not match the grant`. For the capsule instance, `lab/grant-binding/src/lib.rs::model_sibling_instance_is_refused` binds the first instance and opens the call on the other instance. The body calls bind_grant and use_grant. The expect_err line is `expect_err("sibling instance")` and the assert_eq of the refusal string is `instance does not match the grant`. For the owned storage root, `lab/grant-binding/src/lib.rs::model_owned_root_must_sit_under_the_agent` binds `UsersAI/other/notes` and expects the bind to fail. The body calls bind_grant. The expect_err line is `expect_err("outside principal")` and the assert_eq of the refusal string is `owned root is outside the agent principal`. These four functions are the lab reference model, and the lab model is not the Runtime. A5 stays open.
 
 ## 4. Model operations
 
