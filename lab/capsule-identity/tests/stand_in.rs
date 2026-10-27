@@ -268,6 +268,61 @@ fn standin_refuses_an_unsigned_or_mismatched_bundle_before_launch() {
     assert_refused(&mut stand_in, &launch_body(), &own, "(g3)");
 }
 
+#[test]
+fn standin_launch_does_not_depend_on_record_order() {
+    // Several package records can bind one CID. The launch goes on when at
+    // least one of them passes the record check, whatever their order.
+    let published = publish_agent_host();
+    let accepted_key = fresh_signing_key();
+    let accepted_record = sign(&accepted_key, &published.folder);
+    let unaccepted_record = sign(&fresh_signing_key(), &published.folder);
+    for (records, case) in [
+        (
+            vec![unaccepted_record.clone(), accepted_record.clone()],
+            "[unaccepted, accepted]",
+        ),
+        (
+            vec![accepted_record.clone(), unaccepted_record.clone()],
+            "[accepted, unaccepted]",
+        ),
+    ] {
+        let mut stand_in = StandInRuntime::new(
+            [published.entry.clone()],
+            records,
+            vec![did_of(&accepted_key)],
+        );
+        let answer = stand_in
+            .post_capsules(&launch_body())
+            .unwrap_or_else(|(status, reason)| panic!("{case}: refused with {status}: {reason}"));
+        assert_eq!(answer["status"], "launched", "{case}");
+        let listed = listed_instances(&stand_in);
+        assert_eq!(listed.len(), 1, "{case}: exactly one instance");
+        assert_eq!(listed[0]["id"], answer["id"], "{case}");
+    }
+
+    // When no record passes, the answer is the first one's own refusal, in
+    // store order, and nothing is launched.
+    let first = sign(&fresh_signing_key(), &published.folder);
+    let second = sign(&fresh_signing_key(), &published.folder);
+    assert_ne!(first.signer_did, second.signer_did);
+    let accepted = vec![did_of(&accepted_key)];
+    let own = verify_checked_package_record(&checked(&published.folder), &first, &accepted)
+        .expect_err("not accepted")
+        .to_string();
+    assert_eq!(
+        own,
+        format!("signer {} is not in the accepted list", first.signer_did)
+    );
+    let mut stand_in =
+        StandInRuntime::new([published.entry.clone()], vec![first, second], accepted);
+    assert_refused(
+        &mut stand_in,
+        &launch_body(),
+        &own,
+        "two unaccepted signers",
+    );
+}
+
 /// Launch the published `agent-host` by its CID; the answer must hold
 /// exactly 032's keys.
 fn launched(stand_in: &mut StandInRuntime) -> Value {
