@@ -671,22 +671,10 @@ class TaskForPidProbe(unittest.TestCase):
                 self.assertEqual(deleted.count("(allow mach-priv-task-port)"), 0)
                 self.assertNotIn("(allow default)", deleted)
                 removed = write_copy(directory, "wallet-deleted", deleted)
-                finding = type(self).recorded_allows.get("wallet")
-                try:
-                    denied = require_denied(removed)
-                except NotDenied as caught:
-                    if not finding:
-                        raise
-                    method = getattr(type(self), "test_wallet_task_for_pid_is_denied")
-                    self.assertTrue(
-                        getattr(method, "__unittest_expecting_failure__", False)
-                    )
-                    self.assertIn(finding, method.__doc__ or "")
-                    self.assertIn("ALLOW", str(caught))
-                else:
-                    self.assertEqual(denied.stdout, DENY_STDOUT)
-                    self.assertEqual(denied.stderr, "")
-                    self.assertEqual(denied.exit_code, 0)
+                denied = require_denied(removed)
+                self.assertEqual(denied.stdout, DENY_STDOUT)
+                self.assertEqual(denied.stderr, "")
+                self.assertEqual(denied.exit_code, 0)
 
             with self.subTest(profile="wallet-lookup"):
                 wallet = PROFILES[0]
@@ -1598,6 +1586,90 @@ class TaskForPidRules(unittest.TestCase):
         )
         self.launch_guard.assert_not_called()
         Recorded.doClassCleanups()
+
+    def test_falsifier_controls_reject_allow_with_recorded_wallet_finding(self):
+        """A recorded live allow cannot excuse an allow from either wallet control."""
+        for control in ("wallet-deleted", "wallet-lookup"):
+            with self.subTest(control=control):
+                class Recorded(TaskForPidProbe):
+                    skip_reason = None
+                    recorded_allows = {"wallet": FINDINGS["wallet"]}
+
+                finding = FINDINGS["wallet"]
+                mark_expected(Recorded, "test_wallet_task_for_pid_is_denied", finding)
+                self.addCleanup(Recorded.doClassCleanups)
+                method = Recorded.test_wallet_task_for_pid_is_denied
+                self.assertTrue(
+                    getattr(method, "__unittest_expecting_failure__", False)
+                )
+                self.assertIn(finding, method.__doc__ or "")
+                profiles = tuple(
+                    dict(profile, rel=profile["path"].relative_to(ROOT).as_posix())
+                    for profile in PROFILES
+                )
+                clean = "(version 1)\n(deny default)\n"
+                texts = {
+                    os.fspath(profile["path"]): (
+                        with_task_allow(clean) if profile["name"] == "wallet" else clean
+                    )
+                    for profile in profiles
+                }
+                original_texts = dict(texts)
+                directory = os.fspath(ROOT / "lab/redteam/injected-task-controls")
+                launched = []
+
+                def injected_copy(directory, name, text):
+                    path = os.path.join(directory, name + ".sb")
+                    texts[path] = text
+                    return path
+
+                def injected_task(profile):
+                    path = os.fspath(profile)
+                    launched.append(os.path.basename(path))
+                    allowed = ALLOW_TASK in texts[path] or Path(path).stem == control
+                    return sbx.Result(
+                        exit_code=0,
+                        stdout="task kr=0 port=515\n" if allowed else DENY_STDOUT,
+                        stderr="",
+                        argv=[sbx.SANDBOX_EXEC, "-f", path, "/private/task"],
+                    )
+
+                with patch(__name__ + ".PROFILES", profiles), patch(
+                    __name__ + ".sha256_file", return_value="unchanged fixture"
+                ), patch.object(
+                    Path, "read_text", autospec=True,
+                    side_effect=lambda path, **_kwargs: texts[os.fspath(path)],
+                ), patch.object(
+                    tempfile, "mkdtemp", return_value=directory
+                ), patch.object(shutil, "rmtree"), patch(
+                    __name__ + ".write_copy", side_effect=injected_copy
+                ), patch(__name__ + ".task_under", side_effect=injected_task), patch(
+                    __name__ + ".require_unchanged", wraps=require_unchanged
+                ) as unchanged:
+                    result = unittest.TestResult()
+                    Recorded("test_falsifier_allow_mach_priv_task_port_is_caught").run(result)
+                    unchanged.assert_called_once_with({
+                        profile["rel"]: "unchanged fixture" for profile in profiles
+                    })
+
+                self.assertEqual(result.testsRun, 1)
+                self.assertEqual(len(result.failures), 1)
+                self.assertIn(control, result.failures[0][0].id())
+                self.assertIn("NotDenied: ALLOW", result.failures[0][1])
+                self.assertIn("task kr=0 port=515\\n", result.failures[0][1])
+                self.assertEqual(result.errors, [])
+                self.assertEqual(result.expectedFailures, [])
+                self.assertEqual(result.unexpectedSuccesses, [])
+                self.assertEqual(result.skipped, [])
+                self.assertFalse(result.wasSuccessful())
+                self.assertEqual(launched, [
+                    "wallet-allow.sb", "did-allow.sb", "model-allow.sb",
+                    "wallet-deleted.sb", "wallet-lookup.sb",
+                ])
+                self.assertEqual(
+                    {path: texts[path] for path in original_texts}, original_texts
+                )
+        self.launch_guard.assert_not_called()
 
     def test_recorded_allow_keeps_complete_probe_suite_green(self):
         """Run every real probe method against injected tools and profile text.
