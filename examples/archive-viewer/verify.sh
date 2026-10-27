@@ -75,12 +75,18 @@ PY
 # Install this trap after recovery, so a failed restore keeps its snapshot.
 host_log=""
 runtime_log=""
+verification_complete=0
 cleanup() {
-    rm -rf "${VIEWER_DIR}/.verify-snapshot"
+    if [[ $verification_complete -eq 1 ]]; then
+        rm -rf "${VIEWER_DIR}/.verify-snapshot"
+    fi
     if [[ -n "$host_log" ]]; then rm -f "$host_log"; fi
     if [[ -n "$runtime_log" ]]; then rm -f "$runtime_log"; fi
 }
 trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
 
 python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" \
     "${VIEWER_DIR}/capsule.json" "${WIT}" archive-viewer
@@ -145,3 +151,4 @@ else
 fi
 
 echo "archive-viewer verification: OK"
+verification_complete=1
