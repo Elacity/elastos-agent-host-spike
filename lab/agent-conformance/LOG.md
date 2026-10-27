@@ -5890,3 +5890,50 @@ Both commands used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=tr
 - `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: PASS, exit 0, 255.480 seconds, inside the 600-second bound. 85 passed, 0 failed, 11 ignored. The effects target passed 35 tests, with 10 ignored, in 202.20 seconds.
 
 `Cargo.toml` and `Cargo.lock` are unchanged. The builder made no Git-state changes.
+
+## 036 — CID launch blocker names what is left after the directory CID
+
+036 records that the lab CID is now a CIDv1 dag-pb UnixFS directory root (cc-capsule-identity 018, PR #226), and names the three conditions still required before `capsule_named_by_hash` can run. AC-025-CID stays the blocker. This task adds no rule, no test, and no `falsifiers.json` id.
+
+`GAPS.md` replaces the stale identity paragraph, and the row's change cell and the flip paragraph name, in order: a measured Kubo v0.40.1 match for the staged probe bundle, the offline content fixture, and `--cid` reaching the directory launch's activation. The ID cell stays `AC-025-CID`. `RUNBOOK.md` states the same three conditions and the fenced-row parser limit. `capsule_named_by_hash` keeps `#[ignore = "blocked: AC-025-CID"]` and its panic names the same three conditions.
+
+### Gate and hand-run of the row
+
+Commands used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true` under the shared heavy-build lease. `./run.sh` sets the lane `target/host` and `target/host-build` directories. Free space was about 43 GiB.
+
+Baseline `./run.sh`: exit 0, 257.881 seconds. No FAIL row. Table line:
+
+```text
+capsule_named_by_hash | BLOCKED (AC-025-CID)
+```
+
+The ID cell was then changed to `AC-025-CIDX` and restored afterward. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report`: exit 0, 2.137 seconds. `test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s`. Those tests grade synthetic rows. The live grader is `./run.sh`.
+
+Planted `./run.sh`: exit 1, 248.618 seconds. FAIL line:
+
+```text
+capsule_named_by_hash | FAIL | GAPS.md: capsule_named_by_hash: missing blocker IDs: [AC-025-CID]; extra blocker IDs: [AC-025-CIDX]
+```
+
+`versions_receipt (A14) | FAIL` followed that suite failure. The receipt failure was the same GAPS sentence. The ID cell was reverted to `AC-025-CID`.
+
+Restored `./run.sh`: exit 0, 252.652 seconds. No FAIL row. Table line:
+
+```text
+capsule_named_by_hash | BLOCKED (AC-025-CID)
+```
+
+`cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, 0.11 seconds. `Cargo.toml` and `Cargo.lock` are unchanged. The builder made no Git-state changes.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `GAPS.md:144` names the lab CID as the directory root. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `tests/runtime.rs:142` stays ignored. The probe is unchanged. |
+| 3. A second path or a second copy of one rule? | No | `src/report.rs:37` remains the one blocked-row check. |
+| 4. Runtime core grows? | No | The edit is `GAPS.md`, `RUNBOOK.md` and the ignored test's panic text. |
+| 5. Refusals deny by default with a clear reason? | Yes | `tests/runtime.rs:147` still stops the journey and names what is left. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The probe source is unchanged. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | No new rule. The planted ID cell above is the existing grader, and it is not a list id. |
+| 8. Identity, admission and allowance stay separate? | Yes | `GAPS.md:171-173` keeps those decisions separate. A valid CID gives no grant. |
