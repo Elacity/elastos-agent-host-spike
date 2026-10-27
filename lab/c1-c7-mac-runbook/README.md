@@ -20,8 +20,8 @@ That line does not write the last booking line.
 
 The only ` ```bash ` fence in this file:
 
-- sha256: 2e1aa417b4a6586990554907fd1a34e540cfd887ceb59ee3be9aeef87079f59b
-- bytes: 27168
+- sha256: bfd28dcdd2d8823e31c3d151bf63d0fd84944437c9c104cbfcddb0553ebe1569
+- bytes: 27143
 
 Those numbers are of the fence body, including its trailing newline,
 and not of the markdown fences.
@@ -593,7 +593,7 @@ workdir = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.getcwd()
 clone = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 else os.getcwd()
 lane = os.path.abspath("lab/c1-c7-mac-runbook")
 needles = []
-for item in (workdir, clone, lane, "lab/c1-c7-mac-runbook"):
+for item in (workdir, clone, lane):
     if item not in needles:
         needles.append(item)
 
