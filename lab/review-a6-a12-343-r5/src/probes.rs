@@ -366,11 +366,12 @@ fn r5_last_byte_of_large_file() {
     let parent = isolated_watch("r5-last-byte");
     let path = parent.join("big.bin");
     let mut first = vec![b'A'; 65 * 1024];
-    first[first.len() - 1] = b'Y';
+    let last = first.len() - 1;
+    first[last] = b'Y';
     fs::write(&path, &first).unwrap();
     let before = a12::snapshot(&parent).expect("before");
     let mut second = first.clone();
-    second[second.len() - 1] = b'Z';
+    second[last] = b'Z';
     fs::write(&path, &second).unwrap();
     let leftovers = a12::leftovers_created(&before, &parent).expect("created-set");
     let found = leftovers.iter().any(|p| p == &path);

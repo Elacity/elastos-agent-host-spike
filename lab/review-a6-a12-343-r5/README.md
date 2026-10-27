@@ -28,3 +28,6 @@ named plants, reapplies the two r4 mutants, and runs the new r5
 hunts.
 
 Findings: `REVIEW.md`.
+
+Verdict on this machine: A12 Linux lab half **PASS**. A6 **BLOCKED
+(RA-6)**. Mac owner commands stay on hold.
