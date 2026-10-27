@@ -1,0 +1,12 @@
+id: F-A5-agentx
+file: src/lib.rs
+test: model_extended_agent_segment_is_refused
+--- old
+    if parts.len() < 3 || parts[0] != "UsersAI" || parts[1] != agent {
+        return Err(Refuse::OutsidePrincipal);
+    }
+--- new
+    if parts.len() < 3 || parts[0] != "UsersAI" || !parts[1].starts_with(agent) {
+        return Err(Refuse::OutsidePrincipal);
+    }
+--- end
