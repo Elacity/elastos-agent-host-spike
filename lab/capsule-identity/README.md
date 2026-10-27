@@ -1354,7 +1354,11 @@ loses every `` ` ``, `*` and `_` at its ends (`*the*` reads as `the`; a mark
 inside a word, such as the hyphen of a hyphenated word, stays). A word that was only marks,
 such as the `*` that starts a block-comment line, is dropped, so it never
 splits a phrase. Other Markdown forms (links, HTML, tables, headings, escapes)
-are not read through.
+are not read through. A known limit, not a rule: trimming stops at
+punctuation, so a mark next to a comma or a full stop inside a phrase
+(`*Runtime's*,`) is not trimmed, and a claim written that way is not found.
+Matching is by substring, so this matters only when the marked word is not
+the phrase's last word. No test asserts this limit.
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
@@ -1362,6 +1366,8 @@ are not read through.
 | A word that was only marks is dropped, so a claim over two ` * ` block-comment lines is found | `the_claim_scan_finds_a_claim_however_it_is_written` | F-CI28b (the empty word kept) |
 | `*` is trimmed from a word's ends, so emphasis inside a claim (`*the*`) does not hide it | `the_claim_scan_finds_a_claim_however_it_is_written` | F-CI28c (`*` not trimmed) |
 | `` ` `` is trimmed from a word's ends, so a word in code marks inside a claim (`` `Runtime's` ``) does not hide it | `the_claim_scan_finds_a_claim_however_it_is_written` | F-CI28d (`` ` `` not trimmed) |
+| `_` is trimmed from a word's ends, so underscore emphasis inside a claim (`_Runtime's_`) does not hide it | `the_claim_scan_finds_a_claim_however_it_is_written` | F-CI30a (`_` not trimmed) |
+| A run of leading `>` is removed, not only one, so a claim over two nested blockquote lines (`> > text`) is found | `the_claim_scan_finds_a_claim_however_it_is_written` | F-CI30b (only one `>` removed; the one-`>` case still passes) |
 
 ## Run
 
@@ -1436,7 +1442,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 240 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 242 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1466,7 +1472,8 @@ F-CI24a to F-CI24e (see
 027's F-CI27a to F-CI27d (see
 [for a lab that uses the lab CID](#for-a-lab-that-uses-the-lab-cid)), and task
 028's F-CI28a to F-CI28d (see [claim scope](#claim-scope)), and task
-029's F-CI29a to F-CI29e (see [the inventory check](#the-inventory-check)).
+029's F-CI29a to F-CI29e (see [the inventory check](#the-inventory-check)),
+and task 030's F-CI30a and F-CI30b (see [claim scope](#claim-scope)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -1518,6 +1525,11 @@ in `comment_body`, F-CI28b in `equality_claims_in`, and F-CI28c and F-CI28d in
 `WORD_MARKS`, which `claim_word` trims. Each anchor is a line task 028 added,
 found exactly once. Task 028 kept the anchor lines of F-CI23e to F-CI23h byte
 for byte and changed no older edit's text.
+Task 030's entries also edit `tests/common/mod.rs`, in the claim scan, which
+it does not change: F-CI30a removes the `'_'` line of `WORD_MARKS`, and
+F-CI30b shares F-CI28a's anchor, the `>`-run line of `comment_body`, and
+removes one `>` where F-CI28a removes none. Each anchor is found exactly once.
+Task 030 added two cases to the named test and changed no older edit's text.
 
 ### The inventory check
 
@@ -1631,8 +1643,11 @@ without an edit, 0 do not`; F-CI27a to F-CI27d each CAUGHT). At task
 without an edit, 0 do not`; F-CI28a to F-CI28d and F-CI23e to F-CI23h each
 CAUGHT). At task 029 it reported `summary: 240 CAUGHT of 240` (`baseline: 127
 named tests pass without an edit, 0 do not`; F-CI29a to F-CI29e each CAUGHT).
+At task 030 it reported `summary: 242 CAUGHT of 242` (`baseline: 127 named
+tests pass without an edit, 0 do not`; F-CI30a and F-CI30b, F-CI28a to
+F-CI28d and F-CI23e to F-CI23h each CAUGHT).
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
-014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028 and 029
-prove each of their falsifiers by break, named test fails, revert.
+014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029 and
+030 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.
