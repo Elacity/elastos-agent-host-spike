@@ -777,6 +777,14 @@ jobs:
           cache-targets: false
           cache-directories: ${{ env.SCCACHE_DIR }}
           save-if: ${{ env.CI_SAVE_CACHE == 'true' }}
+      - name: free runner disk
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          df -h /
       - name: require 16 GiB free disk
         run: |
           set -euo pipefail
