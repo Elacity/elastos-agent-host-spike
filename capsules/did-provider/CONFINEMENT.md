@@ -356,15 +356,27 @@ OS is read, so that run is no evidence for the OS argument.
 
 In the lab, did-provider also starts through the stand-in launcher in
 `../wallet-provider/tests/confine.rs`.
-`standin_launcher_refuses_a_start_it_cannot_confine` runs every refusal case
-for did before wallet, `standin_launcher_starts_did_confined_under_the_generated_profile`
-runs did's start and outside-write journey, and
+`standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` runs
+did's start and outside-write journey first and then wallet's, before every
+host and process refusal the stand-in must make for each provider.
 `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
 compares did's permitted and denied suite on the committed `confine.sb` and on
 a stand-in start. That suite holds both targets of `outside_write_denied`, so
 the sibling write beneath the same base separates a write grant on `did/` from
-one on its parent in the comparison too. The stand-in is test code and not the
-Runtime.
+one on its parent in the comparison too.
+
+The stand-in's input is one host report, not a bare OS name. The report holds
+the OS name and, for a simulated Linux host, which of Landlock, user namespaces
+or the seccomp filter it reports unavailable. Each refusal starts
+`{name} start on {os} is refused:` and carries only its own case's words: an OS
+with no confinement design names that OS and the list where the stand-in
+applies confinement; a simulated Linux host with a missing primitive carries
+the design's exact words for it from
+`../wallet-provider/CONFINEMENT-LINUX.md`; and a simulated Linux host that
+reports nothing missing says Linux is designed, not enforced, in this lab, so
+`linux` is not in `DECLARED_CONFINED_OS`. Those Linux rows are simulated host
+reports and not a Linux run, so no test here probes a kernel or claims Linux
+enforcement. The stand-in is test code and not the Runtime.
 
 ## Falsifiers
 
