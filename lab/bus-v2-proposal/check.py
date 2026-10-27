@@ -37,6 +37,10 @@ LAUNCHING_MARKER = "`" + LAUNCHING_SPAN + "`"
 ASKS_SPAN = "examples/agent-host/src/lib.rs:8149"
 ASKS_MARKER = "`" + ASKS_SPAN + "`"
 
+# Its quotation is the first indented line after the deny span, source line 3526.
+DENY_SPAN = "examples/agent-host/src/lib.rs:3526"
+DENY_MARKER = "`" + DENY_SPAN + "`"
+
 # The draft indents a quotation by exactly four spaces.
 DRAFT_INDENT = "    "
 
@@ -222,6 +226,14 @@ def asks_quote(text):
     return remainders[2]
 
 
+def deny_quote(text):
+    """Return the first quotation after the deny span, or None when absent."""
+    remainders = _remainders(text, DENY_MARKER)
+    if not remainders:
+        return None
+    return remainders[0]
+
+
 def quoted_line_matches(quoted, source):
     """True only when the quotation equals the pinned source line."""
     return quoted == source
@@ -289,8 +301,27 @@ def _asks_quote_refusal(root, text, sha):
     return None
 
 
+def _deny_quote_refusal(root, text, sha):
+    """Return the 3526 refusal, or None when that quote is absent or matches."""
+    if text.count(DENY_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + DENY_SPAN
+    quoted = deny_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(DENY_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + DENY_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + DENY_SPAN
+    return None
+
+
 def _quote_refusals(root, text, sha):
-    """Return the quote refusals in source order: 3754, 3755, 8149, 8162, then 8168."""
+    """Return the quote refusals in source order: 3526, 3754, 3755, 8149, 8162, then 8168."""
+    deny = _deny_quote_refusal(root, text, sha)
+    if deny is not None:
+        return [deny]
     if text.count(OWNED_MARKER) > 1:
         return ["refuse: quoted line is not one line: " + OWNED_SPAN]
     quoted = owned_quote(text)
