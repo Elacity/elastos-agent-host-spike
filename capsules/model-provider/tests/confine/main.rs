@@ -16,6 +16,9 @@
 //! profile's exec rule alone decides whether that program runs. Before
 //! `spawn`, a launch that binds `PROVIDER_EXECUTABLE` records that file's
 //! sha256 and refuses to start when the file no longer has that digest.
+//! The profile binds PROVIDER_EXECUTABLE by path. That refusal is a lab
+//! stand-in for the Runtime's launch-by-hash check, not the Runtime's check.
+//! This stand-in counts toward no M1 check.
 //! `Unconfined` and `Idle` do not bind the parameter. Its profile launch
 //! starts the real provider binary under a given profile path with exactly
 //! the bindings it is given. Its idle launch starts `/bin/sleep` on
@@ -1982,7 +1985,7 @@ fn model_bound_copy_serves_under_profile() {
 }
 
 /// A byte-different file at the path bound as `PROVIDER_EXECUTABLE` gets past
-/// the profile's exec refusal.
+/// the profile's exec refusal. The profile binds PROVIDER_EXECUTABLE by path.
 ///
 /// The copy is made in a temporary directory, never at the real provider
 /// binary's path and never in the directory that holds that binary. Its last
@@ -2100,7 +2103,9 @@ fn byte_different_file_at_bound_path_starts() {
 /// sha256, and appends one byte. `Launch::Program` passes that recorded
 /// digest and the changed path as both executable and program. The helper
 /// panics before `spawn`. The panic names `PROVIDER_EXECUTABLE digest
-/// mismatch`, the path, and both digests. If `start` returns, the test kills
+/// mismatch`, the path, and both digests. That refusal is a lab stand-in
+/// for the Runtime's launch-by-hash check, not the Runtime's check. This
+/// stand-in counts toward no M1 check. If `start` returns, the test kills
 /// and waits, then fails because the helper started the changed file. The
 /// test does not call `sandbox_available` and does not need `sandbox-exec`.
 ///
@@ -2328,18 +2333,32 @@ fn allow_form_closes(profile: &str) -> Result<(), String> {
             continue;
         }
         let line = line.trim();
-        // A line that is only `(` and whose next line starts `allow` is an
-        // allow the collector never sees. Look at that next line only.
+        // A line that trims to `(` and, after a run of empty lines or lines
+        // whose bytes are only spaces, tabs, form feeds, or vertical tabs, a
+        // line that starts with `allow` is an allow the collector never sees.
         if line == "(" {
-            if let Some(next) = lines.get(index + 1) {
-                if !next.starts_with(";;") {
-                    let next = next.trim();
-                    if let Some(rest) = next.strip_prefix("allow") {
-                        if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
-                            return Err(format!("allow form does not close: {line}"));
-                        }
+            let mut cursor = index + 1;
+            while let Some(next) = lines.get(cursor) {
+                // A line with no bytes, or whose every byte is a space, a tab,
+                // a form feed (byte 12), or a vertical tab (byte 11), is part
+                // of that run. A carriage return is not.
+                if next
+                    .bytes()
+                    .all(|byte| matches!(byte, b' ' | b'\t' | b'\x0c' | b'\x0b'))
+                {
+                    cursor += 1;
+                    continue;
+                }
+                if next.starts_with(";;") {
+                    break;
+                }
+                let next = next.trim();
+                if let Some(rest) = next.strip_prefix("allow") {
+                    if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
+                        return Err(format!("allow form does not close: {line}"));
                     }
                 }
+                break;
             }
         }
         if !line.contains("(allow") {
@@ -2482,6 +2501,41 @@ fn allow_rules_trace_to_declared_rights() {
             && !unclosed_message.contains("allow rule has no declared right")
             && !unclosed_message.contains("startup-root-directory widened"),
         "{unclosed_message}"
+    );
+    // A line that trims to `(` and whose next line starts `allow` and then a
+    // space or a tab is in memory. Neither call reads the fixture or the
+    // profile file.
+    let split_space = [
+        "(allow file-read-data (literal \"/\"))",
+        "(",
+        "allow file-read* (literal \"/tmp/cc-split-allow\"))",
+        "(allow sysctl-read)",
+    ]
+    .join("\n");
+    let split_space_message = allow_form_closes(&split_space)
+        .expect_err("a line ( whose next line starts allow must fail before check 2");
+    assert!(
+        split_space_message.contains("allow form does not close")
+            && split_space_message.contains("(")
+            && !split_space_message.contains("allow rule has no declared right")
+            && !split_space_message.contains("startup-root-directory widened"),
+        "{split_space_message}"
+    );
+    let split_tab = [
+        "(allow file-read-data (literal \"/\"))",
+        "(",
+        "allow\tfile-read* (literal \"/tmp/cc-split-allow-tab\"))",
+        "(allow sysctl-read)",
+    ]
+    .join("\n");
+    let split_tab_message = allow_form_closes(&split_tab)
+        .expect_err("a line ( whose next line starts allow must fail before check 2");
+    assert!(
+        split_tab_message.contains("allow form does not close")
+            && split_tab_message.contains("(")
+            && !split_tab_message.contains("allow rule has no declared right")
+            && !split_tab_message.contains("startup-root-directory widened"),
+        "{split_tab_message}"
     );
     if let Err(reason) = allow_form_closes(&profile) {
         panic!("{reason}");
@@ -2908,6 +2962,112 @@ fn platform_baseline_rules_stay_narrow() {
     ]
     .join("\n");
     assert_eq!(allow_form_closes(&not_split), Ok(()));
+
+    // A run of empty lines, or lines whose bytes are only spaces, tabs, form
+    // feeds, or vertical tabs, between `(` and `allow` is the same allow.
+    // None of these profiles reads the fixture or confine.sb.
+    let skipped_before_allow = [
+        [
+            root,
+            "(",
+            "",
+            "allow file-read* (literal \"/tmp/cc-blank-allow\"))",
+            sysctl,
+        ]
+        .join("\n"),
+        [
+            root,
+            "(",
+            "   ",
+            "allow file-read* (literal \"/tmp/cc-spaces-allow\"))",
+            sysctl,
+        ]
+        .join("\n"),
+        [
+            root,
+            "(",
+            "",
+            "",
+            "allow file-read* (literal \"/tmp/cc-two-blank-allow\"))",
+            sysctl,
+        ]
+        .join("\n"),
+        [
+            root,
+            "(",
+            "\t",
+            "allow file-read* (literal \"/tmp/cc-tab-line-allow\"))",
+            sysctl,
+        ]
+        .join("\n"),
+        [
+            root,
+            "(",
+            "\x0c",
+            "allow file-read* (literal \"/tmp/cc-ff-line-allow\"))",
+            sysctl,
+        ]
+        .join("\n"),
+        [
+            root,
+            "(",
+            "\x0b",
+            "allow file-read* (literal \"/tmp/cc-vt-line-allow\"))",
+            sysctl,
+        ]
+        .join("\n"),
+        [
+            root,
+            "(",
+            " \t\x0c\x0b",
+            "allow file-read* (literal \"/tmp/cc-mix-line-allow\"))",
+            sysctl,
+        ]
+        .join("\n"),
+        [
+            root,
+            "( ",
+            "",
+            "allow file-read* (literal \"/tmp/cc-sp-paren-allow\"))",
+            sysctl,
+        ]
+        .join("\n"),
+        [
+            root,
+            "(",
+            "",
+            "allow\tfile-read* (literal \"/tmp/cc-blank-tab\"))",
+            sysctl,
+        ]
+        .join("\n"),
+    ];
+    for profile in skipped_before_allow {
+        let message = allow_form_closes(&profile).unwrap_err();
+        assert_eq!(message, "allow form does not close: (");
+        assert!(
+            !message.contains("startup-root-directory widened"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("allow rule has no declared right"),
+            "{message}"
+        );
+    }
+    let comment_between = [
+        "(",
+        "",
+        "allowing",
+        "(",
+        "",
+        "allow-default",
+        "(",
+        "",
+        ";; note",
+        "allow file-read* (literal \"/tmp/cc-comment-allow\"))",
+        "(",
+    ]
+    .join("\n");
+    assert_eq!(allow_form_closes(&comment_between), Ok(()));
 
     let profile_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("confine.sb");
     let profile = fs::read_to_string(&profile_path).unwrap_or_else(|err| {

@@ -6116,3 +6116,85 @@ The same environment and lease as the falsifiers. Both commands stayed inside 60
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `tests/common/grants.rs:1008` sends the provider read with the granted token. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/effects.rs:930` fails under F-a5-other-session. The planted gap cell fails in the report. |
 | 8. Identity, admission and allowance stay separate? | Yes | `tests/effects.rs:856` keeps the Public read off A5 credit. `:954` passes no verified caller. |
+
+## 039 — Owned storage root row, and A3 relabelled as process isolation
+
+039 records `instance_writes_only_under_own_storage_root` as `BLOCKED (AC-039-OWNED-ROOT)` and relabels the two-client rows as process isolation, not A3. `Cargo.toml`, `Cargo.lock` and `falsifiers.json` are unchanged. There is no new list id.
+
+### Ignored journey
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- instance_writes_only_under_own_storage_root --exact --nocapture --ignored --test-threads=2` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. Exit 101, real 10.96 seconds. Each session wrote its own file. The sibling request stayed pending, the existing deny route settled it, and the test then failed.
+
+```text
+owned root: write localhost://Public/agent-conformance-grants/instance-a/own.txt status:ok bytes:10
+owned root: write localhost://Public/agent-conformance-grants/instance-b/own.txt status:ok bytes:10
+owned root: sibling request localhost://Public/agent-conformance-grants/instance-a/sibling.txt status:pending
+fixture controller: denied
+thread 'instance_writes_only_under_own_storage_root' (62680033) panicked at tests/effects.rs:1056:28:
+Runtime refuses a sibling write under the other owned root: "Runtime left the sibling write pending for the shell"
+test instance_writes_only_under_own_storage_root ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 68 filtered out; finished in 10.86s
+```
+
+The cleanup line was `pending:0 grants:BLOCKED(AC-021-GRANTS)`.
+
+### F-a3-label
+
+`src/report.rs` `INSTANCE_GRANTS_SCOPE` was set back to `process-isolation lab half of A3, A6 and A9`. No other file changed.
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test report -- --test-threads=2
+```
+
+Exit 101, real 2.65 seconds.
+
+```text
+thread 'instance_receipt_requires_both_launches_and_scope' (62691114) panicked at tests/report.rs:1029:9:
+assertion failed: complete.table.contains(&format!("{name} | PASS | {scope}"))
+test result: FAILED. 22 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.35s
+```
+
+The constant was restored before the next step. The restored report target later passed 23 tests.
+
+### F-a5-root-gap-row
+
+The new row's ID cell was `AC-039-OWNED-ROOTX`. `./run.sh` from `lab/agent-conformance`. The first planted run also hit the known `fixture_operator_sockets_are_loopback_only` census flake. Nothing was changed for that flake. The planted command was run once more. `owned_root_row_is_blocked_in_gaps` reads `GAPS.md`, so that test fails while the ID cell is planted.
+
+| Step | Exit | Seconds | Row |
+| --- | --- | --- | --- |
+| Planted, with the socket flake | 1 | 289.66 | `instance_writes_only_under_own_storage_root \| FAIL \| GAPS.md: instance_writes_only_under_own_storage_root: missing blocker IDs: [AC-039-OWNED-ROOT]; extra blocker IDs: [AC-039-OWNED-ROOTX]` |
+| Planted, rerun | 1 | 269.12 | same FAIL line; `fixture_operator_sockets_are_loopback_only \| PASS` |
+| Restored | 0 | 248.45 | `instance_writes_only_under_own_storage_root \| BLOCKED (AC-039-OWNED-ROOT)` |
+
+The flake text was `process leftover; processes:1 paths:["home/Library/Application Support/elastos/host-process.lock"]`. On both planted runs, `grant_refused_from_another_session` and `grant_refused_from_a_new_session` stayed PASS with the session-binding label, and `grant_record_names_agent_identity` stayed `BLOCKED (AC-038-GRANT-PRINCIPAL)`. The ID cell is restored.
+
+### Acceptance run
+
+The restored `./run.sh` above is the acceptance run: exit 0, real 248.45 seconds. No FAIL row. `versions_receipt (A14) | PASS`.
+
+```text
+grant_refused_from_another_session | PASS | session binding of a Runtime grant on the run client's route, lab client sessions (M1 A5 half); a Public read earns no A5 credit
+grant_refused_from_a_new_session | PASS | session binding of a Runtime grant on the run client's route, lab client sessions (M1 A5 half); a Public read earns no A5 credit
+grant_record_names_agent_identity | BLOCKED (AC-038-GRANT-PRINCIPAL)
+instance_writes_only_under_own_storage_root | BLOCKED (AC-039-OWNED-ROOT)
+```
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. Both commands stayed inside 600 seconds. The locked suite passed on the first run, so there was no census rerun.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.16 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 249.44 seconds. The effects target passed 57 tests, with 12 ignored, in 196.85 seconds. The report target passed 23 tests. `fixture_operator_sockets_are_loopback_only` passed.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `GAPS.md:966` names the Runtime change by its existing issue. The receipt hash fields are unchanged. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `tests/common/grants.rs:1011` sends the owned-file write with the session grant token. |
+| 3. A second path or a second copy of one rule? | No | `tests/common/grants.rs:926` is the one request-and-grant path for read and write. |
+| 4. Runtime core grows? | No | `tests/effects.rs:1054` keeps the blocked journey in the lane harness. |
+| 5. Refusals deny by default with a clear reason? | Yes | `tests/common/grants.rs:1840` accepts only `denied` or `auto_denied` with a reason. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `tests/common/grants.rs:1010` writes through the existing provider route. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/effects.rs:1056` fails while the sibling request is pending. F-a5-root-gap-row and F-a3-label fail when planted. |
+| 8. Identity, admission and allowance stay separate? | Yes | `GAPS.md:966` keeps the owned root bound to identity and session. A granted write does not close the row. |

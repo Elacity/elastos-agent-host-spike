@@ -1457,7 +1457,7 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/run.rs",
-          "old": "    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, input.granted)\n        .map_err(TwoEngineRefusal::Verify)?;\n",
+          "old": "    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, input.granted)\n        .map_err(TwoEngineRefusal::Verify)?;\n    check_module_memory(&bundle).map_err(TwoEngineRefusal::Memory)?;\n",
           "new": "    let module = input.bundle.join(\"capsule.wasm\");\n"
         },
         {
@@ -1718,8 +1718,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/run.rs",
-          "old": "    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, input.granted)\n        .map_err(TwoEngineRefusal::Verify)?;\n    let wasmtime_version =\n        query_version(Engine::Wasmtime, input.wasmtime).map_err(TwoEngineRefusal::Version)?;\n    let wasmer_version =\n        query_version(Engine::Wasmer, input.wasmer).map_err(TwoEngineRefusal::Version)?;\n",
-          "new": "    let wasmtime_version =\n        query_version(Engine::Wasmtime, input.wasmtime).map_err(TwoEngineRefusal::Version)?;\n    let wasmer_version =\n        query_version(Engine::Wasmer, input.wasmer).map_err(TwoEngineRefusal::Version)?;\n    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, input.granted)\n        .map_err(TwoEngineRefusal::Verify)?;\n"
+          "old": "    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, input.granted)\n        .map_err(TwoEngineRefusal::Verify)?;\n    check_module_memory(&bundle).map_err(TwoEngineRefusal::Memory)?;\n    let wasmtime_version =\n        query_version(Engine::Wasmtime, input.wasmtime).map_err(TwoEngineRefusal::Version)?;\n    let wasmer_version =\n        query_version(Engine::Wasmer, input.wasmer).map_err(TwoEngineRefusal::Version)?;\n",
+          "new": "    let wasmtime_version =\n        query_version(Engine::Wasmtime, input.wasmtime).map_err(TwoEngineRefusal::Version)?;\n    let wasmer_version =\n        query_version(Engine::Wasmer, input.wasmer).map_err(TwoEngineRefusal::Version)?;\n    let bundle = verify_bundle(input.bundle, input.signature, input.accepted, input.granted)\n        .map_err(TwoEngineRefusal::Verify)?;\n    check_module_memory(&bundle).map_err(TwoEngineRefusal::Memory)?;\n"
         }
       ],
       "tests": [
@@ -1992,8 +1992,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/README.md",
-          "old": "`falsifiers.json` holds 178 planted bugs",
-          "new": "`falsifiers.json` holds 177 planted bugs"
+          "old": "`falsifiers.json` holds 179 planted bugs",
+          "new": "`falsifiers.json` holds 178 planted bugs"
         }
       ],
       "tests": [
@@ -2411,7 +2411,6 @@
         "runner_passes_no_directory_env_or_network_flags",
         "declared_memory_cap_comes_from_the_manifest",
         "memory_grow_past_the_declared_cap_traps_on_wasmtime",
-        "second_memory_cannot_double_the_declared_cap_on_wasmtime",
         "receipt_cap_line_matches_the_argv_the_engine_got"
       ]
     },
@@ -2463,8 +2462,7 @@
       ],
       "tests": [
         "runner_passes_no_directory_env_or_network_flags",
-        "declared_memory_cap_comes_from_the_manifest",
-        "second_memory_cannot_double_the_declared_cap_on_wasmtime"
+        "declared_memory_cap_comes_from_the_manifest"
       ]
     },
     {
@@ -2929,6 +2927,24 @@
       "tests": [
         "budget_refusal_receipt_names_its_reason",
         "refusal_receipt_ids_are_distinct_and_named"
+      ]
+    },
+    {
+      "id": "F-WC10E-CAP-CHECK-DROPPED",
+      "title": "the module memory check returns success at its first line, so a module with no memory maximum, a maximum above the declared size or a second memory reaches an engine",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "fn check_module_memory(bundle: &VerifiedBundle) -> Result<Option<u64>, Refusal> {\n",
+          "new": "fn check_module_memory(bundle: &VerifiedBundle) -> Result<Option<u64>, Refusal> {\n    return Ok(None);\n"
+        }
+      ],
+      "tests": [
+        "run_refuses_a_module_memory_with_no_maximum_on_both_engines",
+        "run_refuses_a_memory_maximum_above_the_declared_size_on_both_engines",
+        "run_refuses_a_second_memory_before_any_engine_start"
       ]
     }
   ]

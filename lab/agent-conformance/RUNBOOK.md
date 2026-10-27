@@ -515,8 +515,10 @@ keeps its existing grade and labels pending/grant cleanup as unmeasured.
 ## Two seeded instances (023)
 
 The rows `two_instances_overlap_with_separate_grants` and
-`instance_grant_does_not_authorise_sibling` each run one shared journey and prove the
-**process-isolation lab half of A3, A6 and A9**. Run `run.sh` under the shared
+`instance_grant_does_not_authorise_sibling` each run one shared journey and prove
+**process isolation, not A3 (A3 needs resident instances in one Runtime); lab half of A6 and A9**.
+A3 is independent resident capsule instances inside one Runtime
+(https://github.com/Elacity/elastos-runtime/issues/181). Run `run.sh` under the shared
 build lease. Read the checked `instance overlap:`, `fixture controller:` and
 `fixture read:` lines beside the operator census and that run's VERSIONS.json.
 The receipt requires both launched component hashes and bundle lab CIDs.
@@ -686,3 +688,4 @@ These rows use lab client sessions on the run client's attach and provider route
 - `grant_refused_from_another_session`: sessions A and B each hold a session-duration grant for their own seeded file; B's presentation of A's token is HTTP 403 `Capability denied: wrong capsule`, expected A's pending-list session and got B's, then A reads again with the same token.
 - `grant_refused_from_a_new_session`: after A's read, a new client session from the same attach secret presents A's token and receives that refusal, with A expected and the new session got, then A reads again.
 - `grant_record_names_agent_identity`: BLOCKED (AC-038-GRANT-PRINCIPAL). The journey reads the Runtime `capability_grant` record and compares its principal and capsule with separate verified caller evidence for the requesting session. Runtime must supply that evidence before the row can pass. GAPS.md records Anders's change (https://github.com/Elacity/elastos-runtime/issues/464).
+- `instance_writes_only_under_own_storage_root`: BLOCKED (AC-039-OWNED-ROOT), with the Runtime change in GAPS.md. Sessions A and B write under their own areas; a sibling write under the other area must be a Runtime refusal with a reason and no shell decision.

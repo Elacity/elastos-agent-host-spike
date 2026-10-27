@@ -2945,52 +2945,38 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
     }
 }
 
-/// The lab writer refuses an unnamed right and writes no profile, so the start
-/// under that unwritten path is refused before the provider runs.
+/// The lab writer refuses an unnamed right and writes no profile, and the
+/// wallet start under that unwritten path is refused before the provider runs.
 ///
-/// Both cases read the real wallet declared-rights file and add one entry: a
-/// rights entry `unnamed-right` (case (a)) or a platform-baseline entry
-/// `unnamed-baseline` with the wallet justification prefix and a reason (case
-/// (b)). `write_generated_profile` returns the existing unnamed-id refusal,
-/// creates no path, and the confined start under that missing path exits
-/// non-zero before any request; `try_send` of `init` fails naming the request,
-/// the exit status and the missing path, and no wallet directory is created.
-/// On a host without the sandbox gate the file half still runs and the start
-/// half is skipped through the existing gate only.
+/// For each name of `allow_rule_profiles` (did first, then wallet) the test
+/// reads `capsules/<name>/tests/fixtures/confine/declared-rights.json` and adds
+/// one entry: a rights entry `unnamed-right` (case (a)) or a platform-baseline
+/// entry `unnamed-baseline` with that name's justification prefix and a reason
+/// (case (b)). `write_generated_profile` must return exactly
+/// `<name> declares <id>, which the shared contract does not name`, creating no
+/// file at that name's path; an `Ok` panics naming the provider and the case.
+/// The start half is wallet only: `PROVIDER_BINARY` is the wallet binary, and
+/// did's harness cannot run the generator. For did the test runs the file half
+/// and starts nothing. For wallet, the confined start under the missing path
+/// exits non-zero before any request; `try_send` of `init` fails naming the
+/// request, the exit status and the missing path, and no wallet directory is
+/// created. On a host without the sandbox gate the file half still runs and
+/// wallet's start half is skipped through the existing gate only.
 ///
 /// Falsifier: WP106 makes the rights-list id refusal in `declared_entries`
-/// never fire, so case (a) writes a profile and fails the no-file assertion;
-/// WP107 makes the platform-baseline id refusal never fire, so case (b) fails
-/// the same way; WP108 makes `write_generated_profile` create the path before
-/// it calls `generate_profile`, so both cases fail the no-file assertion.
+/// never fire, so case (a) writes a profile and the test panics at the refusal
+/// check in the did case; WP107 makes the platform-baseline id refusal never
+/// fire, so case (b) panics at that check in the did case; WP108 makes
+/// `write_generated_profile` create the path before it calls
+/// `generate_profile`, so both cases fail the no-file assertion in the did case.
 #[test]
 fn generator_refuses_an_unnamed_right_and_the_start_is_refused() {
     let fixture = tempfile::tempdir().expect("temporary wallet root");
     let base = resolved(fixture.path());
-    let declared_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/confine/declared-rights.json");
-    let declared = read_declared_rights("wallet-provider", &declared_path)
-        .unwrap_or_else(|err| panic!("{err}"));
+    let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("capsules/wallet-provider must sit under capsules/");
     let rule = r#"(allow file-read* (literal "/private/var/cc-confine-unnamed"))"#;
-    let prefix = platform_baseline_justification("wallet-provider");
-    let cases: [(&str, &str, Value); 2] = [
-        (
-            "(a) an unnamed right",
-            "unnamed-right",
-            json!({ "id": "unnamed-right", "rules": [rule] }),
-        ),
-        (
-            "(b) an unnamed platform-baseline rule",
-            "unnamed-baseline",
-            json!({
-                "id": "unnamed-baseline",
-                "justification": format!(
-                    "{prefix}a declared right that the shared contract does not name"
-                ),
-                "rules": [rule],
-            }),
-        ),
-    ];
     let profile_root = tempfile::tempdir().expect("temporary profile root");
     let profile_root = resolved(profile_root.path());
     let canonical = canonical_bindings(&base);
@@ -3000,77 +2986,110 @@ fn generator_refuses_an_unnamed_right_and_the_start_is_refused() {
         "op": "init",
         "config": { "base_path": base.display().to_string() }
     });
-    for (case, id, entry) in cases {
-        let mut declared = declared.clone();
-        if id == "unnamed-right" {
-            declared["rights"]
-                .as_array_mut()
-                .expect("wallet declared rights")
-                .push(entry);
-        } else {
-            declared[PLATFORM_BASELINE]["rules"]
-                .as_array_mut()
-                .expect("wallet platform-baseline rules")
-                .push(entry);
+    for name in allow_rule_profiles() {
+        let declared_path = capsules
+            .join(name)
+            .join("tests/fixtures/confine/declared-rights.json");
+        let declared =
+            read_declared_rights(name, &declared_path).unwrap_or_else(|err| panic!("{err}"));
+        let prefix = platform_baseline_justification(name);
+        let cases: [(&str, &str, Value); 2] = [
+            (
+                "(a) an unnamed right",
+                "unnamed-right",
+                json!({ "id": "unnamed-right", "rules": [rule] }),
+            ),
+            (
+                "(b) an unnamed platform-baseline rule",
+                "unnamed-baseline",
+                json!({
+                    "id": "unnamed-baseline",
+                    "justification": format!(
+                        "{prefix}a declared right that the shared contract does not name"
+                    ),
+                    "rules": [rule],
+                }),
+            ),
+        ];
+        for (case, id, entry) in cases {
+            let mut declared = declared.clone();
+            if id == "unnamed-right" {
+                declared["rights"]
+                    .as_array_mut()
+                    .expect("declared rights")
+                    .push(entry);
+            } else {
+                declared[PLATFORM_BASELINE]["rules"]
+                    .as_array_mut()
+                    .expect("platform-baseline rules")
+                    .push(entry);
+            }
+            let path = profile_root.join(format!("{name}-{id}-profile.sb"));
+            let refusal = match write_generated_profile(name, &declared, &path) {
+                Ok(()) => panic!(
+                    "{name} {case}: an unnamed id must be refused, but a profile was written"
+                ),
+                Err(refusal) => refusal,
+            };
+            assert_eq!(
+                refusal,
+                format!("{name} declares {id}, which the shared contract does not name"),
+                "{name} {case}: the refusal must be the one unnamed-id reason"
+            );
+            eprintln!("{name} {case} refusal: {refusal}");
+            assert!(
+                !path.exists(),
+                "{name} {case}: a refused profile must create no file: {}",
+                path.display()
+            );
+            if name != "wallet-provider" {
+                continue;
+            }
+            if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+                continue;
+            }
+            let bindings: Vec<(&str, &Path)> = canonical
+                .iter()
+                .map(|(name, path)| (*name, path.as_path()))
+                .collect();
+            let mut provider =
+                ConfinedProvider::start_under(&path, &bindings, Path::new(PROVIDER_BINARY));
+            let exit = provider.wait_for_exit();
+            assert!(
+                exit.code().is_some(),
+                "{case}: sandbox-exec must exit instead of starting the provider: {exit}"
+            );
+            assert_ne!(
+                exit.code(),
+                Some(0),
+                "{case}: sandbox-exec must refuse the missing profile: {exit}"
+            );
+            let failure = provider
+                .try_send(&request)
+                .expect_err("a refused start must not answer a request");
+            assert!(
+                failure.contains(&request.to_string()),
+                "{case}: the failure must name the request: {failure}"
+            );
+            assert!(
+                failure.contains(&exit.to_string()),
+                "{case}: the failure must name the exit status: {failure}"
+            );
+            assert!(
+                failure.contains(&path.display().to_string()),
+                "{case}: the failure must name the missing path: {failure}"
+            );
+            assert!(
+                !failure.contains("execvp"),
+                "{case}: sandbox-exec must refuse the profile before any exec: {failure}"
+            );
+            assert!(
+                !wallet_root.exists(),
+                "{case}: a refused start must create no wallet directory: {}",
+                wallet_root.display()
+            );
+            eprintln!("{case} startup refusal: {failure}");
         }
-        let path = profile_root.join(format!("{id}-profile.sb"));
-        let refusal = write_generated_profile("wallet-provider", &declared, &path)
-            .expect_err("an unnamed right must be refused");
-        assert_eq!(
-            refusal,
-            format!("wallet-provider declares {id}, which the shared contract does not name"),
-            "{case}: the refusal must be the one unnamed-id reason"
-        );
-        eprintln!("{case} refusal: {refusal}");
-        assert!(
-            !path.exists(),
-            "{case}: a refused profile must create no file: {}",
-            path.display()
-        );
-        if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-            continue;
-        }
-        let bindings: Vec<(&str, &Path)> = canonical
-            .iter()
-            .map(|(name, path)| (*name, path.as_path()))
-            .collect();
-        let mut provider =
-            ConfinedProvider::start_under(&path, &bindings, Path::new(PROVIDER_BINARY));
-        let exit = provider.wait_for_exit();
-        assert!(
-            exit.code().is_some(),
-            "{case}: sandbox-exec must exit instead of starting the provider: {exit}"
-        );
-        assert_ne!(
-            exit.code(),
-            Some(0),
-            "{case}: sandbox-exec must refuse the missing profile: {exit}"
-        );
-        let failure = provider
-            .try_send(&request)
-            .expect_err("a refused start must not answer a request");
-        assert!(
-            failure.contains(&request.to_string()),
-            "{case}: the failure must name the request: {failure}"
-        );
-        assert!(
-            failure.contains(&exit.to_string()),
-            "{case}: the failure must name the exit status: {failure}"
-        );
-        assert!(
-            failure.contains(&path.display().to_string()),
-            "{case}: the failure must name the missing path: {failure}"
-        );
-        assert!(
-            !failure.contains("execvp"),
-            "{case}: sandbox-exec must refuse the profile before any exec: {failure}"
-        );
-        assert!(
-            !wallet_root.exists(),
-            "{case}: a refused start must create no wallet directory: {}",
-            wallet_root.display()
-        );
-        eprintln!("{case} startup refusal: {failure}");
     }
 }
 
@@ -4645,6 +4664,163 @@ fn generated_did_and_wallet_profiles_match_their_committed_oracles() {
             );
         }
     }
+}
+
+/// Fails when a file outside test code names the lab generator or writer.
+///
+/// A file may name `generate_profile` or `write_generated_profile` only when
+/// its path relative to `root` has a component exactly `tests`, its file name
+/// is exactly `falsifiers.json`, or its extension is `md`. Every other file
+/// fails. The walk reads every regular file as bytes, so a non-UTF-8 file is
+/// read, not skipped, and matches each name as a plain byte substring, so a
+/// longer name that contains one also fails (P11). It does not follow symbolic
+/// links. It skips `.git` (git data), `node_modules` (dependency build output)
+/// and a directory whose name starts with `target` (cargo's `target/` and the
+/// lane's `target-build/`); each skip is build output or git data, not source.
+///
+/// Returns the number of files it read, or one refusal that lists every
+/// offending path, relative to `root` and sorted, with the reason.
+fn check_lab_generator_names(root: &Path) -> Result<usize, String> {
+    const NAMES: [&[u8]; 2] = [b"generate_profile", b"write_generated_profile"];
+    let mut pending = vec![root.to_path_buf()];
+    let mut read = 0usize;
+    let mut offending: Vec<PathBuf> = Vec::new();
+    while let Some(dir) = pending.pop() {
+        let entries = fs::read_dir(&dir)
+            .map_err(|err| format!("{} must be readable: {err}", dir.display()))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|err| format!("{} must be readable: {err}", dir.display()))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|err| format!("{} must be readable: {err}", path.display()))?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                let name = entry.file_name();
+                let name = name.to_str().unwrap_or_default();
+                if name == ".git" || name == "node_modules" || name.starts_with("target") {
+                    continue;
+                }
+                pending.push(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let bytes = fs::read(&path)
+                .map_err(|err| format!("{} must be readable: {err}", path.display()))?;
+            read += 1;
+            let relative = path.strip_prefix(root).unwrap_or(path.as_path());
+            let in_tests = relative
+                .components()
+                .any(|component| component.as_os_str().to_str() == Some("tests"));
+            let file_name = path.file_name().and_then(|name| name.to_str());
+            let extension = path.extension().and_then(|extension| extension.to_str());
+            if in_tests || file_name == Some("falsifiers.json") || extension == Some("md") {
+                continue;
+            }
+            if NAMES
+                .iter()
+                .any(|name| bytes.windows(name.len()).any(|window| window == *name))
+            {
+                offending.push(relative.to_path_buf());
+            }
+        }
+    }
+    if offending.is_empty() {
+        return Ok(read);
+    }
+    offending.sort();
+    Err(offending
+        .iter()
+        .map(|path| {
+            format!(
+                "{} names the lab generator, which is test code only",
+                path.display()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// The lab generator and its writer are named only in test code.
+///
+/// The test walks the whole repository from `capsules/`'s parent and requires
+/// that no file outside test code names `generate_profile` or
+/// `write_generated_profile`. It prints how many files it read.
+#[test]
+fn lab_generator_is_named_only_in_test_code() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|capsules| capsules.parent())
+        .expect("capsules/wallet-provider must sit under the repository root");
+    let read = check_lab_generator_names(root).unwrap_or_else(|err| panic!("{err}"));
+    println!("lab generator name check read {read} files");
+}
+
+/// A non-test file that names the lab generator is refused, and the exempt
+/// files and build output are not.
+///
+/// The fixture holds `src/main.rs` and `elastos/x.py` naming the generator and
+/// writer, the exempt `tests`, `falsifiers.json` and `md` names, and a
+/// `target/` file naming it. The refusal names exactly the first two, sorted;
+/// after they are removed the check returns `Ok`. A longer name that contains
+/// `generate_profile` and a non-UTF-8 file naming it are then each refused,
+/// because the check matches plain bytes and reads every file as bytes.
+#[test]
+fn lab_generator_name_check_refuses_a_non_test_file() {
+    let root = tempfile::tempdir().expect("temporary repository root");
+    let root = root.path();
+    let files = [
+        ("src/main.rs", "fn main() { generate_profile(); }\n"),
+        ("elastos/x.py", "write_generated_profile(path)\n"),
+        ("crate/tests/a.rs", "generate_profile\n"),
+        ("crate/src/tests/b.rs", "write_generated_profile\n"),
+        (
+            "crate/falsifiers.json",
+            "{\"about\": \"generate_profile\"}\n",
+        ),
+        ("crate/README.md", "generate_profile\n"),
+        ("target/debug/planted.rs", "generate_profile\n"),
+    ];
+    for (path, contents) in files {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().expect("a fixture file has a parent"))
+            .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+        fs::write(&path, contents).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+    }
+    let refusal = check_lab_generator_names(root)
+        .expect_err("a non-test file that names the generator must be refused");
+    assert_eq!(
+        refusal,
+        "elastos/x.py names the lab generator, which is test code only\n\
+         src/main.rs names the lab generator, which is test code only"
+    );
+    fs::remove_file(root.join("elastos/x.py")).expect("remove the python fixture");
+    fs::remove_file(root.join("src/main.rs")).expect("remove the rust fixture");
+    assert_eq!(
+        check_lab_generator_names(root).expect("only test code and build output remain"),
+        4
+    );
+    fs::write(root.join("crate/longer.rs"), "regenerate_profile\n")
+        .expect("a fixture file under crate/");
+    assert_eq!(
+        check_lab_generator_names(root)
+            .expect_err("a longer name that contains the generator name must be refused"),
+        "crate/longer.rs names the lab generator, which is test code only"
+    );
+    fs::remove_file(root.join("crate/longer.rs")).expect("remove the longer-name fixture");
+    fs::write(root.join("crate/binary.bin"), b"\xffgenerate_profile\xfe")
+        .expect("a non-UTF-8 fixture file");
+    assert_eq!(
+        check_lab_generator_names(root)
+            .expect_err("a non-UTF-8 file that names the generator must be read, not skipped"),
+        "crate/binary.bin names the lab generator, which is test code only"
+    );
+    fs::remove_file(root.join("crate/binary.bin")).expect("remove the binary fixture");
 }
 
 /// The model provider's declared-rights file uses the same template as did and

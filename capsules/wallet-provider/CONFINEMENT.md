@@ -64,6 +64,9 @@ declared-rights file and the contract head, and
 `generated_did_and_wallet_profiles_match_their_committed_oracles` requires it
 to equal this oracle; the Runtime's own generator and its comparison are not
 built and stay in `elastos/`, outside this lane.
+The lab generator and writer are test code only, and
+`lab_generator_is_named_only_in_test_code` fails if a file outside test code
+names either, so the Runtime keeps one profile generator (P10).
 The one contract check, `check_profile_contract`, holds every oracle
 to these terms, and the generated profile meets them too: `(version 1)` first,
 `(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
@@ -812,18 +815,27 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `generated_did_and_wallet_profiles_match_their_committed_oracles` fails
   because neither declared-rights file names that rule.
 - Make the declared-rights check's rights-list id refusal never fire (WP106):
-  `generator_refuses_an_unnamed_right_and_the_start_is_refused` fails because
-  case (a) writes a profile for the unnamed right.
+  `generator_refuses_an_unnamed_right_and_the_start_is_refused` fails at its
+  refusal check because case (a) writes a profile for the unnamed right in the
+  did case, and the panic names `did-provider` and the case.
 - Make the platform-baseline id refusal never fire (WP107): the same test fails
-  because case (b) writes a profile for the unnamed baseline rule.
+  at its refusal check because case (b) writes a profile for the unnamed
+  baseline rule in the did case.
 - Make the lab writer create the profile path before it calls the generator
-  (WP108): the same test fails because both cases create the refused path.
+  (WP108): the same test fails on its no-file assertion because both cases
+  create the refused path in the did case.
 - Append `(deny file-write* (literal "/private/var/cc-confine-generated"))`
   after the declared rules in `generate_profile` (WP109):
   `generated_did_and_wallet_profiles_match_their_committed_oracles` fails only
   at the sorted-tail comparison, because the head keeps its order and neither
   contract check reads a deny form, so the panic names that form under "only in
   generated".
+- Name `generate_profile` in `capsules/wallet-provider/src/main.rs` (WP110):
+  `lab_generator_is_named_only_in_test_code` fails because the walk reads the
+  provider's non-test file and its refusal names that path.
+- Name `generate_profile` in `capsules/did-provider/src/main.rs` (WP111): the
+  same test fails because the walk reaches the other crate and its refusal
+  names that path.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

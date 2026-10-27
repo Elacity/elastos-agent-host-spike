@@ -1027,7 +1027,9 @@ fn runner_uses_only_explicit_inputs() {
         ["serde", "_json"].concat(),
         ["Capsule", "Manifest"].concat(),
         ["from", "_slice"].concat(),
-        ["wasm_capsule", "_audit"].concat(),
+        ["wasm_capsule_audit", "::audit"].concat(),
+        ["audit", "_component"].concat(),
+        ["audit", "("].concat(),
         ["checked", "_bundle"].concat(),
         ["verify", "_checked("].concat(),
         ["entries", "()"].concat(),
@@ -1067,10 +1069,32 @@ fn runner_uses_only_explicit_inputs() {
         1,
         "the runner uses the granted imports somewhere other than its verify call"
     );
+    // Task 033: the module's bytes come from entrypoint() twice, the module
+    // write and the memory check, and nowhere else.
     assert_eq!(
         code.matches(".entrypoint()").count(),
+        2,
+        "the runner takes the module bytes from entrypoint() other than for its write and its memory check"
+    );
+    // Task 033: the runner reads the module's memory limits only through the
+    // audit crate's `memories`, the lab's one module reader, imported once and
+    // called once; it uses nothing else of that crate.
+    let audit_crate = ["wasm_capsule", "_audit"].concat();
+    assert_eq!(
+        code.matches(audit_crate.as_str()).count(),
         1,
-        "the runner takes the module bytes from entrypoint() once"
+        "the runner names the audit crate other than in its one import"
+    );
+    assert!(
+        code.contains(&format!(
+            "use {audit_crate}::{{memories, Refusal as AuditRefusal}};"
+        )),
+        "the runner imports more or less of the audit crate than memories and its refusal"
+    );
+    assert_eq!(
+        code.matches(["memories", "("].concat().as_str()).count(),
+        1,
+        "the runner reads the module's memory limits more or less than once"
     );
 }
 
@@ -2534,19 +2558,29 @@ fn module_import_with_no_typed_operation_is_refused() {
     assert_engine_starts(&ran, 0, "untyped-not-granted");
 }
 
-/// wc-010b: a hand-written core module, as bytes: one memory of 1 page with no
-/// maximum, no import, and one export, `digest (i32) -> i32`, that ignores its
-/// argument and runs `memory.grow` by the constant `delta` (two signed LEB128
-/// bytes), returning what `memory.grow` returns: the old size in pages, 1, on
+/// wc-010b, task 033: a hand-written core module, as bytes: one memory of 1
+/// page with a maximum of 1024 pages, 64 MB, this capsule's declared size, no
+/// import, and one export, `digest (i32) -> i32`, that ignores its argument
+/// and runs `memory.grow` by the constant `delta` (two signed LEB128 bytes),
+/// returning what `memory.grow` returns: the old size in pages, 1, on
 /// success, or -1 on failure.
 fn grow_module(delta: [u8; 2]) -> Vec<u8> {
+    memory_module(&MAXIMUM_1024, delta)
+}
+
+/// [`grow_module`]'s module with one memory whose limits are `limits`, as
+/// encoded: the limits flag (0x00 minimum only, 0x01 minimum and maximum),
+/// then the minimum and any maximum in pages, each LEB128.
+fn memory_module(limits: &[u8], delta: [u8; 2]) -> Vec<u8> {
     let mut module = b"\0asm\x01\0\0\0".to_vec();
     // Type section: one type, (i32) -> (i32).
     module.extend_from_slice(&[0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f]);
     // Function section: one function, of type 0.
     module.extend_from_slice(&[0x03, 0x02, 0x01, 0x00]);
-    // Memory section: one memory, minimum 1 page, no maximum.
-    module.extend_from_slice(&[0x05, 0x03, 0x01, 0x00, 0x01]);
+    // Memory section: one memory, with `limits`.
+    let size = u8::try_from(1 + limits.len()).expect("a one-byte section size");
+    module.extend_from_slice(&[0x05, size, 0x01]);
+    module.extend_from_slice(limits);
     // Export section: "digest", function 0.
     module.extend_from_slice(&[0x07, 0x0a, 0x01, 0x06]);
     module.extend_from_slice(b"digest");
@@ -2557,6 +2591,22 @@ fn grow_module(delta: [u8; 2]) -> Vec<u8> {
     module.extend_from_slice(&[0x40, 0x00, 0x0b]);
     module
 }
+
+/// Task 033: memory limits for [`memory_module`]: minimum 1 page, maximum
+/// 1024 pages (64 MB, the default declared size).
+const MAXIMUM_1024: [u8; 4] = [0x01, 0x01, 0x80, 0x08];
+
+/// Minimum 1 page, maximum 1025 pages: one page over the default 64 MB.
+const MAXIMUM_1025: [u8; 4] = [0x01, 0x01, 0x81, 0x08];
+
+/// Minimum 1 page, maximum 32 pages: exactly a declared 2 MB.
+const MAXIMUM_32: [u8; 3] = [0x01, 0x01, 0x20];
+
+/// Minimum 1 page, maximum 33 pages: one page over a declared 2 MB.
+const MAXIMUM_33: [u8; 3] = [0x01, 0x01, 0x21];
+
+/// Minimum 1 page and no maximum.
+const NO_MAXIMUM: [u8; 2] = [0x00, 0x01];
 
 /// 1023 pages as signed LEB128: from 1 page to exactly 1024 pages, 64 MB, the
 /// declared cap.
@@ -2771,60 +2821,315 @@ fn memory_grow_past_the_declared_cap_traps_on_wasmtime() {
     eprintln!("PASS: wasmtime trapped on the grow past the declared 64 MB cap");
 }
 
-/// wc-010b: a hand-written core module, as bytes: two memories of 32 pages
-/// (2 MB) each with no maximum, no import, and one export, `digest (i32) ->
-/// i32`, that ignores its argument and returns `memory.size 0 + memory.size
-/// 1`, 64 pages. Each memory alone fits a 2 MB cap; together they are twice
-/// it.
+/// wc-010b, task 033: a hand-written core module, as bytes: two memories of
+/// 32 pages (2 MB) each with a maximum of 32 pages, no import, and one export,
+/// `digest (i32) -> i32`, that ignores its argument and returns `memory.size
+/// 0 + memory.size 1`, 64 pages. Each memory alone fits a 2 MB cap; together
+/// they are twice it.
 const TWO_MEMORY_MODULE: &[u8] = &[
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // header
     0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, // type: (i32) -> (i32)
     0x03, 0x02, 0x01, 0x00, // function: one, of type 0
-    0x05, 0x05, 0x02, 0x00, 0x20, 0x00, 0x20, // memory: two, minimum 32 pages, no maximum
+    0x05, 0x07, 0x02, // memory: two,
+    0x01, 0x20, 0x20, 0x01, 0x20, 0x20, // each minimum 32 pages, maximum 32 pages
     0x07, 0x0a, 0x01, 0x06, b'd', b'i', b'g', b'e', b's', b't', 0x00, 0x00, // export "digest"
     0x0a, 0x09, 0x01, 0x07, 0x00, // code: one body, no locals
     0x3f, 0x00, 0x3f, 0x01, 0x6a, 0x0b, // memory.size 0; memory.size 1; i32.add; end
 ];
 
-/// wc-010b, real engine: the declared cap is the capsule's whole linear
-/// memory. `max-memory-size` caps each memory on its own, so a signed,
-/// verified module that declares 2 MB and has two 2 MB memories would get
-/// 4 MB; on `wasmtime` it is refused at start, with `max-memories=1`'s own
-/// reason on stderr, and never runs.
+/// Task 033: a bundle of `module` in `root`, signed with a fresh key, that
+/// declares `memory_mb`, or, with none, carries this capsule's manifest as it
+/// is, so it declares the Runtime's default, 64.
+fn declaring(root: &Path, name: &str, module: &[u8], memory_mb: Option<u32>) -> Declared {
+    match memory_mb {
+        Some(memory_mb) => signed_bundle_declaring(root, name, module, memory_mb),
+        None => {
+            let key = fresh_key();
+            let (bundle, sig) = signed_bundle(root, name, module, &key);
+            Declared {
+                bundle,
+                sig,
+                accepted: vec![did(&key)],
+            }
+        }
+    }
+}
+
+/// Task 033: `module`, bundled by [`declaring`] in `root`, through
+/// `run_engine` on `wasmtime` and on `wasmer`, then through `run`, all on
+/// [`marked`] stand-ins of `case`'s own. Every answer must be a refusal at the
+/// entrypoint's path in the bundle, `capsule.wasm`, that prints exactly
+/// `capsule.wasm: <text>`; `run`'s comes as `TwoEngineRefusal::Memory`. No
+/// run folder is made in any of the three work roots, and neither stand-in is
+/// started for a module run or asked `--version`. Returns the three reasons,
+/// `run_engine`'s two then `run`'s.
+fn refused_for_memory(
+    root: &Path,
+    case: &str,
+    module: &[u8],
+    memory_mb: Option<u32>,
+    text: &str,
+) -> Vec<Reason> {
+    let signed = declaring(root, &format!("bundle-{case}"), module, memory_mb);
+    let value = verify_bundle(&signed.bundle, Some(&signed.sig), &signed.accepted, &[])
+        .unwrap_or_else(|refusal| panic!("{case}: the verifier refused: {refusal}"));
+    let engines = work_root(root, &format!("engines-{case}"));
+    let wasmtime = marked(&engines, "wasmtime", "printf 'same\\n'\n");
+    let wasmer = marked(&engines, "wasmer", "printf 'same\\n'\n");
+    let expected = format!("capsule.wasm: {text}");
+
+    let mut reasons = Vec::new();
+    for (engine_kind, program) in [(Engine::Wasmtime, &wasmtime), (Engine::Wasmer, &wasmer)] {
+        let work = work_root(root, &format!("work-{case}-{engine_kind}"));
+        let refusal = refused(run_engine(
+            &value,
+            engine_kind,
+            program,
+            &work,
+            &TEST_CONTROL,
+        ));
+        assert_eq!(
+            refusal.path,
+            Path::new("capsule.wasm"),
+            "{case}, {engine_kind}"
+        );
+        assert_eq!(refusal.to_string(), expected, "{case}, {engine_kind}");
+        assert!(
+            names(&work).is_empty(),
+            "{case}, {engine_kind}: a run folder was made"
+        );
+        reasons.push(refusal.reason);
+    }
+
+    let work = work_root(root, &format!("work-{case}-run"));
+    let refusal = match two_refused(run(&signed.input(&wasmtime, &wasmer, &work))) {
+        TwoEngineRefusal::Memory(refusal) => refusal,
+        other => panic!("{case}: run did not refuse the module's memory: {other}"),
+    };
+    assert_eq!(refusal.path, Path::new("capsule.wasm"), "{case}, run");
+    assert_eq!(refusal.to_string(), expected, "{case}, run");
+    assert!(
+        names(&work).is_empty(),
+        "{case}, run: a run folder was made"
+    );
+    reasons.push(refusal.reason);
+
+    for name in ["wasmtime", "wasmer"] {
+        assert!(
+            !started(&engines, name),
+            "{case}: {name} was started for a module run"
+        );
+        assert!(
+            !queried(&engines, name),
+            "{case}: {name} was asked --version"
+        );
+    }
+    reasons
+}
+
+/// Task 033 (M1 C0 lab half): a module whose one memory declares no maximum
+/// (minimum 1 page) is refused, by `run_engine` on both engines and by `run`,
+/// before any engine process starts: no engine applies the declared size to
+/// it, and it is never run uncapped. Stand-in engines.
 #[test]
-fn second_memory_cannot_double_the_declared_cap_on_wasmtime() {
-    let Some(program) = real_wasmtime("the two-memory run") else {
+fn run_refuses_a_module_memory_with_no_maximum_on_both_engines() {
+    let tmp = TempDir::new("run33-no-max");
+    let root = canonical(&tmp);
+    let module = memory_module(&NO_MAXIMUM, GROW_TO_THE_CAP);
+    let reasons = refused_for_memory(
+        &root,
+        "no-max",
+        &module,
+        None,
+        "the module's memory (minimum 1 × 64 KiB) declares no maximum: the module is not run uncapped",
+    );
+    assert_eq!(reasons.len(), 3);
+    for reason in &reasons {
+        assert!(
+            matches!(reason, Reason::MemoryMaximumMissing { minimum: 1 }),
+            "not MemoryMaximumMissing: {reason}"
+        );
+    }
+}
+
+/// Task 033: a memory maximum above the declared size is refused before any
+/// engine process starts, by `run_engine` on both engines and by `run`: 33
+/// pages under a declared 2 MB (32 pages), and 1025 pages under this
+/// capsule's default 64 MB (1024 pages), each one page over. Stand-in engines.
+#[test]
+fn run_refuses_a_memory_maximum_above_the_declared_size_on_both_engines() {
+    let tmp = TempDir::new("run33-above");
+    let root = canonical(&tmp);
+    let cases: [(&str, &[u8], Option<u32>, u64, u32, &str); 2] = [
+        (
+            "two-mb",
+            &MAXIMUM_33,
+            Some(2),
+            33,
+            2,
+            "the module's memory maximum, 33 × 64 KiB, is above the declared 2 MB (32 × 64 KiB): the module is not run uncapped",
+        ),
+        (
+            "default",
+            &MAXIMUM_1025,
+            None,
+            1025,
+            64,
+            "the module's memory maximum, 1025 × 64 KiB, is above the declared 64 MB (1024 × 64 KiB): the module is not run uncapped",
+        ),
+    ];
+    for (case, limits, declared, pages, memory_mb, text) in cases {
+        let module = memory_module(limits, GROW_TO_THE_CAP);
+        let reasons = refused_for_memory(&root, case, &module, declared, text);
+        assert_eq!(reasons.len(), 3, "{case}");
+        for reason in &reasons {
+            assert!(
+                matches!(
+                    reason,
+                    Reason::MemoryMaximumAboveDeclared { maximum, memory_mb: declared_mb }
+                        if *maximum == pages && *declared_mb == memory_mb
+                ),
+                "{case}: not MemoryMaximumAboveDeclared {{ {pages}, {memory_mb} }}: {reason}"
+            );
+        }
+    }
+}
+
+/// Task 033: the declared size caps the capsule's whole linear memory. A
+/// module that declares 2 MB and has two memories, each with a maximum of 32
+/// pages (2 MB), so 4 MB together, is refused with the more-than-one-memory
+/// reason by `run_engine` on both engines and by `run`, before any engine
+/// process starts. Stand-in engines; before task 033 this module reached
+/// wasmtime, which refused it at start under `max-memories=1`.
+#[test]
+fn run_refuses_a_second_memory_before_any_engine_start() {
+    let tmp = TempDir::new("run33-two-memories");
+    let root = canonical(&tmp);
+    let reasons = refused_for_memory(
+        &root,
+        "two-memories",
+        TWO_MEMORY_MODULE,
+        Some(2),
+        "the module has 2 memories: the declared size caps one linear memory, so the module is not run uncapped",
+    );
+    assert_eq!(reasons.len(), 3);
+    for reason in &reasons {
+        assert!(
+            matches!(reason, Reason::MemoryCountAboveOne { count: 2 }),
+            "not MemoryCountAboveOne: {reason}"
+        );
+    }
+}
+
+/// Task 033: a module whose one memory's maximum is exactly the declared size
+/// (32 pages under a declared 2 MB), and the zero-memory `MODULE`, which has no
+/// linear memory to grow, both still run as before: through `run_engine` on
+/// both stand-in engines, then through `run`, each module run started once and
+/// each engine asked `--version` once, by `run`.
+#[test]
+fn run_starts_a_module_whose_maximum_fits_the_declared_size() {
+    let tmp = TempDir::new("run33-fits");
+    let root = canonical(&tmp);
+    let fits = memory_module(&MAXIMUM_32, GROW_TO_THE_CAP);
+    for (case, module, memory_mb) in [("fits", &fits[..], Some(2)), ("no-memory", MODULE, None)] {
+        let signed = declaring(&root, &format!("bundle-{case}"), module, memory_mb);
+        let value = verify_bundle(&signed.bundle, Some(&signed.sig), &signed.accepted, &[])
+            .unwrap_or_else(|refusal| panic!("{case}: the verifier refused: {refusal}"));
+        let engines = work_root(&root, &format!("engines-{case}"));
+        let wasmtime = counting(&engines, "wasmtime");
+        let wasmer = counting(&engines, "wasmer");
+        for (engine_kind, program) in [(Engine::Wasmtime, &wasmtime), (Engine::Wasmer, &wasmer)] {
+            let work = work_root(&root, &format!("work-{case}-{engine_kind}"));
+            let stdout = ran(run_engine(
+                &value,
+                engine_kind,
+                program,
+                &work,
+                &TEST_CONTROL,
+            ));
+            assert_eq!(stdout, b"same\n", "{case}, {engine_kind}");
+        }
+        let work = work_root(&root, &format!("work-{case}-run"));
+        let passed = two_ran(run(&signed.input(&wasmtime, &wasmer, &work)));
+        assert_eq!(passed.wasmtime(), b"same\n", "{case}");
+        assert_eq!(passed.wasmer(), b"same\n", "{case}");
+        for program in [&wasmtime, &wasmer] {
+            assert_eq!(
+                starts(program, "module"),
+                2,
+                "{case}: {}",
+                program.display()
+            );
+            assert_eq!(
+                starts(program, "version"),
+                1,
+                "{case}: {}",
+                program.display()
+            );
+        }
+    }
+}
+
+/// Task 033, real engine: [`grow_module`]'s maximum is 1024 pages, this
+/// capsule's declared 64 MB, so `run_engine` starts it on `wasmer`, which has
+/// no cap flag; a grow to exactly that maximum succeeds and `memory.grow`
+/// returns the old size, 1.
+#[test]
+fn capsule_grows_within_its_module_maximum_on_wasmer() {
+    let Some(program) = real_wasmer("the within-maximum run") else {
         return;
     };
-    let tmp = TempDir::new("run10-two-memories");
+    let tmp = TempDir::new("run33-wasmer-within");
     let root = canonical(&tmp);
-    let value = verified_bundle_declaring(&root, "bundle", TWO_MEMORY_MODULE, 2);
+    let (_, value) = verified_bundle(&root, "bundle", &grow_module(GROW_TO_THE_CAP));
+    assert_eq!(value.memory_mb(), 64);
     let work = work_root(&root, "work");
 
-    let refusal = refused(run_engine(
+    let stdout = ran(run_engine(
         &value,
-        Engine::Wasmtime,
+        Engine::Wasmer,
         &program,
         &work,
         &TEST_CONTROL,
     ));
-    match &refusal.reason {
-        Reason::EngineFailed {
-            engine,
-            status,
-            stderr,
-        } => {
-            assert_eq!(*engine, Engine::Wasmtime);
-            assert!(!status.success(), "a failed run exited 0");
-            assert!(
-                stderr.contains("resource limit exceeded: memory count too high at 2"),
-                "wasmtime ({}) did not refuse the second memory: {stderr}",
-                program.display()
-            );
-        }
-        _ => panic!("not an engine failure: {refusal}"),
-    }
-    eprintln!("PASS: wasmtime refused a second memory under the declared 2 MB cap");
+    assert_eq!(
+        String::from_utf8_lossy(&stdout),
+        "1\n",
+        "wasmer ({}): the grow to the module's maximum did not succeed",
+        program.display()
+    );
+    eprintln!("PASS: wasmer grew to the module's 1024-page maximum and printed 1");
+}
+
+/// Task 033, real engine: on `wasmer`, which has no cap flag, the cap is the
+/// module's own maximum (task 030, row m2): a grow one page past
+/// [`grow_module`]'s 1024 pages fails, `memory.grow` returns -1, and the
+/// engine exits 0 with `-1` as its output.
+#[test]
+fn memory_grow_past_the_module_maximum_returns_minus_one_on_wasmer() {
+    let Some(program) = real_wasmer("the past-maximum run") else {
+        return;
+    };
+    let tmp = TempDir::new("run33-wasmer-past");
+    let root = canonical(&tmp);
+    let (_, value) = verified_bundle(&root, "bundle", &grow_module(GROW_PAST_THE_CAP));
+    assert_eq!(value.memory_mb(), 64);
+    let work = work_root(&root, "work");
+
+    let stdout = ran(run_engine(
+        &value,
+        Engine::Wasmer,
+        &program,
+        &work,
+        &TEST_CONTROL,
+    ));
+    assert_eq!(
+        String::from_utf8_lossy(&stdout),
+        "-1\n",
+        "wasmer ({}): the grow past the module's maximum did not return -1",
+        program.display()
+    );
+    eprintln!("PASS: wasmer returned -1 to a grow past the module's 1024-page maximum");
 }
 
 /// Task 032 (M1 C0 step ii): the capsule `tools/build` makes declares its own
@@ -2941,12 +3246,16 @@ fn built_capsule_runs_under_the_declared_cap_on_wasmtime() {
     );
 }
 
-/// wc-010b: wasmer 7.5.0's CLI has no memory cap flag, so no cap is claimed
-/// for it. This test is never run and never counted as a PASS.
+/// wc-010b: wasmer 7.5.0's CLI has no memory cap flag, so `run` gives it no
+/// cap argument. Since task 033 its cap is the module's own memory maximum,
+/// which `run` checks against the declared size before any start
+/// (`capsule_grows_within_its_module_maximum_on_wasmer` and
+/// `memory_grow_past_the_module_maximum_returns_minus_one_on_wasmer`). This
+/// test, for a cap flag, is never run and never counted as a PASS.
 #[test]
-#[ignore = "SKIPPED: wasmer 7.5.0 has no memory cap flag in wasmer run --help or wasmer --help (wc-010a); no cap is claimed for wasmer"]
+#[ignore = "SKIPPED: wasmer 7.5.0 has no memory cap flag in wasmer run --help or wasmer --help (wc-010a); its cap is the module's own memory maximum, checked by run (task 033)"]
 fn memory_cap_on_wasmer_is_skipped() {
-    panic!("SKIPPED: no memory cap is claimed for wasmer");
+    panic!("SKIPPED: wasmer has no memory cap flag");
 }
 
 /// wc-010c: the receipt's line for an engine started with no memory cap
@@ -4192,11 +4501,15 @@ fn reason_variant(reason: &Reason) -> usize {
         Reason::EngineNotStopped { .. } => 21,
         Reason::EngineNotWaited { .. } => 22,
         Reason::OutputNotRead { .. } => 23,
+        Reason::MemoryNotRead(_) => 24,
+        Reason::MemoryCountAboveOne { .. } => 25,
+        Reason::MemoryMaximumMissing { .. } => 26,
+        Reason::MemoryMaximumAboveDeclared { .. } => 27,
     }
 }
 
 /// The number of `Reason` variants [`reason_variant`] numbers.
-const REASON_VARIANTS: usize = 24;
+const REASON_VARIANTS: usize = 28;
 
 /// Whether `id` is lowercase snake_case: lowercase ASCII words joined by
 /// single underscores.
@@ -4208,7 +4521,8 @@ fn is_snake_case(id: &str) -> bool {
 }
 
 /// Task 044: one example value per `Reason` variant (as a module run's
-/// refusal, or a version query's for the version reasons) and per
+/// refusal, a version query's for the version reasons, or, task 033, the
+/// memory check's, `TwoEngineRefusal::Memory`, for the memory reasons) and per
 /// `TwoEngineRefusal` variant, constructed here. Each renders the five lines
 /// with its own `reason:` id, lowercase snake_case and distinct from every
 /// other; `engine:` is the engine its reason names (`wasmer` in every example
@@ -4285,6 +4599,13 @@ fn refusal_receipt_ids_are_distinct_and_named() {
             engine,
             error: error(),
         },
+        Reason::MemoryNotRead(AuditRefusal::Malformed),
+        Reason::MemoryCountAboveOne { count: 2 },
+        Reason::MemoryMaximumMissing { minimum: 1 },
+        Reason::MemoryMaximumAboveDeclared {
+            maximum: 33,
+            memory_mb: 2,
+        },
     ];
     let mut covered: Vec<usize> = reasons.iter().map(reason_variant).collect();
     covered.sort_unstable();
@@ -4314,6 +4635,8 @@ fn refusal_receipt_ids_are_distinct_and_named() {
         };
         let refusal = if version {
             TwoEngineRefusal::Version(refusal)
+        } else if is_memory_reason(&refusal.reason) {
+            TwoEngineRefusal::Memory(refusal)
         } else {
             TwoEngineRefusal::Engine(refusal)
         };
@@ -4375,6 +4698,31 @@ fn refusal_receipt_ids_are_distinct_and_named() {
         ],
         "OutputsDiffer"
     );
+
+    // Task 033: one id per Reason, as for a version query's refusal: a
+    // memory reason from `run_engine` (as `TwoEngineRefusal::Engine`) has the
+    // id it has from `run`'s memory check (as `TwoEngineRefusal::Memory`).
+    let from_run_engine = TwoEngineRefusal::Engine(Refusal {
+        path: PathBuf::from("capsule.wasm"),
+        reason: Reason::MemoryMaximumMissing { minimum: 1 },
+    });
+    assert_eq!(
+        receipt_lines(&render_refused(&from_run_engine))[2..4],
+        ["reason: memory_maximum_missing", "engine: none"],
+        "a memory reason from run_engine"
+    );
+}
+
+/// Whether `reason` is one of task 033's memory-check reasons, which `run`
+/// returns as `TwoEngineRefusal::Memory`.
+fn is_memory_reason(reason: &Reason) -> bool {
+    matches!(
+        reason,
+        Reason::MemoryNotRead(_)
+            | Reason::MemoryCountAboveOne { .. }
+            | Reason::MemoryMaximumMissing { .. }
+            | Reason::MemoryMaximumAboveDeclared { .. }
+    )
 }
 
 /// Whether the example `reason` above has an `engine` field. Coverage only, as

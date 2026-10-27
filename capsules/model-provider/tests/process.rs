@@ -249,7 +249,19 @@ fn access_binding(create: &Value) -> Value {
 }
 
 fn wait_for_run_terminal(provider: &mut ProviderProcess, run_id: &str, binding: &Value) -> Value {
-    let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
+    wait_for_run_terminal_within(provider, run_id, binding, FIXTURE_EVENT_TIMEOUT)
+}
+
+/// Waits for the run to settle within `deadline`. The fixture tests keep
+/// `FIXTURE_EVENT_TIMEOUT`; the opt-in real turn passes its own longer budget,
+/// because a real model turn is slower than the fixture backend.
+fn wait_for_run_terminal_within(
+    provider: &mut ProviderProcess,
+    run_id: &str,
+    binding: &Value,
+    deadline: Duration,
+) -> Value {
+    let deadline = Instant::now() + deadline;
     loop {
         let run =
             provider.request(json!({"op":"runs_get", "run_id":run_id, "runtime_binding":binding}));
@@ -743,9 +755,9 @@ Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
 
 /// Adds one backend chunk as `{len:X}\r\n{bytes}\r\n`, the Runtime's copy at
 /// `elastos/crates/elastos-server/src/api/model_provider_egress.rs:1644-1648`.
-fn push_runtime_hosted_stream_frame(answer: &mut Vec<u8>, frame: &str) {
+fn push_runtime_hosted_stream_frame(answer: &mut Vec<u8>, frame: &[u8]) {
     answer.extend_from_slice(format!("{:X}\r\n", frame.len()).as_bytes());
-    answer.extend_from_slice(frame.as_bytes());
+    answer.extend_from_slice(frame);
     answer.extend_from_slice(b"\r\n");
 }
 
@@ -759,7 +771,7 @@ fn runtime_hosted_stream_answer() -> Vec<u8> {
         format!("data: {}\n\n", RUNTIME_HOSTED_STREAM_EVENTS[1]),
         "data: [DONE]\n\n".to_string(),
     ] {
-        push_runtime_hosted_stream_frame(&mut answer, &frame);
+        push_runtime_hosted_stream_frame(&mut answer, frame.as_bytes());
     }
     answer.extend_from_slice(b"0\r\n\r\n");
     answer
@@ -778,19 +790,25 @@ fn runtime_hosted_cut_answer() -> Vec<u8> {
     let mut answer = runtime_hosted_stream_head();
     push_runtime_hosted_stream_frame(
         &mut answer,
-        &format!("data: {}\n\n", RUNTIME_HOSTED_STREAM_EVENTS[0]),
+        format!("data: {}\n\n", RUNTIME_HOSTED_STREAM_EVENTS[0]).as_bytes(),
     );
     answer
 }
 
 /// What the stand-in answers: the Runtime's refusal, which is the default, its
-/// accepted head followed by the whole backend stream, or its accepted head
-/// followed by a cut stream.
-#[derive(Clone, Copy)]
+/// accepted head followed by the whole backend stream, its accepted head
+/// followed by a cut stream, or a real backend answer relayed through that same
+/// head and framing.
+#[derive(Clone)]
 enum HostedEffectAnswer {
     Refused,
     Streaming,
     Cut,
+    /// Relays the recorded request body to this base URL and copies the backend
+    /// answer back as the Runtime's hosted stream.
+    Relay {
+        backend_url: String,
+    },
 }
 
 /// One request the stand-in read to its end: the request line and every header
@@ -802,6 +820,9 @@ struct RecordedRequest {
     /// reader refuses such a line
     /// (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:556`).
     colonless: Vec<String>,
+    /// The request body, kept so a relaying answer forwards the provider's own
+    /// bytes and the test can read them.
+    body: Vec<u8>,
 }
 
 impl RecordedRequest {
@@ -842,6 +863,8 @@ struct HostedEffectStandIn {
     requests: Receiver<RecordedRequest>,
     /// False while `hold_answer` holds each answer back.
     answer_released: Arc<(Mutex<bool>, Condvar)>,
+    /// What the backend answered, when the answer relays.
+    relay_outcome: Arc<Mutex<Option<RelayOutcome>>>,
     stop: Arc<AtomicBool>,
     accept_loop: Option<thread::JoinHandle<()>>,
 }
@@ -865,6 +888,17 @@ impl HostedEffectStandIn {
         Self::bind_answering(label, HostedEffectAnswer::Cut)
     }
 
+    /// Binds the stand-in that relays each hosted effect to the real backend at
+    /// `backend_url` and answers in the Runtime's accepted stream shape.
+    fn bind_relaying(label: &str, backend_url: &str) -> Self {
+        Self::bind_answering(
+            label,
+            HostedEffectAnswer::Relay {
+                backend_url: backend_url.to_string(),
+            },
+        )
+    }
+
     fn bind_answering(label: &str, answer: HostedEffectAnswer) -> Self {
         // The provider refuses a socket path of 104 bytes or more
         // (`src/config.rs:163`), so bind under `/tmp` rather than under the
@@ -881,11 +915,13 @@ impl HostedEffectStandIn {
         let connections = Arc::new(AtomicUsize::new(0));
         let (request_tx, requests) = mpsc::channel();
         let answer_released = Arc::new((Mutex::new(true), Condvar::new()));
+        let relay_outcome = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let accept_loop = {
             let listener = Arc::clone(&listener);
             let connections = Arc::clone(&connections);
             let answer_released = Arc::clone(&answer_released);
+            let relay_outcome = Arc::clone(&relay_outcome);
             let stopping = Arc::clone(&stop);
             thread::spawn(move || {
                 while !stopping.load(Ordering::Relaxed) {
@@ -894,8 +930,16 @@ impl HostedEffectStandIn {
                             connections.fetch_add(1, Ordering::Relaxed);
                             let request_tx = request_tx.clone();
                             let answer_released = Arc::clone(&answer_released);
+                            let relay_outcome = Arc::clone(&relay_outcome);
+                            let answer = answer.clone();
                             thread::spawn(move || {
-                                serve_hosted_effect(stream, request_tx, answer_released, answer)
+                                serve_hosted_effect(
+                                    stream,
+                                    request_tx,
+                                    answer_released,
+                                    answer,
+                                    relay_outcome,
+                                )
                             });
                         }
                         Err(_) => thread::sleep(Duration::from_millis(5)),
@@ -909,6 +953,7 @@ impl HostedEffectStandIn {
             connections,
             requests,
             answer_released,
+            relay_outcome,
             stop,
             accept_loop: Some(accept_loop),
         }
@@ -931,6 +976,12 @@ impl HostedEffectStandIn {
     /// The connections the accept loop has returned so far.
     fn connection_count(&self) -> usize {
         self.connections.load(Ordering::Relaxed)
+    }
+
+    /// What the backend answered, when the answer relays. `None` before the
+    /// backend answered, or when the answer does not relay.
+    fn relay_outcome(&self) -> Option<RelayOutcome> {
+        self.relay_outcome.lock().unwrap().clone()
     }
 
     /// Waits for the accept loop to return `expected` connections, failing
@@ -995,11 +1046,14 @@ fn serve_hosted_effect(
     request_tx: mpsc::Sender<RecordedRequest>,
     answer_released: Arc<(Mutex<bool>, Condvar)>,
     answer: HostedEffectAnswer,
+    relay_outcome: Arc<Mutex<Option<RelayOutcome>>>,
 ) {
     let recorded = read_hosted_effect_request(&stream);
+    // A relaying answer forwards the provider's exact bytes, which the record
+    // keeps for the test. The request is recorded before any wait, so a held
+    // answer still counts the send the provider made.
+    let body = recorded.body.clone();
     let _ = request_tx.send(recorded);
-    // The request is recorded before any wait, so a held answer still counts
-    // the send the provider made.
     {
         let (released, wake) = &*answer_released;
         let mut released = released.lock().unwrap();
@@ -1011,8 +1065,150 @@ fn serve_hosted_effect(
         HostedEffectAnswer::Refused => RUNTIME_HOSTED_REFUSAL.to_vec(),
         HostedEffectAnswer::Streaming => runtime_hosted_stream_answer(),
         HostedEffectAnswer::Cut => runtime_hosted_cut_answer(),
+        HostedEffectAnswer::Relay { backend_url } => {
+            let outcome = relay_hosted_effect(&stream, &body, &backend_url);
+            *relay_outcome.lock().unwrap() = Some(outcome);
+            return;
+        }
     };
     let _ = (&stream).write_all(&response);
+}
+
+/// What a relaying answer read from the backend: its status with the first
+/// bytes of its answer, or the reason no answer arrived. A backend that refuses
+/// the turn fails the test with its own status and body, not only with the
+/// provider's error code.
+#[derive(Clone)]
+enum RelayOutcome {
+    Answered { status: u16, first_bytes: Vec<u8> },
+    Unreachable { reason: String },
+}
+
+/// The backend's answer prefix that a failure message carries.
+const RELAY_FAILURE_BYTES: usize = 1024;
+
+/// One relayed hosted effect: the stand-in sends the provider's body to the
+/// backend, then writes the Runtime's accepted head, each backend body chunk as
+/// one HTTP chunk, and the end `0\r\n\r\n`, the same framing
+/// `runtime_hosted_stream_answer` builds
+/// (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:1644-1648`,
+/// `:1650`, `:1662-1670`). It adds no field, no header and no key, so the
+/// backend sees exactly the body the provider sent.
+fn relay_hosted_effect(stream: &UnixStream, body: &[u8], backend_url: &str) -> RelayOutcome {
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return RelayOutcome::Unreachable {
+            reason: "the stand-in could not build its relay runtime".to_string(),
+        };
+    };
+    runtime.block_on(relay_turn(stream, body, backend_url))
+}
+
+async fn relay_turn(stream: &UnixStream, body: &[u8], backend_url: &str) -> RelayOutcome {
+    let client = match reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(REAL_TURN_TIMEOUT)
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            return RelayOutcome::Unreachable {
+                reason: format!("the stand-in could not build its client: {err}"),
+            }
+        }
+    };
+    let endpoint = format!("{}/v1/chat/completions", backend_url.trim_end_matches('/'));
+    let mut response = match client
+        .post(&endpoint)
+        .header("content-type", "application/json")
+        .body(body.to_vec())
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(err) => {
+            return RelayOutcome::Unreachable {
+                reason: reason_chain(&err),
+            }
+        }
+    };
+    let status = response.status();
+    if !status.is_success() {
+        let first_bytes = read_backend_prefix(&mut response).await;
+        let mut answer = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("Unknown"),
+            first_bytes.len()
+        )
+        .into_bytes();
+        answer.extend_from_slice(&first_bytes);
+        let _ = (&*stream).write_all(&answer);
+        return RelayOutcome::Answered {
+            status: status.as_u16(),
+            first_bytes,
+        };
+    }
+    let _ = (&*stream).write_all(&runtime_hosted_stream_head());
+    let mut frame = Vec::new();
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(err) => {
+                // The head is written and the stream has no end, so the provider
+                // reads an incomplete chunked body and fails the run closed.
+                return RelayOutcome::Unreachable {
+                    reason: format!("the backend stream broke after the head: {err}"),
+                };
+            }
+        };
+        frame.clear();
+        push_runtime_hosted_stream_frame(&mut frame, &chunk);
+        if (&*stream).write_all(&frame).is_err() {
+            return RelayOutcome::Answered {
+                status: status.as_u16(),
+                first_bytes: Vec::new(),
+            };
+        }
+    }
+    let _ = (&*stream).write_all(b"0\r\n\r\n");
+    RelayOutcome::Answered {
+        status: status.as_u16(),
+        first_bytes: Vec::new(),
+    }
+}
+
+/// The full cause chain of a transport failure, so the failure names
+/// `connection refused` and not only the client's wrapper text.
+fn reason_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut reason = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        reason.push_str(": ");
+        reason.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    reason
+}
+
+/// The backend's answer prefix, read to the end or to `RELAY_FAILURE_BYTES`.
+async fn read_backend_prefix(response: &mut reqwest::Response) -> Vec<u8> {
+    let mut prefix = Vec::new();
+    while prefix.len() < RELAY_FAILURE_BYTES {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let room = RELAY_FAILURE_BYTES - prefix.len();
+                prefix.extend_from_slice(&chunk[..chunk.len().min(room)]);
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    prefix
 }
 
 /// Reads one request head and its body to the end, waiting at most
@@ -1055,6 +1251,7 @@ fn read_hosted_effect_request(stream: &UnixStream) -> RecordedRequest {
         request_line: request_line.trim_end().to_string(),
         headers,
         colonless,
+        body,
     }
 }
 
@@ -1090,7 +1287,12 @@ fn hosted_run_posts_the_runtime_effect_headers_with_the_contract_run_id_and_no_k
     let root = std::fs::canonicalize(root).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let stand_in = HostedEffectStandIn::bind("hosted-effect-headers");
-    let init = hosted_effect_init(&root, &stand_in);
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
     let mut provider = ProviderProcess::start();
     let started = provider.request(init);
     assert_eq!(
@@ -1235,7 +1437,12 @@ fn hosted_answer_through_the_runtime_socket_completes_the_run_with_text_and_usag
     let root = std::fs::canonicalize(root).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let stand_in = HostedEffectStandIn::bind_streaming("hosted-accepted-answer");
-    let init = hosted_effect_init(&root, &stand_in);
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
     let mut provider = ProviderProcess::start();
     let started = provider.request(init);
     assert_eq!(
@@ -1340,14 +1547,24 @@ fn hosted_answer_through_the_runtime_socket_completes_the_run_with_text_and_usag
     provider.shutdown();
 }
 
+/// The model every fixture hosted test pins. The one real turn passes
+/// `deepseek-v4-flash` instead.
+const HOSTED_FIXTURE_MODEL: &str = "fixture/text";
+
+/// The run limit every fixture hosted test gives the one offer. The real turn
+/// passes its own, longer limit.
+const HOSTED_FIXTURE_RUNTIME_MS_LIMIT: u64 = 30_000;
+
 /// The hosted `open_ai_compatible_text` offer task 035 uses, with the fixture
 /// key that a hosted run must never put on the Runtime socket. Every hosted
-/// test calls `hosted_effect_init`, so there is one copy of this offer.
-fn hosted_effect_offer() -> Value {
+/// test calls `hosted_effect_init`, so there is one copy of this offer. The
+/// model id and the run limit are parameters because the opt-in real turn pins
+/// the DeepSeek selector and needs a longer run limit than the fixture.
+fn hosted_effect_offer(model: &str, runtime_ms_limit: u64) -> Value {
     let policy = json!({
         "concurrency_limit": 1, "input_bytes_limit": 8192,
         "inline_output_bytes_limit": 8192, "event_bytes_limit": 8192,
-        "runtime_ms_limit": 30000, "retention_secs": 60,
+        "runtime_ms_limit": runtime_ms_limit, "retention_secs": 60,
         "cancel_settlement_timeout_ms": 20
     });
     let hosted = json!({
@@ -1363,19 +1580,26 @@ fn hosted_effect_offer() -> Value {
         "policy": policy,
         "adapter": {"kind": "open_ai_compatible_text",
         "api_url": "https://hosted.invalid/v1/chat/completions",
-        "api_key": "fixture-key", "model": "fixture/text", "hosted": hosted},
+        "api_key": "fixture-key", "model": model, "hosted": hosted},
         "enabled": true
     })
 }
 
 /// The `init` request every hosted test sends: the shared offer and the
 /// stand-in's socket, with the fixture root as `base_path` and its `journal`
-/// folder as `journal_dir`.
-fn hosted_effect_init(root: &Path, stand_in: &HostedEffectStandIn) -> Value {
+/// folder as `journal_dir`. The offer's model id and run limit are parameters,
+/// so the opt-in real turn pins the DeepSeek selector through this one init.
+fn hosted_effect_init(
+    root: &Path,
+    stand_in: &HostedEffectStandIn,
+    model: &str,
+    runtime_ms_limit: u64,
+) -> Value {
     json!({"op": "init", "config": {
         "base_path": root, "allowed_paths": [], "read_only": false, "encryption_key": "",
         "extra": {"provider_id": "model-provider", "journal_dir": root.join("journal"),
-        "offers": [hosted_effect_offer()], "runtime_hosted_socket": &stand_in.path}
+        "offers": [hosted_effect_offer(model, runtime_ms_limit)],
+        "runtime_hosted_socket": &stand_in.path}
     }})
 }
 
@@ -1403,7 +1627,12 @@ fn hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect()
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let stand_in = HostedEffectStandIn::bind("hosted-open-run-retry");
     stand_in.hold_answer();
-    let init = hosted_effect_init(&root, &stand_in);
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
     let mut provider = ProviderProcess::start();
     let started = provider.request(init);
     assert_eq!(
@@ -1574,7 +1803,12 @@ fn hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage() {
     let root = std::fs::canonicalize(root).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let stand_in = HostedEffectStandIn::bind_cut("hosted-stream-cut");
-    let init = hosted_effect_init(&root, &stand_in);
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
     let mut provider = ProviderProcess::start();
     let started = provider.request(init);
     assert_eq!(
@@ -1706,7 +1940,12 @@ fn hosted_cancel_while_the_answer_is_held_settles_unknown_and_sends_nothing_more
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let stand_in = HostedEffectStandIn::bind("hosted-cancel-held");
     stand_in.hold_answer();
-    let init = hosted_effect_init(&root, &stand_in);
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
     let mut provider = ProviderProcess::start();
     let started = provider.request(init);
     assert_eq!(
@@ -1755,9 +1994,10 @@ fn hosted_cancel_while_the_answer_is_held_settles_unknown_and_sends_nothing_more
         ),
         "the hosted run must report an open status while the answer is held: {create}"
     );
-    // A request reaches the stand-in only after `request.send()` has left the
-    // worker's select (`src/adapters.rs:1990-1996`), so the worker owns the
-    // open send before the cancel arrives.
+    // The stand-in reads and records the request while `request.send()` is
+    // still the pending arm of the worker's select
+    // (`src/adapters.rs:1990-1996`), so the worker owns the open send before
+    // the cancel arrives.
     stand_in.wait_for_connections(1);
 
     let cancel = provider.request(json!({
@@ -1870,7 +2110,12 @@ fn hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect() {
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let stand_in = HostedEffectStandIn::bind("hosted-second-concurrent");
     stand_in.hold_answer();
-    let init = hosted_effect_init(&root, &stand_in);
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
     let mut provider = ProviderProcess::start();
     let started = provider.request(init);
     assert_eq!(
@@ -1964,6 +2209,10 @@ fn hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect() {
         created_b["data"]["terminal"]["error"]["code"], "model_busy",
         "a run above the offer ceiling must carry the busy reason: {created_b}"
     );
+    assert_eq!(
+        created_b["data"]["terminal"]["error"]["class"], "rate_limited",
+        "a run above the offer ceiling must carry the rate-limited class: {created_b}"
+    );
     assert!(
         created_b["data"]["terminal"]["output"].is_null(),
         "a refused run must carry no output: {created_b}"
@@ -2037,6 +2286,323 @@ fn hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect() {
             "a hosted run must carry no bearer key"
         );
     }
+
+    provider.shutdown();
+}
+
+/// A hosted run whose Runtime binding names no grant is refused before the
+/// provider opens the Runtime socket. The binding check is the first step of
+/// `handle_runs_create` after `reject_untrusted_binding_fields`
+/// (`src/state.rs:506-510`); it reads `grant_id` through
+/// `validate_bounded_trimmed`
+/// (`elastos/crates/elastos-model-contract/src/lib.rs:136`) and maps every
+/// failure to `invalid_request` with `invalid runtime binding`. The control
+/// run in the same test carries a grant and reaches the stand-in exactly once,
+/// so the stand-in was listening and the refused run sent nothing.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_run_with_no_grant_is_refused_before_any_send() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted run with no grant: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-no-grant");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind("hosted-no-grant");
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "a hosted run with no grant"
+    });
+    let input_hash = model_input_hash(&input).unwrap();
+    let refused_request = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": "session:test",
+            "capsule_id": "assistant",
+            "grant_id": "",
+            "request_id": test_support::fixture_model_request_id("request:hosted-no-grant"),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": input_hash
+        }
+    });
+    let mut accepted_request = refused_request.clone();
+    accepted_request["runtime_binding"]["grant_id"] = json!("grant:test");
+    accepted_request["runtime_binding"]["request_id"] = json!(
+        test_support::fixture_model_request_id("request:hosted-no-grant-control")
+    );
+
+    let refused = provider.request(refused_request);
+    assert_eq!(
+        refused,
+        json!({
+            "status": "error",
+            "code": "invalid_request",
+            "message": "invalid runtime binding",
+        }),
+        "a run with no grant must be refused with the provider's own error \
+         response: {refused}"
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        0,
+        "the refused run must open no connection to the Runtime socket: {refused}"
+    );
+
+    // The control run is the same request with a grant and a new request id.
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(accepted_request["runtime_binding"].clone()).unwrap();
+    let accepted = provider.request(accepted_request);
+    assert_eq!(
+        accepted["status"], "ok",
+        "unexpected create response: {accepted}"
+    );
+    assert_eq!(
+        accepted["data"]["run_id"],
+        model_run_id(&binding),
+        "runs_create must return the contract run id"
+    );
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "only the control run may open a connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "only the control run may send a hosted request"
+    );
+
+    provider.shutdown();
+}
+
+/// The model id the Sparks engine serves and the agent-host opt-in tests pin
+/// (`examples/agent-host/src/lib.rs:10153`, `:10161`).
+const REAL_TURN_MODEL: &str = "deepseek-v4-flash";
+
+/// The real turn's budget. A Sparks prefill and decode are slower than the
+/// fixture backend, so the offer's run limit, the relay's backend timeout and
+/// this test's settle deadline share one longer value.
+const REAL_TURN_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// The opt-in real model turn through the provider's hosted half. The stand-in
+/// plays the Runtime: it accepts the hosted effect, relays the provider's body
+/// unchanged to the Sparks engine at `SPARKS_MODEL_URL`, and answers in the
+/// Runtime's own stream framing. The test shows that the provider's hosted half
+/// carries one real model turn end to end. It is lab evidence only: the
+/// stand-in is not the Runtime, and a Sparks engine reached by URL is not
+/// Anders's A4 path
+/// (`examples/agent-host/handoff/reports/provider-a4-deepseek-turn-gaps.md`,
+/// "The A4 path, as Anders states it").
+///
+/// It needs the network, so it is ignored by default and no falsifier runs it.
+/// Its paired falsifier is 048's `MP29`: a run with no grant is refused before
+/// any send.
+#[test]
+#[ignore = "opt-in: needs SPARKS_MODEL_URL and the DeepSeek model on the Sparks"]
+fn opt_in_real_deepseek_turn_through_the_runtime_socket_completes_with_text_and_usage() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider real DeepSeek turn: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let Some(backend_url) = std::env::var("SPARKS_MODEL_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    else {
+        eprintln!(
+            "SKIP model-provider real DeepSeek turn: SPARKS_MODEL_URL is unset, \
+             so no real model is called"
+        );
+        return;
+    };
+
+    let root = test_support::temp_root_path("model-provider-process", "real-deepseek-turn");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind_relaying("real-deepseek-turn", &backend_url);
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        REAL_TURN_MODEL,
+        REAL_TURN_TIMEOUT.as_millis() as u64,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "Reply with the single word ready"
+    });
+    let create_request = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": "session:test",
+            "capsule_id": "assistant",
+            "grant_id": "grant:test",
+            "request_id": test_support::fixture_model_request_id("request:real-deepseek-turn"),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": model_input_hash(&input).unwrap()
+        }
+    });
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    assert_eq!(
+        create["data"]["run_id"], expected_run_id,
+        "runs_create must return the contract run id"
+    );
+
+    // The grant is the Runtime's, not the stand-in's: this run carries a grant
+    // and the stand-in only relays. MP29 is the paired refusal.
+    let settled = wait_for_run_terminal_within(
+        &mut provider,
+        &expected_run_id,
+        &access_binding(&create_request),
+        REAL_TURN_TIMEOUT + FIXTURE_EVENT_TIMEOUT,
+    );
+
+    // The backend's own status explains a failed run before the run's error
+    // code does.
+    let backend = {
+        let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
+        loop {
+            if let Some(outcome) = stand_in.relay_outcome() {
+                break outcome;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the relaying stand-in recorded no backend answer: {settled}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    };
+    match &backend {
+        RelayOutcome::Answered { status: 200, .. } => {}
+        RelayOutcome::Answered {
+            status,
+            first_bytes,
+        } => panic!(
+            "the Sparks backend answered {status}, not 200: {}",
+            String::from_utf8_lossy(first_bytes)
+        ),
+        RelayOutcome::Unreachable { reason } => {
+            panic!("the Sparks backend is unreachable: {reason}")
+        }
+    }
+
+    assert_eq!(
+        settled["data"]["status"], "completed",
+        "the permitted real turn must complete the run: {settled}"
+    );
+    let output = &settled["data"]["terminal"]["output"];
+    assert_eq!(
+        output["schema"], RUN_OUTPUT_TEXT_SCHEMA,
+        "the run must carry the text output schema: {settled}"
+    );
+    let text = output["text"]
+        .as_str()
+        .expect("the completed run carries text");
+    assert!(
+        !text.trim().is_empty(),
+        "the DeepSeek answer must not be empty: {settled}"
+    );
+    let report = &settled["data"]["terminal"]["backend_report"];
+    assert_eq!(
+        report["usage"]["status"], "reported",
+        "the run must record the backend's usage: {settled}"
+    );
+    let input_tokens = report["usage"]["value"]["input_tokens"]
+        .as_u64()
+        .expect("reported usage carries input_tokens");
+    let output_tokens = report["usage"]["value"]["output_tokens"]
+        .as_u64()
+        .expect("reported usage carries output_tokens");
+    let total_tokens = report["usage"]["value"]["total_tokens"]
+        .as_u64()
+        .expect("reported usage carries total_tokens");
+    assert!(
+        input_tokens > 0,
+        "the real turn must report input tokens: {settled}"
+    );
+    assert!(
+        output_tokens > 0,
+        "the real turn must report output tokens: {settled}"
+    );
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "the real turn must open exactly one connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "the real turn must send exactly one request"
+    );
+    let recorded = &requests[0];
+    assert_eq!(recorded.request_line, "POST /v1/hosted-effect HTTP/1.1");
+    assert_eq!(
+        recorded.value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
+    );
+    let forwarded: Value = serde_json::from_slice(&recorded.body)
+        .expect("the provider's hosted body is the JSON text request");
+    assert_eq!(
+        forwarded["model"], REAL_TURN_MODEL,
+        "the forwarded body must pin the DeepSeek selector: {forwarded}"
+    );
+
+    eprintln!(
+        "real DeepSeek turn: answer {} bytes, usage input_tokens {input_tokens}, \
+         output_tokens {output_tokens}, total_tokens {total_tokens}",
+        text.len()
+    );
 
     provider.shutdown();
 }

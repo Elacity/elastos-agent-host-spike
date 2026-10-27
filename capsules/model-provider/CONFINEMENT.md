@@ -35,12 +35,20 @@ half is "The Runtime bridge change" in `../did-provider/CONFINEMENT.md` and
 `../wallet-provider/CONFINEMENT.md`: the Runtime generates each provider's
 profile from its approved declared rights, one generator covers
 `model-provider` too, and the profile it generates for this provider must
-match this file, with the same three parameters bound to the same paths. The
-test that compares them is the Runtime's half. That half is not built. The
-model provider needs nothing from the Runtime beyond that one generator and
-that comparing test, and there is no separate Runtime proposal for the model
-provider (P10). The `sandbox-exec -f confine.sb` launch is the tests' launch
-(see "Tests"), not the Runtime's.
+match this file, with the same three parameters bound to the same paths. A
+lab generator, `generate_profile` in
+`capsules/wallet-provider/tests/confine.rs`, builds a profile from a
+declared-rights file and the contract head.
+`generated_did_and_wallet_profiles_match_their_committed_oracles` requires
+the generated did and wallet profiles to equal their oracles and does not
+read this profile.
+`model_declared_rights_read_on_the_did_and_wallet_template` reads this oracle
+and this declared-rights file. The Runtime's own generator and its comparison
+are not built and stay in `elastos/`, outside this lane. The model provider
+needs nothing from the Runtime beyond that one generator and that comparing
+test, and there is no separate Runtime proposal for the model provider (P10).
+The `sandbox-exec -f confine.sb` launch is the tests' launch (see "Tests"),
+not the Runtime's.
 
 `allow_rules_trace_to_declared_rights` traces every allow rule in this oracle
 to exactly one approved declared right in the `rights` array of
@@ -54,7 +62,8 @@ the page size to place its stack guard page.` for the sysctl read.
 They are Runtime platform baseline,
 technical OS permissions with no user approval prompt, not approved rights.
 The file is a lab stand-in for the Runtime generator's input, not a manifest
-field. The generator itself stays the Runtime's (Anders).
+field. The lab generator is test code.
+The Runtime's own generator is not built (Anders).
 
 `platform_baseline_rules_stay_narrow` fails if `startup-root-directory`
 widens in path or operation, including an added file write, or if
@@ -241,9 +250,9 @@ programs", means the profile applied and refused the exec.
 The launcher starts the provider no other way, as F-cc19a shows. The reason
 reaches the test through the launcher's stderr channel, as F-cc19b shows.
 For the Runtime's refusal of such a start, see "The Runtime bridge change"
-in `../did-provider/CONFINEMENT.md`. That bridge change is not built: the
-Runtime half that generates and enforces the profile is future work in
-`elastos/`, outside this lane.
+in `../did-provider/CONFINEMENT.md`. The lab writer in that did section is
+test code, and the Runtime half that generates and enforces the profile is
+not built and stays in `elastos/`, outside this lane.
 
 ## What the profile does not grant
 
@@ -530,6 +539,7 @@ profile does not grant".
   `F-cc36a` removes the last parenthesis of the `STORAGE_ROOT` allow, so this
   launch exits 65 and `byte_different_file_at_bound_path_starts` fails because
   the profile did not apply.
+  The profile binds PROVIDER_EXECUTABLE by path.
   A process still running after 2 seconds, or any other exit, is the outcome
   the test allows. The real binary's digest is
   unchanged. It runs under `sandbox-exec`, as the other confined tests do.
@@ -537,7 +547,9 @@ profile does not grant".
   the sha256 of a copy of `/usr/bin/true`, one byte is appended, and the
   start that passes the recorded digest panics with `PROVIDER_EXECUTABLE
   digest mismatch` before `spawn`. The panic names the path and both
-  digests. It needs no sandbox.
+  digests. That refusal is a lab stand-in for the Runtime's launch-by-hash
+  check, not the Runtime's check. This stand-in counts toward no M1 check.
+  It needs no sandbox.
 - `allow_rules_trace_to_declared_rights`: every allow rule in this oracle
   traces to exactly one approved declared right in the `rights` array of
   `tests/fixtures/confine/declared-rights.json`, or to one platform-baseline
@@ -555,6 +567,8 @@ profile does not grant".
   or a carriage return. A form feed or a vertical tab directly after `allow`
   is not a match. The baseline file scan calls that same function and keeps
   no second `(allow ` filter.
+  A line that trims to `(` and whose next line starts with `allow` and then
+  a space or a tab fails with `allow form does not close`.
 - `platform_baseline_rules_stay_narrow`: `startup-root-directory` stays
   `(allow file-read-data (literal "/"))` and `startup-sysctl` stays
   `(allow sysctl-read)`. Each pin is written in the test. A wider path or
@@ -574,6 +588,10 @@ profile does not grant".
   a space or a tab fails with `allow form does not close`.
   `F-cc39a` writes a line `(` after the root pin, then
   `allow file-read* (literal "/tmp/cc-split-allow"))`.
+  A run of empty lines, or lines whose bytes are only spaces, tabs, form
+  feeds, or vertical tabs, between a line that trims to `(` and a line that
+  starts with `allow` and then a space or a tab, fails with `allow form does
+  not close`. A `;;` line is not part of that run.
 - `startup_is_refused_when_the_profile_cannot_be_applied`: a missing profile,
   a copy of `confine.sb` with its last `)` removed, and `confine.sb` with
   `STORAGE_ROOT` unbound each refuse the start. It runs under
@@ -708,7 +726,7 @@ allow_rules_trace_to_declared_rights.
 | F-cc36a | The last parenthesis of the `STORAGE_ROOT` allow is removed | `byte_different_file_at_bound_path_starts` | The launch exits 65 and the test fails because the profile did not apply. |
 | F-cc37a | `(allow file-read-data (literal "/tmp/cc-same-line-allow"))` is written after `(deny network*)` on the same line | `allow_rules_trace_to_declared_rights` | That allow has no declared right and no platform baseline. |
 | F-cc38a | `(allow` is written on its own line after the root pin, then `file-read* (literal "/tmp/cc-unclosed"))` on the next line | `platform_baseline_rules_stay_narrow` | The allow form does not close. |
-| F-cc39a | A line `(` is written after the root pin, then `allow file-read* (literal "/tmp/cc-split-allow"))` on the next line | `platform_baseline_rules_stay_narrow` | The allow form does not close. |
+| F-cc39a | A line `(` is written after the root pin, then `allow file-read* (literal "/tmp/cc-split-allow"))` on the next line | `platform_baseline_rules_stay_narrow` and `allow_rules_trace_to_declared_rights` | The allow form does not close. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
