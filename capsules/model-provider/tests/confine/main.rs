@@ -3716,6 +3716,82 @@ fn generated_model_profile_matches_the_oracle() {
     );
 }
 
+/// The file `Launch::Profile` applies has the oracle's sorted allow lines.
+///
+/// `standin_profile` builds the text from the approved declared rights.
+/// `write_standin_profile` writes it at `storage.base.join("standin.sb")`.
+/// The written file has no `;;` line. Before `Provider::start`, that file's
+/// sorted allow lines equal the oracle's. `Launch::Profile` applies that
+/// file with `canonical_bindings`. Hosted `init` passes `assert_serving` and
+/// creates `runs/`. `applied_profile()` is that path, and the bytes there
+/// have the same sorted allow lines.
+///
+/// Falsifier: F-cc51a appends
+/// `(allow file-read-data (literal "/tmp/cc-launched-extra"))` inside
+/// `sandboxed` after the path is recorded, so
+/// `generated_profile_launch_matches_the_oracle` fails at the post-start
+/// allow-line compare.
+#[test]
+fn generated_profile_launch_matches_the_oracle() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let storage = Storage::prepare("standin-launched-file");
+    let profile = storage.base.join("standin.sb");
+    write_standin_profile(&profile, &generated);
+    let written = fs::read_to_string(&profile)
+        .unwrap_or_else(|err| panic!("the stand-in file must be readable: {err}"));
+    assert!(
+        written.lines().all(|line| !line.starts_with(";;")),
+        "the stand-in file has no comment line"
+    );
+    let oracle = fs::read_to_string(PROFILE_PATH)
+        .unwrap_or_else(|err| panic!("the profile oracle must be readable: {err}"));
+    let mut written_lines = collect_allow_lines(&written);
+    let mut oracle_lines = collect_allow_lines(&oracle);
+    written_lines.sort();
+    oracle_lines.sort();
+    assert_eq!(
+        written_lines, oracle_lines,
+        "the stand-in file's allow lines must equal the oracle's before start"
+    );
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let bindings = canonical_bindings(&storage, &binary);
+    let mut provider = Provider::start(Launch::Profile {
+        profile: &profile,
+        bindings: &bindings,
+    });
+    assert_serving(&provider.ok(&init_request(&storage, None)));
+    assert!(
+        storage.root.join("runs").is_dir(),
+        "init must create runs/ under STORAGE_ROOT"
+    );
+    assert_eq!(
+        applied_profile(),
+        profile,
+        "the launch records the stand-in file"
+    );
+    let launched = fs::read_to_string(applied_profile())
+        .unwrap_or_else(|err| panic!("the launched profile must be readable: {err}"));
+    let mut launched_lines = collect_allow_lines(&launched);
+    launched_lines.sort();
+    assert_eq!(
+        launched_lines, oracle_lines,
+        "the launched file's allow lines must equal the oracle's"
+    );
+    provider.shutdown();
+}
+
 /// The profile the stand-in builds is the file `Launch::Profile` applies.
 ///
 /// A hosted `init` answers through `assert_serving` and creates `runs/`
