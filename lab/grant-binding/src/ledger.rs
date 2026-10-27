@@ -29,6 +29,24 @@ fn handles_match(bound: Handle, presented: Handle) -> bool {
     bound == presented
 }
 
+fn held_for_identity(
+    open: &HashMap<u64, OpenHold>,
+    grants: &HashMap<Handle, crate::GrantRecord>,
+    identity: &str,
+) -> u64 {
+    let mut sum = 0;
+    for open_hold in open.values() {
+        let Some(grant) = grants.get(&open_hold.handle) else {
+            continue;
+        };
+        if grant.identity != identity {
+            continue;
+        }
+        sum += open_hold.amount;
+    }
+    sum
+}
+
 /// The one ledger the verifier owns.
 #[derive(Debug)]
 pub(crate) struct Ledger {
@@ -213,6 +231,13 @@ impl Verifier {
             .clone();
         let mut ledger = self.ledger.lock().expect("ledger lock");
         let held = ledger.held;
+        let shared = held;
+        let own = held_for_identity(&ledger.open, &self.grants, &identity);
+        let held = if ledger.ceilings.contains_key(&identity) {
+            own
+        } else {
+            shared
+        };
         ledger.ceiling = ledger.admitted;
         if let Some(agent_ceiling) = ledger.ceilings.get(&identity).copied() {
             ledger.ceiling = agent_ceiling;
@@ -229,6 +254,9 @@ impl Verifier {
             }
         };
         ledger.held = total;
+        if ledger.ceilings.contains_key(&identity) {
+            ledger.held = shared - own + total;
+        }
         ledger.next_reservation += 1;
         ledger.open.insert(
             ledger.next_reservation,
@@ -1685,4 +1713,62 @@ fn model_unasked_agent_reads_the_last_admit() {
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
     assert_eq!(after.held, 1);
+}
+
+#[test]
+fn model_other_agent_hold_does_not_fill_the_ceiling() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-2", "session-a");
+    assert_ne!(second, first);
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", rights())
+        .expect("bind");
+    assert_ne!(second_handle, first_handle);
+    let first_call = verifier.open_call(first);
+    let second_call = verifier.open_call(second);
+    let first_request = guest(first_handle);
+    let second_request = guest(second_handle);
+    verifier
+        .admit_ask(
+            &first_call,
+            &first_request,
+            crate::ask::BudgetAsk { amount: 4 },
+            10,
+        )
+        .expect("first ask");
+    verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            crate::ask::BudgetAsk { amount: 50 },
+            80,
+        )
+        .expect("second ask");
+    verifier
+        .reserve(&first_call, &first_request, 4)
+        .expect("first agent uses its own ceiling");
+    assert_eq!(books(&verifier).held, 4);
+    verifier
+        .reserve(&second_call, &second_request, 50)
+        .expect("first hold does not fill the second ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 54);
+    let refusal = verifier
+        .reserve(&second_call, &second_request, 1)
+        .expect_err("second agent is at its own ceiling");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 50,
+            held: 50,
+            asked: 1,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    assert_eq!(books(&verifier).held, 54);
 }
