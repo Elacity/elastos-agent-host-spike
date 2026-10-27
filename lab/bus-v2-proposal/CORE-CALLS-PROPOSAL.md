@@ -228,6 +228,8 @@ The guest denies a step with no grant id and does not mint one.
     /// authorize another step. A child cannot be answered with the parent's
     /// grant. The answer name is kept in the log. The grant string is not.
 
+This citation is design input for A3. `lab/capsule-identity/tests/package_record.rs::package_record_stays_outside_the_bundle` reads the named bytes before the signature. The test assembles two fixtures. The parent's listing is the fixture name alone. The lab CID and the `capsule.json` bytes are taken before any signature. Signing writes the record outside those bytes. The test's sign helper calls sign_package_record. After signing, the listing is unchanged, the lab CID is unchanged, `capsule.json` is unchanged, and that manifest's signature is none. Both verifiers leave those bytes in place. The checked verifier and the path verifier each run, and the same four checks pass after each. verify_checked_package_record is the checked verifier and verify_package_record is the path verifier. This outside record is the lab reference model, and the lab model is not the Runtime. The package-record signature stays outside the named bytes. Signing and checking that record leave the lab CID unchanged. This paragraph does not answer the agent DID question. A3 stays open.
+
 ## 3. Grant requests and A5 binding
 
 This section is design input for A5. A5 stays open.
