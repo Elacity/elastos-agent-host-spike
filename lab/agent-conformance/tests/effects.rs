@@ -394,14 +394,7 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
         let reads = collected
             .as_ref()
             .map_err(|_| "overlap collection failed")
-            .and_then(|completions| {
-                instance_read_result(
-                    completions,
-                    &controller,
-                    outcome,
-                    settlement.as_ref().ok().and_then(Option::as_ref),
-                )
-            });
+            .and_then(|completions| instance_read_result(completions, &controller, outcome));
         let passed = reads.is_ok()
             && overlap.is_ok()
             && finished.is_ok()
@@ -583,7 +576,6 @@ fn instance_read_result(
     completions: &[agent_conformance::harness::Completion],
     controller: &grants::Controller,
     outcome: ReadOutcome,
-    settlement: Option<&grants::Settlement>,
 ) -> Result<(), &'static str> {
     if completions.len() != 2 {
         return Err("both clients must be collected");
@@ -627,16 +619,11 @@ fn instance_read_result(
     } else {
         2
     };
-    let denials = if outcome == ReadOutcome::Kill {
-        1 + settlement
-            .ok_or("kill: orphan measurement is missing")?
-            .before
-    } else {
-        2
-    };
+    // Two denials: the sibling refusal and one other refusal. Kill's orphan
+    // count stays in Settlement::check, so 0 or 2 orphans deny 1 or 3 times.
     if controller.decisions.matched != grants
         || controller.decisions.granted != grants
-        || controller.decisions.denied != denials
+        || controller.decisions.denied != 2
     {
         return Err("expected own session grants and two denials are required");
     }

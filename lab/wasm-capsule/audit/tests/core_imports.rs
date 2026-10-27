@@ -566,3 +566,73 @@ fn memory_without_a_maximum_reports_none() {
         }])
     );
 }
+
+#[test]
+fn memory64_is_reported() {
+    let wasm = wat::parse_str("(module (memory i64 1 4))").unwrap();
+    assert_eq!(
+        memories(&wasm),
+        Ok(vec![MemoryLimits {
+            minimum: 1,
+            maximum: Some(4),
+            memory64: true,
+            shared: false,
+        }])
+    );
+}
+
+#[test]
+fn shared_memory_is_reported() {
+    let wasm = wat::parse_str("(module (memory 1 2 shared))").unwrap();
+    assert_eq!(
+        memories(&wasm),
+        Ok(vec![MemoryLimits {
+            minimum: 1,
+            maximum: Some(2),
+            memory64: false,
+            shared: true,
+        }])
+    );
+}
+
+#[test]
+fn memories_follow_import_then_definition_order() {
+    let wasm =
+        wat::parse_str(r#"(module (import "env" "memory" (memory 2)) (memory 16 1024))"#).unwrap();
+    assert_eq!(
+        memories(&wasm),
+        Ok(vec![
+            MemoryLimits {
+                minimum: 2,
+                maximum: None,
+                memory64: false,
+                shared: false,
+            },
+            MemoryLimits {
+                minimum: 16,
+                maximum: Some(1024),
+                memory64: false,
+                shared: false,
+            },
+        ])
+    );
+}
+
+#[test]
+fn memories_use_the_same_validation_as_audit() {
+    for (label, text) in [
+        ("(component)", "(component)"),
+        ("(module (memory 1025 1024))", "(module (memory 1025 1024))"),
+    ] {
+        let wasm = wat::parse_str(text).unwrap();
+        let from_memories = memories(&wasm).expect_err(label);
+        let from_audit = audit(&wasm, &[]).expect_err(label);
+        assert_eq!(from_memories, Refusal::Malformed, "{label}");
+        assert_eq!(from_audit, Refusal::Malformed, "{label}");
+        assert_eq!(from_memories.to_string(), "malformed module", "{label}");
+        assert_eq!(from_audit.to_string(), "malformed module", "{label}");
+    }
+    let source = read_source("src/lib.rs");
+    assert_eq!(source.matches("Parser::new").count(), 1);
+    assert_eq!(source.matches("Validator::new()").count(), 1);
+}

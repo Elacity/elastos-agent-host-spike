@@ -547,7 +547,12 @@ profile does not grant".
   after another form on the same line is taken from that `(allow `. A new
   grant fails check 2. `F-cc37a` writes that allow after `(deny network*)`.
   A same-line copy of a declared rule is kept, and check 3 fails with
-  `declared rule matches more than one allow line`.
+  `declared rule matches more than one allow line`. The trace calls
+  `allow_form_closes`. An allow form that contains `(allow` and does not
+  close fails with `allow form does not close`, before check 2.
+  `collect_allow_lines` takes `(allow` followed by ASCII whitespace, including
+  a tab, and `( allow`. The baseline file scan calls that same function and
+  keeps no second `(allow ` filter.
 - `platform_baseline_rules_stay_narrow`: `startup-root-directory` stays
   `(allow file-read-data (literal "/"))` and `startup-sysctl` stays
   `(allow sysctl-read)`. Each pin is written in the test. A wider path or
@@ -561,7 +566,8 @@ profile does not grant".
   The test reads `confine.sb` from disk. It starts no process and needs no
   sandbox. An allow form that contains `(allow` and does not close on that
   line fails, even when both pins remain. The failure contains `allow form
-  does not close`.
+  does not close`. `F-cc38a` writes `(allow` on its own line after the root
+  pin, then `file-read* (literal "/tmp/cc-unclosed"))` on the next line.
 - `startup_is_refused_when_the_profile_cannot_be_applied`: a missing profile,
   a copy of `confine.sb` with its last `)` removed, and `confine.sb` with
   `STORAGE_ROOT` unbound each refuse the start. It runs under
@@ -695,6 +701,7 @@ allow_rules_trace_to_declared_rights.
 | F-cc35g | Both startup pins stay. One line, `(allow file* (literal "/tmp/cc35-wildcard"))`, is added to the profile | `platform_baseline_rules_stay_narrow` | The file wildcard is a wider operation while both pins remain. |
 | F-cc36a | The last parenthesis of the `STORAGE_ROOT` allow is removed | `byte_different_file_at_bound_path_starts` | The launch exits 65 and the test fails because the profile did not apply. |
 | F-cc37a | `(allow file-read-data (literal "/tmp/cc-same-line-allow"))` is written after `(deny network*)` on the same line | `allow_rules_trace_to_declared_rights` | That allow has no declared right and no platform baseline. |
+| F-cc38a | `(allow` is written on its own line after the root pin, then `file-read* (literal "/tmp/cc-unclosed"))` on the next line | `platform_baseline_rules_stay_narrow` | The allow form does not close. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
@@ -711,6 +718,7 @@ F-cc35f needs no rebuild: the test reads confine.sb at runtime.
 F-cc35g needs no rebuild: the test reads confine.sb at runtime.
 F-cc36a needs no rebuild: sandbox-exec reads confine.sb at launch.
 F-cc37a needs no rebuild: the test reads confine.sb at runtime.
+F-cc38a needs no rebuild: the test reads confine.sb at runtime.
 
 The list is a Mac gate. On a Mac without `/usr/bin/sandbox-exec` the unmutated
 suite fails, so a list run there is no evidence. Off macOS, when
@@ -718,7 +726,7 @@ suite fails, so a list run there is no evidence. Off macOS, when
 entry reads SURVIVED there. The entries whose tests need no sandbox (F-cc12a,
 F-cc15a, F-cc15b, F-cc15c, F-cc16a, F-cc16b, F-cc16c, F-cc17a, F-cc17b,
 F-cc29a, F-cc30a, F-cc30b, F-cc30c, F-cc30d, F-cc30e, F-cc30f, F-cc31a,
-F-cc35a, F-cc35b, F-cc35c, F-cc35d, F-cc35e, F-cc35f, F-cc35g and F-cc37a) are
+F-cc35a, F-cc35b, F-cc35c, F-cc35d, F-cc35e, F-cc35f, F-cc35g, F-cc37a and F-cc38a) are
 CAUGHT on any host that builds their crate. F-cc12a reads the profile files
 and is CAUGHT on any host that builds the wallet crate. The model-provider
 entries among them are CAUGHT on any Unix host where `tests/confine/main.rs`
