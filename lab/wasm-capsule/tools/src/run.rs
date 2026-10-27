@@ -836,8 +836,8 @@ pub fn work_root_folder(
 /// beyond those two is carried unchanged.
 pub fn module_refusal(refusal: WriteRefusal) -> Refusal {
     let reason = match refusal.reason {
-        WriteReason::ManifestNotCreated(error) => Reason::ModuleNotCreated(error),
-        WriteReason::ManifestNotWritten(error) => Reason::ModuleNotWritten(error),
+        WriteReason::FileNotCreated(error) => Reason::ModuleNotCreated(error),
+        WriteReason::FileNotWritten(error) => Reason::ModuleNotWritten(error),
         other => Reason::Writer(other),
     };
     Refusal {
