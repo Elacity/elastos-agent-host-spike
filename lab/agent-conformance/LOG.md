@@ -8341,12 +8341,33 @@ New:
         self.settle_pending(&session_id, &cause);
 ```
 
+F-058-refusal-guard. Named test `standin_refused_finish_start_preserves_requests`. The `settle_pending` call was moved above the `start already returned` guard, so a refused second start settled the running instance's request. Planted exit 101 (2.24 seconds cold, 0.06 seconds warm) at `src/../standin-runtime/mod.rs:2433:9` `assertion left == right failed: the stand-in leaves the request pending after a second start`; the record read `denied` with `settled_by` `runtime`. Restored exit 0 in 1.18 seconds.
+
+Old:
+
+```text
+        if instance.phase != ResidentStatus::Starting {
+            return Err((400, "start already returned".to_owned()));
+        }
+```
+
+New:
+
+```text
+        if instance.phase != ResidentStatus::Starting {
+            let session_id = instance.id.clone();
+            let cause = instance.cause.clone();
+            self.settle_pending(&session_id, &cause);
+            return Err((400, "start already returned".to_owned()));
+        }
+```
+
 ### Gates
 
 `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged.
 
 - `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.13 seconds.
-- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 339.08 seconds, inside the 600-second bound. 176 tests ran before the review-round harness tests: 162 passed, 0 failed, 14 ignored. Lib 48, effects 59 passed with 12 ignored, report 23, runtime 10 with 2 ignored, harness 9, artifact 7, build 1, standin_contract 2, probe 3. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 339.08 seconds, inside the 600-second bound. 176 tests ran: 162 passed, 0 failed, 14 ignored. Lib 48, effects 59 passed with 12 ignored, report 23, runtime 10 with 2 ignored, harness 9, artifact 7, build 1, standin_contract 2, probe 3. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
 
 ### Principles check
 
@@ -8363,29 +8384,17 @@ New:
 
 The real A11 row stays open: the real capability call returns the grant, so RI-6 is a Runtime gap. A PASS here gives the Runtime no A11 credit.
 
-### Review round: the census test's own leftover
+### Stop: the census test's own leftover is outside this task
 
-The supervisor's rerun failed `cleanup_census_refuses_each_leftover` at `tests/runtime.rs:403` with `cleanup census: FAIL retained:target/home-67644-...-1; process leftover; processes:1 paths:["stdout-25"]`. The retained root holds `stdout-25` with 646 bytes, the size of an `lsof +D` listing, so the counted file was a collected census-tool capture.
+The supervisor runs failed `cleanup_census_refuses_each_leftover` at `tests/runtime.rs:403` with `cleanup census: FAIL retained:target/home-67644-...-1; process leftover; processes:1 paths:["stdout-25"]` and, on the next run, `retained:target/home-99131-...-0` with the same one-process `stdout-25` shape. The retained `stdout-25` is 646 bytes, the size of an `lsof +D` listing, so the counted file is a collected census-tool capture.
 
-Cause: `collect_captures_from` renamed a completed census tool's captures into the inspected root. The census runs `lsof`, whose forked stat helper inherits the capture file and can outlive the tool; the renamed file then appears under the inspected root, and the next census counts the helper as a process leftover. `src/census.rs:40-41` already states that the tool's captures stay outside the inspected roots.
+Cause, for the planner and not fixed here: `collect_captures_from` (`src/harness.rs`) renames a completed census tool's captures into the inspected root. The census runs `lsof`, whose forked stat helper inherits the capture file and can outlive the tool; the renamed file then appears under the inspected root, and the next census counts the helper as a process leftover. `src/census.rs:40-41` states that the tool's captures stay outside the inspected roots. A copy instead of a rename keeps the originals in the tool root until it is removed.
 
-Fix: `src/harness.rs:353-374` copies the tool capture bytes into the inspected Home and leaves the originals in the tool root until that root is removed. The collected bytes, the inventory and every JSON shape stay the same. The refusal strings are unchanged.
+`cleanup_census_refuses_each_leftover` is not on the six-test flake list, so Acceptance 6 stops this task on that check. The census change belongs in its own task with its own plan, review and falsifier ids. Tell planner: plan "census tool captures are copied, not moved" with the `stdout-25` evidence.
 
-New tests in `tests/harness.rs:366` and `:402`:
+This branch changes no `src/harness.rs` or `tests/harness.rs` byte. Both files match their `f551d4b0c` blobs: `src/harness.rs` `sha256 39b2093d698636464aeb0d54655b6bee2d4fdeba5e59afe3ef4e90516fb94fc4`, `tests/harness.rs` `sha256 87704b47af39004b27bd445d0a983d0430b15057a83858b914691b4e43fc1801`. No census code, operator fixture, test assertion or dependency changes.
 
-- `collect_captures_copies_before_the_tool_root_is_removed`: after collection the tool's `stdout` and `stderr` are still files in its own root, the inspected Home holds one capture with the same stdout bytes, and `tool.finish()` removes the originals.
-- `collect_captures_refuses_before_it_writes`: a pre-existing destination returns `census capture destination already exists` and leaves both the source captures and the destination bytes; a missing source returns `could not collect census capture`; a refused collection leaves `capture inventory is empty`. The `guard` reasons stay asserted in `home_is_throwaway`.
+Rerun after the revert:
 
-Hand-run falsifiers, each restored before the next. Command `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness NAME -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`.
-
-F-058-copy. Named test `collect_captures_copies_before_the_tool_root_is_removed`. `fs::copy` planted back to `fs::rename`. Planted exit 101 in 1.75 seconds at `tests/harness.rs:378:5` `the census tool keeps its captures in its own root until that root is removed`. Restored exit 0 in 1.93 seconds.
-
-F-058-destination. Named test `collect_captures_refuses_before_it_writes`. The destination-exists refusal was removed, so the copy overwrote the occupied file. Planted exit 101 in 1.21 seconds at `tests/harness.rs:414:5` `assertion left == right failed`, `left: Ok(())`, `right: Err("census capture destination already exists")`. Restored exit 0 in 0.87 seconds. After both restores `src/harness.rs` matched `sha256 660cc1591a49a001e479b71bdca9098ca986f76d25c0d217abc69388e336a77b`.
-
-Rerun after the fix:
-
-- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.13 seconds.
-- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 277.37 seconds, inside the 600-second bound. 178 tests: 164 passed, 0 failed, 14 ignored. Lib 48, harness 11, effects 59 passed with 12 ignored, report 23, runtime 10 with 2 ignored, artifact 7, build 1, standin_contract 2, probe 3.
-- `cargo test --locked --test runtime` passed three times in a row: 10 passed, 2 ignored, 0 failed, 15.23, 13.64 and 14.46 seconds.
-
-No census code, operator fixture, test assertion or dependency changed.
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 262.51 seconds, inside the 600-second bound. 176 tests: 162 passed, 0 failed, 14 ignored. Lib 48, effects 59 passed with 12 ignored, report 23, runtime 10 with 2 ignored, harness 9, artifact 7, build 1, standin_contract 2, probe 3. `cleanup_census_refuses_each_leftover` passed this time; the census race remains open in the planner item above.
