@@ -1,0 +1,8 @@
+id: F-GB-litsingle
+file: src/link.rs
+test: link::model_literal_string_path_is_a_link
+--- old
+        decoded.extend_from_slice(&bytes[start + 1..end]);
+--- new
+        decoded.extend_from_slice(b"");
+--- end
