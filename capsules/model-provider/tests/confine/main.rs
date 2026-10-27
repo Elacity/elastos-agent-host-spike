@@ -2964,6 +2964,163 @@ fn byte_different_file_at_bound_path_starts() {
     );
 }
 
+/// A byte-different file at the path bound as `PROVIDER_EXECUTABLE` gets past
+/// the profile's exec refusal under the file the stand-in writes.
+///
+/// The oracle launch stays `byte_different_file_at_bound_path_starts`, which
+/// starts the flipped copy under `PROFILE_PATH`. This test repeats that copy,
+/// the last-byte flip and the directory checks in its own temporary directory.
+/// `standin_profile` builds the text, `write_standin_profile` writes it under
+/// the storage base, and the written file has no `;;` line. Its sorted allow
+/// lines equal the oracle's. The launch binds the flipped copy and starts it,
+/// with `bound_digest: None`, under the written file. After `start`, the
+/// recorded profile path is that file. The show is not exit 65, because exit
+/// 65 means the profile did not apply, and it is not exit 71 with `execvp()`
+/// and `Operation not permitted`. Before the checks, one line starting
+/// `byte-different stand-in outcome: ` prints the status and the stderr
+/// lines. The test kills and waits on the process `start` returned. It does
+/// not call `shutdown`. The real binary's digest is unchanged at the end.
+/// The evidence is for the lab launcher. It makes no claim that the Runtime
+/// enforced the profile or that B3 is complete, and it does not count toward
+/// B1. When `sandbox-exec` is missing on a host OS other than macOS it prints
+/// a skip reason and returns. On macOS a missing `sandbox-exec` fails the
+/// test.
+///
+/// A plant that points this launch at the committed oracle still gets past
+/// the exec refusal, so this test has no falsifier. F-cc46a already scores
+/// that substitution on `generated_profile_refuses_an_unbound_copy`.
+#[test]
+fn generated_profile_starts_a_byte_different_file() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let recorded = record_provider_executable(&binary);
+    let root = test_support::temp_root_path("model-provider-confine", "byte-different-standin");
+    fs::create_dir_all(&root).expect("temporary directory");
+    let root = resolved(&root);
+    let binary_dir = binary
+        .parent()
+        .expect("the provider binary's directory")
+        .to_path_buf();
+    assert_ne!(
+        root, binary_dir,
+        "the temporary directory must not be the directory that holds the provider binary"
+    );
+    let copy_path = root.join(binary.file_name().expect("the provider binary's file name"));
+    fs::copy(&binary, &copy_path).expect("copy the provider binary");
+    let mut flipped = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&copy_path)
+        .unwrap_or_else(|err| panic!("the copy must be writable: {err}"));
+    let len = flipped
+        .metadata()
+        .unwrap_or_else(|err| panic!("the copy's length must be readable: {err}"))
+        .len();
+    assert!(len > 0, "the copy must have a last byte");
+    flipped
+        .seek(SeekFrom::End(-1))
+        .expect("the copy's last byte must be reachable");
+    let mut byte = [0u8; 1];
+    flipped
+        .read_exact(&mut byte)
+        .expect("the copy's last byte must be readable");
+    byte[0] = byte[0].wrapping_add(1);
+    flipped
+        .seek(SeekFrom::End(-1))
+        .expect("the copy's last byte must be reachable");
+    flipped
+        .write_all(&byte)
+        .expect("the copy's last byte must change");
+    drop(flipped);
+    let copy = resolved(&copy_path);
+    assert_ne!(
+        copy, binary,
+        "the copy must not be the real provider binary"
+    );
+    assert_ne!(
+        copy.parent(),
+        Some(binary_dir.as_path()),
+        "the copy must not sit in the directory that holds the provider binary"
+    );
+    assert_ne!(
+        test_support::sha256_file(&copy),
+        recorded,
+        "the copy's digest must differ from the real provider binary"
+    );
+
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let storage = Storage::prepare("byte-different-standin-launch");
+    let written = storage.base.join("standin.sb");
+    write_standin_profile(&written, &generated);
+    let written_text = fs::read_to_string(&written)
+        .unwrap_or_else(|err| panic!("the stand-in file must be readable: {err}"));
+    assert!(
+        written_text.lines().all(|line| !line.starts_with(";;")),
+        "the launched file has no ;; line"
+    );
+    let mut written_lines = collect_allow_lines(&written_text);
+    let oracle = fs::read_to_string(PROFILE_PATH)
+        .unwrap_or_else(|err| panic!("the profile oracle must be readable: {err}"));
+    let mut oracle_lines = collect_allow_lines(&oracle);
+    written_lines.sort();
+    oracle_lines.sort();
+    assert_eq!(
+        written_lines, oracle_lines,
+        "the stand-in file's allow lines must equal the oracle's"
+    );
+
+    let mut provider = Provider::start(Launch::Program {
+        storage: &storage,
+        executable: &copy,
+        program: &copy,
+        profile: &written,
+        bound_digest: None,
+    });
+    assert_eq!(
+        applied_profile(),
+        written,
+        "the recorded path must be the stand-in file"
+    );
+    let (status, stderr) = provider.outcome_within(Duration::from_secs(2));
+    println!("byte-different stand-in outcome: {status:?} {stderr:?}");
+    provider.kill_and_wait();
+    let code = status.and_then(|status| status.code());
+    assert!(
+        code != Some(65),
+        "host OS {}: the profile did not apply: status {} is exit 65: {stderr:?}",
+        std::env::consts::OS,
+        describe(status)
+    );
+    let refused = code == Some(71)
+        && stderr
+            .iter()
+            .any(|line| line.contains("execvp()") && line.contains("Operation not permitted"));
+    assert!(
+        !refused,
+        "host OS {}: a byte-different file at the bound path gets past the profile's exec \
+         refusal, so the launch must not be exit 71 with execvp() and Operation not permitted, \
+         but status {} had that refusal: {stderr:?}",
+        std::env::consts::OS,
+        describe(status)
+    );
+    assert_eq!(
+        test_support::sha256_file(&binary),
+        recorded,
+        "the real provider binary's digest must be unchanged"
+    );
+}
+
 /// The launch helper refuses to start when the file bound as
 /// `PROVIDER_EXECUTABLE` no longer has the digest it recorded.
 ///
@@ -3428,6 +3585,79 @@ fn standin_refuses_a_start_it_cannot_apply() {
         },
         &storage,
         "expecting ')'",
+    );
+}
+
+/// A generated profile with `STORAGE_ROOT` unbound never starts the provider.
+///
+/// `standin_profile` builds the text from the approved declared rights.
+/// `write_standin_profile` writes it at `storage.base.join("standin.sb")`,
+/// outside `STORAGE_PARENT`. The written file has no `;;` line, and its
+/// sorted allow lines equal the oracle's. The bindings are
+/// `canonical_bindings` with the `STORAGE_ROOT` pair removed, so
+/// `PROVIDER_EXECUTABLE` stays the real binary and `STORAGE_PARENT` stays.
+/// `assert_startup_is_refused` reads exit 65 and the marker
+/// `invalid data type of path filter`. The launch records the profile path
+/// it applies, and that path is the stand-in file. This evidence is for the
+/// lab launcher.
+///
+/// Falsifier: F-cc47a makes this launch use the committed oracle instead of
+/// the stand-in file. Both files exit 65. The recorded path is the oracle,
+/// so this test fails.
+#[test]
+fn generated_profile_refuses_an_unbound_root() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let storage = Storage::prepare("standin-unbound-root");
+    let unbound_root_profile = storage.base.join("standin.sb");
+    write_standin_profile(&unbound_root_profile, &generated);
+    let written_text = fs::read_to_string(&unbound_root_profile)
+        .unwrap_or_else(|err| panic!("the stand-in file must be readable: {err}"));
+    assert!(
+        written_text.lines().all(|line| !line.starts_with(";;")),
+        "the stand-in file has no comment line"
+    );
+    let mut written_lines = collect_allow_lines(&written_text);
+    let oracle = fs::read_to_string(PROFILE_PATH)
+        .unwrap_or_else(|err| panic!("the profile oracle must be readable: {err}"));
+    let mut oracle_lines = collect_allow_lines(&oracle);
+    written_lines.sort();
+    oracle_lines.sort();
+    assert_eq!(
+        written_lines, oracle_lines,
+        "the stand-in file's allow lines must equal the oracle's"
+    );
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let canonical = canonical_bindings(&storage, &binary);
+    let without_root: Vec<(&'static str, PathBuf)> = canonical
+        .iter()
+        .filter(|(name, _)| *name != "STORAGE_ROOT")
+        .cloned()
+        .collect();
+    assert_startup_is_refused(
+        "the generated profile names an unbound parameter",
+        Launch::Profile {
+            profile: &unbound_root_profile,
+            bindings: &without_root,
+        },
+        &storage,
+        "invalid data type of path filter",
+    );
+    assert_eq!(
+        applied_profile(),
+        unbound_root_profile,
+        "the launch must apply the stand-in file"
     );
 }
 
