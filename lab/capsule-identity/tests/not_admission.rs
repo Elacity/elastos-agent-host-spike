@@ -103,11 +103,12 @@ fn valid_signature_grants_nothing_by_itself() {
 
 /// Every `pub fn` the library declares: identity checks only. `check_name`
 /// is listed twice: the free function and `CheckedBundle`'s checked form.
-/// The next five are task 011's package record: its digest, its payload, its
+/// `manifest_name` is task 036's: the checked manifest's `name`, identity
+/// data read from the one manifest check, not a decision. The next five are task 011's package record: its digest, its payload, its
 /// signer and its two verifiers. The last four are task 015's variant
 /// binding: its payload, its signer and its two verifiers. None admits,
 /// grants or launches.
-const IDENTITY_FUNCTIONS: [&str; 24] = [
+const IDENTITY_FUNCTIONS: [&str; 25] = [
     "lab_cid",
     "lab_cid_observed",
     "checked_bundle",
@@ -115,6 +116,7 @@ const IDENTITY_FUNCTIONS: [&str; 24] = [
     "check_name",
     "cid",
     "entries",
+    "manifest_name",
     "check_name",
     "encode_entries",
     "entry_kind",

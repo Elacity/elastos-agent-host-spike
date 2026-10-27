@@ -283,13 +283,16 @@ pub struct BundleEntry {
 /// one walk and the one manifest check. Its fields are private and nothing
 /// changes them, so its lab CID always names its entries. It also keeps
 /// whether that manifest check found `type` to be `wasm`, for the variant
-/// binding's check (e2) alone; no accessor hands it out. It holds a name and
-/// bytes, never a decision: it is no trust, admission or launch value.
+/// binding's check (e2) alone; no accessor hands it out. And it keeps the
+/// manifest's `name` from that same check, which
+/// [`CheckedBundle::manifest_name`] hands out. It holds a name and bytes,
+/// never a decision: it is no trust, admission or launch value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckedBundle {
     cid: LabCid,
     entries: Vec<BundleEntry>,
     wasm: bool,
+    name: String,
 }
 
 /// A test-key signature over a printed lab CID.
@@ -619,8 +622,9 @@ pub fn checked_bundle(bundle: &Path) -> Result<CheckedBundle, Refusal> {
 /// never waits on a FIFO. It reads every regular file once, from its checked
 /// handle. Then the root `capsule.json` it read gets the Runtime's own two
 /// checks, and exactly the bytes that were checked are named and kept, with
-/// whether that check found `type` to be `wasm`. This is the one walk and the
-/// one manifest check. A refusal returns no value.
+/// whether that check found `type` to be `wasm` and the manifest's `name`.
+/// This is the one walk and the one manifest check. A refusal returns no
+/// value.
 pub fn checked_bundle_observed(
     bundle: &Path,
     mut observe: impl FnMut(Moment, &str),
@@ -630,10 +634,15 @@ pub fn checked_bundle_observed(
         .iter()
         .find(|entry| entry.path == MANIFEST_FILE)
         .ok_or(Refusal::NoManifest)?;
-    let wasm = check_manifest(&manifest.content)?;
+    let (wasm, name) = check_manifest(&manifest.content)?;
     encode_entries(&entries)
         // The value keeps the very entries its lab CID names: no second read.
-        .map(|cid| CheckedBundle { cid, entries, wasm })
+        .map(|cid| CheckedBundle {
+            cid,
+            entries,
+            wasm,
+            name,
+        })
 }
 
 /// Check the name `claimed` against the bundle at `bundle`.
@@ -662,6 +671,13 @@ impl CheckedBundle {
     /// sorts them, and a caller that needs an order sorts them by path.
     pub fn entries(&self) -> &[BundleEntry] {
         &self.entries
+    }
+
+    /// The `name` of the bundle's `capsule.json`, as the one manifest check
+    /// read it from the bytes in [`CheckedBundle::entries`]. It is identity
+    /// data, not a decision.
+    pub fn manifest_name(&self) -> &str {
+        &self.name
     }
 
     /// Check the name `claimed` against this bundle's lab CID.
@@ -1141,14 +1157,15 @@ fn read_file(handle: OwnedFd, path: &str) -> Result<Vec<u8>, Refusal> {
 /// The Runtime's own two checks on `capsule.json`, the same two calls it
 /// makes on a fetched bundle's manifest: parse it as `CapsuleManifest`
 /// (which refuses an unknown field), then `validate()`. The lab adds no rule.
-/// It returns whether the parsed manifest's `type` is `wasm`, read from that
-/// one parse: nothing else parses `capsule.json`.
-fn check_manifest(bytes: &[u8]) -> Result<bool, Refusal> {
+/// It returns whether the parsed manifest's `type` is `wasm` and the
+/// manifest's `name`, both read from that one parse: nothing else parses
+/// `capsule.json`.
+fn check_manifest(bytes: &[u8]) -> Result<(bool, String), Refusal> {
     let manifest: CapsuleManifest = serde_json::from_slice(bytes)
         .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;
     let wasm = manifest.capsule_type == CapsuleType::Wasm;
     manifest.validate().map_err(Refusal::ManifestInvalid)?;
-    Ok(wasm)
+    Ok((wasm, manifest.name))
 }
 
 fn special_name(file_type: FileType) -> &'static str {
