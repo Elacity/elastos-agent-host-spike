@@ -123,17 +123,17 @@ itself is granted and expected.
     (confine 037)
   - sha256: `79ec0289fc1a886aa5231586b007d17382b37648b24e64844376827268b84950`
 - model: `capsules/model-provider/confine.sb`
-  - commit: `58ab45897e666f4315b33212e2d7140367db4290`, merge PR #196
-    (cc-model-confine 020)
-  - sha256: `bc9c821dcbf30adafb63e0374ce8b71d395a37318d0da14a2ae1171cb6bcb6b5`
+  - commit: `e324708ce42235d816821f9e5b0570d8999f4b80`, merge PR #542
+    (cc-model-confine 054)
+  - sha256: `399d0dc9d6381555c0f132d339146aed1420cc6d0395ba0ba475801b9a34bb17`
 
 Measured with `git log -1 --format='%H %s' HEAD -- <file>` and
-`shasum -a 256 <file>` on HEAD `b67ae9509a52936089ad0bfb3d6a4055f951a80c`.
+`shasum -a 256 <file>` on HEAD `95ab22afb58226163a11286748acb372507662db`.
 
 A clean run says only: these probes did not break the wallet profile on
 `959b104022bd0e8ae55636f69f6f06b8eb028e2b`, the did profile on
 `959b104022bd0e8ae55636f69f6f06b8eb028e2b`, or the model profile on
-`58ab45897e666f4315b33212e2d7140367db4290`. If the bytes change, pin the new
+`e324708ce42235d816821f9e5b0570d8999f4b80`. If the bytes change, pin the new
 commit and re-run. Never carry a stale pin.
 
 ### How the probe tells a deny from a harness error
