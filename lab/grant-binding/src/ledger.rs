@@ -1049,3 +1049,42 @@ fn model_reported_usage_does_not_keep_the_released_hold() {
     assert_eq!(freed.held, 10);
     assert_eq!(freed.charged, 0);
 }
+
+#[test]
+fn model_lower_ceiling_does_not_refuse_the_settle() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = guest(handle);
+    let reservation = verifier.reserve(&call, &request, 8).expect("reserve");
+    verifier.admit(4);
+    assert_eq!(books(&verifier).held, 8);
+    assert_eq!(books(&verifier).charged, 0);
+    assert_eq!(
+        verifier.settle(&call, &request, reservation, SettleOutcome::Known(8)),
+        Ok(8)
+    );
+    let after = books(&verifier);
+    assert_eq!(after.charged, 8);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+    let refusal = verifier
+        .reserve(&call, &request, 5)
+        .expect_err("lowered ceiling still bounds a new reserve");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 0,
+            asked: 5,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    verifier
+        .reserve(&call, &request, 4)
+        .expect("room under the lowered ceiling");
+    let freed = books(&verifier);
+    assert_eq!(freed.held, 4);
+    assert_eq!(freed.charged, 8);
+}
