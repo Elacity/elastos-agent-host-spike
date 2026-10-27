@@ -141,10 +141,12 @@ pub enum Reason {
     BundleDirExists,
     /// `OUT_DIR/bundle` could not be made.
     BundleDirNotCreated(io::Error),
-    /// `bundle/capsule.json` could not be made new.
-    ManifestNotCreated(io::Error),
-    /// `bundle/capsule.json` was made, but its bytes could not be written.
-    ManifestNotWritten(io::Error),
+    /// [`write_new_file`] could not make the new file at the refusal's path.
+    /// The text names no file: the path in front of it is the only name.
+    FileNotCreated(io::Error),
+    /// [`write_all_to`] could not write the bytes of the new file at the
+    /// refusal's path. The text names no file.
+    FileNotWritten(io::Error),
     /// The module could not be moved into the bundle.
     ModuleNotMoved(io::Error),
     /// [`crate::bundle_identity`] refused the bundle: its own refusal,
@@ -167,11 +169,11 @@ impl fmt::Display for Reason {
                 "bundle/ already exists: it appeared during the build, and tools/bundle never writes into or through it"
             ),
             Reason::BundleDirNotCreated(error) => write!(f, "bundle/ cannot be created: {error}"),
-            Reason::ManifestNotCreated(error) => {
-                write!(f, "capsule.json cannot be created: {error}")
+            Reason::FileNotCreated(error) => {
+                write!(f, "cannot be created as a new file: {error}")
             }
-            Reason::ManifestNotWritten(error) => {
-                write!(f, "capsule.json cannot be written: {error}")
+            Reason::FileNotWritten(error) => {
+                write!(f, "was created, but its bytes cannot be written: {error}")
             }
             Reason::ModuleNotMoved(error) => {
                 write!(f, "capsule.wasm cannot be moved into the bundle: {error}")
@@ -278,7 +280,7 @@ pub fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), RunRefusal> {
         .write(true)
         .create_new(true)
         .open(path)
-        .map_err(|error| RunRefusal::new(path, Reason::ManifestNotCreated(error)))?;
+        .map_err(|error| RunRefusal::new(path, Reason::FileNotCreated(error)))?;
     write_all_to(path, &mut file, bytes)
 }
 
@@ -286,7 +288,7 @@ pub fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), RunRefusal> {
 pub fn write_all_to(path: &Path, out: &mut impl Write, bytes: &[u8]) -> Result<(), RunRefusal> {
     out.write_all(bytes)
         .and_then(|()| out.flush())
-        .map_err(|error| RunRefusal::new(path, Reason::ManifestNotWritten(error)))
+        .map_err(|error| RunRefusal::new(path, Reason::FileNotWritten(error)))
 }
 
 /// Move the module from `from` to `to` with `rename`. A rename moves a
