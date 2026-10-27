@@ -1,12 +1,15 @@
 //! This test code stands in for the Runtime's launch by CID, which does not exist yet.
 
-use super::{error, stand_in::dispatch, Bridge, StandInBinding};
+use super::{
+    dispatch, error, stand_in::record_loaded_instance, Bridge, StandInBinding,
+    STAND_IN_TEST_PRINCIPAL,
+};
 use serde_json::{json, Value};
 
 const CONTENT: &str = "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku";
 const MEMBER: &str = "localhost://Users/self/AppData/stand-in/input.png";
 const INSTANCE: &str = "stand-in-instance";
-const PRINCIPAL: &str = "person:local:test";
+const PRINCIPAL: &str = STAND_IN_TEST_PRINCIPAL;
 const BYTES: &[u8] = b"stand-in object bytes";
 
 fn binding(id: &str) -> StandInBinding {
@@ -301,4 +304,57 @@ fn run_calls_dispatch_with_the_bus_caller() {
         "move |line, capsule, principal| {{\n        let principal = principal.unwrap_or_default();\n{dispatch}"
     )));
     assert!(!source.contains("_capsule, _principal"));
+}
+
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+#[test]
+fn record_loaded_instance_sets_only_the_instance_id() {
+    for active in [false, true] {
+        let mut bridge = bridge();
+        let mut binding = binding("stand-in-1");
+        binding.instance_id = "placeholder".into();
+        binding.principal = "person:local:other".into();
+        let mut calls = 0;
+        binding.readmit = Box::new(move || {
+            calls += 1;
+            Err(format!("readmit-{calls}"))
+        });
+        bridge.arm_stand_in(binding);
+        if !active {
+            bridge.close_stand_in();
+        }
+        assert_eq!(
+            (bridge.stand_in.as_mut().unwrap().readmit)(),
+            Err("readmit-1".into())
+        );
+
+        record_loaded_instance(&mut bridge, "component-1");
+
+        let binding = bridge.stand_in.as_mut().unwrap();
+        assert_eq!(binding.instance_id, "component-1");
+        assert_eq!(binding.active, active);
+        assert_eq!(binding.principal, "person:local:other");
+        assert_eq!(binding.members, [MEMBER.into()].into());
+        assert_eq!(binding.binding_id, "stand-in-1");
+        assert_eq!(binding.content_cid, CONTENT);
+        assert_eq!((binding.readmit)(), Err("readmit-2".into()));
+    }
+
+    let mut bridge = bridge();
+    record_loaded_instance(&mut bridge, "component-1");
+    assert!(bridge.stand_in.is_none());
+}
+
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+#[test]
+fn run_records_the_loaded_instance_before_start() {
+    let source = include_str!("lib.rs");
+    let record = "    record_loaded_instance(&mut bridge.lock().unwrap(), &handle.id.0);";
+    assert_eq!(source.lines().filter(|line| *line == record).count(), 1);
+    let principal = source
+        .find(".set_bridge_principal(&handle.id, Some(STAND_IN_TEST_PRINCIPAL.into()))\n        .await;")
+        .unwrap();
+    let record = source.find(record).unwrap();
+    let start = source.find("provider.start").unwrap();
+    assert!(principal < record && record < start);
 }

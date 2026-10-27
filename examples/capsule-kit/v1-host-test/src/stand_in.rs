@@ -6,6 +6,8 @@ use serde_json::{json, Value};
 
 use super::{error, Bridge};
 
+pub const STAND_IN_TEST_PRINCIPAL: &str = "person:local:test";
+
 pub struct StandInBinding {
     pub binding_id: String,
     pub content_cid: String,
@@ -29,7 +31,14 @@ impl Bridge {
     }
 }
 
-pub(crate) fn dispatch(bridge: &mut Bridge, line: &str, capsule: &str, principal: &str) -> Value {
+pub(crate) fn record_loaded_instance(bridge: &mut Bridge, instance_id: &str) {
+    let Some(binding) = bridge.stand_in.as_mut() else {
+        return;
+    };
+    binding.instance_id = instance_id.into();
+}
+
+pub fn dispatch(bridge: &mut Bridge, line: &str, capsule: &str, principal: &str) -> Value {
     let Some(binding) = bridge.stand_in.as_mut() else {
         return bridge.answer(line);
     };

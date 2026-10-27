@@ -35,6 +35,11 @@ CASES = [
      "        let response = dispatch(&mut *host.lock().unwrap(), line, capsule, principal);",
      "        let response = host.lock().unwrap().answer(line);",
      "run_calls_dispatch_with_the_bus_caller"),
+    # This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    ("stand-in loaded instance recording bypassed", "lib.rs",
+     "    record_loaded_instance(&mut bridge.lock().unwrap(), &handle.id.0);",
+     "    let _ = &handle.id.0;",
+     "run_records_the_loaded_instance_before_start"),
 ]
 
 
@@ -64,7 +69,7 @@ def main():
     ]
     kit.main(
         [(cases, build, test_fails, None, True, test_failures)],
-        done="all 5 stand-in guard falsifiers caught",
+        done="all 6 stand-in guard falsifiers caught",
     )
 
 

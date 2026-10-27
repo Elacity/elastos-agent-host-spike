@@ -17,8 +17,9 @@ use serde_json::{json, Value};
 
 // This test code stands in for the Runtime's launch by CID, which does not exist yet.
 pub mod stand_in;
-use stand_in::dispatch;
+use stand_in::record_loaded_instance;
 pub use stand_in::StandInBinding;
+pub use stand_in::{dispatch, STAND_IN_TEST_PRINCIPAL};
 
 #[cfg(test)]
 mod stand_in_tests;
@@ -220,8 +221,9 @@ pub async fn run(
         .await
         .expect("ComponentProvider loads the capsule");
     provider
-        .set_bridge_principal(&handle.id, Some("person:local:test".into()))
+        .set_bridge_principal(&handle.id, Some(STAND_IN_TEST_PRINCIPAL.into()))
         .await;
+    record_loaded_instance(&mut bridge.lock().unwrap(), &handle.id.0);
     let result = provider.start(&handle).await.map_err(|err| err.to_string());
     // The provider keeps the hostcall, so take the state out through the lock.
     let bridge = std::mem::take(&mut *bridge.lock().unwrap());
