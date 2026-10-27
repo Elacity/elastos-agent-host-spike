@@ -359,11 +359,15 @@ In the lab, did-provider also starts through the stand-in launcher in
 `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` runs
 did's start and outside-write journey first and then wallet's, before every
 host and process refusal the stand-in must make for each provider.
-`standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
-compares did's permitted and denied suite on the committed `confine.sb` and on
-a stand-in start. That suite holds both targets of `outside_write_denied`, so
-the sibling write beneath the same base separates a write grant on `did/` from
-one on its parent in the comparison too.
+`standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
+holds M1 check B3 for did first and then wallet: it reads the provider's
+committed declared-rights file, starts the binary through the stand-in into a
+fresh profile directory, reads the one generated profile the stand-in launched,
+and compares that launched profile and the provider's permitted and denied
+suite with the provider's committed `confine.sb`, case by case. did's suite
+holds both targets of `outside_write_denied`, so the sibling write beneath the
+same base separates a write grant on `did/` from one on its parent in the
+comparison too.
 
 The stand-in's input is one host report, not a bare OS name. The report holds
 the OS name and, for a simulated Linux host, which of Landlock, user namespaces
