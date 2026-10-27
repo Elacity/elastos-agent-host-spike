@@ -348,6 +348,16 @@ fn declared_rights_path(name: &str) -> PathBuf {
         .join("tests/fixtures/confine/declared-rights.json")
 }
 
+/// The committed `confine.sb` of the named provider, the oracle a generated
+/// or launched profile must match.
+fn confine_oracle_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("capsules/wallet-provider must sit under capsules/")
+        .join(name)
+        .join("confine.sb")
+}
+
 /// The did-provider binary this test crate starts.
 ///
 /// One `cargo build` for did's manifest, run once per test process by the
@@ -4590,14 +4600,19 @@ fn assert_suite_outcomes(label: &str, record: &[SuiteEntry], cases: &[(&str, Sui
     );
 }
 
-/// Requires the stand-in record to equal the committed-profile record entry by
-/// entry, and names the first case that differs. Both suite callers share this
-/// comparison, so the wallet and did proofs apply one rule.
-fn assert_standin_matches_oracle(oracle_record: &[SuiteEntry], standin_record: &[SuiteEntry]) {
+/// Requires the stand-in record of `name` to equal its committed-profile
+/// record entry by entry, and names the provider, the step and the first case
+/// that differs. The B3 journey compares both providers through this one
+/// function, so did and wallet apply one comparison rule (P10).
+fn assert_standin_matches_oracle(
+    name: &str,
+    oracle_record: &[SuiteEntry],
+    standin_record: &[SuiteEntry],
+) {
     assert_eq!(
         oracle_record.len(),
         standin_record.len(),
-        "the stand-in start must record as many cases as the committed confine.sb: \
+        "{name} stand-in start must record as many cases as the committed confine.sb: \
          committed {}, stand-in {}",
         oracle_record.len(),
         standin_record.len()
@@ -4605,150 +4620,158 @@ fn assert_standin_matches_oracle(oracle_record: &[SuiteEntry], standin_record: &
     for (oracle_entry, standin_entry) in oracle_record.iter().zip(standin_record) {
         assert_eq!(
             oracle_entry, standin_entry,
-            "the stand-in start differs from the committed confine.sb on case {:?}: \
+            "{name} stand-in start differs from the committed confine.sb on case {:?}: \
              committed {:?}, stand-in {:?}",
             oracle_entry.case, oracle_entry.outcome, standin_entry.outcome
         );
     }
 }
 
-/// The stand-in's start answers every permitted and denied suite case as the
-/// committed `confine.sb` does.
-///
-/// `wallet_standin_suite` runs once on a provider started under the committed
-/// profile through `ConfinedProvider::start`, and once on a provider Started by
-/// `standin_spawn_confined_provider` from wallet's committed declared-rights
-/// file, each on its own fresh temporary root. Each record must hold one entry
-/// per case of `SUITE_CASES`, in its order, with its name and class; every
-/// permitted case answers `ok`, and the key-writing call answers `ok` only when
-/// its bound wallet result is `ok`; every denied case is refused in both
-/// records, and the two records are equal entry by entry; a difference names
-/// the first differing case. The lab stand-in is test code and not the Runtime.
-///
-/// Falsifier: WP116 binds the stand-in's `STORAGE_ROOT` to the base instead of
-/// the wallet directory; the widened grant permits `<root>/sibling`, so the
-/// stand-in record holds `ok` where the committed profile refuses and this test
-/// fails on that case. WP121 removes the planted-key push, so the record holds
-/// eight entries and this test fails naming the missing case.
-#[test]
-fn standin_start_matches_the_oracle_on_the_permitted_and_denied_suite() {
-    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
-    }
-    let declared_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/confine/declared-rights.json");
-    let declared = read_declared_rights("wallet-provider", &declared_path)
-        .unwrap_or_else(|err| panic!("{err}"));
-
-    let oracle_fixture = tempfile::tempdir().expect("temporary wallet root");
-    let oracle_root = resolved(oracle_fixture.path());
-    let mut oracle = ConfinedProvider::start(&oracle_root);
-    let oracle_record = wallet_standin_suite(&mut oracle, &oracle_root);
-
-    let standin_fixture = tempfile::tempdir().expect("temporary wallet root");
-    let standin_root = resolved(standin_fixture.path());
-    let profile_fixture = tempfile::tempdir().expect("temporary profile root");
-    let profile_dir = resolved(profile_fixture.path());
-    let mut standin = standin_spawn_confined_provider(
-        StandinHost::reporting(std::env::consts::OS),
-        Path::new(SANDBOX_EXEC),
-        "wallet-provider",
-        Path::new(PROVIDER_BINARY),
-        &standin_root,
-        &declared,
-        &profile_dir,
-    )
-    .unwrap_or_else(|err| panic!("{err}"));
-    let standin_record = wallet_standin_suite(&mut standin, &standin_root);
-
-    oracle.shutdown();
-    standin.shutdown();
-
-    assert_suite_outcomes("the committed confine.sb", &oracle_record, &SUITE_CASES);
-    assert_suite_outcomes(
-        "the stand-in's generated profile",
-        &standin_record,
-        &SUITE_CASES,
-    );
-    assert_standin_matches_oracle(&oracle_record, &standin_record);
+/// One provider's place in the B3 journey: the name the stand-in serves, the
+/// binary it starts, the one suite that drives that provider, and the cases
+/// that suite must record.
+struct B3Provider {
+    name: &'static str,
+    binary: &'static Path,
+    suite: fn(&mut ConfinedProvider, &Path) -> Vec<SuiteEntry>,
+    cases: &'static [(&'static str, SuiteClass)],
 }
 
-/// The stand-in's did start answers every permitted and denied did suite case
-/// as the committed `confine.sb` does.
-///
-/// `did_standin_suite` runs once on did's binary started under did's committed
-/// `confine.sb` through `ConfinedProvider::start_under` with did's layout, and
-/// once on a provider Started by `standin_spawn_confined_provider` from did's
-/// committed declared-rights file, each on its own fresh temporary root. Each
-/// record must hold one entry per case of `DID_SUITE_CASES`, in its order, with
-/// its name and class; every permitted case answers `ok`, every denied case is
-/// refused in both records, and the two records are equal entry by entry; a
-/// difference names the first differing case. The second outside write is the
-/// sibling of `did/` under the same base, so a write grant that stops at
-/// `STORAGE_ROOT` is separable from one that covers `STORAGE_PARENT`; the
-/// unrelated directory alone cannot separate them because both grants refuse
-/// it. The lab stand-in is test code and not the Runtime.
-///
-/// Falsifier: WP124 makes the stand-in use wallet's root layout for did; the
-/// stand-in binds `STORAGE_ROOT` to `<root>/ElastOS/SystemServices/Wallet`, so
-/// its `init` cannot write `<root>/did` and the start is Refused. This test
-/// fails at the start and records no case. WP127 appends a write grant on
-/// `STORAGE_PARENT` to the stand-in's generated profile for did, so the sibling
-/// write answers `ok`; the stand-in start's suite then fails at its `the
-/// sibling write must be denied` assertion, before the two starts' records are
-/// compared. The unrelated outside write passes before it, and the planted read
-/// runs after it and needs a read grant WP127 does not add.
-#[test]
-fn standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite() {
-    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
-        return;
-    }
-    let did_binary = did_provider_binary();
-    let declared = read_declared_rights(DID_PROVIDER, &declared_rights_path(DID_PROVIDER))
-        .unwrap_or_else(|err| panic!("{err}"));
-
-    let oracle_fixture = tempfile::tempdir().expect("temporary did root");
-    let oracle_root = resolved(oracle_fixture.path());
-    let bindings = canonical_bindings(DID_PROVIDER, &oracle_root, did_binary);
+/// Starts `name`'s binary under that provider's committed `confine.sb` on
+/// `root`, through the one launch builder and the provider's canonical
+/// bindings. The B3 journey takes this start as the record the committed
+/// oracle itself produces.
+fn standin_oracle_start(name: &str, binary: &Path, root: &Path) -> ConfinedProvider {
+    let bindings = canonical_bindings(name, root, binary);
     create_shared_ancestors(&bindings);
     let paths: Vec<(&str, &Path)> = bindings
         .iter()
-        .map(|(name, path)| (*name, path.as_path()))
+        .map(|(binding, path)| (*binding, path.as_path()))
         .collect();
-    let mut oracle =
-        ConfinedProvider::start_under(&did_provider_dir().join("confine.sb"), &paths, did_binary);
-    let oracle_record = did_standin_suite(&mut oracle, &oracle_root);
+    ConfinedProvider::start_under(&confine_oracle_path(name), &paths, binary)
+}
 
-    let standin_fixture = tempfile::tempdir().expect("temporary did root");
+/// One provider's leg of the B3 journey, from its committed declared-rights
+/// file to its permitted and denied suite record.
+///
+/// The leg reads the provider's committed declared-rights file and its
+/// committed `confine.sb`, then starts the binary through the lab stand-in into
+/// a fresh profile directory. It reads the one file the stand-in wrote there,
+/// which is the file the launch used, and requires that file to pass
+/// `check_profile_contract`, to pass `check_declared_rights` against the
+/// declared rights it was generated from, and to equal the committed oracle
+/// through `compare_profile_to_its_oracle`. The provider's suite then drives
+/// the stand-in start and a second start under the committed file, each on its
+/// own fresh root; both records must hold every case of `provider.cases` in
+/// order with its class, and the two records must agree entry by entry. Every
+/// refusal names the provider and the step it failed. The stand-in is test
+/// code and not the Runtime.
+fn standin_b3_journey(provider: &B3Provider) {
+    let name = provider.name;
+    let declared = read_declared_rights(name, &declared_rights_path(name))
+        .unwrap_or_else(|err| panic!("{name} B3 journey: {err}"));
+    let committed = read_allow_rule_profile(name, &confine_oracle_path(name))
+        .unwrap_or_else(|err| panic!("{name} B3 journey: {err}"));
+
+    let standin_fixture = tempfile::tempdir().expect("temporary provider root");
     let standin_root = resolved(standin_fixture.path());
     let profile_fixture = tempfile::tempdir().expect("temporary profile root");
     let profile_dir = resolved(profile_fixture.path());
     let mut standin = standin_spawn_confined_provider(
         StandinHost::reporting(std::env::consts::OS),
         Path::new(SANDBOX_EXEC),
-        DID_PROVIDER,
-        did_binary,
+        name,
+        provider.binary,
         &standin_root,
         &declared,
         &profile_dir,
     )
-    .unwrap_or_else(|err| panic!("{err}"));
-    let standin_record = did_standin_suite(&mut standin, &standin_root);
+    .unwrap_or_else(|err| panic!("{name} B3 journey: the stand-in start is refused: {err}"));
 
-    oracle.shutdown();
+    let launched = read_launched_profile(name, &profile_dir)
+        .unwrap_or_else(|err| panic!("{name} B3 journey: {err}"));
+    check_profile_contract(name, &launched).unwrap_or_else(|err| {
+        panic!("{name} B3 journey: the launched profile must pass the contract check: {err}")
+    });
+    check_declared_rights(name, &launched, &declared).unwrap_or_else(|err| {
+        panic!("{name} B3 journey: the launched profile must trace to its declared rights: {err}")
+    });
+    compare_profile_to_its_oracle(name, &launched, &committed).unwrap_or_else(|err| {
+        panic!("{name} B3 journey: the launched profile and its oracle disagree: {err}")
+    });
+
+    let standin_record = (provider.suite)(&mut standin, &standin_root);
+
+    let oracle_fixture = tempfile::tempdir().expect("temporary provider root");
+    let oracle_root = resolved(oracle_fixture.path());
+    let mut oracle = standin_oracle_start(name, provider.binary, &oracle_root);
+    let oracle_record = (provider.suite)(&mut oracle, &oracle_root);
+
     standin.shutdown();
+    oracle.shutdown();
 
     assert_suite_outcomes(
-        "did's committed confine.sb",
+        &format!("{name}'s committed confine.sb"),
         &oracle_record,
-        &DID_SUITE_CASES,
+        provider.cases,
     );
     assert_suite_outcomes(
-        "did's stand-in generated profile",
+        &format!("{name}'s stand-in launched profile"),
         &standin_record,
-        &DID_SUITE_CASES,
+        provider.cases,
     );
-    assert_standin_matches_oracle(&oracle_record, &standin_record);
+    assert_standin_matches_oracle(name, &oracle_record, &standin_record);
+}
+
+/// M1 check B3, one end-to-end journey for each file profile: did first, then
+/// wallet. Each provider starts from its committed declared-rights file
+/// through the lab stand-in into a fresh profile directory, and the one file
+/// the stand-in wrote there is the file the launch used. That file must pass
+/// the two contract checks and equal the provider's committed `confine.sb`
+/// through the one comparison body `compare_profile_to_its_oracle`
+/// (`standin_b3_journey`). The same provider's permitted and denied suite then
+/// runs on the stand-in start and on a start under the committed file, and
+/// both records must hold their provider's cases in order and agree entry by
+/// entry. A stand-in that changes the launched profile after the writer, in a
+/// way the suite does not exercise, fails at the launched-profile check. The
+/// stand-in is test code and not the Runtime.
+///
+/// Falsifier: WP116 binds the stand-in's `STORAGE_ROOT` to the base instead of
+/// the wallet directory; the widened grant permits `<root>/sibling`, so
+/// wallet's stand-in record holds `ok` where the committed profile refuses and
+/// the journey fails on that case. WP121 removes the planted-key push, so
+/// wallet's stand-in record holds eight entries where `SUITE_CASES` holds nine
+/// and the journey fails naming the missing case. WP124 makes the stand-in use
+/// wallet's root layout for did, so did's start is refused at its first `init`.
+/// WP127 appends a write grant on `STORAGE_PARENT` to did's launched profile,
+/// so the journey fails at did's launched-profile check on the form only the
+/// launched file holds. WP133 appends one allow form the suite does not
+/// exercise to the launched file, and WP134 removes `(deny network*)` from the
+/// launched file; the journey fails at that same check for each, because the
+/// writer-generated text test reads `generate_profile`'s own text and the suite
+/// exercises neither change.
+#[test]
+fn standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let providers = [
+        B3Provider {
+            name: DID_PROVIDER,
+            binary: did_provider_binary(),
+            suite: did_standin_suite,
+            cases: &DID_SUITE_CASES,
+        },
+        B3Provider {
+            name: WALLET_PROVIDER,
+            binary: Path::new(PROVIDER_BINARY),
+            suite: wallet_standin_suite,
+            cases: &SUITE_CASES,
+        },
+    ];
+    for provider in &providers {
+        standin_b3_journey(provider);
+    }
 }
 
 /// The stand-in start uses the generated profile, not the committed file.
@@ -5894,9 +5917,11 @@ fn read_allow_rule_sources(capsules: &Path) -> Result<AllowRuleSources, String> 
     Ok(AllowRuleSources { profiles, entries })
 }
 
-/// Reads one profile for the removal check and proves that `profile_forms`
-/// accepts it, or refuses with a reason that names the profile and its path.
-/// There is no skip path.
+/// Reads one profile and proves that `profile_forms` accepts it, or refuses
+/// with a reason that names the profile and its path. The removal check reads
+/// each committed profile through it, and the generated-profile test and the
+/// B3 journey read each provider's oracle through it too. There is no skip
+/// path.
 fn read_allow_rule_profile(name: &str, path: &Path) -> Result<String, String> {
     let profile = fs::read_to_string(path).map_err(|err| {
         format!(
@@ -5916,6 +5941,43 @@ fn read_allow_rule_profile(name: &str, path: &Path) -> Result<String, String> {
             )
         })
         .map(|_forms| profile)
+}
+
+/// The one profile file the lab stand-in wrote into `profile_dir`, read as
+/// text: the file the launch used, not a second copy of the generator's text.
+/// A directory that does not hold exactly one entry is a refusal that names
+/// the provider and the path, so the B3 journey reads no guessed file name and
+/// there is no skip path.
+fn read_launched_profile(name: &str, profile_dir: &Path) -> Result<String, String> {
+    let mut entries = fs::read_dir(profile_dir)
+        .map_err(|err| {
+            format!(
+                "{name} profile directory {} must be readable: {err}",
+                profile_dir.display()
+            )
+        })?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| {
+            format!(
+                "{name} profile directory {} must list: {err}",
+                profile_dir.display()
+            )
+        })?;
+    if entries.len() != 1 {
+        return Err(format!(
+            "{name} launcher must write exactly one profile into {}: found {}",
+            profile_dir.display(),
+            entries.len()
+        ));
+    }
+    let profile = entries.remove(0);
+    fs::read_to_string(&profile).map_err(|err| {
+        format!(
+            "{name} launched profile {} must be readable: {err}",
+            profile.display()
+        )
+    })
 }
 
 /// The one heading line every confinement document uses for its falsifier
@@ -6406,21 +6468,83 @@ fn every_did_and_wallet_allow_rule_traces_to_one_declared_right() {
     }
 }
 
+/// The one profile comparison: requires `generated` to hold the contract head
+/// in order and the same remaining forms as `committed`, in any order.
+///
+/// The committed profile holds only allow forms after its head, so the order
+/// of those forms does not change what is granted and the comparison sorts
+/// them; the head keeps its order. A mismatch returns the provider name, the
+/// forms only `generated` holds and the forms only `committed` holds.
+/// `generated_did_and_wallet_profiles_match_their_committed_oracles` compares
+/// the lab generator's text with each committed oracle, and the B3 journey
+/// compares the profile the stand-in launched with that same oracle, so the
+/// two callers share one comparison body (P10).
+fn compare_profile_to_its_oracle(
+    name: &str,
+    generated: &str,
+    committed: &str,
+) -> Result<(), String> {
+    let generated_forms = profile_forms(generated);
+    let committed_forms = profile_forms(committed);
+    let head = |forms: &[String]| {
+        forms
+            .iter()
+            .take(PROFILE_HEAD.len())
+            .map(String::as_str)
+            .eq(PROFILE_HEAD)
+    };
+    if !head(&generated_forms) {
+        return Err(format!(
+            "{name} generated profile must start with {PROFILE_HEAD:?}: {generated}"
+        ));
+    }
+    if !head(&committed_forms) {
+        return Err(format!(
+            "{name} committed profile must start with {PROFILE_HEAD:?}: {committed}"
+        ));
+    }
+    let mut generated_rest: Vec<String> = generated_forms
+        .iter()
+        .skip(PROFILE_HEAD.len())
+        .cloned()
+        .collect();
+    let mut committed_rest: Vec<String> = committed_forms
+        .iter()
+        .skip(PROFILE_HEAD.len())
+        .cloned()
+        .collect();
+    generated_rest.sort();
+    committed_rest.sort();
+    if generated_rest != committed_rest {
+        let only_generated: Vec<&String> = generated_rest
+            .iter()
+            .filter(|form| !committed_rest.contains(form))
+            .collect();
+        let only_committed: Vec<&String> = committed_rest
+            .iter()
+            .filter(|form| !generated_rest.contains(form))
+            .collect();
+        return Err(format!(
+            "{name} generated profile differs from its committed oracle: only in generated \
+             {only_generated:?}, only in committed {only_committed:?}"
+        ));
+    }
+    Ok(())
+}
+
 /// The one lab generator builds each did and wallet profile from its
 /// declared-rights file and the contract head, and the generated profile
 /// equals that provider's committed `confine.sb`, the test oracle.
 ///
-/// The test reads `capsules/did-provider/confine.sb` and
-/// `capsules/wallet-provider/confine.sb` with `read_allow_rule_profile`, reads
-/// each provider's `tests/fixtures/confine/declared-rights.json` with
-/// `read_declared_rights`, then requires `check_profile_contract` and
-/// `check_declared_rights` to accept the generated profile. The committed
-/// profile holds only allow forms after its head, so the order of those forms
-/// does not change what is granted and the test compares them as sorted
-/// lists; the head keeps its order. A mismatch fails with the provider name,
-/// the forms only the generated profile holds and the forms only the committed
-/// one holds. The Runtime's own generator and its comparison are not built.
-/// The test reads files and starts no process, so it runs on every platform.
+/// The test reads each provider's `tests/fixtures/confine/declared-rights.json`
+/// with `read_declared_rights`, generates its profile with `generate_profile`,
+/// then requires `check_profile_contract` and `check_declared_rights` to accept
+/// the generated profile. The committed profile is read with
+/// `read_allow_rule_profile` and compared with the generated one through
+/// `compare_profile_to_its_oracle`; the B3 journey calls that same comparison
+/// on the profile the stand-in launched. The Runtime's own generator and its
+/// comparison are not built. The test reads files and starts no process, so it
+/// runs on every platform.
 ///
 /// Falsifier: WP105 makes `generate_profile` emit
 /// `(allow file-read* (literal "/private/var/cc-confine-generated"))` after
@@ -6431,64 +6555,16 @@ fn every_did_and_wallet_allow_rule_traces_to_one_declared_right() {
 /// the head keeps its order and neither contract check reads a deny form.
 #[test]
 fn generated_did_and_wallet_profiles_match_their_committed_oracles() {
-    let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("capsules/wallet-provider must sit under capsules/");
     for name in allow_rule_profiles() {
-        let profile_path = capsules.join(name).join("confine.sb");
-        let committed =
-            read_allow_rule_profile(name, &profile_path).unwrap_or_else(|err| panic!("{err}"));
-        let declared_path = capsules
-            .join(name)
-            .join("tests/fixtures/confine/declared-rights.json");
-        let declared =
-            read_declared_rights(name, &declared_path).unwrap_or_else(|err| panic!("{err}"));
+        let committed = read_allow_rule_profile(name, &confine_oracle_path(name))
+            .unwrap_or_else(|err| panic!("{err}"));
+        let declared = read_declared_rights(name, &declared_rights_path(name))
+            .unwrap_or_else(|err| panic!("{err}"));
         let generated = generate_profile(name, &declared).unwrap_or_else(|err| panic!("{err}"));
         check_profile_contract(name, &generated).unwrap_or_else(|err| panic!("{err}"));
         check_declared_rights(name, &generated, &declared).unwrap_or_else(|err| panic!("{err}"));
-        let generated_forms = profile_forms(&generated);
-        let committed_forms = profile_forms(&committed);
-        let head = |forms: &[String]| {
-            forms
-                .iter()
-                .take(PROFILE_HEAD.len())
-                .map(String::as_str)
-                .eq(PROFILE_HEAD)
-        };
-        assert!(
-            head(&generated_forms),
-            "{name} generated profile must start with {PROFILE_HEAD:?}: {generated}"
-        );
-        assert!(
-            head(&committed_forms),
-            "{name} committed profile must start with {PROFILE_HEAD:?}: {committed}"
-        );
-        let mut generated_rest: Vec<String> = generated_forms
-            .iter()
-            .skip(PROFILE_HEAD.len())
-            .cloned()
-            .collect();
-        let mut committed_rest: Vec<String> = committed_forms
-            .iter()
-            .skip(PROFILE_HEAD.len())
-            .cloned()
-            .collect();
-        generated_rest.sort();
-        committed_rest.sort();
-        if generated_rest != committed_rest {
-            let only_generated: Vec<&String> = generated_rest
-                .iter()
-                .filter(|form| !committed_rest.contains(form))
-                .collect();
-            let only_committed: Vec<&String> = committed_rest
-                .iter()
-                .filter(|form| !generated_rest.contains(form))
-                .collect();
-            panic!(
-                "{name} generated profile differs from its committed oracle: only in generated \
-                 {only_generated:?}, only in committed {only_committed:?}"
-            );
-        }
+        compare_profile_to_its_oracle(name, &generated, &committed)
+            .unwrap_or_else(|err| panic!("{err}"));
     }
 }
 
