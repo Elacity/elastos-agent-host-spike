@@ -161,8 +161,9 @@ lone braces.
 | `host-test/tests/component.rs` | 70 | App paths, names, fixtures and the fuel-gate wrapper around the kit harness (`v1-host-test`) |
 | `verify.sh`, `build.sh`, `falsify.py` | 18, 5, 46 | Script skeletons: which crates, which tests, which artifact |
 
-Also still per page: the about 25 lines of `launchToken`, the client and `cut` in each `surface/browser/*.js`,
-because the Runtime's gateway test installs exactly four Photos page files (unchanged from #32).
+The docs page ships verified copies of the kit's launch client and docs-model renderer. The archive page
+still has its own client copy. The Photos page keeps its client copy until the Runtime's four-file gateway
+test allows a fifth file.
 
 ## Counts
 
@@ -221,8 +222,9 @@ Written on 23 Oct 2026, when the Photo track moved to its own lane. The archive 
 - **The strict input-list parser** is done (task 012): one copy, `guest/src/list.rs`, used by `album.rs` and
   `shelf.rs`, with its kit tests and falsifiers.
 - **The typed blocks** (markdown to blocks) are `docs-model`, not the kit; only the text checks moved.
-- **Page code** (`launchToken`, the client, `cut`) is still per page, because the Runtime's gateway test installs
-  exactly four Photos page files.
+- **Page code**: The docs page ships the kit `page-client.js`. The archive page and the Photos page still
+  keep their own client copies. The Photos page keeps its copy until the Runtime's four-file gateway test
+  allows a fifth file; the docs client imports `cut` from the kit's `docs-render.js` copy.
 - **One shared `examples/` workspace** would make native builds path-free again: a proposed slice, above.
 - **From the archive design:** M4 (lying-archive fixtures) is the app's; M5, M6 and M7 need Anders, the Runtime
   or the real move PR.
