@@ -1,0 +1,21 @@
+id: F41-dumpable-reenable-allowed
+file: src/seccomp.rs
+test: real_kernel::real_same_uid_host_cannot_ptrace_or_read_mem
+--- old
+    prog.push(jump(
+        BPF_JMP | BPF_JEQ | BPF_K,
+        libc::SYS_prctl as u32,
+        0,
+        4,
+    ));
+    prog.push(stmt(BPF_LD | BPF_W | BPF_ABS, DATA_ARG0_LOW));
+    prog.push(jump(
+        BPF_JMP | BPF_JEQ | BPF_K,
+        libc::PR_SET_DUMPABLE as u32,
+        0,
+        1,
+    ));
+    prog.push(stmt(BPF_RET | BPF_K, eperm));
+    prog.push(stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+--- new
+--- end

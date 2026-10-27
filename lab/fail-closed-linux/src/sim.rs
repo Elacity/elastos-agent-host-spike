@@ -114,6 +114,10 @@ impl Kernel for SimKernel {
         self.run(Step::SetNoNewPrivs)
     }
 
+    fn set_not_dumpable(&mut self, _executable: &CStr) -> Result<(), Errno> {
+        self.run(Step::SetDumpable)
+    }
+
     fn install_seccomp_filter(&mut self, _filter: &[libc::sock_filter]) -> Result<(), Errno> {
         self.run(Step::InstallFilter)
     }

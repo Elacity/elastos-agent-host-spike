@@ -97,6 +97,27 @@ pub fn filter() -> Vec<sock_filter> {
         prog.push(jump(BPF_JMP | BPF_JEQ | BPF_K, nr as u32, 0, 1));
         prog.push(stmt(BPF_RET | BPF_K, eperm));
     }
+    // Deny any later PR_SET_DUMPABLE. The helper already set dumpable to 0.
+    // 0: JEQ prctl, 0, 4  -> not prctl jumps to clone3
+    // 1: LD ARG0_LOW
+    // 2: JEQ PR_SET_DUMPABLE, 0, 1 -> other prctl jumps to ALLOW
+    // 3: RET EPERM
+    // 4: RET ALLOW
+    prog.push(jump(
+        BPF_JMP | BPF_JEQ | BPF_K,
+        libc::SYS_prctl as u32,
+        0,
+        4,
+    ));
+    prog.push(stmt(BPF_LD | BPF_W | BPF_ABS, DATA_ARG0_LOW));
+    prog.push(jump(
+        BPF_JMP | BPF_JEQ | BPF_K,
+        libc::PR_SET_DUMPABLE as u32,
+        0,
+        1,
+    ));
+    prog.push(stmt(BPF_RET | BPF_K, eperm));
+    prog.push(stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
     prog.push(jump(
         BPF_JMP | BPF_JEQ | BPF_K,
         libc::SYS_clone3 as u32,

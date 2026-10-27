@@ -414,6 +414,22 @@ impl Kernel for RealKernel {
         check(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) }.into()).map(drop)
     }
 
+    fn set_not_dumpable(&mut self, executable: &CStr) -> Result<(), Errno> {
+        // After maps and capset, dumpable may already be 0. Set it again so
+        // a later exec of a readable file is the only reset. Then make the
+        // granted binary execute-only: execve of a readable file sets
+        // dumpable back to 1, and a same-uid host can PTRACE_ATTACH.
+        // SAFETY: integer prctl only.
+        if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+            return Err(errno());
+        }
+        // SAFETY: `executable` is a NUL-terminated path from Plan.
+        if unsafe { libc::chmod(executable.as_ptr(), 0o111) } != 0 {
+            return Err(errno());
+        }
+        Ok(())
+    }
+
     fn install_seccomp_filter(&mut self, filter: &[libc::sock_filter]) -> Result<(), Errno> {
         let len = u16::try_from(filter.len()).map_err(|_| libc::EINVAL)?;
         let prog = libc::sock_fprog {

@@ -1287,6 +1287,91 @@ fn real_stdin_socket_cannot_import_fd() {
     }
 }
 
+#[test]
+fn real_same_uid_host_cannot_ptrace_or_read_mem() {
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("host-ptrace", provider);
+        let mut command = launch_command(&launcher(), provider, &fixture, &[], Inherit::Nothing);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("cannot start the launcher");
+        let stdin = child.stdin.take().unwrap();
+        let (pid, lines) = read_until_ready(&mut child, provider);
+        assert!(
+            lines.contains(&format!("set_dumpable errno={}", libc::EPERM)),
+            "{provider}: PR_SET_DUMPABLE(1) after start must be EPERM, got {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line == "set_dumpable ok"),
+            "{provider}: provider re-enabled dumpable: {lines:?}"
+        );
+        let provider_pid = innermost_child(pid)
+            .unwrap_or_else(|| panic!("NOT RUN: no provider pid under init {pid} ({provider})"));
+
+        assert_ptrace_and_mem_refused(pid, provider, "init");
+        assert_ptrace_and_mem_refused(provider_pid, provider, "provider");
+
+        drop(stdin);
+        let done = child.wait_with_output().unwrap();
+        assert_eq!(
+            done.status.code(),
+            Some(0),
+            "{provider}: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    }
+}
+
+fn assert_ptrace_and_mem_refused(pid: u32, provider: &str, who: &str) {
+    use std::os::unix::fs::MetadataExt;
+    let mem_path = format!("/proc/{pid}/mem");
+    let meta = fs::metadata(&mem_path)
+        .unwrap_or_else(|err| panic!("{provider}: {who} /proc/{pid}/mem metadata: {err}"));
+    assert_eq!(
+        meta.uid(),
+        0,
+        "{provider}: {who} /proc/{pid}/mem owner must be root when dumpable is 0, got uid {}",
+        meta.uid()
+    );
+    match fs::File::open(&mem_path) {
+        Ok(_) => panic!("{provider}: same-uid host opened {who} /proc/{pid}/mem"),
+        Err(err) => {
+            let errno = err.raw_os_error();
+            assert!(
+                errno == Some(libc::EACCES) || errno == Some(libc::EPERM),
+                "{provider}: {who} /proc/{pid}/mem expected EACCES or EPERM, got {err}"
+            );
+        }
+    }
+    let attached = unsafe {
+        libc::ptrace(
+            libc::PTRACE_ATTACH,
+            pid as libc::pid_t,
+            std::ptr::null_mut::<libc::c_void>(),
+            std::ptr::null_mut::<libc::c_void>(),
+        )
+    };
+    if attached == 0 {
+        unsafe {
+            libc::ptrace(
+                libc::PTRACE_DETACH,
+                pid as libc::pid_t,
+                std::ptr::null_mut::<libc::c_void>(),
+                std::ptr::null_mut::<libc::c_void>(),
+            );
+        }
+        panic!("{provider}: same-uid host PTRACE_ATTACH of {who} pid {pid} succeeded");
+    }
+    let errno = std::io::Error::last_os_error().raw_os_error();
+    assert_eq!(
+        errno,
+        Some(libc::EPERM),
+        "{provider}: {who} PTRACE_ATTACH expected EPERM, got {errno:?}"
+    );
+}
+
 fn unix_stream_pair() -> (std::fs::File, std::fs::File) {
     let mut fds = [-1, -1];
     let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };

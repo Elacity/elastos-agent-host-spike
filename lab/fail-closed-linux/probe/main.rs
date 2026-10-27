@@ -45,6 +45,7 @@ extern "C" {
     ) -> i32;
     fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize;
     fn syscall(nr: i64, ...) -> i64;
+    fn prctl(option: i32, ...) -> i32;
     #[link_name = "write"]
     fn c_write(fd: i32, buf: *const u8, count: usize) -> isize;
 }
@@ -95,6 +96,7 @@ const F_GETFD: i32 = 1;
 const AT_EMPTY_PATH: i64 = 0x1000;
 const MFD_CLOEXEC: u32 = 1;
 const MFD_EXEC: u32 = 0x0010;
+const PR_SET_DUMPABLE: i32 = 4;
 #[cfg(target_arch = "x86_64")]
 const SYS_MEMFD_CREATE: i64 = 319;
 #[cfg(target_arch = "x86_64")]
@@ -134,6 +136,7 @@ fn main() {
     let _ = writeln!(out, "stdin_sock={}", i32::from(fd_is_sock(0)));
     report(&mut out, "stdin_ioctl", ioctl_on_fd(0));
     report(&mut out, "stdin_tiocsti", ioctl_tiocsti(0));
+    try_set_dumpable(&mut out);
     if extra.memfd_exec {
         try_memfd_exec(&mut out, &args[0]);
     }
@@ -475,17 +478,9 @@ fn ioctl_tiocsti(fd: i32) -> io::Result<()> {
 }
 
 fn try_memfd_exec(out: &mut impl Write, self_path: &str) {
-    let src = match fs::read(self_path) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            let _ = writeln!(
-                out,
-                "memfd_open_src errno={}",
-                err.raw_os_error().unwrap_or(-1)
-            );
-            return;
-        }
-    };
+    // The granted binary is execute-only after confine. A dummy image is
+    // enough: seccomp must return EPERM before the kernel reads the bytes.
+    let src = b"fcl-memfd-dummy";
     let flags = MFD_CLOEXEC | MFD_EXEC;
     let mem = unsafe { syscall(SYS_MEMFD_CREATE, b"fcl\0".as_ptr(), flags) };
     let mem = if mem < 0 {
@@ -551,18 +546,8 @@ fn fd_is_sock(fd: i32) -> bool {
     unsafe { fstat(fd, &mut st) == 0 && (st.st_mode & S_IFMT) == S_IFSOCK }
 }
 
-fn try_memfd_procfd(out: &mut impl Write, self_path: &str) {
-    let src = match fs::read(self_path) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            let _ = writeln!(
-                out,
-                "memfd_procfd_open errno={}",
-                err.raw_os_error().unwrap_or(-1)
-            );
-            return;
-        }
-    };
+fn try_memfd_procfd(out: &mut impl Write, _self_path: &str) {
+    let src = b"fcl-memfd-dummy";
     let mem = unsafe { syscall(SYS_MEMFD_CREATE, b"fcl\0".as_ptr(), MFD_CLOEXEC) };
     if mem < 0 {
         let _ = writeln!(
@@ -631,6 +616,19 @@ fn try_reexec(out: &mut impl Write, self_path: &str) {
             io::Error::last_os_error().raw_os_error().unwrap_or(-1)
         }
     );
+}
+
+fn try_set_dumpable(out: &mut impl Write) {
+    let ret = unsafe { prctl(PR_SET_DUMPABLE, 1, 0, 0, 0) };
+    if ret == 0 {
+        let _ = writeln!(out, "set_dumpable ok");
+    } else {
+        let _ = writeln!(
+            out,
+            "set_dumpable errno={}",
+            io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+        );
+    }
 }
 
 fn try_scm_recv(out: &mut impl Write) {
