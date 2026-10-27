@@ -1,0 +1,9 @@
+id: F-A7-timeout
+file: src/ledger.rs
+test: ledger::model_timeout_ends_an_uncertain_hold
+--- old
+        if !uncertain {
+            return Err(TimeoutRefuse::NotUncertain);
+        }
+--- new
+--- end

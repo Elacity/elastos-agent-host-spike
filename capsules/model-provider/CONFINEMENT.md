@@ -51,6 +51,8 @@ the Runtime generator, not the Runtime, and it does not count toward B3-R.
 This journey launches the stand-in text: `Launch::Profile` applies the
 generated text, hosted init creates `runs/`, and the local offer answers
 `internal_error`.
+`generated_profile_denies_the_hosted_connect` launches the stand-in text, the
+stand-in counts zero connections, and this is not the Runtime's refusal.
 `model_declared_rights_read_on_the_did_and_wallet_template` reads this oracle
 and this declared-rights file. The Runtime's own generator and its comparison
 are not built and stay in `elastos/`, outside this lane. The model provider
@@ -263,6 +265,13 @@ in `../did-provider/CONFINEMENT.md`. The lab writer in that did section is
 test code, and the Runtime half that generates and enforces the profile is
 not built and stays in `elastos/`, outside this lane.
 
+`standin_refuses_a_start_it_cannot_apply` refuses a declared value with no
+rights list and starts nothing, and a generated profile whose last `)` is
+removed exits 65 through `assert_startup_is_refused`. The value is
+`json!({})`, so the `rights` key is absent;
+`generated_model_profile_matches_the_oracle` already refuses a present value
+that is not a list, on the same line. The Runtime's own refusal is not built.
+
 ## What the profile does not grant
 
 ### The local engine
@@ -364,6 +373,8 @@ count of connections and the control.
   `src/adapters.rs:2799-2834`), and the run settles as
   `hosted_effect_refused`. Off macOS the provider refuses every hosted run
   itself, so there the control prints a skip reason.
+- `generated_profile_denies_the_hosted_connect` launches the stand-in text,
+  the stand-in counts zero connections, and this is not the Runtime's refusal.
 
 F-cc10b turns `(deny network*)` into `(allow network*)` and changes nothing
 else. The request then reaches the stand-in, and the confined test fails. So
@@ -424,13 +435,13 @@ cited `model_` test name in this section is a function in `tests/confine/main.rs
 | Operation | Inputs | Outputs | Right | Effect | macOS rule and test | Linux |
 | --- | --- | --- | --- | --- | --- | --- |
 | init | `op`, `config` | ok: `status`, `data` (`provider`, `protocol_version`, `offers_ready` from `StatusResponse`). error: `status`, `code`, `message`. | storage | writes: creates `runs/` under `STORAGE_ROOT`. refuses: an outside `init` answers `journal_corrupt`; the refused create answers `journal_access_denied`. A local offer's refusal is the citation in "The local engine" and `model_local_offer_fails_closed_under_profile`. | `model_provider_ops_under_profile` shows the creation of `runs/` under `STORAGE_ROOT`. The parent read rule is `(allow file-read* (literal (param "STORAGE_PARENT")))`; removing it is F-cc1-rm-parent and `model_provider_ops_under_profile` fails. The `STORAGE_ROOT` subpath rule is `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`; removing it is F-cc1-rm-storage and `model_provider_ops_under_profile` fails. `model_outside_write_denied` shows an outside `init` answers `journal_corrupt`. `model_outside_create_reports_access_denied` shows the refused create answers `journal_access_denied`. | designed, not enforced |
-| status | `op` | ok: `status`, `data` (`provider`, `protocol_version`, `offers_ready` from `StatusResponse`). error: `status`, `code`, `message`. | no named test shows this | no named test shows this | `model_provider_ops_under_profile` shows the answer equals `init`'s. No named test shows a storage or socket right, or a read, write, settle or refusal, for this call. | designed, not enforced |
-| shutdown | `op` | ok: `status`, `data` (`shutdown`). error: `status`, `code`, `message`. | no named test shows this | no named test shows this | `Provider::shutdown`, used by `model_provider_ops_under_profile` and `model_bound_copy_serves_under_profile`, shows `data.shutdown` true and a clean exit. No named test shows a storage or socket right for this call. | designed, not enforced |
-| offers_list | `op` | ok: `status`, `data` (`schema`, `provider`, `protocol_version`, `offers`, `offer_revisions`). error: `status`, `code`, `message`. | no named test shows this | no named test shows this | `model_provider_ops_under_profile` shows `data.offers` and the configured offer id. The same call answers again in `model_outside_read_denied`, `model_local_offer_fails_closed_under_profile` and `model_hosted_run_fails_closed_under_profile`. No named test shows this op itself reading, writing, settling or using a socket. | designed, not enforced |
-| runs_create | `op`, `offer_id`, `operation`, `input`, `runtime_binding`, `expected_execution_binding_hash` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`). error: `status`, `code`, `message`. | storage | writes one run under `STORAGE_ROOT`. | `model_outside_read_denied` stores one run with this op before `runs_get` reads it back. `model_hosted_run_fails_closed_under_profile` sends `runs_create`, then `runs_get` until the run is terminal, and the hosted Runtime socket stand-in counts zero connections. The run's `status` is `failed` and `terminal.error.code` is `transport_interrupted`. The profile rule is `(deny network*)`. The test does not show which call connects. `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` for the `STORAGE_ROOT` write. The profile denies the hosted Runtime socket with `(deny network*)`. That denial is not a grant. | designed, not enforced |
+| status | `op` | ok: `status`, `data` (`provider`, `protocol_version`, `offers_ready` from `StatusResponse`). error: `status`, `code`, `message`. | no named test shows this | the storage tree after `init` is unchanged | `model_provider_ops_under_profile` shows the answer equals `init`'s. `model_status_offers_and_shutdown_leave_storage_unchanged` shows the storage tree after `init` is the same after this call, and no named test shows a read inside `STORAGE_ROOT` or a socket. | designed, not enforced |
+| shutdown | `op` | ok: `status`, `data` (`shutdown`). error: `status`, `code`, `message`. | no named test shows this | the storage tree after `init` is unchanged | `Provider::shutdown`, used by `model_provider_ops_under_profile` and `model_bound_copy_serves_under_profile`, shows `data.shutdown` true and a clean exit. `model_status_offers_and_shutdown_leave_storage_unchanged` shows the storage tree after `init` is the same after this call, and no named test shows a read inside `STORAGE_ROOT` or a socket. | designed, not enforced |
+| offers_list | `op` | ok: `status`, `data` (`schema`, `provider`, `protocol_version`, `offers`, `offer_revisions`). error: `status`, `code`, `message`. | no named test shows this | the storage tree after `init` is unchanged | `model_provider_ops_under_profile` shows `data.offers` and the configured offer id. The same call answers again in `model_outside_read_denied`, `model_local_offer_fails_closed_under_profile` and `model_hosted_run_fails_closed_under_profile`. `model_status_offers_and_shutdown_leave_storage_unchanged` shows the storage tree after `init` is the same after this call, and no named test shows a read inside `STORAGE_ROOT` or a socket. | designed, not enforced |
+| runs_create | `op`, `offer_id`, `operation`, `input`, `runtime_binding`, `expected_execution_binding_hash` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`). error: `status`, `code`, `message`. | storage | writes one run under `STORAGE_ROOT`. | `model_outside_read_denied` stores one run with this op before `runs_get` reads it back. `model_hosted_run_fails_closed_under_profile` sends `runs_create`, then `runs_get` until the run is terminal, and the hosted Runtime socket stand-in counts zero connections. The run's `status` is `failed` and `terminal.error.code` is `transport_interrupted`. The profile rule is `(deny network*)`. The test does not show which call connects. `generated_profile_denies_the_hosted_connect` launches this denial under the stand-in text, the stand-in counts zero connections, and `terminal.error.code` is `transport_interrupted`. `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` for the `STORAGE_ROOT` write. The profile denies the hosted Runtime socket with `(deny network*)`. That denial is not a grant. | designed, not enforced |
 | runs_get | `op`, `run_id`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`). error: `status`, `code`, `message`. | storage | reads inside `STORAGE_ROOT`. refuses that read once the record is outside it. The hosted test settles by reading this op until the run is terminal. | `model_outside_read_denied` shows the read inside `STORAGE_ROOT` and `journal_corrupt` once the record is outside it. A `STORAGE_ROOT` read under `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`. The outside read is refused under the fixture profile `READ_FIXTURE_RULE`. That refusal is a denial, not a grant. `model_hosted_run_fails_closed_under_profile` sends `runs_create`, then `runs_get` until the run is terminal, and the hosted Runtime socket stand-in counts zero connections. The run's `status` is `failed` and `terminal.error.code` is `transport_interrupted`. The profile rule is `(deny network*)`. The profile denies the hosted Runtime socket with `(deny network*)`. That denial is not a grant. The test does not show which call connects. | designed, not enforced |
-| runs_events | `op`, `run_id`, `after_sequence`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `next_cursor`, `has_more`, `events` from `RunEventsPage`), names only. error: `status`, `code`, `message`, names only. no named test shows the answer. | no named test shows this | no named test shows this | no named test shows this. no named test shows the right and the effect. | designed, not enforced |
-| runs_cancel | `op`, `run_id`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`), names only. error: `status`, `code`, `message`, names only. no named test shows the answer. | no named test shows this | no named test shows this | no named test shows this. no named test shows the right and the effect. | designed, not enforced |
+| runs_events | `op`, `run_id`, `after_sequence`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `next_cursor`, `has_more`, `events` from `RunEventsPage`). error: `status`, `code`, `message`. | storage | reads the stored terminal run and does not write. | `model_terminal_run_page_and_cancel_read_under_profile` shows `schema` `elastos.model.run-events/v1`, `run_id` equal to the create data's `run_id`, `has_more` false, and a last event whose `kind` is `failed`. The storage snapshot after both calls equals the snapshot after create. A live cancel is not shown. | designed, not enforced |
+| runs_cancel | `op`, `run_id`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`). error: `status`, `code`, `message`. | storage | reads the stored terminal run and does not write. | `model_terminal_run_page_and_cancel_read_under_profile` shows the data equals the create data. The storage snapshot after both calls equals the snapshot after create. A live cancel is not shown. | designed, not enforced |
 
 ## Host-OS status
 
@@ -622,6 +633,15 @@ profile does not grant".
 - `generated_profile_permits_init_and_denies_the_local_offer`: `Launch::Profile`
   applies the generated text, hosted init creates `runs/`, and the local offer
   answers `internal_error`.
+- `standin_refuses_a_start_it_cannot_apply`: a declared value with no rights
+  list is refused and starts nothing, and a generated profile whose last `)`
+  is removed exits 65 through `assert_startup_is_refused`. The value is
+  `json!({})`, so the `rights` key is absent.
+  `generated_model_profile_matches_the_oracle` already refuses a present
+  `rights` value that is not a list, on the same line.
+- `generated_profile_denies_the_hosted_connect`: `Launch::Profile` applies
+  the generated text, the stand-in counts zero connections, and the run
+  settles `transport_interrupted`.
 
 `journal_corrupt` is the provider's existing code for an unavailable journal,
 and `journal_access_denied` is its code for a refused journal create or write
@@ -676,9 +696,9 @@ python3 -I examples/agent-host/falsify.py --from capsules/model-provider/confine
 `confine-falsifiers.json` holds this profile's falsifiers for the shared
 runner. Every entry uses `expect: caught`. F-cc12a uses command `wallet`,
 because the one shape check is in the wallet crate, and every other entry
-uses command `provider`. Each mutates `confine.sb` only, except the twenty-one
+uses command `provider`. Each mutates `confine.sb` only, except the twenty-three
 entries that edit `tests/confine/main.rs`.
-The twenty-one are: F-cc1e removes the outside-read
+The twenty-three are: F-cc1e removes the outside-read
 fixture rule, F-cc8-rm-journal removes the outside-create fixture grant,
 F-cc15a, F-cc15b and F-cc15c each undo one part of how the Runtime socket
 stand-in counts connections, F-cc16a, F-cc16b and F-cc16c each undo one
@@ -690,7 +710,7 @@ keeps none of the stderr lines `Provider::ended` reads, and F-cc29a skips
 the digest compare in refuse_changed_provider_executable, and F-cc31a
 renames `model_provider_ops_under_profile`, and F-cc30b,
 F-cc30c, F-cc30d and F-cc30e each change the declared-rights path in
-allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match return Ok before it compares. F-cc41a makes standin_profile return the oracle file and ignore the declared value. F-cc42a makes write_standin_profile write an allow-default profile and ignore the generated text.
+allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match return Ok before it compares. F-cc41a makes standin_profile return the oracle file and ignore the declared value. F-cc42a makes write_standin_profile write an allow-default profile and ignore the generated text, so generated_profile_permits_init_and_denies_the_local_offer and standin_refuses_a_start_it_cannot_apply fail. F-cc43a makes standin_profile return an empty profile when the rights list is missing, so standin_refuses_a_start_it_cannot_apply and generated_model_profile_matches_the_oracle fail. F-cc44a makes standin_profile emit (allow network*) instead of (deny network*).
 
 | Id | Mutation | Named test | Why the test fails |
 | --- | --- | --- | --- |
@@ -746,14 +766,16 @@ allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match 
 | F-cc39a | A line `(` is written after the root pin, then `allow file-read* (literal "/tmp/cc-split-allow"))` on the next line | `platform_baseline_rules_stay_narrow` and `allow_rules_trace_to_declared_rights` | The allow form does not close. |
 | F-cc40a | In the test, `falsifier_section_ids_match` returns `Ok` before it compares | `falsifier_section_names_every_list_id` | A table that drops F-cc39a is accepted. |
 | F-cc41a | In the test, `standin_profile` returns the oracle file and ignores the declared value | `generated_model_profile_matches_the_oracle` | A changed declared rule still matches the oracle. |
-| F-cc42a | In the test, `write_standin_profile` writes an allow-default profile and ignores the generated text | `generated_profile_permits_init_and_denies_the_local_offer` | The local offer's init answers ok. |
+| F-cc42a | In the test, `write_standin_profile` writes an allow-default profile and ignores the generated text | `generated_profile_permits_init_and_denies_the_local_offer` and `standin_refuses_a_start_it_cannot_apply` | The local offer's init answers ok, and the broken generated text is ignored so the launch does not exit 65. |
+| F-cc43a | In the test, `standin_profile` returns an empty profile when the rights list is missing | `standin_refuses_a_start_it_cannot_apply` and `generated_model_profile_matches_the_oracle` | The missing rights list is accepted. |
+| F-cc44a | In the test, `standin_profile` emits `(allow network*)` instead of `(deny network*)` | `generated_profile_denies_the_hosted_connect` and `generated_model_profile_matches_the_oracle` | The stand-in counts a connection and the generated head's third line is `(allow network*)`. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
 same for the outside-create grant: the refusal that test observes is the
 create, not the inspect before it. The runner rebuilds the test for both, and
 for the F-cc15, F-cc16, F-cc17, F-cc19 and F-cc29a entries, and for F-cc30b,
-F-cc30c, F-cc30d, F-cc30e F-cc31a, F-cc40a, F-cc41a and F-cc42a. F-cc30a and F-cc30f need no rebuild:
+F-cc30c, F-cc30d, F-cc30e F-cc31a, F-cc40a, F-cc41a, F-cc42a, F-cc43a and F-cc44a. F-cc30a and F-cc30f need no rebuild:
 the test reads confine.sb at runtime. Its startup recovery restores
 `tests/confine/main.rs` after a killed run (provider task 015), as it restores
 `confine.sb`. F-cc35a needs no rebuild: the test reads confine.sb at runtime.
@@ -767,7 +789,7 @@ F-cc38a needs no rebuild: the test reads confine.sb at runtime.
 F-cc39a needs no rebuild: the test reads confine.sb at runtime.
 F-cc40a needs a rebuild: it edits tests/confine/main.rs.
 F-cc41a needs a rebuild: it edits tests/confine/main.rs.
-F-cc42a needs a rebuild: it edits tests/confine/main.rs. F-cc42a needs the sandbox: the named test launches the provider.
+F-cc42a needs a rebuild: it edits tests/confine/main.rs. F-cc42a needs the sandbox: the named tests launch the provider. F-cc43a needs a rebuild: it edits tests/confine/main.rs. F-cc44a needs a rebuild: it edits tests/confine/main.rs. F-cc44a needs the sandbox: the hosted test launches the provider.
 
 The list is a Mac gate. On a Mac without `/usr/bin/sandbox-exec` the unmutated
 suite fails, so a list run there is no evidence. Off macOS, when
@@ -776,7 +798,7 @@ entry reads SURVIVED there. The entries whose tests need no sandbox (F-cc12a,
 F-cc15a, F-cc15b, F-cc15c, F-cc16a, F-cc16b, F-cc16c, F-cc17a, F-cc17b,
 F-cc29a, F-cc30a, F-cc30b, F-cc30c, F-cc30d, F-cc30e, F-cc30f, F-cc31a,
 F-cc35a, F-cc35b, F-cc35c, F-cc35d, F-cc35e, F-cc35f, F-cc35g, F-cc37a,
-F-cc38a, F-cc39a, F-cc40a and F-cc41a) are
+F-cc38a, F-cc39a, F-cc40a, F-cc41a and F-cc43a) are
 CAUGHT on any host that builds their crate. F-cc12a reads the profile files
 and is CAUGHT on any host that builds the wallet crate. The model-provider
 entries among them are CAUGHT on any Unix host where `tests/confine/main.rs`

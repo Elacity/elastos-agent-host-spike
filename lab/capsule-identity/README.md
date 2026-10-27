@@ -13,8 +13,9 @@ sign that printed lab CID, and a check can say whether that key did.
 - It answers two questions: do these bytes match this name, and did this test
   key sign that name?
 - It never answers "may this run?". It makes no trust, admission or launch
-  decision. It sits in no admission or launch path, and no Runtime code calls
-  it. Admission stays a separate decision under each Runtime's trust policy.
+  decision. It sits in no Runtime admission or launch path, and no Runtime
+  code calls it; the lab's stand-in launcher, in test code, calls it (see
+  [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)). Admission stays a separate decision under each Runtime's trust policy.
   A signature check that returns `Ok(())` is not a permission to run.
 - Its value is a **lab CID**, a lab package CID: the CIDv1 SHA-256 UnixFS
   directory root of the bundle, printed as 59 characters that start
@@ -805,7 +806,9 @@ them. The provider lane adds those two recovery lines after this task merges.
 
 The rule: a valid signature grants nothing by itself. A bundle whose test-key
 signature verifies is still not admitted, and it gets no grant. This library
-checks identity only, and it sits in no admission or launch path.
+checks identity only, and it sits in no Runtime admission or launch path; the
+lab's stand-in launcher, in test code, calls it
+([below](#lab-stand-in-launcher-m1-check-b1)).
 
 What the tests show, on the `agent-host` fixture. Its manifest asks for a grant
 through `capabilities`, and it has its `asks.json`. A fresh in-memory test key
@@ -884,7 +887,10 @@ authorize (`CapsuleManifest::resource_authority_bounds`,
 decisions into Runtime policy is Runtime issue 464,
 https://github.com/Elacity/elastos-runtime/issues/464. So these tests say
 nothing about what the Runtime would decide. They do not run the Runtime, and
-they model no admission or grant, not even in a test.
+they model no grant. The lab's stand-in launcher, in test code, models only a
+launch route's refusals before launch
+([below](#lab-stand-in-launcher-m1-check-b1)); it is not the Runtime's
+admission, and it grants nothing.
 
 Claim scope: one Mac, these fixtures, test keys only.
 
@@ -1294,6 +1300,82 @@ Claim scope: one Mac, these two variant fixtures and this recipe, test keys
 only. It is not a claim about real binaries, real builds or the Runtime's
 release records.
 
+## Lab stand-in launcher (M1 check B1)
+
+`StandInRuntime` in `tests/common/mod.rs` is a lab stand-in for the Runtime's
+launch route, not the Runtime. It lives in test code, so the library stays
+identity only (`the_harness_exports_only_identity_checks` and its list are
+unchanged), and the falsifier runner restores its file after a killed run.
+A launch names the bundle by its lab CID only. The stand-in recomputes the CID
+from the stored bytes and checks the publisher's signed package record before
+anything is launched. It holds a store (printed lab CID -> bundle folder,
+filled at publish time by `published`, from `lab_cid` of the folder), the
+package records and an explicit list of accepted publisher DIDs.
+
+`post_capsules` checks in this order, and the first refusal is the answer,
+with status 400 and nothing launched. Each library refusal is its `Refusal`'s
+own text, unchanged, and the stand-in calls the lane's one parse, one walk,
+one name compare and one record check, never a copy (P10):
+
+| Check | Refused when | Reason | Named test |
+| --- | --- | --- | --- |
+| (a) `pre-CID, not B1 evidence` | the body is not a JSON object whose only key is `cid` with a string value; `path` is never a fallback | names the extra, missing or wrong-typed field, or says "an object" | `standin_launches_by_cid_only` |
+| (b) `pre-CID, not B1 evidence` | `cid` does not parse as `LabCid` (`impl FromStr for LabCid`) | the parse's own reason | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
+| (c) `pre-CID, not B1 evidence` | the store holds no bundle under that CID | "no bundle is stored under" the CID | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
+| (d) | `checked_bundle` of the stored folder refuses (here: `capsule.json` removed after publish) | the walk's own refusal | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
+| (e) | `CheckedBundle::check_name(cid)` refuses: the stored bytes changed after publish (here: one byte of `asks.json`) | the compare's own refusal, naming both CIDs | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
+| (f) | no record's `cid` equals the requested CID | starts "unsigned:" and names the CID | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
+| (g) | `verify_checked_package_record` refuses: a signer not accepted, an empty accepted list, a flipped signature byte | the record check's own refusal | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
+
+Only then it adds one instance and answers `{"id", "name", "status":
+"launched", "session_id"}`, with `name` from the checked manifest's `name`.
+`get_capsules` answers `{"capsules": [...]}`, one entry per launched instance
+with `id`, `name`, `status`, `session_id` and `cause` (`null`); a refused
+launch never appears. `standin_launches_a_signed_bundle_by_its_cid` runs the
+journey on the `agent-host` fixture: published under its pin, its record
+signed by a fresh test key whose DID is accepted, launched by CID, listed once
+with the same `id` and `session_id`, and its lab CID and its parent's listing
+unchanged after. Ids and session ids come from a counter.
+
+Each route, field and state, and where it comes from. #309 is draft PR #309,
+`lab/runtime-asks/` at `513988ebd` (branch `cursor/runtime-asks-ad52`);
+`routes.rs` is `elastos/crates/elastos-server/src/api/routes.rs`, read only.
+
+| Route, field or state | Source |
+| --- | --- |
+| `POST /api/capsules` (`post_capsules`) | #309 `06-resident-instances-core.md:24` (RI-2) |
+| `GET /api/capsules` (`get_capsules`) | #309 `06-resident-instances-core.md:25` (RI-3); today's `list_capsules`, `routes.rs:47` |
+| request field `cid` | lab field, not in #309; today's route takes `path` (`routes.rs:65-66`) |
+| answer `id`, `name`, `status` | `LaunchResponse`, `routes.rs:74-78` |
+| answer and list `session_id` | #309 `06-resident-instances-core.md:24` (RI-2) |
+| list `status` and `cause` | #309 `06-resident-instances-core.md:25` (RI-3) |
+| state "launched" | `routes.rs:102` |
+| state "refused": status 400 and the reason | `routes.rs:116`, `Err((StatusCode::BAD_REQUEST, e.to_string()))` |
+
+| Rule | Named test | Falsifiers |
+| --- | --- | --- |
+| A launch runs every check; a stub that answers launched at once fails | `standin_launches_by_cid_only`, `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32a (the planted stub) |
+| (e) bytes changed after publish are refused by the name compare | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32b ((e) removed; the case then fails at (g) with another reason) |
+| (g) the record check refuses before launch | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32c ((g) removed) |
+| (f) a CID with no record is refused as unsigned | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32d (a missing record launches) |
+| (a) `path` is never a fallback | `standin_launches_by_cid_only` | F-CI32e (a body with `path` is looked up by its folder) |
+| A refused launch leaves no instance | `standin_launches_by_cid_only`, `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32f (the instance is added before the checks) |
+| A launched answer has its listed instance | `standin_launches_a_signed_bundle_by_its_cid` | F-CI32g (answers launched, adds no instance) |
+
+Not shown:
+
+- The real Runtime ran nothing here, and it still launches by path
+  (`routes.rs:65-66`, `LaunchRequest { path, ... }`). No sentence here says
+  the Runtime launched, checked or refused anything.
+- No code is executed: a launched instance is a record. There is no HTTP
+  server, socket, process start or wasm execution.
+- No grant model yet: task 033 adds that a valid signature alone yields no
+  grant.
+- `principal_id` and `launch_grant` (`routes.rs:65-71`) are left out.
+
+Claim scope: one Mac, the `agent-host` fixture, test keys only, records in
+memory.
+
 ## Why a lab CID and not the Runtime's CID
 
 The Runtime names a published capsule by the CID its IPFS provider returns when
@@ -1356,7 +1438,8 @@ such as the `*` that starts a block-comment line, is dropped, so it never
 splits a phrase. Other Markdown forms (links, HTML, tables, headings, escapes)
 are not read through. A known limit, not a rule: trimming stops at
 punctuation, so a mark next to a comma or a full stop inside a phrase
-(`*Runtime's*,`) is not trimmed, and a claim written that way is not found.
+(`*Runtime's*,`) is not trimmed, nor is a mark after an opening bracket
+(`(*Runtime's*`), and a claim written that way is not found.
 Matching is by substring, so this matters only when the marked word is not
 the phrase's last word. No test asserts this limit.
 
@@ -1413,7 +1496,8 @@ tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 dri
                          key-material scan, the python3 -I run of README's blocks,
                          the cargo metadata scan for lab crates that use this one,
                          the claim scan of the lane's docs and src/, the check
-                         of the falsifier list's inventory
+                         of the falsifier list's inventory, the lab stand-in
+                         launcher (StandInRuntime)
 tests/adoption.rs        the adoption note lists every lab CID consumer; Cargo's
                          reader decides; the scan writes nothing
 tests/bytes.rs           every byte is the name: manifest, payload, asks.json, files
@@ -1435,6 +1519,7 @@ tests/not_admission.rs   verify is not admit: a valid signature grants nothing
 tests/package_record.rs  the lab package record outside the bundle binds the CID
 tests/parse.rs           a printed lab CID is read with the one claim check
 tests/refusals.rs        each refusal and its reason
+tests/stand_in.rs        the lab stand-in launches by CID after the publisher check
 tests/variant_binding.rs the signed variant binding outside the bundles
 tests/walk.rs            changes made while a bundle is named; one walk
 falsifiers.json          planted bugs, each caught by named tests
@@ -1442,7 +1527,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 244 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 251 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1474,7 +1559,9 @@ F-CI24a to F-CI24e (see
 028's F-CI28a to F-CI28d (see [claim scope](#claim-scope)), and task
 029's F-CI29a to F-CI29e (see [the inventory check](#the-inventory-check)),
 and task 030's F-CI30a and F-CI30b (see [claim scope](#claim-scope)), and
-task 031's F-CI31a and F-CI31b (see [the inventory check](#the-inventory-check)).
+task 031's F-CI31a and F-CI31b (see [the inventory check](#the-inventory-check)),
+and task 032's F-CI32a to F-CI32g (see
+[the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -1531,6 +1618,12 @@ it does not change: F-CI30a removes the `'_'` line of `WORD_MARKS`, and
 F-CI30b shares F-CI28a's anchor, the `>`-run line of `comment_body`, and
 removes one `>` where F-CI28a removes none. Each anchor is found exactly once.
 Task 030 added two cases to the named test and changed no older edit's text.
+Task 032's entries all edit `tests/common/mod.rs`, in `StandInRuntime`:
+F-CI32a and F-CI32f in `post_capsules`, F-CI32b to F-CI32d in
+`checked_launch`, F-CI32e in `launch_cid` and F-CI32g in `launch`. Each anchor
+is a line task 032 added, found exactly once (F-CI32a and F-CI32f share the
+check line, and F-CI32c and F-CI32d the record-check line). Task 032 changed no
+older edit's text.
 
 ### The inventory check
 
@@ -1662,8 +1755,10 @@ tests pass without an edit, 0 do not`; F-CI30a and F-CI30b, F-CI28a to
 F-CI28d and F-CI23e to F-CI23h each CAUGHT). At task 031 it reported
 `summary: 244 CAUGHT of 244` (`baseline: 127 named tests pass without an
 edit, 0 do not`; F-CI31a and F-CI31b and F-CI29a to F-CI29e each CAUGHT).
+At task 032 it reported `summary: 251 CAUGHT of 251` (`baseline: 130 named
+tests pass without an edit, 0 do not`; with the id prefix `F-CI32`: 7 of 7).
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029,
-030 and 031 prove each of their falsifiers by break, named test fails, revert.
+030, 031 and 032 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.

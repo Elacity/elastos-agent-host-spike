@@ -447,6 +447,7 @@ wasm_capsule_tools::run::run_engine(bundle: &VerifiedBundle, engine: Engine, pro
     work_root: &Path, control: &RunControl) -> Result<EngineRun, Refusal>
 
 pub struct RunControl { /* private */ }   // task 043: RunControl::new(budget: Duration)
+                                          // task 045: .cancel_handle() -> CancelHandle
 
 pub struct EngineRun { pub status: ExitStatus, pub stdout: Vec<u8> }
 ```
@@ -461,7 +462,8 @@ is returned) and its stdout. In order, the first refusal is the answer:
    memory is checked (`check_module_memory`, "The runner checks the module's
    maximum (task 033)"), and a module with more than one memory, a memory with
    no maximum or a maximum above the declared size is refused before anything
-   is made or started;
+   is made or started; task 045: a cancelled control is refused between those
+   two checks, before anything is made or started ("Cancel (M1 A10 lab half)");
 1. `program` must be absolute (`./wasmtime` or a bare `wasmtime` is refused),
    so it is never looked up on PATH; the same path is the one started;
 2. `work_root` must be absolute, resolve, be byte for byte its own
@@ -527,7 +529,10 @@ That argv is the one wc-005's discovery recorded for `wasmtime` 45.0.1 and
   stopped it with SIGKILL`; `the runner could not stop <engine> with SIGKILL:
   <OS error>`; `the runner could not wait for <engine>: <OS error>` (a failed
   `try_wait`, after which the engine is stopped too, or a failed reap); and
-  `<engine>'s output could not be read: <OS error>`.
+  `<engine>'s output could not be read: <OS error>`;
+- task 045: `the run on <engine> was cancelled by its caller: no engine starts
+  after a cancel, and a running one is stopped with SIGKILL` (its path is the
+  engine program; "Cancel (M1 A10 lab half)").
 
 **The run budget (task 043, M1 A7 lab half).** Every module run has a
 wall-clock budget, applied by the runner from outside the engine process. The
@@ -553,7 +558,7 @@ is wall-clock time, not CPU time; a stopped run's partial stdout and stderr are
 dropped; a runner process that is itself killed leaves its engine running, as
 it leaves its folder (task 039). This is lab input for M1 A7, not a Runtime
 admission or launch claim. The refusal receipt (task 044) is in "Run receipt
-(wc-005c)"; cancel is task 045.
+(wc-005c)"; cancel (task 045) is in "Cancel (M1 A10 lab half)".
 
 **A rejected cap argument (task 038).** A module run that was given a memory
 cap argument (`wasmtime` only; "Memory cap (wc-010b)") and exits with the
@@ -633,7 +638,9 @@ first refusal is the answer:
 2. task 016: each engine is asked `--version`, `wasmtime` and then `wasmer`
    (the next section). Task 038: the first line must name the pinned version,
    `wasmtime 45.0.1` or `wasmer 7.5.0` (the next section). A refusal comes
-   back as `TwoEngineRefusal::Version`, and no module run starts;
+   back as `TwoEngineRefusal::Version`, and no module run starts. Task 045: a
+   cancelled control is refused before each query, also as
+   `TwoEngineRefusal::Version` (the step it stopped before);
 3. `run_engine` (above) runs `wasmtime` on the verified value and returns;
 4. only then `run_engine` runs `wasmer` on the same value. The two are separate
    processes, one after the other, never nested or overlapping. `run_engine` is
@@ -815,7 +822,7 @@ A refused run gets a receipt too, rendered from the `TwoEngineRefusal` that
 
 ```
 schema: wc-005.run-refusal/v1
-outcome: refused
+outcome: <refused|cancelled>
 reason: <id>
 engine: <wasmtime|wasmer|none>
 detail: "<the refusal's Display, through escape_ascii>"
@@ -838,6 +845,11 @@ configured. There is no lab CID line, since a verifier refusal may have none.
 an existing file or link at the path is refused with that writer's own reason
 and cause, unchanged. The refusal receipt is lab text: it makes no admission
 decision, and it is not signed. The passed-run receipt above is unchanged.
+
+Task 045: `outcome` is `cancelled` for a run the caller cancelled (id
+`cancelled`, "Cancel (M1 A10 lab half)") and `refused` for every other
+refusal. It is read from the id alone (`refusal_outcome`), so there is no
+second rule for which refusal is a cancel.
 
 ## Runtime ABI for a bare capsule (wc-008)
 
@@ -1520,6 +1532,56 @@ hosting cannot be claimed for wasmer.
   is the only result they share. wc-009b's wasmer hosting test must report
   SKIPPED with this reason, never PASS.
 
+## Cancel (M1 A10 lab half)
+
+Task 045. The rule: a run the caller cancels settles as `cancelled`, with a
+reason in its refusal receipt, and leaves nothing behind under the work root.
+
+The handle. There is no `tools/run` command: by C2 answer (c), `run` is a
+library call. So the signal is a handle the caller holds:
+`RunControl::cancel_handle()` gives a `CancelHandle` (`Clone + Send`; it
+shares an `Arc<AtomicBool>` with the control and its clones), and
+`CancelHandle::cancel()` sets it, from any thread. A future command's signal
+handler, or a test thread, calls it. The runner reads no signal, environment
+variable or file for it (`runner_uses_only_explicit_inputs`); it needs no new
+dependency.
+
+Where the runner checks it:
+
+- `run_engine`, right after the zero-budget check: a cancelled control makes no
+  run folder and starts no engine;
+- every poll of the wait loop (task 043), before the exit status and the
+  budget: a cancel stops the engine with SIGKILL (`Child::kill`), reaps it
+  (`Child::wait`), drops its output, removes the run folder through
+  `finish_run` (step 6) and refuses the run, so a cancel is never reported as
+  `BudgetExceeded` or `EngineFailed`;
+- `run`, before each `--version` query (as `TwoEngineRefusal::Version`) and,
+  through `run_engine`, before each module run (as `TwoEngineRefusal::Engine`).
+  So after a cancel no further engine starts: `wasmer` never starts after
+  `wasmtime` is cancelled.
+
+The refusal is `Reason::Cancelled { engine }`, its path the engine program,
+its text `the run on <engine> was cancelled by its caller: no engine starts
+after a cancel, and a running one is stopped with SIGKILL`. Its receipt id is
+`cancelled`, and the refusal receipt says `outcome: cancelled`; every other
+refusal still says `outcome: refused`.
+
+What the census covers: after a cancel during the run on each real engine,
+after a cancel set before the call, and after a cancel during `wasmtime` in a
+two-engine `run`, the census ("Cleanup census (M1 A12)") finds no engine
+process, entry or open file under the work root. On this Mac the real engines
+answered within tens of milliseconds of `cancel()`; the test allows 5 s.
+
+Limits, not claimed:
+
+- No command and no OS signal handler exists; the handle is the library form.
+- A `--version` query is not interrupted mid-query (it has no budget either),
+  and the verifier is not cancelled mid-call; a cancel is seen at the next
+  check.
+- A runner process that is itself killed leaves its engine and its run folder.
+- It is lab input for Anders (M1 A10 lab half), not a Runtime claim; the lane
+  claims no spike grade row.
+
 ## Cleanup census (M1 A12)
 
 Task 040, the lab half of M1 A12, step 2 of 2 (task 039 is step 1: `run_engine`
@@ -1584,6 +1646,20 @@ the pinned versions, task 038), each followed by an empty census:
   max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y <work
   root>/wasmtime/module.wasm 1592590337` and `<wasmer> run --invoke digest
   <work root>/wasmer/module.wasm 1592590337`.
+
+Task 045 adds two kinds of run, each followed by an empty census:
+
+- Cancelled (`cancelled_run_settles_as_cancelled_and_leaves_nothing_on_both_engines`,
+  `run_cancelled_during_wasmtime_never_starts_wasmer`): the looping module on
+  each real engine, and a stand-in `wasmtime` that sleeps in a two-engine
+  `run`, each cancelled once its process is live ("Cancel (M1 A10 lab half)").
+  A cancel set before the call (`cancel_before_start_starts_no_engine`) leaves
+  an empty work root.
+- Refused and failed, through `run`
+  (`refused_and_failed_runs_leave_nothing_under_the_scratch_root`): a verifier
+  refusal (an import that is not granted), an unpinned `--version` (stand-in),
+  an engine that fails (stand-in, exit 3) and task 043's budget stop (stand-in
+  sleeper, 200 ms).
 
 `census_reports_each_kind_of_leftover` proves the census sees what it counts,
 with no engine: a file left in a work root, a live `/bin/sleep 30` whose
@@ -2264,6 +2340,38 @@ Task 044, the refusal receipt (`tests/run.rs`; README "Run receipt
   planted file, a live link and a dangling link are each refused with the
   shared writer's own reason and cause, and nothing changes.
 
+Task 045, cancel (`tests/run.rs`; README "Cancel (M1 A10 lab half)" and
+"Cleanup census (M1 A12)"). A test that cancels a live run waits at most 10 s
+for its engine process (`live_processes`), then calls `cancel()`, then waits at
+most 5 s for the answer (`cancel_once_live`); on any failed wait it runs
+`stop_run_engines`, joins the thread, and only then fails (task 042's rule).
+
+- `cancelled_run_settles_as_cancelled_and_leaves_nothing_on_both_engines` —
+  per real engine, `run_engine` on a `digest` that loops forever, with a
+  120 s budget, on a thread, cancelled once its process is live: `Cancelled`
+  for that engine (exact text), within 5 s of `cancel()`; the refusal receipt
+  says `outcome: cancelled`, `reason: cancelled` and the engine; then the
+  census is empty. SKIPPED, no result, when either engine is missing.
+- `cancel_before_start_starts_no_engine` — a control cancelled before the
+  call: `run_engine` per engine and then `run`, each with `counting`
+  stand-ins, refuse `Cancelled` (`run` as `TwoEngineRefusal::Version` for
+  `wasmtime`, receipt `outcome: cancelled`); no module run, no `--version`
+  query, and an empty work root.
+- `run_cancelled_during_wasmtime_never_starts_wasmer` — `run` with a pinned
+  stand-in `wasmtime` that `exec`s `/bin/sleep 600` and a `counting`
+  `wasmer`, cancelled once the `wasmtime` process is live:
+  `TwoEngineRefusal::Engine` with `Cancelled` for `wasmtime` within 5 s;
+  `wasmer` was asked `--version` once and ran no module; the census is empty.
+- `refused_and_failed_runs_leave_nothing_under_the_scratch_root` — through
+  `run`: a verifier refusal (`env.f` not granted), an unpinned `wasmtime
+  9.9.9` (stand-in), a failing `wasmtime` (stand-in, exit 3) and a 200 ms
+  budget stop (stand-in sleeper, under the watchdog), each its own expected
+  reason, each followed by an empty census.
+
+`refusal_receipt_ids_are_distinct_and_named` gains the `Cancelled` example
+(id `cancelled`, `engine: wasmer`) and now checks the `outcome:` line of
+every example: `cancelled` for the cancel, `refused` for every other one.
+
 Task 033, the module memory check (`tests/run.rs`; README "The runner checks
 the module's maximum (task 033)"). The stand-in tests use `marked` or
 `counting` stand-ins, each bundle signed with a fresh key and verified:
@@ -2320,28 +2428,28 @@ gives `67108864` on both (`real_receipt_names_both_installed_engines`).
 
 ## Falsifiers
 
-`falsifiers.json` holds 181 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 182 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
 seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
 031, two task 032, one task 035, three task 036, five task 038, three task
 039, one task 040, one task 041, two task 043, one task 044, one task
-033 and two task 034.
+033, two task 034 and one task 045.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 117, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 118, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033 and 034: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
-+ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2), each run by the canonical runner with its summary
+029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034 and 045: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
++ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1), each run by the canonical runner with its summary
 line quoted.
 Hand-proven, pending R1: 66, each counted once: the 64 entries of the sections
 marked so (wc-001, tasks 010 and 009, wc-004 and wc-008: 9 + 7 + 23 + 21 + 4),
-and two proofs with no `falsifiers.json` entry, outside the 181 (task 036's
+and two proofs with no `falsifiers.json` entry, outside the 182 (task 036's
 `/bin/bash` 3.2 guard in `tests/reproducible.rs` and task 042's killed-run
 stop in `tests/run.rs`; neither file is a recovery target, so a proof that
 edits one is a hand proof), each proved by the repo's break →
@@ -3077,3 +3185,18 @@ before. F-WC10-CAP-REJECTED-RETRY's planted `EngineRun` now also sets the new
 Both were re-run by the canonical runner and keep their runner-caught label
 above, as does every other entry that edits `tools/src/run.rs` or
 `tools/src/receipt.rs` (LOG.md, task 034).
+
+Task 045's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 045). Its anchor is a new line of `tools/src/run.rs`, a recovery
+target, found exactly once, and its named test fails at its assertion:
+
+- F-WC-A10-CANCEL-CLEANUP-SKIPPED — on a cancel while the engine runs,
+  `run_engine` returns `Cancelled` before `finish_run`, so the run folder and
+  its module file are left
+  (`cancelled_run_settles_as_cancelled_and_leaves_nothing_on_both_engines`, at
+  its census assertion: `entry: wasmtime`).
+
+Task 045 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before, and keeps its runner-caught label above. `RunControl::new` is no
+longer a `const fn` (a control now holds its cancel flag), so the test file's
+two shared controls are made on first use (`LazyLock`); no anchor changed.

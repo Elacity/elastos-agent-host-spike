@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030 and 031). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code or the check of this list's inventory (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031 and 032). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -4051,6 +4051,125 @@
       ],
       "tests": [
         "the_falsifier_inventory_refuses_what_it_cannot_read"
+      ]
+    },
+    {
+      "id": "F-CI32a",
+      "title": "the planted stub: the stand-in's POST /api/capsules answers launched at once and runs no check",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        let name = self.checked_launch(body).map_err(|reason| (400, reason))?;\n",
+          "new": "        let name = String::from(\"stub\");\n"
+        }
+      ],
+      "tests": [
+        "standin_launches_by_cid_only",
+        "standin_refuses_an_unsigned_or_mismatched_bundle_before_launch"
+      ]
+    },
+    {
+      "id": "F-CI32b",
+      "title": "the stand-in skips the name compare (e), so bytes changed after publish reach the record check with another reason",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        checked.check_name(&cid).map_err(said)?;\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "standin_refuses_an_unsigned_or_mismatched_bundle_before_launch"
+      ]
+    },
+    {
+      "id": "F-CI32c",
+      "title": "the stand-in skips the record check (g), so an unaccepted signer or a flipped signature byte launches",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        verify_checked_package_record(&checked, record, &self.accepted).map_err(said)?;\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "standin_refuses_an_unsigned_or_mismatched_bundle_before_launch"
+      ]
+    },
+    {
+      "id": "F-CI32d",
+      "title": "a launch with no package record for its CID is not refused as unsigned (f) but launches, checking a record only if one is found",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "            .ok_or_else(|| format!(\"unsigned: no package record binds {cid}\"))?;\n        verify_checked_package_record(&checked, record, &self.accepted).map_err(said)?;\n",
+          "new": "            ;\n        if let Some(record) = record {\n            verify_checked_package_record(&checked, record, &self.accepted).map_err(said)?;\n        }\n"
+        }
+      ],
+      "tests": [
+        "standin_refuses_an_unsigned_or_mismatched_bundle_before_launch"
+      ]
+    },
+    {
+      "id": "F-CI32e",
+      "title": "a launch body's path is a fallback: a body with path and no cid is looked up by its folder in the store",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        if let Some(extra) = fields.keys().find(|key| *key != \"cid\") {\n",
+          "new": "        if let Some(extra) = fields.keys().find(|key| *key != \"cid\" && *key != \"path\") {\n"
+        },
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        let Some(cid) = fields.get(\"cid\") else {\n",
+          "new": "        let by_folder = fields.get(\"path\").and_then(Value::as_str).and_then(|path| {\n            self.store\n                .iter()\n                .find(|(_, folder)| folder.as_path() == Path::new(path))\n                .map(|(cid, _)| Value::from(cid.as_str()))\n        });\n        let Some(cid) = fields.get(\"cid\").or(by_folder.as_ref()) else {\n"
+        }
+      ],
+      "tests": [
+        "standin_launches_by_cid_only"
+      ]
+    },
+    {
+      "id": "F-CI32f",
+      "title": "the stand-in adds the instance before its checks, so a refused launch is still listed",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        let name = self.checked_launch(body).map_err(|reason| (400, reason))?;\n        Ok(self.launch(name))\n",
+          "new": "        self.launch(String::new());\n        let name = self.checked_launch(body).map_err(|reason| (400, reason))?;\n        self.instances.pop();\n        Ok(self.launch(name))\n"
+        }
+      ],
+      "tests": [
+        "standin_launches_by_cid_only",
+        "standin_refuses_an_unsigned_or_mismatched_bundle_before_launch"
+      ]
+    },
+    {
+      "id": "F-CI32g",
+      "title": "the stand-in answers launched but adds no instance, so GET /api/capsules lists nothing",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        self.instances.push(instance);\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "standin_launches_a_signed_bundle_by_its_cid"
       ]
     }
   ]
