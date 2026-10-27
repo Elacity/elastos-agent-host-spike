@@ -1,0 +1,8 @@
+id: F-GB-cr
+file: src/link.rs
+test: link::model_carriage_return_escape_is_not_a_link
+--- old
+        b'r' => Some(('\r', simple)),
+--- new
+        b'r' => Some(('r', simple)),
+--- end
