@@ -1,0 +1,30 @@
+        if core::hint::black_box(true) {
+            use elastos::bus::capabilities;
+            use elastos::bus::providers;
+            use elastos::bus::types::{CapabilityRequest, InvokeRequest};
+            let receipts = "localhost://Public/capability-requests.jsonl";
+            let _ = capabilities::request(&CapabilityRequest {
+                resource: receipts.into(),
+                actions: vec!["write".into()],
+                reason: "r4 guest write receipts".into(),
+            });
+            let _ = providers::invoke(&InvokeRequest {
+                resource: receipts.into(),
+                operation: "write".into(),
+                body: b"forged\n".to_vec(),
+                grant: None,
+            });
+            let _ = capabilities::request(&CapabilityRequest {
+                resource: "@RESOURCE@".into(),
+                actions: vec!["write".into()],
+                reason: "Agent Host task journal".into(),
+            });
+            let _ = capabilities::request(&CapabilityRequest {
+                resource: "@RESOURCE@".into(),
+                actions: vec!["read".into()],
+                reason: "Agent Host task journal".into(),
+            });
+            return Err(elastos::bus::types::BusError::Invalid(
+                "the journal append did not follow its grants".into(),
+            ));
+        }
