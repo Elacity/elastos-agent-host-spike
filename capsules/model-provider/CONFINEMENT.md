@@ -183,18 +183,25 @@ the same redirected `init`: `STORAGE_ROOT/escape` is a link to
   `STORAGE_ROOT` succeeds, and `shutdown` exits cleanly. The evidence is
   the lab launcher's. It makes no claim that the Runtime enforced the
   profile or that B3 is complete. Test: `model_outside_write_denied`.
-- When only a metadata read of the outside path is added, the sandbox refuses
-  the journal create, and the provider reports `journal_access_denied`
-  (provider task 012). It logs the create of `<journal_dir>/runs` with
-  `Operation not permitted`. Test:
-  `model_outside_create_reports_access_denied`.
+- The same journey runs under the oracle copy and under the stand-in file
+  plus the one metadata rule. When only that metadata read of the outside
+  path is added, the sandbox refuses the journal create, and the provider
+  reports `journal_access_denied` (provider task 012). It logs the create of
+  `<journal_dir>/runs` with `Operation not permitted`. The launched stand-in
+  copy has no line that starts with `;;`. The evidence is for the lab
+  launcher. Test: `model_outside_create_reports_access_denied`.
 
-The second test runs a test-time copy of `confine.sb` with one fixture grant:
-`file-read-metadata` of `outside/inner`, bound as a resolved path. It is
-metadata only. The fixture adds no content read and no write. The inspect of
-`runs/`, which does not exist yet, needs no grant: the sandbox answers it with
-not-found. The test also checks that the outside sibling keeps its entries,
-modes and bytes, and that a later normal `init` on `STORAGE_ROOT` succeeds.
+The same journey runs under the oracle copy and under the stand-in file plus
+the one metadata rule. The oracle case runs a test-time copy of `confine.sb`
+with one fixture grant: `file-read-metadata` of `outside/inner`, bound as a
+resolved path. The generated case reads the declared fixture, writes the
+stand-in text under that case's storage, and the one fixture writer appends
+the same grant. The launched stand-in copy has no line that starts with
+`;;`. The grant is metadata only. The fixture adds no content read and no
+write. The inspect of `runs/`, which does not exist yet, needs no grant: the
+sandbox answers it with not-found. Each case checks that the outside sibling
+keeps its entries, modes and bytes, and that a later normal `init` on
+`STORAGE_ROOT` succeeds. The evidence is for the lab launcher.
 
 `redirect_journal_materializes_outside_when_unconfined` is the control for
 both tests: the same fixture and request without a profile create the journal
@@ -536,11 +543,12 @@ profile does not grant".
   no `;;` line. This evidence is for the lab launcher. See "Reads outside the
   storage root".
 - `model_outside_create_reports_access_denied`: the same redirected `init`
-  under a test-time copy of `confine.sb` that adds only a metadata read of the
-  outside journal root. The sandbox refuses the journal create, and the
-  answer is `journal_access_denied`. Its control is
-  `redirect_journal_materializes_outside_when_unconfined`. See "Writes
-  outside the storage root".
+  runs under the oracle copy and under the stand-in file plus the one
+  metadata rule. The launched stand-in copy has no line that starts with
+  `;;`. The sandbox refuses the journal create, and the answer is
+  `journal_access_denied`. Its control is
+  `redirect_journal_materializes_outside_when_unconfined`. The evidence is
+  for the lab launcher. See "Writes outside the storage root".
 - `model_local_offer_fails_closed_under_profile`: an `init` whose one offer is
   a local engine offer fails closed under the profile, writes nothing, and
   leaves the provider in service. See "What the profile does not grant".
@@ -770,8 +778,8 @@ allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match 
 | F-cc1e | Remove the outside-read fixture rule from the test | `model_outside_read_denied` | `runs_get` stops at the record's existence check (`model run is unreadable`), before the open, so the check for EPERM on the open fails. |
 | F-cc7a | `(deny default)` becomes `(allow default)`; `(version 1)` stays first | `model_local_offer_fails_closed_under_profile` | The local offer's `init` answers `ok`. `(deny network*)` stays, so no run could complete; the test sends none. |
 | F-cc7b | One line, `(allow file-read*)`, is added after the last rule; `(deny default)` and every other rule stay | `model_local_offer_fails_closed_under_profile` | With reads alone added, the same `init` answers `ok`. So the test watches the profile's read boundary at `base_path`, not only `(deny default)`. |
-| F-cc8a | `(deny default)` becomes `(allow default)`; `(version 1)` stays first | `model_outside_create_reports_access_denied` | The redirected `init` answers `ok`. |
-| F-cc8c | One line, `(allow file-write* (subpath (param "STORAGE_PARENT")))`, is added after the `STORAGE_ROOT` rule; `(deny default)` and every other rule stay | `model_outside_create_reports_access_denied` | The create succeeds and `runs/` appears under the outside sibling. The provider's next inspect, of the new `runs/`, is refused, so `init` answers `journal_corrupt`, not `journal_access_denied`. So the test watches the write grant itself. |
+| F-cc8a | `(deny default)` becomes `(allow default)`; `(version 1)` stays first | `model_outside_create_reports_access_denied` | The plant edits `confine.sb` and the stand-in case launches the generated file. The oracle copy's redirected `init` answers `ok`. |
+| F-cc8c | One line, `(allow file-write* (subpath (param "STORAGE_PARENT")))`, is added after the `STORAGE_ROOT` rule; `(deny default)` and every other rule stay | `model_outside_create_reports_access_denied` | The plant edits `confine.sb` and the stand-in case launches the generated file. The oracle copy's create succeeds and `runs/` appears under the outside sibling. The provider's next inspect, of the new `runs/`, is refused, so `init` answers `journal_corrupt`, not `journal_access_denied`. So the test watches the write grant itself. |
 | F-cc8-rm-journal | Remove the outside-create fixture grant from the test | `model_outside_create_reports_access_denied` | The sandbox refuses the inspect of the outside journal root before the create, so `init` answers `journal_corrupt`. |
 | F-cc10a | `(deny default)` becomes `(allow default)` and `(deny network*)` is removed; `(version 1)` stays first | `model_hosted_run_fails_closed_under_profile` | The hosted run's request reaches the Runtime socket stand-in. `(allow default)` alone is not enough: `(deny network*)` still refuses the connect. |
 | F-cc10b | `(deny network*)` becomes `(allow network*)`; nothing else changes | `model_hosted_run_fails_closed_under_profile` | The request reaches the stand-in, so the network denial alone holds this edge. This is the widening a hosted grant would add. |
