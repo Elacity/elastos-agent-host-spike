@@ -127,6 +127,7 @@ apply and verify each entry by hand in this workspace.
 | F-CWA23a | Never run the `component-type` branch, so the magic window decides | `wit_bindgen_component_type_section_is_accepted`, `component_type_section_that_does_not_parse_is_refused` |
 | F-CWA23b | Accept any data under a `component-type` name | `component_type_section_that_does_not_parse_is_refused`, `component_type_section_with_a_core_module_is_refused` |
 | F-CWA23c | Accept any component that parses, whatever its payloads | `component_type_section_with_a_core_module_is_refused` |
+| F-CWA23d | Let nested `component-type` sections keep recursing | `component_type_section_inside_component_type_data_is_refused` |
 
 Start with passing checks. Save the original bytes of the edited file and its
 SHA-256, then apply one entry's exact edits. With the check environment above,

@@ -137,7 +137,7 @@ fn inspect(
     read_imports: impl FnMut(Payload<'_>) -> Result<(), Refusal>,
 ) -> Result<(), Refusal> {
     let mut validator = Validator::new();
-    inspect_with_validator(wasm, encoding, &mut validator, read_imports)
+    inspect_with_validator(wasm, encoding, &mut validator, false, read_imports)
 }
 
 // The crate's one parse. A `component-type` section reuses it on its own data.
@@ -151,6 +151,7 @@ fn inspect_with_validator(
     wasm: &[u8],
     encoding: Encoding,
     validator: &mut Validator,
+    nested: bool,
     mut read_imports: impl FnMut(Payload<'_>) -> Result<(), Refusal>,
 ) -> Result<(), Refusal> {
     let (right_encoding, invalid) = match encoding {
@@ -168,7 +169,13 @@ fn inspect_with_validator(
             Payload::Version { .. } => depth += 1,
             Payload::End(_) => depth -= 1,
             Payload::CustomSection(section) => {
-                if section.name().starts_with("component-type") {
+                let component_type = section.name().starts_with("component-type");
+                // One level only: the encoded world never nests its own
+                // section, and a hostile chain would exhaust the stack.
+                if nested && component_type {
+                    return Err(Refusal::CodeInCustomSection);
+                }
+                if component_type {
                     type_only_component(section.data(), validator)?;
                 } else {
                     let range = section.range();
@@ -191,14 +198,23 @@ fn inspect_with_validator(
 // wit-bindgen names its encoded world `component-type:...`. That data is a
 // component of type definitions and type exports, never code.
 fn type_only_component(data: &[u8], validator: &mut Validator) -> Result<(), Refusal> {
-    inspect_with_validator(data, Encoding::Component, validator, type_only_payload)
-        .map_err(|_| Refusal::CodeInCustomSection)
+    inspect_with_validator(
+        data,
+        Encoding::Component,
+        validator,
+        true,
+        type_only_payload,
+    )
+    .map_err(|_| Refusal::CodeInCustomSection)
 }
 
 fn type_only_payload(payload: Payload<'_>) -> Result<(), Refusal> {
     match payload {
         Payload::ComponentTypeSection(_) => Ok(()),
         Payload::ComponentExportSection(section) => {
+            // Defence in depth: a non-type export needs a definition section
+            // (module, instance, component, function or value), and the final
+            // arm refuses every such section before this export is read.
             for export in section {
                 let export = export.map_err(|_| Refusal::CodeInCustomSection)?;
                 if export.kind != ComponentExternalKind::Type {

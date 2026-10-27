@@ -862,8 +862,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "if section.name().starts_with(\"component-type\") {",
-          "new": "if false && section.name().starts_with(\"component-type\") {"
+          "old": "if component_type {",
+          "new": "if false && component_type {"
         }
       ],
       "tests": [
@@ -902,6 +902,22 @@
       ],
       "tests": [
         "component_type_section_with_a_core_module_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA23d",
+      "title": "Nested component-type sections keep recursing",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if nested && component_type {",
+          "new": "if false && nested && component_type {"
+        }
+      ],
+      "tests": [
+        "component_type_section_inside_component_type_data_is_refused"
       ]
     }
   ]

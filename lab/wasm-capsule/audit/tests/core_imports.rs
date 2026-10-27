@@ -49,13 +49,17 @@ fn leb_u32(mut value: usize) -> Vec<u8> {
 // A core module whose last section is a custom section with a multi-byte size.
 fn with_custom_section(name: &[u8], data: &[u8]) -> Vec<u8> {
     let mut wasm = wat::parse_str("(module)").unwrap();
+    append_custom_section(&mut wasm, name, data);
+    wasm
+}
+
+fn append_custom_section(wasm: &mut Vec<u8>, name: &[u8], data: &[u8]) {
     let mut payload = leb_u32(name.len());
     payload.extend_from_slice(name);
     payload.extend_from_slice(data);
     wasm.push(0);
     wasm.extend_from_slice(&leb_u32(payload.len()));
     wasm.extend_from_slice(&payload);
-    wasm
 }
 
 #[test]
@@ -437,6 +441,24 @@ fn component_type_section_with_a_core_module_is_refused() {
         assert_eq!(refusal, Refusal::CodeInCustomSection, "{label}");
         assert_eq!(refusal.to_string(), "code in custom section", "{label}");
     }
+}
+
+#[test]
+fn component_type_section_inside_component_type_data_is_refused() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wit-bindgen-0.57.1-component-type.bin");
+    let inner = fs::read(fixture).unwrap();
+    // The first step of a hostile chain: a valid component that carries the
+    // same section again.
+    let mut data = inner.clone();
+    append_custom_section(&mut data, COMPONENT_TYPE_NAME, &inner);
+    Validator::new().validate_all(&data).unwrap();
+
+    let wasm = with_custom_section(COMPONENT_TYPE_NAME, &data);
+    Validator::new().validate_all(&wasm).unwrap();
+    let refusal = audit(&wasm, &[]).unwrap_err();
+    assert_eq!(refusal, Refusal::CodeInCustomSection);
+    assert_eq!(refusal.to_string(), "code in custom section");
 }
 
 #[test]
