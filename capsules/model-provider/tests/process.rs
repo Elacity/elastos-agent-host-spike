@@ -2766,6 +2766,8 @@ fn hosted_relay_forwards_the_provider_body_unchanged_and_no_key() {
         None,
         "the relay must add no authorization header"
     );
+    // An added header other than `authorization` passes the no-key check
+    // above and fails here on the set comparison (MP34).
     let mut names: Vec<String> = backend_request
         .headers
         .iter()

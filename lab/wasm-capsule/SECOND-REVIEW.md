@@ -558,7 +558,8 @@ Lane diff: `git diff 33cbed8c5^1 33cbed8c5 -- lab/wasm-capsule/` (4 files,
   assertion lines of the test at the merge. It also records the restore
   (`shasum -a 256` equal to the fixed file). `falsifiers.json` is the
   runner's input, not a recovery target, at the merge and at 43b4af944
-  (`examples/agent-host/falsify.py:339-359` lists no `falsifiers.json`), so a
+  (`PROVIDER_TARGETS`, `examples/agent-host/falsify.py:291-325` at 33cbed8c5
+  and `:323-383` at 43b4af944, lists no `falsifiers.json`), so a
   hand proof is the only kind possible. This review re-proved one of the
   eight at 43b4af944 (below).
 - Promise 4: one README sentence saying "## Falsifiers" is the one place for
