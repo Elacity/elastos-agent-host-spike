@@ -65,7 +65,8 @@ DATA = HERE / "falsifiers.json"
 # Each provider crate is its own workspace with its own lockfile.
 PROVIDER_MANIFEST = REPO / "capsules" / "model-provider" / "Cargo.toml"
 # One table for the three provider crates, the lab's capsule-identity crate,
-# the lab's agent-conformance crate and the lab's wasm-capsule workspace.
+# the lab's agent-conformance crate, the lab's grant-binding crate and the
+# lab's wasm-capsule workspace.
 # Each row is a crate's manifest plus the optional Cargo arguments its command
 # adds; each entry is its own workspace with its own lockfile, and its command
 # exists only with that manifest and those arguments: a second branch per
@@ -73,13 +74,15 @@ PROVIDER_MANIFEST = REPO / "capsules" / "model-provider" / "Cargo.toml"
 # `--workspace`, because its root package `capsule` is the default selection
 # and its audit member's tests live behind that flag. The agent-conformance
 # crate needs no argument: its `default-members` already select its `probe`
-# member.
+# member. The grant-binding crate is one package in its own empty `[workspace]`
+# with a committed lockfile, so it needs none either.
 PROVIDER_CRATES = {
     "provider": (PROVIDER_MANIFEST, ()),
     "did": (REPO / "capsules" / "did-provider" / "Cargo.toml", ()),
     "wallet": (REPO / "capsules" / "wallet-provider" / "Cargo.toml", ()),
     "capsule-identity": (REPO / "lab" / "capsule-identity" / "Cargo.toml", ()),
     "agent-conformance": (REPO / "lab" / "agent-conformance" / "Cargo.toml", ()),
+    "grant-binding": (REPO / "lab" / "grant-binding" / "Cargo.toml", ()),
     "lab": (REPO / "lab" / "wasm-capsule" / "Cargo.toml", ("--workspace",)),
 }
 BACKUP_SUFFIX = ".falsify-original"
@@ -279,12 +282,15 @@ def load(path=DATA):
 # - capsules/model-provider/falsifiers.json: the model provider's
 #   src/local_memory.rs, src/journal.rs, src/contract.rs, src/state.rs,
 #   tests/process.rs, src/local_llama.rs and src/adapters.rs.
-#   tests/process.rs is named here because the model list's MP30-MP36 and
-#   MP38 edit it: MP30, MP31 and MP34 change the relay request, MP33 sends it
-#   a second time, MP32 changes the record of a closed provider socket, MP35
-#   drops the no-live-grant refusal in the granting stand-in, MP36 answers from
-#   a canned stream instead of relaying, and MP38 drops the shared stand-in's
-#   authorise call so a grant for another session reaches the model. The model
+#   tests/process.rs is named here because the model list's MP30-MP36, MP38
+#   and MP39 edit it: MP30, MP31 and MP34 change the relay request, MP33 sends
+#   it a second time, MP32 changes the record of a closed provider socket, MP35
+#   ignores the shared stand-in's authorise result so a run with no grant
+#   reaches the model, MP36 answers from a canned stream instead of relaying,
+#   MP38 passes the session the shell view lists instead of the served session
+#   so another session's grant reaches the model, and MP39 passes the first
+#   live entry's request id instead of the effect's so a run whose own request
+#   id has no grant is admitted. The model
 #   list's `selftest` entries
 #   edit falsify.py, which recovery
 #   finds under examples/agent-host.
@@ -293,8 +299,11 @@ def load(path=DATA):
 # - capsules/did-provider/falsifiers.json: did's src/main.rs, did's
 #   confine.sb and did's tests/confine.rs.
 # - capsules/wallet-provider/falsifiers.json: wallet's src/main.rs, wallet's
-#   confine.sb, wallet's tests/confine.rs and src/tests/falsifiers.rs, and
-#   did's src/main.rs, did's confine.sb and did's tests/confine.rs.
+#   confine.sb, wallet's tests/confine.rs, src/tests/falsifiers.rs and
+#   tests/common/profile_generator.rs, and did's src/main.rs, did's
+#   confine.sb and did's tests/confine.rs. The profile generator file is
+#   named ahead of the move: wallet's WP93 to WP103 and WP105 to WP108 edit
+#   it once confine moves the lab profile generator there.
 # - lab/capsule-identity/falsifiers.json: capsule-identity's .gitignore,
 #   README.md, src/lib.rs, tests/common/mod.rs and
 #   fixtures/wc001-core/capsule.json.
@@ -324,6 +333,12 @@ def load(path=DATA):
 #   `../../lab/agent-conformance/...`, relative to examples/agent-host, the
 #   folder the runner resolves every list's edit against, so recovery finds
 #   each of these files under lab/agent-conformance.
+# - lab/grant-binding/plants/*.txt: the five files those plants edit, relative
+#   to lab/grant-binding: src/ask.rs, src/ledger.rs, src/lib.rs, src/link.rs
+#   and src/ops.rs. That crate has no falsifiers.json yet, so no list is named
+#   here; once its plants convert to list entries, their values follow the
+#   runner's rule, `../../lab/grant-binding/src/...`, relative to
+#   examples/agent-host.
 # A killed run therefore restores an exact file instead of leaving a weakened
 # confinement test, profile or fixture behind.
 PROVIDER_TARGETS = (
@@ -336,6 +351,7 @@ PROVIDER_TARGETS = (
     "capsules/did-provider/confine.sb",
     "capsules/did-provider/tests/confine.rs",
     "capsules/wallet-provider/src/main.rs",
+    "capsules/wallet-provider/tests/common/profile_generator.rs",
     "capsules/wallet-provider/confine.sb",
     "capsules/wallet-provider/tests/confine.rs",
     "capsules/wallet-provider/src/tests/falsifiers.rs",
@@ -365,6 +381,11 @@ PROVIDER_TARGETS = (
     "lab/wasm-capsule/tests/lab_cid.rs",
     "capsules/model-provider/src/state.rs",
     "capsules/model-provider/tests/process.rs",
+    "lab/grant-binding/src/ask.rs",
+    "lab/grant-binding/src/ledger.rs",
+    "lab/grant-binding/src/lib.rs",
+    "lab/grant-binding/src/link.rs",
+    "lab/grant-binding/src/ops.rs",
     "capsules/model-provider/src/local_llama.rs",
     "capsules/model-provider/src/adapters.rs",
     "lab/agent-conformance/fixtures/granted-bytes.txt",
@@ -2110,18 +2131,18 @@ def a_killed_provider_edit_is_recovered():
     through main(), and repeat the edit. This lane's model-provider targets,
     the model provider's confinement test harness and process test file, the
     confine lane's five did/wallet targets plus its did confinement test
-    harness and wallet's falsifier honesty test, capsule-identity's
-    .gitignore, README.md, src/lib.rs, tests/common/mod.rs and
-    fixtures/wc001-core/capsule.json, and
-    the wasm lab's .gitignore, README.md, LOG.md, capsule/capsule.json,
-    capsule/src/lib.rs, tests/common/build.rs, tests/lab_cid.rs,
-    tests/verify.rs, tools/build, tools/src/bin/bundle.rs,
-    tools/src/bundle.rs, tools/src/lib.rs, tools/src/receipt.rs,
-    tools/src/run.rs, tools/src/verify.rs, tools/src/lab_name.rs and audit
-    Cargo.toml, INTERFACE.md and src/lib.rs, and agent-conformance's 19 edit
-    targets all come back in either startup mode. Foreign backups, including
-    both providers' confinement documents, each harness's support neighbour,
-    the model provider tests' other.rs neighbour, wallet's test support
+    harness, wallet's falsifier honesty test and wallet's profile generator
+    file, capsule-identity's .gitignore, README.md, src/lib.rs,
+    tests/common/mod.rs and fixtures/wc001-core/capsule.json, the wasm lab's
+    .gitignore, README.md, LOG.md, capsule/capsule.json, capsule/src/lib.rs,
+    tests/common/build.rs, tests/lab_cid.rs, tests/verify.rs, tools/build,
+    tools/src/bin/bundle.rs, tools/src/bundle.rs, tools/src/lib.rs,
+    tools/src/receipt.rs, tools/src/run.rs, tools/src/verify.rs,
+    tools/src/lab_name.rs and audit Cargo.toml, INTERFACE.md and src/lib.rs,
+    agent-conformance's 19 edit targets and grant-binding's five edit targets
+    all come back in either startup mode. Foreign backups, including both
+    providers' confinement documents, each harness's support neighbour, the
+    model provider tests' other.rs neighbour, wallet's test support
     neighbour, the labs' adoption note, gap report and web-app fixture, the
     lab's tools manifest and a tools/src neighbour, stay with their owners."""
     owned = {entry["id"]: entry
@@ -2133,10 +2154,11 @@ def a_killed_provider_edit_is_recovered():
     # provider's process test file, wallet's falsifier honesty test,
     # capsule-identity's .gitignore, README.md,
     # src/lib.rs, tests/common/mod.rs and fixtures/wc001-core/capsule.json,
-    # the wasm lab's edit and run-log files, and agent-conformance's 19 edit
-    # targets are named here, not read from the table, so a target dropped
-    # from PROVIDER_TARGETS is caught. Their original bytes are written in the
-    # isolated tree, never read from the real lab or crates.
+    # the wasm lab's edit and run-log files, agent-conformance's 19 edit
+    # targets and grant-binding's five edit targets are named here, not read
+    # from the table, so a target dropped from PROVIDER_TARGETS is caught.
+    # Their original bytes are written in the isolated tree, never read from
+    # the real lab or crates.
     synthetic = ("../../capsules/model-provider/tests/confine/main.rs",
                  "../../capsules/model-provider/tests/process.rs",
                  "../../capsules/did-provider/src/main.rs",
@@ -2145,6 +2167,7 @@ def a_killed_provider_edit_is_recovered():
                  "../../capsules/wallet-provider/src/main.rs",
                  "../../capsules/wallet-provider/confine.sb",
                  "../../capsules/wallet-provider/tests/confine.rs",
+                 "../../capsules/wallet-provider/tests/common/profile_generator.rs",
                  "../../capsules/wallet-provider/src/tests/falsifiers.rs",
                  "../../lab/capsule-identity/src/lib.rs",
                  "../../lab/capsule-identity/tests/common/mod.rs",
@@ -2188,7 +2211,12 @@ def a_killed_provider_edit_is_recovered():
                  "../../lab/agent-conformance/tests/common/operator.rs",
                  "../../lab/agent-conformance/tests/common/probe.rs",
                  "../../lab/agent-conformance/tests/effects.rs",
-                 "../../lab/agent-conformance/tests/runtime.rs")
+                 "../../lab/agent-conformance/tests/runtime.rs",
+                 "../../lab/grant-binding/src/ask.rs",
+                 "../../lab/grant-binding/src/ledger.rs",
+                 "../../lab/grant-binding/src/lib.rs",
+                 "../../lab/grant-binding/src/link.rs",
+                 "../../lab/grant-binding/src/ops.rs")
     entry = {"id": "MP01+MP02+MP05+MP12+MP15+MP16+MP23",
              "edits": [edit for owned_entry in owned.values() for edit in owned_entry["edits"]]
              + [{"file": "owned.txt", "old": "original bytes", "new": "mutated bytes"},
@@ -3032,16 +3060,17 @@ def argv_refusal_precedes_work():
 
 def provider_spec_uses_locked_manifest():
     """Every crate in the table — the three provider crates, the lab's
-    capsule-identity crate, the lab's agent-conformance crate and the lab's
-    wasm-capsule workspace — is a registered command, and both its build and
-    run argv name --locked and the manifest that follows --manifest-path. The
-    lab workspace adds --workspace before the libtest separator; every other
-    row, agent-conformance included, adds no argument. The expected manifests
-    and arguments are written here, so a table that maps one crate to another
-    crate's manifest is caught (PV43, PV50, PV118); lab registration, its
-    manifest, its omitted workspace flag and a flag that leaks into a provider
-    row are caught (PV65-PV68); an absent agent-conformance row is caught
-    (PV117)."""
+    capsule-identity crate, the lab's agent-conformance crate, the lab's
+    grant-binding crate and the lab's wasm-capsule workspace — is a registered
+    command, and both its build and run argv name --locked and the manifest
+    that follows --manifest-path. The lab workspace adds --workspace before
+    the libtest separator; every other row, agent-conformance and
+    grant-binding included, adds no argument. The expected manifests and
+    arguments are written here, so a table that maps one crate to another
+    crate's manifest is caught (PV43, PV50, PV118, PV129); lab registration,
+    its manifest, its omitted workspace flag and a flag that leaks into a
+    provider row are caught (PV65-PV68); an absent agent-conformance row is
+    caught (PV117), and an absent grant-binding row is caught (PV128)."""
     ok = True
     expected = {
         "provider": (str(REPO / "capsules" / "model-provider" / "Cargo.toml"), ()),
@@ -3049,6 +3078,7 @@ def provider_spec_uses_locked_manifest():
         "wallet": (str(REPO / "capsules" / "wallet-provider" / "Cargo.toml"), ()),
         "capsule-identity": (str(REPO / "lab" / "capsule-identity" / "Cargo.toml"), ()),
         "agent-conformance": (str(REPO / "lab" / "agent-conformance" / "Cargo.toml"), ()),
+        "grant-binding": (str(REPO / "lab" / "grant-binding" / "Cargo.toml"), ()),
         "lab": (str(REPO / "lab" / "wasm-capsule" / "Cargo.toml"), ("--workspace",)),
     }
     for command, (manifest, extra) in expected.items():
@@ -3099,6 +3129,46 @@ def an_agent_conformance_entry_loads_and_runs_its_crate():
         base = ["cargo", "test", "--locked", "--manifest-path", manifest]
         print(f"self-test: agent-conformance build {[argv for argv, _cwd in build]}")
         print(f"self-test: agent-conformance run {one}")
+        if cwd != REPO or extra or len(build) != 1 or build[0][1] != REPO:
+            ok = False
+        elif build[0][0] != base + ["--no-run"]:
+            ok = False
+        if one != base + ["--"]:
+            ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
+def a_grant_binding_entry_loads_and_runs_its_crate():
+    """A list entry whose command is grant-binding loads, and that command
+    builds and runs the crate through its own manifest with --locked and no
+    extra Cargo argument. The crate is one package in its own empty
+    `[workspace]` with a committed lockfile, so the row adds none. No cargo
+    runs here."""
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        path = SELF_TEST_DIR / "grant-binding.json"
+        entry = {"id": "GB1", "command": "grant-binding",
+                 "expect": "caught", "tests": ["tests::x"]}
+        path.write_text(json.dumps({"falsifiers": [entry]}), encoding="utf-8")
+        try:
+            loaded = load(path)
+        except SystemExit:
+            print("self-test: a grant-binding entry does not load")
+            return False
+        print(f"self-test: a grant-binding entry loads: {loaded == [entry]}")
+        if loaded != [entry]:
+            ok = False
+        manifest = str(REPO / "lab" / "grant-binding" / "Cargo.toml")
+        how = spec("grant-binding")
+        build = how["build"]
+        one, cwd, extra = how["one"]
+        base = ["cargo", "test", "--locked", "--manifest-path", manifest]
+        print(f"self-test: grant-binding build {[argv for argv, _cwd in build]}")
+        print(f"self-test: grant-binding run {one}")
         if cwd != REPO or extra or len(build) != 1 or build[0][1] != REPO:
             ok = False
         elif build[0][0] != base + ["--no-run"]:
@@ -3477,6 +3547,8 @@ SELF_TEST_CASES = {
     "provider spec uses locked manifest": provider_spec_uses_locked_manifest,
     "an agent-conformance entry loads and runs its crate":
         an_agent_conformance_entry_loads_and_runs_its_crate,
+    "a grant-binding entry loads and runs its crate":
+        a_grant_binding_entry_loads_and_runs_its_crate,
     "list mode displays": list_mode_displays,
     "prefix token still selects": prefix_token_still_selects,
     "a nested list is listed": a_nested_list_is_listed,

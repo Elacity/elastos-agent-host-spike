@@ -176,8 +176,25 @@ pub struct RunEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BackendFact<T> {
-    Reported { value: T },
-    Unknown,
+    Reported {
+        value: T,
+    },
+    Unknown {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<UsageUnknownReason>,
+    },
+}
+
+/// Why a hosted run has no usage count. `Cut` means the effect request
+/// reached the Runtime socket and the response body started, then the stream
+/// was cut. `Refused` means the provider sent nothing: it refused the run, or
+/// the request never reached the Runtime socket. A usage fact with no reason
+/// says only that no count arrived.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageUnknownReason {
+    Cut,
+    Refused,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -199,6 +216,10 @@ pub struct BackendCost {
     pub unit: Option<String>,
 }
 
+/// Usage is the one backend fact that records its unknown reason, because the
+/// two causes a Runtime account must tell apart are both about missing usage;
+/// the journal refuses a reason on `resolved_model` or `cost`. A fact with no
+/// reason keeps the bare `{"status": "unknown"}` shape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BackendReport {
@@ -212,9 +233,19 @@ impl BackendReport {
     pub fn unknown() -> Self {
         Self {
             schema: BACKEND_REPORT_SCHEMA.to_string(),
-            resolved_model: BackendFact::Unknown,
-            usage: BackendFact::Unknown,
-            cost: BackendFact::Unknown,
+            resolved_model: BackendFact::Unknown { reason: None },
+            usage: BackendFact::Unknown { reason: None },
+            cost: BackendFact::Unknown { reason: None },
+        }
+    }
+
+    /// The unknown report of a hosted run that records why it has no usage.
+    pub fn unknown_with_usage_reason(reason: UsageUnknownReason) -> Self {
+        Self {
+            usage: BackendFact::Unknown {
+                reason: Some(reason),
+            },
+            ..Self::unknown()
         }
     }
 }
