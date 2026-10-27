@@ -941,6 +941,12 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   which then reads the wrong-tool reason and lacks `is absent`.
 - Drop the OS from the stand-in's wrong-tool reason (WP126): the same test
   fails on case (c2), whose reason then lacks `macos`.
+- Append a write grant on `STORAGE_PARENT` to the stand-in's generated profile
+  for did (WP127):
+  `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
+  fails on the sibling write beneath the base, which answers `ok` where the
+  committed `confine.sb` refuses it. The unrelated outside write and the
+  planted read still pass, so only that case catches it.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
