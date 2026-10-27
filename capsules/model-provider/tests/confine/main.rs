@@ -857,8 +857,19 @@ fn wait_for_terminal(
 /// `missing test: model_provider_ops_under_profile`. A span `not_a_test` is
 /// not cited. This test starts no process and needs no sandbox.
 ///
+/// `operations_table_cells_stay_lab_claims` runs on that same section after
+/// the real-file missing-test check and returns ok. A data row starts with
+/// `| ` and its first non-empty cell is not `Operation` and not `---`. The
+/// Right cell is the fourth non-empty cell: `storage` or
+/// `no named test shows this`. The Linux cell is the seventh non-empty cell:
+/// `designed, not enforced`. An in-memory row whose Right cell is `network`
+/// panics, and the panic contains `network` and `right`. An in-memory row
+/// whose Linux cell is `enforced` panics, and the panic contains `enforced`
+/// and `Linux`.
+///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
-/// test no longer finds that function.
+/// test no longer finds that function. F-cc49a drops the `generated_`
+/// acceptance, so the in-memory stand-in citation fails.
 #[test]
 fn operations_section_cites_existing_tests() {
     fn cited_test_name(span: &str) -> bool {
@@ -939,6 +950,52 @@ fn operations_section_cites_existing_tests() {
             .unwrap_or(doc.len());
         &doc[start..line_end]
     }
+    // Right is the fourth non-empty cell. Linux is the seventh. Header and
+    // separator rows are not data rows, so their cells are not claims.
+    fn operations_table_cells_stay_lab_claims(section: &str) -> Result<(), String> {
+        const RIGHT_PLACE: usize = 4;
+        const LINUX_PLACE: usize = 7;
+        const APPROVED_RIGHT: &str = "storage";
+        const UNSHOWN_RIGHT: &str = "no named test shows this";
+        const LINUX_CLAIM: &str = "designed, not enforced";
+        for line in section.lines() {
+            if !line.starts_with("| ") {
+                continue;
+            }
+            let cells: Vec<&str> = line
+                .split('|')
+                .map(str::trim)
+                .filter(|cell| !cell.is_empty())
+                .collect();
+            let Some(first) = cells.first().copied() else {
+                continue;
+            };
+            if first == "Operation" || first == "---" {
+                continue;
+            }
+            let right = cells.get(RIGHT_PLACE - 1).copied().unwrap_or("");
+            if right != APPROVED_RIGHT && right != UNSHOWN_RIGHT {
+                return Err(format!("right cell `{right}` is not an approved right id"));
+            }
+            let linux = cells.get(LINUX_PLACE - 1).copied().unwrap_or("");
+            if linux != LINUX_CLAIM {
+                return Err(format!(
+                    "Linux cell `{linux}` is not designed, not enforced"
+                ));
+            }
+        }
+        Ok(())
+    }
+    fn caught_lab_claim_panic(section: &str) -> String {
+        match catch_unwind(AssertUnwindSafe(|| {
+            if let Err(reason) = operations_table_cells_stay_lab_claims(section) {
+                panic!("{reason}");
+            }
+        })) {
+            Err(payload) => panic_text(payload),
+            Ok(()) => String::new(),
+        }
+    }
 
     let source_without_the_function = "";
     let stand_in_failure = caught_citation_failure(
@@ -979,6 +1036,19 @@ fn operations_section_cites_existing_tests() {
     require_cited_tests("`model_`", source_without_the_function);
     require_cited_tests("`generated_`", source_without_the_function);
 
+    let network_row = "| init | in | out | network | effect | rule | designed, not enforced |";
+    let network_panic = caught_lab_claim_panic(network_row);
+    assert!(
+        network_panic.contains("network") && network_panic.contains("right"),
+        "{network_panic}"
+    );
+    let enforced_row = "| init | in | out | storage | effect | rule | enforced |";
+    let enforced_panic = caught_lab_claim_panic(enforced_row);
+    assert!(
+        enforced_panic.contains("enforced") && enforced_panic.contains("Linux"),
+        "{enforced_panic}"
+    );
+
     let doc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("CONFINEMENT.md");
     let doc = fs::read_to_string(&doc_path).unwrap_or_else(|err| {
         panic!(
@@ -1004,6 +1074,8 @@ fn operations_section_cites_existing_tests() {
         "the trace citation must be a required test name"
     );
     require_cited_tests(section, &source);
+    operations_table_cells_stay_lab_claims(section)
+        .expect("the real operations section keeps its Right and Linux lab claims");
 }
 
 /// The Id cells in `section` are the same set as `ids`.
@@ -1157,6 +1229,102 @@ fn model_provider_ops_under_profile() {
     );
 
     provider.shutdown();
+}
+
+/// After a hosted `init`, an unknown `op` is refused under the oracle and
+/// under the stand-in file, and the storage tree is unchanged.
+///
+/// The request is `{"op":"not_an_op"}`. The answer is `status` `error`,
+/// `code` `unsupported_operation`, and message
+/// `unsupported model provider operation`. The oracle case uses
+/// `Launch::Confined` with `Storage::prepare("unknown-op")`. The stand-in
+/// case reads the declared fixture, calls `standin_profile` once, writes
+/// that text with `write_standin_profile` under
+/// `Storage::prepare("unknown-op-standin")`, and starts with
+/// `Launch::Profile` and `canonical_bindings`. The written file has no line
+/// that starts with `;;`, and `collect_allow_lines` on that file, sorted,
+/// equals the oracle's allow lines, sorted. Both cases pass `assert_serving`
+/// on `init`, create `runs/`, take `tree_snapshot` of `STORAGE_ROOT`, send
+/// the request, require that snapshot to be unchanged, and call `shutdown`.
+/// A launch of the oracle still returns `unsupported_operation`, so this
+/// test adds no falsifier. On a host where `sandbox_available` fails, the
+/// test returns. This does not say B4 is met.
+#[test]
+fn model_unknown_op_is_refused_under_profile() {
+    /// Hosted `init`, then `{"op":"not_an_op"}`. The storage snapshot stays
+    /// the snapshot taken after `init`. Then `shutdown`.
+    fn assert_unknown_op_is_refused(case: &str, storage: &Storage, mut provider: Provider) {
+        let init = provider.ok(&init_request(storage, None));
+        assert_serving(&init);
+        assert!(
+            storage.root.join("runs").is_dir(),
+            "{case}: init must create runs/ under STORAGE_ROOT"
+        );
+        let after_init = tree_snapshot(&storage.root);
+
+        let refused = provider.request(&json!({ "op": "not_an_op" }));
+        assert_eq!(
+            refused,
+            json!({
+                "status": "error",
+                "code": "unsupported_operation",
+                "message": "unsupported model provider operation"
+            }),
+            "{case}: an unknown op must be refused: {refused}"
+        );
+        assert_eq!(
+            tree_snapshot(&storage.root),
+            after_init,
+            "{case}: the unknown op must leave the storage tree after init unchanged"
+        );
+        provider.shutdown();
+    }
+
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+
+    let storage = Storage::prepare("unknown-op");
+    let provider = Provider::start(Launch::Confined(&storage));
+    assert_unknown_op_is_refused("oracle", &storage, provider);
+
+    let storage = Storage::prepare("unknown-op-standin");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let profile = storage.base.join("standin.sb");
+    write_standin_profile(&profile, &generated);
+    let launched = fs::read_to_string(&profile).unwrap_or_else(|err| {
+        panic!("stand-in: the file passed to Launch::Profile must be readable: {err}")
+    });
+    assert!(
+        launched.lines().all(|line| !line.starts_with(";;")),
+        "stand-in: the file passed to Launch::Profile has no line that starts with ;;"
+    );
+    let mut launched_lines = collect_allow_lines(&launched);
+    let oracle = fs::read_to_string(PROFILE_PATH)
+        .unwrap_or_else(|err| panic!("stand-in: the profile oracle must be readable: {err}"));
+    let mut oracle_lines = collect_allow_lines(&oracle);
+    launched_lines.sort();
+    oracle_lines.sort();
+    assert_eq!(
+        launched_lines, oracle_lines,
+        "stand-in: sorted allow lines must equal the oracle's"
+    );
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let bindings = canonical_bindings(&storage, &binary);
+    let provider = Provider::start(Launch::Profile {
+        profile: &profile,
+        bindings: &bindings,
+    });
+    assert_unknown_op_is_refused("stand-in", &storage, provider);
 }
 
 /// The redirect fixture shared by `model_outside_write_denied`,

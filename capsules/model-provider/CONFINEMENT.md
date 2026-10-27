@@ -479,7 +479,9 @@ macOS half only. `operations_section_cites_existing_tests` checks that each
 cited `model_` or `generated_` test name, and
 `allow_rules_trace_to_declared_rights`, is a function in
 `tests/confine/main.rs`. The check covers `model_` names, `generated_` names,
-and `allow_rules_trace_to_declared_rights`.
+and `allow_rules_trace_to_declared_rights`. The same test requires each Right
+cell to be an approved right id or `no named test shows this`, and each Linux
+cell to be `designed, not enforced`.
 
 | Operation | Inputs | Outputs | Right | Effect | macOS rule and test | Linux |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -491,6 +493,7 @@ and `allow_rules_trace_to_declared_rights`.
 | runs_get | `op`, `run_id`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`). error: `status`, `code`, `message`. | storage | reads inside `STORAGE_ROOT`. refuses that read once the record is outside it. The hosted test settles by reading this op until the run is terminal. | `model_outside_read_denied` shows the read inside `STORAGE_ROOT` and `journal_corrupt` once the record is outside it. A `STORAGE_ROOT` read under `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`. The outside read is refused under the fixture profile `READ_FIXTURE_RULE`. That refusal is a denial, not a grant. `model_hosted_run_fails_closed_under_profile` sends `runs_create`, then `runs_get` until the run is terminal, and the hosted Runtime socket stand-in counts zero connections. The run's `status` is `failed` and `terminal.error.code` is `transport_interrupted`. The profile rule is `(deny network*)`. The profile denies the hosted Runtime socket with `(deny network*)`. That denial is not a grant. The test does not show which call connects. | designed, not enforced |
 | runs_events | `op`, `run_id`, `after_sequence`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `next_cursor`, `has_more`, `events` from `RunEventsPage`). error: `status`, `code`, `message`. | storage | reads the stored terminal run and does not write. | `model_terminal_run_page_and_cancel_read_under_profile` shows `schema` `elastos.model.run-events/v1`, `run_id` equal to the create data's `run_id`, `has_more` false, and a last event whose `kind` is `failed`. The storage snapshot after both calls equals the snapshot after create. A live cancel is not shown. The same journey runs under the stand-in file, which has no `;;` line. | designed, not enforced |
 | runs_cancel | `op`, `run_id`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`). error: `status`, `code`, `message`. | storage | reads the stored terminal run and does not write. | `model_terminal_run_page_and_cancel_read_under_profile` shows the data equals the create data. The storage snapshot after both calls equals the snapshot after create. A live cancel is not shown. The same journey runs under the stand-in file, which has no `;;` line. | designed, not enforced |
+| unsupported | `op` | error: `status`, `code`, `message`. | no named test shows this | the storage tree after `init` is unchanged | `model_unknown_op_is_refused_under_profile` sends the request `op` `not_an_op` and shows `code` `unsupported_operation` and the message `unsupported model provider operation`. The storage tree after `init` is unchanged, and no named test shows a read inside `STORAGE_ROOT` or a socket. The same journey runs under the stand-in file, which has no `;;` line. | designed, not enforced |
 
 ## Host-OS status
 
@@ -528,6 +531,17 @@ profile does not grant".
   `STORAGE_ROOT` does not. The test drives `init`, `status` and `offers_list`,
   checks each answer, and checks that `init` created `runs/` under
   `STORAGE_ROOT`. It then shuts the provider down and requires a clean exit.
+- `model_unknown_op_is_refused_under_profile`: after a hosted `init` that
+  passes `assert_serving` and creates `runs/`, the request
+  `{"op":"not_an_op"}` answers `status` `error`, `code`
+  `unsupported_operation`, and message `unsupported model provider
+  operation`. `tree_snapshot` of `STORAGE_ROOT` is unchanged. The oracle
+  case uses `Launch::Confined` with label `unknown-op`. The stand-in case
+  calls `standin_profile` once, writes the file with
+  `write_standin_profile` under `unknown-op-standin`, and starts with
+  `Launch::Profile` and `canonical_bindings`. The written file has no `;;`
+  line, and its sorted allow lines equal the oracle's. Both cases call
+  `shutdown`.
 - `model_outside_write_denied`: the same journey runs under the oracle
   (`Launch::Confined`) and under the generated stand-in file. Each case
   prepares its own redirect fixture. The generated case reads the declared
@@ -780,9 +794,9 @@ python3 -I examples/agent-host/falsify.py --from capsules/model-provider/confine
 `confine-falsifiers.json` holds this profile's falsifiers for the shared
 runner. Every entry uses `expect: caught`. F-cc12a uses command `wallet`,
 because the one shape check is in the wallet crate, and every other entry
-uses command `provider`. Each mutates `confine.sb` only, except the twenty-seven
+uses command `provider`. Each mutates `confine.sb` only, except the twenty-eight
 entries that edit `tests/confine/main.rs`.
-The twenty-seven are: F-cc1e removes the outside-read
+The twenty-eight are: F-cc1e removes the outside-read
 fixture rule, F-cc8-rm-journal removes the outside-create fixture grant,
 F-cc15a, F-cc15b and F-cc15c each undo one part of how the Runtime socket
 stand-in counts connections, F-cc16a, F-cc16b and F-cc16c each undo one
@@ -794,7 +808,7 @@ keeps none of the stderr lines `Provider::ended` reads, and F-cc29a skips
 the digest compare in refuse_changed_provider_executable, and F-cc31a
 renames `model_provider_ops_under_profile`, and F-cc30b,
 F-cc30c, F-cc30d and F-cc30e each change the declared-rights path in
-allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match return Ok before it compares. F-cc41a makes standin_profile return the oracle file and ignore the declared value. F-cc42a makes write_standin_profile write an allow-default profile and ignore the generated text, so generated_profile_permits_init_and_denies_the_local_offer and standin_refuses_a_start_it_cannot_apply fail. F-cc43a makes standin_profile return an empty profile when the rights list is missing, so standin_refuses_a_start_it_cannot_apply and generated_model_profile_matches_the_oracle fail. F-cc44a makes standin_profile emit (allow network*) instead of (deny network*). F-cc45a makes standin_launch_uses_the_generated_profile start under the committed oracle instead of the generated file. F-cc46a makes Launch::Program pass the committed oracle to sandboxed instead of the profile it was given, so generated_profile_refuses_an_unbound_copy fails because the recorded profile path is the committed oracle. F-cc47a makes generated_profile_refuses_an_unbound_root start under the committed oracle instead of the stand-in file, so that test fails because the recorded profile path is the committed oracle. Both files exit 65. F-cc48a appends `(allow file-read-data (literal "/tmp/cc-standin-extra"))` after the joined rules, so `generated_model_profile_matches_the_oracle` fails at the sorted allow-line compare.
+allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match return Ok before it compares. F-cc41a makes standin_profile return the oracle file and ignore the declared value. F-cc42a makes write_standin_profile write an allow-default profile and ignore the generated text, so generated_profile_permits_init_and_denies_the_local_offer and standin_refuses_a_start_it_cannot_apply fail. F-cc43a makes standin_profile return an empty profile when the rights list is missing, so standin_refuses_a_start_it_cannot_apply and generated_model_profile_matches_the_oracle fail. F-cc44a makes standin_profile emit (allow network*) instead of (deny network*). F-cc45a makes standin_launch_uses_the_generated_profile start under the committed oracle instead of the generated file. F-cc46a makes Launch::Program pass the committed oracle to sandboxed instead of the profile it was given, so generated_profile_refuses_an_unbound_copy fails because the recorded profile path is the committed oracle. F-cc47a makes generated_profile_refuses_an_unbound_root start under the committed oracle instead of the stand-in file, so that test fails because the recorded profile path is the committed oracle. Both files exit 65. F-cc48a appends `(allow file-read-data (literal "/tmp/cc-standin-extra"))` after the joined rules, so `generated_model_profile_matches_the_oracle` fails at the sorted allow-line compare. F-cc49a drops the `generated_` acceptance in `cited_test_name`, so the in-memory stand-in citation fails.
 
 | Id | Mutation | Named test | Why the test fails |
 | --- | --- | --- | --- |
@@ -857,13 +871,14 @@ allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match 
 | F-cc46a | In the test, `Launch::Program` passes the committed oracle to `sandboxed` instead of the profile it was given | `generated_profile_refuses_an_unbound_copy` | The recorded profile path is the committed oracle. The copy is still refused with exit 71. |
 | F-cc47a | In the test, `generated_profile_refuses_an_unbound_root` starts under the committed oracle instead of the stand-in file | `generated_profile_refuses_an_unbound_root` | The recorded profile path is the committed oracle. Both files exit 65. |
 | F-cc48a | In the test, `standin_profile` appends `(allow file-read-data (literal "/tmp/cc-standin-extra"))` after the joined rules | `generated_model_profile_matches_the_oracle` | The sorted allow-line compare fails. |
+| F-cc49a | In the test, `cited_test_name` drops the `generated_` acceptance | `operations_section_cites_existing_tests` | The in-memory stand-in citation fails. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
 same for the outside-create grant: the refusal that test observes is the
 create, not the inspect before it. The runner rebuilds the test for both, and
 for the F-cc15, F-cc16, F-cc17, F-cc19 and F-cc29a entries, and for F-cc30b,
-F-cc30c, F-cc30d, F-cc30e F-cc31a, F-cc40a, F-cc41a, F-cc42a, F-cc43a, F-cc44a, F-cc45a, F-cc46a, F-cc47a and F-cc48a. F-cc30a and F-cc30f need no rebuild:
+F-cc30c, F-cc30d, F-cc30e F-cc31a, F-cc40a, F-cc41a, F-cc42a, F-cc43a, F-cc44a, F-cc45a, F-cc46a, F-cc47a, F-cc48a and F-cc49a. F-cc30a and F-cc30f need no rebuild:
 the test reads confine.sb at runtime. Its startup recovery restores
 `tests/confine/main.rs` after a killed run (provider task 015), as it restores
 `confine.sb`. F-cc35a needs no rebuild: the test reads confine.sb at runtime.
@@ -877,7 +892,7 @@ F-cc38a needs no rebuild: the test reads confine.sb at runtime.
 F-cc39a needs no rebuild: the test reads confine.sb at runtime.
 F-cc40a needs a rebuild: it edits tests/confine/main.rs.
 F-cc41a needs a rebuild: it edits tests/confine/main.rs.
-F-cc42a needs a rebuild: it edits tests/confine/main.rs. F-cc42a needs the sandbox: the named tests launch the provider. F-cc43a needs a rebuild: it edits tests/confine/main.rs. F-cc44a needs a rebuild: it edits tests/confine/main.rs. F-cc44a needs the sandbox: the hosted test launches the provider. F-cc45a needs a rebuild: it edits tests/confine/main.rs. F-cc45a needs the sandbox: the named test launches the provider. F-cc46a needs a rebuild: it edits tests/confine/main.rs. F-cc46a needs the sandbox: the named test launches the provider. F-cc47a needs a rebuild: it edits tests/confine/main.rs. F-cc47a needs the sandbox: the named test launches the provider. F-cc48a needs a rebuild: it edits tests/confine/main.rs and needs no sandbox, and the sorted allow-line compare fails.
+F-cc42a needs a rebuild: it edits tests/confine/main.rs. F-cc42a needs the sandbox: the named tests launch the provider. F-cc43a needs a rebuild: it edits tests/confine/main.rs. F-cc44a needs a rebuild: it edits tests/confine/main.rs. F-cc44a needs the sandbox: the hosted test launches the provider. F-cc45a needs a rebuild: it edits tests/confine/main.rs. F-cc45a needs the sandbox: the named test launches the provider. F-cc46a needs a rebuild: it edits tests/confine/main.rs. F-cc46a needs the sandbox: the named test launches the provider. F-cc47a needs a rebuild: it edits tests/confine/main.rs. F-cc47a needs the sandbox: the named test launches the provider. F-cc48a needs a rebuild: it edits tests/confine/main.rs and needs no sandbox, and the sorted allow-line compare fails. F-cc49a needs a rebuild: it edits tests/confine/main.rs and needs no sandbox, and dropping the `generated_` acceptance fails the in-memory stand-in citation.
 
 The list is a Mac gate. On a Mac without `/usr/bin/sandbox-exec` the unmutated
 suite fails, so a list run there is no evidence. Off macOS, when
@@ -886,8 +901,8 @@ entry reads SURVIVED there. The entries whose tests need no sandbox (F-cc12a,
 F-cc15a, F-cc15b, F-cc15c, F-cc16a, F-cc16b, F-cc16c, F-cc17a, F-cc17b,
 F-cc29a, F-cc30a, F-cc30b, F-cc30c, F-cc30d, F-cc30e, F-cc30f, F-cc31a,
 F-cc35a, F-cc35b, F-cc35c, F-cc35d, F-cc35e, F-cc35f, F-cc35g, F-cc37a,
-F-cc38a, F-cc39a, F-cc40a, F-cc41a, F-cc43a and F-cc48a) are
-CAUGHT on any host that builds their crate. F-cc12a reads the profile files
+F-cc38a, F-cc39a, F-cc40a, F-cc41a, F-cc43a, F-cc48a and F-cc49a) are
+CAUGHT on any host that builds their crate. F-cc49a drops the `generated_` acceptance. F-cc12a reads the profile files
 and is CAUGHT on any host that builds the wallet crate. The model-provider
 entries among them are CAUGHT on any Unix host where `tests/confine/main.rs`
 builds and runs. A call site that passes a fixed `"linux"` is not caught by a

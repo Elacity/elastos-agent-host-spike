@@ -1,0 +1,12 @@
+id: F-A5-casesess
+file: src/lib.rs
+test: model_case_different_session_is_refused
+--- old
+        if live.session != grant.session {
+            return Err(Refuse::Session);
+        }
+--- new
+        if !live.session.eq_ignore_ascii_case(&grant.session) {
+            return Err(Refuse::Session);
+        }
+--- end
