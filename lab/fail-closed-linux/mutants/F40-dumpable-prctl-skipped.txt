@@ -1,0 +1,10 @@
+id: F40-dumpable-prctl-skipped
+file: src/lib.rs
+test: real_kernel::real_same_uid_host_cannot_ptrace_or_read_mem
+--- old
+    kernel
+        .set_not_dumpable(plan.executable())
+        .map_err(os(Step::SetDumpable))?;
+--- new
+    let _ = (plan.executable(), Step::SetDumpable);
+--- end

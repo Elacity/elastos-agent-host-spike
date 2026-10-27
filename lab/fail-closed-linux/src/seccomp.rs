@@ -3,9 +3,12 @@
 //! A foreign architecture kills the process. On x86-64 every x32 system call
 //! returns EPERM. The system calls in `DENIED`, and `clone` with any
 //! namespace flag, return EPERM; `clone3` returns ENOSYS so the C library
-//! falls back to `clone`, whose flags the filter can read. Every other system
-//! call is allowed: this is a deny-list for network sockets and sandbox
-//! escapes, not a per-provider allow-list.
+//! falls back to `clone`, whose flags the filter can read. `DENIED` includes
+//! `pidfd_open`, `pidfd_getfd` and `pidfd_send_signal`, so a confined
+//! process cannot steal a parent fd or signal through a pidfd. Every other
+//! system call is allowed: this is a deny-list for network sockets and
+//! sandbox escapes, not a per-provider allow-list. A same-uid host process
+//! is outside this filter.
 
 use libc::{
     sock_filter, BPF_ABS, BPF_JEQ, BPF_JMP, BPF_JSET, BPF_K, BPF_LD, BPF_RET, BPF_W,
@@ -26,13 +29,16 @@ const DATA_NR: u32 = 0;
 const DATA_ARCH: u32 = 4;
 const DATA_ARG0_LOW: u32 = 16;
 const DATA_ARG0_HIGH: u32 = 20;
+const DATA_ARG1_LOW: u32 = 24;
 
 pub const DENIED: &[libc::c_long] = &[
     libc::SYS_socket,
     libc::SYS_socketpair,
-    libc::SYS_ptrace,
     libc::SYS_process_vm_readv,
     libc::SYS_process_vm_writev,
+    libc::SYS_pidfd_open,
+    libc::SYS_pidfd_getfd,
+    libc::SYS_pidfd_send_signal,
     libc::SYS_unshare,
     libc::SYS_setns,
     libc::SYS_mount,
@@ -97,6 +103,32 @@ pub fn filter() -> Vec<sock_filter> {
         prog.push(jump(BPF_JMP | BPF_JEQ | BPF_K, nr as u32, 0, 1));
         prog.push(stmt(BPF_RET | BPF_K, eperm));
     }
+    // Allow PR_SET_DUMPABLE only with value 0. The provider sets dumpable
+    // 0 in exec(); a later re-enable is EPERM. Other prctl calls pass.
+    // 0: JEQ prctl, 0, 6
+    // 1: LD ARG0_LOW
+    // 2: JEQ PR_SET_DUMPABLE, 0, 3
+    // 3: LD ARG1_LOW
+    // 4: JEQ 0, 1, 0
+    // 5: RET EPERM
+    // 6: RET ALLOW
+    prog.push(jump(
+        BPF_JMP | BPF_JEQ | BPF_K,
+        libc::SYS_prctl as u32,
+        0,
+        6,
+    ));
+    prog.push(stmt(BPF_LD | BPF_W | BPF_ABS, DATA_ARG0_LOW));
+    prog.push(jump(
+        BPF_JMP | BPF_JEQ | BPF_K,
+        libc::PR_SET_DUMPABLE as u32,
+        0,
+        3,
+    ));
+    prog.push(stmt(BPF_LD | BPF_W | BPF_ABS, DATA_ARG1_LOW));
+    prog.push(jump(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0));
+    prog.push(stmt(BPF_RET | BPF_K, eperm));
+    prog.push(stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
     prog.push(jump(
         BPF_JMP | BPF_JEQ | BPF_K,
         libc::SYS_clone3 as u32,
@@ -145,6 +177,15 @@ pub fn no_exec_filter(granted_path: u64) -> Vec<sock_filter> {
         prog.push(jump(BPF_JMP | libc::BPF_JGE | BPF_K, X32_SYSCALL_BIT, 0, 1));
         prog.push(stmt(BPF_RET | BPF_K, eperm));
     }
+    // Init traces the provider (first filter allows ptrace). After this
+    // filter the provider cannot ptrace, so a sibling cannot attach.
+    prog.push(jump(
+        BPF_JMP | BPF_JEQ | BPF_K,
+        libc::SYS_ptrace as u32,
+        0,
+        1,
+    ));
+    prog.push(stmt(BPF_RET | BPF_K, eperm));
     prog.push(jump(
         BPF_JMP | BPF_JEQ | BPF_K,
         libc::SYS_execveat as u32,

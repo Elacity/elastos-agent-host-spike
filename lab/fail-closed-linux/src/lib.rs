@@ -16,7 +16,14 @@
 //! `landlock_restrict_self` a throwaway child tries one denied operation
 //! per needed right; any success is a refusal. Before restrict, a terminal
 //! or a socket on fd 0, 1 or 2 is replaced with `/dev/null`; a failed
-//! replace refuses and names the fd. After confine the guard installs a
+//! replace refuses and names the fd. After the maps and the capability
+//! drop, the guard makes the granted binary execute-only and the
+//! provider sets `PR_SET_DUMPABLE` to 0 in `exec()`, so `execve` does
+//! not reset dumpable to 1. The first seccomp filter then allows
+//! `PR_SET_DUMPABLE` only with value 0, and denies `pidfd_open`,
+//! `pidfd_getfd` and `pidfd_send_signal`. Same-uid host
+//! `process_vm_readv`, `pidfd_getfd` and `perf_event_open` stay NOT
+//! CLOSED on a 1:1 userns. After confine the guard installs a
 //! second seccomp filter that returns EPERM for every `execveat` and for
 //! every `execve` except the helper's granted-path pointer. That one
 //! `execve` is the confined program's own initial exec. After that image
@@ -291,6 +298,7 @@ pub enum Step {
     AmbientSet,
     CapabilitySets,
     SetNoNewPrivs,
+    SetDumpable,
     InstallFilter,
     AbiProbe,
     AbiFloor,
@@ -315,7 +323,7 @@ pub enum Step {
 
 impl Step {
     /// The steps that run in the provider's process, in guard order.
-    pub const GUARD: [Step; 23] = [
+    pub const GUARD: [Step; 24] = [
         Step::Unshare,
         Step::UidMap,
         Step::Setgroups,
@@ -326,6 +334,7 @@ impl Step {
         Step::AmbientSet,
         Step::CapabilitySets,
         Step::SetNoNewPrivs,
+        Step::SetDumpable,
         Step::InstallFilter,
         Step::AbiProbe,
         Step::AbiFloor,
@@ -357,7 +366,7 @@ impl Step {
             Step::LastCapability | Step::BoundingSet | Step::AmbientSet | Step::CapabilitySets => {
                 Layer::Capabilities
             }
-            Step::SetNoNewPrivs => Layer::NoNewPrivs,
+            Step::SetNoNewPrivs | Step::SetDumpable => Layer::NoNewPrivs,
             Step::InstallFilter | Step::InstallNoExec => Layer::Seccomp,
             Step::AbiProbe
             | Step::AbiFloor
@@ -391,6 +400,7 @@ impl Step {
             Step::AmbientSet => "ambient_set",
             Step::CapabilitySets => "capset",
             Step::SetNoNewPrivs => "set_no_new_privs",
+            Step::SetDumpable => "set_dumpable",
             Step::InstallFilter => "install_filter",
             Step::AbiProbe => "abi_probe",
             Step::AbiFloor => "abi_floor",
@@ -940,6 +950,12 @@ pub trait Kernel {
     fn clear_ambient_capabilities(&mut self) -> Result<(), Errno>;
     fn clear_capability_sets(&mut self) -> Result<(), Errno>;
     fn set_no_new_privs(&mut self) -> Result<(), Errno>;
+    /// After the maps and capability drop: `PR_SET_DUMPABLE` 0, and make
+    /// the granted binary execute-only so `execve` does not raise dumpable.
+    fn set_not_dumpable(&mut self, executable: &CStr) -> Result<(), Errno> {
+        let _ = (self, executable);
+        Ok(())
+    }
     fn install_seccomp_filter(&mut self, filter: &[libc::sock_filter]) -> Result<(), Errno>;
     /// Replace a terminal or a socket on fd 0, 1 or 2. On failure
     /// `named_fault_found` is that fd.
@@ -1033,6 +1049,9 @@ pub fn confine<K: Kernel + ?Sized>(kernel: &mut K, plan: &Plan) -> Result<(), Fa
         .map_err(os(Step::CapabilitySets))?;
 
     kernel.set_no_new_privs().map_err(os(Step::SetNoNewPrivs))?;
+    kernel
+        .set_not_dumpable(plan.executable())
+        .map_err(os(Step::SetDumpable))?;
 
     kernel
         .install_seccomp_filter(&plan.filter)
