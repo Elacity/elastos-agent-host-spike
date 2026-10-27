@@ -1,0 +1,11 @@
+id: F-A7-releid
+file: src/ledger.rs
+test: ledger::model_released_reservation_id_is_not_reused
+--- old
+        ledger.open.remove(&reservation.id);
+        ledger.held -= amount;
+--- new
+        ledger.open.remove(&reservation.id);
+        ledger.held -= amount;
+        ledger.next_reservation = reservation.id.saturating_sub(1);
+--- end

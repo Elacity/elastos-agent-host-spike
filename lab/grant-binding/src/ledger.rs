@@ -1000,3 +1000,52 @@ fn model_reported_usage_does_not_open_ceiling_room() {
         .expect("at the stored ceiling");
     assert_eq!(books(&verifier).held, 5);
 }
+
+#[test]
+fn model_released_reservation_id_is_not_reused() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = guest(handle);
+    let released = verifier.reserve(&call, &request, 6).expect("reserve");
+    assert_eq!(verifier.release(&call, &request, released), Ok(()));
+    let second = verifier.reserve(&call, &request, 4).expect("reserve");
+    let stale = verifier
+        .settle(&call, &request, released, SettleOutcome::Known(4))
+        .expect_err("released id is not reused");
+    assert_eq!(stale, SettleRefuse::NotOutstanding);
+    assert_eq!(stale.to_string(), "reservation is not outstanding");
+    assert_ne!(second.id, released.id);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&second.id), Some(&4));
+    assert!(!after.open.contains_key(&released.id));
+}
+
+#[test]
+fn model_reported_usage_does_not_keep_the_released_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(handle)
+    };
+    assert!(request.reported_usage > 0);
+    let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
+    assert_eq!(books(&verifier).held, 10);
+    assert_eq!(verifier.release(&call, &request, reservation), Ok(()));
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+    verifier
+        .reserve(&call, &request, 10)
+        .expect("the released hold is free");
+    let freed = books(&verifier);
+    assert_eq!(freed.held, 10);
+    assert_eq!(freed.charged, 0);
+}

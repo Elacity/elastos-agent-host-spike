@@ -204,6 +204,21 @@ fn matches_orphan(request: &Value, original: &Value) -> Result<bool> {
     Ok(same_id && field(request, "session_id")? == field(original, "session_id")?)
 }
 
+// The exact original orphan stays for post-exit measurement.
+// A changed orphan refuses here. Every other request reaches the overlap rule.
+fn active_requests(pending: &[Value], overlap: Option<&Overlap>) -> Result<Vec<Value>> {
+    let mut active = Vec::new();
+    for request in pending {
+        if let Some(overlap) = overlap.filter(|overlap| overlap.kill && overlap.stage > 0) {
+            if matches_orphan(request, &overlap.first[0])? {
+                continue;
+            }
+        }
+        active.push(request.clone());
+    }
+    Ok(active)
+}
+
 // Instance `index`'s new sibling read of the other instance's file, in its own session.
 fn sibling_reason(index: usize) -> String {
     format!("agent conformance: instance-{} sibling", index + 1)
@@ -585,7 +600,7 @@ impl Controller {
                 !(Duration::from_secs(2)..=Duration::from_secs(5)).contains(&time)
             })
         {
-            return Err("kill: overlap, orphan settlement and quiet window are required");
+            return Err("kill: overlap and quiet window are required");
         }
         Ok(())
     }
@@ -695,18 +710,7 @@ impl Controller {
             }
             field(request, "session_id")?;
         }
-        // Retain only the exact original orphan for post-exit measurement.
-        // Every new request, including from a new session, reaches the rule.
-        let mut active = Vec::new();
-        for request in pending {
-            if let Some(overlap) = self.overlap.as_ref().filter(|o| o.kill && o.stage > 0) {
-                if matches_orphan(request, &overlap.first[0])? {
-                    continue;
-                }
-            }
-            active.push(request.clone());
-        }
-        let pending = active;
+        let pending = active_requests(pending, self.overlap.as_ref())?;
         if let Some(overlap) = &mut self.overlap {
             if !overlap.ready(&pending, &self.fixture, running)? {
                 return Ok(());
@@ -1765,6 +1769,95 @@ mod tests {
         assert_eq!(
             matches_orphan(&missing_session, &original),
             Err("orphan request changed while pending")
+        );
+    }
+
+    fn serve_pending(requests: Vec<Value>) -> (u16, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = serde_json::to_vec(&json!({"requests": requests})).unwrap();
+        let server = std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let started = Instant::now();
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if started.elapsed() >= Duration::from_secs(2) {
+                            panic!("pending stub accept exceeded 2 seconds");
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("pending stub accept failed: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(&body).unwrap();
+        });
+        (port, server)
+    }
+
+    fn poll_kill_pending(pending: Vec<Value>, original: &Value) -> Result<()> {
+        let (port, server) = serve_pending(pending);
+        let mut overlap = Overlap::new();
+        overlap.kill = true;
+        overlap.stage = 1;
+        overlap.first = vec![
+            original.clone(),
+            json!({
+                "request_id": "first-b",
+                "session_id": "session-b",
+                "resource": "fixture-b"
+            }),
+        ];
+        let mut controller = Controller {
+            port,
+            credentials: vec!["fixture-secret".into(), "fixture-token".into()],
+            printed: RefCell::default(),
+            fixture: fixture(),
+            used: BTreeSet::new(),
+            decisions: Decisions::default(),
+            overlap: Some(overlap),
+            requests: Vec::new(),
+        };
+        let mut running = RunningInstances::start(&[], None).unwrap();
+        let result = controller.poll(&mut running);
+        server.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn poll_gives_changed_orphan_its_own_reason() {
+        let original = json!({"request_id":"orphan", "session_id":"session-a",
+            "resource":"fixture-a", "action":"read", "reason":"fixture read"});
+        assert_eq!(
+            poll_kill_pending(vec![original.clone()], &original),
+            Ok(()),
+            "the exact orphan stays out of the overlap rule"
+        );
+        let mut retry = original.clone();
+        retry["request_id"] = json!("retry");
+        assert_eq!(
+            poll_kill_pending(vec![retry], &original),
+            Err("no-retry check: killed worker made a further request"),
+            "a new request id still reaches the retry rule"
+        );
+        let mut changed = original.clone();
+        changed["resource"] = json!("changed");
+        assert_eq!(
+            poll_kill_pending(vec![changed], &original),
+            Err("orphan request changed while pending"),
+            "a changed orphan keeps its own reason on the live poll path"
         );
     }
 
