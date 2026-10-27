@@ -1,0 +1,4 @@
+/target/
+*.r7bak
+*.r7plant
+evidence/*.tmp

@@ -1,0 +1,10 @@
+First full ./lab/a6-a12-evidence-fix/run.sh on /tmp/pr457-r7 at 4564a30f
+(cold compile + suite). Captured from the live reviewer run.
+
+test result: ok. 71 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 652.91s
+CAUGHT lines: 53
+Mac: Resident A6/A12 and ThrowawayHome census: NOT RUN (need macOS).
+A6: BLOCKED (RA-6)
+manager.rs sha256 after: cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a
+ls /tmp/elastos: No such file or directory
+worktree: clean

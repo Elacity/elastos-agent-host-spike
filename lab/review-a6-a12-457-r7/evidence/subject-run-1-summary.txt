@@ -1,0 +1,5 @@
+run1: 71 passed; 0 failed; finished in 652.91s
+CAUGHT lines from planted_bugs_are_caught: 53
+manager.rs cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a
+ls /tmp/elastos: No such file or directory
+Mac: NOT RUN

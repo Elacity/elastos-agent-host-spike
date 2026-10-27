@@ -1,0 +1,40 @@
+r7 hunts against 4564a30f (worktree /tmp/pr457-r7)
+
+r6 claims re-checked:
+  r7-hardlink-out              CAUGHT
+  r7-home-cache                CAUGHT
+  r7-subdir-ephemeral          CAUGHT
+  r7-rename-out                CAUGHT
+  r7-otmpfile-unlink           CAUGHT
+  r7-overflow-load             CAUGHT (fail closed)
+  r7-openat2-pin               CAUGHT
+  r7-overflow-pin              CAUGHT (if present)
+  r7-watch-add-pin             CAUGHT
+  r7-ra6-current               BLOCKED
+  r7-detached-hostpart         NOT RUN
+  r7-bind-hostpart             NOT RUN
+  r7-pidns-hostpart            NOT RUN
+  r7-run-user-hostpart         NOT RUN
+  r7-watch-sysctl-hostpart     NOT RUN
+  r7-mount-ns                  NOT RUN
+
+new hunts:
+  r7-memfd                     OUT OF SCOPE (no directory entry)
+  r7-shm-open                  CAUGHT
+  r7-unix-socket               CAUGHT
+  r7-mkfifo                    SURVIVED (blocking File::open)
+  r7-fifo-open-pin             SURVIVED (source)
+  r7-proc-fd                   CAUGHT
+  r7-scm-rights                CAUGHT
+  r7-after-watch               SURVIVED (same class as detached-after-return)
+  r7-detached-after-return     SURVIVED (HostPart is NOT RUN)
+  r7-xdg-runtime               CAUGHT
+  r7-tmpdir-mid                FALSE-FAIL (pre-existing file in new TMPDIR)
+  r7-rename-xdev               CAUGHT
+  r7-before-snapshot           EXPECTED (not a leftover)
+  r7-system-temps              CLEAN (no systemd-tmpfiles false FAIL)
+
+source plants:
+  R7-IGNORE-OVERFLOW           SURVIVED pin (if kept, return dropped)
+  R7-NO-OPENAT2                CAUGHT
+  R7-HOME-CACHE-SOURCE         CAUGHT
