@@ -457,6 +457,31 @@ fn model_extended_identity_is_refused() {
 }
 
 #[test]
+fn model_extended_session_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier
+        .host_set_session(instance, "session-a2")
+        .expect("set session");
+    let refusal = verifier
+        .use_grant(verifier.open_call(instance), &guest(handle))
+        .expect_err("extended session");
+    assert_eq!(refusal, Refuse::Session);
+    assert_eq!(refusal.to_string(), "session does not match the grant");
+    verifier
+        .host_set_session(instance, "session-a")
+        .expect("restore session");
+    let decision = verifier
+        .use_grant(verifier.open_call(instance), &guest(handle))
+        .expect("the stored session still matches");
+    assert_eq!(decision.session, "session-a");
+    assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
+}
+
+#[test]
 fn model_new_session_is_refused() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
