@@ -1096,3 +1096,30 @@
   `tools/Cargo.toml`, `capsule/`, `tools/build`, lab CID or sha256 pin changed. Retired-label greps from the repo root
   (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256'
   lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 044 (M1 A7 lab half: a refused run gets a receipt that names its reason). Base `deb1cab13`.
+  `tools/src/receipt.rs`: `REFUSAL_SCHEMA` (`wc-005.run-refusal/v1`); `refusal_reason(&TwoEngineRefusal) -> (&'static
+  str, Option<Engine>)`, one exhaustive `match` over every `TwoEngineRefusal` variant and one over every `run::Reason`
+  variant, no wildcard arm (24 `Reason` ids, each the variant in snake_case except `Writer` → `writer_refused`, plus
+  `verify_refused` and `outputs_differ`; the engine is the one the reason names, else none); `render_refused` gives
+  the five lines `schema`, `outcome: refused`, `reason`, `engine: <wasmtime|wasmer|none>` and `detail: "<Display,
+  escape_ascii>"`, with no lab CID line; `write_refused_receipt` writes it through `write_new_file`, its refusal
+  unchanged. `render`, `RECEIPT_SCHEMA` and the passed-run lines are unchanged, and `run.rs` is unchanged (how `run`
+  refuses is not touched). New tests in `tests/run.rs`: `budget_refusal_receipt_names_its_reason` (pinned stand-in
+  wasmtime `exec -a "$module" /bin/sleep 600`, `counting` wasmer, 200 ms budget, under `answer_within_watchdog`;
+  exact five lines with `reason: budget_exceeded`, `engine: wasmtime`), `refusal_receipt_ids_are_distinct_and_named`
+  (one example per variant, made in the test; a test-only exhaustive `reason_variant` match makes a new `Reason`
+  variant fail the test build until it has an example) and `refusal_receipt_write_refuses_an_existing_path` (a real
+  zero-budget refusal; the written receipt, a planted file, a live link and a dangling link). New falsifier
+  F-WC-A7-RECEIPT-REASON-GENERIC: in `receipt.rs` the line `Reason::BudgetExceeded { engine, .. } =>
+  ("budget_exceeded", Some(*engine)),` gets `"engine_failed"`; F-WC-README-COUNT re-anchored to 178. Canonical runner,
+  from the repo root: `python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json
+  F-WC-A7-RECEIPT-REASON-GENERIC F-WC-README-COUNT` gave "baseline: 3 named tests pass without an edit, 0 do not",
+  "F-WC-README-COUNT CAUGHT", "F-WC-A7-RECEIPT-REASON-GENERIC CAUGHT", "summary: 2 CAUGHT of 2", exit 0; then the
+  other 12 entries that edit `tools/src/receipt.rs` gave "baseline: 4 named tests pass without an edit, 0 do not",
+  "summary: 12 CAUGHT of 12", exit 0; no `*.falsify-original` left. Every one of the 187 anchors in `falsifiers.json`
+  is found exactly once (a `str.count` = 1 loop). README: "The refusal receipt" part in "Run receipt (wc-005c)", the
+  run-budget sentence points to it, three named tests, totals 178 (one task 044) and 114 runner-caught, a task 044
+  section. Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (119
+  passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0. No
+  dependency, `Cargo.toml`, `Cargo.lock`, lab CID or pin changed. Retired-label greps from the repo root: both empty,
+  exit 1.
