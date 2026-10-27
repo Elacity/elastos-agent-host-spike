@@ -1,0 +1,10 @@
+id: F-A7-ownceil
+file: src/ledger.rs
+test: ledger::model_second_agent_does_not_raise_the_ceiling
+--- old
+        if let Some(agent_ceiling) = ledger.ceilings.get(&identity).copied() {
+            ledger.ceiling = agent_ceiling;
+        }
+--- new
+        let _kept = &identity;
+--- end

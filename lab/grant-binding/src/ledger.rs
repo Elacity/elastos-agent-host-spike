@@ -33,6 +33,8 @@ fn handles_match(bound: Handle, presented: Handle) -> bool {
 #[derive(Debug)]
 pub(crate) struct Ledger {
     ceiling: u64,
+    ceilings: HashMap<String, u64>,
+    pending_identity: Option<String>,
     held: u64,
     next_reservation: u64,
     charged: u64,
@@ -44,6 +46,8 @@ impl Ledger {
     pub(crate) fn new() -> Self {
         Self {
             ceiling: 0,
+            ceilings: HashMap::new(),
+            pending_identity: None,
             held: 0,
             next_reservation: 0,
             charged: 0,
@@ -159,8 +163,22 @@ impl std::fmt::Display for TimeoutRefuse {
 }
 
 impl Verifier {
+    /// Stages the grant identity whose admitted amount the next `admit` keeps.
+    pub(crate) fn stage_admitted_identity(&self, identity: &str) {
+        self.ledger.lock().expect("ledger lock").pending_identity = Some(identity.to_owned());
+    }
+
+    fn store_staged_ceiling(&self, ceiling: u64) {
+        let mut ledger = self.ledger.lock().expect("ledger lock");
+        if let Some(identity) = ledger.pending_identity.take() {
+            ledger.ceilings.insert(identity, ceiling);
+        }
+    }
+
     /// Sets the allowance ceiling. Outstanding holds stay as they are.
+    /// A staged identity keeps this ceiling for its own reserves.
     pub fn admit(&self, ceiling: u64) {
+        self.store_staged_ceiling(ceiling);
         self.ledger.lock().expect("ledger lock").ceiling = ceiling;
     }
 
@@ -176,8 +194,17 @@ impl Verifier {
     ) -> Result<Reservation, ReserveRefuse> {
         self.resolve(*call, request.handle)
             .map_err(ReserveRefuse::Binding)?;
+        let identity = self
+            .grants
+            .get(&request.handle)
+            .expect("resolved grant")
+            .identity
+            .clone();
         let mut ledger = self.ledger.lock().expect("ledger lock");
         let held = ledger.held;
+        if let Some(agent_ceiling) = ledger.ceilings.get(&identity).copied() {
+            ledger.ceiling = agent_ceiling;
+        }
         let ledger: &mut Ledger = &mut ledger;
         let total = match held.checked_add(amount) {
             Some(total) if total <= ledger.ceiling => total,
@@ -1500,4 +1527,59 @@ fn model_unknown_from_another_handle_does_not_mark_the_hold() {
     assert_eq!(after_release.charged, 0);
     assert_eq!(after_release.held, 0);
     assert!(!after_release.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_second_agent_does_not_raise_the_ceiling() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-2", "session-a");
+    assert_ne!(second, first);
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", rights())
+        .expect("bind");
+    assert_ne!(second_handle, first_handle);
+    let first_call = verifier.open_call(first);
+    let second_call = verifier.open_call(second);
+    let first_request = guest(first_handle);
+    let second_request = guest(second_handle);
+    let granted = verifier
+        .admit_ask(
+            &first_call,
+            &first_request,
+            crate::ask::BudgetAsk { amount: 4 },
+            10,
+        )
+        .expect("first ask");
+    assert_eq!(granted, 4);
+    let granted = verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            crate::ask::BudgetAsk { amount: 50 },
+            80,
+        )
+        .expect("second ask");
+    assert_eq!(granted, 50);
+    let refusal = verifier
+        .reserve(&first_call, &first_request, 5)
+        .expect_err("second ask does not raise the first ceiling");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 0,
+            asked: 5,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    verifier
+        .reserve(&second_call, &second_request, 50)
+        .expect("second agent keeps its own ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 50);
 }
