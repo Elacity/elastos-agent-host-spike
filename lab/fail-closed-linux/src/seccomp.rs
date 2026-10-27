@@ -3,9 +3,12 @@
 //! A foreign architecture kills the process. On x86-64 every x32 system call
 //! returns EPERM. The system calls in `DENIED`, and `clone` with any
 //! namespace flag, return EPERM; `clone3` returns ENOSYS so the C library
-//! falls back to `clone`, whose flags the filter can read. Every other system
-//! call is allowed: this is a deny-list for network sockets and sandbox
-//! escapes, not a per-provider allow-list.
+//! falls back to `clone`, whose flags the filter can read. `DENIED` includes
+//! `pidfd_open`, `pidfd_getfd` and `pidfd_send_signal`, so a confined
+//! process cannot steal a parent fd or signal through a pidfd. Every other
+//! system call is allowed: this is a deny-list for network sockets and
+//! sandbox escapes, not a per-provider allow-list. A same-uid host process
+//! is outside this filter.
 
 use libc::{
     sock_filter, BPF_ABS, BPF_JEQ, BPF_JMP, BPF_JSET, BPF_K, BPF_LD, BPF_RET, BPF_W,
@@ -33,6 +36,9 @@ pub const DENIED: &[libc::c_long] = &[
     libc::SYS_socketpair,
     libc::SYS_process_vm_readv,
     libc::SYS_process_vm_writev,
+    libc::SYS_pidfd_open,
+    libc::SYS_pidfd_getfd,
+    libc::SYS_pidfd_send_signal,
     libc::SYS_unshare,
     libc::SYS_setns,
     libc::SYS_mount,

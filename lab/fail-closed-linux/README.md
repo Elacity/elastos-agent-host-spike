@@ -18,7 +18,7 @@ step stops it.
 | user-namespace | `unshare`, `uid_map`, `setgroups`, `gid_map` | `unshare(CLONE_NEWUSER)`, then maps the caller's own uid and gid to themselves |
 | pid-namespace | `unshare_pid` | `unshare(CLONE_NEWPID)`. The caller stays in the old PID namespace. A later fork puts the provider in the new one. A failed unshare refuses: `the PID namespace cannot be created` |
 | capabilities | `cap_last_cap`, `bounding_set`, `ambient_set`, `capset` | `PR_CAPBSET_DROP` for every capability up to `/proc/sys/kernel/cap_last_cap`, `PR_CAP_AMBIENT_CLEAR_ALL`, then `capset` to all zero |
-| no_new_privs | `set_no_new_privs`, `set_dumpable` | `prctl(PR_SET_NO_NEW_PRIVS, 1)`, then `chmod 0111` of the granted binary. The provider calls `prctl(PR_SET_DUMPABLE, 0)` in `exec()`. Init traces the provider so a same-uid host cannot attach (the userns owner keeps `CAP_SYS_PTRACE`). |
+| no_new_privs | `set_no_new_privs`, `set_dumpable` | `prctl(PR_SET_NO_NEW_PRIVS, 1)`, then `chmod 0111` of the granted binary. The provider calls `prctl(PR_SET_DUMPABLE, 0)` in `exec()`. Init traces the provider so a same-uid host `PTRACE_ATTACH` of the provider is EPERM (one tracer). The 1:1 userns owner keeps `CAP_SYS_PTRACE`, so same-uid host `process_vm_readv`, `pidfd_getfd` and `perf_event_open` of the provider stay NOT CLOSED. Init stays dumpable so the parent can read `/proc/<init>/task/init/children`; same-uid `PTRACE_ATTACH` of init is NOT CLOSED. |
 | seccomp | `install_filter`, `install_no_exec` | first `seccomp(SECCOMP_SET_MODE_FILTER)` with the deny-list in `src/seccomp.rs`. That filter allows `prctl(PR_SET_DUMPABLE)` only with value 0, so the provider cannot turn dumpable back on. After confine, a second filter returns EPERM for every `execveat` and for every `execve` except the helper's granted-path pointer. That one `execve` is the confined program's own initial exec. After that image starts, pathname re-exec of the granted binary and `execve("/proc/self/fd/N")` of a memfd both return EPERM. A failed second install refuses and names `install_no_exec`. |
 | landlock | `abi_probe`, `abi_floor`, `right_probe`, `create_ruleset`, `storage_root_rule`, `executable_rule`, `restrict_self`, `enforce_self` | probes the kernel ABI, then requires every right the shared file profile needs (`truncate` at ABI 3, `ioctl_dev` at ABI 5). A missing right refuses and names the right and the ABI that first expresses it. Then it try-creates a ruleset for each needed right; `EINVAL` is a named `right_probe` refusal so a lying ABI number cannot hide a missing bit. After `restrict_self` a throwaway child tries write-outside, truncate, ioctl, `execveat` of a memfd, `REFER` (rename across two storage dirs), and `make_*` (fifo, symlink, char, block, sock). Any success is a refusal. TCP bind/connect and `LANDLOCK_SCOPE_SIGNAL` are NOT COVERED here: seccomp denies `socket` before a net probe can run, and the self-test child shares the provider's PID namespace. The ruleset handles only bits that ABI knows. The storage grant is the eight-right mask (no `REFER`, no `ioctl_dev`, no special-file create). ABI 6 also sets `LANDLOCK_SCOPE_SIGNAL`. |
 | launch | `sanitize_stdio`, `close_fds` | before restrict, if fd 0, 1 or 2 is a terminal or a socket (`S_ISSOCK`) it is replaced with `/dev/null`. A failed replace refuses and names the fd. Before exec, close every fd except stdin, stdout, stderr and the fault pipe (`close_range`, or `/proc/self/fd` if that syscall is missing). The identity pipe stays close-on-exec. A pre-confine pty or Unix socket cannot be inherited on stdin, so `SCM_RIGHTS` cannot import a host fd. |
@@ -45,10 +45,16 @@ needed right.
 The seccomp filter kills a process that uses a foreign architecture. On
 x86-64 it returns EPERM for every x32 call. It returns EPERM for sockets,
 `prctl(PR_SET_DUMPABLE)` with a value other than 0, namespace calls,
-`mount`, `bpf`, module loading and the other calls in `DENIED`, and for
+`mount`, `bpf`, module loading, `pidfd_open`, `pidfd_getfd`,
+`pidfd_send_signal` and the other calls in `DENIED`, and for
 `clone` with a namespace flag. `ptrace` is denied by the second filter,
-after init has attached to the provider. A same-uid host cannot attach:
-the userns owner keeps `CAP_SYS_PTRACE`, so dumpable 0 is not enough. It returns ENOSYS for
+after init has attached to the provider. A same-uid host
+`PTRACE_ATTACH` of the provider is EPERM because init already holds the
+tracer slot. Dumpable 0 makes `/proc/<provider>/mem` EACCES. That is
+not a closed host-memory story: the userns owner keeps `CAP_SYS_PTRACE`,
+so same-uid host `process_vm_readv`, `pidfd_getfd` and `perf_event_open`
+stay NOT CLOSED. Same-uid `PTRACE_ATTACH` of init is NOT CLOSED; init
+must stay dumpable. It returns ENOSYS for
 `clone3`. It allows all other calls. This filter is a deny-list. A
 per-provider allow-list is profile work (see the PR #296 section below).
 
@@ -119,7 +125,7 @@ Linux x86_64, kernel 6.12.94+, rustc 1.91.0, Landlock ABI 6.
 | --- | --- |
 | `lib` (unit) | 9 passed |
 | `simulated` | 22 passed |
-| `real_kernel` | 32 passed |
+| `real_kernel` | 33 passed |
 
 Each refusal row runs for `did-provider`, `wallet-provider` and
 `model-provider` in both suites. A real-kernel row uses the real `fcl-launch`
@@ -149,7 +155,8 @@ seccomp gives the errno, and the feature itself is present.
 | Memfd second image | — | `real_memfd_second_image_is_refused` | probe copies itself into a memfd and `execveat(AT_EMPTY_PATH)`; seccomp returns EPERM |
 | Memfd via `/proc/self/fd/N` | — | `real_memfd_procfd_second_image_is_refused` | memfd without `MFD_EXEC`, then `fchmod` and `execve("/proc/self/fd/N")`; seccomp returns EPERM |
 | Granted-path re-exec | — | `real_granted_path_reexec_is_refused` | pathname `execve` of the granted binary after start returns EPERM |
-| Same-uid host ptrace / mem | — | `real_same_uid_host_cannot_ptrace_or_read_mem` | after start, `PR_SET_DUMPABLE(1)` is EPERM; a same-uid host `PTRACE_ATTACH` of init and of the provider is EPERM; `/proc/<pid>/mem` is EACCES |
+| Same-uid host ptrace / mem | — | `real_same_uid_host_cannot_ptrace_or_read_mem` | CLOSED after start: `PR_SET_DUMPABLE(1)` is EPERM; same-uid host `PTRACE_ATTACH` of the provider is EPERM; `/proc/<provider>/mem` is EACCES. NOT CLOSED (1:1 userns owner `CAP_SYS_PTRACE`; this uid cannot map another host uid): same-uid host `process_vm_readv`, `pidfd_getfd` and `perf_event_open` of the provider, and `PTRACE_ATTACH` of init. The row names those leftovers. It does not treat them as a PASS. |
+| In-sandbox pidfd of init | — | `real_confined_provider_cannot_pidfd_parent` | after start, `pidfd_open`, `pidfd_getfd` and `pidfd_send_signal` of init are EPERM |
 | Lying enforcement | `sim_lying_kernel_enforcement_refuses` | `real_lying_enforcement_self_test_refuses` | SimKernel reports a denied op succeeded. Real hook: `--test-lie-enforcement` |
 | No-exec filter cannot be installed | `sim_no_exec_filter_failure_refuses` | — | SimKernel: `install_no_exec` fails; the refusal names the step. A real second `seccomp` failure is the same syscall as the first filter |
 | Stdio replace fails | `sim_stdio_sanitize_failure_refuses` | — | SimKernel: `sanitize_stdio` fails and names fd 0 |
@@ -300,6 +307,7 @@ It must survive: the whole suite passes on its copy. Logs go to
 | F39-execve-after-start | the no-exec filter allows later `execve` | granted-path re-exec and memfd `/proc/self/fd` rows |
 | F40-dumpable-prctl-skipped | `set_not_dumpable` is skipped | `real_same_uid_host_cannot_ptrace_or_read_mem` |
 | F41-dumpable-reenable-allowed | `PR_SET_DUMPABLE` removed from the first seccomp filter | `real_same_uid_host_cannot_ptrace_or_read_mem` |
+| F42-pidfd-allowed | `pidfd_open`, `pidfd_getfd` and `pidfd_send_signal` removed from `DENIED` | `real_confined_provider_cannot_pidfd_parent` |
 | F12-restrict-self-error-ignored | a `restrict_self` error is ignored | the ruleset row in both suites |
 | F13-socket-allowed | `socket` removed from the seccomp deny-list | `real_confined_provider_has_every_layer` |
 | F14-storage-rule-covers-parent | the Landlock storage rule names the parent directory | `real_confined_provider_has_every_layer` |
@@ -308,7 +316,7 @@ It must survive: the whole suite passes on its copy. Logs go to
 | F17-gid-map-reported-as-uid-map | a `gid_map` failure is reported as `uid_map` | 2 simulated tests |
 | C00-noop-control | a comment | must survive |
 
-Result: `python3 falsify.py` on this tree: 37/37 caught; 1/1
+Result: `python3 falsify.py` on this tree: 38/38 caught; 1/1
 control survived. A skipped (`ignored`) test is `NOT RUN`, never a pass.
 F19 (skip `CLONE_NEWPID`) is caught because the probe's `nspid` is a
 host pid. F23-F26 catch the #338 review gaps. F27-F29, F31 and F32
@@ -318,7 +326,8 @@ without `execve`. F36-F37 catch the r4 leftovers: a memfd second image
 and a pre-confine pty on stdin. F38-F39 catch the r5 leftovers: an
 inherited stdin socket and a later `execve` after start. F40-F41 catch
 the r6 residual: dumpable stays 1 and a same-uid host can
-`PTRACE_ATTACH` or open `/proc/<pid>/mem`.
+`PTRACE_ATTACH` the provider or open `/proc/<pid>/mem`. F42 catches
+the r7 in-sandbox leftover: `pidfd_getfd` of init.
 
 ## Not covered here
 
@@ -352,11 +361,18 @@ the r6 residual: dumpable stays 1 and a same-uid host can
   `LANDLOCK_SCOPE_SIGNAL` are NOT COVERED by the self-test (seccomp
   denies `socket`; the self-test child is in the same PID namespace as
   the provider).
-- Host ptrace: after start dumpable is 0. A same-uid host
-  `PTRACE_ATTACH` of init or the provider is EPERM, and
-  `/proc/<pid>/mem` is EACCES. The provider's `PR_SET_DUMPABLE(1)` is
-  EPERM. Bind-mount of the granted path is NOT RUN when this uid cannot
-  mount. Landlock TCP and `LANDLOCK_SCOPE_SIGNAL` stay NOT COVERED.
+- Host ptrace and memory: after start dumpable is 0. A same-uid host
+  `PTRACE_ATTACH` of the provider is EPERM, and `/proc/<provider>/mem`
+  is EACCES. The provider's `PR_SET_DUMPABLE(1)` is EPERM. Same-uid
+  host `process_vm_readv`, `pidfd_getfd` and `perf_event_open` of the
+  provider are NOT CLOSED: a 1:1 unprivileged userns sets `ns->owner`
+  to the caller's euid, so every same-uid host process has
+  `CAP_SYS_PTRACE` in that namespace. This uid cannot write a foreign
+  host uid into `uid_map`. Same-uid `PTRACE_ATTACH` of init is NOT
+  CLOSED; init stays dumpable so the parent can read
+  `/proc/<init>/task/init/children`. Bind-mount of the granted path is
+  NOT RUN when this uid cannot mount. Landlock TCP and
+  `LANDLOCK_SCOPE_SIGNAL` stay NOT COVERED.
 - Real Jetson: NOT RUN. An emulated 5.15 ABI-1 guest is a stand-in for
   the refusal text only. It does not prove tegra 5.15.148, JetPack LSM
   config, or real provider binaries.

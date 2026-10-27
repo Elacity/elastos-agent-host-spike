@@ -17,10 +17,13 @@
 //! per needed right; any success is a refusal. Before restrict, a terminal
 //! or a socket on fd 0, 1 or 2 is replaced with `/dev/null`; a failed
 //! replace refuses and names the fd. After the maps and the capability
-//! drop, the guard sets `PR_SET_DUMPABLE` to 0 and makes the granted
-//! binary execute-only, so `execve` does not reset dumpable to 1. The
-//! first seccomp filter then allows `PR_SET_DUMPABLE` only with value
-//! 0. After confine the guard installs a
+//! drop, the guard makes the granted binary execute-only and the
+//! provider sets `PR_SET_DUMPABLE` to 0 in `exec()`, so `execve` does
+//! not reset dumpable to 1. The first seccomp filter then allows
+//! `PR_SET_DUMPABLE` only with value 0, and denies `pidfd_open`,
+//! `pidfd_getfd` and `pidfd_send_signal`. Same-uid host
+//! `process_vm_readv`, `pidfd_getfd` and `perf_event_open` stay NOT
+//! CLOSED on a 1:1 userns. After confine the guard installs a
 //! second seccomp filter that returns EPERM for every `execveat` and for
 //! every `execve` except the helper's granted-path pointer. That one
 //! `execve` is the confined program's own initial exec. After that image

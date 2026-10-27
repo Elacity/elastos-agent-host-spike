@@ -1288,6 +1288,43 @@ fn real_stdin_socket_cannot_import_fd() {
 }
 
 #[test]
+fn real_confined_provider_cannot_pidfd_parent() {
+    for provider in PROVIDERS {
+        let fixture = Fixture::new("pidfd-parent", provider);
+        let mut command = launch_command(&launcher(), provider, &fixture, &[], Inherit::Nothing);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("cannot start the launcher");
+        let stdin = child.stdin.take().unwrap();
+        let (_pid, lines) = read_until_ready(&mut child, provider);
+        for name in [
+            "pidfd_open_parent",
+            "pidfd_getfd_parent",
+            "pidfd_send_signal_parent",
+        ] {
+            assert!(
+                lines.contains(&format!("{name} errno={}", libc::EPERM)),
+                "{provider}: {name} after start must be EPERM, got {lines:?}"
+            );
+            assert!(
+                !lines.iter().any(|line| line == &format!("{name} ok")),
+                "{provider}: {name} succeeded inside the sandbox: {lines:?}"
+            );
+        }
+        drop(stdin);
+        let done = child.wait_with_output().unwrap();
+        assert_eq!(
+            done.status.code(),
+            Some(0),
+            "{provider}: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    }
+}
+
+#[test]
 fn real_same_uid_host_cannot_ptrace_or_read_mem() {
     for provider in PROVIDERS {
         let fixture = Fixture::new("host-ptrace", provider);
@@ -1310,6 +1347,22 @@ fn real_same_uid_host_cannot_ptrace_or_read_mem() {
         let provider_pid = innermost_child(pid)
             .unwrap_or_else(|| panic!("NOT RUN: no provider pid under init {pid} ({provider})"));
         assert_ptrace_and_mem_refused(provider_pid, provider, "provider");
+
+        let foreign_map = unprivileged_foreign_uid_map_errno();
+        assert_eq!(
+            foreign_map,
+            libc::EPERM,
+            "{provider}: unprivileged uid_map of a foreign host uid must be EPERM, got {foreign_map}"
+        );
+
+        let leftovers = host_same_uid_leftovers(provider_pid, pid);
+        assert_eq!(
+            leftovers, HOST_SAME_UID_NOT_CLOSED,
+            "{provider}: host leftover set changed; update the README. got {leftovers:?}"
+        );
+        for leftover in &leftovers {
+            eprintln!("NOT CLOSED: {provider}: {leftover}");
+        }
 
         drop(stdin);
         let done = child.wait_with_output().unwrap();
@@ -1368,6 +1421,183 @@ fn assert_ptrace_and_mem_refused(pid: u32, provider: &str, who: &str) {
         Some(libc::EPERM),
         "{provider}: {who} PTRACE_ATTACH expected EPERM, got {errno:?}"
     );
+}
+
+/// Host attacks a 1:1 unprivileged userns cannot refuse. The official row
+/// records these as expected leftovers, never as a closed PASS.
+const HOST_SAME_UID_NOT_CLOSED: [&str; 4] = [
+    "host process_vm_readv of provider",
+    "host pidfd_getfd of provider",
+    "host perf_event_open of provider",
+    "host PTRACE_ATTACH of init",
+];
+
+fn last_errno() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+}
+
+fn refused(errno: i32) -> bool {
+    errno == libc::EPERM || errno == libc::EACCES
+}
+
+/// An unprivileged process can only map its own host uid. A foreign host
+/// uid in the map is EPERM, so this lab cannot move ns->owner off the
+/// caller's euid. That owner walk is why the leftovers below stay open.
+fn unprivileged_foreign_uid_map_errno() -> i32 {
+    let child = unsafe { libc::fork() };
+    assert!(child >= 0, "fork: {}", std::io::Error::last_os_error());
+    if child == 0 {
+        if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
+            unsafe { libc::_exit(last_errno()) };
+        }
+        let path = c"/proc/self/uid_map";
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
+        if fd < 0 {
+            unsafe { libc::_exit(last_errno()) };
+        }
+        // Host uid 1 is not this process. The 1:1 map of our own uid works;
+        // this one must not.
+        let map = b"0 1 1\n";
+        let written = unsafe { libc::write(fd, map.as_ptr().cast(), map.len()) };
+        if written < 0 {
+            unsafe { libc::_exit(last_errno()) };
+        }
+        unsafe { libc::_exit(0) };
+    }
+    let mut status = 0;
+    let waited = unsafe { libc::waitpid(child, &mut status, 0) };
+    assert_eq!(
+        waited,
+        child,
+        "waitpid: {}",
+        std::io::Error::last_os_error()
+    );
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else {
+        panic!("foreign uid_map child did not exit: status={status}");
+    }
+}
+
+fn first_map_addr(pid: u32) -> usize {
+    let text = fs::read_to_string(format!("/proc/{pid}/maps")).unwrap_or_default();
+    text.lines()
+        .next()
+        .and_then(|line| line.split('-').next())
+        .and_then(|hex| usize::from_str_radix(hex, 16).ok())
+        .unwrap_or(0x400000)
+}
+
+fn leftover_if_open(name: &'static str, closed: bool) -> Option<&'static str> {
+    if closed {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn host_process_vm_readv_closed(pid: u32) -> bool {
+    let addr = first_map_addr(pid);
+    let mut buf = [0u8; 8];
+    let local = libc::iovec {
+        iov_base: buf.as_mut_ptr().cast(),
+        iov_len: buf.len(),
+    };
+    let remote = libc::iovec {
+        iov_base: addr as *mut libc::c_void,
+        iov_len: buf.len(),
+    };
+    let n = unsafe { libc::process_vm_readv(pid as libc::pid_t, &local, 1, &remote, 1, 0) };
+    if n >= 0 {
+        return false;
+    }
+    refused(last_errno())
+}
+
+fn host_pidfd_getfd_closed(pid: u32) -> bool {
+    let pfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    if pfd < 0 {
+        return refused(last_errno());
+    }
+    let stolen = unsafe { libc::syscall(libc::SYS_pidfd_getfd, pfd, 1, 0) };
+    let err = last_errno();
+    if stolen >= 0 {
+        unsafe { libc::close(stolen as libc::c_int) };
+    }
+    unsafe { libc::close(pfd as libc::c_int) };
+    stolen < 0 && refused(err)
+}
+
+fn host_perf_event_open_closed(pid: u32) -> bool {
+    let mut attr = [0u8; 136];
+    attr[0..4].copy_from_slice(&1u32.to_ne_bytes());
+    attr[4..8].copy_from_slice(&136u32.to_ne_bytes());
+    attr[8..16].copy_from_slice(&9u64.to_ne_bytes());
+    attr[40..48].copy_from_slice(&(1u64 | (1u64 << 5)).to_ne_bytes());
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_perf_event_open,
+            attr.as_ptr(),
+            pid as libc::pid_t,
+            -1i32,
+            -1i32,
+            0u32,
+        )
+    };
+    if fd >= 0 {
+        unsafe { libc::close(fd as libc::c_int) };
+        return false;
+    }
+    refused(last_errno())
+}
+
+fn host_ptrace_attach_closed(pid: u32) -> bool {
+    let attached = unsafe {
+        libc::ptrace(
+            libc::PTRACE_ATTACH,
+            pid as libc::pid_t,
+            std::ptr::null_mut::<libc::c_void>(),
+            std::ptr::null_mut::<libc::c_void>(),
+        )
+    };
+    if attached == 0 {
+        let mut status = 0;
+        unsafe { libc::waitpid(pid as libc::pid_t, &mut status, 0) };
+        unsafe {
+            libc::ptrace(
+                libc::PTRACE_DETACH,
+                pid as libc::pid_t,
+                std::ptr::null_mut::<libc::c_void>(),
+                std::ptr::null_mut::<libc::c_void>(),
+            )
+        };
+        return false;
+    }
+    refused(last_errno())
+}
+
+fn host_same_uid_leftovers(provider_pid: u32, init_pid: u32) -> Vec<&'static str> {
+    [
+        leftover_if_open(
+            "host process_vm_readv of provider",
+            host_process_vm_readv_closed(provider_pid),
+        ),
+        leftover_if_open(
+            "host pidfd_getfd of provider",
+            host_pidfd_getfd_closed(provider_pid),
+        ),
+        leftover_if_open(
+            "host perf_event_open of provider",
+            host_perf_event_open_closed(provider_pid),
+        ),
+        leftover_if_open(
+            "host PTRACE_ATTACH of init",
+            host_ptrace_attach_closed(init_pid),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 fn unix_stream_pair() -> (std::fs::File, std::fs::File) {

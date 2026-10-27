@@ -356,8 +356,11 @@ impl Kernel for RealKernel {
             close_fault_write(self);
             close_identity_write(self);
             // The userns owner uid keeps CAP_SYS_PTRACE in this namespace,
-            // so dumpable 0 does not block a same-uid host attach. Init
-            // traces the provider; only one tracer is allowed.
+            // so dumpable 0 does not block a same-uid host attach.
+            // Init traces the provider; that occupies the single-tracer
+            // slot and makes host PTRACE_ATTACH of the provider EPERM.
+            // process_vm_readv, pidfd_getfd and perf_event_open do not
+            // need that slot. They stay NOT CLOSED on a 1:1 map.
             if unsafe {
                 libc::ptrace(
                     libc::PTRACE_ATTACH,

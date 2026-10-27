@@ -105,6 +105,10 @@ const SYS_EXECVEAT: i64 = 322;
 const SYS_MEMFD_CREATE: i64 = 279;
 #[cfg(target_arch = "aarch64")]
 const SYS_EXECVEAT: i64 = 281;
+// Common numbers on x86_64 and aarch64.
+const SYS_PIDFD_SEND_SIGNAL: i64 = 424;
+const SYS_PIDFD_OPEN: i64 = 434;
+const SYS_PIDFD_GETFD: i64 = 438;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -137,6 +141,7 @@ fn main() {
     report(&mut out, "stdin_ioctl", ioctl_on_fd(0));
     report(&mut out, "stdin_tiocsti", ioctl_tiocsti(0));
     try_set_dumpable(&mut out);
+    try_pidfd_parent(&mut out);
     if extra.memfd_exec {
         try_memfd_exec(&mut out, &args[0]);
     }
@@ -628,6 +633,37 @@ fn try_set_dumpable(out: &mut impl Write) {
             "set_dumpable errno={}",
             io::Error::last_os_error().raw_os_error().unwrap_or(-1)
         );
+    }
+}
+
+fn last_errno() -> i32 {
+    io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+}
+
+fn report_syscall(out: &mut impl Write, name: &str, ret: i64) {
+    if ret >= 0 {
+        let _ = writeln!(out, "{name} ok");
+    } else {
+        let _ = writeln!(out, "{name} errno={}", last_errno());
+    }
+}
+
+/// Exercise pidfd_open of init, then pidfd_getfd and pidfd_send_signal.
+/// When open is denied the other two still run against a dummy fd so
+/// seccomp, not the kernel fd check, is what the test sees.
+fn try_pidfd_parent(out: &mut impl Write) {
+    let open = unsafe { syscall(SYS_PIDFD_OPEN, 1i32, 0i32) };
+    report_syscall(out, "pidfd_open_parent", open);
+    let pidfd = if open >= 0 { open as i32 } else { 0 };
+    let getfd = unsafe { syscall(SYS_PIDFD_GETFD, pidfd, 1i32, 0i32) };
+    report_syscall(out, "pidfd_getfd_parent", getfd);
+    if getfd >= 0 {
+        unsafe { close(getfd as i32) };
+    }
+    let sent = unsafe { syscall(SYS_PIDFD_SEND_SIGNAL, pidfd, 0i32, 0i64, 0u32) };
+    report_syscall(out, "pidfd_send_signal_parent", sent);
+    if open >= 0 {
+        unsafe { close(open as i32) };
     }
 }
 
