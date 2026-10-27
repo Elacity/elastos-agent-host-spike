@@ -711,3 +711,5 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 `standin_stop_denies_that_sessions_pending` is this stand-in, and a PASS there gives the Runtime no A10 credit.
 
 `standin_matches_ra1_fields` and `standin_matches_ra6_states` are this stand-in, and a PASS there gives the Runtime no credit.
+
+`standin_two_agent_components_stay_resident` is this stand-in, and a PASS there gives the Runtime no A3 credit.

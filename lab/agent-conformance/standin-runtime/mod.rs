@@ -1069,9 +1069,17 @@ mod tests {
 
     const SHARED_PATH: &str = "/capsules/read-shared";
     const SHARED_NAME: &str = "read-shared";
+    const AGENT_A_PATH: &str = "/capsules/agent-a";
+    const AGENT_A_NAME: &str = "agent-a";
+    const AGENT_B_PATH: &str = "/capsules/agent-b";
+    const AGENT_B_NAME: &str = "agent-b";
 
     fn shared_body() -> Value {
         json!({ "path": SHARED_PATH })
+    }
+
+    fn agent_body(path: &str) -> Value {
+        json!({ "path": path })
     }
 
     fn shell_list(standin: &StandIn) -> Value {
@@ -1485,6 +1493,140 @@ mod tests {
                 ]
             }),
             "the stand-in lists both instances sorted by id"
+        );
+    }
+
+    #[test]
+    fn standin_two_agent_components_stay_resident() {
+        let mut standin = StandIn::new();
+        standin
+            .admit_resident(AGENT_A_PATH, AGENT_A_NAME, Start::Ok)
+            .expect("the stand-in admits agent-a");
+        standin
+            .admit_resident(AGENT_B_PATH, AGENT_B_NAME, Start::Ok)
+            .expect("the stand-in admits agent-b");
+        let first = standin
+            .post_capsules(Caller::Shell, &agent_body(AGENT_A_PATH))
+            .expect("the stand-in launches agent-a");
+        let second = standin
+            .post_capsules(Caller::Shell, &agent_body(AGENT_B_PATH))
+            .expect("the stand-in launches agent-b");
+        assert_eq!(
+            first["id"], "component-1",
+            "the stand-in numbers the agent-a launch component-1"
+        );
+        assert_eq!(
+            second["id"], "component-2",
+            "the stand-in numbers the agent-b launch component-2"
+        );
+        assert_eq!(
+            first["session_id"], first["id"],
+            "the stand-in uses the agent-a launch id as its Bus session"
+        );
+        assert_eq!(
+            second["session_id"], second["id"],
+            "the stand-in uses the agent-b launch id as its Bus session"
+        );
+        assert_eq!(
+            first["name"], AGENT_A_NAME,
+            "the stand-in names the agent-a launch from its admitted path"
+        );
+        assert_eq!(
+            second["name"], AGENT_B_NAME,
+            "the stand-in names the agent-b launch from its admitted path"
+        );
+        assert_eq!(
+            shell_list(&standin),
+            json!({
+                "capsules": [
+                    {
+                        "id": "component-1",
+                        "name": AGENT_A_NAME,
+                        "status": "starting",
+                        "session_id": "component-1",
+                        "cause": "",
+                    },
+                    {
+                        "id": "component-2",
+                        "name": AGENT_B_NAME,
+                        "status": "starting",
+                        "session_id": "component-2",
+                        "cause": "",
+                    },
+                ]
+            }),
+            "the stand-in lists both agent components starting after both launches"
+        );
+        standin
+            .finish_start("component-1")
+            .expect("the stand-in applies agent-a Start::Ok");
+        standin
+            .finish_start("component-2")
+            .expect("the stand-in applies agent-b Start::Ok");
+        let running = shell_list(&standin);
+        assert_eq!(
+            running,
+            json!({
+                "capsules": [
+                    {
+                        "id": "component-1",
+                        "name": AGENT_A_NAME,
+                        "status": "running",
+                        "session_id": "component-1",
+                        "cause": "",
+                    },
+                    {
+                        "id": "component-2",
+                        "name": AGENT_B_NAME,
+                        "status": "running",
+                        "session_id": "component-2",
+                        "cause": "",
+                    },
+                ]
+            }),
+            "the stand-in lists both agent components running with distinct ids after start returned"
+        );
+        standin.set_instant(60);
+        assert_eq!(
+            shell_list(&standin),
+            running,
+            "the stand-in still lists both running agent components at test instant 60"
+        );
+        assert_eq!(
+            standin.delete_capsule(Caller::Shell, "component-1", &stop_body()),
+            Ok(Value::Null),
+            "the stand-in stops component-1 and answers null"
+        );
+        let after_stop = shell_list(&standin);
+        assert_eq!(
+            after_stop["capsules"][0],
+            json!({
+                "id": "component-1",
+                "name": AGENT_A_NAME,
+                "status": "stopped",
+                "session_id": "component-1",
+                "cause": "stopped: stop one",
+            }),
+            "the stand-in lists component-1 stopped with the stop cause"
+        );
+        assert_eq!(
+            after_stop["capsules"][1],
+            json!({
+                "id": "component-2",
+                "name": AGENT_B_NAME,
+                "status": "running",
+                "session_id": "component-2",
+                "cause": "",
+            }),
+            "the stand-in keeps component-2 running as agent-b after the sibling stop"
+        );
+        assert_eq!(
+            after_stop["capsules"]
+                .as_array()
+                .expect("the stand-in returns capsules")
+                .len(),
+            2,
+            "the stand-in lists exactly the two agent components after one stop"
         );
     }
 

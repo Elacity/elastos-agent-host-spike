@@ -7898,3 +7898,109 @@ New:
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The probe still requests through `capabilities::request` and returns on refusal, with no provider invoke. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/effects.rs:132` is the new named test; `F-net-undeclared` failed at `:110` and `F-net-reason` failed at `:597`. |
 | 8. Identity, admission and allowance stay separate? | Yes | The undeclared row exercises admission (manifest declaration) alone and creates no grant; the declared row exercises the separate fixture denial. |
+
+## 055 — Two agent components stay resident in one stand-in
+
+055: `standin_two_agent_components_stay_resident` (`standin-runtime/mod.rs:1500`) admits `/capsules/agent-a` as `agent-a` and `/capsules/agent-b` as `agent-b` on one `StandIn`. It launches each path once, so the launch ids are `component-1` and `component-2` with `session_id` equal to each id and each name from that path's admit row. One list shows both `starting`, then both `running`, and instant 60 still shows both `running`. A stop of `component-1` with `{"reason":"stop one"}` returns null, stores `stopped: stop one`, and leaves `component-2` `running` as `agent-b`. `post_capsules`, `get_capsules`, `finish_start`, `delete_capsule`, `admit_resident`, `keep` and `visible` keep their bytes; no method is added. `standin_two_launches_are_two_instances` (`:1442`) still launches `/capsules/read-shared` twice and stops at `starting`. The new test uses one `StandIn` and no operator, probe build or second stand-in type.
+
+### Quote from the A3 journey (read only, `35697329be0aad89eb68d0adf78aa94d24751317:lab/resident-instances/SPEC.md`)
+
+> **A3.** Launch `read-shared` twice. Wait for one pending read from each
+> session. In one list snapshot both instances are live. Grant both for their
+> sessions. Both reach `running`. After the dwell, one snapshot still shows both
+> `running`, so `start` returned and they stayed resident. No new process
+> appeared below the operator. Stop both, then run the census.
+
+This task takes the two-component pair, the one list, the dwell at instant 60 and one stop that leaves the sibling. The pending-request, grant, process-tree and census sentences are A6, A10 and A12.
+
+### Hand-run plants
+
+No `falsifiers.json` id. Each plant ran one at a time and was restored before the next. The command was `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_two_agent_components_stay_resident -- --exact`. Each planted crate compiled (the stub and empty plants each with a warning), and the named test failed on its assertion. After the last restore the named test passed (`1 passed; 0 failed`), and `git diff --numstat -- lab/agent-conformance/standin-runtime/mod.rs` is `142 0`: only the new test, its four path/name constants and `agent_body` are added.
+
+F-standin-a3-stub. Named test `standin_two_agent_components_stay_resident`.
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let path = launch_path(body)?;
+```
+
+New:
+
+```text
+        require_shell(caller)?;
+        return Ok(json!({
+            "id": "component-1",
+            "name": "agent-a",
+            "status": "running",
+            "session_id": "component-1",
+        }));
+        let path = launch_path(body)?;
+```
+
+Planted exit 1 in 1.86 seconds (`real`), test result FAILED. Assertion: `src/../standin-runtime/mod.rs:1524:9`, `the stand-in numbers the agent-b launch component-2`; left `String("component-1")`, right `"component-2"`. The stub also stored no instance and read no admit. Restored, the named test passed.
+
+F-standin-a3-empty. Named test `standin_two_agent_components_stay_resident`.
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let mut listed: Vec<&Instance> = self
+```
+
+New:
+
+```text
+        require_shell(caller)?;
+        return Ok(json!({ "capsules": [] }));
+        let mut listed: Vec<&Instance> = self
+```
+
+Planted exit 1 in 1.52 seconds (`real`), test result FAILED. Assertion: `src/../standin-runtime/mod.rs:1539:9`, `the stand-in lists both agent components starting after both launches`; left `{"capsules":[]}`, right the two `starting` entries. Restored, the named test passed.
+
+F-standin-a3-one-name. Named test `standin_two_agent_components_stay_resident`.
+
+Old:
+
+```text
+        let path = launch_path(body)?;
+        let (name, start) = self.admitted_start(path)?;
+```
+
+New:
+
+```text
+        let path = launch_path(body)?;
+        let (_, start) = self.admitted_start(path)?;
+        let name = self.admitted[0].name.clone();
+```
+
+Planted exit 1 in 1.33 seconds (`real`), test result FAILED. Assertion: `src/../standin-runtime/mod.rs:1535:9`, `the stand-in names the agent-b launch from its admitted path`; left `String("agent-a")`, right `"agent-b"`. Restored, the named test passed. `delete_capsule`, `finish_start`, `admit_resident`, `keep` and `visible` are unchanged by the plants.
+
+### Docs
+
+`standin-runtime/README.md:37` is the new paragraph before `## Callers`. It keeps the RA-1 section and the RI-1 to RI-4 section, and states that `agent-a` and `agent-b` are two admitted components on one `StandIn`, that one list shows both `running` with distinct ids, and that instant 60 still shows both, with the M1-R replacement sentence, no A3 credit, the RT4 ignore and the 045 row for two launches of one path. `RUNBOOK.md:715` is the new paragraph after the last stand-in paragraph. `GAPS.md`, `falsifiers.json` and `falsify.py` are unchanged; so are `Cargo.toml` and `Cargo.lock`.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.168 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 339.377 seconds, inside the 600-second bound. 157 passed, 0 failed, 14 ignored across 12 targets. The lib target passed 42, including `standin_two_agent_components_stay_resident`; the effects target passed 59 with 12 ignored. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `standin-runtime/mod.rs:1500` admits the two fixture paths `/capsules/agent-a` and `/capsules/agent-b` as lab records and names no code or content by URL. |
+| 2. Capsule, Home or UI gains ungranted access? | No | The test reads and writes the stand-in's in-memory `admitted` and `instances`; it starts no route, opens no file or network, and grants nothing. |
+| 3. A second path or a second copy of one rule? | No | `standin-runtime/mod.rs:307` `post_capsules`, `:329` `get_capsules` and `:344` `delete_capsule` are reused as found; `:397` `mint_id` is the one id source. No method and no status map are added. |
+| 4. Runtime core grows? | No | The edit is `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and `LOG.md`. `elastos/` is unchanged. |
+| 5. Refusals deny by default with a clear reason? | Yes | No new refusal surface. The reused stop path refuses a non-live instance with 400 `instance is not live: <status>` at `:637` and an unknown id with 400 `unknown instance: <id>` at `:607`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The test decides from stored records; `standin-runtime/mod.rs:585` `apply_start` is the one start outcome arm and imports no capsule or `wasi:*`. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:1500` is the new named test; the three plants failed at `:1524`, `:1539` and `:1535`. |
+| 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:254` `admit_resident` stores the path name and the `Start`; the launch at `:307` reads that row and the stop at `:344` changes only one instance's phase and cause. |
+
+The real A3 row stays blocked. `standin_two_agent_components_stay_resident` is the lab stand-in, and a PASS there gives the Runtime no A3 credit. `parallel_capsules_complete_independently` stays `#[ignore = "blocked: RT4"]`.

@@ -34,6 +34,8 @@ The status strings are `starting`, `running`, `stopping`, `stopped` and `failed`
 
 This value is the lab stand-in and the real route can replace it later because the JSON matches (M1-R). `parallel_capsules_complete_independently` stays `#[ignore = "blocked: RT4"]`. `run_leaves_no_live_grant` stays blocked on the real Runtime.
 
+`agent-a` and `agent-b` are two admitted components on one `StandIn`. One launch of each path gives `component-1` and `component-2`; one list shows both `running` with distinct `id` and `session_id`, and the test instant 60 still shows both. `standin_two_agent_components_stay_resident` proves that pair. This value is the lab stand-in and the real route can replace it later because the list JSON matches (M1-R). A PASS gives the Runtime no A3 credit. `parallel_capsules_complete_independently` stays `#[ignore = "blocked: RT4"]`. Two launches of one path stay the 045 row, `standin_two_launches_are_two_instances`.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.
