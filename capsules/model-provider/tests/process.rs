@@ -865,6 +865,11 @@ enum HostedEffectAnswer {
     Cut,
     /// As `Cut`, but the backend sent a usage event before the cut.
     CutAfterUsage,
+    /// As `Cut`, but the stand-in writes the accepted head and the first
+    /// frame, then holds the close until `release_cut_after_first_frame`. The
+    /// connection is still open, so the test can read the text the provider
+    /// buffered from that frame before the cut lands.
+    CutHeldAfterFirstFrame,
     /// Reads the effect request to its end and closes without a status line,
     /// as a peer that received the request and then died.
     Closed,
@@ -955,6 +960,9 @@ struct HostedEffectStandIn {
     requests: Receiver<RecordedRequest>,
     /// False while `hold_answer` holds each answer back.
     answer_released: Arc<(Mutex<bool>, Condvar)>,
+    /// False while `hold_cut_after_first_frame` holds a cut answer after its
+    /// head and first frame, before the close.
+    cut_released: Arc<(Mutex<bool>, Condvar)>,
     /// What the backend answered, when the answer relays.
     relay_outcome: Arc<Mutex<Option<RelayOutcome>>>,
     /// The shared stand-in's live-grant view when the answer checks grants
@@ -989,6 +997,12 @@ impl HostedEffectStandIn {
     /// hosted stream after the backend sent a usage event.
     fn bind_cut_after_usage(label: &str) -> Self {
         Self::bind_answering(label, HostedEffectAnswer::CutAfterUsage, None)
+    }
+
+    /// Binds the stand-in that cuts a hosted stream after the accepted head
+    /// and the first frame, and holds the close until the test releases it.
+    fn bind_cut_held_after_first_frame(label: &str) -> Self {
+        Self::bind_answering(label, HostedEffectAnswer::CutHeldAfterFirstFrame, None)
     }
 
     /// Binds the stand-in that reads each effect request and closes without a
@@ -1053,6 +1067,7 @@ impl HostedEffectStandIn {
         let connections = Arc::new(AtomicUsize::new(0));
         let (request_tx, requests) = mpsc::channel();
         let answer_released = Arc::new((Mutex::new(true), Condvar::new()));
+        let cut_released = Arc::new((Mutex::new(true), Condvar::new()));
         let relay_outcome = Arc::new(Mutex::new(None));
         let refusals = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
@@ -1060,6 +1075,7 @@ impl HostedEffectStandIn {
             let listener = Arc::clone(&listener);
             let connections = Arc::clone(&connections);
             let answer_released = Arc::clone(&answer_released);
+            let cut_released = Arc::clone(&cut_released);
             let relay_outcome = Arc::clone(&relay_outcome);
             let refusals = Arc::clone(&refusals);
             let stopping = Arc::clone(&stop);
@@ -1070,6 +1086,7 @@ impl HostedEffectStandIn {
                             connections.fetch_add(1, Ordering::Relaxed);
                             let request_tx = request_tx.clone();
                             let answer_released = Arc::clone(&answer_released);
+                            let cut_released = Arc::clone(&cut_released);
                             let relay_outcome = Arc::clone(&relay_outcome);
                             let refusals = Arc::clone(&refusals);
                             let answer = answer.clone();
@@ -1078,6 +1095,7 @@ impl HostedEffectStandIn {
                                     stream,
                                     request_tx,
                                     answer_released,
+                                    cut_released,
                                     answer,
                                     relay_outcome,
                                     refusals,
@@ -1095,6 +1113,7 @@ impl HostedEffectStandIn {
             connections,
             requests,
             answer_released,
+            cut_released,
             relay_outcome,
             grants,
             refusals,
@@ -1113,6 +1132,20 @@ impl HostedEffectStandIn {
     /// Lets every held answer go with the Runtime's refusal.
     fn release_answer(&self) {
         let (released, wake) = &*self.answer_released;
+        *released.lock().unwrap() = true;
+        wake.notify_all();
+    }
+
+    /// Holds a `CutHeldAfterFirstFrame` answer open after its accepted head
+    /// and first frame, before the close. Call it before the provider starts.
+    fn hold_cut_after_first_frame(&self) {
+        let (released, _) = &*self.cut_released;
+        *released.lock().unwrap() = false;
+    }
+
+    /// Lets a held cut answer close, which is the Runtime cutting the stream.
+    fn release_cut_after_first_frame(&self) {
+        let (released, wake) = &*self.cut_released;
         *released.lock().unwrap() = true;
         wake.notify_all();
     }
@@ -1209,6 +1242,7 @@ fn serve_hosted_effect(
     stream: UnixStream,
     request_tx: mpsc::Sender<RecordedRequest>,
     answer_released: Arc<(Mutex<bool>, Condvar)>,
+    cut_released: Arc<(Mutex<bool>, Condvar)>,
     answer: HostedEffectAnswer,
     relay_outcome: Arc<Mutex<Option<RelayOutcome>>>,
     refusals: Arc<Mutex<Vec<String>>>,
@@ -1234,11 +1268,13 @@ fn serve_hosted_effect(
             released = wake.wait(released).unwrap();
         }
     }
+    let hold_after_first_frame = matches!(answer, HostedEffectAnswer::CutHeldAfterFirstFrame);
     let response = match answer {
         HostedEffectAnswer::Refused => RUNTIME_HOSTED_REFUSAL.to_vec(),
         HostedEffectAnswer::Streaming => runtime_hosted_stream_answer(),
         HostedEffectAnswer::Cut => runtime_hosted_cut_answer(),
         HostedEffectAnswer::CutAfterUsage => runtime_hosted_cut_after_usage_answer(),
+        HostedEffectAnswer::CutHeldAfterFirstFrame => runtime_hosted_cut_answer(),
         HostedEffectAnswer::Closed => return,
         HostedEffectAnswer::Relay { backend_url } => {
             let outcome = relay_hosted_effect(&stream, &body, &backend_url);
@@ -1275,6 +1311,15 @@ fn serve_hosted_effect(
         }
     };
     let _ = (&stream).write_all(&response);
+    // The held cut has written the accepted head and the first frame; keeping
+    // the connection open until the release is the Runtime's cut still to come.
+    if hold_after_first_frame {
+        let (released, wake) = &*cut_released;
+        let mut released = released.lock().unwrap();
+        while !*released {
+            released = wake.wait(released).unwrap();
+        }
+    }
 }
 
 /// What a relaying answer read from the backend: its status with the first
@@ -2372,6 +2417,336 @@ fn hosted_stream_cut_after_a_usage_chunk_keeps_only_the_observed_counts() {
     );
 
     provider.shutdown();
+}
+
+/// Is this event the text the stand-in's first frame carries? The provider
+/// stores a streamed delta as a `text_delta` event whose `data` holds the text
+/// (`src/adapters.rs:2514-2515`, `:2568-2576`).
+fn is_ready_text_event(event: &Value) -> bool {
+    event["kind"] == "text_delta"
+        && event["data"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("ready"))
+}
+
+/// A hosted run the Runtime cuts after it already sent text keeps that text in
+/// its event record: the events stay ordered and a reconnect reads only the
+/// rest, the run keeps one terminal state, and a second provider process on the
+/// same root replays the same record without repeating the effect. These are
+/// the conformance rules "stream events are ordered and reconnectable", "each
+/// request has one terminal state" and "reconnecting presentation does not
+/// repeat inference or effects" (`docs/MODEL_PROVIDER.md:545-548`). The cut
+/// also pins the error half of "Errors identify the failed request and whether
+/// any output was emitted" (`docs/MODEL_PROVIDER.md:298`): the ready text event
+/// is recorded before the cut, while the terminal carries no output.
+///
+/// The provider buffers text and publishes it on a 1 s timer
+/// (`src/adapters.rs:36` `LOCAL_TEXT_DELTA_FLUSH_INTERVAL`, the timer at
+/// `:2088-2092` and its select arm at `:2101-2106`, `flush_local_text_delta`
+/// at `:2553`). The stand-in writes the Runtime's accepted head and the first
+/// frame and holds the close, so the test polls `runs_events`
+/// (`src/state.rs:667`, `page_run_events` `:1282`) with a 10 s deadline, well
+/// under `HOSTED_FIXTURE_RUNTIME_MS_LIMIT` of 30 s, until the ready delta is
+/// recorded. Only then does it release the cut, so the "output was emitted"
+/// half is deterministic. The one terminal transition appends one terminal
+/// event (`transition_terminal_with_backend_report`, `src/state.rs:1341`;
+/// `synthesize_terminal_event`, `:1602`; the `Failed` arm `:1639`). The
+/// restart check keeps the direct-key test's order
+/// (`src/execution.rs:4513`): shut the first provider down, start a second one
+/// on the same root, then `runs_get` and `runs_events` from `0`.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_text_sent_before_a_runtime_cut_stays_ordered_and_replays_after_restart() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted text before a cut: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-cut-text-replay");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind_cut_held_after_first_frame("hosted-cut-text-replay");
+    stand_in.hold_cut_after_first_frame();
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "a hosted answer whose text reaches the Runtime before the cut"
+    });
+    let create_request = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": "session:test",
+            "capsule_id": "assistant",
+            "grant_id": "grant:test",
+            "request_id": test_support::fixture_model_request_id(
+                "request:hosted-cut-text-replay"
+            ),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": model_input_hash(&input).unwrap()
+        }
+    });
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+    let access = access_binding(&create_request);
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    assert_eq!(
+        create["data"]["run_id"], expected_run_id,
+        "runs_create must return the contract run id"
+    );
+
+    // The stand-in holds the cut open after the accepted head and the first
+    // frame. The run must stay open while the provider publishes the text it
+    // buffered from that frame, so the test learns the output was emitted
+    // rather than assuming the flush timer fired.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let run = provider.request(json!({
+            "op": "runs_get",
+            "run_id": expected_run_id,
+            "runtime_binding": access
+        }));
+        assert_eq!(run["status"], "ok", "unexpected run response: {run}");
+        assert!(
+            run["data"]["terminal"].is_null(),
+            "the run must stay open while the stand-in holds the cut open: {run}"
+        );
+        let held_page = provider.request(json!({
+            "op": "runs_events",
+            "run_id": expected_run_id,
+            "runtime_binding": access,
+            "after_sequence": 0
+        }));
+        assert_eq!(
+            held_page["status"], "ok",
+            "unexpected events response: {held_page}"
+        );
+        let ready_text = held_page["data"]["events"]
+            .as_array()
+            .is_some_and(|events| events.iter().any(is_ready_text_event));
+        if ready_text {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the held cut run published no text event carrying ready within 10 s: {held_page}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    stand_in.release_cut_after_first_frame();
+    let settled = wait_for_run_terminal(&mut provider, &expected_run_id, &access);
+    assert_eq!(
+        settled["data"]["run_id"], expected_run_id,
+        "runs_get must return the contract run id"
+    );
+    assert_eq!(
+        settled["data"]["status"], "failed",
+        "a cut hosted stream must fail the run: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["error"]["code"], "transport_interrupted",
+        "a cut hosted stream must settle with the transport fault: {settled}"
+    );
+    assert!(
+        settled["data"]["terminal"]["output"].is_null(),
+        "a failed run must carry no output: {settled}"
+    );
+    // The stand-in sent no usage event, so the cut records usage unknown with
+    // its reason and no observed counts, as the cut test with no usage event
+    // records it.
+    assert_eq!(
+        settled["data"]["terminal"]["backend_report"],
+        json!({
+            "schema": BACKEND_REPORT_SCHEMA,
+            "resolved_model": {"status": "unknown"},
+            "usage": {"status": "unknown", "reason": "cut"},
+            "cost": {"status": "unknown"},
+        }),
+        "a cut hosted stream must record usage unknown with reason cut: {settled}"
+    );
+
+    // Every event of the run is one page from 0, in order, with one terminal
+    // event last.
+    let page = provider.request(json!({
+        "op": "runs_events",
+        "run_id": expected_run_id,
+        "runtime_binding": access,
+        "after_sequence": 0
+    }));
+    assert_eq!(page["status"], "ok", "unexpected events response: {page}");
+    assert_eq!(
+        page["data"]["has_more"], false,
+        "the fixture run's events must fit one page: {page}"
+    );
+    let events = page["data"]["events"]
+        .as_array()
+        .expect("runs_events returns an event array")
+        .clone();
+    assert!(!events.is_empty(), "the run must keep its events: {page}");
+    for (position, event) in events.iter().enumerate() {
+        assert_eq!(
+            event["sequence"].as_u64(),
+            Some(position as u64 + 1),
+            "event sequences must start at 1 and rise by exactly one: {page}"
+        );
+    }
+    let terminal_position = events.len() - 1;
+    assert_eq!(
+        events[terminal_position]["terminal"], true,
+        "the last event must be the terminal: {page}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["terminal"] == true)
+            .count(),
+        1,
+        "the run must keep exactly one terminal event: {page}"
+    );
+    let ready_text_positions: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| is_ready_text_event(event))
+        .map(|(position, _)| position)
+        .collect();
+    assert!(
+        !ready_text_positions.is_empty(),
+        "the run must keep the text event it published before the cut: {page}"
+    );
+    assert!(
+        ready_text_positions
+            .iter()
+            .all(|position| *position < terminal_position),
+        "every ready text event must come before the terminal: {page}"
+    );
+    assert_eq!(
+        events[terminal_position]["kind"], "failed",
+        "the terminal event must carry the failed status: {page}"
+    );
+
+    // A reconnect after the last text event returns the rest and repeats no
+    // text and no effect.
+    let last_text_position = *ready_text_positions.last().unwrap();
+    let last_text_sequence = events[last_text_position]["sequence"]
+        .as_u64()
+        .expect("a text event has a sequence");
+    let reconnect = provider.request(json!({
+        "op": "runs_events",
+        "run_id": expected_run_id,
+        "runtime_binding": access,
+        "after_sequence": last_text_sequence
+    }));
+    assert_eq!(
+        reconnect["status"], "ok",
+        "unexpected events response: {reconnect}"
+    );
+    let reconnect_events = reconnect["data"]["events"]
+        .as_array()
+        .expect("runs_events returns an event array");
+    assert_eq!(
+        reconnect_events.as_slice(),
+        &events[last_text_position + 1..],
+        "a reconnect after the last text event must return only the events after it: {reconnect}"
+    );
+    assert_eq!(
+        reconnect_events.last(),
+        Some(events.last().unwrap()),
+        "the reconnect must end at the same terminal event: {reconnect}"
+    );
+    assert!(
+        !reconnect_events.iter().any(is_ready_text_event),
+        "a reconnect must not repeat a text event: {reconnect}"
+    );
+
+    // A second provider process on the same root replays the same record.
+    provider.shutdown();
+    let mut restarted = ProviderProcess::start();
+    let restarted_start = restarted.request(hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    ));
+    assert_eq!(
+        restarted_start["status"], "ok",
+        "unexpected restarted init response: {restarted_start}"
+    );
+    let replayed_run = restarted.request(json!({
+        "op": "runs_get",
+        "run_id": expected_run_id,
+        "runtime_binding": access
+    }));
+    assert_eq!(
+        replayed_run["status"], "ok",
+        "unexpected restarted run response: {replayed_run}"
+    );
+    assert_eq!(
+        replayed_run["data"]["terminal"], settled["data"]["terminal"],
+        "a restarted provider must return the same terminal JSON: {replayed_run}"
+    );
+    let replayed_page = restarted.request(json!({
+        "op": "runs_events",
+        "run_id": expected_run_id,
+        "runtime_binding": access,
+        "after_sequence": 0
+    }));
+    assert_eq!(
+        replayed_page["status"], "ok",
+        "unexpected restarted events response: {replayed_page}"
+    );
+    assert_eq!(
+        replayed_page["data"]["events"], page["data"]["events"],
+        "a restarted provider must replay the same ordered events: {replayed_page}"
+    );
+    restarted.shutdown();
+
+    // One connection and one request cover both provider processes, so the
+    // reconnecting presentation repeats no inference and no effect.
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "the cut run and its restart must open exactly one connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "the cut run and its restart must send exactly one request"
+    );
+    let recorded = &requests[0];
+    assert_eq!(recorded.request_line, "POST /v1/hosted-effect HTTP/1.1");
+    assert_eq!(
+        recorded.value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
+    );
 }
 
 /// A hosted run whose effect socket cannot be reached never writes the effect.

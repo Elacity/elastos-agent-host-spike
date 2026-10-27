@@ -2888,6 +2888,22 @@
         "list with a bare token is refused",
         "argv refusal precedes work"
       ]
+    },
+    {
+      "id": "MP48",
+      "title": "a failed terminal transition drops the run's earlier non-terminal events, so the record no longer holds the text published before a Runtime cut and the cut run's transition is rolled back; the text-before-a-cut replay test fails because the run settles settlement_unknown instead of failed",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "    let (terminal_kind, terminal_data) =\n        synthesize_terminal_event(status.clone(), output.as_ref(), error.as_ref())?;",
+          "new": "    if matches!(status, RunStatus::Failed) {\n        run.events.retain(|event| event.terminal);\n    }\n    let (terminal_kind, terminal_data) =\n        synthesize_terminal_event(status.clone(), output.as_ref(), error.as_ref())?;"
+        }
+      ],
+      "tests": [
+        "hosted_text_sent_before_a_runtime_cut_stays_ordered_and_replays_after_restart"
+      ]
     }
   ]
 }
