@@ -5,11 +5,11 @@ Target (owner lane grant-binding), read only. Pins from
 ``spike/agent-host``:
 
   lab/grant-binding/src/lib.rs
-    02adcde9c388dd0a5514805ca334c3da3a7598a4  PR #409
-    sha256 63663b636a35e91354dc2eb7e90406d8290b7905a7f8192059433a26e501efe0
+    648f2d11e92687d62bdb5243c666509ecade5d1b  PR #443
+    sha256 4989d0e316386af69de471fcf349f419d0fe3d3a62882434a89c8a8826da46e7
   lab/grant-binding/src/ledger.rs
-    41674e4f02223f0680ce6449e8d103334f3bbae9  PR #413
-    sha256 928d33686d73136dbe35915e87b6a4cec11f7ec4257377042ee1a2fbb80fd6c5
+    ab4f6c40e4e83ad7bb60a317b63e76073eda77c5  PR #451
+    sha256 9cbf3d70b483f4d3ecf0d32b61be8325d1330487b4c20fb521bf993eb7bd6697
 
 The owner's session and instance tests open the call after the registry
 change. This probe opens it first. The same call must then be refused, and
@@ -50,12 +50,12 @@ LEDGER = CRATE / "src" / "ledger.rs"
 FINDING = REPO / "lab" / "redteam" / "findings" / "grant-binding-001.md"
 
 FINDING_ID = "grant-binding-001"
-LIB_COMMIT = "02adcde9c388dd0a5514805ca334c3da3a7598a4"
-LIB_PR = 409
-LIB_SHA = "63663b636a35e91354dc2eb7e90406d8290b7905a7f8192059433a26e501efe0"
-LEDGER_COMMIT = "41674e4f02223f0680ce6449e8d103334f3bbae9"
-LEDGER_PR = 413
-LEDGER_SHA = "928d33686d73136dbe35915e87b6a4cec11f7ec4257377042ee1a2fbb80fd6c5"
+LIB_COMMIT = "648f2d11e92687d62bdb5243c666509ecade5d1b"
+LIB_PR = 443
+LIB_SHA = "4989d0e316386af69de471fcf349f419d0fe3d3a62882434a89c8a8826da46e7"
+LEDGER_COMMIT = "ab4f6c40e4e83ad7bb60a317b63e76073eda77c5"
+LEDGER_PR = 451
+LEDGER_SHA = "9cbf3d70b483f4d3ecf0d32b61be8325d1330487b4c20fb521bf993eb7bd6697"
 
 SESSION_NAME = "test_stale_call_session_replay_is_refused"
 SIBLING_NAME = "test_stale_call_sibling_instance_replay_is_refused"
