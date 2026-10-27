@@ -4,6 +4,7 @@
 - PR #244 (task 020), merge f26d5d036: Verdict: PASS (runner at the base: `summary: 6 CAUGHT of 6`)
 - PR #247 (task 021), merge 6fe61d88e: Verdict: FOLLOWUP (citations: 69 checked, 69 match)
 - FOLLOWUP: lab/capsule-identity/GAP-REPORT.md:848 says the lab "sits in no admission or launch path", but since task 032 (PR #587, merge 58fe29b8a) README says only "no Runtime admission or launch path" and that the lab's stand-in launcher, in test code, calls it; hand check: `sed -n 845,849p lab/capsule-identity/GAP-REPORT.md` against `sed -n 14,17p lab/capsule-identity/README.md`, and `git show 58fe29b8a^1:lab/capsule-identity/README.md | sed -n 16p` (the old wording) against `git show 58fe29b8a:lab/capsule-identity/README.md | sed -n 16p`. Closed by task 038.
+- PR #657 (task 033), merge f94d89ac6: Verdict: PASS (added by task 039; runner at c6e2d58d5: `summary: 3 CAUGHT of 3`; citations: 13 checked, 13 match)
 
 Why: Flint's 27 Oct 12:06 note (Sasha's "nothing idle", to reopen and close S1 after
 Rong's review rong-20261027-1010) asks the claude and cursor pair to re-read three merges
@@ -326,3 +327,160 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 `c641bcff2` for `lab/capsule-identity/src/lib.rs:73` and
 `elastos/crates/elastos-server/src/runtime.rs:366`): `69 checked, 69 match`. The 17
 files: `git diff --quiet c641bcff2 01f6add1f -- <file>` exits 0 for 17 of 17.
+
+## PR #657 (task 033), merge f94d89ac6
+
+Added by task 039, on 2026-10-27. Rong (principles) asked on 27 Oct, per Sasha's 25 Oct
+direction, for a second review of #657 before any B1 credit, because Flint's M1 B1 note
+sets the bar at two independent reviews. #657 had one reviewer only: Cursor, PASS in round
+2 (round 1 failed the test gate, not a review). So it was the one B1 stand-in merge below
+the bar; #587 (task 032) already had Claude and Cursor.
+
+Base commit of this section: `c6e2d58d5e298e3fa7d07908841ce4ca0a64f6f2` (`c6e2d58d5`). The
+merge is judged as merged, with `git show f94d89ac6:<path>` (written "M:line" below). Then
+each promise says "still true at c6e2d58d5" (written "B:line"), or which later change moved
+it, from `git log --oneline --first-parent f94d89ac6..HEAD -- <file>`: 035 (PR #730,
+`1503ac6f4`), 036 (PR #757, `b7c613a10`), 037 (`dd84ef2fe`, PR #782, done in the batch and
+still open) and 038 (`c6e2d58d5`, `GAP-REPORT.md` only). This section fixes nothing.
+
+Verdict: PASS
+
+Lane diff: `git diff f94d89ac6^1 f94d89ac6 -- lab/capsule-identity/` (6 files, +292 -11):
+`GAP-REPORT.md`, `LOG.md`, `README.md`, `falsifiers.json`, `tests/common/mod.rs` and
+`tests/stand_in.rs`.
+
+Known, queued as 037 (not new findings): Cursor's two round-2 FOLLOWUPs on #657, "seeds one
+grant, so a view that returns only the first held grant (`take(1)` ...) still passes", and
+"The `StandInRuntime` doc still says 'Its two methods'" (M:1370 in `tests/common/mod.rs`).
+At c6e2d58d5 both are changed by 037: the doc lists each method (B:1369-1376), and
+`standin_grant_view_lists_every_held_grant_of_every_session` (`tests/stand_in.rs` B:439)
+holds three grants over two sessions with F-CI37a-c.
+
+New FOLLOWUP lines: none.
+
+- Promise 1 (the view, the seed, no grant from a launch, 032's keys). At the merge,
+  `tests/common/mod.rs` holds `get_capability_list_all_sessions_live` (M:1479-1482),
+  answering `{"scope": "all_sessions_live", "capabilities": [...]}` from `self.grants`, and
+  `seed_grant(session_id, resource, action, duration)` (M:1489), whose doc starts "Lab test
+  seam, not a route" (M:1484). Checked: `self.grants.push` occurs once, in `seed_grant`
+  (M:1491); `post_capsules` (M:1448-1451) and `launch` (M:1549-1563) touch only
+  `instances`, so a launch adds no grant. The answer keys are `id`, `name`, `status`,
+  `session_id` (M:1556-1561) and the list keys add `cause` (M:1461-1467), with no grant or
+  token key; `tests/stand_in.rs` M:275-279 and M:290-294 assert both key sets exactly.
+  Still true at c6e2d58d5: view B:1492-1494, seed B:1497-1502, one push B:1504, keys
+  asserted B:333-337 and B:348-352. Changed by 035: `launch` also stores the instance's
+  asks (B:1591-1607) and its answer keys are the same four; by 036: the record check moved
+  into `check_records` and any accepted record launches; neither adds a grant.
+- Promise 2 (`standin_valid_signature_alone_yields_no_grant`). At the merge
+  (`tests/stand_in.rs` M:309), it asserts the `agent-host` manifest asks for a capability
+  (M:314-318), launches the signed bundle by CID, asserts no view entry for that session and
+  an empty view (M:323-331), then launches again, asserts a second session id and two
+  listed instances, and an empty view (M:333-341). Every view read goes through
+  `grant_view`, which asserts the keys `capabilities` and `scope` and the value
+  `all_sessions_live` (M:301-306). Still true at c6e2d58d5 (B:367-400, `grant_view`
+  B:359-364). The run below gives `ok` for it.
+- Promise 3 (`standin_grant_view_lists_a_seeded_grant`). At the merge (M:345), it seeds one
+  grant for the launched session, asserts one entry (M:354), the six keys (M:356-366), the
+  seeded `session_id`, `resource`, `action` and `duration`, a non-empty `request_id`, a
+  number `granted_at`, and that the instance list is unchanged (M:377). Still true at
+  c6e2d58d5 (B:403-436). Its one-grant limit is 037's known FOLLOWUP above.
+- Promise 4 (F-CI33a, F-CI33b, F-CI33c, each in `tests/common/mod.rs`, each CAUGHT). At the
+  merge, the three entries edit only `../../lab/capsule-identity/tests/common/mod.rs`:
+  F-CI33a on `Ok(self.launch(name))` (M:1450), seeding one grant per manifest
+  `capabilities` entry; F-CI33b `take(0)` on the view's line (M:1480); F-CI33c drops
+  `"scope"` (M:1481). At c6e2d58d5 the three ids are in the list; F-CI33a was changed by
+  035 (anchor `Ok(self.launch(name, asks))`, B:1463) and by 036 (its planted code names
+  `elastos_common::CapsuleManifest` and `capsule_identity::MANIFEST_FILE` by path), with the
+  same bug and test, as README B:1737-1743 and B:1756-1757 say; F-CI33b and F-CI33c are
+  unchanged. Runner result at c6e2d58d5: `summary: 3 CAUGHT of 3` (raw lines below).
+- Promise 5 (README's stand-in section). At the merge, README M:1340-1359 states the rule,
+  the view's answer, the seed as "a lab test seam, not a route" and both tests; the
+  interface rows are M:1375 (the view, citing #309 `01-live-grant-view.md:11` and `:83` at
+  `513988ebd`, and `capability.rs:411-423`) and M:1376 (the seed); the rule rows M:1387-1389
+  name the tests and F-CI33a-c; "Not shown" holds "No shell approval is modelled; a grant
+  exists only through the test seam `seed_grant`" (M:1399-1401). Each citation in the row
+  was checked with `git show` (list below). Still true at c6e2d58d5: paragraph B:1367-1386
+  and rows B:1402-1403, word for word; B:1416 and B:1418 as at the merge; B:1417 widened by
+  037 to name its test and F-CI37a-c; "Not shown" B:1428.
+- Promise 6 (GAP-REPORT's dated paragraph). At the merge, the revision line is
+  `GAP-REPORT.md` M:34-37 and the paragraph "B1 through a lab stand-in (27 Oct, tasks 032
+  and 033)" is M:838-856, right after "B1 and B2 (Anders, 26 Oct)" (M:778, no heading
+  between), with its "Not shown" at M:853-856. Each of its citations was checked (list
+  below). Still true at c6e2d58d5: B:34-37 and B:845-863, word for word (`diff` of the two
+  ranges prints nothing). 036 changed the record check to "any accepted record", and the
+  paragraph's steps (f) and (g) still describe it.
+- Promise 7 (`about`, README count, no `src/lib.rs`, `Cargo.toml` or `Cargo.lock` change).
+  At the merge, `about` ends "031, 032 and 033" (033 after 032, in list order), the list
+  holds 254 entries (`grep -c '"id": "F-CI'`) and README M:1559 says 254. `git diff --stat
+  f94d89ac6^1 f94d89ac6 -- lab/capsule-identity/src lab/capsule-identity/Cargo.toml
+  lab/capsule-identity/Cargo.lock` prints nothing. At c6e2d58d5 `about` names "032, 033,
+  035, 036 and 037", README B:1628 says 262, and `tests/inventory.rs` passes in the full
+  run below; `src/lib.rs` was changed later by 036 only. The LOG line (M:28, unchanged at
+  B:28) says the whole list gave 254 CAUGHT of 254 in two runs; this review did not rerun
+  the whole list, only F-CI33.
+
+033's citations, each read with `git show` at its recorded commit: 13 checked, 13 match.
+README's view row: `lab/runtime-asks/01-live-grant-view.md:11` at `513988ebd` ("A shell
+session can read the live grants of every session"), `:83` ("`\"scope\":
+\"all_sessions_live\"` to the response, and add the session id to"), and
+`elastos/crates/elastos-server/src/api/handlers/capability.rs:411-423` (`CapabilityOutput`
+with the five keys, `ListCapabilitiesOutput` with `capabilities`; the same at `513988ebd`,
+f94d89ac6 and c6e2d58d5). GAP-REPORT's paragraph: its lab base `693c3681d` is the parent of
+033's one commit `f767631f1`; its place after "B1 and B2 (Anders, 26 Oct)"; `StandInRuntime`
+in `tests/common/mod.rs` (M:1386); README "Lab stand-in launcher (M1 check B1)" (M:1303);
+RA-1's route (`01-live-grant-view.md:83`); the two tests (`tests/stand_in.rs` M:309,
+M:345); `seed_grant` as the one seam (M:1489, one push); the README section's launch request
+citation `routes.rs:65-66` (README M:1394; `LaunchRequest {` and `path: String,` at
+f94d89ac6 and c6e2d58d5); and "asks for one grant in `capabilities`" (the `agent-host`
+fixture's `capabilities` has one entry). The tests it names do not exist at `693c3681d`,
+as expected: 033 added them, and the revision line says it names tests, not lines.
+
+Principles check:
+
+1. Named by hash: yes. A launch names its bundle only by its lab CID and recomputes it
+   before any grant view is read (`tests/common/mod.rs:1507-1522` at f94d89ac6).
+2. No ambient authority: yes. A launch gives no grant; the one way a grant exists is the
+   test seam (`tests/common/mod.rs:1489-1491` at f94d89ac6); no capsule, Home or UI code
+   changes.
+3. One path: yes. One view over one `grants` list, one entry builder (`Grant::entry`,
+   `tests/common/mod.rs:1414` at f94d89ac6); the stand-in still calls the library's
+   checks, not copies (`:1514-1521`).
+4. Trusted core: not affected. No `elastos/`, `src/lib.rs`, `Cargo.toml` or `Cargo.lock`
+   change (`git diff --stat f94d89ac6^1 f94d89ac6`); the code is test code
+   (`tests/common/mod.rs:1367` at f94d89ac6).
+5. Fails closed: not affected. 033 adds no refusal; the view holds nothing unless a test
+   seeds it (`tests/common/mod.rs:1439` at f94d89ac6, `grants: Vec::new()`).
+6. Self-contained: not affected. No capsule code; the stand-in runs nothing
+   (`tests/common/mod.rs:1367-1368` at f94d89ac6).
+7. Tests prove it: yes. Two named tests (`tests/stand_in.rs:309`, `:345` at f94d89ac6) and
+   three falsifiers, run at the base: `summary: 3 CAUGHT of 3`.
+8. Separate decisions: yes. A verified publisher record (identity) admits a launch in the
+   stand-in, and the grant view (allowance) stays empty after it
+   (`tests/stand_in.rs:323-341` at f94d89ac6).
+
+Commands and raw results for this section, all at c6e2d58d5 on this Mac (Python 3.9.6,
+rustc 1.91.0), holding the build lease (`.git/local-ai-heavy-build.lock`, free, taken
+after 0 s), with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. After the runner,
+`git status --short` printed nothing.
+
+`python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json F-CI33`
+(exit 0):
+
+```
+baseline: 2 named tests pass without an edit, 0 do not
+F-CI33a CAUGHT                            10s  a launch gives the instance one grant for each capabilities entry of its manifest, so a valid signature alone yields a grant
+F-CI33b CAUGHT                             8s  the grant view answers no entries whatever is held, so it is a constant
+F-CI33c CAUGHT                             9s  the grant view drops the all_sessions_live scope marker
+summary: 3 CAUGHT of 3
+```
+
+`RUST_TEST_THREADS=2 cargo test --locked --offline --manifest-path lab/capsule-identity/Cargo.toml --test stand_in`
+(exit 0):
+
+```
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+```
+
+#657 now has two reviews, Cursor's merge review and this record, so both B1 stand-in merges,
+#587 and #657, have two; the Runtime did nothing here: no Runtime code ran, launched, checked,
+refused or granted anything.
