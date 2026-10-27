@@ -705,6 +705,20 @@ fn model_public_prefix_is_not_a_public_read() {
 }
 
 #[test]
+fn model_extended_usersai_segment_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let refusal = verifier
+        .bind_grant(instance, "UsersAIextra/agent-1/notes", rights())
+        .expect_err("extended UsersAI segment");
+    assert_eq!(refusal, Refuse::OutsidePrincipal);
+    assert_eq!(
+        refusal.to_string(),
+        "owned root is outside the agent principal"
+    );
+}
+
+#[test]
 fn model_use_path_under_the_owned_root_is_allowed() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
@@ -719,6 +733,49 @@ fn model_use_path_under_the_owned_root_is_allowed() {
     verifier
         .use_path(&call, &request, "UsersAI/agent-1/notes/page.md")
         .expect("a child of the owned root");
+}
+
+#[test]
+fn model_forged_identity_does_not_move_the_use_path() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    verifier
+        .use_path(&call, &request, "UsersAI/agent-1/notes/page.md")
+        .expect("forged identity does not move the use path");
+    let decision = verifier.use_grant(call, &guest(handle)).expect("grant");
+    assert_eq!(decision.identity, "agent-1");
+    assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
+}
+
+#[test]
+fn model_forged_session_does_not_move_the_use_path() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    verifier
+        .use_path(&call, &request, "UsersAI/agent-1/notes/page.md")
+        .expect("forged session does not move the use path");
+    let decision = verifier.use_grant(call, &guest(handle)).expect("grant");
+    assert_eq!(decision.identity, "agent-1");
+    assert_eq!(decision.session, "session-a");
+    assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
 }
 
 #[test]

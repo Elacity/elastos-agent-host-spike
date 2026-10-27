@@ -5937,3 +5937,182 @@ capsule_named_by_hash | BLOCKED (AC-025-CID)
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The probe source is unchanged. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | No new rule. The planted ID cell above is the existing grader, and it is not a list id. |
 | 8. Identity, admission and allowance stay separate? | Yes | `GAPS.md:171-173` keeps those decisions separate. A valid CID gives no grant. |
+
+## 037 — Kill row reasons and the denial count use one settlement rule
+
+037: `check_kill`'s last refusal names overlap and the quiet window; `instance_read_result` requires two denials and no longer builds that count from the settlement; `poll` uses one orphan filter and returns the changed-orphan reason.
+
+`Controller::check_kill` still calls `Settlement::check` for the orphan count. Its last branch only checks overlap and the quiet window, and its refusal is `kill: overlap and quiet window are required`. No other refusal string changed. `kill_requires_measured_fixture_settlement` keeps its assertions.
+
+`instance_read_result` no longer takes a settlement. Every instance outcome requires `denied == 2`. Cancel and kill still require one grant. The orphan count stays in `Settlement::check` (`tests/common/grants.rs:172`). A settlement of 0 or 2 orphans denies 1 or 3 times, so this comparison fails on its own. `grep -n before tests/effects.rs` leaves `orphan.before` only at `tests/effects.rs:513`, where the absent-policy journey compares its denial total with the measured pending length. That line builds no kill count.
+
+`active_requests` is the one filter. `Controller::poll` calls it once (`tests/common/grants.rs:713`). The exact original orphan is dropped. A new request id stays and reaches the retry rule. The same id with a changed field returns `orphan request changed while pending`. `poll_gives_changed_orphan_its_own_reason` calls `Controller::poll` for all three.
+
+### Hand-run falsifiers
+
+There is no new list id. The runner's `lab` command runs `lab/wasm-capsule` (BACKLOG item 7). Each mutation was restored before the next one. Each old-text anchor occurred once before the plant and once after restore.
+
+Commands were `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects TEST -- --exact --nocapture` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`, and the shared heavy-build lease. In the old/new cells, `\n` is one newline.
+
+| ID | File | Exact old text | Exact new text | Named test | Libtest lines and results | Failing assertion |
+| --- | --- | --- | --- | --- | --- | --- |
+| F-poll-orphan-wiring | `tests/common/grants.rs` | the call line below | the swallowed call line below | `grants::tests::poll_gives_changed_orphan_its_own_reason` | baseline: `test grants::tests::poll_gives_changed_orphan_its_own_reason ... ok / test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.02s` (exit 0, 0.923 s)<br>planted: `test grants::tests::poll_gives_changed_orphan_its_own_reason ... FAILED / test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.02s` (exit 101, 1.072 s)<br>restored: `test grants::tests::poll_gives_changed_orphan_its_own_reason ... ok / test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.02s` (exit 0, 0.885 s) | `assertion left == right failed: a changed orphan keeps its own reason on the live poll path; left: Err("no-retry check: killed worker made a further request"); right: Err("orphan request changed while pending")` |
+| F-orphan-owner | `tests/common/grants.rs` | `        if self.before == 0 {\n            return Err("orphan already settled when measured; re-measure AC-027-ORPHAN and name the Runtime source line");\n        }\n        if self.before != 1 {` | `        if self.before > 1 {` | `grants::tests::kill_requires_measured_fixture_settlement` | baseline: `test grants::tests::kill_requires_measured_fixture_settlement ... ok / test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.00s` (exit 0, 0.825 s)<br>planted: `test grants::tests::kill_requires_measured_fixture_settlement ... FAILED / test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.00s` (exit 101, 0.989 s)<br>restored: `test grants::tests::kill_requires_measured_fixture_settlement ... ok / test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.00s` (exit 0, 0.847 s) | `assertion left == right failed: kill requires exactly one measured orphan and zero after settlement; left: Ok(()); right: Err("orphan already settled when measured; re-measure AC-027-ORPHAN and name the Runtime source line")` |
+| F-orphan-match | `tests/common/grants.rs` | `    let same_id = field(request, "request_id")? == field(original, "request_id")?;\n    if same_id && request != original {\n        return Err("orphan request changed while pending");\n    }\n    Ok(same_id && field(request, "session_id")? == field(original, "session_id")?)` | `    Ok(field(request, "request_id")? == field(original, "request_id")?)` | `grants::tests::changed_orphan_has_its_own_reason` | baseline: `test grants::tests::changed_orphan_has_its_own_reason ... ok / test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.00s` (exit 0, 1.624 s)<br>planted: `test grants::tests::changed_orphan_has_its_own_reason ... FAILED / test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.00s` (exit 101, 1.091 s)<br>restored: `test grants::tests::changed_orphan_has_its_own_reason ... ok / test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.00s` (exit 0, 0.853 s) | `assertion left == right failed: a changed orphan needs its own reason; left: Ok(true); right: Err("orphan request changed while pending")` |
+
+F-poll-orphan-wiring replaces this call in `Controller::poll`. The closure characters are the exact bytes:
+
+```text
+        let pending = active_requests(pending, self.overlap.as_ref())?;
+        let pending = active_requests(pending, self.overlap.as_ref()).unwrap_or_else(|_| pending.clone());
+```
+
+The first line is the old text, including its newline. The second line is the planted text, including its newline. F-poll-orphan-wiring swallows the filter error at the `poll` call site. The planted test then reports the retry reason. F-orphan-owner and F-orphan-match use the same bytes as 035. Their anchors still match once. `falsifiers.json` is unchanged. Item 2 adds no rule, so it has no new falsifier.
+
+### Kill journey
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects killed_worker_settlement_recorded_without_retry -- --exact --nocapture` exited 0 in 14.223 s. Libtest: `test killed_worker_settlement_recorded_without_retry ... ok` and `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 45 filtered out; finished in 13.14s`.
+
+```text
+kill settlement: instance-1 exit:None signal:Some(9) elapsed:0.057638s kill_at:0.030282s; instance-2 exit:Some(1) signal:None elapsed:0.329145s kill_at:0.000000s; first:0.029879s overlap:0.028939s since_decision:5.922889s; reason:fixture settlement: worker killed; orphan_before:1 orphan_after:0; settled by the fixture; quiet:2.013832s; kill-worker settlement, lab half of A11 (A12 census)
+```
+
+### Gates
+
+Commands used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`, and the shared heavy-build lease. The volume had 41 GiB free. Each command stayed inside 600 seconds.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, 0.132 s.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, 218.348 s. `ungranted_memory_write_is_refused` failed in the cleanup census: `process leftover; processes:1 paths:["home/Library/Application Support/elastos/host-process.lock"]`.
+- Same command, rerun: exit 101, 221.562 s. `cancelled_instance_settles_with_reason_sibling_completes` failed with the same census leftover. The code was unchanged.
+- Same command, one further run: exit 0, 221.330 s. 86 passed, 0 failed, 11 ignored. The effects target passed 36 tests, with 10 ignored, in 173.84 s.
+
+`Cargo.toml`, `Cargo.lock` and `falsifiers.json` are unchanged. The builder made no Git-state changes.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `src/identity.rs:91` still records the bundle lab CID. `tests/common/grants.rs:209` filters pending requests. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `probe/src/lib.rs:138` requests the grant before the provider call at `:146`. |
+| 3. A second path or a second copy of one rule? | No | `tests/common/grants.rs:172` owns the orphan count. `:209` is the one poll filter, called at `:713`. `tests/effects.rs:626` compares the denial total with 2. |
+| 4. Runtime core grows? | No | The edit is `tests/common/grants.rs` and `tests/effects.rs`. |
+| 5. Refusals deny by default with a clear reason? | Yes | `tests/common/grants.rs:603` names overlap and the quiet window. `:1859` requires the changed-orphan reason from `poll`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `probe/src/lib.rs:138` requests the capability and `:146` passes the grant to the provider. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/common/grants.rs:1840` fails when `poll` swallows the filter error. F-orphan-owner and F-orphan-match still fail when planted. |
+| 8. Identity, admission and allowance stay separate? | Yes | `src/report.rs:521` keeps the bundle CID, admission and the session grant separate. A settlement count grants nothing. |
+
+## 041 — Land reviewed A5 session rows
+
+041 lands the reviewed 038 tree for rows (a), (b) and (d) on the current base. `git merge-file` used base `6f0eb5a5cbb6cb14071effecd4b317351731bd87` (`git merge-base HEAD 0da4b9b3e3c52cb04b555e37f657a0e590ac5a14`) and other `0da4b9b3e3c52cb04b555e37f657a0e590ac5a14`. All seven files merged with exit 0 and no conflict markers: `GAPS.md`, `RUNBOOK.md`, `run.sh`, `src/report.rs`, `tests/common/grants.rs`, `tests/effects.rs`, `tests/report.rs`. `LOG.md` was not merged. `Cargo.toml`, `Cargo.lock` and `falsifiers.json` are unchanged. There is no new list id.
+
+The merge keeps, once each, `fn active_requests` (`tests/common/grants.rs:209`), `fn barrier_decision` (`:247`), the refusal `kill: overlap and quiet window are required` (`:647`), and the `capsule_named_by_hash` ID cell `AC-025-CID` (`GAPS.md:84`). `src/report.rs:234` still says `process-isolation lab half of A3, A6 and A9`. `client_session` (`tests/common/grants.rs:855`) and `grant_names_verified_agent` (`:1705`) are present. `run.sh:42` prints lines that start with `session grant`.
+
+Rows (a) and (b) are `grant_refused_from_another_session` and `grant_refused_from_a_new_session`. Both call `exercise_session_binding`. Row (d), `grant_record_names_agent_identity`, stays `#[ignore = "blocked: AC-038-GRANT-PRINCIPAL"]`. A permitted Public read remains the positive control and earns no A5 credit.
+
+### Hand-run falsifiers
+
+Commands used `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`, and the shared heavy-build lease. The lease was free. Each old anchor occurred once. Each plant was restored before the next step. The volume had about 40 GiB free.
+
+#### F-a5-other-session
+
+The other-session arm presents the owner. The replaced line is `SessionBinding::OtherSession => other.as_ref().unwrap(),`, and the planted line is `SessionBinding::OtherSession => &owner,`.
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grant_refused_from_another_session --exact --nocapture --test-threads=2
+```
+
+Unmutated: exit 0, 14.260 seconds.
+
+```text
+test grant_refused_from_another_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 12.15s
+```
+
+Planted: exit 101, 14.118 seconds.
+
+```text
+thread 'grant_refused_from_another_session' (61106448) panicked at tests/effects.rs:932:10:
+another session cannot present the grant: "presenting session was not refused"
+test grant_refused_from_another_session ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 61 filtered out; finished in 11.49s
+```
+
+Restored: exit 0, 13.883 seconds.
+
+```text
+test grant_refused_from_another_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 11.91s
+```
+
+#### F-a5-new-session
+
+The new-session arm presents the owner. The replaced line is `SessionBinding::NewSession => renewed.as_ref().unwrap(),`, and the planted line is `SessionBinding::NewSession => &owner,`.
+
+```bash
+cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects -- grant_refused_from_a_new_session --exact --nocapture --test-threads=2
+```
+
+Unmutated: exit 0, 11.321 seconds.
+
+```text
+test grant_refused_from_a_new_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 11.18s
+```
+
+Planted: exit 101, 13.323 seconds.
+
+```text
+thread 'grant_refused_from_a_new_session' (61117523) panicked at tests/effects.rs:939:10:
+a new session cannot present the grant: "presenting session was not refused"
+test grant_refused_from_a_new_session ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 61 filtered out; finished in 11.19s
+```
+
+Restored: exit 0, 10.870 seconds.
+
+```text
+test grant_refused_from_a_new_session ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 9.43s
+```
+
+#### F-a5-gap-row
+
+The new `GAPS.md` ID cell changes from `AC-038-GRANT-PRINCIPAL` to `AC-038-GRANT-PRINCIPALX` on the `grant_record_names_agent_identity` row only. `./run.sh` from `lab/agent-conformance`:
+
+| Step | Exit | Seconds | Row |
+| --- | --- | --- | --- |
+| Unmutated | 0 | 297.287 | `grant_record_names_agent_identity \| BLOCKED (AC-038-GRANT-PRINCIPAL)` |
+| Planted | 1 | 282.639 | `grant_record_names_agent_identity \| FAIL \| GAPS.md: grant_record_names_agent_identity: missing blocker IDs: [AC-038-GRANT-PRINCIPAL]; extra blocker IDs: [AC-038-GRANT-PRINCIPALX]` |
+| Restored | 0 | 286.630 | `grant_record_names_agent_identity \| BLOCKED (AC-038-GRANT-PRINCIPAL)` |
+
+The planted run also printed `versions receipt failure:` with that same missing/extra ID text. On every run, rows (a) and (b) stayed PASS with the session-binding label. The ID cell is restored. The restored table has no FAIL row.
+
+### Acceptance run
+
+The restored `./run.sh` above is the acceptance run on this head: exit 0, 286.630 seconds. No FAIL row.
+
+```text
+grant_refused_from_another_session | PASS | session binding of a Runtime grant on the run client's route, lab client sessions (M1 A5 half); a Public read earns no A5 credit
+grant_refused_from_a_new_session | PASS | session binding of a Runtime grant on the run client's route, lab client sessions (M1 A5 half); a Public read earns no A5 credit
+grant_record_names_agent_identity | BLOCKED (AC-038-GRANT-PRINCIPAL)
+```
+
+### Gates
+
+The same environment and lease as the falsifiers. Both commands stayed inside 600 seconds. The locked suite passed on the first run, so there was no census rerun.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, 0.126 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, 359.885 seconds. 104 passed, 0 failed, 12 ignored. The effects target passed 51 tests, with 11 ignored, in 276.09 seconds.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `tests/effects.rs:820` records the Runtime SHA-256 for the session journey. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `tests/common/grants.rs:994` accepts a cross-session presentation only as the Runtime 403. |
+| 3. A second path or a second copy of one rule? | No | `tests/common/grants.rs:998` is the one provider read for the granted read and the presentation. |
+| 4. Runtime core grows? | No | `tests/common/grants.rs:1705` keeps the principal comparison in the lane harness. |
+| 5. Refusals deny by default with a clear reason? | Yes | `tests/common/grants.rs:1714` denies when verified caller evidence is unavailable. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `tests/common/grants.rs:1008` sends the provider read with the granted token. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/effects.rs:930` fails under F-a5-other-session. The planted gap cell fails in the report. |
+| 8. Identity, admission and allowance stay separate? | Yes | `tests/effects.rs:856` keeps the Public read off A5 credit. `:954` passes no verified caller. |

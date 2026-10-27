@@ -44,7 +44,9 @@ use wasm_capsule_audit::Refusal as AuditRefusal;
 use wasm_capsule_tools::bundle::{
     write_new_file, Reason as WriteReason, RunRefusal as WriteRefusal,
 };
-use wasm_capsule_tools::receipt::{render, write_receipt, RECEIPT_SCHEMA};
+use wasm_capsule_tools::receipt::{
+    render, render_refused, write_receipt, write_refused_receipt, RECEIPT_SCHEMA,
+};
 use wasm_capsule_tools::run::{
     module_refusal, run, run_engine, work_root_folder, Engine, EngineRun, Reason, Refusal,
     RunControl, RunInput, TwoEngineRefusal, TwoEngineRun, DIGEST_ARGUMENT, DIGEST_EXPORT,
@@ -4103,6 +4105,400 @@ fn engine_output_past_a_pipe_buffer_never_blocks_it() {
             "{name}: other bytes"
         );
     }
+}
+
+/// Task 044: the five lines of `receipt`, after checking it ends in a newline.
+fn receipt_lines(receipt: &str) -> Vec<&str> {
+    assert!(receipt.ends_with('\n'), "no final newline: {receipt:?}");
+    receipt.lines().collect()
+}
+
+/// Task 044 (M1 A7 lab half): `run` with a pinned stand-in `wasmtime` whose
+/// module run `exec`s `/bin/sleep 600` (under the module path as its
+/// `argv[0]`, so the watchdog's `pkill -f <work root>` finds it) and a
+/// [`counting`] `wasmer`, with a 200 ms budget, under the watchdog: the
+/// refusal receipt is exactly its five lines, naming `budget_exceeded` and
+/// `wasmtime`, never a generic failure.
+#[test]
+fn budget_refusal_receipt_names_its_reason() {
+    const BUDGET: Duration = Duration::from_millis(200);
+    let signed = signed_fixture();
+    let tmp = TempDir::new("run44-budget-receipt");
+    let root = canonical(&tmp);
+    let engines = work_root(&root, "engines");
+    let wasmtime = marked(
+        &engines,
+        "wasmtime",
+        &format!("{MODULE_ARGUMENT}exec -a \"$module\" /bin/sleep 600\n"),
+    );
+    let wasmer = counting(&engines, "wasmer");
+    let work = work_root(&root, "work");
+
+    let (result, _) = answer_within_watchdog(&work, BUDGET, {
+        let (wasmtime, wasmer, work) = (wasmtime.clone(), wasmer.clone(), work.clone());
+        move || {
+            run(&RunInput {
+                control: &RunControl::new(BUDGET),
+                ..input(&signed, &wasmtime, &wasmer, &work)
+            })
+        }
+    });
+    let refusal = two_refused(result);
+    let receipt = render_refused(&refusal);
+    assert_eq!(
+        receipt_lines(&receipt),
+        [
+            "schema: wc-005.run-refusal/v1".to_owned(),
+            "outcome: refused".to_owned(),
+            "reason: budget_exceeded".to_owned(),
+            "engine: wasmtime".to_owned(),
+            format!(
+                "detail: \"{}: wasmtime still ran at its run budget of 200 ms: the runner stopped it with SIGKILL\"",
+                wasmtime.display()
+            ),
+        ]
+    );
+    assert_eq!(starts(&wasmer, "module"), 0, "wasmer ran a module");
+    assert_census_empty(&work, "budget refusal receipt run");
+}
+
+/// Task 044: which `Reason` variant `reason` is, as an index, by an exhaustive
+/// `match` with no wildcard arm. It is coverage only: a new variant makes this
+/// test fail to build until it has an example below. The ids come from the
+/// tools crate alone.
+fn reason_variant(reason: &Reason) -> usize {
+    match reason {
+        Reason::EngineNotAbsolute => 0,
+        Reason::WorkRootNotAbsolute => 1,
+        Reason::WorkRootUnresolved(_) => 2,
+        Reason::WorkRootNotCanonical { .. } => 3,
+        Reason::WorkRootMetadataFailed(_) => 4,
+        Reason::WorkRootNotAFolder => 5,
+        Reason::RunDirExists => 6,
+        Reason::RunDirNotCreated(_) => 7,
+        Reason::ModuleNotCreated(_) => 8,
+        Reason::ModuleNotWritten(_) => 9,
+        Reason::Writer(_) => 10,
+        Reason::EngineDidNotStart { .. } => 11,
+        Reason::EngineFailed { .. } => 12,
+        Reason::VersionDidNotStart { .. } => 13,
+        Reason::VersionFailed { .. } => 14,
+        Reason::VersionEmpty { .. } => 15,
+        Reason::VersionNotPinned { .. } => 16,
+        Reason::CapRejected { .. } => 17,
+        Reason::RunDirNotRemoved(_) => 18,
+        Reason::BudgetZero => 19,
+        Reason::BudgetExceeded { .. } => 20,
+        Reason::EngineNotStopped { .. } => 21,
+        Reason::EngineNotWaited { .. } => 22,
+        Reason::OutputNotRead { .. } => 23,
+    }
+}
+
+/// The number of `Reason` variants [`reason_variant`] numbers.
+const REASON_VARIANTS: usize = 24;
+
+/// Whether `id` is lowercase snake_case: lowercase ASCII words joined by
+/// single underscores.
+fn is_snake_case(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .split('_')
+            .all(|word| !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_lowercase()))
+}
+
+/// Task 044: one example value per `Reason` variant (as a module run's
+/// refusal, or a version query's for the version reasons) and per
+/// `TwoEngineRefusal` variant, constructed here. Each renders the five lines
+/// with its own `reason:` id, lowercase snake_case and distinct from every
+/// other; `engine:` is the engine its reason names (`wasmer` in every example
+/// that names one), else `none`, so a verifier refusal and `OutputsDiffer`
+/// both say `none`; `detail:` is its Display through `escape_ascii`.
+#[test]
+fn refusal_receipt_ids_are_distinct_and_named() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    let path = Path::new("/lab/path");
+    let error = || io::Error::from_raw_os_error(2);
+    let status = ExitStatus::from_raw(3 << 8);
+    let engine = Engine::Wasmer;
+    let reasons = [
+        Reason::EngineNotAbsolute,
+        Reason::WorkRootNotAbsolute,
+        Reason::WorkRootUnresolved(error()),
+        Reason::WorkRootNotCanonical {
+            canonical: PathBuf::from("/private/lab"),
+        },
+        Reason::WorkRootMetadataFailed(error()),
+        Reason::WorkRootNotAFolder,
+        Reason::RunDirExists,
+        Reason::RunDirNotCreated(error()),
+        Reason::ModuleNotCreated(error()),
+        Reason::ModuleNotWritten(error()),
+        Reason::Writer(WriteReason::OutDirExists),
+        Reason::EngineDidNotStart {
+            engine,
+            error: error(),
+        },
+        Reason::EngineFailed {
+            engine,
+            status,
+            stderr: "boom\n".to_owned(),
+        },
+        Reason::VersionDidNotStart {
+            engine,
+            error: error(),
+        },
+        Reason::VersionFailed {
+            engine,
+            status,
+            stderr: "boom\n".to_owned(),
+        },
+        Reason::VersionEmpty { engine },
+        Reason::VersionNotPinned {
+            engine,
+            printed: b"wasmer 9.9.9 \"quoted\"".to_vec(),
+            pinned: WASMER_VERSION,
+        },
+        Reason::CapRejected {
+            engine,
+            argument: "max-memory-size=1".to_owned(),
+            status,
+            stderr: "error: bad -W value\n".to_owned(),
+        },
+        Reason::RunDirNotRemoved(error()),
+        Reason::BudgetZero,
+        Reason::BudgetExceeded {
+            engine,
+            budget: Duration::from_millis(200),
+        },
+        Reason::EngineNotStopped {
+            engine,
+            error: error(),
+        },
+        Reason::EngineNotWaited {
+            engine,
+            error: error(),
+        },
+        Reason::OutputNotRead {
+            engine,
+            error: error(),
+        },
+    ];
+    let mut covered: Vec<usize> = reasons.iter().map(reason_variant).collect();
+    covered.sort_unstable();
+    assert_eq!(
+        covered,
+        (0..REASON_VARIANTS).collect::<Vec<_>>(),
+        "one example per Reason variant"
+    );
+
+    let mut examples: Vec<(TwoEngineRefusal, &str)> = Vec::new();
+    for reason in reasons {
+        let named = if refusal_names_engine(&reason) {
+            "wasmer"
+        } else {
+            "none"
+        };
+        let version = matches!(
+            reason,
+            Reason::VersionDidNotStart { .. }
+                | Reason::VersionFailed { .. }
+                | Reason::VersionEmpty { .. }
+                | Reason::VersionNotPinned { .. }
+        );
+        let refusal = Refusal {
+            path: path.to_path_buf(),
+            reason,
+        };
+        let refusal = if version {
+            TwoEngineRefusal::Version(refusal)
+        } else {
+            TwoEngineRefusal::Engine(refusal)
+        };
+        examples.push((refusal, named));
+    }
+    examples.push((TwoEngineRefusal::Verify(VerifyRefusal::Unsigned), "none"));
+    examples.push((
+        TwoEngineRefusal::OutputsDiffer {
+            wasmtime: b"1\n".to_vec(),
+            wasmer: b"2\n".to_vec(),
+        },
+        "none",
+    ));
+
+    let mut ids = std::collections::BTreeSet::new();
+    for (refusal, named) in &examples {
+        let receipt = render_refused(refusal);
+        let lines = receipt_lines(&receipt);
+        assert_eq!(lines.len(), 5, "{refusal}: {receipt:?}");
+        assert_eq!(lines[0], "schema: wc-005.run-refusal/v1", "{refusal}");
+        assert_eq!(lines[1], "outcome: refused", "{refusal}");
+        let id = lines[2]
+            .strip_prefix("reason: ")
+            .unwrap_or_else(|| panic!("{refusal}: no reason line: {receipt:?}"));
+        assert!(is_snake_case(id), "{refusal}: {id:?} is not snake_case");
+        assert!(
+            ids.insert(id.to_owned()),
+            "{refusal}: the id {id} is not distinct"
+        );
+        assert_eq!(lines[3], format!("engine: {named}"), "{refusal}");
+        assert_eq!(
+            lines[4],
+            format!(
+                "detail: \"{}\"",
+                refusal.to_string().as_bytes().escape_ascii()
+            ),
+            "{refusal}"
+        );
+    }
+    assert_eq!(ids.len(), REASON_VARIANTS + 2, "{ids:?}");
+
+    let receipt = render_refused(&examples[REASON_VARIANTS].0);
+    assert_eq!(
+        receipt_lines(&receipt)[2..],
+        [
+            "reason: verify_refused",
+            "engine: none",
+            "detail: \"the bundle has no signature: an unsigned bundle is refused\"",
+        ],
+        "the verifier refusal"
+    );
+    let receipt = render_refused(&examples[REASON_VARIANTS + 1].0);
+    assert_eq!(
+        receipt_lines(&receipt)[2..],
+        [
+            "reason: outputs_differ",
+            "engine: none",
+            "detail: \"the engines\\' outputs differ: wasmtime printed \\\"1\\\\n\\\", wasmer printed \\\"2\\\\n\\\"\"",
+        ],
+        "OutputsDiffer"
+    );
+}
+
+/// Whether the example `reason` above has an `engine` field. Coverage only, as
+/// [`reason_variant`]; the receipt's own rule is in the tools crate.
+fn refusal_names_engine(reason: &Reason) -> bool {
+    matches!(
+        reason,
+        Reason::EngineDidNotStart { .. }
+            | Reason::EngineFailed { .. }
+            | Reason::VersionDidNotStart { .. }
+            | Reason::VersionFailed { .. }
+            | Reason::VersionEmpty { .. }
+            | Reason::VersionNotPinned { .. }
+            | Reason::CapRejected { .. }
+            | Reason::BudgetExceeded { .. }
+            | Reason::EngineNotStopped { .. }
+            | Reason::EngineNotWaited { .. }
+            | Reason::OutputNotRead { .. }
+    )
+}
+
+/// Task 044: the refusal receipt of a real `run` refusal (a zero budget) is
+/// written byte for byte to a new path; at the receipt just written, a planted
+/// file, a live link and a dangling link it is refused with the shared
+/// writer's own reason and cause, and nothing at or behind the path changes.
+#[test]
+fn refusal_receipt_write_refuses_an_existing_path() {
+    let signed = signed_fixture();
+    let tmp = TempDir::new("run44-refusal-write");
+    let root = canonical(&tmp);
+    let engines = work_root(&root, "engines");
+    let wasmtime = counting(&engines, "wasmtime");
+    let wasmer = counting(&engines, "wasmer");
+    let work = work_root(&root, "work");
+    let zero = RunControl::new(Duration::ZERO);
+    let refusal = two_refused(run(&RunInput {
+        control: &zero,
+        ..input(&signed, &wasmtime, &wasmer, &work)
+    }));
+
+    let receipts = work_root(&root, "receipts");
+    let written = receipts.join("refusal.txt");
+    write_refused_receipt(&refusal, &written)
+        .unwrap_or_else(|refusal| panic!("the refusal receipt was refused: {refusal}"));
+    let first = render_refused(&refusal);
+    assert_eq!(
+        fs::read_to_string(&written).expect("read the refusal receipt"),
+        first
+    );
+    assert!(first.contains("\nreason: budget_zero\n"), "{first}");
+
+    let planted = receipts.join("planted.txt");
+    fs::write(&planted, b"planted receipt\n").expect("plant a file");
+    let target = receipts.join("target.txt");
+    fs::write(&target, b"link target\n").expect("write a link target");
+    let live = receipts.join("live-link.txt");
+    std::os::unix::fs::symlink(&target, &live).expect("plant a live link");
+    let nowhere = receipts.join("nowhere.txt");
+    let dangling = receipts.join("dangling-link.txt");
+    std::os::unix::fs::symlink(&nowhere, &dangling).expect("plant a dangling link");
+
+    for (kind, path) in [
+        ("the refusal receipt already written", &written),
+        ("a planted file", &planted),
+        ("a live link", &live),
+        ("a dangling link", &dangling),
+    ] {
+        let link_before = fs::read_link(path).ok();
+        let bytes_before = fs::read(path).ok();
+        let write_refusal = write_refused_receipt(&refusal, path)
+            .err()
+            .unwrap_or_else(|| panic!("{kind}: the receipt was written over an existing path"));
+        assert_eq!(&write_refusal.path, path, "{kind}");
+        match &write_refusal.reason {
+            WriteReason::ManifestNotCreated(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{kind}");
+                assert_eq!(error.raw_os_error(), Some(17), "{kind}");
+            }
+            other => panic!("{kind}: {other}"),
+        }
+        let own = write_new_file(path, b"other bytes")
+            .err()
+            .unwrap_or_else(|| panic!("{kind}: the shared writer wrote over an existing path"));
+        assert_eq!(write_refusal.to_string(), own.to_string(), "{kind}");
+        assert_eq!(
+            write_refusal.to_string(),
+            format!(
+                "{}: capsule.json cannot be created: File exists (os error 17)",
+                path.display()
+            ),
+            "{kind}"
+        );
+        assert_eq!(
+            fs::read_link(path).ok(),
+            link_before,
+            "{kind}: the link changed"
+        );
+        assert_eq!(
+            fs::read(path).ok(),
+            bytes_before,
+            "{kind}: the bytes changed"
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(&written).expect("read the refusal receipt"),
+        first,
+        "the first refusal receipt changed"
+    );
+    assert_eq!(fs::read(&planted).expect("read"), b"planted receipt\n");
+    assert_eq!(fs::read(&target).expect("read"), b"link target\n");
+    assert!(
+        !nowhere.exists(),
+        "a receipt was written through the dangling link"
+    );
+    assert_eq!(
+        names(&receipts),
+        [
+            "dangling-link.txt",
+            "live-link.txt",
+            "planted.txt",
+            "refusal.txt",
+            "target.txt"
+        ]
+    );
 }
 
 /// Task 041 (M1 A8 lab half): the variable naming the case folder the outer

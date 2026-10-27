@@ -2339,6 +2339,38 @@
       ]
     },
     {
+      "id": "PV122",
+      "title": "the with-repo check skips the baseline",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    got_added, got_listed = [result for _entry, result, _duration\n                             in run_chosen([added, real], how_for=how_for)]\n",
+          "new": "    got_added, got_listed = [reported(entry, how_for(entry[\"command\"]) if how_for else None)\n                             for entry in (added, real)]\n"
+        }
+      ],
+      "tests": [
+        "the with-repo check holds its entries to the baseline"
+      ]
+    },
+    {
+      "id": "PV123",
+      "title": "a baseline reason drops the missing tests",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "        if missing:\n            reasons.append(\"did not run without the edit: \" + \", \".join(missing))\n",
+          "new": "        if missing and not failed:\n            reasons.append(\"did not run without the edit: \" + \", \".join(missing))\n"
+        }
+      ],
+      "tests": [
+        "a baseline reason names failed and missing tests"
+      ]
+    },
+    {
       "id": "MP24",
       "title": "a Runtime-forwarded answer is read as a failure",
       "command": "provider",

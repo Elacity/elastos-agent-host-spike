@@ -2263,6 +2263,104 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
     );
 }
 
+fn collect_allow_lines(profile: &str) -> Vec<&str> {
+    fn allow_at(line: &str) -> Option<usize> {
+        let bytes = line.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] != b'(' {
+                index += 1;
+                continue;
+            }
+            let mut cursor = index + 1;
+            // Between `(` and `allow`, one run skips a space, a tab, a
+            // carriage return (byte 13), a form feed (byte 12), or a vertical
+            // tab (byte 11). After `allow`, the next byte may be the end, a
+            // space, a tab, or a carriage return. A form feed or a vertical
+            // tab there is not a match. A letter, a digit, `-`, or `*` there
+            // is not a match, so `allowing` and `allow-default` stay unseen.
+            while cursor < bytes.len()
+                && matches!(bytes[cursor], b' ' | b'\t' | b'\r' | b'\x0c' | b'\x0b')
+            {
+                cursor += 1;
+            }
+            let allow = b"allow";
+            let after = cursor + allow.len();
+            if bytes.get(cursor..after) == Some(&allow[..])
+                && (after == bytes.len() || matches!(bytes[after], b' ' | b'\t' | b'\r'))
+            {
+                return Some(index);
+            }
+            index += 1;
+        }
+        None
+    }
+
+    let mut allow_lines: Vec<&str> = profile
+        .lines()
+        .filter(|line| !line.starts_with(";;"))
+        .map(str::trim)
+        .filter(|line| allow_at(line) == Some(0))
+        .collect();
+    // An allow after another form on the same line is one more allow line.
+    // A suffix stays even when it equals a line already collected. A line
+    // whose allow starts at index 0 is taken once, by the walk above.
+    for line in profile
+        .lines()
+        .filter(|line| !line.starts_with(";;"))
+        .map(str::trim)
+    {
+        let Some(start) = allow_at(line) else {
+            continue;
+        };
+        if start == 0 {
+            continue;
+        }
+        allow_lines.push(&line[start..]);
+    }
+    allow_lines
+}
+
+fn allow_form_closes(profile: &str) -> Result<(), String> {
+    let lines: Vec<&str> = profile.lines().collect();
+    for (index, line) in lines.iter().enumerate() {
+        if line.starts_with(";;") {
+            continue;
+        }
+        let line = line.trim();
+        // A line that is only `(` and whose next line starts `allow` is an
+        // allow the collector never sees. Look at that next line only.
+        if line == "(" {
+            if let Some(next) = lines.get(index + 1) {
+                if !next.starts_with(";;") {
+                    let next = next.trim();
+                    if let Some(rest) = next.strip_prefix("allow") {
+                        if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
+                            return Err(format!("allow form does not close: {line}"));
+                        }
+                    }
+                }
+            }
+        }
+        if !line.contains("(allow") {
+            continue;
+        }
+        let mut open = 0usize;
+        let mut close = 0usize;
+        for ch in line.chars() {
+            if ch == '(' {
+                open += 1;
+            } else if ch == ')' {
+                close += 1;
+            }
+        }
+        if open != close {
+            return Err(format!("allow form does not close: {line}"));
+        }
+    }
+    Ok(())
+}
+
 /// Every allow rule in `confine.sb` traces to exactly one approved declared
 /// right or one platform-baseline rule in the declared-rights fixture.
 ///
@@ -2299,32 +2397,6 @@ fn allow_rules_trace_to_declared_rights() {
             })
             .collect()
     }
-    fn collect_allow_lines(profile: &str) -> Vec<&str> {
-        let mut allow_lines: Vec<&str> = profile
-            .lines()
-            .filter(|line| !line.starts_with(";;"))
-            .map(str::trim)
-            .filter(|line| line.starts_with("(allow "))
-            .collect();
-        // An allow after another form on the same line is one more allow line.
-        // A suffix stays even when it equals a line already collected. A line
-        // that starts with `(allow ` is taken once, by the walk above.
-        for line in profile
-            .lines()
-            .filter(|line| !line.starts_with(";;"))
-            .map(str::trim)
-        {
-            if line.starts_with("(allow ") {
-                continue;
-            }
-            let Some(start) = line.find("(allow ") else {
-                continue;
-            };
-            let suffix = &line[start..];
-            allow_lines.push(suffix);
-        }
-        allow_lines
-    }
     fn declared_rule_match(allow_lines: &[&str], rule: &str) -> Result<(), String> {
         match allow_lines.iter().filter(|line| **line == rule).count() {
             0 => Err(format!("declared rule is not an allow line: {rule}")),
@@ -2351,7 +2423,69 @@ fn allow_rules_trace_to_declared_rights() {
         "{message}"
     );
 
+    // A tab after `(allow`, a space in `( allow`, a deny, and a same-line tab
+    // allow are in memory. None of these four calls reads the fixture.
+    let tab_allow = "(allow\tfile-read* (literal \"/tmp/cc-tab-allow\"))";
+    assert_eq!(collect_allow_lines(tab_allow), [tab_allow]);
+    let spaced_allow = "( allow file-read* (literal \"/tmp/cc-spaced-allow\"))";
+    assert_eq!(collect_allow_lines(spaced_allow), [spaced_allow]);
+    assert!(
+        collect_allow_lines("(deny network*)").is_empty(),
+        "(deny network*) collects nothing"
+    );
+    let same_line_tab = format!("(deny network*) {tab_allow}");
+    assert_eq!(collect_allow_lines(&same_line_tab), [tab_allow]);
+
+    // Carriage return, form feed, and vertical tab are in memory. None of
+    // these calls reads the fixture or the profile file.
+    let cr_after = "(allow\rfile-read* (literal \"/tmp/cc-cr-allow\"))";
+    assert_eq!(collect_allow_lines(cr_after), [cr_after]);
+    let cr_before = "(\rallow file-read* (literal \"/tmp/cc-cr-before\"))";
+    assert_eq!(collect_allow_lines(cr_before), [cr_before]);
+    let ff_before = "(\x0callow file-read* (literal \"/tmp/cc-ff-before\"))";
+    assert_eq!(collect_allow_lines(ff_before), [ff_before]);
+    let vt_before = "(\x0ballow file-read* (literal \"/tmp/cc-vt-before\"))";
+    assert_eq!(collect_allow_lines(vt_before), [vt_before]);
+    let ff_same_suffix = "(\x0callow file-read* (literal \"/tmp/cc-ff-same\"))";
+    let ff_same = format!("(deny network*) {ff_same_suffix}");
+    assert_eq!(collect_allow_lines(&ff_same), [ff_same_suffix]);
+    assert!(
+        collect_allow_lines("(allow\x0cfile-read* (literal \"/tmp/cc-ff-after\"))").is_empty(),
+        "a form feed directly after allow collects nothing"
+    );
+    assert!(
+        collect_allow_lines("(allow\x0bfile-read* (literal \"/tmp/cc-vt-after\"))").is_empty(),
+        "a vertical tab directly after allow collects nothing"
+    );
+    assert!(
+        collect_allow_lines("(allowing file-read* (literal \"/tmp/cc-allowing\"))").is_empty(),
+        "(allowing file-read* collects nothing"
+    );
+    assert!(
+        collect_allow_lines("(allow-default)").is_empty(),
+        "(allow-default) collects nothing"
+    );
+
     let profile = fs::read_to_string(PROFILE_PATH).expect("the profile source");
+    let unclosed = [
+        "(allow file-read-data (literal \"/\"))",
+        "(allow",
+        "file-read* (literal \"/tmp/cc-unclosed\"))",
+        "(allow sysctl-read)",
+    ]
+    .join("\n");
+    let unclosed_message = allow_form_closes(&unclosed)
+        .expect_err("an allow form that does not close must fail before check 2");
+    assert!(
+        unclosed_message.contains("allow form does not close")
+            && unclosed_message.contains("(allow")
+            && !unclosed_message.contains("allow rule has no declared right")
+            && !unclosed_message.contains("startup-root-directory widened"),
+        "{unclosed_message}"
+    );
+    if let Err(reason) = allow_form_closes(&profile) {
+        panic!("{reason}");
+    }
     let allow_lines = collect_allow_lines(&profile);
     let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
     let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
@@ -2432,7 +2566,7 @@ fn allow_rules_trace_to_declared_rights() {
     let baseline_ids: Vec<&str> = baseline.iter().map(entry_id).collect();
     assert_eq!(baseline_ids, ["startup-root-directory", "startup-sysctl"]);
     let justifications = [
-        "macOS model-provider executable bound as PROVIDER_EXECUTABLE: Process startup reads the root directory before main runs",
+        "macOS model-provider executable bound as PROVIDER_EXECUTABLE: Process startup reads the root directory before `main` runs",
         "macOS model-provider executable bound as PROVIDER_EXECUTABLE: At startup the Rust runtime reads the page size to place its stack guard page.",
     ];
     assert_eq!(baseline.len(), justifications.len());
@@ -2697,33 +2831,8 @@ fn platform_baseline_rules_stay_narrow() {
     );
 
     // A trimmed line that contains `(allow` must close on that line. The
-    // scan below keeps only a line that starts with `(allow `, so an unclosed
-    // form would otherwise leave both pins in place.
-    fn allow_form_closes(profile: &str) -> Result<(), String> {
-        for line in profile.lines() {
-            if line.starts_with(";;") {
-                continue;
-            }
-            let line = line.trim();
-            if !line.contains("(allow") {
-                continue;
-            }
-            let mut open = 0usize;
-            let mut close = 0usize;
-            for ch in line.chars() {
-                if ch == '(' {
-                    open += 1;
-                } else if ch == ')' {
-                    close += 1;
-                }
-            }
-            if open != close {
-                return Err(format!("allow form does not close: {line}"));
-            }
-        }
-        Ok(())
-    }
-
+    // file scan calls `collect_allow_lines`, so an unclosed form would
+    // otherwise leave both pins in place.
     let unclosed = [
         "(allow file-read-data (literal \"/\"))",
         "(allow",
@@ -2744,6 +2853,62 @@ fn platform_baseline_rules_stay_narrow() {
     let committed_allows = [exec, root, sysctl, parent, storage].join("\n");
     assert_eq!(allow_form_closes(&committed_allows), Ok(()));
 
+    // A line that trims to `(` whose next line starts `allow` and a space or
+    // a tab is an allow the collector never sees. Both pins stay.
+    let split_space = [
+        "(allow file-read-data (literal \"/\"))",
+        "(",
+        "allow file-read* (literal \"/tmp/cc-split-allow\"))",
+        "(allow sysctl-read)",
+    ]
+    .join("\n");
+    let split_space_message = allow_form_closes(&split_space).unwrap_err();
+    assert!(
+        split_space_message.contains("allow form does not close"),
+        "{split_space_message}"
+    );
+    assert!(split_space_message.contains("("), "{split_space_message}");
+    assert!(
+        !split_space_message.contains("startup-root-directory widened"),
+        "{split_space_message}"
+    );
+    assert!(
+        !split_space_message.contains("allow rule has no declared right"),
+        "{split_space_message}"
+    );
+    let split_tab = [
+        "(allow file-read-data (literal \"/\"))",
+        "(",
+        "allow\tfile-read* (literal \"/tmp/cc-split-allow-tab\"))",
+        "(allow sysctl-read)",
+    ]
+    .join("\n");
+    let split_tab_message = allow_form_closes(&split_tab).unwrap_err();
+    assert!(
+        split_tab_message.contains("allow form does not close"),
+        "{split_tab_message}"
+    );
+    assert!(split_tab_message.contains("("), "{split_tab_message}");
+    assert!(
+        !split_tab_message.contains("startup-root-directory widened"),
+        "{split_tab_message}"
+    );
+    assert!(
+        !split_tab_message.contains("allow rule has no declared right"),
+        "{split_tab_message}"
+    );
+    let not_split = [
+        "(",
+        "allowing",
+        "(",
+        "allow-default",
+        "(",
+        "(deny network*)",
+        "(",
+    ]
+    .join("\n");
+    assert_eq!(allow_form_closes(&not_split), Ok(()));
+
     let profile_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("confine.sb");
     let profile = fs::read_to_string(&profile_path).unwrap_or_else(|err| {
         panic!(
@@ -2754,14 +2919,9 @@ fn platform_baseline_rules_stay_narrow() {
     if let Err(reason) = allow_form_closes(&profile) {
         panic!("{reason}");
     }
-    // Whole lines that start with `;;` are comments. Allow lines are the
-    // trimmed lines that start with `(allow `.
-    let allow_lines: Vec<&str> = profile
-        .lines()
-        .filter(|line| !line.starts_with(";;"))
-        .map(str::trim)
-        .filter(|line| line.starts_with("(allow "))
-        .collect();
+    // Whole lines that start with `;;` are comments. Allow lines come from
+    // `collect_allow_lines`.
+    let allow_lines = collect_allow_lines(&profile);
     if let Err(reason) = refuse_widened_baseline(&allow_lines) {
         panic!("{reason}");
     }

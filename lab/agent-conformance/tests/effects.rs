@@ -394,14 +394,7 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
         let reads = collected
             .as_ref()
             .map_err(|_| "overlap collection failed")
-            .and_then(|completions| {
-                instance_read_result(
-                    completions,
-                    &controller,
-                    outcome,
-                    settlement.as_ref().ok().and_then(Option::as_ref),
-                )
-            });
+            .and_then(|completions| instance_read_result(completions, &controller, outcome));
         let passed = reads.is_ok()
             && overlap.is_ok()
             && finished.is_ok()
@@ -583,7 +576,6 @@ fn instance_read_result(
     completions: &[agent_conformance::harness::Completion],
     controller: &grants::Controller,
     outcome: ReadOutcome,
-    settlement: Option<&grants::Settlement>,
 ) -> Result<(), &'static str> {
     if completions.len() != 2 {
         return Err("both clients must be collected");
@@ -627,16 +619,11 @@ fn instance_read_result(
     } else {
         2
     };
-    let denials = if outcome == ReadOutcome::Kill {
-        1 + settlement
-            .ok_or("kill: orphan measurement is missing")?
-            .before
-    } else {
-        2
-    };
+    // Two denials: the sibling refusal and one other refusal. Kill's orphan
+    // count stays in Settlement::check, so 0 or 2 orphans deny 1 or 3 times.
     if controller.decisions.matched != grants
         || controller.decisions.granted != grants
-        || controller.decisions.denied != denials
+        || controller.decisions.denied != 2
     {
         return Err("expected own session grants and two denials are required");
     }
@@ -764,4 +751,213 @@ mod host_key;
 #[test]
 fn host_key_read_is_refused() {
     host_key::exercise();
+}
+
+// Lab client sessions on the run client's attach and provider routes.
+// A Public read is the positive control and earns no A5 credit.
+#[derive(Clone, Copy)]
+enum SessionBinding {
+    OtherSession,
+    NewSession,
+    AgentRecord,
+}
+
+impl SessionBinding {
+    fn name(self) -> &'static str {
+        match self {
+            Self::OtherSession => "grant_refused_from_another_session",
+            Self::NewSession => "grant_refused_from_a_new_session",
+            Self::AgentRecord => "grant_record_names_agent_identity",
+        }
+    }
+}
+
+fn exercise_session_binding(
+    binding: SessionBinding,
+) -> Result<Option<grants::AgentRecord>, &'static str> {
+    let _serial = EFFECT_RUN.lock().unwrap_or_else(|error| error.into_inner());
+    let runtime = runtime_under_test().unwrap_or_else(|reason| probe::skipped(reason));
+    let provider = agent_conformance::runtime::localhost_provider_under_test()
+        .unwrap_or_else(|reason| probe::skipped(reason));
+    let home = ThrowawayHome::new().unwrap_or_else(|reason| probe::skipped(reason));
+    let mut operator = common::operator::Operator::start(&home)
+        .unwrap_or_else(|reason| probe::skipped(&format!("operator prerequisite: {reason}")));
+    let sampled = operator
+        .begin_check()
+        .expect("operator ready and first census");
+    let mut controller = grants::Controller::attach(
+        &home,
+        operator.port,
+        grants::Fixture::committed().expect("valid committed grant fixture"),
+    )
+    .expect("fixture shell controller attaches once");
+    controller
+        .seed_read_files()
+        .expect("seed fixture files through Runtime");
+    let outcome = bind_client_sessions(&mut controller, binding);
+    let cleanup_state = controller.check_cleanup_wiring(|controller| controller.cleanup_state());
+    let finished = operator.finish_check(sampled);
+    let line = match &finished {
+        Ok(line) | Err(line) => line.clone(),
+    };
+    let state = match &cleanup_state {
+        Ok(state) => (*state).to_owned(),
+        Err(reason) => format!("FAIL {reason}"),
+    };
+    controller
+        .print_checked(&format!("{line}; {state}"))
+        .expect("cleanup evidence excludes fixture credentials");
+    controller
+        .check_captures(&home)
+        .expect("captures exclude fixture credentials");
+    controller
+        .check_sources()
+        .expect("lane sources exclude fixture credentials");
+    if outcome.is_ok() {
+        let observations = [
+            Observation::Native {
+                role: "elastos".into(),
+                sha256: runtime.sha256.clone(),
+            },
+            Observation::Native {
+                role: "localhost-provider".into(),
+                sha256: provider.sha256.clone(),
+            },
+        ];
+        controller
+            .check_journey(
+                binding.name(),
+                &observations,
+                !matches!(binding, SessionBinding::AgentRecord),
+            )
+            .expect("report and receipt exclude fixture credentials");
+    }
+    finished.expect("cleanup census refused leftovers; see checked reason");
+    cleanup_state.expect("cleanup grant census failed; see checked reason");
+    let removed = home.finish();
+    let outcome = outcome?;
+    removed?;
+    Ok(outcome)
+}
+
+fn bind_client_sessions(
+    controller: &mut grants::Controller,
+    binding: SessionBinding,
+) -> Result<Option<grants::AgentRecord>, &'static str> {
+    let owner = controller.client_session()?;
+    let grant = controller.open_session_read(
+        &owner,
+        grants::GRANTED_READ_RESOURCE,
+        "agent conformance: session binding read",
+    )?;
+    controller.read_seeded(&owner, grants::GRANTED_READ_RESOURCE, &grant)?;
+    controller.note_seeded_read(
+        grants::GRANTED_READ_RESOURCE,
+        "positive control; a Public read earns no A5 credit",
+    )?;
+    let other = match binding {
+        SessionBinding::OtherSession | SessionBinding::AgentRecord => {
+            Some(controller.client_session()?)
+        }
+        SessionBinding::NewSession => None,
+    };
+    let renewed = match binding {
+        SessionBinding::NewSession => Some(controller.client_session()?),
+        SessionBinding::OtherSession | SessionBinding::AgentRecord => None,
+    };
+    let (got_session, got_label) = match binding {
+        SessionBinding::OtherSession => {
+            let other = other.as_ref().unwrap();
+            if other.session_id() == owner.session_id() {
+                return Err("another session reused the granting session");
+            }
+            let other_grant = controller.open_session_read(
+                other,
+                grants::SIBLING_READ_RESOURCE,
+                "agent conformance: session binding sibling",
+            )?;
+            controller.read_seeded(other, grants::SIBLING_READ_RESOURCE, &other_grant)?;
+            controller.note_seeded_read(
+                grants::SIBLING_READ_RESOURCE,
+                "presenting session read its own file",
+            )?;
+            (other_grant.session_id().to_owned(), "<session-B>")
+        }
+        SessionBinding::NewSession => {
+            let renewed = renewed.as_ref().unwrap();
+            if renewed.session_id() == owner.session_id() {
+                return Err("new session reused the granting session");
+            }
+            (renewed.session_id().to_owned(), "<session-A2>")
+        }
+        SessionBinding::AgentRecord => {
+            let other = other.as_ref().unwrap();
+            if other.session_id() == owner.session_id() {
+                return Err("another session reused the granting session");
+            }
+            (other.session_id().to_owned(), "<session-B>")
+        }
+    };
+    // The presented session is the only input to the Runtime refusal.
+    // F-a5-other-session replaces `SessionBinding::OtherSession => other.as_ref().unwrap(),` with `SessionBinding::OtherSession => &owner,`.
+    // F-a5-new-session replaces `SessionBinding::NewSession => renewed.as_ref().unwrap(),` with `SessionBinding::NewSession => &owner,`.
+    let presenting = match binding {
+        SessionBinding::OtherSession => other.as_ref().unwrap(),
+        SessionBinding::NewSession => renewed.as_ref().unwrap(),
+        SessionBinding::AgentRecord => other.as_ref().unwrap(),
+    };
+    let text = controller.present_grant(presenting, grants::GRANTED_READ_RESOURCE, &grant)?;
+    let checked = grants::check_wrong_capsule(&text, grant.session_id(), &got_session)?;
+    controller.print_checked(&grants::redact_refusal(&checked, got_label)?)?;
+    controller.read_seeded(&owner, grants::GRANTED_READ_RESOURCE, &grant)?;
+    controller.note_seeded_read(
+        grants::GRANTED_READ_RESOURCE,
+        "same token after the presenting session was refused",
+    )?;
+    if matches!(binding, SessionBinding::AgentRecord) {
+        let (capsule_id, principal) = controller.grant_record(grants::GRANTED_READ_RESOURCE)?;
+        return Ok(Some(grants::AgentRecord {
+            session_id: grant.session_id().to_owned(),
+            capsule_id,
+            principal,
+            refusal_expected: checked.expected().to_owned(),
+        }));
+    }
+    Ok(None)
+}
+
+#[test]
+fn grant_refused_from_another_session() {
+    assert!(exercise_session_binding(SessionBinding::OtherSession)
+        .expect("another session cannot present the grant")
+        .is_none());
+}
+
+#[test]
+fn grant_refused_from_a_new_session() {
+    assert!(exercise_session_binding(SessionBinding::NewSession)
+        .expect("a new session cannot present the grant")
+        .is_none());
+}
+
+#[test]
+#[ignore = "blocked: AC-038-GRANT-PRINCIPAL"]
+fn grant_record_names_agent_identity() {
+    let record = exercise_session_binding(SessionBinding::AgentRecord)
+        .expect("session binding journey")
+        .expect("grant record");
+    let named = grants::grant_names_verified_agent(
+        &record.capsule_id,
+        record.principal.as_deref(),
+        &record.session_id,
+        // This attach route has no independently verified agent evidence yet.
+        None,
+    );
+    assert!(
+        named.is_ok(),
+        "{}; 403 expected ID equals A's session ID: {}; audit capsule_id equals A's session ID: {}",
+        named.unwrap_err(),
+        record.refusal_expected == record.session_id,
+        record.capsule_id == record.session_id
+    );
 }
