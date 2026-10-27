@@ -18,6 +18,11 @@ the crate. The probe watches the ceiling: a refused reserve of 5, then a
 reserve of 5 that must succeed, then a reserve of 1 that must be over the
 ceiling.
 
+One child path uses that same opened call. ``use_path`` of
+``UsersAI/agent-1/notes/page.md`` succeeds, then the session changes, and
+that same call is ``Refuse::Session`` with ``session does not match the
+grant``. The path probe does not call ``admit`` or ``reserve``.
+
 One driver. A temp package outside this repo path-depends on the crate and
 runs ``cargo test --offline --locked``. Plants edit a temp copy that omits
 ``target/`` and ``src/plant.rs``. The probe does not run the owner's tests.
@@ -59,12 +64,18 @@ LEDGER_SHA = "928d33686d73136dbe35915e87b6a4cec11f7ec4257377042ee1a2fbb80fd6c5"
 
 SESSION_NAME = "test_stale_call_session_replay_is_refused"
 SIBLING_NAME = "test_stale_call_sibling_instance_replay_is_refused"
+PATH_NAME = "test_stale_call_use_path_is_refused"
 CLEAN_NAME = "test_clean_full_ceiling_reserve_succeeds"
-PROBE_NAMES = (SESSION_NAME, SIBLING_NAME, CLEAN_NAME)
+PROBE_NAMES = (SESSION_NAME, SIBLING_NAME, PATH_NAME, CLEAN_NAME)
 STALE_NAMES = (SESSION_NAME, SIBLING_NAME)
+# A finding may name a stale call or the path replay. The clean ceiling test stays out.
+ALLOWED_PROBES = frozenset((*STALE_NAMES, PATH_NAME))
 
 TIMEOUT_S = 240
-CLEAN = "these two stale calls were refused and did not spend the ceiling, on {commit}"
+CLEAN = (
+    "these two stale calls were refused and did not spend the ceiling, "
+    "and test_stale_call_use_path_is_refused refused the child path, on {commit}"
+)
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _COMPILE = re.compile(r"could not compile|error\[E\d+\]")
@@ -193,6 +204,31 @@ fn test_stale_call_session_replay_is_refused() {
         }
     );
     assert_eq!(over.to_string(), "reservation exceeds the ceiling");
+}
+
+#[test]
+fn test_stale_call_use_path_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let request = guest(handle);
+    // This call is the one the later check reuses. Nothing opens a second call.
+    let call = verifier.open_call(instance);
+    verifier
+        .use_path(&call, &request, "UsersAI/agent-1/notes/page.md")
+        .expect("child path before the session change");
+
+    verifier
+        .host_set_session(instance, "session-b")
+        .expect("set session");
+    let refusal = match verifier.use_path(&call, &request, "UsersAI/agent-1/notes/page.md") {
+        Err(refusal) => refusal,
+        Ok(()) => panic!("accepted replay: use_path returned Ok"),
+    };
+    assert_eq!(refusal, Refuse::Session);
+    assert_eq!(refusal.to_string(), "session does not match the grant");
 }
 
 #[test]
@@ -439,7 +475,10 @@ def verify_pins():
 
 
 def recorded_from(text):
-    """Probe names in a finding. The first line carries both pins. The body records Ok or OverCeiling."""
+    """Probe names in a finding. The first line carries both pins. The body records Ok or OverCeiling.
+
+    Allowed names are the stale calls and the path replay. The clean ceiling test is not allowed.
+    """
     lines = text.splitlines()
     if not lines:
         raise ProbeError("finding is empty")
@@ -460,7 +499,7 @@ def recorded_from(text):
     for line in lines[1:]:
         if line.startswith("probe: "):
             name = line[len("probe: "):].strip()
-            if name not in STALE_NAMES:
+            if name not in ALLOWED_PROBES:
                 raise ProbeError(f"finding names an unknown probe {name}")
             names.add(name)
         if line.startswith("observed: Ok") or line.startswith("observed: OverCeiling"):
@@ -868,6 +907,10 @@ class GrantReplayProbe(unittest.TestCase):
         """The owner's call is opened first. The sibling call is refused and spends nothing."""
         self.check_real(SIBLING_NAME)
 
+    def test_stale_call_use_path_is_refused(self):
+        """A child path on the call opened before host_set_session is Refuse::Session."""
+        self.check_real(PATH_NAME)
+
     def plant(self, name, relative, old, new):
         dest = copy_crate(self.work / f"crate-{name}")
         self.assertFalse((dest / "target").exists())
@@ -886,6 +929,11 @@ class GrantReplayProbe(unittest.TestCase):
         session = suite.by_name[SESSION_NAME]
         sibling = suite.by_name[SIBLING_NAME]
         clean = suite.by_name[CLEAN_NAME]
+        self.assertEqual(
+            suite.by_name[PATH_NAME].kind,
+            "passed",
+            evidence(suite.output) or tail(suite.output),
+        )
         self.assertEqual(clean.kind, "failed", evidence(suite.output) or tail(suite.output))
         self.assertIn("without a refused replay", clean.output)
         self.assertNotEqual(clean.kind, "error")
@@ -900,12 +948,17 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertFalse(self._expecting("test_clean_full_ceiling_reserve_succeeds"))
 
     def test_deleted_session_comparison_is_caught(self):
-        """Deleting the live session comparison makes the session replay test fail."""
+        """Deleting the live session comparison makes the session replay and the path replay fail."""
         suite = self.plant("drop-session", "src/lib.rs", SESSION_OLD, "")
         session = suite.by_name[SESSION_NAME]
+        path = suite.by_name[PATH_NAME]
         self.assertTrue(session.caught, evidence(suite.output) or tail(suite.output))
         self.assertIn("accepted replay:", session.output)
         self.assertNotIn("lost accounting:", session.output)
+        self.assertEqual(path.kind, "failed", evidence(suite.output) or tail(suite.output))
+        self.assertIn("accepted replay:", path.output)
+        self.assertIn("accepted replay: use_path returned Ok", path.output)
+        self.assertNotIn("lost accounting:", path.output)
         self.assertEqual(suite.by_name[SIBLING_NAME].kind, "passed", evidence(suite.output))
         self.assertEqual(suite.by_name[CLEAN_NAME].kind, "passed", evidence(suite.output))
 
@@ -917,6 +970,7 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertIn("accepted replay:", sibling.output)
         self.assertNotIn("lost accounting:", sibling.output)
         self.assertEqual(suite.by_name[SESSION_NAME].kind, "passed", evidence(suite.output))
+        self.assertEqual(suite.by_name[PATH_NAME].kind, "passed", evidence(suite.output))
         self.assertEqual(suite.by_name[CLEAN_NAME].kind, "passed", evidence(suite.output))
 
     def test_early_reserve_charge_is_caught(self):
@@ -927,6 +981,11 @@ class GrantReplayProbe(unittest.TestCase):
         clean = suite.by_name[CLEAN_NAME]
         self.assertTrue(accounting_plant_caught(session, sibling, clean), evidence(suite.output) or tail(suite.output))
         self.assertEqual(clean.kind, "passed", evidence(suite.output) or tail(suite.output))
+        self.assertEqual(
+            suite.by_name[PATH_NAME].kind,
+            "passed",
+            evidence(suite.output) or tail(suite.output),
+        )
 
     def test_compile_error_is_error(self):
         """Invalid Rust is an error. It is not a caught plant and not an expected failure."""
@@ -934,7 +993,7 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertNotEqual(suite.code, 0)
         self.assertRegex(suite.output, r"could not compile|error\[E\d+\]")
         self.assertNotIn(" ... FAILED", suite.output)
-        recorded = {SESSION_NAME, SIBLING_NAME}
+        recorded = {SESSION_NAME, SIBLING_NAME, PATH_NAME}
         for name in PROBE_NAMES:
             outcome = suite.by_name[name]
             self.assertEqual(outcome.kind, "error", evidence(suite.output) or tail(suite.output))
@@ -982,6 +1041,17 @@ class GrantReplayProbe(unittest.TestCase):
             "observed: OverCeiling\n"
         )
         self.assertEqual(recorded_from(both), set(STALE_NAMES))
+        path_only = pin_line() + (
+            "\nprobe: " + PATH_NAME + "\n"
+            "call: open_call, use_path, host_set_session, use_path\n"
+            "observed: Ok\n"
+        )
+        self.assertEqual(recorded_from(path_only), {PATH_NAME})
+        self.assertNotIn(PATH_NAME, STALE_NAMES)
+        self.assertIn(PATH_NAME, ALLOWED_PROBES)
+        self.assertNotIn(CLEAN_NAME, ALLOWED_PROBES)
+        with self.assertRaises(ProbeError):
+            recorded_from(pin_line() + "\nprobe: " + CLEAN_NAME + "\nobserved: Ok\n")
         with self.assertRaises(ProbeError):
             recorded_from(FINDING_ID + "\nprobe: " + SESSION_NAME + "\nobserved: Ok\n")
         with self.assertRaises(ProbeError):
