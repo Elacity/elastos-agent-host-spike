@@ -1,0 +1,18 @@
+id: F-A7-guestask
+file: src/ask.rs
+test: ask::model_over_budget_ask_is_refused
+--- old
+        if ask.amount > cap {
+            return Err(AdmitRefuse::OverBudget {
+                cap,
+                asked: ask.amount,
+            });
+        }
+--- new
+        if !guest_budget_ok(&ask) {
+            return Err(AdmitRefuse::OverBudget {
+                cap,
+                asked: ask.amount,
+            });
+        }
+--- end

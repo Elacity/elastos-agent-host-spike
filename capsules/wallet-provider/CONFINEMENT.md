@@ -116,6 +116,36 @@ reason; the `startup-root-directory` justification uses this document's
 root-directory sentence, and a justification with another provider's prefix or
 no reason is refused.
 
+## Lab stand-in launcher
+
+`standin_spawn_confined_provider` in `tests/confine.rs` is a lab stand-in in
+test code, and it is not the Runtime. It copies the inputs of the Runtime's
+provider launch entry, `ProviderBridge::spawn(binary_path, config)` with
+`ProviderConfig.base_path`, because draft PR #309 names no provider-launch ask
+that this stand-in could map to. The stand-in owns the start decision for the
+lab proofs: a start it cannot confine is refused with a reason and starts
+nothing.
+
+The stand-in refuses in the order of these steps:
+
+1. An `os` outside `DECLARED_CONFINED_OS` is refused with one reason that
+   names that OS and the list where the stand-in applies confinement.
+2. An absent `sandbox-exec` is refused with a reason that names the OS and the
+   path.
+3. A refusal of `write_generated_profile` is returned unchanged.
+4. A start that `sandbox-exec` refuses, or an `init` that does not answer
+   `ok`, is refused with the `try_send` failure or the answer.
+
+Otherwise the stand-in writes the profile that the lab generator builds from
+the declared rights, creates the shared ancestors, and starts the named binary
+under that profile through `start_under` with the three canonical bindings. It
+sends `init` with `base_path` and is Started only when `init` answers `ok`. The
+stand-in never starts the binary outside `sandbox-exec`.
+
+`standin_launcher_refuses_a_start_it_cannot_confine` holds the refusals, and
+`standin_launcher_starts_wallet_confined_under_the_generated_profile` holds
+the full wallet journey through the stand-in.
+
 ## The model provider's inline profile
 
 `elastos/crates/elastos-runtime/src/provider/bridge.rs` builds a third,
@@ -836,6 +866,17 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Name `generate_profile` in `capsules/did-provider/src/main.rs` (WP111): the
   same test fails because the walk reaches the other crate and its refusal
   names that path.
+- Start the binary bare in the stand-in's OS refusal (WP112):
+  `standin_launcher_refuses_a_start_it_cannot_confine` fails on cases (a) and
+  (b), which return Started instead of their reasons.
+- Start the binary bare after a failed `init` (WP113): the same test fails on
+  case (e), which returns Started instead of the reason.
+- Replace the stand-in's generated-profile start with a bare start (WP114):
+  `standin_launcher_starts_wallet_confined_under_the_generated_profile` fails
+  at the outside `init`, which then succeeds.
+- Ignore the lab writer's refusal and start under the committed `confine.sb`
+  (WP115): `standin_launcher_refuses_a_start_it_cannot_confine` fails on case
+  (d), which returns Started instead of the unnamed-id reason.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
