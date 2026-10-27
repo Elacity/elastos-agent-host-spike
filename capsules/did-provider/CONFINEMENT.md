@@ -390,6 +390,8 @@ This section records the lab evidence for M1 checks C0 and B3 for
 `did-provider`. It states what the evidence is and gives no verdict; cc-redteam
 judges C0 and B3.
 
+Pins: read at the pinned head `606956b3dded92b183c56472b447b96fe0204a61` (`git rev-parse HEAD`), an ancestor of the fetched head `c76403f1c26ac1ed8be7ed218b988d9d34ce2327` from `git fetch spike spike/agent-host` and one `git rev-parse FETCH_HEAD`; each file pin below is a commit that holds the file, read with `git show <commit>:<path>`, every `confine.rs` line number is from `git show 606956b3dded92b183c56472b447b96fe0204a61:capsules/wallet-provider/tests/confine.rs`, and each wallet `falsifiers.json` entry line is from `git show 606956b3dded92b183c56472b447b96fe0204a61:capsules/wallet-provider/falsifiers.json`.
+
 Gap (#309, routed to Flint): draft PR #309 at 513988ebd names no provider-launch ask, so this launcher has no RA route to copy, and M1-R for C0 and B3 waits on that ask.
 
 Launcher copy: `standin_spawn_confined_provider` is still a lane copy in `capsules/wallet-provider/tests/confine.rs`. Flint and Rong (2026-10-27 19:25) ruled the copy not acceptable; it is to move under the one shared stand-in, `lab/agent-conformance/standin-runtime/`, owned by cx-agent-conformance. The evidence here runs through the copy, and the move is not done.
@@ -405,50 +407,57 @@ refusal with a reason, a CAUGHT falsifier, and reviews that pass.
 
 Journey test: `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host`
 in `capsules/wallet-provider/tests/confine.rs` at
-`7053dcd1040778beca234b5e203876ecae95f42c` (line 4159). It runs did first and
-then wallet. Its macOS leg is `standin_confined_journey`: it starts the provider
-under the stand-in's generated profile, refuses one outside write with nothing
-created, keeps the root answering, and exits 0 on `shutdown`. Its refusal rows
-call `standin_refusals_for` (line 3651), which reads one host report through
-`standin_host_refusal` (line 904) and the launch through
-`standin_spawn_confined_provider` (line 965).
+`606956b3dded92b183c56472b447b96fe0204a61` (line 4165). It runs did first and
+then wallet. Its macOS leg is `standin_confined_journey` (line 3999): it starts
+the provider under the stand-in's generated profile, refuses one outside write
+with nothing created, keeps the root answering, and exits 0 on `shutdown`. Its
+refusal rows call `standin_refusals_for` (line 3657), which reads one host
+report through `standin_host_refusal` (line 904) and the launch through
+`standin_spawn_confined_provider` (line 971).
 
 Files at their commits:
 
 - `capsules/wallet-provider/tests/confine.rs` at
-  `7053dcd1040778beca234b5e203876ecae95f42c`, the journey test and the stand-in.
+  `606956b3dded92b183c56472b447b96fe0204a61`, the journey test and the stand-in.
 - `capsules/did-provider/tests/fixtures/confine/declared-rights.json` at
   `7c5a31a956bec77db60c9d03c77d05ce6704852a`.
 - `capsules/wallet-provider/tests/fixtures/confine/declared-rights.json` at
   `9bb0e9ba4debac4a78b512156841f1594d9bb8a4`.
 - `capsules/wallet-provider/falsifiers.json` at
-  `7053dcd1040778beca234b5e203876ecae95f42c`.
+  `606956b3dded92b183c56472b447b96fe0204a61`.
 - `lab/agent-conformance/standin-runtime/README.md` at
   `cccbd8ceb2fde5c2c3eda59ff932d09b33fc1592` answers the stand-in's routes and
   names no provider-launch route.
 
-Refusals, with the reason the test asserts for `did-provider`. The wallet leg
-asserts the same strings with `wallet-provider` in place of `did-provider`.
+Refusals, with the reason the code produces and what the journey row checks for
+`did-provider`. The wallet leg checks the same strings with `wallet-provider` in
+place of `did-provider`. The first eight rows, `standin_refusals_for`'s cases
+(a) to (c2), check the `{name} start on {os} is refused: ` prefix and the named
+parts, and require the forbidden parts absent (lines 3776-3790); cases (c3),
+(e) and (f) check no prefix.
 
-- plan9 row: `did-provider start on plan9 is refused: plan9 has no confinement design, and the lab stand-in applies confinement only on macos`.
-- Linux without Landlock: `did-provider start on linux is refused: linux confinement refused: the kernel has no Landlock`.
-- Linux without user namespaces: `did-provider start on linux is refused: linux confinement refused: user namespaces are turned off`.
-- Linux without the seccomp filter: `did-provider start on linux is refused: linux confinement refused: the seccomp filter cannot be installed`.
-- Linux with every primitive reported present: `did-provider start on linux is refused: linux is designed, not enforced, in this lab, so linux is not in DECLARED_CONFINED_OS (macos)`.
-- macOS whose report leaves Landlock unavailable: `did-provider start on macos is refused: linux confinement refused: the kernel has no Landlock`.
-- macOS without the tool: `did-provider start on macos is refused: the confinement tool <capsules/wallet-provider/tests/absent-sandbox-exec> is absent`.
-- macOS with another tool: `did-provider start on macos is refused: the confinement tool <the test executable path> is not /usr/bin/sandbox-exec, which is the one the stand-in runs`.
-- A binary path that is not a file: `did-provider start is refused: the provider binary <capsules/wallet-provider/tests/absent-provider-binary> is not a file`.
-- An unnamed right: `did-provider declares unnamed-right, which the shared contract does not name`.
-- A profile the launch cannot apply: `did-provider start is refused: <failure>`, where the failure carries `exit status:` and `invalid data type of path filter`, and no `execvp`.
-- An `init` answer that is not ok: `did-provider start is refused: init answered <answer>`, where the answer carries `"status":"error"`.
+- plan9 row: the code produces `did-provider start on plan9 is refused: plan9 has no confinement design, and the lab stand-in applies confinement only on macos`; the row checks the prefix and the parts `plan9`, `has no confinement design` and `macos`, and requires none of `linux is designed, not enforced`, `linux confinement refused: the kernel has no Landlock`, `linux confinement refused: user namespaces are turned off` or `linux confinement refused: the seccomp filter cannot be installed`.
+- Linux without Landlock: the code produces `did-provider start on linux is refused: linux confinement refused: the kernel has no Landlock`; the row checks the prefix and that part, and requires none of `linux confinement refused: user namespaces are turned off`, `linux confinement refused: the seccomp filter cannot be installed`, `linux is designed, not enforced` or `has no confinement design`.
+- Linux without user namespaces: the code produces `did-provider start on linux is refused: linux confinement refused: user namespaces are turned off`; the row checks the prefix and that part, and requires none of `linux confinement refused: the kernel has no Landlock`, `linux confinement refused: the seccomp filter cannot be installed`, `linux is designed, not enforced` or `has no confinement design`.
+- Linux without the seccomp filter: the code produces `did-provider start on linux is refused: linux confinement refused: the seccomp filter cannot be installed`; the row checks the prefix and that part, and requires none of `linux confinement refused: the kernel has no Landlock`, `linux confinement refused: user namespaces are turned off`, `linux is designed, not enforced` or `has no confinement design`.
+- Linux with every primitive reported present: the code produces `did-provider start on linux is refused: linux is designed, not enforced, in this lab, so linux is not in DECLARED_CONFINED_OS (macos)`; the row checks the prefix and the parts `linux is designed, not enforced` and `not in DECLARED_CONFINED_OS`, and requires none of `linux confinement refused: the kernel has no Landlock`, `linux confinement refused: user namespaces are turned off`, `linux confinement refused: the seccomp filter cannot be installed` or `has no confinement design`.
+- macOS whose report leaves Landlock unavailable: the code produces `did-provider start on macos is refused: linux confinement refused: the kernel has no Landlock`; the row checks the prefix and the parts `linux confinement refused: the kernel has no Landlock` and `on macos`, and requires none of `linux confinement refused: user namespaces are turned off`, `linux confinement refused: the seccomp filter cannot be installed`, `linux is designed, not enforced` or `has no confinement design`.
+- macOS without the tool: the code produces `did-provider start on macos is refused: the confinement tool <capsules/wallet-provider/tests/absent-sandbox-exec> is absent`; the row checks the prefix and the parts `on macos`, `is absent` and that path, and requires that the reason holds no `/usr/bin/sandbox-exec`.
+- macOS with another tool: the code produces `did-provider start on macos is refused: the confinement tool <the test executable path> is not /usr/bin/sandbox-exec, which is the one the stand-in runs`; the row checks the prefix and the parts `on macos`, that path and `/usr/bin/sandbox-exec`.
+- A binary path that is not a file: the code produces `did-provider start is refused: the provider binary <capsules/wallet-provider/tests/absent-provider-binary> is not a file`; the row checks the provider name and that path in the reason and requires no `must resolve` (lines 3835-3841), and it checks no prefix.
+- An unnamed right: the code produces `did-provider declares unnamed-right, which the shared contract does not name`; the row compares the whole string exactly (lines 3882-3886).
+- A profile the launch cannot apply: the code produces `did-provider start is refused: <failure>`; the row checks that the failure carries `exit status:` and `invalid data type of path filter` and requires no `execvp` (lines 3932-3942), and it checks no prefix.
+- An `init` answer that is not ok: the code produces `did-provider start is refused: init answered <answer>`; the row checks that the reason carries `init answered` and `"status":"error"` (lines 3970-3976), and it checks no prefix.
 
 CAUGHT falsifiers. Each entry is in `capsules/wallet-provider/falsifiers.json`
-at `7053dcd1040778beca234b5e203876ecae95f42c`; wallet's crate holds the stand-in
+at `606956b3dded92b183c56472b447b96fe0204a61`; wallet's crate holds the stand-in
 and its list. The gate logs of PR #561, PR #607, PR #643, PR #692 and PR #710
-are not part of this tree, so this summary quotes no raw `CAUGHT` line and did
-not rerun a plant. The evidence read for each entry is its `expect` of
-`caught`, its only named test
+are not part of this tree, so this summary quotes no raw `CAUGHT` line for those
+runs. One hand run of `examples/agent-host/falsify.py --from
+capsules/wallet-provider/falsifiers.json WP132 WP135 WP136 WP137` at
+`606956b3dded92b183c56472b447b96fe0204a61` printed `CAUGHT` for all four; the
+other entries were not rerun. The evidence read for each entry is its `expect`
+of `caught`, its only named test
 `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host`, and the
 plant named on its line.
 
@@ -473,23 +482,22 @@ plant named on its line.
 - `WP131` (entry line 2102, PR #692, not rerun): starts the binary bare on a
   simulated Linux host that reports a missing primitive, so did's Landlock row
   returns Started.
-- `WP132` (entry line 2118, PR #692, re-anchored by PR #710, not rerun):
-  returns one fixed reason that names no primitive, so did's Landlock row loses
-  the design's exact words. No build log holds a run at its new anchor, because
-  PR #710's gate ran only its three new ids, and task 109 has not merged at
-  this build.
-- `WP135` (entry line 2166, PR #710, not rerun): moves the
+- `WP132` (entry line 2118, PR #692, re-anchored by PR #710, rerun at
+  `606956b3d`): returns one fixed reason that names no primitive, so did's
+  Landlock row loses the design's exact words. The hand run printed
+  `WP132  CAUGHT                             2s  the missing-primitive refusal returns one fixed reason that names no primitive`.
+- `WP135` (entry line 2166, PR #710, rerun at `606956b3d`): moves the
   `DECLARED_CONFINED_OS` lookup above the missing-primitive check, so did's
   `macos` Landlock row returns Started where `sandbox-exec` exists.
-- `WP136` (entry line 2182, PR #710, not rerun): prefixes the missing-primitive
-  reason with `linux has no confinement design; `, so did's Landlock row
-  carries the forbidden words.
-- `WP137` (entry line 2198, PR #710, not rerun): drops the `{name} start on
-  {os} is refused: ` prefix, so the plan9 row lacks it.
+- `WP136` (entry line 2182, PR #710, rerun at `606956b3d`): prefixes the
+  missing-primitive reason with `linux has no confinement design; `, so did's
+  Landlock row carries the forbidden words.
+- `WP137` (entry line 2198, PR #710, rerun at `606956b3d`): drops the `{name}
+  start on {os} is refused: ` prefix, so the plan9 row lacks it.
 
 Reviews. Read with `gh pr view <number> --repo
 Elacity/elastos-agent-host-spike --json body,mergeCommit`; each merge commit is
-an ancestor of `345697ee3a954e140700033775bad1349587c513`. Each PASS line is
+an ancestor of `606956b3dded92b183c56472b447b96fe0204a61`. Each PASS line is
 the pull request body, which states the reviews as passed; no reviewed SHA is
 recorded in it.
 
@@ -502,17 +510,18 @@ recorded in it.
 - PR #643, https://github.com/Elacity/elastos-agent-host-spike/pull/643, merge
   `5d8ba7997d598d952b432f7cd1adf9b0c38bb04e`. Body line: `Gates passed on the
   Mac; reviews PASS: claude,cursor.`
+- PR #672 (task 102; WP127's records say where it fails), https://github.com/Elacity/elastos-agent-host-spike/pull/672, merge `652cf3bd5c41fd080508662550005ead562512d4`. Body line: `Gates passed on the Mac; reviews PASS: claude,cursor.`
 - PR #692, https://github.com/Elacity/elastos-agent-host-spike/pull/692, merge
   `705e4fbbdfaef640a51f5c707069a4a5e7564c5b`. Body line: `Gates passed on the
   Mac; reviews PASS: claude,cursor.`
 - PR #710, https://github.com/Elacity/elastos-agent-host-spike/pull/710, merge
   `b7ade04219ceb5d5affc567bd745a3a1cbe73006`. Body line: `Gates passed on the
   Mac; reviews PASS: claude,cursor.`
+- PR #725 (task 109), https://github.com/Elacity/elastos-agent-host-spike/pull/725, merge `606956b3dded92b183c56472b447b96fe0204a61`. Body line: `Gates passed on the Mac; reviews PASS: claude,cursor.`
 
 What this part is not: it is lab stand-in evidence, not the Runtime. The Linux
 rows are simulated host reports, not a Linux run. M1-R is not met because #309
-has no provider-launch ask. No Runtime code generated, launched or refused a
-provider in this evidence.
+has no provider-launch ask.
 
 ### B3 part
 
@@ -526,17 +535,17 @@ Counting rule, as `lab/redteam/acceptance/C8.md` words it: a complete journey, a
 refusal with a reason, a CAUGHT falsifier, and reviews that pass.
 
 Journey test: `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
-in the same file at `7053dcd1040778beca234b5e203876ecae95f42c` (line 4869). Its
-leg is `standin_b3_journey` (line 4774). The launched-profile checks are
-`check_profile_contract` (line 5558), `check_declared_rights` (line 5680) and
-`compare_profile_to_its_oracle` (line 6598). The suite comparison is
-`assert_suite_outcomes` (line 4670) and `assert_standin_matches_oracle` (line
-4710). It runs did first and then wallet.
+in the same file at `606956b3dded92b183c56472b447b96fe0204a61` (line 4875). Its
+leg is `standin_b3_journey` (line 4780). The launched-profile checks are
+`check_profile_contract` (line 5564), `check_declared_rights` (line 5686) and
+`compare_profile_to_its_oracle` (line 6604). The suite comparison is
+`assert_suite_outcomes` (line 4676) and `assert_standin_matches_oracle` (line
+4716). It runs did first and then wallet.
 
 Files at their commits:
 
 - `capsules/wallet-provider/tests/confine.rs` at
-  `7053dcd1040778beca234b5e203876ecae95f42c`, the journey test and the
+  `606956b3dded92b183c56472b447b96fe0204a61`, the journey test and the
   comparison body.
 - `capsules/did-provider/confine.sb` at
   `959b104022bd0e8ae55636f69f6f06b8eb028e2b`.
@@ -547,7 +556,7 @@ Files at their commits:
 - `capsules/wallet-provider/tests/fixtures/confine/declared-rights.json` at
   `9bb0e9ba4debac4a78b512156841f1594d9bb8a4`.
 - `capsules/wallet-provider/falsifiers.json` at
-  `7053dcd1040778beca234b5e203876ecae95f42c`.
+  `606956b3dded92b183c56472b447b96fe0204a61`.
 
 Refusals, with the reason the test panics with for `did-provider`. The wallet
 leg asserts the same strings with `wallet-provider` in place of `did-provider`.
@@ -557,10 +566,11 @@ leg asserts the same strings with `wallet-provider` in place of `did-provider`.
 - Launched-profile mismatch, oracle comparison: `did-provider B3 journey: the launched profile and its oracle disagree: did-provider generated profile differs from its committed oracle: only in generated <forms>, only in committed <forms>`.
 - Suite mismatch, case count: `did-provider stand-in start must record as many cases as the committed confine.sb: committed <count>, stand-in <count>`.
 - Suite mismatch, entry: `did-provider stand-in start differs from the committed confine.sb on case "<case>": committed <outcome>, stand-in <outcome>`.
-- Suite mismatch, order or class: `did-provider's stand-in launched profile suite must record case "<case>" as <class>`, and the permitted or denied class message that names the case.
+- Suite mismatch, short record: `did-provider's stand-in launched profile suite must record case "<case>" as <class>: the record holds N entries`, where N is the record's length (lines 4679-4682).
+- Suite mismatch, order or class: `did-provider's stand-in launched profile must record case "<case>" as <class>` (lines 4684-4688).
 
 CAUGHT falsifiers. Each entry is in `capsules/wallet-provider/falsifiers.json`
-at `7053dcd1040778beca234b5e203876ecae95f42c`. The gate logs of PR #593, PR
+at `606956b3dded92b183c56472b447b96fe0204a61`. The gate logs of PR #593, PR
 #624, PR #635, PR #655, PR #704 and PR #718 are not part of this tree, so this
 summary quotes no raw `CAUGHT` line and did not rerun a plant. The evidence read
 for each entry is its `expect` of `caught`, its only named test
@@ -582,7 +592,7 @@ merged words of PR #718 say.
 
 Reviews. Read with `gh pr view <number> --repo
 Elacity/elastos-agent-host-spike --json body,mergeCommit`; each merge commit is
-an ancestor of `345697ee3a954e140700033775bad1349587c513`. Each PASS line is
+an ancestor of `606956b3dded92b183c56472b447b96fe0204a61`. Each PASS line is
 the pull request body, which states the reviews as passed; no reviewed SHA is
 recorded in it.
 
@@ -598,17 +608,18 @@ recorded in it.
 - PR #655, https://github.com/Elacity/elastos-agent-host-spike/pull/655, merge
   `62eac8742bb84ec1106159a6c1e5bba988476d9a`. Body line: `Gates passed on the
   Mac; reviews PASS: claude,cursor.`
+- PR #672 (task 102; WP127's records say where it fails), https://github.com/Elacity/elastos-agent-host-spike/pull/672, merge `652cf3bd5c41fd080508662550005ead562512d4`. Body line: `Gates passed on the Mac; reviews PASS: claude,cursor.`
 - PR #704, https://github.com/Elacity/elastos-agent-host-spike/pull/704, merge
   `978873050f6dc3884cef117e39d4345e38d7fb2c`. Body line: `Gates passed on the
   Mac; reviews PASS: claude,cursor.`
 - PR #718, https://github.com/Elacity/elastos-agent-host-spike/pull/718, merge
   `345697ee3a954e140700033775bad1349587c513`. Body line: `Gates passed on the
   Mac; reviews PASS: claude,cursor.`
+- PR #725 (task 109), https://github.com/Elacity/elastos-agent-host-spike/pull/725, merge `606956b3dded92b183c56472b447b96fe0204a61`. Body line: `Gates passed on the Mac; reviews PASS: claude,cursor.`
 
 What this part is not: it is lab stand-in evidence, not the Runtime. The Linux
 rows are simulated host reports, not a Linux run. M1-R is not met because #309
-has no provider-launch ask. No Runtime code generated, launched or refused a
-provider in this evidence.
+has no provider-launch ask.
 
 ## Falsifiers
 
