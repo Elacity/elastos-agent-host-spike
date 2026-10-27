@@ -730,6 +730,30 @@ fn model_forged_session_does_not_move_the_child_path() {
 }
 
 #[test]
+fn model_reported_usage_does_not_widen_the_child_root() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: false,
+            child_journal: true,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(parent)
+    };
+    assert!(request.reported_usage > 0);
+    let refusal = verifier
+        .create_child_journal(&call, &request, "UsersAI/agent-1/other")
+        .expect_err("reported usage does not widen the child root");
+    assert_eq!(refusal, OperateRefuse::Binding(Refuse::OutsideRoot));
+    assert_eq!(refusal.to_string(), "use path leaves the owned root");
+}
+
+#[test]
 fn model_owned_root_needs_a_resource_segment() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
