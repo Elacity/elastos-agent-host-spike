@@ -3431,6 +3431,79 @@ fn standin_refuses_a_start_it_cannot_apply() {
     );
 }
 
+/// A generated profile with `STORAGE_ROOT` unbound never starts the provider.
+///
+/// `standin_profile` builds the text from the approved declared rights.
+/// `write_standin_profile` writes it at `storage.base.join("standin.sb")`,
+/// outside `STORAGE_PARENT`. The written file has no `;;` line, and its
+/// sorted allow lines equal the oracle's. The bindings are
+/// `canonical_bindings` with the `STORAGE_ROOT` pair removed, so
+/// `PROVIDER_EXECUTABLE` stays the real binary and `STORAGE_PARENT` stays.
+/// `assert_startup_is_refused` reads exit 65 and the marker
+/// `invalid data type of path filter`. The launch records the profile path
+/// it applies, and that path is the stand-in file. This evidence is for the
+/// lab launcher.
+///
+/// Falsifier: F-cc47a makes this launch use the committed oracle instead of
+/// the stand-in file. Both files exit 65. The recorded path is the oracle,
+/// so this test fails.
+#[test]
+fn generated_profile_refuses_an_unbound_root() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let storage = Storage::prepare("standin-unbound-root");
+    let unbound_root_profile = storage.base.join("standin.sb");
+    write_standin_profile(&unbound_root_profile, &generated);
+    let written_text = fs::read_to_string(&unbound_root_profile)
+        .unwrap_or_else(|err| panic!("the stand-in file must be readable: {err}"));
+    assert!(
+        written_text.lines().all(|line| !line.starts_with(";;")),
+        "the stand-in file has no comment line"
+    );
+    let mut written_lines = collect_allow_lines(&written_text);
+    let oracle = fs::read_to_string(PROFILE_PATH)
+        .unwrap_or_else(|err| panic!("the profile oracle must be readable: {err}"));
+    let mut oracle_lines = collect_allow_lines(&oracle);
+    written_lines.sort();
+    oracle_lines.sort();
+    assert_eq!(
+        written_lines, oracle_lines,
+        "the stand-in file's allow lines must equal the oracle's"
+    );
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let canonical = canonical_bindings(&storage, &binary);
+    let without_root: Vec<(&'static str, PathBuf)> = canonical
+        .iter()
+        .filter(|(name, _)| *name != "STORAGE_ROOT")
+        .cloned()
+        .collect();
+    assert_startup_is_refused(
+        "the generated profile names an unbound parameter",
+        Launch::Profile {
+            profile: &unbound_root_profile,
+            bindings: &without_root,
+        },
+        &storage,
+        "invalid data type of path filter",
+    );
+    assert_eq!(
+        applied_profile(),
+        unbound_root_profile,
+        "the launch must apply the stand-in file"
+    );
+}
+
 /// The stand-in text denies the hosted connect.
 ///
 /// `Launch::Profile` applies the text `standin_profile` builds. The one
