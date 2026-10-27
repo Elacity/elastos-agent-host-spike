@@ -1299,6 +1299,80 @@ fn model_outside_read_denied() {
     provider.shutdown();
 }
 
+/// Under the profile, `runs_events` and a terminal `runs_cancel` load the
+/// stored failed run and leave the storage tree unchanged.
+///
+/// `runs_create` without `runtime_hosted_socket` stores the run as failed
+/// before any socket. The create data's `terminal.error.message` is
+/// `Hosted external HTTPS is paused.` `runs_events` with `after_sequence` 0
+/// returns schema `elastos.model.run-events/v1`, that run's `run_id`,
+/// `has_more` false, and a last event whose `kind` is `failed`.
+/// `runs_cancel` returns the create data. The storage tree after both calls
+/// equals the tree after create. A live cancel is not shown: the run is
+/// already terminal, so the call does not reach the adapter.
+#[test]
+fn model_terminal_run_page_and_cancel_read_under_profile() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let storage = Storage::prepare("terminal-read");
+    let run = HostedRun::new("request:terminal-read");
+
+    let mut provider = Provider::start(Launch::Confined(&storage));
+    assert_serving(&provider.ok(&init_request(&storage, None)));
+    let created = provider.ok(&run.create);
+    assert_eq!(
+        created["terminal"]["error"]["message"], "Hosted external HTTPS is paused.",
+        "the binary must refuse hosted dispatch before any socket: {created}"
+    );
+    let after_create = tree_snapshot(&storage.root);
+
+    let events = provider.ok(&json!({
+        "op": "runs_events",
+        "run_id": run.get["run_id"].clone(),
+        "after_sequence": 0,
+        "runtime_binding": run.get["runtime_binding"].clone()
+    }));
+    assert_eq!(
+        events["schema"], "elastos.model.run-events/v1",
+        "runs_events must use the run-events schema: {events}"
+    );
+    assert_eq!(
+        events["run_id"], created["run_id"],
+        "runs_events must name the stored run: {events}"
+    );
+    assert_eq!(
+        events["has_more"], false,
+        "the terminal page must not continue: {events}"
+    );
+    let last = events["events"]
+        .as_array()
+        .and_then(|page| page.last())
+        .expect("the stored run must keep a last event");
+    assert_eq!(
+        last["kind"], "failed",
+        "the last event kind must be failed: {events}"
+    );
+
+    let cancelled = provider.ok(&json!({
+        "op": "runs_cancel",
+        "run_id": run.get["run_id"].clone(),
+        "runtime_binding": run.get["runtime_binding"].clone()
+    }));
+    assert_eq!(
+        cancelled, created,
+        "a terminal runs_cancel must return the stored run"
+    );
+    assert_eq!(
+        tree_snapshot(&storage.root),
+        after_create,
+        "runs_events and a terminal runs_cancel must not write"
+    );
+
+    provider.ok(&json!({ "op": "offers_list" }));
+    provider.shutdown();
+}
+
 /// The outside-create fixture's one rule: metadata, never content, of the
 /// redirected journal root `STORAGE_PARENT/outside/inner`. `RunJournal::open`
 /// inspects that directory, as the journal root and again as the parent of
