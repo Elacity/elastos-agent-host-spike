@@ -265,3 +265,114 @@ fn standin_refuses_an_unsigned_or_mismatched_bundle_before_launch() {
     let mut stand_in = StandInRuntime::new([published.entry.clone()], vec![flipped], accepted);
     assert_refused(&mut stand_in, &launch_body(), &own, "(g3)");
 }
+
+/// Launch the published `agent-host` by its CID; the answer must hold
+/// exactly 032's keys.
+fn launched(stand_in: &mut StandInRuntime) -> Value {
+    let answer = stand_in
+        .post_capsules(&launch_body())
+        .unwrap_or_else(|(status, reason)| panic!("refused with {status}: {reason}"));
+    assert_eq!(
+        keys(&answer),
+        ["id", "name", "session_id", "status"],
+        "the launch answer holds no grant or token key"
+    );
+    answer
+}
+
+/// The listed instances; each must hold exactly 032's keys.
+fn listed_instances(stand_in: &StandInRuntime) -> Vec<Value> {
+    let capsules = stand_in.get_capsules()["capsules"]
+        .as_array()
+        .expect("a list")
+        .clone();
+    for instance in &capsules {
+        assert_eq!(
+            keys(instance),
+            ["cause", "id", "name", "session_id", "status"],
+            "a listed instance holds no grant or token key"
+        );
+    }
+    capsules
+}
+
+/// The entries of the stand-in's grant view, which must answer under the
+/// `all_sessions_live` marker.
+fn grant_view(stand_in: &StandInRuntime) -> Vec<Value> {
+    let view = stand_in.get_capability_list_all_sessions_live();
+    assert_eq!(keys(&view), ["capabilities", "scope"]);
+    assert_eq!(view["scope"], "all_sessions_live");
+    view["capabilities"].as_array().expect("a list").clone()
+}
+
+#[test]
+fn standin_valid_signature_alone_yields_no_grant() {
+    let published = publish_agent_host();
+    let (mut stand_in, _) = signed_stand_in(&published);
+    // The manifest asks for a grant, so a launch that turned asks into grants
+    // would show here.
+    let manifest: Value =
+        serde_json::from_slice(&read_fixture(&AGENT_HOST, "capsule.json")).expect("JSON");
+    assert!(manifest["capabilities"]
+        .as_array()
+        .is_some_and(|asked| !asked.is_empty()));
+
+    // The launch passes the record check, so the publisher's signature is
+    // valid, and still no grant is held.
+    let first = launched(&mut stand_in);
+    assert_eq!(listed_instances(&stand_in).len(), 1);
+    let held = grant_view(&stand_in);
+    assert!(
+        !held
+            .iter()
+            .any(|entry| entry["session_id"] == first["session_id"]),
+        "a valid signature alone must yield no grant for the launched session: {held:?}"
+    );
+    assert_eq!(held, Vec::<Value>::new(), "no grant is held at all");
+
+    // A second launch gives a second session, and still no grant.
+    let second = launched(&mut stand_in);
+    assert_ne!(second["session_id"], first["session_id"]);
+    assert_eq!(listed_instances(&stand_in).len(), 2);
+    assert_eq!(
+        grant_view(&stand_in),
+        Vec::<Value>::new(),
+        "no grant is held after a second launch"
+    );
+}
+
+#[test]
+fn standin_grant_view_lists_a_seeded_grant() {
+    let published = publish_agent_host();
+    let (mut stand_in, _) = signed_stand_in(&published);
+    let answer = launched(&mut stand_in);
+    let session = answer["session_id"].as_str().expect("a session id");
+    let resource = "localhost://Users/self/.AppData/Agents/agent-host/journal";
+    stand_in.seed_grant(session, resource, "write", "session");
+
+    let held = grant_view(&stand_in);
+    assert_eq!(held.len(), 1, "exactly the one seeded grant: {held:?}");
+    let entry = &held[0];
+    assert_eq!(
+        keys(entry),
+        [
+            "action",
+            "duration",
+            "granted_at",
+            "request_id",
+            "resource",
+            "session_id"
+        ]
+    );
+    assert_eq!(entry["session_id"], session);
+    assert_eq!(entry["resource"], resource);
+    assert_eq!(entry["action"], "write");
+    assert_eq!(entry["duration"], "session");
+    assert!(entry["request_id"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty()));
+    assert!(entry["granted_at"].is_u64());
+
+    // The seed is not a launch: the instance list is unchanged.
+    assert_eq!(listed_instances(&stand_in).len(), 1);
+}

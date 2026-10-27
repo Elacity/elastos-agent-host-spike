@@ -1,6 +1,7 @@
 //! Unit coverage for the shape reader itself, on crafted modules: it reads the
-//! required shape, counts an import, sees an altered signature, rejects a
-//! non-core file, and fails closed on a truncated module (PRINCIPLES P11).
+//! required shape, refuses a module with an import section (it reads no
+//! imports, task 053), sees an altered signature, rejects a non-core file, and
+//! fails closed on a truncated module (PRINCIPLES P11).
 
 mod common;
 
@@ -67,7 +68,6 @@ fn reads_the_required_shape_from_a_crafted_module() {
     ]);
     let shape = read(&module).expect("shape");
     assert!(shape.is_core_wasm);
-    assert_eq!(shape.import_count, 0);
     assert_eq!(
         shape.digest,
         Some(FuncType {
@@ -78,17 +78,25 @@ fn reads_the_required_shape_from_a_crafted_module() {
     assert!(shape.is_the_required_capsule_shape());
 }
 
+/// Task 053: the shape reader reads no imports, so it refuses this one-import
+/// module with its one exact reason, which names the one import reader.
 #[test]
-fn counts_an_import_and_is_not_the_required_shape() {
+fn refuses_a_module_with_an_import_section() {
     let mut import_body = vec![1];
     import_body.extend_from_slice(&name("env"));
     import_body.extend_from_slice(&name("f"));
     import_body.push(0x00); // function import
     import_body.push(0); // type index
     let module = core_module(&[type_section(functype(&[], &[])), section(2, import_body)]);
-    let shape = read(&module).expect("shape");
-    assert_eq!(shape.import_count, 1);
-    assert!(!shape.is_the_required_capsule_shape());
+    assert_eq!(
+        read(&module),
+        Err(
+            "the shape reader reads no imports: a module's imports are read only \
+             through wasm_capsule_audit::audit"
+                .to_string()
+        ),
+        "a module with an import section must be refused, not read"
+    );
 }
 
 #[test]

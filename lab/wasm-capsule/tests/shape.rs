@@ -7,7 +7,12 @@ mod common;
 use common::build::{lane_dir, run_build, TempDir};
 use common::wasm_shape::{self, FuncType, ValType};
 use std::fs;
+use wasm_capsule_audit::audit;
 
+/// Task 053: the imports are read only through `wasm_capsule_audit::audit`,
+/// the lab's one module reader (P10). With no import declared, it returns an
+/// empty list or refuses the first import by name; the test-only shape reader
+/// reads no imports and checks only core Wasm and the `digest` signature.
 #[test]
 fn built_capsule_has_the_required_wasm_shape() {
     let lane = lane_dir();
@@ -16,13 +21,18 @@ fn built_capsule_has_the_required_wasm_shape() {
     run_build(&lane, &out);
 
     let bytes = fs::read(out.join("capsule.wasm")).expect("read capsule.wasm");
+    let imports = audit(&bytes, &[]).map_err(|refusal| refusal.to_string());
+    assert_eq!(
+        imports,
+        Ok(Vec::new()),
+        "the capsule must import nothing: the one audit reader's import list or refusal is {imports:?}"
+    );
     let shape = wasm_shape::read(&bytes).expect("read wasm shape");
 
     assert!(
         shape.is_core_wasm,
         "the artifact must be a core Wasm module"
     );
-    assert_eq!(shape.import_count, 0, "the capsule must import nothing");
     assert_eq!(
         shape.digest,
         Some(FuncType {

@@ -550,7 +550,7 @@ fn runner_io_refusals_keep_path_and_cause() {
         path: module.clone(),
         reason,
     };
-    let created = module_refusal(writer(WriteReason::ManifestNotCreated(
+    let created = module_refusal(writer(WriteReason::FileNotCreated(
         io::Error::from_raw_os_error(17),
     )));
     assert!(
@@ -565,7 +565,7 @@ fn runner_io_refusals_keep_path_and_cause() {
             module.display()
         )
     );
-    let written = module_refusal(writer(WriteReason::ManifestNotWritten(
+    let written = module_refusal(writer(WriteReason::FileNotWritten(
         io::Error::from_raw_os_error(28),
     )));
     assert!(
@@ -2133,7 +2133,7 @@ fn receipt_write_refuses_an_existing_path() {
             .unwrap_or_else(|| panic!("{kind}: the receipt was written over an existing path"));
         assert_eq!(&refusal.path, path, "{kind}");
         match &refusal.reason {
-            WriteReason::ManifestNotCreated(error) => {
+            WriteReason::FileNotCreated(error) => {
                 assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{kind}");
                 assert_eq!(error.raw_os_error(), Some(17), "{kind}");
             }
@@ -2143,10 +2143,16 @@ fn receipt_write_refuses_an_existing_path() {
             .err()
             .unwrap_or_else(|| panic!("{kind}: the shared writer wrote over an existing path"));
         assert_eq!(refusal.to_string(), own.to_string(), "{kind}");
+        // The writer's reason names no file: the receipt's path is the only
+        // name, so the refusal never names the bundle's manifest.
+        assert!(
+            !refusal.to_string().contains("capsule.json"),
+            "{kind}: the refusal names capsule.json: {refusal}"
+        );
         assert_eq!(
             refusal.to_string(),
             format!(
-                "{}: capsule.json cannot be created: File exists (os error 17)",
+                "{}: cannot be created as a new file: File exists (os error 17)",
                 path.display()
             ),
             "{kind}"
@@ -4914,7 +4920,7 @@ fn refusal_receipt_write_refuses_an_existing_path() {
             .unwrap_or_else(|| panic!("{kind}: the receipt was written over an existing path"));
         assert_eq!(&write_refusal.path, path, "{kind}");
         match &write_refusal.reason {
-            WriteReason::ManifestNotCreated(error) => {
+            WriteReason::FileNotCreated(error) => {
                 assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{kind}");
                 assert_eq!(error.raw_os_error(), Some(17), "{kind}");
             }
@@ -4924,10 +4930,16 @@ fn refusal_receipt_write_refuses_an_existing_path() {
             .err()
             .unwrap_or_else(|| panic!("{kind}: the shared writer wrote over an existing path"));
         assert_eq!(write_refusal.to_string(), own.to_string(), "{kind}");
+        // The writer's reason names no file: the refusal receipt's path is the
+        // only name, so the refusal never names the bundle's manifest.
+        assert!(
+            !write_refusal.to_string().contains("capsule.json"),
+            "{kind}: the refusal names capsule.json: {write_refusal}"
+        );
         assert_eq!(
             write_refusal.to_string(),
             format!(
-                "{}: capsule.json cannot be created: File exists (os error 17)",
+                "{}: cannot be created as a new file: File exists (os error 17)",
                 path.display()
             ),
             "{kind}"

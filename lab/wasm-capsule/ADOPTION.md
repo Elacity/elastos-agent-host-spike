@@ -13,9 +13,11 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   fixed `SOURCE_DATE_EPOCH`, isolated target dir, `--remap-path-prefix`) are the
   reproducible-build recipe.
 - `tests/common/wasm_shape.rs` — a tiny dependency-free reader that checks an
-  artifact is core Wasm, imports nothing, and has an expected export signature.
-  It is NOT a validator, and it is not grown into an import audit. Moving its
-  zero-import check onto `audit/` after cwa-001 is an open item for Flint.
+  artifact is core Wasm and that its `digest` export has the expected
+  signature. It is NOT a validator, and it reads no imports: it refuses a
+  module with an import section by name. The capsule's zero-import check reads
+  through `audit/` (`wasm_capsule_audit::audit`, task 053), the one import
+  reader (P10).
 - `audit/` — the `wasm-capsule-audit` crate, owned by the cx-wasm-audit lane and
   a member of this workspace (wc-000). It is the one static import-audit path
   (PRINCIPLES P10): wc-004's verifier calls `wasm_capsule_audit::audit`
