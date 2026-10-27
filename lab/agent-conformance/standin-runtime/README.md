@@ -18,10 +18,10 @@ A scope other than `all_sessions_live` is status 400. The reason starts with `un
 
 The launch body's only key is `path`. The launch value's keys are `id`, `name`, `status` and `session_id`. `session_id` equals `id`. The list body's only key is `capsules`. Each entry's keys are `id`, `name`, `status`, `session_id` and `cause`. Entries are sorted by `id`.
 
-The status strings are `starting`, `running`, `stopping`, `stopped` and `failed`. This stand-in stores `starting`, `running` and `failed`. `cause` is empty while `starting` or `running`. A `failed` entry stays while the test-supplied instant is less than 60 seconds after it failed, and the list omits it at 60 seconds. A `starting` or `running` entry stays at every instant.
+The status strings are `starting`, `running`, `stopping`, `stopped` and `failed`. This stand-in stores `starting`, `running`, `stopped` and `failed`. `cause` is empty while `starting` or `running`. A `failed` entry stays while the test-supplied instant is less than 60 seconds after it failed, and the list omits it at 60 seconds. A `starting` or `running` entry stays at every instant.
 
 `admit_resident` stores one path with its name, its `Start`, and the world name `resident-capsule`. `admit_resident`, `finish_start` and `set_instant` are lab test seams, not routes. `finish_start` is the one call to `resident.start`. Launch answers `starting` before that call returns.
 
-`resident.stop` and `DELETE /api/capsules/:id` belong to the next slice.
+`StandIn::delete_capsule` answers `DELETE /api/capsules/:id`. The body's only key is `reason`. The Ok value is null. `cause` is `stopped: ` joined with that reason. A `stopped` entry stays while the test-supplied instant is less than 60 seconds after the stop, and the list omits it at 60 seconds. Each `Live` grant whose session is that instance becomes `Revoked` and drops out through the one life filter. The sibling instance stays. Pending-request settlement is a later slice.
 
-This value is the lab stand-in and the real routes can replace it later because the JSON matches (M1-R). `parallel_capsules_complete_independently` stays `#[ignore = "blocked: RT4"]`.
+This value is the lab stand-in and the real route can replace it later because the JSON matches (M1-R). `parallel_capsules_complete_independently` stays `#[ignore = "blocked: RT4"]`. `run_leaves_no_live_grant` stays blocked on the real Runtime.

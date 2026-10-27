@@ -6733,3 +6733,55 @@ The first three are CAUGHT. `F-agent-host-p7` is NOT RUN with `did not run witho
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `tests/effects.rs:275` calls `poll` only when `apply_policy` is true. This change adds no capsule import. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `falsifiers.json:763` names `no_policy_file_does_not_mean_allow`. The runner reported `F-ac2c` CAUGHT. |
 | 8. Identity, admission and allowance stay separate? | Yes | `tests/common/grants.rs:39` treats a missing file as zero entries. A grant still requires the flag at `tests/effects.rs:275`. |
+
+## 047 — Land the reviewed stand-in stop without the census drain
+
+047: `standin-runtime/mod.rs` and `standin-runtime/README.md` are the bytes from `6b073a4710ee056b7007b8fb989d91238c51f413`. `StandIn::delete_capsule` answers `DELETE /api/capsules/:id`. A shell body whose only key is a non-empty string `reason` stores `stopped` with cause `stopped: ` joined to that reason, revokes that session's `Live` grants through the one `keep` filter, and leaves the sibling. `tests/common/operator.rs`, `src/census.rs`, `RUNBOOK.md`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` stay as the base has them. A search of `lab/agent-conformance` finds none of `drain_capture_holders`, `capture_holder_only`, or `capture_holder_drain_retries_a_stdout_leftover`. There is no new `falsifiers.json` id.
+
+`fn delete_capsule` was absent under `lab/agent-conformance/` at `ccb528a515918fd894cc8a2dd029fe661bb449e6`. `refs/remotes/spike/spike/agent-host` is `62eac8742`, three commits after `b1a14bdef`. Those commits leave `lab/agent-conformance/` unchanged, and `fn delete_capsule` is absent on that ref too.
+
+After the restore, `git diff 6b073a471 -- lab/agent-conformance/standin-runtime/mod.rs lab/agent-conformance/standin-runtime/README.md` is empty. `mod.rs` sha256 is `2aa6aa8d9cfdb4a830cb863934f0eb5965e53b303bf1a70ba74357fce663dbc6`.
+
+### Hand-run falsifier
+
+No list id. One plant, then the restore, before the gates. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_stop_sets_stopped -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true` and lane `target/host` plus `target/host-build`.
+
+F-standin-stop-stub. Named test `standin_stop_sets_stopped`. Planted exit 101 in 1.170 s. Restored exit 0 in 1.196 s. Assertion: `src/../standin-runtime/mod.rs:982:9` `the stand-in stores stopped with the stop reason`. Left status `running` with an empty cause. Right status `stopped` with cause `stopped: stop one`.
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let reason = stop_reason(body)?;
+```
+
+New:
+
+```text
+        return Ok(Value::Null);
+        require_shell(caller)?;
+        let reason = stop_reason(body)?;
+```
+
+The plant is the start of `delete_capsule`. It returns `Ok` of null before any instance is read. After the restore, that return is absent and `git diff 6b073a471 -- lab/agent-conformance/standin-runtime/mod.rs` is empty.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`. The shared heavy-build lease wait was 56.226 s before the planted test, then 0.000 s before the restored test and both full runs. `cargo fmt` and both full test commands stayed inside 600 seconds. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.177 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, real 293.738 seconds. The effects target finished 56 passed, 1 failed, 12 ignored, in 239.54 seconds. The failed test was `agent_cannot_read_human_space_without_grant`. The census line was `process leftover; processes:1 paths:["home/Library/Application Support/elastos/host-process.lock"]`. That path is outside the `ca.key` / `device.key` / `tls.key` set and outside `stdout-<digits>` / `stderr-<digits>`. The stand-in files stayed the restored bytes. `operator.rs` and `src/census.rs` stayed as the base has them. The holder was already gone, so the same command ran once more.
+- Same command, once more: exit 0, real 374.913 seconds. 137 passed, 0 failed, 14 ignored. The lib target passed 26 tests. The effects target passed 57 tests, with 12 ignored, in 261.21 seconds. The runtime target passed 10 tests, with 2 ignored, in 40.56 seconds. The report target passed 23 tests. The harness target passed 9 tests. The artifact target passed 7 tests.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `standin-runtime/mod.rs:235` `delete_capsule` takes the instance id. It does not name code or content by a URL. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `standin-runtime/mod.rs:265` `revoke_live` changes stored grant life. It opens no file, network, or `wasi` import. |
+| 3. A second path or a second copy of one rule? | No | `standin-runtime/mod.rs:331` `keep` is the one life filter. `src/census.rs:79` `cleanup` stays the one cleanup. |
+| 4. Runtime core grows? | No | The edit is `standin-runtime/mod.rs`, `standin-runtime/README.md` and `LOG.md`. `src/lib.rs:9` still points the lab module there. |
+| 5. Refusals deny by default with a clear reason? | Yes | `standin-runtime/mod.rs:451` returns 400 `unknown instance`. `:456` returns 400 `instance is not live`. `:372` returns 403 `This endpoint requires shell privileges`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `standin-runtime/mod.rs:247` `stop_one` updates stand-in state. This change adds no capsule import. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:1449` `standin_stop_sets_stopped`. The planted return of null fails that assertion at `:982` and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:235` stops an instance and does not admit a path. `keep` at `:331` filters life and grants nothing. |
