@@ -1922,8 +1922,16 @@ class IssueRules(unittest.TestCase):
         Wallet allow, then a did profile error: the writer records the wallet
         allow, the wallet deny test is marked, and the error still propagates.
         Model is not opened. A did allow before a model error is recorded too.
-        The clean run writes no finding.
+        The mocked writer leaves all live finding contents unchanged.
         """
+        live_names = (
+            ROOT / "lab" / "redteam" / "CRITICAL.md",
+            ROOT / FINDINGS["wallet"],
+            ROOT / FINDINGS["model"],
+        )
+        before = {
+            path: path.read_bytes() if path.is_file() else None for path in live_names
+        }
         allow = sbx.Result(
             exit_code=0,
             stdout=FULL_STDOUT,
@@ -2012,13 +2020,10 @@ class IssueRules(unittest.TestCase):
         finally:
             if observed is not None:
                 observed.doClassCleanups()
-        live_names = (
-            ROOT / "lab" / "redteam" / "CRITICAL.md",
-            ROOT / FINDINGS["wallet"],
-            ROOT / FINDINGS["model"],
-        )
         for path in live_names:
-            self.assertFalse(path.exists())
+            self.assertEqual(
+                path.read_bytes() if path.is_file() else None, before[path],
+            )
         self.launch_guard.assert_not_called()
 
     def test_recorded_allow_is_expected_failure(self):
@@ -2285,18 +2290,26 @@ class IssueRules(unittest.TestCase):
         Only the deny test of a profile that contains a plant line is an
         expected failure. The finding names every call that returned a token.
         The plants still run, nothing skips, and the result is successful.
+        The observation rule runs after the probe, with its findings present.
+        An existing CRITICAL.md from another probe also stays unchanged.
         """
         method_names = unittest.defaultTestLoader.getTestCaseNames(IssueProbe)
-        scenarios = [{}]
+        scenarios = [({}, None), ({}, b"CRITICAL fixture from another probe\n")]
         for profile_name in ("wallet", "did", "model"):
             for names in ALLOW_GROUPS:
-                scenarios.append({profile_name: names})
-        self.assertEqual(len(scenarios), 1 + 3 * len(ALLOW_GROUPS))
-        for allowed in scenarios:
-            with self.subTest(allowed=tuple(allowed.items())), tempfile.TemporaryDirectory(
+                scenarios.append(({profile_name: names}, None))
+        self.assertEqual(len(scenarios), 2 + 3 * len(ALLOW_GROUPS))
+        for allowed, existing_critical in scenarios:
+            with self.subTest(
+                allowed=tuple(allowed.items()), existing_critical=existing_critical,
+            ), tempfile.TemporaryDirectory(
                 prefix="ccrt-issue-suite-"
             ) as tmp:
                 repo = Path(tmp).resolve()
+                critical = repo / "lab/redteam/CRITICAL.md"
+                if existing_critical is not None:
+                    critical.parent.mkdir(parents=True, exist_ok=True)
+                    critical.write_bytes(existing_critical)
                 profiles = []
                 for original in PROFILES:
                     profile = dict(original)
@@ -2371,8 +2384,10 @@ class IssueRules(unittest.TestCase):
                     skip_reason=None, recorded_allows={},
                 ):
                     result = unittest.TestResult()
-                    unittest.defaultTestLoader.loadTestsFromTestCase(IssueProbe).run(result)
-                    self.assertEqual(result.testsRun, len(method_names))
+                    suite = unittest.defaultTestLoader.loadTestsFromTestCase(IssueProbe)
+                    suite.addTest(IssueRules("test_observe_records_allow_before_later_error"))
+                    suite.run(result)
+                    self.assertEqual(result.testsRun, len(method_names) + 1)
                     self.assertEqual(result.errors, [])
                     self.assertEqual(result.failures, [])
                     self.assertEqual(result.unexpectedSuccesses, [])
@@ -2431,7 +2446,10 @@ class IssueRules(unittest.TestCase):
                             (repo / "lab/redteam/CRITICAL.md").read_text(encoding="utf-8"),
                         )
                     if not allowed:
-                        self.assertFalse((repo / "lab/redteam/CRITICAL.md").exists())
+                        if existing_critical is None:
+                            self.assertFalse(critical.exists())
+                        else:
+                            self.assertEqual(critical.read_bytes(), existing_critical)
                         for rel in set(FINDINGS.values()):
                             self.assertFalse((repo / rel).exists())
                     else:
