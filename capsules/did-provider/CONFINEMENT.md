@@ -354,6 +354,15 @@ skip an entry that names one reads `SURVIVED`. A call site that passes a fixed
 `/usr/bin/sandbox-exec` exists, because a present tool runs the test before the
 OS is read, so that run is no evidence for the OS argument.
 
+In the lab, did-provider also starts through the stand-in launcher in
+`../wallet-provider/tests/confine.rs`.
+`standin_launcher_refuses_a_start_it_cannot_confine` runs every refusal case
+for did before wallet, `standin_launcher_starts_did_confined_under_the_generated_profile`
+runs did's start and outside-write journey, and
+`standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
+compares did's permitted and denied suite on the committed `confine.sb` and on
+a stand-in start. The stand-in is test code and not the Runtime.
+
 ## Falsifiers
 
 - Restore the temp-directory fallback for a missing or empty storage root

@@ -144,8 +144,19 @@ The stand-in refuses in the order of these steps:
 Otherwise the stand-in writes the profile that the lab generator builds from
 the declared rights, creates the shared ancestors, and starts the named binary
 under that profile through `start_under` with the three canonical bindings. It
-sends `init` with `base_path` and is Started only when `init` answers `ok`. The
+sends the provider's `init` config, which holds `base_path` and, for did, the
+isolated fixture device key, and is Started only when `init` answers `ok`. The
 stand-in never starts the binary outside `sandbox-exec`.
+
+Both file-profile providers start through this one stand-in:
+`wallet-provider` here and `did-provider` in the same test file, each with its
+own committed declared-rights file, binary and storage-root layout. did's
+start binds `<base>/did` as `STORAGE_ROOT` and `<base>` as `STORAGE_PARENT`.
+`standin_launcher_starts_did_confined_under_the_generated_profile` holds the
+did journey, and
+`standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
+compares did's suite on the committed `confine.sb` and on a stand-in start,
+through the same record type and comparison as the wallet suite.
 
 `standin_launcher_refuses_a_start_it_cannot_confine` holds the refusals, and
 `standin_launcher_starts_wallet_confined_under_the_generated_profile` holds
@@ -921,6 +932,9 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Record every bound result as `Ok` in `wallet_suite_entry` (WP123):
   `wallet_suite_entry_records_an_inner_refusal_as_refused` fails because the
   inner refusal reads `Ok`.
+- Use wallet's root layout for a did start in the stand-in (WP124):
+  `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
+  fails because the did start is refused at its first `init`.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
