@@ -1442,7 +1442,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 242 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 244 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1473,7 +1473,8 @@ F-CI24a to F-CI24e (see
 [for a lab that uses the lab CID](#for-a-lab-that-uses-the-lab-cid)), and task
 028's F-CI28a to F-CI28d (see [claim scope](#claim-scope)), and task
 029's F-CI29a to F-CI29e (see [the inventory check](#the-inventory-check)),
-and task 030's F-CI30a and F-CI30b (see [claim scope](#claim-scope)).
+and task 030's F-CI30a and F-CI30b (see [claim scope](#claim-scope)), and
+task 031's F-CI31a and F-CI31b (see [the inventory check](#the-inventory-check)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -1544,10 +1545,21 @@ round 1 of task 001, which 005 carried). `falsifier_inventory_findings` in
 of three-digit items, ids `F-CI<n><letters>` (one to three digits, no leading
 zero, lowercase letters), and one "holds N planted bugs" here, read word by
 word. Anything else is refused with its own reason, never read as no
-mismatch. It does not check the per-task paragraph above or the tables row by
-row. Task 029's entries all edit `tests/common/mod.rs`, in that helper, each
-anchor found exactly once; no entry edits `falsifiers.json`, which the runner
-does not restore.
+mismatch. The order is checked too: when every task is named and no task is
+named without entries, `about`'s tasks must come in the order the list first
+holds each task's entries, or that is finding (d), which gives both orders.
+A task named twice in `about` is refused, not read as a mismatch. A repeated
+id is not this check's: the runner's loader refuses the whole list with "an
+id is used twice" (`examples/agent-host/falsify.py`), so the lane keeps no
+second check for it (P10). It does not check the per-task paragraph above or
+the tables row by row. Task 029's entries all edit `tests/common/mod.rs`, in
+that helper, each anchor found exactly once; no entry edits
+`falsifiers.json`, which the runner does not restore. Task 031's entries also
+edit `tests/common/mod.rs`, in that helper: F-CI31a in the order compare of
+`falsifier_inventory_findings`, F-CI31b in the repeat refusal of
+`about_tasks`. Each anchor is a line task 031 added, found exactly once. Task
+031 kept the anchor lines of F-CI29a to F-CI29e byte for byte and changed no
+older edit's text.
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
@@ -1555,7 +1567,9 @@ does not restore.
 | (a) a task with entries that `about` does not name is found | `the_falsifier_inventory_finds_each_mismatch` | F-CI29a (check (a) dropped) |
 | (b) a task `about` names with no entry is found | `the_falsifier_inventory_finds_each_mismatch` | F-CI29b (check (b) dropped) |
 | (c) a count that differs from the number of ids is found, with both numbers | `the_falsifier_inventory_finds_each_mismatch` | F-CI29c (the count compare dropped) |
+| (d) `about`'s tasks out of the list's order are found, with both orders, when (a) and (b) find nothing | `the_falsifier_inventory_finds_each_mismatch` | F-CI31a (the order compare never reports) |
 | No "(tasks ...)" list, two lists, an unclosed list, an item that is not three digits, an id of another form, and no or two count sentences are each refused with their own reason | `the_falsifier_inventory_refuses_what_it_cannot_read` | F-CI29e (no "(tasks ...)" list reads as naming no task) |
+| A task named twice in `about` is refused, not read as an order finding | `the_falsifier_inventory_refuses_what_it_cannot_read` | F-CI31b (the repeat refusal removed) |
 
 Task 018 swapped the framed stream for the UnixFS root, so 23 older entries
 whose text it removed are re-targeted in place: the same id, the same bug in
@@ -1645,9 +1659,11 @@ CAUGHT). At task 029 it reported `summary: 240 CAUGHT of 240` (`baseline: 127
 named tests pass without an edit, 0 do not`; F-CI29a to F-CI29e each CAUGHT).
 At task 030 it reported `summary: 242 CAUGHT of 242` (`baseline: 127 named
 tests pass without an edit, 0 do not`; F-CI30a and F-CI30b, F-CI28a to
-F-CI28d and F-CI23e to F-CI23h each CAUGHT).
+F-CI28d and F-CI23e to F-CI23h each CAUGHT). At task 031 it reported
+`summary: 244 CAUGHT of 244` (`baseline: 127 named tests pass without an
+edit, 0 do not`; F-CI31a and F-CI31b and F-CI29a to F-CI29e each CAUGHT).
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
-014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029 and
-030 prove each of their falsifiers by break, named test fails, revert.
+014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029,
+030 and 031 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.
