@@ -34,7 +34,7 @@ fn held_for_identity(
     grants: &HashMap<Handle, crate::GrantRecord>,
     identity: &str,
 ) -> u64 {
-    let mut sum = 0;
+    let mut sum: u64 = 0;
     for open_hold in open.values() {
         let Some(grant) = grants.get(&open_hold.handle) else {
             continue;
@@ -42,7 +42,7 @@ fn held_for_identity(
         if grant.identity != identity {
             continue;
         }
-        sum += open_hold.amount;
+        sum = sum.saturating_add(open_hold.amount);
     }
     sum
 }
@@ -211,9 +211,10 @@ impl Verifier {
         self.ledger.lock().expect("ledger lock").ceiling = ceiling;
     }
 
-    /// Holds `amount` on the ledger when the outstanding total plus `amount`
-    /// stays at or under the ceiling. A binding refusal records nothing, a sum
-    /// that does not fit in `u64` is over the ceiling, and the request's
+    /// Holds `amount` on the ledger when the total this identity compares plus
+    /// `amount` stays at or under the ceiling and the stored sum of every open
+    /// hold plus `amount` fits in `u64`. A binding refusal records nothing, a
+    /// sum that does not fit in `u64` is over the ceiling, and the request's
     /// reported usage does not lower the hold.
     pub fn reserve(
         &self,
@@ -253,9 +254,23 @@ impl Verifier {
                 })
             }
         };
+        let put_back = if ledger.ceilings.contains_key(&identity) {
+            match shared.checked_add(amount) {
+                Some(shared_total) => Some(shared_total),
+                None => {
+                    return Err(ReserveRefuse::OverCeiling {
+                        ceiling: ledger.ceiling,
+                        held,
+                        asked: amount,
+                    })
+                }
+            }
+        } else {
+            None
+        };
         ledger.held = total;
-        if ledger.ceilings.contains_key(&identity) {
-            ledger.held = shared - own + total;
+        if let Some(shared_total) = put_back {
+            ledger.held = shared_total;
         }
         ledger.next_reservation += 1;
         ledger.open.insert(
@@ -1771,4 +1786,57 @@ fn model_other_agent_hold_does_not_fill_the_ceiling() {
     );
     assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
     assert_eq!(books(&verifier).held, 54);
+}
+
+#[test]
+fn model_second_agent_hold_past_the_shared_u64_total_is_refused() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-2", "session-a");
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", rights())
+        .expect("bind");
+    let first_call = verifier.open_call(first);
+    let second_call = verifier.open_call(second);
+    let first_request = guest(first_handle);
+    let second_request = guest(second_handle);
+    verifier
+        .admit_ask(
+            &first_call,
+            &first_request,
+            crate::ask::BudgetAsk { amount: u64::MAX },
+            u64::MAX,
+        )
+        .expect("first ask");
+    verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            crate::ask::BudgetAsk { amount: 1 },
+            1,
+        )
+        .expect("second ask");
+    verifier
+        .reserve(&first_call, &first_request, u64::MAX)
+        .expect("first agent fills its own ceiling");
+    assert_eq!(books(&verifier).held, u64::MAX);
+    let refusal = verifier
+        .reserve(&second_call, &second_request, 1)
+        .expect_err("the stored sum does not fit in u64");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 1,
+            held: 0,
+            asked: 1,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.held, u64::MAX);
+    assert_eq!(after.open.len(), 1);
+    assert_eq!(after.charged, 0);
 }

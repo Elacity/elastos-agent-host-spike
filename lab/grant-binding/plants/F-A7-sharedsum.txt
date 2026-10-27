@@ -1,0 +1,17 @@
+id: F-A7-sharedsum
+file: src/ledger.rs
+test: ledger::model_second_agent_hold_past_the_shared_u64_total_is_refused
+--- old
+            match shared.checked_add(amount) {
+                Some(shared_total) => Some(shared_total),
+                None => {
+                    return Err(ReserveRefuse::OverCeiling {
+                        ceiling: ledger.ceiling,
+                        held,
+                        asked: amount,
+                    })
+                }
+            }
+--- new
+            Some(shared.wrapping_add(amount))
+--- end
