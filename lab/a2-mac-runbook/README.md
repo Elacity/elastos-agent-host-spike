@@ -10,8 +10,8 @@ lanes, BACKLOG.md, lane.env, or any 0.8.0 runtime code.
 
 The only ` ```bash ` fence in [RUNBOOK.md](RUNBOOK.md):
 
-- sha256: fd7d4b049f40cda224bbdffbcb610f5390daaa383e343f5d428aac7f0ca0f6c0
-- bytes: 21909
+- sha256: a379968784991a3ea9d689a035f660a50971eb12bf0505fdc58adef02a36ac4d
+- bytes: 21906
 
 Those numbers are of the fence body, including its trailing newline,
 and not of the markdown fences.
