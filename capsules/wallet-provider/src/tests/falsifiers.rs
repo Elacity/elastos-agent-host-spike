@@ -168,7 +168,7 @@ use std::process::Command;
 /// profile but starts under the committed `confine.sb`, so
 /// `standin_start_runs_under_the_generated_profile_not_the_committed_file`
 /// fails because the start is then Started.
-const EXPECTED_FALSIFIERS: usize = 115;
+const EXPECTED_FALSIFIERS: usize = 118;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
