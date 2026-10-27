@@ -2301,12 +2301,32 @@ fn allow_rules_trace_to_declared_rights() {
     }
 
     let profile = fs::read_to_string(PROFILE_PATH).expect("the profile source");
-    let allow_lines: Vec<&str> = profile
+    let mut allow_lines: Vec<&str> = profile
         .lines()
         .filter(|line| !line.starts_with(";;"))
         .map(str::trim)
         .filter(|line| line.starts_with("(allow "))
         .collect();
+    // An allow after another form on the same line is one more allow line.
+    // A line that already starts with `(allow ` stays the one copy, so a
+    // declared rule is not counted twice.
+    for line in profile
+        .lines()
+        .filter(|line| !line.starts_with(";;"))
+        .map(str::trim)
+    {
+        if line.starts_with("(allow ") {
+            continue;
+        }
+        let Some(start) = line.find("(allow ") else {
+            continue;
+        };
+        let suffix = &line[start..];
+        if allow_lines.contains(&suffix) {
+            continue;
+        }
+        allow_lines.push(suffix);
+    }
     let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
     let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
         panic!(

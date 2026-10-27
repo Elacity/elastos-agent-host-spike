@@ -536,6 +536,8 @@ This citation is design input for A5. For the identity, `lab/grant-binding/src/l
 
 This citation is design input for A5. For the path check, `lab/grant-binding/src/lib.rs::use_path` resolves the grant, then checks the path against the stored owned root. The guest's claims are not read. The doc line is `Uses a grant for one path.` The body calls resolve, then resource_name. The body lines are `let record = self.resolve(*call, request.handle)?;` and `resource_name(&record.identity, path, Some(&record.owned_root))?;`. For a .. segment, `lab/grant-binding/src/lib.rs::model_use_path_dotdot_is_refused` binds UsersAI/agent-1/notes and uses UsersAI/agent-1/notes/../other. The expect_err line is `expect_err("dotdot use path")` and the assert_eq of the refusal string is `owned root is a host path`. For a path outside the owned root, `lab/grant-binding/src/lib.rs::model_use_path_outside_the_owned_root_is_refused` uses UsersAI/agent-1/other and UsersAI/agent-1/notes-extra. The expect_err line is `expect_err("outside the owned root")` and the assert_eq of the refusal string is `use path leaves the owned root`. For a symlink-shaped segment, `lab/grant-binding/src/lib.rs::model_symlink_shaped_use_path_is_refused` uses UsersAI/agent-1/notes/link->out. The expect_err line is `expect_err("symlink-shaped segment")` and the assert_eq of the refusal string is `use path has a symlink-shaped segment`. The same test also uses UsersAI/agent-1/notes/. and UsersAI/agent-1/notes/.., and the expect_err line is `expect_err("host-shaped segment")` and the assert_eq of the refusal string is `owned root is a host path` for those two paths. For a sibling instance, `lab/grant-binding/src/lib.rs::model_use_path_on_a_sibling_instance_is_refused` registers two instances with the same identity and the same session, binds the first, and opens the call on the other. The path is the owned root UsersAI/agent-1/notes. Both instances use agent-1 and session-a. The expect_err line is `expect_err("sibling instance")` and the assert_eq of the refusal string is `instance does not match the grant`. These use-path functions are the lab reference model, and the lab model is not the Runtime. A5 stays open.
 
+This citation is design input for A5. `lab/grant-binding/src/lib.rs::model_public_storage_read_is_refused` registers agent-1 and session-a, then bind_grant of Public/notes fails. The fn line is `fn model_public_storage_read_is_refused() {`. The body calls register_instance, then bind_grant. The call is `bind_grant(instance, "Public/notes", rights())`. The expect_err line is `expect_err("public storage read")`, the assert_eq of the refusal is `Refuse::PublicRead`, and the assert_eq of the refusal string is `public storage read does not bind`. That call returns no handle. The same test then bind_grant of UsersAI/agent-1/notes. use_path of Public/notes and use_path of Public/notes/page.md each fail with the same text. The loop line is `for path in ["Public/notes", "Public/notes/page.md"]`. The expect_err line on use_path is `expect_err("public storage read")` and the second assert_eq of the refusal string is `public storage read does not bind`. use_path of UsersAI/agent-1/notes/Public is allowed. The call is `use_path(&call, &request, "UsersAI/agent-1/notes/Public")` and the expect line is `expect("a later Public segment is a normal child path")`. This public-storage test is the lab reference model, and the lab model is not the Runtime. A5 stays open.
+
 ## 4. Model operations
 
 This section is design input for A4. A4 stays open. This section cites no lab/grant-binding test.
@@ -1662,3 +1664,261 @@ This group is design input for B2. B2 stays open.
         assert_eq!(refusal, OperateRefuse::AppendNotGranted);
         assert_eq!(refusal.to_string(), "overwrite does not permit append");
     }
+
+## 7. Open questions
+
+`lab/grant-binding/README.md:12` says the crate is a reference model, not the Runtime.
+
+    reference model, not the Runtime; counts toward no M1 check; the Runtime half is Anders's (#464, #463, #181)
+
+The cited lab functions are the lab reference model, and the lab model is not the Runtime. This section is design input for A3, A4, A5, A7 and B2. Those checks stay open.
+
+Section 1 shows the guest names `Users/self`. local_person_principal_id builds `person:local:`. The journal root is `localhost://Users/self/.AppData/Agents/`. Section 2 shows signer_did is the bundle signer's `did:key`, and a valid signature grants nothing. `examples/agent-host/src/lib.rs` contains no `did:`.
+
+`docs/AGENT_ARCHITECTURE.md:19` says a human and an agent are both represented by Runtime principals.
+
+    - A human and an agent are both represented by Runtime principals.
+
+`docs/AGENT_ARCHITECTURE.md:21` says the human product identity is a signed Profile document with a stable Profile DID.
+
+      signed Profile document with a stable Profile DID, controlled from a
+
+`docs/AGENT_ARCHITECTURE.md:24` says executable agent software is a capsule, separate from the agent principal.
+
+    - Executable agent software is a capsule, separate from the agent principal
+
+`docs/AGENT_ARCHITECTURE.md:332` says agent state is rooted under the agent principal's `UsersAI/...` space.
+
+    - Agent state is rooted under the agent principal's `UsersAI/...` space.
+
+`lab/grant-binding/src/lib.rs::register_instance` stores the identity string and the session string. The body writes `identity: identity.to_owned()` and `session: session.to_owned()`. The body does not parse a DID.
+
+    /// Registers an instance and returns its registry id.
+    pub fn register_instance(&mut self, identity: &str, session: &str) -> InstanceId {
+        self.next_instance += 1;
+        let instance = InstanceId(self.next_instance);
+        self.registry.insert(
+            instance,
+            InstanceRecord {
+                identity: identity.to_owned(),
+                session: session.to_owned(),
+            },
+        );
+        instance
+    }
+
+`lab/grant-binding/src/lib.rs::resource_name` is the name check. `lab/grant-binding/src/lib.rs:277` is the guard `if parts.len() < 3 || parts[0] != "UsersAI" || parts[1] != agent`. The body returns OutsidePrincipal when that guard is true.
+
+    fn resource_name(agent: &str, name: &str, owned_root: Option<&str>) -> Result<String, Refuse> {
+        if name.contains('\\') || name.starts_with('/') {
+            return Err(Refuse::HostPath);
+        }
+        let parts: Vec<&str> = name.split('/').collect();
+        if parts
+            .iter()
+            .any(|part| part.is_empty() || *part == "." || *part == "..")
+        {
+            return Err(Refuse::HostPath);
+        }
+        if parts.first() == Some(&"Public") {
+            return Err(Refuse::PublicRead);
+        }
+        if parts.len() < 3 || parts[0] != "UsersAI" || parts[1] != agent {
+            return Err(Refuse::OutsidePrincipal);
+        }
+        if !parts.iter().skip(2).all(|part| {
+            part.chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+        }) {
+            return Err(Refuse::SymlinkShaped);
+        }
+        if let Some(root) = owned_root {
+            let inside = name
+                .strip_prefix(root)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));
+            if !inside {
+                return Err(Refuse::OutsideRoot);
+            }
+        }
+        Ok(name.to_owned())
+    }
+
+Is the agent DID the person principal (person:local:), or a separate DID? Does the owned journal root stay on the launching person's Users/self path, or move to the agent principal's UsersAI path?
+
+Section 3 shows the cited functions return the token string as the grant id. grant-id is a string. Those functions do not show a separate handle table.
+
+`lab/grant-binding/src/lib.rs:20` says an opaque grant handle. The guest holds only this. `lab/grant-binding/src/lib.rs:22` is the struct. Handle is an opaque value and the guest holds only that.
+
+    /// An opaque grant handle. The guest holds only this.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct Handle(u64);
+
+`lab/grant-binding/src/lib.rs::bind_grant` binds the instance's identity and session, the owned root, and the rights to a fresh handle. `lab/grant-binding/src/lib.rs:159` is the doc line for that binding. The body loads the instance record, asks resource_name for the owned root, and stores the identity, the session, the instance, the owned root, and the rights on a new handle.
+
+    /// Binds the instance's identity and session, the owned root and the rights
+    /// to a fresh handle.
+    pub fn bind_grant(
+        &mut self,
+        instance: InstanceId,
+        resource: &str,
+        rights: Rights,
+    ) -> Result<Handle, Refuse> {
+        let record = self
+            .registry
+            .get(&instance)
+            .ok_or(Refuse::UnknownInstance)?;
+        let owned_root = resource_name(&record.identity, resource, None)?;
+        self.next_handle += 1;
+        let handle = Handle(self.next_handle);
+        self.grants.insert(
+            handle,
+            GrantRecord {
+                identity: record.identity.clone(),
+                session: record.session.clone(),
+                instance,
+                owned_root,
+                rights,
+            },
+        );
+        Ok(handle)
+    }
+
+`lab/grant-binding/src/lib.rs::use_grant` uses the handle. The guest's claims are not read. `lab/grant-binding/src/lib.rs:241` says the call uses a grant and the guest's claims are not read. The body resolves the handle and returns the stored identity, session, instance, owned root, and rights.
+
+    /// Uses a grant. The guest's claims are not read.
+    pub fn use_grant(&self, call: Call, request: &GuestRequest) -> Result<Decision, Refuse> {
+        let record = self.resolve(call, request.handle)?;
+        Ok(Decision {
+            identity: record.identity,
+            session: record.session,
+            instance: record.instance,
+            owned_root: record.owned_root,
+            rights: record.rights,
+        })
+    }
+
+Is the Bus v2 host-side handle the token string, or an opaque handle whose binding the guest does not read?
+
+Section 4 keeps the hosted-effect path apart from the direct URL path and leaves A4 open. The names in that section are propose_hosted, effect_request, runtime_hosted_socket, MODEL_OPERATIONS, handle, and forward. The five strings section 4 lists are `offers_list`, `runs_create`, `runs_get`, `runs_events`, and `runs_cancel`.
+
+Which path does the model operation use: the hosted-effect socket, or the five model operations on the remote model service?
+
+Section 5 shows the guest writes zeros, the journal check is room for history, the concurrency check counts non-terminal runs, the slot stores a time, and the usage function refuses an empty report. Section 5 states the account A7 asks for and cites no lab/grant-binding test.
+
+`lab/grant-binding/src/ledger.rs::reserve` holds an amount when the outstanding total plus the amount stays at or under the ceiling. `lab/grant-binding/src/ledger.rs:139` is the line that states that hold. The comparison is `total <= ledger.ceiling`.
+
+    /// Holds `amount` on the ledger when the outstanding total plus `amount`
+    /// stays at or under the ceiling. A binding refusal records nothing, a sum
+    /// that does not fit in `u64` is over the ceiling, and the request's
+    /// reported usage does not lower the hold.
+    pub fn reserve(
+        &self,
+        call: &Call,
+        request: &GuestRequest,
+        amount: u64,
+    ) -> Result<Reservation, ReserveRefuse> {
+        self.resolve(*call, request.handle)
+            .map_err(ReserveRefuse::Binding)?;
+        let mut ledger = self.ledger.lock().expect("ledger lock");
+        let held = ledger.held;
+        let ledger: &mut Ledger = &mut ledger;
+        let total = match held.checked_add(amount) {
+            Some(total) if total <= ledger.ceiling => total,
+            _ => {
+                return Err(ReserveRefuse::OverCeiling {
+                    ceiling: ledger.ceiling,
+                    held,
+                    asked: amount,
+                })
+            }
+        };
+        ledger.held = total;
+        ledger.next_reservation += 1;
+        ledger.open.insert(
+            ledger.next_reservation,
+            OpenHold {
+                handle: request.handle,
+                amount,
+            },
+        );
+        Ok(Reservation {
+            id: ledger.next_reservation,
+        })
+    }
+
+`lab/grant-binding/src/ledger.rs::model_reserve_over_the_ceiling_is_refused` expects the refusal when the asked amount is past the ceiling, and the held total stays unchanged. The body admits a ceiling of 5, asks for 6, and the held total stays 0.
+
+    #[test]
+    fn model_reserve_over_the_ceiling_is_refused() {
+        let mut verifier = Verifier::new();
+        let (instance, handle) = bound(&mut verifier);
+        verifier.admit(5);
+        let call = verifier.open_call(instance);
+        let refusal = verifier
+            .reserve(&call, &guest(handle), 6)
+            .expect_err("over the ceiling");
+        assert_eq!(
+            refusal,
+            ReserveRefuse::OverCeiling {
+                ceiling: 5,
+                held: 0,
+                asked: 6,
+            }
+        );
+        assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+        assert_eq!(books(&verifier).held, 0);
+    }
+
+`lab/grant-binding/src/ledger.rs::model_reported_usage_does_not_lower_the_hold` expects the held total to stay at the reserved amount. The body reserves 10 while the request reports a usage of 1, and the held total stays 10.
+
+    #[test]
+    fn model_reported_usage_does_not_lower_the_hold() {
+        let mut verifier = Verifier::new();
+        let (instance, handle) = bound(&mut verifier);
+        verifier.admit(10);
+        let call = verifier.open_call(instance);
+        let request = GuestRequest {
+            reported_usage: 1,
+            ..guest(handle)
+        };
+        verifier.reserve(&call, &request, 10).expect("reserve");
+        assert_eq!(books(&verifier).held, 10);
+    }
+
+reserve, model_reserve_over_the_ceiling_is_refused, and model_reported_usage_does_not_lower_the_hold do not name a unit, and they do not settle or release a hold.
+
+What unit does the Runtime reserve before each dispatch, and does a cancellation or an uncertain outcome release that hold?
+
+`lab/grant-binding/src/ledger.rs::settle` resolves the call first, then charges the measured figure. A known SettleOutcome uses that measured figure as the charge. `lab/grant-binding/src/ledger.rs:212` contains `let charge = measured;`. `lab/grant-binding/src/ledger.rs::model_settle_known_outcome_charges_the_measured_figure` expects that charge to equal the measured figure, the charged total to gain it, and the held total to return to zero. `lab/grant-binding/src/ledger.rs::model_reported_usage_does_not_lower_the_settled_charge` sets reported_usage to 1 and still expects the charge to equal the measured figure. The unknown arm of settle returns before it changes the held total or the charged total. `lab/grant-binding/src/ledger.rs:197` contains `return Err(SettleRefuse::UnknownOutcome);`. `lab/grant-binding/src/ledger.rs::model_unknown_outcome_keeps_the_hold` expects that refusal, with `expect_err("unknown outcome")` and `unknown outcome keeps the hold`. The held total stays at the reserved amount. `lab/grant-binding/src/ledger.rs::release` resolves the call first, removes the open hold, and subtracts the stored amount from the held total. It does not change the charged total. `lab/grant-binding/src/ledger.rs:242` contains `ledger.held -= amount;`. `lab/grant-binding/src/ledger.rs::model_release_returns_the_unused_hold` expects `Ok(())`, a held total of zero, and a charged total of zero. This citation is design input for A7. These settle and release functions are the lab reference model, and the lab model is not the Runtime. An unknown outcome in this lab model keeps the hold. Release in this lab model returns the unused hold and charges nothing. This paragraph does not answer the question above. A7 stays open.
+
+Section 6 contains the sentence Every ask in the asks file is mapped in this section. Section 6 names model_overwrite_grant_does_not_permit_append.
+
+`lab/grant-binding/src/ops.rs::operate` performs one operation when the resolved grant carries its right. The doc line says the function performs one operation when the resolved grant carries its right. The match arms are Operation::Append, Operation::Overwrite, and Operation::ChildJournal. The body resolves the grant, refuses an arm whose right is absent, and returns Ok when the grant carries that right.
+
+    /// Performs one operation when the resolved grant carries its right.
+    pub fn operate(
+        &mut self,
+        call: &Call,
+        request: &GuestRequest,
+        operation: Operation,
+    ) -> Result<(), OperateRefuse> {
+        let grant = self
+            .resolve(*call, request.handle)
+            .map_err(OperateRefuse::Binding)?;
+        match operation {
+            Operation::Append if !grant.rights.append => Err(OperateRefuse::AppendNotGranted),
+            Operation::Overwrite if !grant.rights.overwrite => {
+                Err(OperateRefuse::OverwriteNotGranted)
+            }
+            Operation::ChildJournal if !grant.rights.child_journal => {
+                Err(OperateRefuse::ChildJournalNotGranted)
+            }
+            _ => Ok(()),
+        }
+    }
+
+The Operation enum names Append, Overwrite, and ChildJournal. None of those variant names is the ask string `run`, `child`, `init`, `hosted`, or `journal-append`. ChildJournal is the lab variant. This section does not choose it as the contract name for the child ask. This section does not choose a name for those five asks.
+
+Which typed operation names does the contract use for run, for child, for init, for hosted, and for journal-append?
+
+This section asks these questions and does not answer them.
