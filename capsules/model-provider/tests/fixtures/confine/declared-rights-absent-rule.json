@@ -22,7 +22,7 @@
     "rules": [
       {
         "id": "startup-root-directory",
-        "justification": "macOS model-provider executable bound as PROVIDER_EXECUTABLE: Process startup reads the root directory before main runs",
+        "justification": "macOS model-provider executable bound as PROVIDER_EXECUTABLE: Process startup reads the root directory before `main` runs",
         "rules": [
           "(allow file-read-data (literal \"/\"))"
         ]

@@ -1992,8 +1992,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/README.md",
-          "old": "`falsifiers.json` holds 177 planted bugs",
-          "new": "`falsifiers.json` holds 176 planted bugs"
+          "old": "`falsifiers.json` holds 178 planted bugs",
+          "new": "`falsifiers.json` holds 177 planted bugs"
         }
       ],
       "tests": [
@@ -2912,6 +2912,23 @@
       ],
       "tests": [
         "engine_output_past_a_pipe_buffer_never_blocks_it"
+      ]
+    },
+    {
+      "id": "F-WC-A7-RECEIPT-REASON-GENERIC",
+      "title": "the refusal receipt gives the budget reason the failed-run id, so a budget stop reads as a generic engine failure",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/receipt.rs",
+          "old": "        Reason::BudgetExceeded { engine, .. } => (\"budget_exceeded\", Some(*engine)),\n",
+          "new": "        Reason::BudgetExceeded { engine, .. } => (\"engine_failed\", Some(*engine)),\n"
+        }
+      ],
+      "tests": [
+        "budget_refusal_receipt_names_its_reason",
+        "refusal_receipt_ids_are_distinct_and_named"
       ]
     }
   ]
