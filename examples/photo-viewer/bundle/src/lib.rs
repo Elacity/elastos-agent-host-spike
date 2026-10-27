@@ -27,7 +27,7 @@ pub mod testing;
 
 pub use admit::{admit, load, resolve_requires, Admitted, Installed, Loaded};
 // This test code stands in for the Runtime's launch by CID, which does not exist yet.
-pub use admit::{validate_content_stand_in, StandInResolveManifest};
+pub use admit::{bind_content_stand_in, validate_content_stand_in, StandInResolveManifest};
 pub use cid::cid_v1_raw_sha256;
 pub use claim::{Claim, SignedClaim, CLAIM_SCHEMA};
 pub use listing::{

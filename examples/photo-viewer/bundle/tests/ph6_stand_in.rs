@@ -5,7 +5,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use capsule_bundle::testing::unseal;
-use capsule_bundle::{load, pack, resolve_requires, validate_content_stand_in, Installed, Refusal};
+use capsule_bundle::{
+    bind_content_stand_in, load, pack, resolve_requires, validate_content_stand_in, Entry,
+    Installed, Loaded, Refusal,
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -186,6 +189,93 @@ fn stand_in_load_keeps_the_bytes_it_hashed() {
     std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o444)).unwrap();
     assert_ne!(std::fs::read(&image).unwrap(), snapshot["images/01.png"]);
     assert_eq!(loaded.bytes, snapshot);
+}
+
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+#[test]
+fn stand_in_binds_verified_content_bytes() {
+    let world = World::new();
+    let source = world.content();
+    let packed = world.path("packed");
+    let (cid, entries) = pack(&source, &packed, &[]).unwrap();
+    let store = world.path("store");
+    std::fs::create_dir(&store).unwrap();
+    let staged = store.join(&cid);
+    std::fs::rename(&packed, &staged).unwrap();
+    for path in FILES {
+        std::fs::set_permissions(staged.join(path), std::fs::Permissions::from_mode(0o444))
+            .unwrap();
+    }
+    for path in [staged.join("images"), staged.clone()] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
+
+    let loaded = load(&store, &cid).unwrap();
+    let bound = bind_content_stand_in(&loaded).unwrap();
+    let expected: Vec<_> = FILES[1..]
+        .iter()
+        .map(|path| format!("localhost://Users/self/Pictures/Capsules/{cid}/{path}"))
+        .collect();
+    assert_eq!(bound.keys().cloned().collect::<Vec<_>>(), expected);
+    for (entry, uri) in entries[1..].iter().zip(&expected) {
+        assert_eq!(hex::encode(Sha256::digest(&bound[uri])), entry.sha256);
+        assert_eq!(bound[uri], loaded.bytes[&entry.path]);
+    }
+
+    let image = staged.join("images/01.png");
+    std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::write(&image, b"changed after load, before binding again").unwrap();
+    std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o444)).unwrap();
+    assert_ne!(
+        std::fs::read(&image).unwrap(),
+        loaded.bytes["images/01.png"]
+    );
+    assert_eq!(bind_content_stand_in(&loaded).unwrap(), bound);
+
+    // Only listed images are members, even when other retained bytes exist.
+    let mut extra = loaded.clone();
+    for path in ["README.md", "images-other/04.png", "other/images/05.png"] {
+        extra.entries.push(Entry {
+            path: path.into(),
+            size: 0,
+            sha256: hex::encode(Sha256::digest(b"")),
+        });
+        extra.bytes.insert(path.into(), Vec::new());
+    }
+    extra.bytes.insert("images/unlisted.png".into(), Vec::new());
+    assert_eq!(bind_content_stand_in(&extra).unwrap(), bound);
+}
+
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+#[test]
+fn stand_in_binding_refuses_a_member_the_uri_check_rejects() {
+    let world = World::new();
+    let path = "images/bad?.png";
+    let bytes = b"invalid member URI".to_vec();
+    let mut loaded = Loaded {
+        cid: capsule_bundle::cid_v1_raw_sha256(b"stand-in binding fixture"),
+        path: world.path("unstaged"),
+        entries: vec![Entry {
+            path: path.into(),
+            size: bytes.len() as u64,
+            sha256: hex::encode(Sha256::digest(&bytes)),
+        }],
+        manifest: Value::Null,
+        bytes: [(path.into(), bytes)].into_iter().collect(),
+    };
+    binding_refusal(
+        bind_content_stand_in(&loaded).unwrap_err(),
+        &loaded.cid,
+        "images/bad?.png: uri must not contain ?, #, \\ or control characters",
+    );
+
+    loaded.entries[0].path = "images/01.png".into();
+    loaded.bytes.clear();
+    binding_refusal(
+        bind_content_stand_in(&loaded).unwrap_err(),
+        &loaded.cid,
+        "images/01.png: loaded bytes have no entry for this path",
+    );
 }
 
 /// This test code stands in for the Runtime's launch by CID, which does not exist yet.

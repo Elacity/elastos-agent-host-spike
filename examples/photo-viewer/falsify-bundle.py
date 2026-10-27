@@ -23,6 +23,12 @@ BUNDLE = pathlib.Path(__file__).resolve().parent / "bundle"
 # (name, file under bundle/src, [(exact old text, new text)], tests that must fail)
 CASES = [
     # This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    ("stand-in F20 binding reads staged files again", "admit.rs",
+     [("loaded.bytes.get(path).cloned()", "std::fs::read(loaded.path.join(path)).ok()")],
+     ["stand_in_binds_verified_content_bytes"]),
+    ("stand-in binding omits a rejected member URI", "admit.rs",
+     [("return Err(binding_invalid(format!(\"{path}: {reason}\")));", "continue;")],
+     ["stand_in_binding_refuses_a_member_the_uri_check_rejects"]),
     ("stand-in load forgets an absent content CID", "admit.rs",
      [("        if err.kind() == std::io::ErrorKind::NotFound {",
        "        if false && err.kind() == std::io::ErrorKind::NotFound {")],

@@ -206,6 +206,37 @@ pub fn load(store: &Path, cid: &str) -> Result<Loaded, Refusal> {
 mod stand_in_uri;
 
 /// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// Bind image members to the bytes already checked by `load`. Admission and
+/// execution remain separate steps for the caller.
+pub fn bind_content_stand_in(loaded: &Loaded) -> Result<BTreeMap<String, Vec<u8>>, Refusal> {
+    let binding_invalid = |detail| Refusal::ContentBindingInvalid {
+        cid: loaded.cid.clone(),
+        detail,
+    };
+    let mut objects = BTreeMap::new();
+    for entry in &loaded.entries {
+        let path = entry.path.as_str();
+        if !path.starts_with("images/") {
+            continue;
+        }
+        let uri = format!(
+            "localhost://Users/self/Pictures/Capsules/{}/{path}",
+            loaded.cid
+        );
+        if let Err(reason) =
+            stand_in_uri::check_object_uri(&uri, "localhost://Users/self/Pictures/")
+        {
+            return Err(binding_invalid(format!("{path}: {reason}")));
+        }
+        let bytes = loaded.bytes.get(path).cloned().ok_or_else(|| {
+            binding_invalid(format!("{path}: loaded bytes have no entry for this path"))
+        })?;
+        objects.insert(uri, bytes);
+    }
+    Ok(objects)
+}
+
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
 /// Optional closure identity for diagnostics. A bare manifest has no closure
 /// CID; callers with a packed/loaded closure pass `(&manifest, cid.as_str())`.
 /// This context supplies neither admission nor execution permission.
