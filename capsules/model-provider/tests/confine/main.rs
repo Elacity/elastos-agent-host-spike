@@ -1102,61 +1102,108 @@ fn tree_snapshot(dir: &Path) -> Vec<(PathBuf, u32, Vec<u8>)> {
     entries
 }
 
-/// Under the profile, an `init` whose journal path leaves `STORAGE_ROOT`
-/// through a symlinked intermediate is refused by the sandbox. The answer is
-/// `journal_corrupt`, the provider's code for an unavailable journal; the
-/// provider's log names the redirected path with EPERM (`Operation not
-/// permitted`), which is how the macOS sandbox refuses; the outside sibling
-/// keeps its entries and bytes; and a later normal `init` on `STORAGE_ROOT`
-/// succeeds. `redirect_journal_materializes_outside_when_unconfined` runs the
-/// same fixture and request without the profile, and the journal lands
-/// outside.
+/// Under the oracle and under the generated stand-in file, an `init` whose
+/// journal path leaves `STORAGE_ROOT` through a symlinked intermediate is
+/// refused at the metadata inspect. The answer is `journal_corrupt`, the
+/// provider's code for an unavailable journal; the provider's log names the
+/// redirected path with EPERM (`Operation not permitted`), which is how the
+/// macOS sandbox refuses; the outside sibling keeps its entries, modes and
+/// bytes; `STORAGE_ROOT/runs` stays absent; a later normal `init` on
+/// `STORAGE_ROOT` succeeds; and `shutdown` exits cleanly. The oracle case
+/// uses `Launch::Confined`. The generated case reads the declared fixture,
+/// writes the stand-in text under that case's storage, and applies that file
+/// with `Launch::Profile` and `canonical_bindings`. Each case has its own
+/// redirect fixture. The evidence is the lab launcher's. It makes no claim
+/// that the Runtime enforced the profile or that B3 is complete.
+/// `redirect_journal_materializes_outside_when_unconfined` runs the same
+/// fixture and request without the profile, and the journal lands outside.
 ///
 /// Falsifiers: F-cc1a (`(allow default)`) and F-cc1b (the read/write grant
-/// widened to `STORAGE_PARENT`) let the redirected `init` succeed, and this
-/// test fails.
+/// widened to `STORAGE_PARENT`) let the oracle case's redirected `init`
+/// succeed. F-cc42a makes `write_standin_profile` write an allow-default
+/// profile, so the generated case's redirected `init` answers `ok` and this
+/// test fails at its refusal assertion.
 #[test]
 fn model_outside_write_denied() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
-    let fixture = Redirect::prepare("outside-write");
-    let before = tree_snapshot(&fixture.outside);
-    let mut provider = Provider::start(Launch::Confined(&fixture.storage));
+    for (case, label) in [
+        ("oracle", "outside-write-oracle"),
+        ("generated", "outside-write-generated"),
+    ] {
+        let fixture = Redirect::prepare(label);
+        let before = tree_snapshot(&fixture.outside);
+        let mut provider = match case {
+            "oracle" => Provider::start(Launch::Confined(&fixture.storage)),
+            "generated" => {
+                let fixture_path =
+                    Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+                let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+                    panic!(
+                        "{case}: the declared-rights fixture {} must be readable: {err}",
+                        fixture_path.display()
+                    )
+                });
+                let declared: Value = serde_json::from_str(&fixture_text).unwrap_or_else(|err| {
+                    panic!("{case}: the declared-rights fixture must be JSON: {err}")
+                });
+                let generated = standin_profile(&declared).unwrap_or_else(|err| {
+                    panic!("{case}: declared rights must build a profile: {err}")
+                });
+                let profile = fixture.storage.base.join("standin.sb");
+                write_standin_profile(&profile, &generated);
+                let binary = resolved(Path::new(PROVIDER_BINARY));
+                let bindings = canonical_bindings(&fixture.storage, &binary);
+                Provider::start(Launch::Profile {
+                    profile: &profile,
+                    bindings: &bindings,
+                })
+            }
+            _ => panic!("{case}: the journey names the oracle and the generated case"),
+        };
 
-    let denied = provider.request(&fixture.request);
-    assert_eq!(
-        denied["status"], "error",
-        "the redirected journal write must be refused: {denied}"
-    );
-    assert_eq!(
-        denied["code"], "journal_corrupt",
-        "the refusal must use the provider's unavailable-journal code: {denied}"
-    );
+        let denied = provider.request(&fixture.request);
+        assert_eq!(
+            denied["status"], "error",
+            "{case}: the redirected journal write must be refused: {denied}"
+        );
+        assert_eq!(
+            denied["code"], "journal_corrupt",
+            "{case}: the refusal must use the provider's unavailable-journal code: {denied}"
+        );
 
-    let logged = provider
-        .logged_fault("journal_corrupt")
-        .expect("the provider must log the journal_corrupt detail");
-    let refused = format!("{}: Operation not permitted", fixture.journal_dir.display());
-    assert!(
-        logged.contains(&refused),
-        "the sandbox must refuse the redirected journal path with EPERM: {logged}"
-    );
+        let logged = provider
+            .logged_fault("journal_corrupt")
+            .unwrap_or_else(|| panic!("{case}: the provider must log the journal_corrupt detail"));
+        let refused = format!("{}: Operation not permitted", fixture.journal_dir.display());
+        assert!(
+            logged.contains(&refused),
+            "{case}: the sandbox must refuse the redirected journal path with EPERM: {logged}"
+        );
 
-    assert_eq!(
-        tree_snapshot(&fixture.outside),
-        before,
-        "the outside sibling must keep its entries and bytes"
-    );
+        assert_eq!(
+            tree_snapshot(&fixture.outside),
+            before,
+            "{case}: the outside sibling must keep its entries, modes and bytes"
+        );
 
-    assert!(!fixture.storage.root.join("runs").exists());
-    let init = provider.ok(&init_request(&fixture.storage, None));
-    assert_serving(&init);
-    assert!(
-        fixture.storage.root.join("runs").is_dir(),
-        "the later normal init must use STORAGE_ROOT"
-    );
-    provider.shutdown();
+        assert!(
+            !fixture.storage.root.join("runs").exists(),
+            "{case}: STORAGE_ROOT/runs must be absent after the refusal"
+        );
+        let init = provider.request(&init_request(&fixture.storage, None));
+        assert_eq!(
+            init["status"], "ok",
+            "{case}: the later normal init must succeed: {init}"
+        );
+        assert_serving(&init["data"]);
+        assert!(
+            fixture.storage.root.join("runs").is_dir(),
+            "{case}: the later normal init must use STORAGE_ROOT"
+        );
+        provider.shutdown();
+    }
 }
 
 /// The control for `model_outside_write_denied`: the same fixture and
@@ -2903,6 +2950,91 @@ fn generated_profile_denies_the_hosted_connect() {
     );
 
     provider.ok(&json!({ "op": "offers_list" }));
+    provider.shutdown();
+}
+
+/// The stand-in launch uses the generated file.
+///
+/// A clone of the declared rights drops the storage write and keeps the
+/// parent read. `standin_profile` builds that text once. `collect_allow_lines`
+/// shows the write rule absent, the parent read present, and the exec rule
+/// present. Those checks run before the sandbox return. `write_standin_profile`
+/// writes the text, and `Launch::Profile` applies that file. `init` with no
+/// journal directory answers `journal_access_denied` with message
+/// `model run journal is not writable`. `storage.root` does not exist, and
+/// `shutdown` exits cleanly. The committed oracle still has the write rule.
+///
+/// Falsifier: F-cc45a makes this launch start under the committed oracle
+/// instead of the generated file, so `init` answers ok.
+#[test]
+fn standin_launch_uses_the_generated_profile() {
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let storage_write = "(allow file-read* file-write* (subpath (param \"STORAGE_ROOT\")))";
+    let parent_read = "(allow file-read* (literal (param \"STORAGE_PARENT\")))";
+    let exec_rule = "(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))";
+    let mut dropped = fixture.clone();
+    let rights = dropped
+        .get_mut("rights")
+        .and_then(Value::as_array_mut)
+        .expect("declared rights must hold a rights list");
+    let mut removed = 0;
+    for entry in rights {
+        if entry.get("id").and_then(Value::as_str) != Some("storage") {
+            continue;
+        }
+        let rules = entry
+            .get_mut("rules")
+            .and_then(Value::as_array_mut)
+            .expect("storage holds a rules list");
+        let before = rules.len();
+        rules.retain(|rule| rule.as_str() != Some(storage_write));
+        removed += before - rules.len();
+    }
+    assert_eq!(removed, 1, "the storage write rule is removed once");
+    let generated = standin_profile(&dropped).expect("declared rights build a profile");
+    let allow_lines = collect_allow_lines(&generated);
+    assert!(
+        !allow_lines.contains(&storage_write),
+        "the storage write is absent"
+    );
+    assert!(
+        allow_lines.contains(&parent_read),
+        "the parent read is present"
+    );
+    assert!(allow_lines.contains(&exec_rule), "the exec rule is present");
+
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+
+    let storage = Storage::prepare("standin-dropped-storage");
+    let dropped_profile = storage.base.join("standin-dropped-storage.sb");
+    write_standin_profile(&dropped_profile, &generated);
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let bindings = canonical_bindings(&storage, &binary);
+    let mut provider = Provider::start(Launch::Profile {
+        profile: &dropped_profile,
+        bindings: &bindings,
+    });
+    let denied = provider.request(&init_request(&storage, None));
+    assert_eq!(
+        denied,
+        json!({
+            "status": "error",
+            "code": "journal_access_denied",
+            "message": "model run journal is not writable"
+        }),
+        "init with no journal directory must answer journal_access_denied"
+    );
+    assert!(!storage.root.exists(), "storage.root must not exist");
     provider.shutdown();
 }
 
