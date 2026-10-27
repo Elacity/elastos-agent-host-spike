@@ -282,9 +282,10 @@ def load(path=DATA):
 #   tests/process.rs is named here because the model list's MP30-MP36 and
 #   MP38 edit it: MP30, MP31 and MP34 change the relay request, MP33 sends it
 #   a second time, MP32 changes the record of a closed provider socket, MP35
-#   drops the grant check in the granting stand-in, MP36 answers from a canned
-#   stream instead of relaying, and MP38 drops the session tie so a grant for
-#   another session reaches the model. The model list's `selftest` entries
+#   drops the no-live-grant refusal in the granting stand-in, MP36 answers from
+#   a canned stream instead of relaying, and MP38 drops the shared stand-in's
+#   authorise call so a grant for another session reaches the model. The model
+#   list's `selftest` entries
 #   edit falsify.py, which recovery
 #   finds under examples/agent-host.
 # - capsules/model-provider/confine-falsifiers.json: the model `confine.sb`

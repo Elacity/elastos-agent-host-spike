@@ -841,9 +841,10 @@ enum HostedEffectAnswer {
         backend_url: String,
     },
     /// Checks the shared stand-in's shell live-grant view for the effect's
-    /// request id and that entry's session before it relays: no live entry, or
-    /// one for a session other than `served_session`, answers with the Runtime's
-    /// refusal (`RUNTIME_HOSTED_REFUSAL`) and reaches no backend.
+    /// request id, then asks the shared stand-in's `authorise` whether that
+    /// grant is for `served_session`, before it relays: no live entry, or a
+    /// grant `authorise` refuses, answers with the Runtime's refusal
+    /// (`RUNTIME_HOSTED_REFUSAL`) and reaches no backend.
     Granted {
         grants: Arc<Mutex<StandIn>>,
         /// The session this stand-in serves. The effect carries no session id
@@ -903,40 +904,16 @@ fn shell_live_grant_view(grants: &Mutex<StandIn>) -> Value {
         .expect("the shared stand-in answers the shell live-grant view")
 }
 
-/// The one entry that view lists for `request_id`. The shared stand-in keeps
-/// only `Live` grants
+/// True when that view lists one entry whose `request_id` equals `request_id`.
+/// The shared stand-in keeps only `Live` grants
 /// (`lab/agent-conformance/standin-runtime/mod.rs:128-139`), so an exhausted,
 /// revoked or expired grant never admits an effect.
-fn shell_view_live_grant(grants: &Mutex<StandIn>, request_id: &str) -> Option<Value> {
+fn shell_view_lists_live_grant(grants: &Mutex<StandIn>, request_id: &str) -> bool {
     shell_live_grant_view(grants)["capabilities"]
         .as_array()
         .expect("the shared stand-in shell view lists capabilities")
         .iter()
-        .find(|entry| entry["request_id"] == request_id)
-        .cloned()
-}
-
-/// True when that view lists one entry whose `request_id` equals `request_id`.
-fn shell_view_lists_live_grant(grants: &Mutex<StandIn>, request_id: &str) -> bool {
-    shell_view_live_grant(grants, request_id).is_some()
-}
-
-/// The named reason to refuse an effect when the live entry for `request_id`
-/// is for another session than `served_session`, and `None` when it is the
-/// served session's. `shell_view_lists_live_grant` decides the case with no
-/// entry first, so this reads only an entry that exists.
-fn shell_view_grant_for_another_session(
-    grants: &Mutex<StandIn>,
-    request_id: &str,
-    served_session: &str,
-) -> Option<String> {
-    let entry = shell_view_live_grant(grants, request_id)?;
-    let session = entry["session_id"]
-        .as_str()
-        .expect("the shared stand-in shell view lists each entry's session");
-    (session != served_session).then(|| {
-        format!("grant for request {request_id} is for session {session}, not {served_session}")
-    })
+        .any(|entry| entry["request_id"] == request_id)
 }
 
 /// Stand-in for the Runtime-owned hosted effect socket that `init` names in
@@ -1253,12 +1230,17 @@ fn serve_hosted_effect(
                 let _ = (&stream).write_all(RUNTIME_HOSTED_REFUSAL);
                 return;
             }
-            // The same check's session tie: the live entry it found must be for
-            // the session this stand-in serves, or the effect is refused with a
-            // reason that names both sessions.
-            if let Some(reason) =
-                shell_view_grant_for_another_session(&grants, &request_id, &served_session)
-            {
+            // The same check's session tie is the shared stand-in's one
+            // admission rule, `StandIn::authorise`
+            // (`lab/agent-conformance/standin-runtime/mod.rs:146-161`): the
+            // grant must be for the session this stand-in serves, or it refuses
+            // with its own reason, which names both sessions (`:504-510`).
+            if let Err((_, reason)) = grants.lock().unwrap().authorise(
+                Caller::Client {
+                    session_id: &served_session,
+                },
+                &request_id,
+            ) {
                 refusals.lock().unwrap().push(reason);
                 let _ = (&stream).write_all(RUNTIME_HOSTED_REFUSAL);
                 return;
@@ -3220,8 +3202,10 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
 /// A hosted model turn is reached only through a live grant for the session the
 /// run's runtime binding names. 058's test shows the refusal with no grant and
 /// the control whose live entry matches; this one seeds one `Live` entry for run
-/// C's request id under `session:other`, so the granting stand-in refuses C with
-/// the one reason that names both sessions and reaches no backend (`MP38`), then
+/// C's request id under `session:other`, so the shared stand-in's `authorise`
+/// refuses C with its one reason that names both sessions
+/// (`wrong capsule: expected session:other, got session:test`) and the granting
+/// stand-in reaches no backend (`MP38`), then
 /// seeds run D's entry under the binding's `session:test`, so D completes with
 /// `ready`. The loopback backend counts exactly one request at the model
 /// endpoint, so only D reached the model. The effect carries no session id
@@ -3337,9 +3321,9 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
     assert_eq!(
         stand_in.refusal_reasons(),
         vec![format!(
-            "grant for request {request_c} is for session {other_session}, not {HOSTED_FIXTURE_SESSION_ID}"
+            "wrong capsule: expected {other_session}, got {HOSTED_FIXTURE_SESSION_ID}"
         )],
-        "the stand-in must record the one reason that names both sessions"
+        "the stand-in must record the shared stand-in's one reason that names both sessions"
     );
 
     // Run D's live entry is for the session the stand-in serves, so D reaches
