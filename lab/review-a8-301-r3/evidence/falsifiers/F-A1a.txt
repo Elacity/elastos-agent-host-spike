@@ -1,0 +1,8 @@
+F-A1a wasi_import_is_refused_at_admission: exit 101, caught
+  a1 runtime: elastos sha256 d185ab44586171595d639dd1bdb0aea0cf4bf1abc7dca2c4986f6f0d7fca2be9
+  a1 wasi build: sha256 a6aa5328127a6c08cd2aee4aae4ef58cf5bb0ca0047e9e3089dedd0b4a33d884 imports ["wasi:cli/environment@0.2.0", "elastos:bus/types@1.0.0"]
+  a1 control build: sha256 b2eaaf6f054837ca0880218909766100214706fbaa9a098aba4fca72e06f6c4f imports ["elastos:bus/types@1.0.0"]
+  a1 refused run: exit:Some(0) refusal_line:None
+  a1 control run: exit:Some(0) admitted_line:Some("[run] Component capsule 'a1-wasi-guest' exited")
+restored lab/a1-a8-hardening/tests/a1_wasi_import.rs sha256 ccf9fc61b70f4c0e6a9b7c44de03ecfbac9a76595bdf07ddb55e55a84d34f17a
+F-A1a: CAUGHT (expected caught)
