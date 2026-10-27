@@ -9,6 +9,7 @@ that draws the docs model ships a copy of it.
 | `test-kit.mjs` | `element`, `fakeDocument(ids)`, `response`: the fakes node tests drive a page with | `photo-viewer/surface/photos.test.mjs`, `docs-viewer/surface/reader.test.mjs` |
 | `stand-in.mjs` | `standIn`: a server with the headers Runtime sends for an app, the front door's preflight and the launch-token check, serving the page's routes; `inHome`: the page framed in Home's opaque sandbox in real Chromium | `photos-browser-smoke.mjs`, `reader-browser-smoke.mjs` |
 | `docs-render.js` | The docs-model block renderer: `readBlock`, `drawBlock`, `readSpans`, `cut`, the style map (`STYLES`, `styleTag`) and the renderer bounds | `docs-viewer` ships a copy at `surface/browser/docs-render.js`; its build writes the copy, and its surface test pins it to these bytes |
+| `page-client.js` | The launch token reader and one-request client: `launchToken`, `TOKEN_HEADER`, `pageClient` | `docs-viewer` ships a copy at `surface/browser/page-client.js`; its build writes the copy, and its surface test pins it to these bytes |
 
 ## One owner, verified copies
 
@@ -18,12 +19,11 @@ The docs-model renderer has one owner: `docs-render.js`. Runtime serves a page f
 owner`) asserts the copy is byte-identical to the owner. Edit the owner and rebuild; a hand edit to a copy
 fails the test. The archive viewer will reuse the owner instead of copying it by hand.
 
-Page glue stays page-local: `launchToken`, the client with its one `fetch` call site, the document-list
-framing and the page-only bounds are about 25 lines in each page. It is not shared, for two reasons:
+The launch client has one owner: `page-client.js`. The docs build copies it into
+`surface/browser/page-client.js`, and `the shipped client matches the kit owner` compares the bytes.
+The client imports `cut` from the sibling `docs-render.js`. The document list and page bounds stay in
+the page. The archive page still has its own client copy.
 
-- **A page ships its own files.** Runtime serves a page from its own folder with `script-src 'self'`, so a
-  shared module would have to be copied into each `browser/` folder anyway.
-- **Runtime's own test of the Photos page installs exactly four files** (`index.html`, `main.js`,
-  `photos.js`, `photos.css`; `elastos-server` `gateway_tests/photos.rs`, `install_photos_surface`). A fifth
-  file that `photos.js` imports would be missing there, and that test is Runtime code, which this slice does
-  not change. The Photos page draws images, not docs-model blocks, so it does not gain `docs-render.js`.
+The Photos page keeps its client copy until Runtime's four-file gateway test allows a fifth file.
+That test (`elastos-server` `gateway_tests/photos.rs`, `install_photos_surface`) installs `index.html`,
+`main.js`, `photos.js` and `photos.css`. The Photos page draws images and keeps its own renderer.
