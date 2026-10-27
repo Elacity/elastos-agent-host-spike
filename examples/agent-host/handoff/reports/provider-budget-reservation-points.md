@@ -304,13 +304,32 @@ proposes a Runtime design; each names what is missing.
    record no binding and keep no pending account.
    The provider side already joins a retry to the original run
    (`capsules/model-provider/src/state.rs:518-531`, `:5025-5026`).
-   A run the provider refuses at its own ceiling sends nothing to the Runtime,
-   yet records `usage` as `unknown`
-   (`capsules/model-provider/tests/process.rs:2099`,
-   `capsules/model-provider/src/state.rs:1352-1354`), the same value a sent run
-   with no report records, so a Runtime account cannot tell "not sent" from
-   "sent, not reported" by the usage field alone; that is Anders-owned, with no
-   design.
+   A hosted run whose usage the provider never saw keeps `usage` as `unknown`
+   and now names why: a run the provider refuses before it sends anything
+   records `{"status": "unknown", "reason": "refused"}`
+   (`capsules/model-provider/src/state.rs:1419-1425` and
+   `capsules/model-provider/src/adapters.rs:1496`), and a run whose response
+   started and then failed records `{"status": "unknown", "reason": "cut"}`
+   (`capsules/model-provider/src/adapters.rs:1498`). A send error after the
+   request may have been written keeps plain `unknown`, because the provider
+   cannot prove nothing was sent
+   (`capsules/model-provider/src/adapters.rs:2030-2039`). The model-busy test
+   (`capsules/model-provider/tests/process.rs:2711`,
+   `hosted_second_concurrent_run_is_refused_model_busy_and_sends_no_effect`)
+   is the note's refused-before-send case and proves that reason and the
+   stand-in's single connection; the connect-failure test
+   (`capsules/model-provider/tests/process.rs:2229`,
+   `hosted_run_that_cannot_connect_records_usage_refused`) proves the same
+   reason at the send boundary; the cut test
+   (`capsules/model-provider/tests/process.rs:2108`,
+   `hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage`) proves
+   the cut case, and a cut that followed a usage event keeps only the counts
+   the backend sent, labelled `observed_partial`, so no number is filled in;
+   and the closed-socket test
+   (`capsules/model-provider/tests/process.rs:2329`,
+   `hosted_run_whose_socket_closes_before_the_status_keeps_usage_unknown`)
+   proves the untagged case. This is the lab shape, offered as input to
+   Anders's Runtime usage record; the provider keeps no budget reservation.
 
 ## Tests still missing
 

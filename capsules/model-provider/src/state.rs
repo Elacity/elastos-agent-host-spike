@@ -11,8 +11,9 @@ use crate::config::{
 use crate::contract::{
     ok_response, validate_run_id, BackendReport, ErrorClass, OfferSummary, OffersListRequest,
     ProviderFault, RunError, RunEvent, RunEventsPage, RunStatus, RunsCancelRequest,
-    RunsCreateRequest, RunsEventsRequest, RunsGetRequest, RuntimeAccessBinding, MAX_EVENT_SEQUENCE,
-    PROVIDER_ID, PROVIDER_PROTOCOL_VERSION, RUN_EVENTS_SCHEMA, RUN_EVENT_SCHEMA,
+    RunsCreateRequest, RunsEventsRequest, RunsGetRequest, RuntimeAccessBinding, UsageUnknownReason,
+    MAX_EVENT_SEQUENCE, PROVIDER_ID, PROVIDER_PROTOCOL_VERSION, RUN_EVENTS_SCHEMA,
+    RUN_EVENT_SCHEMA,
 };
 use crate::journal::validate_run_error;
 use crate::journal::{deterministic_run_id, now_ms, request_fingerprint, RunJournal, StoredRun};
@@ -607,7 +608,7 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
 
         let active_runs = self.journal.active_run_count(&offer.id)?;
         if active_runs > offer.policy.concurrency_limit as usize {
-            transition_error(
+            transition_error_refused_before_send(
                 &offer,
                 &mut run,
                 RunError {
@@ -634,7 +635,9 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
             Err(fault) => {
                 fault.log();
                 let stored_offer = run.offer.clone();
-                transition_error(&stored_offer, &mut run, fault.error)?;
+                // Every dispatch error precedes the worker that writes the
+                // effect request, so a hosted run sends nothing.
+                transition_error_refused_before_send(&stored_offer, &mut run, fault.error)?;
             }
         }
         self.journal.store_run(&run)?;
@@ -1408,12 +1411,35 @@ fn transition_error(
     run: &mut StoredRun,
     error: RunError,
 ) -> Result<(), ProviderFault> {
+    transition_error_with_usage_reason(offer, run, error, None)
+}
+
+/// A hosted terminal reached before the effect request is written to the
+/// Runtime socket: the provider sent nothing, so `usage` names `refused`.
+fn transition_error_refused_before_send(
+    offer: &impl OfferLimitsView,
+    run: &mut StoredRun,
+    error: RunError,
+) -> Result<(), ProviderFault> {
+    transition_error_with_usage_reason(offer, run, error, Some(UsageUnknownReason::Refused))
+}
+
+fn transition_error_with_usage_reason(
+    offer: &impl OfferLimitsView,
+    run: &mut StoredRun,
+    error: RunError,
+    reason: Option<UsageUnknownReason>,
+) -> Result<(), ProviderFault> {
     let status = match error.class {
         ErrorClass::Cancelled => RunStatus::Cancelled,
         ErrorClass::SettlementUnknown => RunStatus::SettlementUnknown,
         _ => RunStatus::Failed,
     };
-    transition_terminal(offer, run, status, None, Some(error))
+    let backend_report = match (run.offer.hosted.as_ref(), reason) {
+        (Some(_), Some(reason)) => Some(BackendReport::unknown_with_usage_reason(reason)),
+        _ => None,
+    };
+    transition_terminal_with_backend_report(offer, run, status, None, Some(error), backend_report)
 }
 
 fn transition_timeout(run: &mut StoredRun) -> Result<(), ProviderFault> {
