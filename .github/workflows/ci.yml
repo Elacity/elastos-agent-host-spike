@@ -1597,8 +1597,9 @@ jobs:
           # Jobs that wait on needs appear late; two quiet polls confirm the end.
           while (( done_polls < 2 )); do
             sleep 20
+            # cargo-audit reports RustSec advisories in its own red job but does not cancel the rest: base has open advisories, and cancelling on it killed every PR run within a minute.
             counts="$(gh api "$run/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" --jq \
-              '[.jobs[] | select(.name != "cancel-on-failure")] | "\(map(select(.conclusion == "failure" or .conclusion == "timed_out")) | length) \(map(select(.status != "completed")) | length)"')" || continue
+              '[.jobs[] | select(.name != "cancel-on-failure" and .name != "cargo-audit")] | "\(map(select(.conclusion == "failure" or .conclusion == "timed_out")) | length) \(map(select(.status != "completed")) | length)"')" || continue
             read -r failed pending <<< "$counts"
             if (( failed > 0 )); then
               echo "A job failed; cancelling the rest of this pull request run."
