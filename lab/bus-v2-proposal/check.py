@@ -53,6 +53,14 @@ JOURNAL_MARKER = "`" + JOURNAL_SPAN + "`"
 GRANT_SPAN = "examples/agent-host/src/lib.rs:3767"
 GRANT_MARKER = "`" + GRANT_SPAN + "`"
 
+# Its quotation is the write ask, remainder 16 after the write span, source line 3849.
+WRITE_SPAN = "examples/agent-host/src/lib.rs:3849"
+WRITE_MARKER = "`" + WRITE_SPAN + "`"
+
+# Its quotation is the read ask, remainder 17 after the read span, source line 3850.
+READ_SPAN = "examples/agent-host/src/lib.rs:3850"
+READ_MARKER = "`" + READ_SPAN + "`"
+
 # The draft indents a quotation by exactly four spaces.
 DRAFT_INDENT = "    "
 
@@ -270,6 +278,22 @@ def grant_quote(text):
     return remainders[0]
 
 
+def write_quote(text):
+    """Return the seventeenth quotation after the write span, or None when absent."""
+    remainders = _remainders(text, WRITE_MARKER)
+    if len(remainders) < 17:
+        return None
+    return remainders[16]
+
+
+def read_quote(text):
+    """Return the eighteenth quotation after the read span, or None when absent."""
+    remainders = _remainders(text, READ_MARKER)
+    if len(remainders) < 18:
+        return None
+    return remainders[17]
+
+
 def quoted_line_matches(quoted, source):
     """True only when the quotation equals the pinned source line."""
     return quoted == source
@@ -401,8 +425,40 @@ def _grant_quote_refusal(root, text, sha):
     return None
 
 
+def _write_quote_refusal(root, text, sha):
+    """Return the 3849 refusal, or None when that quote is absent or matches."""
+    if text.count(WRITE_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + WRITE_SPAN
+    quoted = write_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(WRITE_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + WRITE_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + WRITE_SPAN
+    return None
+
+
+def _read_quote_refusal(root, text, sha):
+    """Return the 3850 refusal, or None when that quote is absent or matches."""
+    if text.count(READ_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + READ_SPAN
+    quoted = read_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(READ_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + READ_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + READ_SPAN
+    return None
+
+
 def _quote_refusals(root, text, sha):
-    """Return the quote refusals in source order: 3526, 3549, 3754, 3755, 3757, 3767, 8149, 8162, then 8168."""
+    """Return the quote refusals in source order: 3526, 3549, 3754, 3755, 3757, 3767, 3849, 3850, 8149, 8162, then 8168."""
     deny = _deny_quote_refusal(root, text, sha)
     if deny is not None:
         return [deny]
@@ -428,6 +484,12 @@ def _quote_refusals(root, text, sha):
     grant = _grant_quote_refusal(root, text, sha)
     if grant is not None:
         return [grant]
+    write = _write_quote_refusal(root, text, sha)
+    if write is not None:
+        return [write]
+    read = _read_quote_refusal(root, text, sha)
+    if read is not None:
+        return [read]
     asks = _asks_quote_refusal(root, text, sha)
     if asks is not None:
         return [asks]
