@@ -490,9 +490,9 @@ def mode_under(profile):
 
 
 def require_unsandboxed_allow(result):
-    """The unsandboxed control must be an allow.
+    """The unsandboxed control must return the full allow line.
 
-    A deny, a bad exit, stderr, or a malformed line is a harness error.
+    A deny, a partial allow, a bad exit, stderr, or a malformed line is a harness error.
     An ordinary assertion is not this check.
     """
     if result.argv and os.fspath(result.argv[0]) == sbx.SANDBOX_EXEC:
@@ -503,6 +503,11 @@ def require_unsandboxed_allow(result):
     if outcome != "allow":
         raise HarnessError(
             "unsandboxed deny is a harness error, not a passing control: "
+            + repr(result.stdout)
+        )
+    if result.stdout != ALLOW_STDOUT:
+        raise HarnessError(
+            "unsandboxed partial allow is a harness error, not a passing control: "
             + repr(result.stdout)
         )
     return result
@@ -1835,8 +1840,8 @@ class ModeRules(unittest.TestCase):
     def test_unsandboxed_failure_is_an_error(self):
         """A failed unsandboxed control is a harness error, not an assertion failure.
 
-        The deny line, ``usage``, a ``create errno=`` line, a ``chmod errno=``
-        line, a nonzero exit, nonempty stderr, and a malformed line each
+        The deny line, every partial allow, ``usage``, a ``create errno=`` line,
+        a ``chmod errno=`` line, a nonzero exit, nonempty stderr, and a malformed line each
         raise ``HarnessError`` with its own reason. They launch nothing.
         """
         parent = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-sugid-unsandboxed-"))
@@ -1915,6 +1920,29 @@ class ModeRules(unittest.TestCase):
         for message in reasons:
             hits = [label for label, _completed, _expected in cases if label in message]
             self.assertEqual(len(hits), 1)
+        partials = (
+            ONLY_SETUID_STDOUT,
+            SETUID_AND_SETGID_STDOUT,
+            DENY_STDOUT.replace("setgid ok=0 mode=644", "setgid ok=1 mode=2644"),
+            DENY_STDOUT.replace("both ok=0 mode=644", "both ok=1 mode=6644"),
+            ALLOW_STDOUT.replace("setgid ok=1 mode=2644", "setgid ok=0 mode=644"),
+            ALLOW_STDOUT.replace("setuid ok=1 mode=4644", "setuid ok=0 mode=644"),
+        )
+        for stdout in partials:
+            with self.subTest(partial=stdout):
+                completed = subprocess.CompletedProcess([binary, parent], 0, stdout, "")
+                with patch.object(subprocess, "run", return_value=completed) as ran, patch.object(
+                    sbx, "run", side_effect=AssertionError("sandbox-exec started")
+                ) as sandbox:
+                    with self.assertRaises(HarnessError) as caught:
+                        run_unsandboxed(binary, parent)
+                    sandbox.assert_not_called()
+                    ran.assert_called_once()
+                self.assertEqual(
+                    str(caught.exception),
+                    "unsandboxed partial allow is a harness error, not a passing control: "
+                    + repr(stdout),
+                )
         self.launch_guard.assert_not_called()
 
     def test_observe_propagates_every_refusal(self):
