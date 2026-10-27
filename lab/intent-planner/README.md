@@ -80,6 +80,10 @@ and does not make another bus call. Multi-step execute checks every grant
 before it spends or calls the bus. The minted token names the approved
 step resource and URI; approving `.../secrets` does not mint a journal
 token. A cloned review with a rewritten `host_id` is `ForeignHost`.
+An empty grant `host_id` is `ForeignHost`. The bind compares the grant
+to the executing Host's own `id`. A foreign token, a rewritten grant
+and review pair, or a second Host that copies the minting `id` fails
+the ready peek (issuer and signature) before the bus.
 
 ## Rows
 
@@ -120,7 +124,11 @@ the approved resource before the first invoke. A parent path, a `..` segment, a 
 slash, ASCII case, or percent-encoding does not cover a child journal.
 `host-1` does not match `host-10`. Empty, NUL, `.`, `..`, `a..b`, and `...`
 `host_id` are `ForeignHost` before invoke. A rewritten review `host_id`
-that does not match the minting grant is `ForeignHost`. A `stored` bus reply, or any
+that does not match the minting grant is `ForeignHost`. An empty grant
+`host_id` is `ForeignHost`. The grant bind is this Host's own `id`, not
+a field that can be rewritten with the review. The ready peek proves
+this Host minted the token (issuer and signature) before any bus call.
+A `stored` bus reply, or any
 reply other than the exact storage BLOCKED token, fails the run and does
 not spend the grant. The Runtime has no plan object. `UsersAI` notes stay
 BLOCKED (RA-5). A stored journal stays BLOCKED (RA-4). Session grants and
@@ -137,7 +145,8 @@ a fresh grant for every presented step. `plants/M1-approve-check.txt` through
 `plants/N10-used-before-bus.txt`, `plants/R3-1-nfc.txt` through
 `plants/R3-12-constant-host.txt`, `plants/R4-1-host-dot.txt` through
 `plants/R4-7-nul-intent.txt`, and `plants/R5-7a-partial-spend.txt`,
-`plants/R5-11-wrong-mint.txt`, and `plants/R5-6d-rewritten-host.txt`
+`plants/R5-11-wrong-mint.txt`, `plants/R5-6d-rewritten-host.txt`,
+and `plants/R6-1-foreign-token.txt` through `plants/R6-4-copied-host.txt`
 each remove one guard.
 `model_planted_bugs_are_caught` requires every named test to fail, then
 restores the planted file:
@@ -186,6 +195,10 @@ restores the planted file:
 | R5-7a | ready-all-grants loop deleted | `failed_two_step_execute_does_not_spend_the_first_grant` |
 | R5-11 | mint always journals | `secrets_path_does_not_mint_a_journal_token` |
 | R5-6d | grant `host_id` bind skipped | `rewritten_host_id_does_not_run_on_a_second_host` |
+| R6-1 | ready-peek issuer check deleted | `forged_foreign_token_does_not_reach_the_bus` |
+| R6-2 | ready-peek issuer check deleted | `rewritten_grant_and_review_host_id_does_not_reach_the_bus` |
+| R6-3 | grant `host_id` bind restored to fail-open | `invalid_grant_host_id_does_not_skip_the_bind` |
+| R6-4 | ready-peek issuer check deleted | `copied_host_id_does_not_run_on_a_second_host` |
 
 ## Checks
 

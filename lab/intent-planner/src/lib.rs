@@ -26,8 +26,10 @@
 //! execute does not spend. Multi-step execute validates every grant before it
 //! spends or calls the bus, so a later failure leaves every grant unused.
 //! The minted token names the approved step resource; a mismatch is refused.
-//! Execute refuses unless this Host minted the token and the review `host_id`
-//! matches that mint. A step the Runtime cannot express is BLOCKED with
+//! Execute refuses unless this Host minted the token (issuer and signature)
+//! and both `host_id` fields name this Host. An empty grant `host_id` is
+//! ForeignHost. A second Host that copies the minting id still fails the
+//! issuer check. A step the Runtime cannot express is BLOCKED with
 //! the missing capability. The public entry does not store a journal. A
 //! `stored` bus reply, or any reply other than the exact BLOCKED token, fails
 //! the run.
@@ -273,8 +275,8 @@ impl Host {
         self.grants.validate_journal_write(token, resource)
     }
 
-    /// Peek whether a journal write token still names `resource` and has a use.
-    /// Does not spend.
+    /// Peek whether this Host minted the token, it still names `resource`,
+    /// and a use remains. Does not spend.
     pub fn journal_write_ready(&self, token: &str, resource: &str) -> Result<(), String> {
         self.grants.journal_write_ready(token, resource)
     }
@@ -426,9 +428,9 @@ impl Host {
                 continue;
             }
             let grant = grant_that_covers(&review.grants, step)?;
-            if validated_name(&review.host_id).is_some()
-                && validated_name(&grant.host_id).is_some()
-                && grant.host_id != review.host_id
+            if validated_name(&grant.host_id).is_none()
+                || grant.host_id != review.host_id
+                || grant.host_id != self.id
             {
                 return Err(Refuse::ForeignHost);
             }
@@ -1686,6 +1688,91 @@ fn rewritten_host_id_does_not_run_on_a_second_host() {
     assert!(host_b.effects().is_empty());
     assert!(runtime_bridge::component_invoke_audit(host_a.audit_dir()).is_empty());
     assert!(runtime_bridge::component_invoke_audit(host_b.audit_dir()).is_empty());
+}
+
+#[test]
+fn forged_foreign_token_does_not_reach_the_bus() {
+    let plan = sample();
+    let mut host = Host::new();
+    let mut review = host.review(&plan, Choice::Approve);
+    let minted = review.grants[0].token.clone();
+    review.grants[0].token = runtime_bridge::Grants::new().mint_journal_write("ada");
+    let error = host
+        .execute(&review, &plan, &plan.steps)
+        .expect_err("foreign token");
+    assert_ne!(error, Refuse::GrantSpent);
+    assert!(host.effects().is_empty());
+    assert!(runtime_bridge::component_invoke_audit(host.audit_dir()).is_empty());
+    host.journal_write_ready(&minted, &runtime_bridge::scoped_journal("ada"))
+        .expect("minted grant unused");
+}
+
+#[test]
+fn rewritten_grant_and_review_host_id_does_not_reach_the_bus() {
+    let plan = sample();
+    let mut host_a = Host::new();
+    let review = host_a.review(&plan, Choice::Approve);
+    let minted = review.grants[0].token.clone();
+    let mut host_b = Host::new();
+    let mut transplanted = review.clone();
+    transplanted.host_id = host_b.id.clone();
+    transplanted.grants[0].host_id = host_b.id.clone();
+    let error = host_b
+        .execute(&transplanted, &plan, &plan.steps)
+        .expect_err("rewritten pair");
+    assert_ne!(error, Refuse::GrantSpent);
+    assert!(host_a.effects().is_empty());
+    assert!(host_b.effects().is_empty());
+    assert!(runtime_bridge::component_invoke_audit(host_a.audit_dir()).is_empty());
+    assert!(runtime_bridge::component_invoke_audit(host_b.audit_dir()).is_empty());
+    host_a
+        .journal_write_ready(&minted, &runtime_bridge::scoped_journal("ada"))
+        .expect("minted grant unused");
+}
+
+#[test]
+fn invalid_grant_host_id_does_not_skip_the_bind() {
+    let plan = sample();
+    let mut host_a = Host::new();
+    let review = host_a.review(&plan, Choice::Approve);
+    let minted = review.grants[0].token.clone();
+    let mut host_b = Host::new();
+    let mut transplanted = review.clone();
+    transplanted.host_id = host_b.id.clone();
+    transplanted.grants[0].host_id.clear();
+    let error = host_b
+        .execute(&transplanted, &plan, &plan.steps)
+        .expect_err("empty grant host_id");
+    assert_eq!(error, Refuse::ForeignHost);
+    assert_ne!(error, Refuse::GrantSpent);
+    assert!(host_a.effects().is_empty());
+    assert!(host_b.effects().is_empty());
+    assert!(runtime_bridge::component_invoke_audit(host_a.audit_dir()).is_empty());
+    assert!(runtime_bridge::component_invoke_audit(host_b.audit_dir()).is_empty());
+    host_a
+        .journal_write_ready(&minted, &runtime_bridge::scoped_journal("ada"))
+        .expect("minted grant unused");
+}
+
+#[test]
+fn copied_host_id_does_not_run_on_a_second_host() {
+    let plan = sample();
+    let mut host_a = Host::new();
+    let review = host_a.review(&plan, Choice::Approve);
+    let minted = review.grants[0].token.clone();
+    let mut host_b = Host::new();
+    host_b.id = host_a.id.clone();
+    let error = host_b
+        .execute(&review, &plan, &plan.steps)
+        .expect_err("copied host id");
+    assert_ne!(error, Refuse::GrantSpent);
+    assert!(host_a.effects().is_empty());
+    assert!(host_b.effects().is_empty());
+    assert!(runtime_bridge::component_invoke_audit(host_a.audit_dir()).is_empty());
+    assert!(runtime_bridge::component_invoke_audit(host_b.audit_dir()).is_empty());
+    host_a
+        .journal_write_ready(&minted, &runtime_bridge::scoped_journal("ada"))
+        .expect("minted grant unused");
 }
 
 #[cfg(test)]

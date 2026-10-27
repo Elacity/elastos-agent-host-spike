@@ -103,9 +103,15 @@ impl Grants {
         self.mint_write(&guest_journal(agent))
     }
 
-    /// True when the token names `resource` and still has a use left. Does not spend.
+    /// True when this Host minted the token, it names `resource`, and a use
+    /// remains. Does not spend.
     pub fn journal_write_ready(&self, token_b64: &str, resource: &str) -> Result<(), String> {
         let token = elastos_runtime::capability::CapabilityToken::from_base64(token_b64)?;
+        if !token.verify_signature(self.manager.public_key())
+            || token.issuer() != &self.manager.public_key_bytes()
+        {
+            return Err("token was not minted by this host".to_owned());
+        }
         if token.resource().as_str() != resource {
             return Err(format!(
                 "wrong resource: expected {}, got {}",
