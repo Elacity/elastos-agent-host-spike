@@ -161,9 +161,9 @@ lone braces.
 | `host-test/tests/component.rs` | 70 | App paths, names, fixtures and the fuel-gate wrapper around the kit harness (`v1-host-test`) |
 | `verify.sh`, `build.sh`, `falsify.py` | 18, 5, 46 | Script skeletons: which crates, which tests, which artifact |
 
-The docs page ships verified copies of the kit's launch client and docs-model renderer. The archive page
-still has its own client copy. The Photos page keeps its client copy until the Runtime's four-file gateway
-test allows a fifth file.
+The docs page ships verified copies of the kit's launch client and docs-model renderer.
+The archive page ships the kit client. The Photos page keeps its client copy until the Runtime's four-file
+gateway test allows a fifth file.
 
 ## Counts
 

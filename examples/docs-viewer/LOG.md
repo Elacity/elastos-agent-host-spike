@@ -9,3 +9,4 @@
 - 2026-10-27 task 029: the kit reports name `page-client.js` as the one owner of `launchToken` and `pageClient`.
 - 2026-10-27 task 030: the container component hash is recorded in `recorded-hashes.txt`, and this Mac does not rebuild it.
 - 2026-10-27 task 031: the kit reports say the archive page ships the kit client.
+- 2026-10-28 task 033: the crate report says the archive page ships the kit client.

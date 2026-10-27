@@ -17,6 +17,8 @@ TEST = "ClientOwnerReportTests.test_the_kit_reports_name_the_docs_client_owner"
 ARCHIVE_BUILD_SENTENCE = "The archive build copies `page-client.js` to `surface/browser/page-client.js`."
 ARCHIVE_COPY_PHRASE = "The archive build copies `page-client.js`"
 ARCHIVE_SENTENCE = "The archive page ships the kit `page-client.js`."
+ARCHIVE_PARAGRAPH_SENTENCE = "The archive page ships the kit client."
+ARCHIVE_OLD_SENTENCE = "The archive page still has its own client copy."
 ARCHIVE_TEST = "ClientOwnerReportTests.test_the_kit_reports_name_the_archive_client_copy"
 
 
@@ -59,6 +61,22 @@ class ClientOwnerReportTests(unittest.TestCase):
         bullets = re.findall(r"^- \*\*Page code\*\*[^\n]*(?:\n[ \t]+[^\n]+)*", source, re.M)
         self.assertEqual(len(bullets), 1)
         self.assertEqual(" ".join(bullets[0].split()).count(ARCHIVE_SENTENCE), 1)
+        self.assertEqual(source.count(ARCHIVE_PARAGRAPH_SENTENCE), 1)
+        self.assertNotIn(ARCHIVE_OLD_SENTENCE, " ".join(source.split()))
+        heading = "\n## What is still copied, and why\n"
+        self.assertEqual(source.count(heading), 1)
+        section = source.split(heading, 1)[1].split("\n## Counts\n", 1)[0]
+        paragraph = " ".join(section.strip().rsplit("\n\n", 1)[-1].split())
+        self.assertEqual(paragraph.count(ARCHIVE_PARAGRAPH_SENTENCE), 1)
+        self.assertIn(
+            "The docs page ships verified copies of the kit's launch client and docs-model renderer.",
+            paragraph,
+        )
+        self.assertIn(
+            "The Photos page keeps its client copy until the Runtime's four-file gateway "
+            "test allows a fifth file.",
+            paragraph,
+        )
 
 
 def failing_tests(*names):
@@ -117,8 +135,14 @@ if __name__ == "__main__":
                 [(ARCHIVE_SENTENCE, "")],
                 [ARCHIVE_TEST],
             ),
+            (
+                "CRATE-REPORT says the archive page has its own client copy",
+                KIT / "CRATE-REPORT.md",
+                [(ARCHIVE_PARAGRAPH_SENTENCE, ARCHIVE_OLD_SENTENCE)],
+                [ARCHIVE_TEST],
+            ),
         ]
         kit.main([(cases, None, test_fails, None, True, failing_tests)], args=[],
-                 done="all 6 client-owner report falsifiers caught")
+                 done="all 7 client-owner report falsifiers caught")
     else:
         unittest.main(verbosity=2)
