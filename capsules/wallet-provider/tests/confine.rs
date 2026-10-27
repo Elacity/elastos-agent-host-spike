@@ -4580,7 +4580,10 @@ fn every_did_and_wallet_allow_rule_traces_to_one_declared_right() {
 /// Falsifier: WP105 makes `generate_profile` emit
 /// `(allow file-read* (literal "/private/var/cc-confine-generated"))` after
 /// the head; this test fails because that rule is in neither declared-rights
-/// file.
+/// file. WP109 makes `generate_profile` emit
+/// `(deny file-write* (literal "/private/var/cc-confine-generated"))` after the
+/// declared rules; this test fails only at the sorted-tail comparison, because
+/// the head keeps its order and neither contract check reads a deny form.
 #[test]
 fn generated_did_and_wallet_profiles_match_their_committed_oracles() {
     let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
