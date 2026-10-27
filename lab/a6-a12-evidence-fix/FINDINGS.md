@@ -103,17 +103,15 @@ Anders's A6 bookability rule still needs RA-6.
 
 Command: `./lab/a6-a12-evidence-fix/run.sh`
 
-Result: recorded after the five stable Linux runs on this head.
-`--list` names the previous 57 tests plus the r6 named tests (openat2
-pin, detached-after-return NOT RUN, hardlink dest, preopen dirfd,
-`$HOME/.cache` with XDG set, subdir create-then-delete, watch.add
-fail-closed, IN_Q_OVERFLOW pin, rename dest, O_TMPFILE unlink,
-bind/pid-ns/`/run/user`/sysctl NOT RUN). Inode reuse prints NOT RUN
-when this ext4 host does not recycle; that is not a panic and not a
-FileId PASS. `planted_bugs_are_caught` keeps the previous 34 plants /
-39 CAUGHT lines and adds one plant per r6 survivor. After the suite,
-`ls /tmp/elastos` must be `No such file or directory`. Runtime
-`manager.rs` sha256 must stay
+Result: five full `./lab/a6-a12-evidence-fix/run.sh` runs on this
+head were each `test result: ok. 71 passed; 0 failed` (209.66s,
+206.55s, 202.25s, 197.48s, 199.10s). `--list` names the previous 57
+tests plus 14 r6 tests. Inode reuse prints NOT RUN when this ext4
+host does not recycle; that is not a panic and not a FileId PASS.
+`planted_bugs_are_caught` printed **53 CAUGHT lines** from **46
+plants** (the previous 34 / 39 plus 12 r6 plants / 14 CAUGHT lines)
+on every run. After each suite, `ls /tmp/elastos` was `No such file
+or directory`. Runtime `manager.rs` sha256 stayed
 `cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a`.
 r3 `lab/review-a6-a12-343-r3/run.sh` still pins `87b974a1` and refuses
 this head. That pin is honest for the head r3 reviewed. This folder
