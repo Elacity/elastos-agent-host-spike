@@ -38,15 +38,18 @@ Guards this probe touches:
 (e) no network, no secrets, Mac toolchain only.
 """
 
+import inspect
 import os
 import shlex
 import signal
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from unittest import mock
 
 from test_wasm_capsule_receipt import (
     REAL_TREES,
@@ -507,12 +510,35 @@ class WasmVerifySwapProbe(unittest.TestCase):
         still raises when the digest changed. Bypassing that comparison lets
         a changed file through.
         """
+        self.assert_digest_guard_with_cargo_skips(1)
+
+    def test_stale_anchor_and_missing_toolchain_keep_digest_guard(self):
+        """A stale plant reports its anchor reason before the toolchain reason."""
+        for count in (0, 2):
+            with self.subTest(anchors=count):
+                self.assert_digest_guard_with_cargo_skips(count)
+
+    def assert_digest_guard_with_cargo_skips(self, count):
+        """Exercise both skip paths and teardown against controlled source bytes."""
         module = sys.modules[__name__]
-        saved_sha = START_SHA
-        saved_skip = WasmVerifySwapProbe.skip_reason
-        saved_rustc = os.environ.get("RUSTC")
-        os.environ["RUSTC"] = "/nonexistent/redteam-036-rustc"
-        try:
+        with tempfile.TemporaryDirectory(prefix="redteam-036-toolchain-") as tmp:
+            path = Path(tmp) / "verify.rs"
+            path.write_text("fn verify_bundle() {}\n" + SIGNATURE_LINE * count)
+            self.assertEqual(path.read_text().count(SIGNATURE_LINE), count)
+            with (
+                mock.patch.object(module, "VERIFY_RS", path),
+                mock.patch.object(module, "START_SHA", START_SHA),
+                mock.patch.dict(os.environ, {"RUSTC": "/nonexistent/redteam-036-rustc"}),
+            ):
+                self.assert_skips_and_teardown(count)
+
+    def assert_skips_and_teardown(self, count):
+        module = sys.modules[__name__]
+        with (
+            mock.patch.object(WasmVerifySwapProbe, "skip_reason", None),
+            mock.patch.object(Edit, "apply") as apply,
+            mock.patch.object(module, "run_cargo") as cargo,
+        ):
             reason = host_rustc_skip_reason()
             self.assertIsNotNone(reason)
             self.assertIn("rustc 1.91.0", reason)
@@ -526,9 +552,15 @@ class WasmVerifySwapProbe(unittest.TestCase):
             self.assertEqual(result.failures, [])
             self.assertEqual(result.errors, [])
             self.assertEqual(len(result.skipped), 2, result.skipped)
-            for _case, skipped in result.skipped:
-                self.assertEqual(skipped, reason)
-                self.assertNotIn("does not cover that plant", skipped)
+            expected = (signature_anchor_reason(count) or reason, reason)
+            for (_case, skipped), wanted in zip(result.skipped, expected):
+                self.assertEqual(skipped, wanted)
+                if wanted == reason:
+                    self.assertNotIn("does not cover that plant", skipped)
+                else:
+                    self.assertIn("does not cover that plant", skipped)
+            apply.assert_not_called()
+            cargo.assert_not_called()
             module.START_SHA = "0" * 64
             with self.assertRaises(ProbeError) as caught:
                 tearDownModule()
@@ -538,13 +570,6 @@ class WasmVerifySwapProbe(unittest.TestCase):
             )
             module.START_SHA = sha256_file(VERIFY_RS)
             tearDownModule()
-        finally:
-            module.START_SHA = saved_sha
-            WasmVerifySwapProbe.skip_reason = saved_skip
-            if saved_rustc is None:
-                os.environ.pop("RUSTC", None)
-            else:
-                os.environ["RUSTC"] = saved_rustc
 
     def test_missing_verify_rs_is_error(self):
         """A missing verify.rs is an error from sha256_file, not a skip."""
@@ -726,7 +751,6 @@ class WasmVerifySwapProbe(unittest.TestCase):
         saved_apply = Edit.apply
         saved_cargo = module.run_cargo
         applied = []
-        self.assertEqual(saved_verify.read_text().count(SIGNATURE_LINE), 1)
         self.assertIsNone(signature_anchor_reason(1))
 
         def signature_text(count):
@@ -773,7 +797,13 @@ class WasmVerifySwapProbe(unittest.TestCase):
                     self.assertEqual(path.read_text().count(SIGNATURE_LINE), count)
                     module.VERIFY_RS = path
                     result = unittest.TestResult()
-                    WasmVerifySwapProbe("test_skipped_signature_is_caught").run(result)
+                    with mock.patch.object(
+                        WasmVerifySwapProbe,
+                        "copy",
+                        side_effect=AssertionError("a stale plant reached copy"),
+                    ) as copy:
+                        WasmVerifySwapProbe("test_skipped_signature_is_caught").run(result)
+                        copy.assert_not_called()
                 self.assertEqual(result.errors, [], result.errors)
                 self.assertEqual(result.failures, [], result.failures)
                 self.assertEqual(len(result.skipped), 1, result.skipped)
@@ -856,6 +886,115 @@ class WasmVerifySwapProbe(unittest.TestCase):
         self.assert_refused(result, root, source, announce=True, record=True)
         self.assert_trees_clean()
         self.assertFalse(owner_test.exists(), owner_test)
+
+
+class WasmVerifySwapFalsifiers(unittest.TestCase):
+    def test_python_rule_falsifiers_are_caught(self):
+        """Apply each named mutation in memory; every named test must reject it.
+
+        Run each test unchanged first. A skip cannot catch a mutation. Only
+        the selected function is replaced, and it is restored after each run.
+        """
+        module = sys.modules[__name__]
+        probe = WasmVerifySwapProbe
+        digest_tests = (
+            "test_digest_guard_runs_when_cargo_skips",
+            "test_stale_anchor_and_missing_toolchain_keep_digest_guard",
+        )
+        anchor_tests = (
+            "test_stale_anchor_skips_only_plant",
+            "test_stale_anchor_and_missing_toolchain_keep_digest_guard",
+        )
+        mutations = (
+            (
+                "bypass-teardown-comparison", module, "tearDownModule",
+                "if sha256_file(VERIFY_RS) != START_SHA:", "if False:",
+                digest_tests,
+            ),
+            (
+                "missing-setup-file-skips", module, "setUpModule",
+                "    START_SHA = sha256_file(VERIFY_RS)",
+                "    try:\n        START_SHA = sha256_file(VERIFY_RS)\n"
+                "    except FileNotFoundError as error:\n"
+                "        raise unittest.SkipTest(str(error)) from None",
+                ("test_missing_verify_rs_is_error",),
+            ),
+            (
+                "missing-teardown-file-skips", module, "tearDownModule",
+                "    if sha256_file(VERIFY_RS) != START_SHA:",
+                "    if not VERIFY_RS.exists():\n"
+                "        raise unittest.SkipTest('missing verify.rs')\n"
+                "    if sha256_file(VERIFY_RS) != START_SHA:",
+                ("test_missing_verify_rs_is_error",),
+            ),
+            (
+                "freeze-finding-commit", module, "verify_pin_line",
+                'commit = git("log", "-1", "--format=%H", "HEAD", "--", VERIFY_REL)',
+                'commit = "ab" * 20',
+                ("test_verify_pin_line_uses_live_head",),
+            ),
+            (
+                "freeze-finding-digest", module, "verify_pin_line",
+                "{sha256_file(VERIFY_RS)}", "{'12' * 32}",
+                ("test_verify_pin_line_uses_live_head",),
+            ),
+            (
+                "omit-commit-validation", module, "verify_pin_line",
+                'if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):',
+                "if False:",
+                ("test_verify_pin_line_rejects_invalid_commit",),
+            ),
+            (
+                "copy-compares-frozen-digest", probe, "assert_copy_is_pinned",
+                "if copy != real:",
+                "if sha256_file(source / VERIFY_LEAF) != START_SHA:",
+                ("test_copy_tracks_live_bytes",),
+            ),
+            (
+                "omit-copy-byte-equality", probe, "assert_copy_is_pinned",
+                "if copy != real:", "if False:",
+                ("test_copy_tracks_live_bytes",),
+            ),
+            (
+                "omit-stale-plant-guard", probe, "test_skipped_signature_is_caught",
+                "if reason is not None:", "if False:",
+                anchor_tests,
+            ),
+            (
+                "extend-anchor-skip-to-unplanted", probe, "test_swapped_module_is_refused",
+                "    root, source = self.copy()",
+                "    reason = signature_anchor_reason(VERIFY_RS.read_text().count(SIGNATURE_LINE))\n"
+                "    if reason is not None:\n        self.skipTest(reason)\n"
+                "    root, source = self.copy()",
+                anchor_tests,
+            ),
+        )
+        for name in sorted({name for *_, names in mutations for name in names}):
+            with self.subTest(baseline=name):
+                result = unittest.TestResult()
+                probe(name).run(result)
+                self.assertEqual(result.testsRun, 1)
+                self.assertEqual(result.skipped, [])
+                self.assertEqual(result.failures, [])
+                self.assertEqual(result.errors, [])
+        for label, owner, function, old, new, names in mutations:
+            with self.subTest(falsifier=label):
+                source = textwrap.dedent(inspect.getsource(getattr(owner, function)))
+                self.assertEqual(source.count(old), 1, label)
+                namespace = {}
+                exec(compile(source.replace(old, new, 1), f"<{label}>", "exec"),
+                     vars(module), namespace)
+                with mock.patch.object(owner, function, namespace[function]):
+                    for name in names:
+                        with self.subTest(test=name):
+                            result = unittest.TestResult()
+                            probe(name).run(result)
+                            self.assertEqual(result.testsRun, 1)
+                            self.assertEqual(result.skipped, [])
+                            self.assertTrue(
+                                result.failures or result.errors,
+                                f"{label}: {name} accepted the mutation",
+                            )
 
 
 if __name__ == "__main__":
