@@ -114,27 +114,7 @@ itself is granted and expected.
 
 `DidConfineProbe` and `ModelConfineProbe` reuse this probe.
 
-- wallet: `capsules/wallet-provider/confine.sb`
-  - commit: `959b104022bd0e8ae55636f69f6f06b8eb028e2b`, merge PR #157
-    (confine 037)
-  - sha256: `fbac35b5ec505eca4f80963b81783273377dc019c4719aab5957346e4dd64d4b`
-- did: `capsules/did-provider/confine.sb`
-  - commit: `959b104022bd0e8ae55636f69f6f06b8eb028e2b`, merge PR #157
-    (confine 037)
-  - sha256: `79ec0289fc1a886aa5231586b007d17382b37648b24e64844376827268b84950`
-- model: `capsules/model-provider/confine.sb`
-  - commit: `e324708ce42235d816821f9e5b0570d8999f4b80`, merge PR #542
-    (cc-model-confine 054)
-  - sha256: `399d0dc9d6381555c0f132d339146aed1420cc6d0395ba0ba475801b9a34bb17`
-
-Measured with `git log -1 --format='%H %s' HEAD -- <file>` and
-`shasum -a 256 <file>` on HEAD `95ab22afb58226163a11286748acb372507662db`.
-
-A clean run says only: these probes did not break the wallet profile on
-`959b104022bd0e8ae55636f69f6f06b8eb028e2b`, the did profile on
-`959b104022bd0e8ae55636f69f6f06b8eb028e2b`, or the model profile on
-`e324708ce42235d816821f9e5b0570d8999f4b80`. If the bytes change, pin the new
-commit and re-run. Never carry a stale pin.
+The three profiles are the live files under `capsules/`. `py/test_confine_mach.py` is the one place that computes a live commit and a live sha256 for a report. `py/test_confine_wallet_profile.py` and `py/test_confine_network.py` call that file's `changed` and `sha256_file`. They record the digest at module start and compare it at module end. They store no digest. An owner change to a profile is not a failure of this check. A difference between the start and the end raises `the probe changed <rel>`.
 
 ### How the probe tells a deny from a harness error
 

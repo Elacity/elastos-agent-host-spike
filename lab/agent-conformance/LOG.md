@@ -6400,3 +6400,293 @@ The shared heavy-build lease was free (`fcntl.flock` acquired in 0.000 s) and re
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `standin-runtime/mod.rs:118` keeps the view in the lab value. This change adds no capsule import. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:221` starts the six tests. Each plant above fails its named assertion and passes after restore. |
 | 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:20` is the life the filter reads. `Caller` at line 12 is only the session argument. |
+
+## 045 — RA-6 stand-in launches and lists resident instances
+
+045: `StandIn::post_capsules` and `StandIn::get_capsules` extend the same `StandIn` for `POST /api/capsules` and `GET /api/capsules`. A shell launch of an admitted path answers `starting` with `session_id` equal to `id` before `finish_start`. The list then shows `running` or `failed` with the cause, and a failed entry stays until the test instant is 60 seconds after it failed. A client is refused with `This endpoint requires shell privileges`. `parallel_capsules_complete_independently` stays `#[ignore = "blocked: RT4"]`. A PASS here leaves the real Runtime's resident rows blocked. There is no new `falsifiers.json` id. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Re-found and still at the cited lines. `35697329b:lab/resident-instances/SPEC.md:104` `world resident-capsule {`. `:131` `{"id": "...", "name": "...", "status": "starting", "session_id": "..."}`. `:155` `entry stays listed with its cause for at least 60 seconds.` `35697329b:lab/resident-instances/src/http.rs:249` `pub fn parse_instance(value: &Value) -> Result<Instance, String> {` and `:252` `session: text(value, "session_id")?.to_owned(),`. Today's `elastos/crates/elastos-server/src/api/routes.rs:100` is `"completed"`. `elastos/crates/elastos-compute/src/providers/component.rs:168` is `let id = CapsuleId::new(format!("component-{}", uuid::Uuid::new_v4()));` and `:352` is `session: self.capsule_id.clone(),`. `elastos/wit/elastos-bus-v1.wit:87` is `run: func() -> result<_, bus-error>;`. `elastos/crates/elastos-server/src/api/middleware.rs:93` is `"This endpoint requires shell privileges"`. `elastos/crates/elastos-server/src/api/server.rs:463` is `.route("/api/capsules", get(routes::list_capsules))`. `lab/agent-conformance/tests/effects.rs:20` is `#[ignore = "blocked: RT4"]`.
+
+### Hand-run falsifiers
+
+No list id. Each plant was restored before the next. Lib tests are `standin_runtime::tests::NAME`; a bare name with `--exact` runs nothing. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::NAME -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true` and lane `target/host` plus `target/host-build`. After the last restore, `standin-runtime/mod.rs` matched its pre-plant bytes (`sha256 1c249e36cedec5c02d1efca72b5bb88e477ca66b5f2b4666be8913bc7ee1fa06`). `git diff -- lab/agent-conformance/standin-runtime/mod.rs` is the candidate only. The plant expressions are absent from that file.
+
+F-standin-launch-stub. Named test `standin_launch_returns_before_start`. Planted exit 101 in 1.224 s. Restored exit 0 in 0.723 s. Assertion: `src/../standin-runtime/mod.rs:977:9` `the stand-in returns starting and the Bus session before start finishes` left `id component-1, name read-shared, status completed` right `status starting` with `session_id component-1`.
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let path = launch_path(body)?;
+```
+
+New:
+
+```text
+        return Ok(json!({
+            "id": "component-1",
+            "name": "read-shared",
+            "status": "completed",
+        }));
+        require_shell(caller)?;
+        let path = launch_path(body)?;
+```
+
+F-standin-early-running. Named test `standin_launch_returns_before_start`. Planted exit 101 in 1.178 s. Restored exit 0 in 0.669 s. Assertion: `src/../standin-runtime/mod.rs:972:9` `the stand-in returns starting and the Bus session before start finishes` left `status running` right `status starting`.
+
+Old:
+
+```text
+        let phase = ResidentStatus::Starting;
+```
+
+New:
+
+```text
+        let phase = ResidentStatus::Running;
+```
+
+F-standin-one-id. Named test `standin_two_launches_are_two_instances`. Planted exit 101 in 0.811 s. Restored exit 0 in 0.947 s. Assertion: `src/../standin-runtime/mod.rs:1021:9` `the stand-in numbers the second launch component-2` left `component-1` right `component-2`.
+
+Old:
+
+```text
+    fn mint_id(&mut self) -> String {
+        let id = format!("component-{}", self.next_id);
+        self.next_id += 1;
+        id
+    }
+```
+
+```text
+        self.instances.push(Instance {
+```
+
+New:
+
+```text
+    fn mint_id(&mut self) -> String {
+        format!("component-{}", self.next_id)
+    }
+```
+
+```text
+        self.instances.clear();
+        self.instances.push(Instance {
+```
+
+F-standin-ok-is-failed. Named test `standin_start_ok_is_running`. Planted exit 101 in 1.217 s. Restored exit 0 in 0.936 s. Assertion: `src/../standin-runtime/mod.rs:1080:9` `the stand-in stores running with an empty cause when start returns ok` left `status failed` right `status running`.
+
+Old:
+
+```text
+        Start::Ok => (ResidentStatus::Running, String::new(), None),
+```
+
+New:
+
+```text
+        Start::Ok => (ResidentStatus::Failed, String::new(), Some(instant)),
+```
+
+F-standin-expire-running. Named test `standin_start_ok_is_running`. Planted exit 101 in 1.213 s. Restored exit 0 in 0.945 s. Assertion: `src/../standin-runtime/mod.rs:1093:9` `the stand-in keeps a running instance at instant 60` left `Null` right `running`.
+
+Old:
+
+```text
+        ResidentStatus::Starting | ResidentStatus::Running => true,
+```
+
+New:
+
+```text
+        ResidentStatus::Starting => true,
+        ResidentStatus::Running => instant < FAILED_KEEP_SECS,
+```
+
+F-standin-bad-start. Named test `standin_bad_start_is_failed`. Planted exit 101 in 1.227 s. Restored exit 0 in 0.610 s. Assertion: `src/../standin-runtime/mod.rs:1119:13` `the stand-in lists a failed start with its cause` left `status running` cause `start refused` right `status failed`.
+
+Old:
+
+```text
+        Start::Error(text) | Start::Trap(text) => {
+            (ResidentStatus::Failed, text.clone(), Some(instant))
+        }
+```
+
+New:
+
+```text
+        Start::Error(text) | Start::Trap(text) => {
+            (ResidentStatus::Running, text.clone(), None)
+        }
+```
+
+F-standin-drop-failed. Named test `standin_failed_stays_for_sixty_seconds`. Planted exit 101 in 1.218 s. Restored exit 0 in 1.019 s. Assertion: `src/../standin-runtime/mod.rs:1156:9` `the stand-in lists a failed instance at instant 0` left `Null` right `failed`.
+
+Old:
+
+```text
+            Some(at) => instant.saturating_sub(at) < FAILED_KEEP_SECS,
+```
+
+New:
+
+```text
+            Some(at) => instant.saturating_sub(at) > 0
+                && instant.saturating_sub(at) < FAILED_KEEP_SECS,
+```
+
+F-standin-keep-failed. Named test `standin_failed_stays_for_sixty_seconds`. Planted exit 101 in 1.172 s. Restored exit 0 in 0.692 s. Assertion: `src/../standin-runtime/mod.rs:1170:9` `the stand-in omits a failed instance at instant 60` left the failed entry right `{"capsules":[]}`.
+
+Old:
+
+```text
+            Some(at) => instant.saturating_sub(at) < FAILED_KEEP_SECS,
+```
+
+New:
+
+```text
+            Some(at) => instant.saturating_sub(at) <= FAILED_KEEP_SECS,
+```
+
+F-standin-admit-skip. Named test `standin_unadmitted_path_is_refused`. Planted exit 101 in 1.222 s. Restored exit 0 in 0.670 s. Assertion: `src/../standin-runtime/mod.rs:878:9` `the stand-in refuses an unadmitted path` left `Ok` `status starting` `session_id component-1`.
+
+Old:
+
+```text
+        Err(self.not_resident(path))
+```
+
+New:
+
+```text
+        Ok(("read-shared".to_owned(), Start::Ok))
+```
+
+F-standin-old-world. Named test `standin_unadmitted_path_is_refused`. Planted exit 101 in 1.189 s. Restored exit 0 in 0.975 s. Assertion: `src/../standin-runtime/mod.rs:878:9` `the stand-in refuses an unadmitted path` left `not a resident component: /capsules/read-shared world product-capsule-v1`.
+
+Old:
+
+```text
+const RESIDENT_WORLD: &str = "resident-capsule";
+```
+
+New:
+
+```text
+const RESIDENT_WORLD: &str = "product-capsule-v1";
+```
+
+F-standin-launch-body. Named test `standin_launch_body_is_path_only`. Planted exit 101 in 1.220 s. Restored exit 0 in 0.965 s. Assertion: `src/../standin-runtime/mod.rs:826:9` `the stand-in refuses a launch body with no path` left `Ok` `status starting`.
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let path = launch_path(body)?;
+```
+
+New:
+
+```text
+        require_shell(caller)?;
+        let path = match launch_path(body) {
+            Ok(path) => path,
+            Err(_) => {
+                return Ok(json!({
+                    "id": "component-1",
+                    "name": "read-shared",
+                    "status": "starting",
+                    "session_id": "component-1",
+                }));
+            }
+        };
+```
+
+F-standin-start-twice. Named test `standin_start_returns_once`. Planted exit 101 in 0.916 s. Restored exit 0 in 0.969 s. Assertion: `src/../standin-runtime/mod.rs:1197:9` `the stand-in accepts start once` left `Ok(())`.
+
+Old:
+
+```text
+        if instance.phase != ResidentStatus::Starting {
+            return Err((400, "start already returned".to_owned()));
+        }
+```
+
+New:
+
+```text
+        if instance.phase != ResidentStatus::Starting {
+            instance.phase = ResidentStatus::Failed;
+            instance.cause = "start already returned".to_owned();
+            instance.failed_at = Some(instant);
+            return Ok(());
+        }
+```
+
+F-standin-rewrite-admit. Named test `standin_one_admit_per_path`. Planted exit 101 in 1.166 s. Restored exit 0 in 0.961 s. Assertion: `src/../standin-runtime/mod.rs:850:9` `the stand-in keeps the first admit` left `Ok(())`.
+
+Old:
+
+```text
+        if self.admitted.iter().any(|row| row.path == path) {
+            return Err((400, format!("resident path already admitted: {path}")));
+        }
+```
+
+New:
+
+```text
+        if let Some(row) = self.admitted.iter_mut().find(|row| row.path == path) {
+            row.start = start;
+            return Ok(());
+        }
+```
+
+F-standin-client-capsules. Named test `standin_client_cannot_launch_or_list`. Planted exit 101 in 0.967 s. Restored exit 0 in 0.951 s. Assertion: `src/../standin-runtime/mod.rs:1233:9` `the stand-in refuses a client launch and list` left two `Ok` bodies, the launch `status starting` and the list holding that entry. `require_shell` was left in place.
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let path = launch_path(body)?;
+```
+
+```text
+        require_shell(caller)?;
+        let mut listed: Vec<&Instance> = self
+```
+
+New:
+
+```text
+        let _ = caller;
+        let path = launch_path(body)?;
+```
+
+```text
+        let _ = caller;
+        let mut listed: Vec<&Instance> = self
+```
+
+### Gates
+
+The shared heavy-build lease was free (`fcntl.flock` acquired in 0.000 s) and released after the commands. `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`. Both commands stayed inside 600 seconds. The locked suite passed on the first run, so there was no census rerun. The volume had about 30 GiB free.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.22 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 338.18 seconds. 127 passed, 0 failed, 14 ignored. The lib target passed 16 tests. The effects target passed 57 tests, with 12 ignored, in 248.68 seconds. The runtime target passed 10 tests, with 2 ignored, in 18.50 seconds. The report target passed 23 tests.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `standin-runtime/mod.rs:197` takes `path` as the launch key and does not open it. The world at line 15 is the SPEC's proposed world name. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `standin-runtime/mod.rs:186` stores the test instant and reads no clock. `admit_resident` at line 144 reads no directory. |
+| 3. A second path or a second copy of one rule? | No | `standin-runtime/mod.rs:321` `require_shell` is the one client refusal. `status_text` at line 328 is the one status map. |
+| 4. Runtime core grows? | No | The edit is `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and `LOG.md`. `src/lib.rs:9` still points the lab module there. `elastos/` is unchanged. |
+| 5. Refusals deny by default with a clear reason? | Yes | `standin-runtime/mod.rs:238` returns 400 for a path that was not admitted. `require_shell` at line 324 returns 403 for a client. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `standin-runtime/mod.rs:176` applies the test-supplied `Start`. This change adds no capsule import. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:823` starts the ten resident tests. Each plant above fails its named assertion and passes after restore. |
+| 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:144` admits a path. Launch mints `component-N` and does not call `seed_grant`. |
