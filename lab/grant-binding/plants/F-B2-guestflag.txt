@@ -1,0 +1,18 @@
+id: F-B2-guestflag
+file: src/ops.rs
+test: ops::model_forged_child_journal_does_not_widen_the_child_root
+--- old
+        super::resource_name(&grant.identity, path, Some(&grant.owned_root))
+            .map_err(OperateRefuse::Binding)?;
+--- new
+        super::resource_name(
+            &grant.identity,
+            path,
+            if !request.forged_child_journal {
+                Some(grant.owned_root.as_str())
+            } else {
+                None
+            },
+        )
+        .map_err(OperateRefuse::Binding)?;
+--- end
