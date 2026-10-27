@@ -1,0 +1,68 @@
+   Compiling review-a8-455-r5 v0.1.0 (/workspace/lab/review-a8-455-r5)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.16s
+     Running unittests src/lib.rs (target-build/debug/deps/review_a8_455_r5-40f26a7b3dbda149)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/r5_hunts.rs (target-build/debug/deps/r5_hunts-6c1ae3c8550233af)
+
+running 18 tests
+H-bom: SURVIVED BOM dropped the first line; remaining complete line later_pass=true records=1
+test h_bom_jsonl ... ok
+H-crlf: CAUGHT HONEST records=2 later_pass=true; CRLF is valid JSONL, not a false PASS
+test h_crlf_jsonl ... ok
+H-mmap-swap: CAUGHT hash is of a Vec snapshot (2b5690679d91d644d4397206f692a648d30e2fdfad1fea109892e1d5a801612c); later file bytes sha256 9d980115bd621c8ea04f0ab98cd00ffb92ed6a28175da8007a65cb4ab098569f
+test h_mmap_swap ... ok
+H-nan-large:nan parse=Err("expected value at line 1 column 306") later_pass=false
+H-nan-large:u64-plus parse=Err("receipt seq must be an unsigned integer") later_pass=false
+H-nan-large:neg parse=Err("receipt seq must be an unsigned integer") later_pass=false
+H-nan-large:float parse=Err("receipt seq must be an unsigned integer") later_pass=false
+H-nan-large-numbers: CAUGHT NaN/u64+/neg/1.5
+test h_nan_and_large_numbers ... ok
+
+thread 'h_hardlinked_journal' (14581) panicked at /workspace/lab/a1-a8-hardening/src/lib.rs:526:9:
+capability-requests.jsonl must not exist before the guest is launched (/tmp/a8-home.Pq4XPT/home/.local/share/elastos/runtime/capability-requests.jsonl)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+H-hardlink-journal: CAUGHT exists() sees the hardlink; pre-exist CAUGHT
+test h_hardlinked_journal ... ok
+H-seal-before-flush: CAUGHT early seal then append: capability-requests.jsonl rewritten after run; host receipts are the sealed copy
+test h_seal_before_final_append ... ok
+H-seq-gaps: CAUGHT receipt seq must be strictly increasing without gaps or repeats; host records: [CapabilityRequestRecord { action: "write", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied", capsule_id: Some("component-341af27a-6b9c-4892-a618-808f0b687a9d"), principal_id: None, session_id: Some("0123456789abcdef0123456789abcdef"), module_hash: Some("f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737"), guest_function: Some("request_journal_grants"), seq: Some(1) }, CapabilityRequestRecord { action: "read", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied", capsule_id: Some("component-341af27a-6b9c-4892-a618-808f0b687a9d"), principal_id: None, session_id: Some("0123456789abcdef0123456789abcdef"), module_hash: Some("f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737"), guest_function: Some("request_journal_grants"), seq: Some(3) }]
+test h_seq_gaps ... ok
+H-seal-guest-writable: CAUGHT seal lives in ReceiptSeal memory; no sibling file
+test h_seal_is_host_held_memory ... ok
+
+thread 'h_seq_overflow_wrap' (14588) panicked at /workspace/lab/a1-a8-hardening/src/lib.rs:992:23:
+attempt to add with overflow
+H-session-all-zeros: SURVIVED is_session_id(00000000000000000000000000000000) later_pass=true
+test h_session_all_zeros ... ok
+H-session-from-pid: SURVIVED is_session_id(000000000000000000000000000038f2) later_pass=true
+test h_session_from_pid ... ok
+H-session-from-time: SURVIVED is_session_id(000000000000000018e23f64c6601327) later_pass=true
+test h_session_from_time ... ok
+H-session-reused: SURVIVED first=true second=true; no used-session set
+test h_session_reused_across_runs ... ok
+H-symlink-journal: SURVIVED dangling symlink treated as absent; records=2 later_pass=true
+test h_symlinked_journal ... ok
+H-seq-overflow-wrap: SURVIVED debug overflow panic (release wrap would bind): attempt to add with overflow
+test h_seq_overflow_wrap ... ok
+H-toctou-rename: SURVIVED hash, rename-swap, load, rename-back: both hashes match honest; load saw swap
+test h_toctou_rename_between_hash_and_load ... ok
+H-truncated-final-line: SURVIVED truncated read dropped; remaining complete write later_pass=true records=1
+test h_truncated_final_line ... ok
+H-unicode-lookalike-keys: CAUGHT parse=Ok(CapabilityRequestRecord { action: "write", resource: "localhost://Public/../../../../.ssh/id_ed25519", code: "manifest_capability_denied", capsule_id: None, principal_id: None, session_id: Some("0123456789abcdef0123456789abcdef"), module_hash: Some("f3d89ab4d9276261372979ebdd67f65327af1b098c5d1f0c59e4417170380737"), guest_function: Some("request_journal_grants"), seq: Some(1) }) later_pass=false
+test h_unicode_lookalike_keys ... ok
+H-tmpfs-remount: NOT RUN mount_ok=false inode_before=528307 inode_after=Some(528307) stderr=mount: /tmp/r5-tmpfs-14578-1793065303705484078: must be superuser to use mount.
+       dmesg(1) may have more information after failed mount system call.
+test h_tmpfs_remount ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Doc-tests review_a8_455_r5
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

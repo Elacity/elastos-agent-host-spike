@@ -1,0 +1,3 @@
+F-A8-rewrite-after-run rewrite_after_seal_fails: exit 101, caught
+restored lab/a1-a8-hardening/src/lib.rs sha256 c868d26909a315cb25cb6f40e2e0f2a74e1058f260a8c2907218eeac3ca47568
+F-A8-rewrite-after-run: CAUGHT (expected caught)

@@ -1,0 +1,39 @@
+=== ignored wasm sentence ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.11s
+     Running tests/a8_agent_host_host_key.rs (lab/a1-a8-hardening/target/host-build/debug/deps/a8_agent_host_host_key-a6a21176feb3add7)
+
+running 1 test
+
+thread 'shipped_wasm_bus_prints_internal_sentence' (21891) panicked at tests/a8_agent_host_host_key.rs:264:5:
+needs runtime: request_journal_grants uses WasmBus, which maps BusError::Internal to BusFailure::Other; the guest then fails closed as Invalid("the journal append did not follow its grants"). The Runtime authorship proof is the host-side manifest_capability_denied record, not this sentence
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test shipped_wasm_bus_prints_internal_sentence ... FAILED
+
+failures:
+
+failures:
+    shipped_wasm_bus_prints_internal_sentence
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test a8_agent_host_host_key`
+=== ignored shipped bytes ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running tests/a8_agent_host_host_key.rs (lab/a1-a8-hardening/target/host-build/debug/deps/a8_agent_host_host_key-a6a21176feb3add7)
+
+running 1 test
+
+thread 'shipped_agent_host_bytes_read_host_key' (21899) panicked at tests/a8_agent_host_host_key.rs:275:5:
+blocked: elastos:bus@v1 has no launch-argument channel (AC-002-ARGS), and the shipped agent-host asks only for localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal and refuses '..' itself, so its unmodified bytes cannot ask for a host key
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test shipped_agent_host_bytes_read_host_key ... FAILED
+
+failures:
+
+failures:
+    shipped_agent_host_bytes_read_host_key
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test a8_agent_host_host_key`
+=== suite done ===

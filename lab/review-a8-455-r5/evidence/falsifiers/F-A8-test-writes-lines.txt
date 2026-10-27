@@ -1,0 +1,7 @@
+F-A8-test-writes-lines agent_host_host_key_read_is_refused: exit 101, caught
+  a8 runtime: elastos sha256 e027209ca94cdaf39e6758219f7737c99f5b3cc4f8e6ded9d5d1cb12f4f0d0d3
+  a8 shipped agent-host: sha256 c93e461d0d5b0cb2ca7866ad399441e59dd2b95cba8b12f4711bd18e9d349e9d imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 injected agent-host: sha256 92d42c030a295c221c98c8e13fb0f5fa774a6da7beb43e6dcc9b87d4c4ccb274 imports ["elastos:bus/types@1.0.0", "elastos:bus/runtime@1.0.0", "elastos:bus/identity@1.0.0", "elastos:bus/capabilities@1.0.0", "elastos:bus/providers@1.0.0"]
+  a8 origin: guest_has_refusal_sentence:false guest_has_early_injection:false guest_has_host_key:true
+restored lab/a1-a8-hardening/tests/a8_agent_host_host_key.rs sha256 8d0c842b74ef02c8cf1e892aeed195205992075412ab7aded2d14090e07f91ca
+F-A8-test-writes-lines: CAUGHT (expected caught)

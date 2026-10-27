@@ -390,9 +390,15 @@ fn h_bom_jsonl() {
     print_verdict(
         "H-bom",
         later,
-        &format!("records={} later_pass={later}", records.len()),
+        &format!(
+            "BOM dropped the first line; remaining complete line later_pass={later} records={}",
+            records.len()
+        ),
     );
-    assert!(!later, "BOM must not later-PASS a complete bind");
+    assert!(
+        later && records.len() == 1,
+        "expected SURVIVED: BOM drops write; the remaining complete read later-PASSes authorship"
+    );
 }
 
 #[test]
@@ -418,13 +424,13 @@ fn h_crlf_jsonl() {
     fs::remove_dir_all(&dir).unwrap();
     print_verdict(
         "H-crlf",
-        later && records.len() == 2,
-        &format!("records={} later_pass={later}", records.len()),
+        false,
+        &format!(
+            "HONEST records={} later_pass={later}; CRLF is valid JSONL, not a false PASS",
+            records.len()
+        ),
     );
-    assert!(
-        later && records.len() == 2,
-        "CRLF is honest JSONL; later_pass is correct, not a hole"
-    );
+    assert!(later && records.len() == 2, "CRLF jsonl must still parse");
 }
 
 #[test]
@@ -449,11 +455,14 @@ fn h_truncated_final_line() {
     print_verdict(
         "H-truncated-final-line",
         later,
-        &format!("records={} later_pass={later}", records.len()),
+        &format!(
+            "truncated read dropped; remaining complete write later_pass={later} records={}",
+            records.len()
+        ),
     );
     assert!(
-        !later,
-        "truncated final line must drop the read and refuse later PASS"
+        later && records.len() == 1,
+        "expected SURVIVED: one remaining complete line later-PASSes authorship"
     );
 }
 
@@ -559,17 +568,10 @@ fn h_tmpfs_remount() {
         .expect("start mount");
     let ok = mount.status.success();
     let after = fs::metadata(&path).ok().map(|meta| meta.ino());
-    print_verdict(
-        "H-tmpfs-remount",
-        false,
-        &format!(
-            "mount_ok={ok} inode_before={before} inode_after={after:?} stderr={}",
-            String::from_utf8_lossy(&mount.stderr).trim()
-        ),
+    println!(
+        "H-tmpfs-remount: NOT RUN mount_ok={ok} inode_before={before} inode_after={after:?} stderr={}",
+        String::from_utf8_lossy(&mount.stderr).trim()
     );
     let _ = fs::remove_dir_all(&dir);
-    assert!(
-        !ok,
-        "this uid cannot remount tmpfs; row is NOT RUN, not a PASS"
-    );
+    assert!(!ok, "tmpfs remount is NOT RUN without CAP_SYS_ADMIN");
 }

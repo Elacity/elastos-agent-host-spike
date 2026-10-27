@@ -1,0 +1,9 @@
+after plants
+c868d26909a315cb25cb6f40e2e0f2a74e1058f260a8c2907218eeac3ca47568  lab/a1-a8-hardening/src/lib.rs
+8d0c842b74ef02c8cf1e892aeed195205992075412ab7aded2d14090e07f91ca  lab/a1-a8-hardening/tests/a8_agent_host_host_key.rs
+ccf9fc61b70f4c0e6a9b7c44de03ecfbac9a76595bdf07ddb55e55a84d34f17a  lab/a1-a8-hardening/tests/a1_wasi_import.rs
+b9de94da7365c507ffdf6f9a3afd9cc5421eefe9061146b5e53350141a10e29f  lab/a1-a8-hardening/tests/authorship_lock.rs
+7ef1dea5f1bcb725c08f8e54e347a23caa9856992007a2306b8289896a0da992  elastos/crates/elastos-server/src/component.rs
+d52efcf8754427be26b2c276ae66bb11e8ce521eb84da47fd7128cf2833cf92a  elastos/crates/elastos-server/src/resource_bridge.rs
+git status -- elastos lab/a1-a8-hardening:
+(empty means clean)
