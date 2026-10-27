@@ -3,15 +3,16 @@
 //!
 //! `admit` sets the allowance ceiling and leaves outstanding holds alone.
 //! `reserve` first takes the binding decision from `Verifier::resolve`, then
-//! records the hold on this ledger. `settle` and `release` are the only ways a
-//! hold ends, and both take that same binding decision first. The guest's
+//! records the hold on this ledger. `settle`, `release`, and `timeout_hold` are
+//! the only ways a hold ends, and each takes that same binding decision first.
+//! The guest's
 //! `reported_usage` claim is not read: a known settle charges the figure the
 //! verifier passes in when it stays at or under the stored hold, refuses a
 //! larger one, and an unknown outcome marks that hold uncertain when its bound
-//! handle is presented and keeps it, and release of an uncertain hold is
-//! refused. The ledger value
-//! sits behind one mutex, and admit, reserve, settle, and release lock it for
-//! the check and the write.
+//! handle is presented and keeps it, release of an uncertain hold is refused,
+//! and a verifier timeout ends that hold with nothing charged. The ledger value
+//! sits behind one mutex, and admit, reserve, settle, release, and timeout_hold
+//! lock it for the check and the write.
 
 use std::collections::HashMap;
 
@@ -135,6 +136,28 @@ impl std::fmt::Display for ReleaseRefuse {
     }
 }
 
+/// A refused timeout with one clear reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutRefuse {
+    NotUncertain,
+    NotOutstanding,
+    OtherHandle,
+    Binding(Refuse),
+}
+
+impl std::fmt::Display for TimeoutRefuse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TimeoutRefuse::NotUncertain => formatter.write_str("hold is not uncertain"),
+            TimeoutRefuse::NotOutstanding => formatter.write_str("reservation is not outstanding"),
+            TimeoutRefuse::OtherHandle => {
+                formatter.write_str("reservation is bound to another handle")
+            }
+            TimeoutRefuse::Binding(refusal) => refusal.fmt(formatter),
+        }
+    }
+}
+
 impl Verifier {
     /// Sets the allowance ceiling. Outstanding holds stay as they are.
     pub fn admit(&self, ceiling: u64) {
@@ -235,6 +258,44 @@ impl Verifier {
     }
 
     /// Ends one hold without charging anything. A binding refusal records
+    /// nothing, a reservation that is not outstanding is refused, and a hold
+    /// that is not uncertain stays open.
+    pub fn timeout_hold(
+        &self,
+        call: &Call,
+        request: &GuestRequest,
+        reservation: Reservation,
+    ) -> Result<(), TimeoutRefuse> {
+        self.resolve(*call, request.handle)
+            .map_err(TimeoutRefuse::Binding)?;
+        let mut ledger = self.ledger.lock().expect("ledger lock");
+        let (bound, amount, uncertain) = match ledger.open.get(&reservation.id) {
+            Some(open) => (open.handle, open.amount, open.uncertain),
+            None => return Err(TimeoutRefuse::NotOutstanding),
+        };
+        if !handles_match(bound, request.handle) {
+            return Err(TimeoutRefuse::OtherHandle);
+        }
+        if !uncertain {
+            return Err(TimeoutRefuse::NotUncertain);
+        }
+        Self::return_unused_hold(&mut ledger, reservation, amount, request);
+        Ok(())
+    }
+
+    /// Returns one hold's amount to the ceiling and drops the hold.
+    #[allow(unused_variables)]
+    fn return_unused_hold(
+        ledger: &mut Ledger,
+        reservation: Reservation,
+        amount: u64,
+        request: &GuestRequest,
+    ) {
+        ledger.open.remove(&reservation.id);
+        ledger.held -= amount;
+    }
+
+    /// Ends one hold without charging anything. A binding refusal records
     /// nothing and a reservation that is not outstanding is refused. Only the
     /// bound handle's unknown settle makes a hold uncertain; an uncertain hold
     /// is refused and stays open with its amount still held.
@@ -257,8 +318,7 @@ impl Verifier {
         if uncertain {
             return Err(ReleaseRefuse::Uncertain);
         }
-        ledger.open.remove(&reservation.id);
-        ledger.held -= amount;
+        Self::return_unused_hold(&mut ledger, reservation, amount, request);
         Ok(())
     }
 }
@@ -1160,6 +1220,141 @@ fn model_release_after_unknown_is_refused() {
     assert_eq!(settled.charged, 4);
     assert_eq!(settled.held, 0);
     assert!(!settled.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_timeout_ends_an_uncertain_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = guest(handle);
+    let first = verifier.reserve(&call, &request, 4).expect("reserve");
+    let second = verifier.reserve(&call, &request, 3).expect("reserve");
+    let fresh = verifier
+        .timeout_hold(&call, &request, first)
+        .expect_err("a fresh hold is not timed out");
+    assert_eq!(fresh, TimeoutRefuse::NotUncertain);
+    assert_eq!(fresh.to_string(), "hold is not uncertain");
+    let before = books(&verifier);
+    assert_eq!(before.charged, 0);
+    assert_eq!(before.held, 7);
+    assert_eq!(before.open.get(&first.id), Some(&4));
+    assert_eq!(before.open.get(&second.id), Some(&3));
+    let unknown = verifier
+        .settle(&call, &request, first, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
+    let blocked = verifier
+        .release(&call, &request, first)
+        .expect_err("release of an uncertain hold stays refused");
+    assert_eq!(blocked, ReleaseRefuse::Uncertain);
+    assert_eq!(blocked.to_string(), "uncertain hold is not released");
+    assert_eq!(books(&verifier).held, 7);
+    assert_eq!(books(&verifier).charged, 0);
+    verifier
+        .timeout_hold(&call, &request, first)
+        .expect("timeout ends the uncertain hold");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 3);
+    assert!(!after.open.contains_key(&first.id));
+    assert_eq!(after.open.get(&second.id), Some(&3));
+}
+
+#[test]
+fn model_timeout_twice_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = guest(handle);
+    let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    assert_eq!(verifier.timeout_hold(&call, &request, reservation), Ok(()));
+    assert_eq!(books(&verifier).held, 0);
+    assert_eq!(books(&verifier).charged, 0);
+    let refusal = verifier
+        .timeout_hold(&call, &request, reservation)
+        .expect_err("second timeout");
+    assert_eq!(refusal, TimeoutRefuse::NotOutstanding);
+    assert_eq!(refusal.to_string(), "reservation is not outstanding");
+    assert_eq!(books(&verifier).held, 0);
+    assert_eq!(books(&verifier).charged, 0);
+    assert!(!books(&verifier).open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_timeout_on_another_handle_is_refused() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    verifier.admit(10);
+    let call = verifier.open_call(first);
+    let request = guest(holder);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let refusal = verifier
+        .timeout_hold(&verifier.open_call(second), &guest(other), reservation)
+        .expect_err("another handle");
+    assert_eq!(refusal, TimeoutRefuse::OtherHandle);
+    assert_eq!(
+        refusal.to_string(),
+        "reservation is bound to another handle"
+    );
+    let after_refusal = books(&verifier);
+    assert_eq!(after_refusal.held, 4);
+    assert_eq!(after_refusal.charged, 0);
+    assert_eq!(after_refusal.open.get(&reservation.id), Some(&4));
+    assert_eq!(verifier.timeout_hold(&call, &request, reservation), Ok(()));
+    let after_timeout = books(&verifier);
+    assert_eq!(after_timeout.charged, 0);
+    assert_eq!(after_timeout.held, 0);
+    assert!(!after_timeout.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_timeout_on_a_sibling_instance_is_refused() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier.admit(10);
+    let call = verifier.open_call(first);
+    let request = guest(handle);
+    let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let sibling_call = verifier.open_call(sibling);
+    let refusal = verifier
+        .timeout_hold(&sibling_call, &request, reservation)
+        .expect_err("sibling instance");
+    assert_eq!(refusal, TimeoutRefuse::Binding(Refuse::Instance));
+    assert_eq!(refusal.to_string(), "instance does not match the grant");
+    assert_eq!(books(&verifier).held, 10);
+    assert_eq!(books(&verifier).charged, 0);
+    assert!(books(&verifier).open.contains_key(&reservation.id));
+    assert_eq!(verifier.timeout_hold(&call, &request, reservation), Ok(()));
+    assert_eq!(books(&verifier).held, 0);
+    assert_eq!(books(&verifier).charged, 0);
 }
 
 #[test]
