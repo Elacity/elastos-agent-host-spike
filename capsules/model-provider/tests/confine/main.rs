@@ -1661,78 +1661,165 @@ fn model_outside_read_denied() {
     provider.shutdown();
 }
 
-/// Under the profile, `runs_events` and a terminal `runs_cancel` load the
-/// stored failed run and leave the storage tree unchanged.
+/// Under the oracle and under the generated stand-in file, `runs_events`
+/// and a terminal `runs_cancel` load the stored failed run and leave the
+/// storage tree unchanged.
 ///
-/// `runs_create` without `runtime_hosted_socket` stores the run as failed
-/// before any socket. The create data's `terminal.error.message` is
-/// `Hosted external HTTPS is paused.` `runs_events` with `after_sequence` 0
-/// returns schema `elastos.model.run-events/v1`, that run's `run_id`,
-/// `has_more` false, and a last event whose `kind` is `failed`.
-/// `runs_cancel` returns the create data. The storage tree after both calls
-/// equals the tree after create. A live cancel is not shown: the run is
-/// already terminal, so the call does not reach the adapter.
+/// The oracle case is `Launch::Confined` with
+/// `Storage::prepare("terminal-read")`. The generated case reads the
+/// declared fixture, calls `standin_profile`, writes that text with
+/// `write_standin_profile` under a fresh
+/// `Storage::prepare("terminal-read-standin")`, and starts with
+/// `Launch::Profile` and `canonical_bindings`. The file passed to
+/// `Launch::Profile` has no line that starts with `;;`, and its sorted
+/// allow lines equal the oracle's. One local function holds the page and
+/// cancel assertions, and both cases call it.
+///
+/// Each case stores one run. `runs_create` sets no `runtime_hosted_socket`
+/// and stores the run as failed before any socket. The create data's
+/// `terminal.error.message` is `Hosted external HTTPS is paused.`
+/// `runs_events` with `after_sequence` 0 returns schema
+/// `elastos.model.run-events/v1`, that run's `run_id`, `has_more` false,
+/// and a last event whose `kind` is `failed`. `runs_cancel` returns the
+/// create data. The storage tree after both calls equals the tree after
+/// create. Then `offers_list` answers and `shutdown` exits cleanly. A
+/// failure names the case. The test does not call `settle`. A live cancel
+/// is not shown: the run is already terminal, so the call does not reach
+/// the adapter. This evidence is for the lab launcher.
 #[test]
 fn model_terminal_run_page_and_cancel_read_under_profile() {
+    /// The stored run's page and terminal cancel. `runs_events` and
+    /// `runs_cancel` are built from `run.get`, with `after_sequence` 0.
+    /// `offers_list` answers and `shutdown` exits cleanly. A failure names
+    /// `case`.
+    fn assert_terminal_page_and_cancel(
+        case: &str,
+        mut provider: Provider,
+        storage: &Storage,
+        run: &HostedRun,
+    ) {
+        let init = provider.request(&init_request(storage, None));
+        assert_eq!(init["status"], "ok", "{case}: init must succeed: {init}");
+        assert_serving(&init["data"]);
+
+        let created_response = provider.request(&run.create);
+        assert_eq!(
+            created_response["status"], "ok",
+            "{case}: runs_create must store the run: {created_response}"
+        );
+        let created = &created_response["data"];
+        assert_eq!(
+            created["terminal"]["error"]["message"], "Hosted external HTTPS is paused.",
+            "{case}: the binary must refuse hosted dispatch before any socket: {created}"
+        );
+        let after_create = tree_snapshot(&storage.root);
+
+        let events_response = provider.request(&json!({
+            "op": "runs_events",
+            "run_id": run.get["run_id"].clone(),
+            "after_sequence": 0,
+            "runtime_binding": run.get["runtime_binding"].clone()
+        }));
+        assert_eq!(
+            events_response["status"], "ok",
+            "{case}: runs_events must answer: {events_response}"
+        );
+        let events = &events_response["data"];
+        assert_eq!(
+            events["schema"], "elastos.model.run-events/v1",
+            "{case}: runs_events must use the run-events schema: {events}"
+        );
+        assert_eq!(
+            events["run_id"], created["run_id"],
+            "{case}: runs_events must name the stored run: {events}"
+        );
+        assert_eq!(
+            events["has_more"], false,
+            "{case}: the terminal page must not continue: {events}"
+        );
+        let last = events["events"]
+            .as_array()
+            .and_then(|page| page.last())
+            .unwrap_or_else(|| panic!("{case}: the stored run must keep a last event"));
+        assert_eq!(
+            last["kind"], "failed",
+            "{case}: the last event kind must be failed: {events}"
+        );
+
+        let cancelled_response = provider.request(&json!({
+            "op": "runs_cancel",
+            "run_id": run.get["run_id"].clone(),
+            "runtime_binding": run.get["runtime_binding"].clone()
+        }));
+        assert_eq!(
+            cancelled_response["status"], "ok",
+            "{case}: runs_cancel must answer: {cancelled_response}"
+        );
+        assert_eq!(
+            &cancelled_response["data"], created,
+            "{case}: a terminal runs_cancel must return the stored run"
+        );
+        assert_eq!(
+            tree_snapshot(&storage.root),
+            after_create,
+            "{case}: runs_events and a terminal runs_cancel must not write"
+        );
+
+        let listed = provider.request(&json!({ "op": "offers_list" }));
+        assert_eq!(
+            listed["status"], "ok",
+            "{case}: offers_list must answer: {listed}"
+        );
+        provider.shutdown();
+    }
+
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
+
     let storage = Storage::prepare("terminal-read");
     let run = HostedRun::new("request:terminal-read");
+    let provider = Provider::start(Launch::Confined(&storage));
+    assert_terminal_page_and_cancel("oracle", provider, &storage, &run);
 
-    let mut provider = Provider::start(Launch::Confined(&storage));
-    assert_serving(&provider.ok(&init_request(&storage, None)));
-    let created = provider.ok(&run.create);
-    assert_eq!(
-        created["terminal"]["error"]["message"], "Hosted external HTTPS is paused.",
-        "the binary must refuse hosted dispatch before any socket: {created}"
+    let storage = Storage::prepare("terminal-read-standin");
+    let run = HostedRun::new("request:terminal-read-standin");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let generated = standin_profile(&fixture).expect("declared rights build a profile");
+    let profile = storage.base.join("standin.sb");
+    write_standin_profile(&profile, &generated);
+    let launched = fs::read_to_string(&profile).unwrap_or_else(|err| {
+        panic!("generated: the file passed to Launch::Profile must be readable: {err}")
+    });
+    assert!(
+        launched.lines().all(|line| !line.starts_with(";;")),
+        "generated: the file passed to Launch::Profile has no line that starts with ;;: {launched}"
     );
-    let after_create = tree_snapshot(&storage.root);
-
-    let events = provider.ok(&json!({
-        "op": "runs_events",
-        "run_id": run.get["run_id"].clone(),
-        "after_sequence": 0,
-        "runtime_binding": run.get["runtime_binding"].clone()
-    }));
+    let mut launched_lines = collect_allow_lines(&launched);
+    let oracle = fs::read_to_string(PROFILE_PATH)
+        .unwrap_or_else(|err| panic!("generated: the profile oracle must be readable: {err}"));
+    let mut oracle_lines = collect_allow_lines(&oracle);
+    launched_lines.sort();
+    oracle_lines.sort();
     assert_eq!(
-        events["schema"], "elastos.model.run-events/v1",
-        "runs_events must use the run-events schema: {events}"
+        launched_lines, oracle_lines,
+        "generated: the stand-in file's allow lines must equal the oracle's"
     );
-    assert_eq!(
-        events["run_id"], created["run_id"],
-        "runs_events must name the stored run: {events}"
-    );
-    assert_eq!(
-        events["has_more"], false,
-        "the terminal page must not continue: {events}"
-    );
-    let last = events["events"]
-        .as_array()
-        .and_then(|page| page.last())
-        .expect("the stored run must keep a last event");
-    assert_eq!(
-        last["kind"], "failed",
-        "the last event kind must be failed: {events}"
-    );
-
-    let cancelled = provider.ok(&json!({
-        "op": "runs_cancel",
-        "run_id": run.get["run_id"].clone(),
-        "runtime_binding": run.get["runtime_binding"].clone()
-    }));
-    assert_eq!(
-        cancelled, created,
-        "a terminal runs_cancel must return the stored run"
-    );
-    assert_eq!(
-        tree_snapshot(&storage.root),
-        after_create,
-        "runs_events and a terminal runs_cancel must not write"
-    );
-
-    provider.ok(&json!({ "op": "offers_list" }));
-    provider.shutdown();
+    let binary = resolved(Path::new(PROVIDER_BINARY));
+    let bindings = canonical_bindings(&storage, &binary);
+    let provider = Provider::start(Launch::Profile {
+        profile: &profile,
+        bindings: &bindings,
+    });
+    assert_terminal_page_and_cancel("generated", provider, &storage, &run);
 }
 
 /// The outside-create fixture's one rule: metadata, never content, of the
