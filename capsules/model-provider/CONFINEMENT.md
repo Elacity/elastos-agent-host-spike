@@ -166,8 +166,13 @@ the same redirected `init`: `STORAGE_ROOT/escape` is a link to
 `RunJournal::open` in `src/journal.rs` inspects the journal root and then
 `runs/`, and creates a missing `runs/`. Each test watches one refused step:
 
-- The profile refuses the metadata inspect of the outside path, before any
-  write. `init` answers `journal_corrupt`. Test: `model_outside_write_denied`.
+- The same journey runs under the oracle and under the generated stand-in
+  file. Both refuse the metadata inspect of the outside path, before any
+  write, and then recover. `init` answers `journal_corrupt`. The outside
+  sibling keeps its entries, modes and bytes. A later normal `init` on
+  `STORAGE_ROOT` succeeds, and `shutdown` exits cleanly. The evidence is
+  the lab launcher's. It makes no claim that the Runtime enforced the
+  profile or that B3 is complete. Test: `model_outside_write_denied`.
 - When only a metadata read of the outside path is added, the sandbox refuses
   the journal create, and the provider reports `journal_access_denied`
   (provider task 012). It logs the create of `<journal_dir>/runs` with
@@ -482,19 +487,29 @@ profile does not grant".
   `STORAGE_ROOT` does not. The test drives `init`, `status` and `offers_list`,
   checks each answer, and checks that `init` created `runs/` under
   `STORAGE_ROOT`. It then shuts the provider down and requires a clean exit.
-- `model_outside_write_denied`: the fixture creates `STORAGE_ROOT` to hold a
-  link: `STORAGE_ROOT/escape` is a symlink to `STORAGE_PARENT/outside`, a
-  sibling of the journal root. `init` names the journal path
-  `STORAGE_ROOT/escape/inner`, so the path looks inside the root but leads
-  outside. The link is an intermediate because the provider refuses a
-  symlinked journal root, run directory or run file. `outside/inner` already
-  exists because the provider also refuses to create a directory under a
-  symlinked parent. The test requires:
+- `model_outside_write_denied`: the same journey runs under the oracle
+  (`Launch::Confined`) and under the generated stand-in file. Each case
+  prepares its own redirect fixture. The generated case reads the declared
+  fixture, builds the stand-in text, writes that file under the case's
+  storage, and applies it with `Launch::Profile` and `canonical_bindings`.
+  The fixture creates `STORAGE_ROOT` to hold a link: `STORAGE_ROOT/escape`
+  is a symlink to `STORAGE_PARENT/outside`, a sibling of the journal root.
+  `init` names the journal path `STORAGE_ROOT/escape/inner`, so the path
+  looks inside the root but leads outside. The link is an intermediate
+  because the provider refuses a symlinked journal root, run directory or
+  run file. `outside/inner` already exists because the provider also refuses
+  to create a directory under a symlinked parent. The refusal is the
+  metadata inspect. Recovery is the later normal `init`. Each case requires:
   - the answer `status: error`, `code: journal_corrupt`;
   - the provider's stderr line
     `[model-provider] journal_corrupt: ... <journal path>: Operation not permitted`;
   - the outside sibling unchanged: the same entries, modes and bytes;
-  - a later normal `init` on `STORAGE_ROOT` succeeds.
+  - `STORAGE_ROOT/runs` absent after the refusal;
+  - a later normal `init` on `STORAGE_ROOT` passes `assert_serving` and
+    creates `runs/`;
+  - `shutdown` exits cleanly.
+  The evidence is the lab launcher's. It makes no claim that the Runtime
+  enforced the profile or that B3 is complete.
 - `redirect_journal_materializes_outside_when_unconfined`: the control. The
   same fixture and the same request, without the profile, answer `status: ok`
   and create the journal (`outside/inner/runs`) under the outside sibling.
@@ -772,7 +787,7 @@ allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match 
 | F-cc39a | A line `(` is written after the root pin, then `allow file-read* (literal "/tmp/cc-split-allow"))` on the next line | `platform_baseline_rules_stay_narrow` and `allow_rules_trace_to_declared_rights` | The allow form does not close. |
 | F-cc40a | In the test, `falsifier_section_ids_match` returns `Ok` before it compares | `falsifier_section_names_every_list_id` | A table that drops F-cc39a is accepted. |
 | F-cc41a | In the test, `standin_profile` returns the oracle file and ignores the declared value | `generated_model_profile_matches_the_oracle` | A changed declared rule still matches the oracle. |
-| F-cc42a | In the test, `write_standin_profile` writes an allow-default profile and ignores the generated text | `generated_profile_permits_init_and_denies_the_local_offer` and `standin_refuses_a_start_it_cannot_apply` | The local offer's init answers ok, and the broken generated text is ignored so the launch does not exit 65. |
+| F-cc42a | In the test, `write_standin_profile` writes an allow-default profile and ignores the generated text | `generated_profile_permits_init_and_denies_the_local_offer`, `standin_refuses_a_start_it_cannot_apply` and `model_outside_write_denied` | The local offer's init answers ok, the broken generated text is ignored so the launch does not exit 65, and the generated case's redirected `init` answers `ok`. |
 | F-cc43a | In the test, `standin_profile` returns an empty profile when the rights list is missing | `standin_refuses_a_start_it_cannot_apply` and `generated_model_profile_matches_the_oracle` | The missing rights list is accepted. |
 | F-cc44a | In the test, `standin_profile` emits `(allow network*)` instead of `(deny network*)` | `generated_profile_denies_the_hosted_connect` and `generated_model_profile_matches_the_oracle` | The stand-in counts a connection and the generated head's third line is `(allow network*)`. |
 | F-cc45a | In the test, the launch uses the committed oracle instead of the generated file | `standin_launch_uses_the_generated_profile` | `init` answers ok because the launch uses the committed oracle, which still has the storage write. |
