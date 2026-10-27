@@ -6,3 +6,5 @@
 # Python scratch.
 __pycache__/
 *.pyc
+
+target/
