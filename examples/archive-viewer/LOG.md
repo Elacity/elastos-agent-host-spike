@@ -526,3 +526,5 @@ one renderer, shipped beside the page, and are not copied into it.
 2026-10-27, task 019: the `--runtime` pass runs the component cases, and the guest cases run on the plain pass.
 
 2026-10-27, task 024: a kill leaves the snapshot; a normal failure removes it.
+
+2026-10-27, task 017: the archive page ships the kit client; the Photos page still keeps its own copy.

@@ -22,7 +22,8 @@ fails the test. The archive viewer will reuse the owner instead of copying it by
 The launch client has one owner: `page-client.js`. The docs build copies it into
 `surface/browser/page-client.js`, and `the shipped client matches the kit owner` compares the bytes.
 The client imports `cut` from the sibling `docs-render.js`. The document list and page bounds stay in
-the page. The archive page still has its own client copy.
+the page. The archive build copies `page-client.js` to `surface/browser/page-client.js`, and
+`the shipped client matches the kit owner` compares the bytes.
 
 The Photos page keeps its client copy until Runtime's four-file gateway test allows a fifth file.
 That test (`elastos-server` `gateway_tests/photos.rs`, `install_photos_surface`) installs `index.html`,
