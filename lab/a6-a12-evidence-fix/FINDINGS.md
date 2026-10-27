@@ -87,9 +87,11 @@ No. Skip neither check.
   includes `/tmp`, `/var/tmp`, `/dev/shm`, `$TMPDIR`, XDG dirs,
   `$HOME/.cache` even when `XDG_CACHE_HOME` is set, `/run/user/$UID`
   when present, and Mac Library dirs. Live watches recurse; add
-  failures and `IN_Q_OVERFLOW` fail closed. Vanished inodes are
-  followed by handle / `(dev,ino)`. Writes re-check then
-  `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` (source-pinned).
+  failures and `IN_Q_OVERFLOW` fail closed (if and `return Err` both
+  pinned). Watch roots freeze at the first snapshot. A leftover FIFO,
+  socket, or device is reported; hashing skips non-regular files.
+  Vanished inodes are followed by handle / `(dev,ino)`. Writes re-check
+  then `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` (source-pinned).
   Symlink roots are resolved; a symlink loop is refused.
   `ThrowawayHome::new` + `census::cleanup` are invoked; Linux is NOT
   RUN. Bind mount, pid namespace, absent `/run/user/$UID`, and watch
@@ -106,15 +108,19 @@ Anders's A6 bookability rule still needs RA-6.
 
 Command: `./lab/a6-a12-evidence-fix/run.sh`
 
-Result: five full `./lab/a6-a12-evidence-fix/run.sh` runs on this
-head were each `test result: ok. 71 passed; 0 failed` (209.66s,
-206.55s, 202.25s, 197.48s, 199.10s). `--list` names the previous 57
-tests plus 14 r6 tests. Inode reuse prints NOT RUN when this ext4
-host does not recycle; that is not a panic and not a FileId PASS.
-`planted_bugs_are_caught` printed **53 CAUGHT lines** from **46
-plants** (the previous 34 / 39 plus 12 r6 plants / 14 CAUGHT lines)
-on every run. After each suite, `ls /tmp/elastos` was `No such file
-or directory`. Runtime `manager.rs` sha256 stayed
+Result: two full `./lab/a6-a12-evidence-fix/run.sh` runs on
+`4117b853` were each `test result: ok. 74 passed; 0 failed` (252.44s,
+253.82s). `--list` names 74 tests (the previous 71 plus 3 r7 tests).
+Two earlier full runs on `a46a5015` were each `73 passed; 1 failed`:
+plant `M-A12-DROP-FROZEN-TMPDIR` used `Vec::new()` and did not
+compile, so that plant was not CAUGHT. The typed plant is on this
+head. Inode reuse prints NOT RUN when this ext4 host does not
+recycle; that is not a panic and not a FileId PASS.
+`planted_bugs_are_caught` printed **57 CAUGHT lines** from **50
+plants** (the previous 46 / 53 plus 4 r7 plants / 4 CAUGHT lines)
+on every passing run: **57 CAUGHT out of 57**. After each suite,
+`ls /tmp/elastos` was `No such file or directory`. Runtime
+`manager.rs` sha256 stayed
 `cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a`.
 r3 `lab/review-a6-a12-343-r3/run.sh` still pins `87b974a1` and refuses
 this head. That pin is honest for the head r3 reviewed. This folder
@@ -133,7 +139,9 @@ does not edit the r3 runner.
 | A12 snapshot after Runtime wrote | **PASS** | watch leftover and live `/tmp/elastos` fail the snapshot |
 | A12 TOCTOU symlink / parent swap after check | **PASS** | write refused; nothing landed outside |
 | A12 run-window TMPDIR / XDG / `$HOME/.cache` / Library /var/tmp /dev/shm / subdir | **PASS** | new entries, create-then-delete, hardlink dest, rename dest, O_TMPFILE unlink found |
-| A12 openat2 flags / IN_Q_OVERFLOW / watch.add | **PASS** | source-pinned; plants CAUGHT |
+| A12 openat2 flags / IN_Q_OVERFLOW / watch.add | **PASS** | source-pinned; if and return Err both CAUGHT |
+| A12 FIFO leftover in bounded time | **PASS** | leftover reported; hash skip plant CAUGHT |
+| A12 TMPDIR mid-run freeze | **PASS** | preexisting in new TMPDIR is not a leftover; original TMPDIR leftover still found |
 | A12 bind / pid-ns / `/run/user` / watch sysctl / detached after return | **NOT RUN** | HostPart::NotRun; never a clean-window PASS |
 | A12 symlink loop | **PASS** | fail closed |
 | A12 in-root `census::cleanup` | **NOT RUN** | `ThrowawayHome::new` refused on Linux |
@@ -244,6 +252,10 @@ does not edit the r3 runner.
 | M-A12-PIDNS-PASS | **CAUGHT** |
 | M-A12-RUN-USER-PASS | **CAUGHT** |
 | M-A12-WATCH-SYSCTL-PASS | **CAUGHT** |
+| M-A12-HASH-FIFO | **CAUGHT** |
+| M-A12-OVERFLOW-NO-RETURN | **CAUGHT** |
+| M-A12-NO-FREEZE-ROOTS | **CAUGHT** |
+| M-A12-DROP-FROZEN-TMPDIR | **CAUGHT** |
 
 ## Still BLOCKED
 
