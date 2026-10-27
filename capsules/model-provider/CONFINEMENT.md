@@ -576,6 +576,10 @@ profile does not grant".
   a space or a tab fails with `allow form does not close`.
   `F-cc39a` writes a line `(` after the root pin, then
   `allow file-read* (literal "/tmp/cc-split-allow"))`.
+  A run of empty lines, or lines whose bytes are only spaces, tabs, form
+  feeds, or vertical tabs, between a line that trims to `(` and a line that
+  starts with `allow` and then a space or a tab, fails with `allow form does
+  not close`. A `;;` line is not part of that run.
 - `startup_is_refused_when_the_profile_cannot_be_applied`: a missing profile,
   a copy of `confine.sb` with its last `)` removed, and `confine.sb` with
   `STORAGE_ROOT` unbound each refuse the start. It runs under
