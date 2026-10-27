@@ -975,3 +975,42 @@
   exit 0. No dependency, `Cargo.toml`, `Cargo.lock`, `tools/Cargo.toml`, `tools/src/`, `capsule/`, `tools/build`, lab
   CID or sha256 pin changed. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
   lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 041 (M1 A8 lab half: host secrets never reach either engine or the capsule output). Base
+  `571741989`. `tests/run.rs` and `tests/common/grants.rs` only, plus docs and `falsifiers.json`; no `tools/src/`
+  change. `tests/common/grants.rs`: the one module builder is now `importing(module, name)`; `importing_env` calls
+  it and `IMPORTING_MODULE` stays byte for byte (`importing("env", "f") == IMPORTING_MODULE` is asserted). New in
+  `tests/run.rs`: `HostSecretCase` (one case-folder layout for both halves), `host_secret_shim` (`#!/bin/sh`: writes
+  `"$@"` one per line and `/usr/bin/env` into `records/<engine>.<version|run>.<argv|env>`, then `exec`s the real
+  engine by its absolute path), and three tests. `host_secret_fixture_never_reaches_either_real_engine` (outer)
+  builds the capsule, writes `<tmp>/home/keys/host-secret` holding `host-secret-marker <fresh test key's DID>`, and
+  starts this test binary (`--exact host_secret_fixture_run_inside_the_child --ignored --nocapture`) with
+  `HOME=<tmp>/home` and `WASM_CAPSULE_LAB_A8_CASE=<tmp>`; it passes only on child exit 0 and `test result: ok. 1
+  passed;`. `host_secret_fixture_run_inside_the_child` (`#[ignore]`, fails at once on another `HOME`: run by hand
+  it panicked "WASM_CAPSULE_LAB_A8_CASE is not set", and with the variable set under the real `HOME`, "HOME is not
+  the fixture home"). `host_secret_probe_imports_are_refused_before_any_engine_starts`. Results (engines
+  `/opt/homebrew/bin`, `wasmtime 45.0.1 (83166ba31 2026-06-05)`, `wasmer 7.5.0`): outer PASS (child PASS);
+  recorded module run argv wasmtime `run --invoke digest -W
+  max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y <work>/wasmtime/module.wasm 1592590337`, wasmer
+  `run --invoke digest <work>/wasmer/module.wasm 1592590337`; each `--version` argv `--version` alone; every
+  recorded environment (both engines, both starts) `PWD=<lane dir>`, `SHLVL=1`, `_=/usr/bin/env`, the shim shell's
+  own (`env -i /bin/sh -c /usr/bin/env` prints the same three), no `HOME`, no home folder, fixture path or marker;
+  both stdouts `FIXED_OUTPUT` and a newline. Probe test PASS: `path_open`, `fd_read`, `fd_prestat_get`,
+  `environ_get`, `environ_sizes_get` from `wasi_snapshot_preview1`, each refused with no grant as `undeclared import
+  wasi_snapshot_preview1.<name>` (`Audit(Undeclared)`) and with a `call` grant as `no typed lab operation for import
+  wasi_snapshot_preview1.<name>` (`UntypedImport`), no run folder, no `--version` and no module run. No leak found.
+  New falsifier F-WC-A8-HOME-PREOPEN (`start_engine` adds `.arg(format!("--dir={}",
+  std::env::var("HOME").unwrap_or_default()))` after the `memory_cap_args` line; that anchor is found once in
+  `tools/src/run.rs`, which this task does not change, so every existing anchor is unchanged); F-WC-README-COUNT
+  re-anchored to 175. Canonical runner, from the repo root, `python3 -I examples/agent-host/falsify.py --from
+  lab/wasm-capsule/falsifiers.json F-WC-A8-HOME-PREOPEN F-WC-README-COUNT`: "baseline: 2 named tests pass without an
+  edit, 0 do not", "F-WC-README-COUNT CAUGHT", "F-WC-A8-HOME-PREOPEN CAUGHT", "summary: 2 CAUGHT of 2", exit 0, no
+  `*.falsify-original` left. With the same mutation applied through `falsify.Mutation`, the real wasmtime took the
+  preopen and ran; the outer test failed at "the child host_secret_fixture_run_inside_the_child did not pass (exit
+  status: 101)", and the child at its `argv_faults` assertion: "wasmtime: the module run's argv [..., "--dir=<tmp>/home",
+  ...]: a preopen, env or network flag: --dir=<tmp>/home". README: new section "Host secrets denied (M1 A8 lab
+  half)", the three tests in "Named tests", totals 175 (one task 041) and 111 runner-caught, a task 041 section;
+  ADOPTION one line. Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test
+  --locked` (112 passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check`
+  exit 0. No dependency, `Cargo.toml`, `Cargo.lock`, `tools/Cargo.toml`, `tools/src/`, `capsule/`, `tools/build`, lab
+  CID or sha256 pin changed. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
+  lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.

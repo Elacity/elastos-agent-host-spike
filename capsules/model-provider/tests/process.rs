@@ -1090,33 +1090,7 @@ fn hosted_run_posts_the_runtime_effect_headers_with_the_contract_run_id_and_no_k
     let root = std::fs::canonicalize(root).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let stand_in = HostedEffectStandIn::bind("hosted-effect-headers");
-    let policy = json!({
-        "concurrency_limit": 1, "input_bytes_limit": 8192,
-        "inline_output_bytes_limit": 8192, "event_bytes_limit": 8192,
-        "runtime_ms_limit": 30000, "retention_secs": 60,
-        "cancel_settlement_timeout_ms": 20
-    });
-    let hosted = json!({
-        "backend_provider_label": "Fixture Provider", "selection_mode": "pinned",
-        "privacy_policy_ref": "fixture:privacy:v1", "terms_ref": "fixture:terms:v1",
-        "upstream_routing_fallback_assertion": "operator_asserted_disabled",
-        "model_privacy": ""
-    });
-    let offer = json!({
-        "id": HOSTED_EFFECT_OFFER, "title": "Hosted Text",
-        "operation": "text.generate",
-        "input_modalities": ["text/plain"], "output_modalities": ["text/plain"],
-        "policy": policy,
-        "adapter": {"kind": "open_ai_compatible_text",
-        "api_url": "https://hosted.invalid/v1/chat/completions",
-        "api_key": "fixture-key", "model": "fixture/text", "hosted": hosted},
-        "enabled": true
-    });
-    let init = json!({"op": "init", "config": {
-        "base_path": root, "allowed_paths": [], "read_only": false, "encryption_key": "",
-        "extra": {"provider_id": "model-provider", "journal_dir": root.join("journal"),
-        "offers": [offer], "runtime_hosted_socket": stand_in.path}
-    }});
+    let init = hosted_effect_init(&root, &stand_in);
     let mut provider = ProviderProcess::start();
     let started = provider.request(init);
     assert_eq!(
@@ -1261,11 +1235,7 @@ fn hosted_answer_through_the_runtime_socket_completes_the_run_with_text_and_usag
     let root = std::fs::canonicalize(root).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let stand_in = HostedEffectStandIn::bind_streaming("hosted-accepted-answer");
-    let init = json!({"op": "init", "config": {
-        "base_path": root, "allowed_paths": [], "read_only": false, "encryption_key": "",
-        "extra": {"provider_id": "model-provider", "journal_dir": root.join("journal"),
-        "offers": [hosted_effect_offer()], "runtime_hosted_socket": stand_in.path}
-    }});
+    let init = hosted_effect_init(&root, &stand_in);
     let mut provider = ProviderProcess::start();
     let started = provider.request(init);
     assert_eq!(
@@ -1371,8 +1341,8 @@ fn hosted_answer_through_the_runtime_socket_completes_the_run_with_text_and_usag
 }
 
 /// The hosted `open_ai_compatible_text` offer task 035 uses, with the fixture
-/// key that a hosted run must never put on the Runtime socket. A second test
-/// builds the same offer here, so the two tests cannot drift apart.
+/// key that a hosted run must never put on the Runtime socket. Every hosted
+/// test calls `hosted_effect_init`, so there is one copy of this offer.
 fn hosted_effect_offer() -> Value {
     let policy = json!({
         "concurrency_limit": 1, "input_bytes_limit": 8192,
@@ -1396,6 +1366,16 @@ fn hosted_effect_offer() -> Value {
         "api_key": "fixture-key", "model": "fixture/text", "hosted": hosted},
         "enabled": true
     })
+}
+
+/// The `init` request every hosted test sends: the shared offer and the
+/// stand-in's socket, with the fixture root as the journal path.
+fn hosted_effect_init(root: &Path, stand_in: &HostedEffectStandIn) -> Value {
+    json!({"op": "init", "config": {
+        "base_path": root, "allowed_paths": [], "read_only": false, "encryption_key": "",
+        "extra": {"provider_id": "model-provider", "journal_dir": root.join("journal"),
+        "offers": [hosted_effect_offer()], "runtime_hosted_socket": &stand_in.path}
+    }})
 }
 
 /// A retry of an open hosted run is a replay, not a second send. The stored
@@ -1422,11 +1402,7 @@ fn hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect()
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let stand_in = HostedEffectStandIn::bind("hosted-open-run-retry");
     stand_in.hold_answer();
-    let init = json!({"op": "init", "config": {
-        "base_path": root, "allowed_paths": [], "read_only": false, "encryption_key": "",
-        "extra": {"provider_id": "model-provider", "journal_dir": root.join("journal"),
-        "offers": [hosted_effect_offer()], "runtime_hosted_socket": stand_in.path}
-    }});
+    let init = hosted_effect_init(&root, &stand_in);
     let mut provider = ProviderProcess::start();
     let started = provider.request(init);
     assert_eq!(
@@ -1472,6 +1448,13 @@ fn hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect()
         create["data"]["terminal"].is_null(),
         "the first hosted run must stay open while the Runtime socket holds its answer: {create}"
     );
+    assert!(
+        matches!(
+            create["data"]["status"].as_str(),
+            Some("prepared" | "running")
+        ),
+        "the first hosted run must report an open status: {create}"
+    );
     stand_in.wait_for_connections(1);
     assert_eq!(
         stand_in.connection_count(),
@@ -1488,6 +1471,13 @@ fn hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect()
     assert!(
         retry["data"]["terminal"].is_null(),
         "the retry of an open run must return its open status: {retry}"
+    );
+    assert!(
+        matches!(
+            retry["data"]["status"].as_str(),
+            Some("prepared" | "running")
+        ),
+        "the retry of an open run must report an open status: {retry}"
     );
     assert_eq!(
         stand_in.connection_count(),
@@ -1583,11 +1573,7 @@ fn hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage() {
     let root = std::fs::canonicalize(root).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let stand_in = HostedEffectStandIn::bind_cut("hosted-stream-cut");
-    let init = json!({"op": "init", "config": {
-        "base_path": root, "allowed_paths": [], "read_only": false, "encryption_key": "",
-        "extra": {"provider_id": "model-provider", "journal_dir": root.join("journal"),
-        "offers": [hosted_effect_offer()], "runtime_hosted_socket": stand_in.path}
-    }});
+    let init = hosted_effect_init(&root, &stand_in);
     let mut provider = ProviderProcess::start();
     let started = provider.request(init);
     assert_eq!(

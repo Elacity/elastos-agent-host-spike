@@ -123,11 +123,11 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 302 filtered out; fi
 | `conflicting_retry_reuses_run_id_and_fails_by_stable_request_fingerprint` | `capsules/model-provider/src/state.rs:4898` | Three retries with changed input, operation or offer hit the same run id and fail `invalid_request` (`:4973`). No dispatch happens. | None. No run terminal is produced. |
 | `create_retry_after_session_and_grant_rotation_returns_same_run_without_redispatch` | `capsules/model-provider/src/state.rs:4978` | The rotated retry returns the same run id (`:5025`), dispatch ran once (`:5026`), and the stored binding keeps the original session and grant (`:5031-5032`). | The offer from `offer("local-text")` is hosted (`state.rs:1861`, `:1877`), so the completed terminal stores `BackendReport::unknown()` (`state.rs:1354`, `contract.rs:212-218`). The test does not assert that field. |
 | `responses_terminal_failures_are_generic_and_not_retried` | `capsules/model-provider/src/execution.rs:4731` | Each of three terminal stream failures gives `backend_failed` with a generic message (`:4763-4770`), records an unknown backend report (`:4772-4775`), and makes exactly one request per run (`:4777`). | Hosted report with `usage` = unknown (`contract.rs:204-209`; `state.rs:1354`), asserted at `execution.rs:4772-4775`. |
-| `hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect` | `capsules/model-provider/tests/process.rs:1373` | On macOS, the first `runs_create` returns the contract run id and stays open; the stand-in has one connection. The same request again returns the same run id and an open status with one connection. After the held answer is released the run settles `failed`/`hosted_effect_refused`, and a third send returns the same run id, terminal status and code, with one connection and one request in total. Off macOS it prints one `SKIP` line and returns. Task 039 keeps this name; 038's report named a `src/state.rs` test `a_same_fingerprint_retry_of_an_open_run_returns_after_refresh`. | The run is hosted and the adapter reports nothing, so the terminal stores `BackendReport::unknown()` (`state.rs:1352-1355`, the arm at `:1354`, `contract.rs:212-218`). The test does not assert that field. |
+| `hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect` | `capsules/model-provider/tests/process.rs:1391` | On macOS, the first `runs_create` returns the contract run id and stays open with status `prepared` or `running`; the stand-in has one connection. The same request again returns the same run id and an open status with one connection. After the held answer is released the run settles `failed`/`hosted_effect_refused`, and a third send returns the same run id, terminal status and code, with one connection and one request in total. Off macOS it prints one `SKIP` line and returns. Task 039 keeps this name; 038's report named a `src/state.rs` test `a_same_fingerprint_retry_of_an_open_run_returns_after_refresh`. The connection count is now proven by `MP26`, which removes both stops for one run: the open-run return (`src/state.rs:518-531`, return at `:530`) and the local text worker refusal (`src/adapters.rs:768-774`). | The run is hosted and the adapter reports nothing, so the terminal stores `BackendReport::unknown()` (`state.rs:1352-1355`, the arm at `:1354`, `contract.rs:212-218`). The test does not assert that field. |
 
 A same-fingerprint retry of a still-open run is pinned by
 `hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect`
-(`capsules/model-provider/tests/process.rs:1373`) on the hosted path. The
+(`capsules/model-provider/tests/process.rs:1391`) on the hosted path. The
 retry returns at `state.rs:530` after `refresh_run_if_needed` (`state.rs:526-528`),
 which can settle a prepared run to `settlement_unknown` before the replay; the
 test holds the hosted answer back, so the replay is observed while the run is
@@ -281,16 +281,18 @@ at `:1883`).
 
 The same-fingerprint retry of an open hosted run is pinned in case 2 by
 `hosted_retry_of_an_open_run_returns_the_same_run_and_sends_no_second_effect`
-(`capsules/model-provider/tests/process.rs:1373`), so task 039 needed no
-`src/state.rs` change and no fresh Sasha note. The four Runtime-side
+(`capsules/model-provider/tests/process.rs:1391`). Task 043 proves the
+no-second-send half with `MP26`, which removes both stops for one run
+(`src/state.rs:530`, `src/adapters.rs:768-774`). The four Runtime-side
 reservation tests above cannot pass until Anders's Runtime reservation exists;
 writing them now would test an
 absence, and the lane's rule keeps provider behaviour unchanged.
 
 ## What this report did not check
 
-- The 13 named tests were re-run at this base; no Runtime test was run.
-- No network call, no model call, no key, no hosted effect.
+- The 14 named tests were re-run at this base; no Runtime test was run.
+- No network call, no model call, no key; a hosted effect reached only the
+  Runtime socket stand-in.
 - No test ran with `SPARKS_MODEL_URL` or `ELASTOS_MODEL_EVAL_ROOT` set.
 - No Runtime build and no installed Runtime or provider.
 - No `capsules/*/src` change, so no Sasha note is needed.
