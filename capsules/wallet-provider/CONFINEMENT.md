@@ -940,13 +940,23 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `standin_launcher_refuses_a_start_it_cannot_confine` fails on case (c),
   which then reads the wrong-tool reason and lacks `is absent`.
 - Drop the OS from the stand-in's wrong-tool reason (WP126): the same test
-  fails on case (c2), whose reason then lacks `macos`.
+  fails on case (c2), whose reason then lacks `on macos`.
 - Append a write grant on `STORAGE_PARENT` to the stand-in's generated profile
   for did (WP127):
   `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
   fails on the sibling write beneath the base, which answers `ok` where the
   committed `confine.sb` refuses it. The unrelated outside write and the
   planted read still pass, so only that case catches it.
+- Return `did_provider_dir().join("target/debug/did-provider")` from the one
+  build-output reader instead of the reported `executable` (WP128):
+  `did_binary_is_the_executable_the_build_reports` fails because its fixture
+  path sits outside any `target` directory, while
+  `standin_launcher_finds_the_built_did_binary` alone still passes because the
+  guessed file exists after did's build.
+- Return `wallet_dir(base)` for an unknown provider name in
+  `provider_storage_root` (WP129):
+  `provider_storage_root_refuses_an_unknown_provider_name` fails because no
+  refusal comes for `model-provider`.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
