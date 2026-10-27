@@ -62,6 +62,9 @@ static HANDOFF_WRITE: AtomicI32 = AtomicI32::new(-1);
 /// Read end of the parent-to-init ack pipe. Init waits here before reaping
 /// so `/proc/<provider>/exe` stays visible.
 static ACK_READ: AtomicI32 = AtomicI32::new(-1);
+/// Provider pid init is tracing. Used to resume ptrace stops while waiting
+/// for the identity ack.
+static TRACE_PID: AtomicI32 = AtomicI32::new(-1);
 
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 
@@ -230,6 +233,17 @@ fn reap_namespace() -> ! {
         // child in the namespace, including orphans and daemonize leftovers.
         let ret = unsafe { libc::waitpid(-1, &mut status, 0) };
         if ret > 0 {
+            if libc::WIFSTOPPED(status) {
+                unsafe {
+                    libc::ptrace(
+                        libc::PTRACE_CONT,
+                        ret,
+                        std::ptr::null_mut::<libc::c_void>(),
+                        std::ptr::null_mut::<libc::c_void>(),
+                    )
+                };
+                continue;
+            }
             if first.is_none() {
                 first = Some(status);
             }
@@ -337,6 +351,53 @@ impl Kernel for RealKernel {
         if provider > 0 {
             close_fault_write(self);
             close_identity_write(self);
+            // The userns owner uid keeps CAP_SYS_PTRACE in this namespace,
+            // so dumpable 0 does not block a same-uid host attach. Init
+            // traces the provider; only one tracer is allowed.
+            if unsafe {
+                libc::ptrace(
+                    libc::PTRACE_ATTACH,
+                    provider,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                )
+            } != 0
+            {
+                return Err(errno());
+            }
+            let mut status = 0;
+            loop {
+                let ret = unsafe { libc::waitpid(provider, &mut status, 0) };
+                if ret == provider && libc::WIFSTOPPED(status) {
+                    break;
+                }
+                if ret < 0 && errno() != libc::EINTR {
+                    return Err(errno());
+                }
+            }
+            if unsafe {
+                libc::ptrace(
+                    libc::PTRACE_SETOPTIONS,
+                    provider,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    (libc::PTRACE_O_TRACEEXEC | libc::PTRACE_O_EXITKILL) as *mut libc::c_void,
+                )
+            } != 0
+            {
+                return Err(errno());
+            }
+            if unsafe {
+                libc::ptrace(
+                    libc::PTRACE_CONT,
+                    provider,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                )
+            } != 0
+            {
+                return Err(errno());
+            }
+            TRACE_PID.store(provider, Ordering::Relaxed);
             wait_for_identity_ack();
             reap_namespace();
         }
@@ -415,14 +476,10 @@ impl Kernel for RealKernel {
     }
 
     fn set_not_dumpable(&mut self, executable: &CStr) -> Result<(), Errno> {
-        // After maps and capset, dumpable may already be 0. Set it again so
-        // a later exec of a readable file is the only reset. Then make the
-        // granted binary execute-only: execve of a readable file sets
-        // dumpable back to 1, and a same-uid host can PTRACE_ATTACH.
-        // SAFETY: integer prctl only.
-        if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
-            return Err(errno());
-        }
+        // Make the granted binary execute-only. execve of a readable file
+        // resets dumpable to 1. Do not PR_SET_DUMPABLE here: confine runs
+        // in the helper, and init must stay dumpable so the parent can
+        // read /proc/<init>/ns. The provider sets dumpable 0 in exec().
         // SAFETY: `executable` is a NUL-terminated path from Plan.
         if unsafe { libc::chmod(executable.as_ptr(), 0o111) } != 0 {
             return Err(errno());
@@ -635,6 +692,13 @@ impl Kernel for RealKernel {
         // The no-exec filter is already stacked. It allows only this
         // pathname pointer. After the image is replaced, every later
         // execve and execveat returns EPERM.
+        // SAFETY: integer prctl only. Init is the parent and stays
+        // dumpable; this is the provider. execve of a readable file
+        // would raise dumpable, so set_not_dumpable already made the
+        // binary execute-only.
+        if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+            return Err(errno());
+        }
         // SAFETY: the path, argv and envp come from `plan`, which keeps every
         // pointed-to string alive and NULL-terminates both vectors. The write
         // end is O_CLOEXEC, so a successful execve closes it and the parent
@@ -921,11 +985,38 @@ fn wait_for_identity_ack() {
     }
     let mut byte = [0u8; 1];
     let n = loop {
-        let ret = unsafe { libc::read(fd, byte.as_mut_ptr().cast(), 1) };
-        if ret < 0 && errno() == libc::EINTR {
+        // Resume a ptrace stop so exec can finish while we wait for ack.
+        let traced = TRACE_PID.load(Ordering::Relaxed);
+        if traced > 0 {
+            let mut status = 0;
+            let stopped = unsafe { libc::waitpid(traced, &mut status, libc::WNOHANG) };
+            if stopped == traced && libc::WIFSTOPPED(status) {
+                unsafe {
+                    libc::ptrace(
+                        libc::PTRACE_CONT,
+                        stopped,
+                        std::ptr::null_mut::<libc::c_void>(),
+                        std::ptr::null_mut::<libc::c_void>(),
+                    )
+                };
+            }
+        }
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let pret = unsafe { libc::poll(&mut pfd, 1, 10) };
+        if pret < 0 && errno() == libc::EINTR {
             continue;
         }
-        break ret;
+        if pret > 0 {
+            let ret = unsafe { libc::read(fd, byte.as_mut_ptr().cast(), 1) };
+            if ret < 0 && errno() == libc::EINTR {
+                continue;
+            }
+            break ret;
+        }
     };
     unsafe { libc::close(fd) };
     ACK_READ.store(-1, Ordering::Relaxed);

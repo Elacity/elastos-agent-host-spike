@@ -18,8 +18,8 @@ step stops it.
 | user-namespace | `unshare`, `uid_map`, `setgroups`, `gid_map` | `unshare(CLONE_NEWUSER)`, then maps the caller's own uid and gid to themselves |
 | pid-namespace | `unshare_pid` | `unshare(CLONE_NEWPID)`. The caller stays in the old PID namespace. A later fork puts the provider in the new one. A failed unshare refuses: `the PID namespace cannot be created` |
 | capabilities | `cap_last_cap`, `bounding_set`, `ambient_set`, `capset` | `PR_CAPBSET_DROP` for every capability up to `/proc/sys/kernel/cap_last_cap`, `PR_CAP_AMBIENT_CLEAR_ALL`, then `capset` to all zero |
-| no_new_privs | `set_no_new_privs`, `set_dumpable` | `prctl(PR_SET_NO_NEW_PRIVS, 1)`, then `prctl(PR_SET_DUMPABLE, 0)` and `chmod 0111` of the granted binary so `execve` does not reset dumpable to 1 |
-| seccomp | `install_filter`, `install_no_exec` | first `seccomp(SECCOMP_SET_MODE_FILTER)` with the deny-list in `src/seccomp.rs`. That filter also returns EPERM for `prctl(PR_SET_DUMPABLE)`, so the provider cannot turn dumpable back on. After confine, a second filter returns EPERM for every `execveat` and for every `execve` except the helper's granted-path pointer. That one `execve` is the confined program's own initial exec. After that image starts, pathname re-exec of the granted binary and `execve("/proc/self/fd/N")` of a memfd both return EPERM. A failed second install refuses and names `install_no_exec`. |
+| no_new_privs | `set_no_new_privs`, `set_dumpable` | `prctl(PR_SET_NO_NEW_PRIVS, 1)`, then `chmod 0111` of the granted binary. The provider calls `prctl(PR_SET_DUMPABLE, 0)` in `exec()`. Init traces the provider so a same-uid host cannot attach (the userns owner keeps `CAP_SYS_PTRACE`). |
+| seccomp | `install_filter`, `install_no_exec` | first `seccomp(SECCOMP_SET_MODE_FILTER)` with the deny-list in `src/seccomp.rs`. That filter allows `prctl(PR_SET_DUMPABLE)` only with value 0, so the provider cannot turn dumpable back on. After confine, a second filter returns EPERM for every `execveat` and for every `execve` except the helper's granted-path pointer. That one `execve` is the confined program's own initial exec. After that image starts, pathname re-exec of the granted binary and `execve("/proc/self/fd/N")` of a memfd both return EPERM. A failed second install refuses and names `install_no_exec`. |
 | landlock | `abi_probe`, `abi_floor`, `right_probe`, `create_ruleset`, `storage_root_rule`, `executable_rule`, `restrict_self`, `enforce_self` | probes the kernel ABI, then requires every right the shared file profile needs (`truncate` at ABI 3, `ioctl_dev` at ABI 5). A missing right refuses and names the right and the ABI that first expresses it. Then it try-creates a ruleset for each needed right; `EINVAL` is a named `right_probe` refusal so a lying ABI number cannot hide a missing bit. After `restrict_self` a throwaway child tries write-outside, truncate, ioctl, `execveat` of a memfd, `REFER` (rename across two storage dirs), and `make_*` (fifo, symlink, char, block, sock). Any success is a refusal. TCP bind/connect and `LANDLOCK_SCOPE_SIGNAL` are NOT COVERED here: seccomp denies `socket` before a net probe can run, and the self-test child shares the provider's PID namespace. The ruleset handles only bits that ABI knows. The storage grant is the eight-right mask (no `REFER`, no `ioctl_dev`, no special-file create). ABI 6 also sets `LANDLOCK_SCOPE_SIGNAL`. |
 | launch | `sanitize_stdio`, `close_fds` | before restrict, if fd 0, 1 or 2 is a terminal or a socket (`S_ISSOCK`) it is replaced with `/dev/null`. A failed replace refuses and names the fd. Before exec, close every fd except stdin, stdout, stderr and the fault pipe (`close_range`, or `/proc/self/fd` if that syscall is missing). The identity pipe stays close-on-exec. A pre-confine pty or Unix socket cannot be inherited on stdin, so `SCM_RIGHTS` cannot import a host fd. |
 
@@ -44,9 +44,11 @@ needed right.
 
 The seccomp filter kills a process that uses a foreign architecture. On
 x86-64 it returns EPERM for every x32 call. It returns EPERM for sockets,
-`ptrace`, `prctl(PR_SET_DUMPABLE)`, namespace calls, `mount`, `bpf`,
-module loading and the other calls in `DENIED`, and for `clone` with a
-namespace flag. It returns ENOSYS for
+`prctl(PR_SET_DUMPABLE)` with a value other than 0, namespace calls,
+`mount`, `bpf`, module loading and the other calls in `DENIED`, and for
+`clone` with a namespace flag. `ptrace` is denied by the second filter,
+after init has attached to the provider. A same-uid host cannot attach:
+the userns owner keeps `CAP_SYS_PTRACE`, so dumpable 0 is not enough. It returns ENOSYS for
 `clone3`. It allows all other calls. This filter is a deny-list. A
 per-provider allow-list is profile work (see the PR #296 section below).
 

@@ -19,8 +19,8 @@
 //! replace refuses and names the fd. After the maps and the capability
 //! drop, the guard sets `PR_SET_DUMPABLE` to 0 and makes the granted
 //! binary execute-only, so `execve` does not reset dumpable to 1. The
-//! first seccomp filter then returns EPERM for any later
-//! `PR_SET_DUMPABLE`. After confine the guard installs a
+//! first seccomp filter then allows `PR_SET_DUMPABLE` only with value
+//! 0. After confine the guard installs a
 //! second seccomp filter that returns EPERM for every `execveat` and for
 //! every `execve` except the helper's granted-path pointer. That one
 //! `execve` is the confined program's own initial exec. After that image

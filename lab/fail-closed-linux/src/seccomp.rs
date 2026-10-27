@@ -26,11 +26,11 @@ const DATA_NR: u32 = 0;
 const DATA_ARCH: u32 = 4;
 const DATA_ARG0_LOW: u32 = 16;
 const DATA_ARG0_HIGH: u32 = 20;
+const DATA_ARG1_LOW: u32 = 24;
 
 pub const DENIED: &[libc::c_long] = &[
     libc::SYS_socket,
     libc::SYS_socketpair,
-    libc::SYS_ptrace,
     libc::SYS_process_vm_readv,
     libc::SYS_process_vm_writev,
     libc::SYS_unshare,
@@ -97,25 +97,30 @@ pub fn filter() -> Vec<sock_filter> {
         prog.push(jump(BPF_JMP | BPF_JEQ | BPF_K, nr as u32, 0, 1));
         prog.push(stmt(BPF_RET | BPF_K, eperm));
     }
-    // Deny any later PR_SET_DUMPABLE. The helper already set dumpable to 0.
-    // 0: JEQ prctl, 0, 4  -> not prctl jumps to clone3
+    // Allow PR_SET_DUMPABLE only with value 0. The provider sets dumpable
+    // 0 in exec(); a later re-enable is EPERM. Other prctl calls pass.
+    // 0: JEQ prctl, 0, 6
     // 1: LD ARG0_LOW
-    // 2: JEQ PR_SET_DUMPABLE, 0, 1 -> other prctl jumps to ALLOW
-    // 3: RET EPERM
-    // 4: RET ALLOW
+    // 2: JEQ PR_SET_DUMPABLE, 0, 3
+    // 3: LD ARG1_LOW
+    // 4: JEQ 0, 1, 0
+    // 5: RET EPERM
+    // 6: RET ALLOW
     prog.push(jump(
         BPF_JMP | BPF_JEQ | BPF_K,
         libc::SYS_prctl as u32,
         0,
-        4,
+        6,
     ));
     prog.push(stmt(BPF_LD | BPF_W | BPF_ABS, DATA_ARG0_LOW));
     prog.push(jump(
         BPF_JMP | BPF_JEQ | BPF_K,
         libc::PR_SET_DUMPABLE as u32,
         0,
-        1,
+        3,
     ));
+    prog.push(stmt(BPF_LD | BPF_W | BPF_ABS, DATA_ARG1_LOW));
+    prog.push(jump(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0));
     prog.push(stmt(BPF_RET | BPF_K, eperm));
     prog.push(stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
     prog.push(jump(
@@ -166,6 +171,15 @@ pub fn no_exec_filter(granted_path: u64) -> Vec<sock_filter> {
         prog.push(jump(BPF_JMP | libc::BPF_JGE | BPF_K, X32_SYSCALL_BIT, 0, 1));
         prog.push(stmt(BPF_RET | BPF_K, eperm));
     }
+    // Init traces the provider (first filter allows ptrace). After this
+    // filter the provider cannot ptrace, so a sibling cannot attach.
+    prog.push(jump(
+        BPF_JMP | BPF_JEQ | BPF_K,
+        libc::SYS_ptrace as u32,
+        0,
+        1,
+    ));
+    prog.push(stmt(BPF_RET | BPF_K, eperm));
     prog.push(jump(
         BPF_JMP | BPF_JEQ | BPF_K,
         libc::SYS_execveat as u32,

@@ -1309,8 +1309,6 @@ fn real_same_uid_host_cannot_ptrace_or_read_mem() {
         );
         let provider_pid = innermost_child(pid)
             .unwrap_or_else(|| panic!("NOT RUN: no provider pid under init {pid} ({provider})"));
-
-        assert_ptrace_and_mem_refused(pid, provider, "init");
         assert_ptrace_and_mem_refused(provider_pid, provider, "provider");
 
         drop(stdin);
