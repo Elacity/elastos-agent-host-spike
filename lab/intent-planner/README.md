@@ -160,7 +160,7 @@ restores the planted file:
 | M4 | `used` token list | `approved_grant_runs_once` |
 | M5 | `covers`; first grant used | `grant_lookup_uses_covers_for_the_exact_resource` |
 | M6 | `validate_journal_write` | `execute_spends_the_allow_once_grant_at_the_lab_manager` |
-| M6-host | Review `host_id` | `unused_review_does_not_run_on_a_second_host` |
+| M6-host | Review `host_id` and grant-to-self bind | `unused_review_does_not_run_on_a_second_host` |
 | M7 | `invoke_journal`; hardcoded BLOCKED | `blocked_journal_effect_comes_from_an_in_process_library_call` |
 | M8 | `principal` in `canonical()` | `approval_for_one_principal_does_not_execute_for_another` |
 | N1 | length prefix on `push_field` | `newline_fields_do_not_collide` |
@@ -169,7 +169,7 @@ restores the planted file:
 | N4 | `covers` treats a parent as a prefix | `prefix_resource_does_not_cover_a_child_journal` |
 | N5 | last path segment only; `step_id` dropped | `grant_lookup_uses_covers_for_the_exact_resource` |
 | N6 | bus reply ignored; hardcoded BLOCKED | `approved_plan_refuses_a_stored_bus_reply` |
-| N7 | `host_id` `starts_with` | `prefix_host_id_stays_foreign` |
+| N7 | Review and grant `host_id` `starts_with` | `prefix_host_id_stays_foreign` |
 | N8 | mint with `max_uses: None` | `execute_spends_the_allow_once_grant_at_the_lab_manager` |
 | N9 | validate the guest URI | `execute_spends_the_allow_once_grant_at_the_lab_manager` |
 | N10 | mark `used` before the bus | `failed_execute_does_not_spend_the_grant` |
@@ -180,7 +180,7 @@ restores the planted file:
 | R3-5 | `covers` strips a trailing `/` | `trailing_slash_path_does_not_cover_journal` |
 | R3-6 | `covers` is ASCII case-insensitive | `ascii_case_path_does_not_cover_journal` |
 | R3-7 | `classify` trims, case-folds, prefix-matches | `blocked_reply_is_a_whole_token` |
-| R3-8 | empty or NUL `host_id` skipped | `empty_or_nul_host_id_is_foreign` |
+| R3-8 | empty or NUL `host_id` skipped; grant bind fail-open | `empty_or_nul_host_id_is_foreign` |
 | R3-9 | `canonical()` sorts steps by resource | `approved_step_order_is_bound` |
 | R3-10 | `covers` percent-decodes | `percent_encoded_path_does_not_cover_journal` |
 | R3-11 | mark `used` before `validate` | `failed_execute_does_not_spend_the_grant` |

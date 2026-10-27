@@ -8,9 +8,51 @@ test: empty_or_nul_host_id_is_foreign
         if review.host_id != self.id {
             return Err(Refuse::ForeignHost);
         }
+        if review.choice != Choice::Approve {
+            return Err(Refuse::NotApproved);
+        }
+        if review.canonical != plan.canonical() {
+            return Err(Refuse::PlanAltered);
+        }
+        if steps != plan.steps.as_slice() {
+            return Err(Refuse::OutsidePlan);
+        }
+        let mut allowed = Vec::new();
+        for step in steps {
+            if runtime_gap(step).is_some() {
+                continue;
+            }
+            let grant = grant_that_covers(&review.grants, step)?;
+            if validated_name(&grant.host_id).is_none()
+                || grant.host_id != review.host_id
+                || grant.host_id != self.id
+            {
+                return Err(Refuse::ForeignHost);
+            }
 --- new
         let host_id = review.host_id.replace('\0', "");
         if !host_id.is_empty() && host_id != self.id {
             return Err(Refuse::ForeignHost);
         }
+        if review.choice != Choice::Approve {
+            return Err(Refuse::NotApproved);
+        }
+        if review.canonical != plan.canonical() {
+            return Err(Refuse::PlanAltered);
+        }
+        if steps != plan.steps.as_slice() {
+            return Err(Refuse::OutsidePlan);
+        }
+        let mut allowed = Vec::new();
+        for step in steps {
+            if runtime_gap(step).is_some() {
+                continue;
+            }
+            let grant = grant_that_covers(&review.grants, step)?;
+            if validated_name(&review.host_id).is_some()
+                && validated_name(&grant.host_id).is_some()
+                && grant.host_id != review.host_id
+            {
+                return Err(Refuse::ForeignHost);
+            }
 --- end
