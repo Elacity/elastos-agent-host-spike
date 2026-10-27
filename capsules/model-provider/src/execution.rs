@@ -4769,9 +4769,15 @@ mod tests {
                 })
             );
             assert!(terminal["data"]["terminal"]["output"].is_null());
+            // The upstream answered and the event stream started, then ended
+            // with a terminal failure event and no usage; that is the cut case,
+            // not a refusal. The error itself stays generic.
             assert_eq!(
                 terminal["data"]["terminal"]["backend_report"],
-                serde_json::to_value(crate::contract::BackendReport::unknown()).unwrap()
+                serde_json::to_value(crate::contract::BackendReport::unknown_with_usage_reason(
+                    crate::contract::UsageUnknownReason::Cut
+                ))
+                .unwrap()
             );
             assert_no_private_leakage(&[terminal.to_string()], &["private failure detail"]);
             assert_eq!(server.requests.lock().unwrap().len(), index + 1);
