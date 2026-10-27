@@ -1,10 +1,20 @@
 id: M-A12-TOCTOU-FOLLOW
 file: src/a12.rs
 test: tests::a12_tmp_root_symlink_swap_after_check_cannot_write_outside
+test: tests::a12_parent_dir_swap_after_check_cannot_write_outside
 --- old
     check_tmp_root(tmp_root)?;
-    let root_fd = open_or_create_dir_nofollow(tmp_root)?;
-    let dir_fd = mkdirat_open(&root_fd, dir_name)?;
+    let isolation = isolation_root();
+    let iso_fd = open_or_create_dir_nofollow(&isolation)?;
+    let rel = tmp_root.strip_prefix(&isolation).map_err(|_| {
+        format!(
+            "ELASTOS_TMP_ROOT write refuses {}: not under isolation {}",
+            tmp_root.display(),
+            isolation.display()
+        )
+    })?;
+    let root_fd = open_rel_beneath(&iso_fd, rel)?;
+    let dir_fd = mkdirat_openat2(&root_fd, dir_name)?;
     writeat(&dir_fd, name, bytes)?;
     Ok(tmp_root.join(dir_name).join(name))
 --- new

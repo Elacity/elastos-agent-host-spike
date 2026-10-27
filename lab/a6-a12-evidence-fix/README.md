@@ -18,22 +18,27 @@ This folder calls Runtime `CapabilityManager::grant` / `validate` and owner
   that pair. Removing validate step 4 from the Runtime this process
   loaded makes that journey FAIL. An `Ok` from a stub with an empty
   `ResidentPair` is FAIL. Two live `/proc` pids that are not proven
-  resident capsules (this process plus pid 1) are FAIL. PASS needs two
-  independent resident capsule instances inside one Runtime, each
-  holding its own grant, sibling refused by the Runtime.
+  resident capsules (this process plus pid 1) are FAIL. Two other live
+  pids without RA-6 host proof are BLOCKED. PASS needs two independent
+  resident capsule instances inside one Runtime, each holding its own
+  grant, sibling refused by the Runtime.
 - **A12:** leftover census records the (dev, inode, ctime, full-content
   hash, file handle) set a run created. A rename to an unrelated name
   (`moved-away`), a leftover with no lab marker, a same-path
   delete+recreate that reuses an inode with the same bytes, and a
-  65 KiB in-place rewrite with mtime restored are found. The snapshot
-  is taken before the Runtime starts; if the Runtime already wrote
-  under the watch or under `/tmp/elastos`, it fails. The run-window
-  watch also covers `$TMPDIR`, XDG cache/data/state/runtime dirs, and
-  `~/Library/Caches` / `~/Library/Application Support`.
+  65 KiB last-byte rewrite with mtime restored are found. The content
+  hash covers the whole file and is sparse-aware (SEEK_HOLE map). An
+  empty file handle is FileId NOT RUN. The snapshot is taken before
+  the Runtime starts; if the Runtime already wrote under the watch or
+  under `/tmp/elastos`, it fails. The run-window watch also covers
+  `/tmp`, `/var/tmp`, `/dev/shm`, `$TMPDIR`, XDG
+  cache/data/state/runtime dirs, and `~/Library/Caches` /
+  `~/Library/Application Support`, plus inotify for create-then-delete.
   `ELASTOS_TMP_ROOT` is guarded after realpath: `/`, empty, `$HOME`, a
   `..` component, a symlink at or under isolation, a reachable live Home,
   and anything whose canonical path is not under the pack mktemp are
-  refused. Writes reopen the checked path with `O_NOFOLLOW` / `openat`.
+  refused. Writes re-check the root, then open with
+  `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`.
   `run.sh` / `mac-pack.sh` set `ELASTOS_TMP_ROOT` to a fresh
   `mktemp -d` folder and clean only that. A clean isolated root is PASS.
   `ThrowawayHome::new` + `census::cleanup` are called; on Linux that

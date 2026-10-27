@@ -42,7 +42,8 @@ returns BLOCKED (`RA-6`).
 PASS requires evidence a real Runtime host produced: two independent
 resident capsule instances inside one Runtime. A pid counts only when
 it is positively proven a resident capsule hosted by that Runtime.
-Two live `/proc` pids (this process plus pid 1) are FAIL. The journey
-checks that evidence itself. An `Ok` from a stub with an empty
-`ResidentPair` is FAIL. Without RA-6 the honest result is BLOCKED,
-never PASS.
+Two live `/proc` pids (this process plus pid 1) are FAIL. Two other
+live pids without RA-6 host proof are BLOCKED, even if `prove` or
+`inspect` is stubbed. The journey checks that evidence itself. An
+`Ok` from a stub with an empty `ResidentPair` is FAIL. Without RA-6
+the honest result is BLOCKED, never PASS.

@@ -10,26 +10,32 @@ count below comes from a command run in this session.
 census records the (dev, inode, ctime, full-content hash, file handle)
 set a run created, so a rename to `moved-away`, a leftover with no lab
 marker, a same-path delete+recreate that reuses an inode with the same
-bytes, and a 65 KiB in-place rewrite with mtime restored are found. On
-this ext4 host, unlink+recreate can recycle inode+ctime; the file
-handle still moves. The snapshot is
+bytes, and a 65 KiB last-byte rewrite with mtime restored are found. The
+content hash covers the whole file and mixes a SEEK_HOLE map, so a hole
+is not the same as written zeros. An empty `name_to_handle_at` handle is
+FileId NOT RUN, not a weaker identity. On this ext4 host, unlink+recreate
+can recycle inode+ctime; the file handle still moves. The snapshot is
 taken before the Runtime starts; if the Runtime already wrote under the
 watch or under `/tmp/elastos`, that snapshot fails. The run-window watch
-also covers `$TMPDIR`, XDG cache/data/state/runtime dirs, and
-`~/Library/Caches` / `~/Library/Application Support`. `run.sh` sets
+snapshots `/tmp`, `/var/tmp`, `/dev/shm`, `$TMPDIR`, XDG
+cache/data/state/runtime dirs, and `~/Library/Caches` /
+`~/Library/Application Support`. An inotify watch records
+create-then-delete between the two snapshots. `run.sh` sets
 `ELASTOS_TMP_ROOT` to a fresh mktemp folder. The guard canonicalizes
 (realpath) first and refuses `/`, empty, `$HOME`, a `..` component, a
-symlink at or under isolation, a reachable live Home, `/var/tmp`, and
-anything whose canonical path is not inside that folder. Writes reopen
-the checked path with `O_NOFOLLOW` / `openat`, so a symlink swap after
-the check cannot land a leftover in a fake live Home.
+symlink at or under isolation, a reachable live Home, `/var/tmp` as a
+plant root, and anything whose canonical path is not inside that folder.
+Writes re-check the root, then open from the isolation dirfd with
+`openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`.
 
 This Linux journey is still not two independent resident capsule instances
 inside one Runtime. The ready A6 journey reports **BLOCKED (RA-6)**. An
 `Ok` from a stub with an empty `ResidentPair` is FAIL. This process plus
-pid 1 is FAIL. The journey never PASS until RA-6 and a real Runtime host
-proves two resident capsule instances inside one Runtime, each holding
-its own grant, sibling refused by the Runtime.
+pid 1 is FAIL. Two other live pids (sleep children) without RA-6 host
+proof are BLOCKED, even if `prove` or `inspect` is stubbed. The journey
+never PASS until RA-6 and a real Runtime host proves two resident
+capsule instances inside one Runtime, each holding its own grant,
+sibling refused by the Runtime.
 
 ## Did #323 or base already fix these?
 
@@ -65,13 +71,15 @@ No. Skip neither check.
   (plant M-A6-STUB-OK). This process plus pid 1 is FAIL (plant
   M-A6-LIVE-PIDS). PASS needs a real Runtime host.
 - **A12** roots honour a guarded `ELASTOS_TMP_ROOT` after realpath. Census
-  uses (dev, inode, ctime, full-content hash, file handle), not a name
-  prefix, lab marker, birth time, or size+mtime. The snapshot fails if the Runtime
+  uses (dev, inode, ctime, full-content hash with SEEK_HOLE map, file
+  handle), not a name prefix, lab marker, birth time, or size+mtime. An
+  empty handle is FileId NOT RUN. The snapshot fails if the Runtime
   already wrote under the watch or `/tmp/elastos`. The run-window watch
-  includes `$TMPDIR`, XDG dirs, and Mac Library dirs. Writes use
-  `O_NOFOLLOW` / `openat`. Symlink roots are resolved; a symlink loop is
-  refused. `ThrowawayHome::new` + `census::cleanup` are invoked; Linux is
-  NOT RUN.
+  includes `/tmp`, `/var/tmp`, `/dev/shm`, `$TMPDIR`, XDG dirs, and Mac
+  Library dirs, plus inotify for create-then-delete. Writes re-check
+  then `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`. Symlink roots
+  are resolved; a symlink loop is refused. `ThrowawayHome::new` +
+  `census::cleanup` are invoked; Linux is NOT RUN.
 
 ## Linux vs resident instances
 
@@ -107,12 +115,12 @@ does not edit the r3 runner.
 | A6 prefix / empty / case / zwsp | **PASS** | exact capsule id |
 | A6 other resource/action sibling | **PASS** | WrongCapsule first |
 | A6 expired / revoked / tampered | **PASS** | Runtime refusals named in the pack |
-| A6 resident two instances | **BLOCKED (RA-6)** | empty stub Ok is FAIL; this pid + pid 1 is FAIL; never PASS from a stub |
-| A12 created-set census | **PASS** | `moved-away`, no-marker, same-bytes inode reuse, 65 KiB rewrite found |
+| A6 resident two instances | **BLOCKED (RA-6)** | empty stub Ok is FAIL; this pid + pid 1 is FAIL; two sleep pids are BLOCKED; never PASS from a stub |
+| A12 created-set census | **PASS** | `moved-away`, no-marker, same-bytes inode reuse, last-byte 65 KiB rewrite, sparse hole vs zeros found |
 | A12 slash / unset / HOME / `..` / live-Home symlink / `/var/tmp` | **PASS** | refused after realpath |
 | A12 snapshot after Runtime wrote | **PASS** | watch leftover and live `/tmp/elastos` fail the snapshot |
-| A12 TOCTOU symlink swap after check | **PASS** | write refused; nothing landed outside |
-| A12 run-window TMPDIR / XDG / Library | **PASS** | new entries found |
+| A12 TOCTOU symlink / parent swap after check | **PASS** | write refused; nothing landed outside |
+| A12 run-window TMPDIR / XDG / Library /var/tmp /dev/shm | **PASS** | new entries and create-then-delete found |
 | A12 symlink loop | **PASS** | fail closed |
 | A12 in-root `census::cleanup` | **NOT RUN** | `ThrowawayHome::new` refused on Linux |
 | Existing A6/A12 gap pins | **PASS** | owner files still have the #294 holes |
@@ -144,8 +152,17 @@ does not edit the r3 runner.
 | M-A12-INODE-REUSE | identity is only (dev,ino)+path | `tests::a12_inode_reuse_same_path_is_found` |
 | M-A12-NO-HANDLE | FileId file handle is empty | `tests::a12_same_bytes_inode_reuse_is_found` |
 | M-A12-HASH-MTIME | large files hash size+mtime | `tests::a12_large_file_inplace_rewrite_mtime_restored_is_found` |
-| M-A12-TOCTOU-FOLLOW | write follows a symlink after the check | `tests::a12_tmp_root_symlink_swap_after_check_cannot_write_outside` |
+| M-A12-TOCTOU-FOLLOW | write follows a symlink after the check | `tests::a12_tmp_root_symlink_swap_after_check_cannot_write_outside`, `tests::a12_parent_dir_swap_after_check_cannot_write_outside` |
 | M-A12-SIBLING-WATCH | extra watch roots are empty | `tests::a12_run_window_watches_tmpdir_xdg_library` |
+| M-A12-NO-SYSTEM-TEMPS | drop `/var/tmp` and `/dev/shm` from writable temps | `tests::a12_run_window_watches_var_tmp_and_dev_shm` |
+| M-A12-NO-LIVE-WATCH | ignore inotify create-then-delete | `tests::a12_create_then_delete_between_snapshots_is_found` |
+| M-A12-HASH-CAP-64K | hash only the first 64 KiB | `tests::a12_large_file_inplace_rewrite_mtime_restored_is_found` |
+| M-A12-SPARSE-READ | hash with `fs::read` (holes as zeros) | `tests::a12_sparse_hole_hash_differs_from_written_zeros` |
+| M-A12-NO-RECHECK | drop write-time `check_tmp_root` | `tests::a12_write_isolated_leftover_rechecks_tmp_root` |
+| M-A12-HANDLE-EMPTY-OK | accept an empty file handle | `tests::a12_empty_file_handle_is_not_run` |
+| M-A6-CLAIMED-NO-RA6 | claimed pair skips RA-6 host proof | `tests::a6_two_other_live_pids_are_blocked` |
+| M-A6-PROVE-ALWAYS-OK | `prove` returns `Ok` | `tests::a6_this_process_and_pid1_cannot_pass`, `tests::a6_sleep_child_is_not_proven_resident` |
+| M-A6-INSPECT-ALWAYS-SOME | inspect returns `Some(())` | `tests::a6_sleep_child_is_not_proven_resident` |
 
 ## Plants table (r3)
 
@@ -176,6 +193,15 @@ does not edit the r3 runner.
 | M-A12-HASH-MTIME | **CAUGHT** |
 | M-A12-TOCTOU-FOLLOW | **CAUGHT** |
 | M-A12-SIBLING-WATCH | **CAUGHT** |
+| M-A12-NO-SYSTEM-TEMPS | **CAUGHT** |
+| M-A12-NO-LIVE-WATCH | **CAUGHT** |
+| M-A12-HASH-CAP-64K | **CAUGHT** |
+| M-A12-SPARSE-READ | **CAUGHT** |
+| M-A12-NO-RECHECK | **CAUGHT** |
+| M-A12-HANDLE-EMPTY-OK | **CAUGHT** |
+| M-A6-CLAIMED-NO-RA6 | **CAUGHT** |
+| M-A6-PROVE-ALWAYS-OK | **CAUGHT** (self+pid1 + sleep prove) |
+| M-A6-INSPECT-ALWAYS-SOME | **CAUGHT** |
 
 ## Still BLOCKED
 
@@ -194,13 +220,14 @@ A6 and A12 stay in-flight for Anders's resident-instance rule.
 These remain uncovered on this host. They are not claimed as PASS.
 
 - `ThrowawayHome` + `census::cleanup` (NOT RUN; needs macOS)
-- leftovers under `/var/tmp` or `/dev/shm`
-- a file that existed only between the two snapshots (write then delete)
 - a detached child write after the first census returns
 - a bind mount into the watch (this host refuses `mount --bind`)
 - a hardlink copied out of the watch, then the watch copy deleted
 - `$HOME/.cache` while `XDG_CACHE_HOME` is set (`extra_watch_roots`
   uses the XDG var)
+- pid reuse after a proven inspect (INCONCLUSIVE: user+pid namespace
+  cannot write `pid_max` or `ns_last_pid` here; 400 spawns did not
+  recycle)
 
 ## NOT RUN (macOS / resident instances)
 

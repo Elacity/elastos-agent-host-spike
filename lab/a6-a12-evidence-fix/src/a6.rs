@@ -9,9 +9,10 @@
 //! host produced: two independent resident capsule instances inside one
 //! Runtime, each positively proven (not merely a live `/proc` pid), each
 //! holding its own grant, sibling refused by the Runtime. Two live pids
-//! such as this process and pid 1 are FAIL. An `Ok` from a stub with an
-//! empty [`ResidentPair`] is FAIL. Without RA-6 the honest result is
-//! BLOCKED, never PASS.
+//! such as this process and pid 1 are FAIL. Two other live pids (sleep
+//! children) without RA-6 host proof are BLOCKED, even if `prove` or
+//! `inspect` is stubbed. An `Ok` from a stub with an empty [`ResidentPair`]
+//! is FAIL. Without RA-6 the honest result is BLOCKED, never PASS.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -401,10 +402,35 @@ fn evidence_is_live_runtime_pair(ev: &RuntimeResidentEvidence) -> Result<(), Str
     Ok(())
 }
 
-/// Evaluate claimed Runtime evidence. This process plus pid 1 is FAIL.
+fn claimed_never_resident_pids(ev: &RuntimeResidentEvidence) -> bool {
+    let this_pid = std::process::id();
+    ev.instance_1_pid == 1
+        || ev.instance_2_pid == 1
+        || ev.instance_1_pid == this_pid
+        || ev.instance_2_pid == this_pid
+}
+
+/// Evaluate claimed Runtime evidence.
+///
+/// This process plus pid 1 is FAIL (those pids are never capsules).
+/// Any other claimed pair requires RA-6 runtime proof
+/// (`try_host_two_resident_instances`) and otherwise reports BLOCKED.
+/// Stubbing `prove` or `inspect` cannot mint PASS from two sleep pids.
 pub fn status_for_claimed_resident_pair(evidence: RuntimeResidentEvidence) -> JourneyStatus {
-    let session = Session::mint_instance1();
-    finish_claimed_evidence(&session, evidence)
+    if claimed_never_resident_pids(&evidence) {
+        let session = Session::mint_instance1();
+        return finish_claimed_evidence(&session, evidence);
+    }
+    match try_host_two_resident_instances() {
+        Err(reason) => JourneyStatus::Blocked {
+            ask: RA_6,
+            reason: format!("claimed resident pair requires RA-6 runtime proof: {reason}"),
+        },
+        Ok(_pair) => {
+            let session = Session::mint_instance1();
+            finish_claimed_evidence(&session, evidence)
+        }
+    }
 }
 
 fn finish_claimed_evidence(session: &Session, evidence: RuntimeResidentEvidence) -> JourneyStatus {

@@ -1,0 +1,8 @@
+id: M-A12-NO-SYSTEM-TEMPS
+file: src/a12.rs
+test: tests::a12_run_window_watches_var_tmp_and_dev_shm
+--- old
+    for extra in ["/tmp", "/var/tmp", "/dev/shm"] {
+--- new
+    for extra in ["/tmp"] {
+--- end

@@ -162,6 +162,69 @@ mod tests {
     }
 
     #[test]
+    fn a6_two_other_live_pids_are_blocked() {
+        let mut first = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep 1");
+        let mut second = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep 2");
+        let evidence = a6::RuntimeResidentEvidence {
+            instance_1_id: a6::INSTANCE_1.into(),
+            instance_1_pid: first.id(),
+            instance_1_grant: "grant-1".into(),
+            instance_2_id: a6::INSTANCE_2.into(),
+            instance_2_pid: second.id(),
+            instance_2_grant: "grant-2".into(),
+        };
+        let status = a6::status_for_claimed_resident_pair(evidence);
+        let _ = first.kill();
+        let _ = second.kill();
+        let _ = first.wait();
+        let _ = second.wait();
+        match status {
+            a6::JourneyStatus::Blocked { ask, reason } => {
+                assert_eq!(ask, a6::RA_6, "{reason}");
+                assert!(
+                    reason.contains("RA-6") || reason.contains("resident"),
+                    "{reason}"
+                );
+                println!("two sleep pids BLOCKED ({ask}): {reason}");
+            }
+            a6::JourneyStatus::Pass(line) => {
+                panic!("two sleep pids must be BLOCKED, not PASS: {line}")
+            }
+            a6::JourneyStatus::Fail(reason) => {
+                panic!("two sleep pids must be BLOCKED, not FAIL: {reason}")
+            }
+        }
+    }
+
+    #[test]
+    fn a6_sleep_child_is_not_proven_resident() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep child");
+        let pid = child.id();
+        let result = a6::prove_resident_capsule_instance(pid, a6::INSTANCE_1);
+        let _ = child.kill();
+        let _ = child.wait();
+        match result {
+            Err(reason) => {
+                assert!(
+                    reason.contains("not positively proven") || reason.contains("not a resident"),
+                    "{reason}"
+                );
+                println!("sleep pid {pid} is not a resident: {reason}");
+            }
+            Ok(()) => panic!("sleep pid {pid} must not be proven a resident capsule"),
+        }
+    }
+
+    #[test]
     fn a6_does_not_claim_resident_instances() {
         let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/a6.rs"));
         let findings = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/FINDINGS.md"));
@@ -636,7 +699,8 @@ mod tests {
             .arg(&stamp)
             .status();
         let mut second = vec![b'B'; 65 * 1024];
-        second[0] = b'Z';
+        let last = second.len() - 1;
+        second[last] = b'Z';
         fs::write(&path, &second).unwrap();
         let _ = std::process::Command::new("touch")
             .arg("-r")
@@ -665,9 +729,38 @@ mod tests {
             "65 KiB in-place rewrite with mtime restored must be found: {leftovers:?}"
         );
         println!(
-            "A12 large-file in-place rewrite leftover found at {}",
+            "A12 large-file last-byte rewrite leftover found at {}",
             path.display()
         );
+    }
+
+    #[test]
+    fn a12_sparse_hole_hash_differs_from_written_zeros() {
+        let parent = a12::isolated_dir("sparse-hash");
+        let hole_path = parent.join("hole.bin");
+        let zero_path = parent.join("zero.bin");
+        {
+            let file = fs::File::create(&hole_path).unwrap();
+            file.set_len(1024 * 1024).unwrap();
+        }
+        fs::write(&zero_path, vec![0u8; 1024 * 1024]).unwrap();
+        let snap = a12::snapshot(&parent).expect("sparse snapshot");
+        let hole_hash = snap
+            .ids
+            .get(&hole_path)
+            .map(|id| id.content_hash)
+            .expect("hole FileId");
+        let zero_hash = snap
+            .ids
+            .get(&zero_path)
+            .map(|id| id.content_hash)
+            .expect("zero FileId");
+        a12::remove_isolated(&parent);
+        assert_ne!(
+            hole_hash, zero_hash,
+            "SEEK_HOLE map must distinguish a 1 MiB hole from written zeros"
+        );
+        println!("A12 sparse hole hash {hole_hash:#x} != written-zero hash {zero_hash:#x}");
     }
 
     #[test]
@@ -748,6 +841,142 @@ mod tests {
             Some(value) => std::env::set_var(key, value),
             None => std::env::remove_var(key),
         }
+    }
+
+    #[test]
+    fn a12_run_window_watches_var_tmp_and_dev_shm() {
+        let _lock = a12::lock_real_root();
+        let roots = a12::writable_temp_roots();
+        assert!(
+            roots.iter().any(|root| root == Path::new("/var/tmp")),
+            "writable temp roots must include /var/tmp: {roots:?}"
+        );
+        assert!(
+            roots.iter().any(|root| root == Path::new("/dev/shm")),
+            "writable temp roots must include /dev/shm: {roots:?}"
+        );
+        assert!(
+            roots.iter().any(|root| root == Path::new("/tmp")),
+            "writable temp roots must include /tmp: {roots:?}"
+        );
+        let pid = std::process::id();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let var_file = Path::new("/var/tmp").join(format!("a6-a12-r5-var-{pid}-{stamp}.txt"));
+        let shm_file = Path::new("/dev/shm").join(format!("a6-a12-r5-shm-{pid}-{stamp}.txt"));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+        let _c1 = Cleanup(var_file.clone());
+        let _c2 = Cleanup(shm_file.clone());
+        let before = a12::snapshot_run_window().expect("run-window snapshot");
+        fs::write(&var_file, b"var/tmp leftover\n").unwrap();
+        fs::write(&shm_file, b"dev/shm leftover\n").unwrap();
+        let leftovers = a12::leftovers_in_run_window(&before).expect("run-window leftovers");
+        assert!(
+            leftovers.iter().any(|path| path == &var_file),
+            "run window must see /var/tmp leftover: {leftovers:?}"
+        );
+        assert!(
+            leftovers.iter().any(|path| path == &shm_file),
+            "run window must see /dev/shm leftover: {leftovers:?}"
+        );
+        println!("A12 run-window watches found /var/tmp and /dev/shm leftovers");
+    }
+
+    #[test]
+    fn a12_create_then_delete_between_snapshots_is_found() {
+        let _lock = a12::lock_real_root();
+        let pid = std::process::id();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let transient =
+            Path::new("/var/tmp").join(format!("a6-a12-r5-transient-{pid}-{stamp}.txt"));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(transient.clone());
+        let before = a12::snapshot_run_window().expect("run-window snapshot");
+        fs::write(&transient, b"existed only between snapshots\n").unwrap();
+        fs::remove_file(&transient).unwrap();
+        let leftovers = a12::leftovers_in_run_window(&before).expect("run-window leftovers");
+        assert!(
+            leftovers.iter().any(|path| path == &transient),
+            "create-then-delete between snapshots must be found: {leftovers:?}"
+        );
+        println!(
+            "A12 create-then-delete leftover found at {}",
+            transient.display()
+        );
+    }
+
+    #[test]
+    fn a12_write_isolated_leftover_rechecks_tmp_root() {
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/a12.rs"));
+        let start = source
+            .find("pub fn write_isolated_leftover")
+            .expect("write_isolated_leftover");
+        let body = &source[start..];
+        let end = body[4..]
+            .find("\npub fn ")
+            .map(|i| i + 4)
+            .unwrap_or(body.len());
+        let body = &body[..end];
+        assert!(
+            body.contains("check_tmp_root(tmp_root)?"),
+            "write_isolated_leftover dropped the write-time parent re-check"
+        );
+        println!("A12 write_isolated_leftover still re-checks tmp_root before open");
+    }
+
+    #[test]
+    fn a12_parent_dir_swap_after_check_cannot_write_outside() {
+        let iso = a12::isolation_root();
+        let pid = std::process::id();
+        let parent = iso.join(format!("parent-swap-{pid}"));
+        let child = parent.join("child");
+        let _ = fs::remove_dir_all(&parent);
+        fs::create_dir_all(&child).unwrap();
+        a12::check_tmp_root(&child).expect("child under isolation");
+        let fake_live = std::env::temp_dir().join(format!("a12-parent-swap-live-{pid}"));
+        let _ = fs::remove_dir_all(&fake_live);
+        fs::create_dir_all(fake_live.join(".local/share/elastos")).unwrap();
+        fs::remove_dir_all(&parent).unwrap();
+        std::os::unix::fs::symlink(&fake_live, &parent).unwrap();
+        let write = a12::create_plain_leftover(&child, "escaped.txt", b"parent-swap\n");
+        let escaped = fake_live.join("storage").join("escaped.txt");
+        let wrote_outside = escaped.is_file();
+        let _ = fs::remove_file(&parent);
+        let _ = fs::remove_dir_all(&fake_live);
+        assert!(
+            !wrote_outside,
+            "parent swap after check_tmp_root must not write outside: write={write:?}"
+        );
+        assert!(
+            write.is_err(),
+            "write after parent swap must be refused: {write:?}"
+        );
+        println!("A12 parent-dir swap after check refused: {write:?}");
+    }
+
+    #[test]
+    fn a12_empty_file_handle_is_not_run() {
+        let err = a12::require_file_handle(Vec::new()).expect_err("empty handle");
+        assert!(
+            err.contains("NOT RUN"),
+            "empty file handle must fail closed as NOT RUN: {err}"
+        );
+        println!("A12 empty file handle is NOT RUN: {err}");
     }
 
     #[test]

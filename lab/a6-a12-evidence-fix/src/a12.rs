@@ -4,21 +4,30 @@
 //! file handle) set the run created. It does not depend on a name prefix, a lab marker,
 //! birth time, or size+mtime. Same-path delete+recreate with a reused
 //! inode and the same bytes is found. An in-place rewrite of a file
-//! larger than 64 KiB with mtime restored is found. Real Runtime leftovers
+//! larger than 64 KiB with mtime restored is found (the named test
+//! changes the last byte, so a 64 KiB hash cap is refused). The content
+//! hash covers the whole file and is sparse-aware: a SEEK_HOLE map is
+//! mixed into the digest so a hole is not the same as written zeros.
+//! `name_to_handle_at` must return a non-empty handle; an empty handle
+//! is FileId NOT RUN, not a weaker identity. Real Runtime leftovers
 //! have no lab marker; a rename to an unrelated name (`moved-away`) must
 //! still be found.
 //!
 //! The census snapshot is taken before the Runtime starts. If the Runtime
-//! already wrote, the snapshot fails. The run-window watch also covers
-//! `$TMPDIR`, XDG cache/data/state/runtime dirs, and
-//! `~/Library/Caches` / `~/Library/Application Support` (Mac).
+//! already wrote, the snapshot fails. The run-window watch snapshots
+//! isolation plus every writable temp root (`/tmp`, `/var/tmp`, `/dev/shm`,
+//! `$TMPDIR`), XDG cache/data/state/runtime dirs, and
+//! `~/Library/Caches` / `~/Library/Application Support` (Mac). An inotify
+//! watch on those roots records create-then-delete between the two
+//! snapshots.
 //!
 //! `ELASTOS_TMP_ROOT` is guarded: canonicalize (realpath) first. `/`, empty,
 //! `$HOME`, a `..` component, a symlink anywhere at or under isolation, a
 //! reachable live Home, and anything whose canonical path is not inside the
-//! pack's fresh mktemp isolation are refused. Writes reopen that path with
-//! `O_NOFOLLOW` / `openat` after the check, so swapping the folder for a
-//! symlink cannot land a leftover in a fake live Home.
+//! pack's fresh mktemp isolation are refused. Writes re-check the root,
+//! then open from the isolation dirfd with `openat2(RESOLVE_BENEATH |
+//! RESOLVE_NO_SYMLINKS)`, so a parent or leaf symlink swap cannot land a
+//! leftover outside isolation.
 //! `ThrowawayHome` / `census::cleanup` are called for real; on Linux that
 //! construction is NOT RUN.
 
@@ -28,8 +37,9 @@ use std::ffi::CString;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{ErrorKind, Write};
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,6 +55,7 @@ use std::os::unix::fs::MetadataExt;
 static ISOLATED: AtomicU64 = AtomicU64::new(0);
 static REAL_ROOT: Mutex<()> = Mutex::new(());
 static ISOLATION: OnceLock<PathBuf> = OnceLock::new();
+static LIVE_WATCH: Mutex<Option<LiveWatch>> = Mutex::new(None);
 
 /// Bytes a lab plant may write. Census does not require this marker.
 pub const LEFTOVER_MARKER: &[u8] = b"a6-a12-evidence-fix leftover-marker\n";
@@ -64,9 +75,12 @@ pub fn live_runtime_tmp_root() -> PathBuf {
 /// Identity of one path at one moment.
 ///
 /// Time is inode ctime (nsec), not birth time. Large files hash full
-/// content, not size+mtime. `file_handle` is the `name_to_handle_at`
-/// cookie (inode generation). On this ext4 host, unlink+recreate can
-/// reuse inode+dev+ctime with the same bytes; the handle still moves.
+/// content with no 64 KiB cap, not size+mtime. The digest includes a
+/// SEEK_HOLE map so a hole is not the same as written zeros.
+/// `file_handle` is the `name_to_handle_at` cookie (inode generation).
+/// An empty handle is FileId NOT RUN, not a weaker identity. On this
+/// ext4 host, unlink+recreate can reuse inode+dev+ctime with the same
+/// bytes; the handle still moves.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileId {
     pub dev: u64,
@@ -314,7 +328,8 @@ pub fn create_runtime_storage_leftover(tmp_root: &Path) -> Result<PathBuf, Strin
 }
 
 /// Leftover with caller bytes. Census must find this with no lab marker.
-/// Re-checks the root and writes through `O_NOFOLLOW` / `openat`.
+/// Re-checks the root, then writes through isolation-relative
+/// `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`.
 pub fn create_plain_leftover(tmp_root: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
     write_isolated_leftover(tmp_root, "storage", name, bytes)
 }
@@ -352,6 +367,7 @@ fn open_or_create_dir_nofollow(path: &Path) -> Result<fs::File, String> {
     }
 }
 
+#[allow(dead_code)]
 fn mkdirat_open(parent: &fs::File, name: &str) -> Result<fs::File, String> {
     if refused_name(name) {
         return Err(format!("refused directory name {name:?}"));
@@ -385,26 +401,97 @@ fn writeat(dir: &fs::File, name: &str, bytes: &[u8]) -> Result<(), String> {
         return Err(format!("refused file name {name:?}"));
     }
     let c_name = CString::new(name).map_err(|_| format!("refused file name {name:?}"))?;
-    let fd = unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            c_name.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o644,
-        )
-    };
-    if fd < 0 {
-        return Err(format!(
-            "ELASTOS_TMP_ROOT write refuses {name}: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
+    let fd = openat2_beneath(
+        dir.as_raw_fd(),
+        &c_name,
+        libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC,
+        0o644,
+    )?;
     let mut file = unsafe { fs::File::from_raw_fd(fd) };
     file.write_all(bytes)
         .map_err(|error| format!("could not write {name}: {error}"))
 }
 
-/// Re-check the root, then write through an fd opened with `O_NOFOLLOW`.
+#[repr(C)]
+struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+const RESOLVE_BENEATH: u64 = 0x08;
+const SYS_OPENAT2: libc::c_long = 437;
+
+fn openat2_beneath(dirfd: i32, name: &CString, flags: i32, mode: u32) -> Result<i32, String> {
+    let how = OpenHow {
+        flags: flags as u64,
+        mode: u64::from(mode),
+        resolve: RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS,
+    };
+    let fd = unsafe {
+        libc::syscall(
+            SYS_OPENAT2,
+            dirfd,
+            name.as_ptr(),
+            &how as *const OpenHow,
+            std::mem::size_of::<OpenHow>(),
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "ELASTOS_TMP_ROOT write refuses {}: {}",
+            String::from_utf8_lossy(name.as_bytes()),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(fd as i32)
+}
+
+fn mkdirat_openat2(parent: &fs::File, name: &str) -> Result<fs::File, String> {
+    if refused_name(name) {
+        return Err(format!("refused directory name {name:?}"));
+    }
+    let c_name = CString::new(name).map_err(|_| format!("refused directory name {name:?}"))?;
+    let created = unsafe { libc::mkdirat(parent.as_raw_fd(), c_name.as_ptr(), 0o755) };
+    if created != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() != ErrorKind::AlreadyExists {
+            return Err(format!("could not mkdirat {name}: {err}"));
+        }
+    }
+    let fd = openat2_beneath(
+        parent.as_raw_fd(),
+        &c_name,
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        0,
+    )?;
+    Ok(unsafe { fs::File::from_raw_fd(fd) })
+}
+
+fn open_rel_beneath(isolation: &fs::File, rel: &Path) -> Result<fs::File, String> {
+    let mut fd = isolation
+        .try_clone()
+        .map_err(|error| format!("could not clone isolation fd: {error}"))?;
+    for part in rel.components() {
+        let name = match part {
+            Component::Normal(name) => name,
+            Component::CurDir => continue,
+            _ => {
+                return Err(format!(
+                    "ELASTOS_TMP_ROOT write refuses relative component {part:?}"
+                ));
+            }
+        };
+        let name = name
+            .to_str()
+            .ok_or_else(|| format!("ELASTOS_TMP_ROOT write refuses non-utf8 {name:?}"))?;
+        fd = mkdirat_openat2(&fd, name)?;
+    }
+    Ok(fd)
+}
+
+/// Re-check the root, then write through isolation-relative `openat2`.
 pub fn write_isolated_leftover(
     tmp_root: &Path,
     dir_name: &str,
@@ -412,8 +499,17 @@ pub fn write_isolated_leftover(
     bytes: &[u8],
 ) -> Result<PathBuf, String> {
     check_tmp_root(tmp_root)?;
-    let root_fd = open_or_create_dir_nofollow(tmp_root)?;
-    let dir_fd = mkdirat_open(&root_fd, dir_name)?;
+    let isolation = isolation_root();
+    let iso_fd = open_or_create_dir_nofollow(&isolation)?;
+    let rel = tmp_root.strip_prefix(&isolation).map_err(|_| {
+        format!(
+            "ELASTOS_TMP_ROOT write refuses {}: not under isolation {}",
+            tmp_root.display(),
+            isolation.display()
+        )
+    })?;
+    let root_fd = open_rel_beneath(&iso_fd, rel)?;
+    let dir_fd = mkdirat_openat2(&root_fd, dir_name)?;
     writeat(&dir_fd, name, bytes)?;
     Ok(tmp_root.join(dir_name).join(name))
 }
@@ -458,11 +554,64 @@ fn content_hash(path: &Path, meta: &fs::Metadata) -> u64 {
         return 0;
     }
     let mut hasher = DefaultHasher::new();
-    match fs::read(path) {
-        Ok(bytes) => bytes.hash(&mut hasher),
-        Err(_) => return 0,
-    }
+    hash_whole_file_sparse(path, meta, &mut hasher);
     hasher.finish()
+}
+
+/// Whole-file digest. No 64 KiB cap. A SEEK_HOLE / SEEK_DATA map is
+/// mixed in so a hole is not the same as written zeros.
+fn hash_whole_file_sparse(path: &Path, meta: &fs::Metadata, hasher: &mut DefaultHasher) {
+    let Ok(file) = fs::File::open(path) else {
+        return;
+    };
+    let fd = file.as_raw_fd();
+    let size = file_len(meta) as i64;
+    size.hash(hasher);
+    let mut pos: i64 = 0;
+    while pos < size {
+        let data = unsafe { libc::lseek(fd, pos, libc::SEEK_DATA) };
+        if data < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENXIO) {
+                b"HOLE".hash(hasher);
+                (size - pos).hash(hasher);
+            }
+            break;
+        }
+        if data > pos {
+            b"HOLE".hash(hasher);
+            (data - pos).hash(hasher);
+        }
+        if data >= size {
+            break;
+        }
+        let hole = unsafe { libc::lseek(fd, data, libc::SEEK_HOLE) };
+        if hole < 0 {
+            break;
+        }
+        let end = hole.min(size);
+        b"DATA".hash(hasher);
+        (end - data).hash(hasher);
+        hash_extent_bytes(fd, data, end, hasher);
+        if end <= pos {
+            break;
+        }
+        pos = end;
+    }
+}
+
+fn hash_extent_bytes(fd: i32, start: i64, end: i64, hasher: &mut DefaultHasher) {
+    let mut buf = [0u8; 8192];
+    let mut off = start;
+    while off < end {
+        let want = ((end - off) as usize).min(buf.len());
+        let n = unsafe { libc::pread(fd, buf.as_mut_ptr().cast(), want, off) };
+        if n <= 0 {
+            break;
+        }
+        hasher.write(&buf[..n as usize]);
+        off += n as i64;
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -473,13 +622,15 @@ struct RawFileHandle {
     f_handle: [u8; 128],
 }
 
-fn file_handle_bytes(path: &Path) -> Vec<u8> {
+fn file_handle_bytes(path: &Path) -> Result<Vec<u8>, String> {
     #[cfg(target_os = "linux")]
     {
-        use std::os::unix::ffi::OsStrExt;
-        let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
-            return Vec::new();
-        };
+        let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            format!(
+                "name_to_handle_at refused non-c path {}; FileId NOT RUN",
+                path.display()
+            )
+        })?;
         let mut raw = RawFileHandle {
             handle_bytes: 128,
             handle_type: 0,
@@ -496,36 +647,59 @@ fn file_handle_bytes(path: &Path) -> Vec<u8> {
             )
         };
         if rc != 0 {
-            return Vec::new();
+            return Err(format!(
+                "name_to_handle_at failed at {}: {}; FileId NOT RUN",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
         }
         let n = raw.handle_bytes as usize;
+        if n == 0 {
+            return Err(format!(
+                "name_to_handle_at empty handle at {}; FileId NOT RUN",
+                path.display()
+            ));
+        }
         if n > raw.f_handle.len() {
-            return Vec::new();
+            return Err(format!(
+                "name_to_handle_at handle too large at {}; FileId NOT RUN",
+                path.display()
+            ));
         }
         let mut out = Vec::with_capacity(8 + n);
         out.extend_from_slice(&mount_id.to_ne_bytes());
         out.extend_from_slice(&raw.handle_type.to_ne_bytes());
         out.extend_from_slice(&raw.f_handle[..n]);
-        out
+        require_file_handle(out)
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = path;
-        Vec::new()
+        Err("name_to_handle_at NOT RUN on this OS".into())
     }
 }
 
-fn file_id(path: &Path, meta: &fs::Metadata) -> FileId {
+/// Empty `name_to_handle_at` bytes are FileId NOT RUN, not identity.
+pub fn require_file_handle(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    if bytes.is_empty() {
+        Err("name_to_handle_at empty handle; FileId NOT RUN".into())
+    } else {
+        Ok(bytes)
+    }
+}
+
+fn file_id(path: &Path, meta: &fs::Metadata) -> Result<FileId, String> {
     let (dev, ino) = inode_of(meta);
     let size = file_len(meta);
-    FileId {
+    let handle = file_handle_bytes(path)?;
+    Ok(FileId {
         dev,
         ino,
         ctime: inode_ctime(meta),
         size,
         content_hash: content_hash(path, meta),
-        file_handle: file_handle_bytes(path),
-    }
+        file_handle: handle,
+    })
 }
 
 fn has_any_files(root: &Path) -> bool {
@@ -583,6 +757,167 @@ pub fn extra_watch_roots() -> Vec<PathBuf> {
     roots
 }
 
+/// Writable temp roots a leftover census must snapshot: isolation extras
+/// plus `/tmp`, `/var/tmp`, `/dev/shm`, and `$TMPDIR`.
+pub fn writable_temp_roots() -> Vec<PathBuf> {
+    let mut roots = extra_watch_roots();
+    for extra in ["/tmp", "/var/tmp", "/dev/shm"] {
+        let path = PathBuf::from(extra);
+        if path.is_dir() && !roots.iter().any(|root| root == &path) {
+            roots.push(path);
+        }
+    }
+    if let Ok(tmpdir) = std::env::var("TMPDIR") {
+        if !tmpdir.is_empty() {
+            let path = PathBuf::from(tmpdir);
+            if path.is_absolute() && !roots.iter().any(|root| root == &path) {
+                roots.push(path);
+            }
+        }
+    }
+    roots
+}
+
+struct LiveWatch {
+    fd: fs::File,
+    wds: BTreeMap<i32, PathBuf>,
+}
+
+impl LiveWatch {
+    fn open() -> Result<Self, String> {
+        let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
+        if fd < 0 {
+            return Err(format!(
+                "inotify_init1 failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let fd = unsafe { fs::File::from_raw_fd(fd) };
+        let mut watch = Self {
+            fd,
+            wds: BTreeMap::new(),
+        };
+        watch.add(&isolation_root())?;
+        add_dir_watches_recursive(&mut watch, &isolation_root(), 0)?;
+        for root in writable_temp_roots() {
+            if root.exists() {
+                let _ = watch.add(&root);
+            }
+        }
+        Ok(watch)
+    }
+
+    fn add(&mut self, path: &Path) -> Result<i32, String> {
+        let c_path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| format!("inotify refused path {}", path.display()))?;
+        let wd = unsafe {
+            libc::inotify_add_watch(
+                self.fd.as_raw_fd(),
+                c_path.as_ptr(),
+                libc::IN_CREATE
+                    | libc::IN_DELETE
+                    | libc::IN_MOVED_FROM
+                    | libc::IN_MOVED_TO
+                    | libc::IN_DELETE_SELF
+                    | libc::IN_MOVE_SELF,
+            )
+        };
+        if wd < 0 {
+            return Err(format!(
+                "inotify_add_watch {} failed: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        self.wds.insert(wd, path.to_path_buf());
+        Ok(wd)
+    }
+
+    fn drain(&mut self) -> Result<Vec<PathBuf>, String> {
+        let mut seen = BTreeSet::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = unsafe { libc::read(self.fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+            if n < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == ErrorKind::WouldBlock {
+                    break;
+                }
+                return Err(format!("inotify read failed: {err}"));
+            }
+            if n == 0 {
+                break;
+            }
+            let n = n as usize;
+            let mut offset = 0usize;
+            let header = std::mem::size_of::<libc::inotify_event>();
+            while offset + header <= n {
+                let ev = unsafe { &*(buf.as_ptr().add(offset).cast::<libc::inotify_event>()) };
+                if ev.mask & libc::IN_Q_OVERFLOW != 0 {
+                    return Err("inotify queue overflow; leftover watch fail closed".into());
+                }
+                let name = if ev.len > 0 {
+                    let start = offset + header;
+                    let end = start + ev.len as usize;
+                    if end > n {
+                        break;
+                    }
+                    let raw = &buf[start..end];
+                    let nul = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+                    Some(String::from_utf8_lossy(&raw[..nul]).into_owned())
+                } else {
+                    None
+                };
+                if let Some(dir) = self.wds.get(&ev.wd) {
+                    let path = match &name {
+                        Some(name) if !name.is_empty() => dir.join(name),
+                        _ => dir.clone(),
+                    };
+                    seen.insert(path);
+                }
+                offset += header + ev.len as usize;
+            }
+        }
+        Ok(seen.into_iter().collect())
+    }
+}
+
+fn add_dir_watches_recursive(watch: &mut LiveWatch, root: &Path, depth: u32) -> Result<(), String> {
+    if depth > 32 {
+        return Ok(());
+    }
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir()
+            && !path
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            let _ = watch.add(&path);
+            add_dir_watches_recursive(watch, &path, depth + 1)?;
+        }
+    }
+    Ok(())
+}
+
+fn start_live_watch() -> Result<(), String> {
+    let watch = LiveWatch::open()?;
+    *LIVE_WATCH.lock().expect("watch lock") = Some(watch);
+    Ok(())
+}
+
+fn drain_live_watch() -> Result<Vec<PathBuf>, String> {
+    let mut guard = LIVE_WATCH.lock().expect("watch lock");
+    match guard.as_mut() {
+        Some(watch) => watch.drain(),
+        None => Err("run-window live watch was not started".into()),
+    }
+}
+
 /// Snapshot every path and identity under `watch` (missing watch is empty).
 pub fn snapshot(watch: &Path) -> Result<FsSnapshot, String> {
     let mut snap = FsSnapshot::default();
@@ -603,7 +938,7 @@ pub fn snapshot_before_runtime(watch: &Path) -> Result<FsSnapshot, String> {
 pub fn snapshot_run_window_unchecked() -> Result<FsSnapshot, String> {
     let mut snap = FsSnapshot::default();
     record_tree(&isolation_root(), &mut snap, true, 0)?;
-    for root in extra_watch_roots() {
+    for root in writable_temp_roots() {
         if root.exists() {
             record_tree(&root, &mut snap, true, 0)?;
         }
@@ -625,6 +960,7 @@ pub fn snapshot_run_window() -> Result<FsSnapshot, String> {
             );
         }
     }
+    start_live_watch()?;
     snapshot_run_window_unchecked()
 }
 
@@ -644,7 +980,7 @@ fn record_tree(
     };
     snap.paths.insert(root.to_path_buf());
     snap.inodes.insert(inode_of(&meta));
-    snap.ids.insert(root.to_path_buf(), file_id(root, &meta));
+    snap.ids.insert(root.to_path_buf(), file_id(root, &meta)?);
     if meta.file_type().is_symlink() {
         if follow_root_symlink {
             let target = fs::canonicalize(root)
@@ -689,7 +1025,7 @@ fn collect_created(before: &FsSnapshot, after: &FsSnapshot) -> Result<Vec<PathBu
             Err(_) => return Err(format!("could not inspect {}", path.display())),
             Ok(meta) => meta,
         };
-        let id = file_id(path, &meta);
+        let id = file_id(path, &meta)?;
         if keep_created_path(before, path, &id) && allow_moved_away(path) {
             found.insert(path.to_path_buf());
         }
@@ -704,9 +1040,17 @@ pub fn leftovers_created(before: &FsSnapshot, watch: &Path) -> Result<Vec<PathBu
 }
 
 /// Leftovers created in the run window across isolation and extra watch roots.
+/// Includes files that existed only between the two snapshots (inotify).
 pub fn leftovers_in_run_window(before: &FsSnapshot) -> Result<Vec<PathBuf>, String> {
     let after = snapshot_run_window_unchecked()?;
-    collect_created(before, &after)
+    let mut found = collect_created(before, &after)?;
+    for path in drain_live_watch()? {
+        if !found.iter().any(|seen| seen == &path) {
+            found.push(path);
+        }
+    }
+    found.sort();
+    Ok(found)
 }
 
 pub fn leftovers_under(roots: &[PathBuf]) -> Result<Vec<PathBuf>, String> {

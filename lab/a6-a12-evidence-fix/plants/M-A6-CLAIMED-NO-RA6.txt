@@ -1,0 +1,18 @@
+id: M-A6-CLAIMED-NO-RA6
+file: src/a6.rs
+test: tests::a6_two_other_live_pids_are_blocked
+--- old
+    match try_host_two_resident_instances() {
+        Err(reason) => JourneyStatus::Blocked {
+            ask: RA_6,
+            reason: format!("claimed resident pair requires RA-6 runtime proof: {reason}"),
+        },
+        Ok(_pair) => {
+            let session = Session::mint_instance1();
+            finish_claimed_evidence(&session, evidence)
+        }
+    }
+--- new
+    let session = Session::mint_instance1();
+    finish_claimed_evidence(&session, evidence)
+--- end
