@@ -39,6 +39,7 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use wasm_capsule_audit::Refusal as AuditRefusal;
 use wasm_capsule_tools::bundle::{
     write_new_file, Reason as WriteReason, RunRefusal as WriteRefusal,
@@ -46,8 +47,8 @@ use wasm_capsule_tools::bundle::{
 use wasm_capsule_tools::receipt::{render, write_receipt, RECEIPT_SCHEMA};
 use wasm_capsule_tools::run::{
     module_refusal, run, run_engine, work_root_folder, Engine, EngineRun, Reason, Refusal,
-    RunInput, TwoEngineRefusal, TwoEngineRun, DIGEST_ARGUMENT, DIGEST_EXPORT, WASMER_VERSION,
-    WASMTIME_VERSION,
+    RunControl, RunInput, TwoEngineRefusal, TwoEngineRun, DIGEST_ARGUMENT, DIGEST_EXPORT,
+    WASMER_VERSION, WASMTIME_VERSION,
 };
 use wasm_capsule_tools::verify::{read_grants, verify_bundle, VerifiedBundle, VerifyRefusal};
 use wasm_capsule_tools::{bundle_identity, CAPSULE_MANIFEST};
@@ -60,6 +61,14 @@ const CHANGED_MODULE: &[u8] = b"\0asm\x01\0\0\0\0\x01\x00";
 
 /// Both engines, in a fixed order.
 const ENGINES: [Engine; 2] = [Engine::Wasmtime, Engine::Wasmer];
+
+/// Task 043: the run budget of every test run that is not about the budget:
+/// far above any run here, so it never decides a result.
+const TEST_BUDGET: Duration = Duration::from_secs(30);
+
+/// The one run control those runs pass: `TEST_BUDGET`, explicit at each call
+/// (the runner has no default).
+static TEST_CONTROL: RunControl = RunControl::new(TEST_BUDGET);
 
 /// The shell line that sets `module` to a stand-in's second-to-last
 /// argument: the module path, which comes just before the fixed argument
@@ -240,7 +249,13 @@ fn run_writes_only_the_verified_entrypoint_bytes() {
     assert_eq!(value.entrypoint().content, MODULE);
     fs::write(bundle.join("capsule.wasm"), CHANGED_MODULE).expect("change capsule.wasm");
 
-    let stdout = ran(run_engine(&value, Engine::Wasmtime, &engine, &root));
+    let stdout = ran(run_engine(
+        &value,
+        Engine::Wasmtime,
+        &engine,
+        &root,
+        &TEST_CONTROL,
+    ));
     assert_eq!(
         stdout, MODULE,
         "the engine did not get the verified entrypoint bytes"
@@ -272,6 +287,7 @@ fn engine_path_must_be_absolute() {
             Engine::Wasmtime,
             Path::new(program),
             &root,
+            &TEST_CONTROL,
         ));
         assert!(
             matches!(refusal.reason, Reason::EngineNotAbsolute),
@@ -300,7 +316,13 @@ fn work_root_must_be_absolute_and_canonical() {
     std::os::unix::fs::symlink(&real, &link).expect("plant a folder link");
 
     for root in ["work", "--env=X", "./work"] {
-        let refusal = refused(run_engine(&value, Engine::Wasmer, &engine, Path::new(root)));
+        let refusal = refused(run_engine(
+            &value,
+            Engine::Wasmer,
+            &engine,
+            Path::new(root),
+            &TEST_CONTROL,
+        ));
         assert!(
             matches!(refusal.reason, Reason::WorkRootNotAbsolute),
             "{root}: {refusal}"
@@ -323,7 +345,13 @@ fn work_root_must_be_absolute_and_canonical() {
         ),
     ];
     for (root, kind) in not_canonical {
-        let refusal = refused(run_engine(&value, Engine::Wasmer, &engine, &root));
+        let refusal = refused(run_engine(
+            &value,
+            Engine::Wasmer,
+            &engine,
+            &root,
+            &TEST_CONTROL,
+        ));
         match &refusal.reason {
             Reason::WorkRootNotCanonical { canonical } => assert_eq!(canonical, &real, "{kind}"),
             _ => panic!("{kind}: {refusal}"),
@@ -357,7 +385,13 @@ fn run_directory_is_private_and_new() {
     // makes a new one, private too; each leaves the root empty.
     for run in ["first", "second"] {
         assert_eq!(
-            ran(run_engine(&value, Engine::Wasmtime, &cat, &root)),
+            ran(run_engine(
+                &value,
+                Engine::Wasmtime,
+                &cat,
+                &root,
+                &TEST_CONTROL
+            )),
             MODULE,
             "{run} run"
         );
@@ -378,7 +412,13 @@ fn run_directory_is_private_and_new() {
     let engine = marking(&engines, &marker);
     let planted = root.join("wasmer");
     fs::create_dir(&planted).expect("plant a folder");
-    let refusal = refused(run_engine(&value, Engine::Wasmer, &engine, &root));
+    let refusal = refused(run_engine(
+        &value,
+        Engine::Wasmer,
+        &engine,
+        &root,
+        &TEST_CONTROL,
+    ));
     assert!(matches!(refusal.reason, Reason::RunDirExists), "{refusal}");
     assert_eq!(
         refusal.to_string(),
@@ -402,7 +442,13 @@ fn runner_io_refusals_keep_path_and_cause() {
 
     // The work root cannot be resolved.
     let missing = base.join("missing");
-    let refusal = refused(run_engine(&value, Engine::Wasmtime, &engine, &missing));
+    let refusal = refused(run_engine(
+        &value,
+        Engine::Wasmtime,
+        &engine,
+        &missing,
+        &TEST_CONTROL,
+    ));
     match &refusal.reason {
         Reason::WorkRootUnresolved(error) => assert_eq!(error.kind(), io::ErrorKind::NotFound),
         _ => panic!("{refusal}"),
@@ -419,7 +465,13 @@ fn runner_io_refusals_keep_path_and_cause() {
     // The work root is a file.
     let file = base.join("file");
     fs::write(&file, b"not a folder").expect("write a file");
-    let refusal = refused(run_engine(&value, Engine::Wasmtime, &engine, &file));
+    let refusal = refused(run_engine(
+        &value,
+        Engine::Wasmtime,
+        &engine,
+        &file,
+        &TEST_CONTROL,
+    ));
     assert!(
         matches!(refusal.reason, Reason::WorkRootNotAFolder),
         "{refusal}"
@@ -466,7 +518,7 @@ fn runner_io_refusals_keep_path_and_cause() {
     let locked = base.join("locked");
     fs::create_dir(&locked).expect("create a folder");
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).expect("lock it");
-    let result = run_engine(&value, Engine::Wasmtime, &engine, &locked);
+    let result = run_engine(&value, Engine::Wasmtime, &engine, &locked, &TEST_CONTROL);
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).expect("unlock it");
     let refusal = refused(result);
     let run_dir = locked.join("wasmtime");
@@ -559,7 +611,13 @@ fn runner_passes_no_directory_env_or_network_flags() {
     assert_eq!(value.memory_mb(), 64, "this capsule's declared memory_mb");
 
     for engine_kind in ENGINES {
-        let stdout = ran(run_engine(&value, engine_kind, &engine, &root));
+        let stdout = ran(run_engine(
+            &value,
+            engine_kind,
+            &engine,
+            &root,
+            &TEST_CONTROL,
+        ));
         let module = root.join(engine_kind.name()).join("module.wasm");
         let argv = String::from_utf8(stdout).expect("the argv is UTF-8");
         let cap = match engine_kind {
@@ -606,7 +664,13 @@ fn engine_starts_with_an_empty_environment() {
         "the test process has no HOME, so this test proves nothing"
     );
 
-    let stdout = ran(run_engine(&value, Engine::Wasmer, &engine, &root));
+    let stdout = ran(run_engine(
+        &value,
+        Engine::Wasmer,
+        &engine,
+        &root,
+        &TEST_CONTROL,
+    ));
     assert_eq!(
         String::from_utf8_lossy(&stdout),
         "unset",
@@ -623,7 +687,13 @@ fn engine_stdin_is_null() {
     for engine_kind in ENGINES {
         let tmp = TempDir::new("run-stdin");
         let root = canonical(&tmp);
-        let stdout = ran(run_engine(&value, engine_kind, &engine, &root));
+        let stdout = ran(run_engine(
+            &value,
+            engine_kind,
+            &engine,
+            &root,
+            &TEST_CONTROL,
+        ));
         assert_eq!(
             String::from_utf8_lossy(&stdout),
             "null",
@@ -642,7 +712,13 @@ fn engine_failures_keep_their_cause() {
     for engine_kind in ENGINES {
         let tmp = TempDir::new("run-fail");
         let root = canonical(&tmp);
-        let refusal = refused(run_engine(&value, engine_kind, &failing, &root));
+        let refusal = refused(run_engine(
+            &value,
+            engine_kind,
+            &failing,
+            &root,
+            &TEST_CONTROL,
+        ));
         match &refusal.reason {
             Reason::EngineFailed {
                 engine,
@@ -669,7 +745,13 @@ fn engine_failures_keep_their_cause() {
     for engine_kind in ENGINES {
         let tmp = TempDir::new("run-missing-engine");
         let root = canonical(&tmp);
-        let refusal = refused(run_engine(&value, engine_kind, &missing, &root));
+        let refusal = refused(run_engine(
+            &value,
+            engine_kind,
+            &missing,
+            &root,
+            &TEST_CONTROL,
+        ));
         match &refusal.reason {
             Reason::EngineDidNotStart { engine, error } => {
                 assert_eq!(*engine, engine_kind);
@@ -709,7 +791,7 @@ fn run_engine_removes_its_run_folder_after_every_outcome() {
         let root = canonical(&tmp);
 
         assert_eq!(
-            ran(run_engine(&value, engine_kind, &cat, &root)),
+            ran(run_engine(&value, engine_kind, &cat, &root, &TEST_CONTROL)),
             MODULE,
             "{engine_kind}: the success"
         );
@@ -724,7 +806,13 @@ fn run_engine_removes_its_run_folder_after_every_outcome() {
             names(&root)
         );
 
-        let refusal = refused(run_engine(&value, engine_kind, &failing, &root));
+        let refusal = refused(run_engine(
+            &value,
+            engine_kind,
+            &failing,
+            &root,
+            &TEST_CONTROL,
+        ));
         match &refusal.reason {
             Reason::EngineFailed {
                 engine,
@@ -744,7 +832,13 @@ fn run_engine_removes_its_run_folder_after_every_outcome() {
             names(&root)
         );
 
-        let refusal = refused(run_engine(&value, engine_kind, &missing, &root));
+        let refusal = refused(run_engine(
+            &value,
+            engine_kind,
+            &missing,
+            &root,
+            &TEST_CONTROL,
+        ));
         match &refusal.reason {
             Reason::EngineDidNotStart { engine, error } => {
                 assert_eq!(*engine, engine_kind);
@@ -799,7 +893,13 @@ fn run_folder_that_cannot_be_removed_is_refused() {
         let tmp = TempDir::new("run039-kept");
         let root = canonical(&tmp);
         let run_dir = root.join(engine_kind.name());
-        let refusal = refused(run_engine(&value, engine_kind, &extra, &root));
+        let refusal = refused(run_engine(
+            &value,
+            engine_kind,
+            &extra,
+            &root,
+            &TEST_CONTROL,
+        ));
         match &refusal.reason {
             Reason::RunDirNotRemoved(error) => assert_eq!(error.raw_os_error(), Some(66)),
             _ => panic!("{engine_kind}: not the removal reason: {refusal}"),
@@ -822,7 +922,13 @@ fn run_folder_that_cannot_be_removed_is_refused() {
         let tmp = TempDir::new("run039-swapped");
         let root = canonical(&tmp);
         let module = root.join(engine_kind.name()).join("module.wasm");
-        let refusal = refused(run_engine(&value, engine_kind, &swapped, &root));
+        let refusal = refused(run_engine(
+            &value,
+            engine_kind,
+            &swapped,
+            &root,
+            &TEST_CONTROL,
+        ));
         match &refusal.reason {
             Reason::RunDirNotRemoved(error) => assert_eq!(error.raw_os_error(), Some(1)),
             _ => panic!("{engine_kind}: not the removal reason: {refusal}"),
@@ -836,7 +942,13 @@ fn run_folder_that_cannot_be_removed_is_refused() {
         let tmp = TempDir::new("run039-kept-failing");
         let root = canonical(&tmp);
         let run_dir = root.join(engine_kind.name());
-        let refusal = refused(run_engine(&value, engine_kind, &extra_failing, &root));
+        let refusal = refused(run_engine(
+            &value,
+            engine_kind,
+            &extra_failing,
+            &root,
+            &TEST_CONTROL,
+        ));
         assert!(
             matches!(refusal.reason, Reason::EngineFailed { .. }),
             "{engine_kind}: the failure is not the answer: {refusal}"
@@ -873,7 +985,13 @@ fn each_engine_prints_the_fixed_output() {
             eprintln!("SKIPPED: {engine_kind} not found on PATH (no result, not a PASS)");
             continue;
         };
-        let stdout = ran(run_engine(&value, engine_kind, &program, &work));
+        let stdout = ran(run_engine(
+            &value,
+            engine_kind,
+            &program,
+            &work,
+            &TEST_CONTROL,
+        ));
         assert_eq!(
             String::from_utf8_lossy(&stdout),
             format!("{FIXED_OUTPUT}\n"),
@@ -1020,6 +1138,7 @@ fn input<'a>(
         wasmtime,
         wasmer,
         work_root,
+        control: &TEST_CONTROL,
     }
 }
 
@@ -1168,6 +1287,7 @@ fn same_name_same_output_on_wasmtime_and_wasmer() {
         wasmtime: &programs[0],
         wasmer: &programs[1],
         work_root: &work,
+        control: &TEST_CONTROL,
     }));
     let expected = format!("{FIXED_OUTPUT}\n");
     assert_eq!(
@@ -1223,6 +1343,7 @@ fn runner_refuses_an_unverified_bundle() {
             wasmtime: &wasmtime,
             wasmer: &wasmer,
             work_root: &work,
+            control: &TEST_CONTROL,
         }));
         assert_eq!(refusal.to_string(), expected.to_string(), "{kind}");
         match refusal {
@@ -1594,7 +1715,13 @@ fn run_engine_starts_its_engine_exactly_once() {
         let work = work_root(&root, &format!("{engine_kind}-work"));
 
         assert_eq!(
-            ran(run_engine(&value, engine_kind, &program, &work)),
+            ran(run_engine(
+                &value,
+                engine_kind,
+                &program,
+                &work,
+                &TEST_CONTROL
+            )),
             b"same\n"
         );
         let module_runs = starts(&program, "module");
@@ -2066,6 +2193,7 @@ fn real_receipt_names_both_installed_engines() {
         wasmtime: &programs[0],
         wasmer: &programs[1],
         work_root: &work,
+        control: &TEST_CONTROL,
     }));
     let expected = format!("{FIXED_OUTPUT}\n");
     for (engine_kind, program) in ENGINES.iter().zip(&programs) {
@@ -2169,6 +2297,7 @@ fn run_with_grants(
         wasmtime: &folders.wasmtime,
         wasmer: &folders.wasmer,
         work_root: &folders.work,
+        control: &TEST_CONTROL,
     });
     (result, folders)
 }
@@ -2261,6 +2390,7 @@ fn zero_grants_zero_imports_runs_on_both_real_engines() {
         wasmtime: &programs[0],
         wasmer: &programs[1],
         work_root: &work,
+        control: &TEST_CONTROL,
     }));
     let expected = format!("{FIXED_OUTPUT}\n");
     for engine_kind in ENGINES {
@@ -2510,6 +2640,7 @@ impl Declared {
             wasmtime,
             wasmer,
             work_root,
+            control: &TEST_CONTROL,
         }
     }
 }
@@ -2532,7 +2663,13 @@ fn declared_memory_cap_comes_from_the_manifest() {
 
         let work = work_root(&root, &format!("work-{memory_mb}"));
         for engine_kind in ENGINES {
-            let stdout = ran(run_engine(&value, engine_kind, &engine, &work));
+            let stdout = ran(run_engine(
+                &value,
+                engine_kind,
+                &engine,
+                &work,
+                &TEST_CONTROL,
+            ));
             let module = work.join(engine_kind.name()).join("module.wasm");
             let cap = match engine_kind {
                 Engine::Wasmtime => {
@@ -2576,7 +2713,13 @@ fn capsule_grows_within_the_declared_cap_on_wasmtime() {
     assert_eq!(value.memory_mb(), 64);
     let work = work_root(&root, "work");
 
-    let stdout = ran(run_engine(&value, Engine::Wasmtime, &program, &work));
+    let stdout = ran(run_engine(
+        &value,
+        Engine::Wasmtime,
+        &program,
+        &work,
+        &TEST_CONTROL,
+    ));
     assert_eq!(
         String::from_utf8_lossy(&stdout),
         "1\n",
@@ -2600,7 +2743,13 @@ fn memory_grow_past_the_declared_cap_traps_on_wasmtime() {
     assert_eq!(value.memory_mb(), 64);
     let work = work_root(&root, "work");
 
-    let refusal = refused(run_engine(&value, Engine::Wasmtime, &program, &work));
+    let refusal = refused(run_engine(
+        &value,
+        Engine::Wasmtime,
+        &program,
+        &work,
+        &TEST_CONTROL,
+    ));
     match &refusal.reason {
         Reason::EngineFailed {
             engine,
@@ -2650,7 +2799,13 @@ fn second_memory_cannot_double_the_declared_cap_on_wasmtime() {
     let value = verified_bundle_declaring(&root, "bundle", TWO_MEMORY_MODULE, 2);
     let work = work_root(&root, "work");
 
-    let refusal = refused(run_engine(&value, Engine::Wasmtime, &program, &work));
+    let refusal = refused(run_engine(
+        &value,
+        Engine::Wasmtime,
+        &program,
+        &work,
+        &TEST_CONTROL,
+    ));
     match &refusal.reason {
         Reason::EngineFailed {
             engine,
@@ -2760,6 +2915,7 @@ fn built_capsule_runs_under_the_declared_cap_on_wasmtime() {
         wasmtime: &wasmtime,
         wasmer: &programs[1],
         work_root: &work,
+        control: &TEST_CONTROL,
     }));
     let expected = format!("{FIXED_OUTPUT}\n");
     for engine_kind in ENGINES {
@@ -3454,6 +3610,7 @@ fn normal_run_leaves_nothing_under_the_scratch_root() {
         wasmtime: &wasmtime,
         wasmer: &wasmer,
         work_root: &work,
+        control: &TEST_CONTROL,
     }));
     let expected = format!("{FIXED_OUTPUT}\n");
     assert_eq!(passed.wasmtime(), passed.wasmer(), "the outputs differ");
@@ -3476,7 +3633,13 @@ fn trapped_run_leaves_nothing_under_the_scratch_root() {
 
     for (engine_kind, program) in ENGINES.into_iter().zip(&programs) {
         let work = work_root(&root, &format!("work-{engine_kind}"));
-        let refusal = refused(run_engine(&value, engine_kind, program, &work));
+        let refusal = refused(run_engine(
+            &value,
+            engine_kind,
+            program,
+            &work,
+            &TEST_CONTROL,
+        ));
         match &refusal.reason {
             Reason::EngineFailed {
                 engine,
@@ -3514,7 +3677,6 @@ fn trapped_run_leaves_nothing_under_the_scratch_root() {
 /// other than 0 (killed one) or 1 (none), and a runner still running after
 /// 10 s.
 fn stop_run_engines<T>(work_root: &Path, runner: &std::thread::JoinHandle<T>) -> Vec<String> {
-    use std::time::{Duration, Instant};
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut problems = Vec::new();
     while !runner.is_finished() {
@@ -3545,6 +3707,9 @@ fn stop_run_engines<T>(work_root: &Path, runner: &std::thread::JoinHandle<T>) ->
     problems
 }
 
+/// Task 043: the killed-run test's run control: 120 s, far above its 10 s wait.
+static KILLED_RUN_CONTROL: RunControl = RunControl::new(Duration::from_secs(120));
+
 /// Task 040, killed run: on each real engine, `run_engine` runs on a thread on
 /// a module whose `digest` loops forever. The test waits (at most 10 s,
 /// polling `pgrep -f <work root>`) for the one engine process, reads its argv,
@@ -3562,10 +3727,13 @@ fn stop_run_engines<T>(work_root: &Path, runner: &std::thread::JoinHandle<T>) ->
 /// stop found. If the thread still runs after those 10 s, the join waits for
 /// it: the test never leaves a detached thread that can still start the
 /// engine. A failed check never leaves an engine looping.
+///
+/// Task 043: its run budget, [`KILLED_RUN_CONTROL`], is far above the 10 s
+/// wait, so the SIGKILL the test sends is the one that stops the engine, and
+/// the run stays `EngineFailed`, never `BudgetExceeded`.
 #[test]
 fn killed_run_leaves_nothing_under_the_scratch_root() {
     use std::os::unix::process::ExitStatusExt;
-    use std::time::{Duration, Instant};
     let Some(programs) = real_engines("the killed-run census") else {
         return;
     };
@@ -3578,7 +3746,9 @@ fn killed_run_leaves_nothing_under_the_scratch_root() {
         let module = work.join(engine_kind.name()).join("module.wasm");
         let runner = {
             let (value, program, work) = (value.clone(), program.clone(), work.clone());
-            std::thread::spawn(move || run_engine(&value, engine_kind, &program, &work))
+            std::thread::spawn(move || {
+                run_engine(&value, engine_kind, &program, &work, &KILLED_RUN_CONTROL)
+            })
         };
 
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -3665,6 +3835,273 @@ fn killed_run_leaves_nothing_under_the_scratch_root() {
             _ => panic!("{engine_kind}: not EngineFailed: {refusal}"),
         }
         assert_census_empty(&work, &format!("killed run on {engine_kind}"));
+    }
+}
+
+/// Task 043: the budget the looping-capsule tests give each module run.
+const LOOP_BUDGET: Duration = Duration::from_millis(500);
+
+/// Task 043: how long past its budget a budget test waits for its run's answer
+/// before it stops the run's engines and fails.
+const WATCHDOG_GRACE: Duration = Duration::from_secs(20);
+
+/// Task 043: run `call` on a thread and return its answer and how long it took.
+/// The canonical runner gives `cargo test` no time limit, so the test waits at
+/// most `budget` + [`WATCHDOG_GRACE`]: if no answer comes by then,
+/// [`stop_run_engines`] stops every engine of the run under `work_root`, the
+/// thread is joined, and only then does the test fail.
+fn answer_within_watchdog<T: Send + 'static>(
+    work_root: &Path,
+    budget: Duration,
+    call: impl FnOnce() -> T + Send + 'static,
+) -> (T, Duration) {
+    let runner = std::thread::spawn(move || {
+        let started = Instant::now();
+        let answer = call();
+        (answer, started.elapsed())
+    });
+    let deadline = Instant::now() + budget + WATCHDOG_GRACE;
+    while !runner.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if !runner.is_finished() {
+        let stopped = stop_run_engines(work_root, &runner);
+        let joined = runner.join();
+        panic!(
+            "no answer within the budget {budget:?} + {WATCHDOG_GRACE:?}; then stopped the run's \
+             engines (problems: {stopped:?}) and joined the runner (it panicked: {})",
+            joined.is_err()
+        );
+    }
+    runner.join().expect("the runner thread panicked")
+}
+
+/// Task 043: `refusal` is `BudgetExceeded` for `engine_kind` at `program` with
+/// exactly `budget`, with its exact text, and the run took at least the budget
+/// and under budget + 5 s.
+fn assert_stopped_at_budget(
+    refusal: &Refusal,
+    engine_kind: Engine,
+    program: &Path,
+    budget: Duration,
+    elapsed: Duration,
+) {
+    match &refusal.reason {
+        Reason::BudgetExceeded {
+            engine,
+            budget: stopped_at,
+        } => {
+            assert_eq!(*engine, engine_kind, "{refusal}");
+            assert_eq!(*stopped_at, budget, "{engine_kind}: {refusal}");
+        }
+        _ => panic!("{engine_kind}: not BudgetExceeded: {refusal}"),
+    }
+    assert_eq!(refusal.path, program, "{engine_kind}");
+    assert_eq!(
+        refusal.to_string(),
+        format!(
+            "{}: {engine_kind} still ran at its run budget of {} ms: the runner stopped it with SIGKILL",
+            program.display(),
+            budget.as_millis()
+        )
+    );
+    assert!(
+        elapsed >= budget,
+        "{engine_kind}: refused after {elapsed:?}, before its budget {budget:?}"
+    );
+    assert!(
+        elapsed < budget + Duration::from_secs(5),
+        "{engine_kind}: refused after {elapsed:?}, not within 5 s of its budget {budget:?}"
+    );
+}
+
+/// Task 043 (M1 A7 lab half): on each real engine, `run_engine` on a module
+/// whose `digest` loops forever, with a 500 ms budget, on a thread under
+/// [`answer_within_watchdog`]: the runner stops the engine and refuses the run
+/// as `BudgetExceeded` for that engine and budget, after at least the budget
+/// and under budget + 5 s; then the census finds nothing under its work root.
+/// SKIPPED, no result, when either engine is missing.
+#[test]
+fn looping_capsule_is_stopped_at_its_run_budget_on_both_engines() {
+    let Some(programs) = real_engines("the run-budget test") else {
+        return;
+    };
+    let tmp = TempDir::new("run43-budget");
+    let root = canonical(&tmp);
+    let (_, value) = verified_bundle(&root, "bundle", &digest_module(LOOP_BODY));
+
+    for (engine_kind, program) in ENGINES.into_iter().zip(programs) {
+        let work = work_root(&root, &format!("work-{engine_kind}"));
+        let (result, elapsed) = answer_within_watchdog(&work, LOOP_BUDGET, {
+            let (value, program, work) = (value.clone(), program.clone(), work.clone());
+            move || {
+                let control = RunControl::new(LOOP_BUDGET);
+                run_engine(&value, engine_kind, &program, &work, &control)
+            }
+        });
+        let refusal = refused(result);
+        assert_stopped_at_budget(&refusal, engine_kind, &program, LOOP_BUDGET, elapsed);
+        eprintln!("PASS: {engine_kind} stopped after {elapsed:?}: {refusal}");
+        assert_census_empty(&work, &format!("budget-stopped run on {engine_kind}"));
+    }
+}
+
+/// Task 043: `run` with a looping `wasmtime` (the real one if found, else a
+/// pinned stand-in whose module run `exec`s `/bin/sleep 600`, under the module
+/// path as its `argv[0]`, so `pkill -f <work root>` still finds it) and a
+/// [`counting`] `wasmer`, with a 500 ms budget, under the watchdog: the answer
+/// is `TwoEngineRefusal::Engine` with `BudgetExceeded` for `wasmtime`;
+/// `wasmer` is asked `--version` but never started for a module run; the census
+/// finds nothing under the work root.
+#[test]
+fn run_stops_wasmtime_at_its_budget_and_never_starts_wasmer() {
+    let tmp = TempDir::new("run43-two");
+    let root = canonical(&tmp);
+    let engines = work_root(&root, "engines");
+    let wasmtime = find_engine(Engine::Wasmtime.name()).unwrap_or_else(|| {
+        eprintln!("wasmtime not found on PATH: a looping stand-in takes its place");
+        marked(
+            &engines,
+            "wasmtime",
+            &format!("{MODULE_ARGUMENT}exec -a \"$module\" /bin/sleep 600\n"),
+        )
+    });
+    let wasmer = counting(&engines, "wasmer");
+    let key = fresh_key();
+    let (bundle, sig) = signed_bundle(&root, "bundle", &digest_module(LOOP_BODY), &key);
+    let accepted = vec![did(&key)];
+    let work = work_root(&root, "work");
+
+    let (result, elapsed) = answer_within_watchdog(&work, LOOP_BUDGET, {
+        let (wasmtime, wasmer, work) = (wasmtime.clone(), wasmer.clone(), work.clone());
+        move || {
+            run(&RunInput {
+                bundle: &bundle,
+                signature: Some(&sig),
+                accepted: &accepted,
+                granted: &[],
+                wasmtime: &wasmtime,
+                wasmer: &wasmer,
+                work_root: &work,
+                control: &RunControl::new(LOOP_BUDGET),
+            })
+        }
+    });
+    let refusal = match two_refused(result) {
+        TwoEngineRefusal::Engine(refusal) => refusal,
+        other => panic!("not an engine refusal: {other}"),
+    };
+    // `elapsed` holds both `--version` queries too, so it is only an upper
+    // bound on the module run; it is still at least the budget.
+    assert_stopped_at_budget(&refusal, Engine::Wasmtime, &wasmtime, LOOP_BUDGET, elapsed);
+    assert_eq!(starts(&wasmer, "module"), 0, "wasmer ran a module");
+    assert_eq!(starts(&wasmer, "version"), 1, "wasmer --version queries");
+    assert_census_empty(&work, "run stopped at wasmtime's budget");
+}
+
+/// Task 043: a zero budget is refused before any engine starts. Per engine,
+/// `run_engine` with a [`counting`] stand-in, and then `run` with two, are each
+/// refused with the zero-budget reason (exact text, with the work root as its
+/// path); no module run and no `--version` query is counted, and each work
+/// root is empty.
+#[test]
+fn zero_run_budget_is_refused_before_any_engine_starts() {
+    let (_bundle, value) = fixture();
+    let tmp = TempDir::new("run43-zero");
+    let root = canonical(&tmp);
+    let zero = RunControl::new(Duration::ZERO);
+    let zero_text = |work: &Path| {
+        format!(
+            "{}: the run budget is zero: no engine is started",
+            work.display()
+        )
+    };
+
+    for engine_kind in ENGINES {
+        let engines = work_root(&root, &format!("{engine_kind}-engines"));
+        let program = counting(&engines, engine_kind.name());
+        let work = work_root(&root, &format!("{engine_kind}-work"));
+        let refusal = refused(run_engine(&value, engine_kind, &program, &work, &zero));
+        assert!(
+            matches!(refusal.reason, Reason::BudgetZero),
+            "{engine_kind}: {refusal}"
+        );
+        assert_eq!(refusal.to_string(), zero_text(&work), "{engine_kind}");
+        assert_eq!(starts(&program, "module"), 0, "{engine_kind}: a module run");
+        assert_eq!(
+            starts(&program, "version"),
+            0,
+            "{engine_kind}: a version query"
+        );
+        assert!(names(&work).is_empty(), "{engine_kind}: {:?}", names(&work));
+    }
+
+    let signed = signed_fixture();
+    let engines = work_root(&root, "two-engines");
+    let wasmtime = counting(&engines, "wasmtime");
+    let wasmer = counting(&engines, "wasmer");
+    let work = work_root(&root, "two-work");
+    let refusal = match two_refused(run(&RunInput {
+        control: &zero,
+        ..input(&signed, &wasmtime, &wasmer, &work)
+    })) {
+        TwoEngineRefusal::Engine(refusal) => refusal,
+        other => panic!("not an engine refusal: {other}"),
+    };
+    assert!(matches!(refusal.reason, Reason::BudgetZero), "{refusal}");
+    assert_eq!(refusal.to_string(), zero_text(&work));
+    for program in [&wasmtime, &wasmer] {
+        assert_eq!(starts(program, "module"), 0, "{}", program.display());
+        assert_eq!(starts(program, "version"), 0, "{}", program.display());
+    }
+    assert!(names(&work).is_empty(), "{:?}", names(&work));
+}
+
+/// Task 043: a stand-in that writes 128 KiB, twice a pipe buffer, to stderr
+/// and then to stdout with shell builtins only (no child process can hold a
+/// pipe), then exits with `status`.
+fn loud(folder: &Path, name: &str, status: u8) -> PathBuf {
+    let script = format!(
+        "#!/bin/sh\ns=x\nfor i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do s=\"$s$s\"; done\nprintf '%s' \"$s\" >&2\nprintf '%s' \"$s\"\nexit {status}\n"
+    );
+    stand_in(folder, name, &script)
+}
+
+/// Task 043: the runner reads the engine's stdout and stderr on a thread each
+/// while it waits, so an engine that writes more than a pipe holds to stderr
+/// before stdout is never blocked: under a 5 s budget and the watchdog, a
+/// passing stand-in's 128 KiB stdout and a failing one's 128 KiB stderr each
+/// come back in full.
+#[test]
+fn engine_output_past_a_pipe_buffer_never_blocks_it() {
+    const OUTPUT_BUDGET: Duration = Duration::from_secs(5);
+    let (_bundle, value) = fixture();
+    let tmp = TempDir::new("run43-pipes");
+    let root = canonical(&tmp);
+    let engines = work_root(&root, "engines");
+    for (status, name) in [(0, "passing"), (3, "failing")] {
+        let program = loud(&engines, name, status);
+        let work = work_root(&root, &format!("work-{name}"));
+        let (result, _) = answer_within_watchdog(&work, OUTPUT_BUDGET, {
+            let (value, program, work) = (value.clone(), program.clone(), work.clone());
+            move || {
+                let control = RunControl::new(OUTPUT_BUDGET);
+                run_engine(&value, Engine::Wasmtime, &program, &work, &control)
+            }
+        });
+        let printed = match result {
+            Ok(run) => run.stdout,
+            Err(Refusal {
+                reason: Reason::EngineFailed { stderr, .. },
+                ..
+            }) => stderr.into_bytes(),
+            Err(refusal) => panic!("{name}: {refusal}"),
+        };
+        assert_eq!(printed.len(), 1 << 17, "{name}: not all 128 KiB came back");
+        assert!(
+            printed.iter().all(|byte| *byte == b'x'),
+            "{name}: other bytes"
+        );
     }
 }
 
@@ -3849,6 +4286,7 @@ fn host_secret_fixture_run_inside_the_child() {
         wasmtime: &case.shim(Engine::Wasmtime),
         wasmer: &case.shim(Engine::Wasmer),
         work_root: &work,
+        control: &TEST_CONTROL,
     }));
 
     let expected = format!("{FIXED_OUTPUT}\n");

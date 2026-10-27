@@ -648,10 +648,18 @@ launch step.
 | Cargo's JSON with no packages list is refused with that reason, never read as no dependency | `the_consumer_scan_refuses_bad_metadata` | F-CI27a (no packages list reads as no dependency) |
 | A package with no `manifest_path` is refused with that reason, never read as no dependency | `the_consumer_scan_refuses_bad_metadata` | F-CI27b (no `manifest_path` reads as no dependency) |
 | A package with no dependencies list is refused with that reason, never read as no dependency | `the_consumer_scan_refuses_bad_metadata` | F-CI27c (no dependencies list reads as no dependency) |
-| A dev-dependency counts: `lab/wasm-capsule` uses this crate only under `[dev-dependencies]` | `the_consumer_scan_uses_cargos_reader`, `every_lab_cid_consumer_is_in_the_adoption_note` | F-CI27d (dev-dependencies are dropped, so `lab/wasm-capsule/Cargo.toml` is missing from the scan) |
+| A dev-dependency counts: `lab/wasm-capsule` uses this crate only under `[dev-dependencies]` | `the_consumer_scan_uses_cargos_reader`, `every_lab_cid_consumer_is_in_the_adoption_note` | F-CI27d (dev-dependencies are dropped, so `lab/wasm-capsule/Cargo.toml` is missing from the scan; see the note below the table) |
 | The scan writes nothing beside a manifest, ignored files included | `the_consumer_scan_writes_nothing` | F-CI25k (a `target/` is left beside a manifest outside the repo), F-CI25l (`--no-deps` is dropped, so Cargo resolves and writes a `Cargo.lock`) |
 | The list is read strictly: a missing note, no list and a line it cannot read each fail with their reason | `the_adoption_list_is_read_strictly` | F-CI25m (a line it cannot read is skipped) |
 | The note states the outside recomputation | `the_adoption_note_states_the_outside_recomputation` | F-CI25e |
+
+A note on F-CI27d: `every_lab_cid_consumer_is_in_the_adoption_note` catches
+it only while `lab/wasm-capsule/Cargo.toml` holds this crate under
+`[dev-dependencies]` and under no other kind. If that consumer moves it to
+`[dependencies]`, the real scan finds it with or without F-CI27d, so that test
+stops failing and the runner reads F-CI27d as not caught; the entry's test
+names must then change. `the_consumer_scan_uses_cargos_reader` catches it
+either way, on synthetic metadata with no consumer file involved.
 
 ## Test-key publisher signature (lab proposal)
 
@@ -1398,7 +1406,8 @@ tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 dri
                          the refusal asserts both signature checks share, the
                          key-material scan, the python3 -I run of README's blocks,
                          the cargo metadata scan for lab crates that use this one,
-                         the claim scan of the lane's docs and src/
+                         the claim scan of the lane's docs and src/, the check
+                         of the falsifier list's inventory
 tests/adoption.rs        the adoption note lists every lab CID consumer; Cargo's
                          reader decides; the scan writes nothing
 tests/bytes.rs           every byte is the name: manifest, payload, asks.json, files
@@ -1411,6 +1420,8 @@ tests/cross_implementation.rs
 tests/encoding.rs        order, boundaries, the printed form, one file per path,
                          each UnixFS profile setting
 tests/fixtures.rs        Runtime manifest checks, pins, the wc-001 bundle
+tests/inventory.rs       falsifiers.json's task list and README's count match
+                         the list
 tests/kinds.rs           app, provider and model share the package rules; one closure
 tests/location.rs        folder name, place, URL, Store rows, times, modes: not the name
 tests/name_signature.rs  a test key signs the printed lab CID; verification only
@@ -1425,7 +1436,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 235 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 240 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1454,7 +1465,8 @@ F-CI24a to F-CI24e (see
 [the cross-implementation check](#the-cross-implementation-check)), and task
 027's F-CI27a to F-CI27d (see
 [for a lab that uses the lab CID](#for-a-lab-that-uses-the-lab-cid)), and task
-028's F-CI28a to F-CI28d (see [claim scope](#claim-scope)).
+028's F-CI28a to F-CI28d (see [claim scope](#claim-scope)), and task
+029's F-CI29a to F-CI29e (see [the inventory check](#the-inventory-check)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -1506,6 +1518,32 @@ in `comment_body`, F-CI28b in `equality_claims_in`, and F-CI28c and F-CI28d in
 `WORD_MARKS`, which `claim_word` trims. Each anchor is a line task 028 added,
 found exactly once. Task 028 kept the anchor lines of F-CI23e to F-CI23h byte
 for byte and changed no older edit's text.
+
+### The inventory check
+
+Two places say what this list holds: the `about` text names, in a
+"(tasks ...)" list, every task that added entries, in the order the list
+holds them, and the first sentence of this section gives the number of
+entries. `the_falsifier_inventory_matches_the_list` (`tests/inventory.rs`)
+checks both against the list's ids, so neither drifts when a task adds
+entries. An id's task is the number after `F-CI`, as three digits (`F-CI1a` is
+round 1 of task 001, which 005 carried). `falsifier_inventory_findings` in
+`tests/common/mod.rs` reads one form only: one "(tasks NNN, NNN and NNN)" list
+of three-digit items, ids `F-CI<n><letters>` (one to three digits, no leading
+zero, lowercase letters), and one "holds N planted bugs" here, read word by
+word. Anything else is refused with its own reason, never read as no
+mismatch. It does not check the per-task paragraph above or the tables row by
+row. Task 029's entries all edit `tests/common/mod.rs`, in that helper, each
+anchor found exactly once; no entry edits `falsifiers.json`, which the runner
+does not restore.
+
+| Rule | Named test | Falsifiers |
+| --- | --- | --- |
+| `about` and this section's count match the committed list | `the_falsifier_inventory_matches_the_list` | F-CI29d (an id's task is read from its first digit, so F-CI27d reads as task 002) |
+| (a) a task with entries that `about` does not name is found | `the_falsifier_inventory_finds_each_mismatch` | F-CI29a (check (a) dropped) |
+| (b) a task `about` names with no entry is found | `the_falsifier_inventory_finds_each_mismatch` | F-CI29b (check (b) dropped) |
+| (c) a count that differs from the number of ids is found, with both numbers | `the_falsifier_inventory_finds_each_mismatch` | F-CI29c (the count compare dropped) |
+| No "(tasks ...)" list, two lists, an unclosed list, an item that is not three digits, an id of another form, and no or two count sentences are each refused with their own reason | `the_falsifier_inventory_refuses_what_it_cannot_read` | F-CI29e (no "(tasks ...)" list reads as naming no task) |
 
 Task 018 swapped the framed stream for the UnixFS root, so 23 older entries
 whose text it removed are re-targeted in place: the same id, the same bug in
@@ -1591,8 +1629,10 @@ without an edit, 0 do not`; F-CI24a to F-CI24e each CAUGHT). At task
 without an edit, 0 do not`; F-CI27a to F-CI27d each CAUGHT). At task
 028 it reported `summary: 235 CAUGHT of 235` (`baseline: 124 named tests pass
 without an edit, 0 do not`; F-CI28a to F-CI28d and F-CI23e to F-CI23h each
-CAUGHT).
+CAUGHT). At task 029 it reported `summary: 240 CAUGHT of 240` (`baseline: 127
+named tests pass without an edit, 0 do not`; F-CI29a to F-CI29e each CAUGHT).
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
-014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027 and 028 prove each of their falsifiers by break, named test fails, revert.
+014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028 and 029
+prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.

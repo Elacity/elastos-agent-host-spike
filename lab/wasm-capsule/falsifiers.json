@@ -1463,7 +1463,7 @@
         {
           "file": "../../lab/wasm-capsule/tools/src/run.rs",
           "old": "    let wasmtime = run_engine(&bundle, Engine::Wasmtime, input.wasmtime, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n    let wasmer = run_engine(&bundle, Engine::Wasmer, input.wasmer, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n",
-          "new": "    let wasmtime = start_engine(Engine::Wasmtime, input.wasmtime, &module, 64)\n        .map_err(TwoEngineRefusal::Engine)?;\n    let wasmer = start_engine(Engine::Wasmer, input.wasmer, &module, 64)\n        .map_err(TwoEngineRefusal::Engine)?;\n"
+          "new": "    let wasmtime = start_engine(Engine::Wasmtime, input.wasmtime, &module, 64, input.control)\n        .map_err(TwoEngineRefusal::Engine)?;\n    let wasmer = start_engine(Engine::Wasmer, input.wasmer, &module, 64, input.control)\n        .map_err(TwoEngineRefusal::Engine)?;\n"
         },
         {
           "file": "../../lab/wasm-capsule/tools/src/run.rs",
@@ -1623,7 +1623,7 @@
         {
           "file": "../../lab/wasm-capsule/tools/src/run.rs",
           "old": "    let wasmer = run_engine(&bundle, Engine::Wasmer, input.wasmer, input.work_root)\n        .map_err(TwoEngineRefusal::Engine)?;\n",
-          "new": "    let wasmer = start_engine(Engine::Wasmer, input.wasmer, &input.bundle.join(&bundle.entrypoint().path), bundle.memory_mb())\n        .map_err(TwoEngineRefusal::Engine)?;\n"
+          "new": "    let wasmer = start_engine(Engine::Wasmer, input.wasmer, &input.bundle.join(&bundle.entrypoint().path), bundle.memory_mb(), input.control)\n        .map_err(TwoEngineRefusal::Engine)?;\n"
         }
       ],
       "tests": [
@@ -1992,8 +1992,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/README.md",
-          "old": "`falsifiers.json` holds 175 planted bugs",
-          "new": "`falsifiers.json` holds 174 planted bugs"
+          "old": "`falsifiers.json` holds 177 planted bugs",
+          "new": "`falsifiers.json` holds 176 planted bugs"
         }
       ],
       "tests": [
@@ -2880,6 +2880,38 @@
       ],
       "tests": [
         "host_secret_fixture_never_reaches_either_real_engine"
+      ]
+    },
+    {
+      "id": "F-WC-A7-BUDGET-IGNORED",
+      "title": "the runner's wait loop never treats the run budget as passed, so a looping capsule holds its run until someone else kills the engine",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "            Ok(None) if started.elapsed() >= control.budget() => {\n",
+          "new": "            Ok(None) if false => {\n"
+        }
+      ],
+      "tests": [
+        "looping_capsule_is_stopped_at_its_run_budget_on_both_engines"
+      ]
+    },
+    {
+      "id": "F-WC-A7-PIPE-BLOCKED",
+      "title": "the runner reads the engine's stdout to its end before it starts reading stderr, so an engine that fills its stderr pipe first blocks",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "    let stdout = read_pipe(child.stdout.take());\n",
+          "new": "    let stdout = read_pipe(child.stdout.take());\n    let stdout: io::Result<PipeReader> = joined(stdout).map(|bytes| thread::spawn(move || Ok(bytes)));\n"
+        }
+      ],
+      "tests": [
+        "engine_output_past_a_pipe_buffer_never_blocks_it"
       ]
     }
   ]
