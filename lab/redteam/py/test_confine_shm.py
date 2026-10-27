@@ -20,10 +20,11 @@ contains CRITICAL and names the commit from ``git log -1 --format=%H HEAD
 is appended to ``CRITICAL.md``. With no allow, this module writes neither
 file.
 
-A recorded allow keeps the gate green. The deny test is marked
-``@unittest.expectedFailure`` and its docstring names that finding file
-(README guard b). A harness error is not an allow, so it is not marked and
-it still fails the gate. A profile error, a failed compile, a failed
+A recorded allow keeps the gate green. The deny test expects only
+``NotDenied`` and its docstring names that finding file (README guard b).
+A later harness error still fails the gate. The plant requires a denying
+baseline; an already-allowing profile skips that plant with its finding link.
+A profile error, a failed compile, a failed
 unsandboxed control, nonempty stderr, and an exit other than 0 are harness
 errors. They are not a deny and they are not a skip.
 
@@ -38,7 +39,9 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from functools import wraps
 from pathlib import Path
+from unittest.mock import patch
 
 import sbx
 from test_confine_mach import (
@@ -410,30 +413,44 @@ def mark_expected(case_cls, method_name, finding_rel):
     the gate stays green. The mark is only for that recorded allow.
     """
     method = getattr(case_cls, method_name)
-    method.__doc__ = (
+
+    @wraps(method)
+    def recorded(self):
+        try:
+            return method(self)
+        except NotDenied:
+            raise
+        except BaseException:
+            # unittest otherwise treats every exception in a marked body as
+            # expected. Only the recorded allow has that status. Leave the
+            # original exception for unittest to report as a failure/error.
+            if self._outcome is not None:
+                self._outcome.expecting_failure = False
+            raise
+
+    recorded.__doc__ = (
         "The live profile allowed a posix shared-memory open. "
         f"Finding file: {finding_rel}"
     )
-    wrapped = unittest.expectedFailure(method)
-    wrapped.__doc__ = method.__doc__
+    wrapped = unittest.expectedFailure(recorded)
     setattr(case_cls, method_name, wrapped)
+    case_cls.addClassCleanup(setattr, case_cls, method_name, method)
 
 
 def observe(case_cls):
     """Classify each live profile once, so an allow is marked before its test."""
+    case_cls.recorded_allows = {}
     items = []
     for profile in PROFILES:
         result = open_under(profile["path"])
-        try:
-            outcome = classify(result)
-        except HarnessError:
-            continue
+        outcome = classify(result)
         if outcome == "allow":
             items.append((profile, result))
     if not items:
         return
     write_findings(ROOT, items)
     for profile, _result in items:
+        case_cls.recorded_allows[profile["name"]] = FINDINGS[profile["name"]]
         mark_expected(
             case_cls,
             f"test_{profile['name']}_shm_open_is_denied",
@@ -462,6 +479,7 @@ class ShmOpenProbe(unittest.TestCase):
     binary = None
     root = None
     parent = None
+    recorded_allows = {}
 
     @classmethod
     def setUpClass(cls):
@@ -469,6 +487,7 @@ class ShmOpenProbe(unittest.TestCase):
         cls.binary = None
         cls.root = None
         cls.parent = None
+        cls.recorded_allows = {}
         if cls.skip_reason:
             return
         cls.parent = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-shm-parent-"))
@@ -592,6 +611,7 @@ class ShmOpenProbe(unittest.TestCase):
         try:
             for profile in PROFILES:
                 with self.subTest(profile=profile["name"]):
+                    self._require_denying_baseline(profile["name"])
                     text = profile["path"].read_text(encoding="utf-8")
                     self.assertEqual(text.count("(allow ipc-posix-shm)"), 0)
                     self.assertEqual(text.count(DENY_DEFAULT), 1)
@@ -621,54 +641,75 @@ class ShmOpenProbe(unittest.TestCase):
                     self.assertIn(copy, result.argv)
                     self.assertNotIn(os.fspath(profile["path"]), result.argv)
 
-            wallet = PROFILES[0]
-            self.assertEqual(wallet["name"], "wallet")
-            wallet_text = wallet["path"].read_text(encoding="utf-8")
-            deleted = without_deny_default(wallet_text)
-            self.assertNotIn("(deny default)", deleted)
-            self.assertEqual(deleted.count("(allow ipc-posix-shm)"), 0)
-            self.assertNotIn("(allow default)", deleted)
-            removed = write_copy(directory, "wallet-deleted", deleted)
-            denied = require_denied(removed)
-            self.assertEqual(denied.stdout, DENY_STDOUT)
-            self.assertEqual(denied.stderr, "")
-            self.assertEqual(denied.exit_code, 0)
+            with self.subTest(profile="wallet-deleted"):
+                self._require_denying_baseline("wallet")
+                wallet = PROFILES[0]
+                self.assertEqual(wallet["name"], "wallet")
+                wallet_text = wallet["path"].read_text(encoding="utf-8")
+                deleted = without_deny_default(wallet_text)
+                self.assertNotIn("(deny default)", deleted)
+                self.assertEqual(deleted.count("(allow ipc-posix-shm)"), 0)
+                self.assertNotIn("(allow default)", deleted)
+                removed = write_copy(directory, "wallet-deleted", deleted)
+                denied = require_denied(removed)
+                self.assertEqual(denied.stdout, DENY_STDOUT)
+                self.assertEqual(denied.stderr, "")
+                self.assertEqual(denied.exit_code, 0)
         finally:
             for profile in PROFILES:
                 if profile["path"].read_bytes() != originals[profile["path"]]:
                     raise AssertionError(f"the probe changed {profile['rel']}")
 
+    def _require_denying_baseline(self, name):
+        finding = type(self).recorded_allows.get(name)
+        if finding:
+            self.skipTest(f"{name} baseline allows shm_open; finding: {finding}")
+
 
 class ShmOpenClassifier(unittest.TestCase):
     """Classifier, pins, and injected results. They compile nothing and launch nothing."""
+
+    def setUp(self):
+        self.launch_guard = self.enter_patch(
+            patch.object(
+                subprocess, "run",
+                side_effect=AssertionError("classifier launched a process"),
+            )
+        )
+
+    def enter_patch(self, patcher):
+        value = patcher.start()
+        self.addCleanup(patcher.stop)
+        return value
 
     def test_skip_reason_names_the_missing_path(self):
         """``skip_reason`` names each missing binary and does not launch."""
         def refuse_subprocess(*_args, **_kwargs):
             raise AssertionError("skip_reason launched a process")
 
-        original = subprocess.run
-        subprocess.run = refuse_subprocess
-        try:
+        with patch.object(subprocess, "run", side_effect=refuse_subprocess), patch.object(
+            os.path, "isfile", side_effect=lambda path: path in (CC, sbx.SANDBOX_EXEC)
+        ):
             live = skip_reason()
             absent_cc = "/usr/bin/cc-not-here"
             absent_sandbox = "/usr/bin/sandbox-exec-not-here"
             missing_cc = skip_reason(cc_path=absent_cc)
             missing_both = skip_reason(cc_path=absent_cc, sandbox_path=absent_sandbox)
+            missing_sandbox = skip_reason(sandbox_path=absent_sandbox)
             present = skip_reason(cc_path=CC, sandbox_path=sbx.SANDBOX_EXEC)
-        finally:
-            subprocess.run = original
-        if os.path.isfile(CC) and os.path.isfile(sbx.SANDBOX_EXEC):
-            self.assertIsNone(live)
-        else:
+        self.assertIsNone(live)
+        with patch.object(os.path, "isfile", return_value=False):
+            live = skip_reason()
             self.assertIsNotNone(live)
-            if not os.path.isfile(CC):
-                self.assertIn(CC, live)
-            if not os.path.isfile(sbx.SANDBOX_EXEC):
-                self.assertIn(sbx.SANDBOX_EXEC, live)
+            self.assertIn(CC, live)
+            self.assertIn(sbx.SANDBOX_EXEC, live)
+            self.assertEqual(live, f"missing {sbx.SANDBOX_EXEC} and {CC}")
         self.assertIn(absent_cc, missing_cc)
         self.assertIn(absent_cc, missing_both)
         self.assertIn(absent_sandbox, missing_both)
+        self.assertEqual(missing_cc, f"missing {absent_cc}")
+        self.assertEqual(missing_sandbox, f"missing {absent_sandbox}")
+        self.assertEqual(missing_both, f"missing {absent_sandbox} and {absent_cc}")
         self.assertIsNone(present)
 
     def test_profile_bytes_match_the_start(self):
@@ -727,17 +768,14 @@ class ShmOpenClassifier(unittest.TestCase):
             PROFILES = saved
             START_SHA.pop(rel, None)
 
-    def test_classifier_refusal_reasons(self):
-        """Each bad result is a harness error with its own reason.
-
-        The cases are a wrong exit, a wrong errno, nonempty deny stderr, a
-        malformed allow stdout, nonempty allow stderr, and a profile error
-        whose text says ``Operation not permitted``. They launch nothing.
-        """
-        samples = (
+    @staticmethod
+    def refusal_samples():
+        return (
             (
                 "wrong exit",
                 sbx.Result(exit_code=2, stdout=DENY_STDOUT, stderr="", argv=["/private/shm"]),
+                "wrong exit 2 is a harness error, not a deny and not an allow. "
+                "stdout='fd=-1 errno=1\\n' stderr=''",
             ),
             (
                 "wrong errno",
@@ -747,6 +785,7 @@ class ShmOpenClassifier(unittest.TestCase):
                     stderr="",
                     argv=["/private/shm"],
                 ),
+                "wrong errno is a harness error, not a deny: 'fd=-1 errno=2\\n'",
             ),
             (
                 "nonempty deny stderr",
@@ -756,6 +795,7 @@ class ShmOpenClassifier(unittest.TestCase):
                     stderr="noise\n",
                     argv=["/private/shm"],
                 ),
+                "nonempty deny stderr is a harness error, not a deny: 'noise\\n'",
             ),
             (
                 "malformed allow stdout",
@@ -765,6 +805,7 @@ class ShmOpenClassifier(unittest.TestCase):
                     stderr="",
                     argv=["/private/shm"],
                 ),
+                "malformed allow stdout is a harness error, not an allow: 'fd=3 errno=0'",
             ),
             (
                 "nonempty allow stderr",
@@ -774,6 +815,13 @@ class ShmOpenClassifier(unittest.TestCase):
                     stderr="noise\n",
                     argv=["/private/shm"],
                 ),
+                "nonempty allow stderr is a harness error, not an allow: 'noise\\n'",
+            ),
+            (
+                "nonempty stderr",
+                sbx.Result(exit_code=0, stdout="bad\n", stderr="noise\n", argv=["/private/shm"]),
+                "nonempty stderr is a harness error, not a deny and not an allow: "
+                "stdout='bad\\n' stderr='noise\\n'",
             ),
             (
                 "profile error",
@@ -783,10 +831,17 @@ class ShmOpenClassifier(unittest.TestCase):
                     stderr="Operation not permitted\n",
                     argv=[sbx.SANDBOX_EXEC, "-f", "confine.sb", "/private/shm"],
                 ),
+                "profile error: profile read or compile error: sandbox-exec exited 65 "
+                "and started no program, so nothing was denied -- a harness error, "
+                "not a deny and not an allow. stderr='Operation not permitted\\n'",
             ),
         )
+
+    def test_classifier_refusal_reasons(self):
+        """Each classifier refusal preserves its exact, distinct reason."""
+        samples = self.refusal_samples()
         reasons = []
-        for label, result in samples:
+        for label, result, expected in samples:
             with self.subTest(label=label):
                 if label == "profile error":
                     problem = sbx.profile_error(result)
@@ -799,21 +854,53 @@ class ShmOpenClassifier(unittest.TestCase):
                     classify(result)
                 message = str(caught.exception)
                 self.assertIn(label, message)
+                self.assertEqual(message, expected)
                 reasons.append(message)
         self.assertEqual(len(set(reasons)), len(samples))
         for message in reasons:
-            hits = [label for label, _result in samples if label in message]
+            hits = [label for label, _result, _expected in samples if label in message]
             self.assertEqual(len(hits), 1)
+
+    def test_observe_propagates_every_refusal(self):
+        """A failed observation stops before any later success or finding mark."""
+        deny = sbx.Result(exit_code=0, stdout=DENY_STDOUT, stderr="", argv=["/private/shm"])
+        for label, refused, expected in self.refusal_samples():
+            for preceding in ([], [deny], [deny, deny]):
+                with self.subTest(reason=label, position=len(preceding)):
+                    class Observed(ShmOpenProbe):
+                        pass
+
+                    with patch(__name__ + ".open_under", side_effect=preceding + [refused, deny]) as opened, patch(
+                        __name__ + ".write_findings"
+                    ) as writer, patch(__name__ + ".mark_expected") as marker:
+                        with self.assertRaises(HarnessError) as caught:
+                            observe(Observed)
+                    self.assertEqual(str(caught.exception), expected)
+                    self.assertEqual(opened.call_count, len(preceding) + 1)
+                    writer.assert_not_called()
+                    marker.assert_not_called()
+                    self.assertEqual(Observed.recorded_allows, {})
+
+        # Three consecutive profile errors also stop on the first refusal.
+        _label, refused, expected = self.refusal_samples()[-1]
+        with patch(__name__ + ".open_under", side_effect=[refused] * 3) as opened:
+            with self.assertRaises(HarnessError) as caught:
+                observe(Observed)
+        self.assertEqual(str(caught.exception), expected)
+        self.assertEqual(opened.call_count, 1)
 
     def test_recorded_allow_is_expected_failure(self):
         """A recorded allow is an expected failure whose docstring names the finding.
 
         The result is injected. The finding is written under a temp repo.
-        Its first line contains CRITICAL, the live commit, and the live
-        sha256. ``CRITICAL.md`` receives that same paragraph. The marked
+        Its first line contains CRITICAL and injected provenance.
+        ``CRITICAL.md`` receives that same paragraph. The marked
         test is an expected failure, so the gate stays green. The same
         raise without the mark is a failure.
         """
+        provenance = self.enter_patch(patch(__name__ + ".last_change", return_value="a" * 40))
+        self.enter_patch(patch(__name__ + ".pr_label", return_value="PR fixture"))
+        self.enter_patch(patch(__name__ + ".sha256_file", return_value="b" * 64))
         allow = sbx.Result(
             exit_code=0,
             stdout="fd=3 errno=0\n",
@@ -899,9 +986,157 @@ class ShmOpenClassifier(unittest.TestCase):
         self.assertEqual(recorded.failures, [])
         self.assertEqual(recorded.errors, [])
         self.assertEqual(recorded.unexpectedSuccesses, [])
+        self.assertTrue(recorded.wasSuccessful())
+        self.assertEqual(
+            {call.args[0] for call in provenance.call_args_list},
+            {wallet["path"], did["path"], model["path"]},
+        )
+        self.launch_guard.assert_not_called()
+        Recorded.doClassCleanups()
+
+    def test_recorded_allow_keeps_complete_probe_suite_green(self):
+        """Run every real probe method against injected tools and profile text.
+
+        Each provider and all providers together can already grant shm_open.
+        Only their deny tests expect failure; their plants name the finding
+        for the unavailable denying baseline. All remaining checks still run.
+        """
+        method_names = unittest.defaultTestLoader.getTestCaseNames(ShmOpenProbe)
+        scenarios = ((), ("wallet",), ("did",), ("model",), ("wallet", "did", "model"))
+        for allowed in scenarios:
+            with self.subTest(allowed=allowed), tempfile.TemporaryDirectory(prefix="ccrt-shm-suite-") as tmp:
+                repo = Path(tmp).resolve()
+                profiles = []
+                for original in PROFILES:
+                    profile = dict(original)
+                    profile["path"] = repo / profile["rel"]
+                    profile["path"].parent.mkdir(parents=True, exist_ok=True)
+                    text = '(version 1)\n(deny default)\n(allow file-read-data (literal "/"))\n'
+                    if profile["name"] in allowed:
+                        text = with_shm_allow(text)
+                    profile["path"].write_text(text, encoding="utf-8")
+                    profiles.append(profile)
+
+                def injected_compile(parent, root, source_text):
+                    if not source_text:
+                        raise HarnessError(f"{CC} failed with exit 1: empty source -- a harness error, not a skip and not a deny")
+                    Path(parent, "shm.c").write_text(source_text, encoding="utf-8")
+                    binary = Path(root, "shm")
+                    binary.write_text("injected executable; never launched\n", encoding="utf-8")
+                    return str(binary)
+
+                def injected_control(binary):
+                    return sbx.Result(
+                        exit_code=0, stdout="fd=3 errno=0\n", stderr="",
+                        argv=[binary, next_shm_name()],
+                    )
+
+                def injected_sandbox(**kwargs):
+                    self.assertEqual(kwargs["pinned_exe"], kwargs["launch_exe"])
+                    self.assertEqual(kwargs["timeout"], 5)
+                    self.assertEqual(len(kwargs["args"]), 1)
+                    text = Path(kwargs["profile"]).read_text(encoding="utf-8")
+                    return sbx.Result(
+                        exit_code=0,
+                        stdout="fd=3 errno=0\n" if ALLOW_IPC in text else DENY_STDOUT,
+                        stderr="",
+                        argv=[
+                            sbx.SANDBOX_EXEC, "-D",
+                            f"PROVIDER_EXECUTABLE={kwargs['pinned_exe']}",
+                            "-f", os.fspath(kwargs["profile"]),
+                            kwargs["launch_exe"], *kwargs["args"],
+                        ],
+                    )
+
+                with patch(__name__ + ".ROOT", repo), patch(__name__ + ".PROFILES", tuple(profiles)), patch.dict(
+                    START_SHA, {}, clear=True
+                ), patch.object(sbx, "REPO_ROOT", repo), patch.object(
+                    sbx, "WALLET_CONFINE_SB", profiles[0]["path"]
+                ), patch.object(os.path, "isfile", return_value=True), patch(
+                    __name__ + ".compile_shm", side_effect=injected_compile
+                ), patch(__name__ + ".run_unsandboxed", side_effect=injected_control), patch.object(
+                    sbx, "run", side_effect=injected_sandbox
+                ), patch(__name__ + ".last_change", return_value="a" * 40), patch(
+                    __name__ + ".pr_label", return_value="PR fixture"
+                ), patch.multiple(
+                    ShmOpenProbe, binary=None, root=None, parent=None,
+                    skip_reason=None, recorded_allows={},
+                ):
+                    result = unittest.TestResult()
+                    unittest.defaultTestLoader.loadTestsFromTestCase(ShmOpenProbe).run(result)
+                    self.assertEqual(result.testsRun, len(method_names))
+                    self.assertEqual(result.errors, [])
+                    self.assertEqual(result.failures, [])
+                    self.assertEqual(result.unexpectedSuccesses, [])
+                    self.assertEqual(len(result.expectedFailures), len(allowed))
+                    self.assertEqual(
+                        {case._testMethodName for case, _error in result.expectedFailures},
+                        {f"test_{name}_shm_open_is_denied" for name in allowed},
+                    )
+                    reasons = [reason for _case, reason in result.skipped]
+                    expected_reasons = [
+                        f"{name} baseline allows shm_open; finding: {FINDINGS[name]}"
+                        for name in allowed
+                    ]
+                    if "wallet" in allowed:
+                        expected_reasons.append(expected_reasons[0])
+                    self.assertCountEqual(reasons, expected_reasons)
+                    self.assertTrue(result.wasSuccessful())
+                    self.assertEqual(
+                        ShmOpenProbe.recorded_allows,
+                        {name: FINDINGS[name] for name in allowed},
+                    )
+                    for name in allowed:
+                        body = (repo / FINDINGS[name]).read_text(encoding="utf-8")
+                        profile = next(p for p in profiles if p["name"] == name)
+                        self.assertIn(f"profile: {profile['rel']}", body)
+                        self.assertIn(sha256_file(profile["path"]), body)
+                        self.assertIn(body, (repo / "lab/redteam/CRITICAL.md").read_text(encoding="utf-8"))
+                    if not allowed:
+                        self.assertFalse((repo / "lab/redteam/CRITICAL.md").exists())
+                        for rel in set(FINDINGS.values()):
+                            self.assertFalse((repo / rel).exists())
+                self.launch_guard.assert_not_called()
 
     def test_harness_error_stays_error(self):
         """An injected harness error stays an error. It is not a deny, an allow, or a skip."""
+        allow = sbx.Result(exit_code=0, stdout="fd=3 errno=0\n", stderr="", argv=["/private/shm"])
+        deny = sbx.Result(exit_code=0, stdout=DENY_STDOUT, stderr="", argv=["/private/shm"])
+        for profile in PROFILES:
+            for label, refused, expected in self.refusal_samples():
+                with self.subTest(profile=profile["name"], reason=label):
+                    class Recorded(ShmOpenProbe):
+                        skip_reason = None
+
+                    def observation(path):
+                        return allow if path == profile["path"] else deny
+
+                    with patch(__name__ + ".open_under", side_effect=observation), patch(
+                        __name__ + ".write_findings"
+                    ) as writer:
+                        observe(Recorded)
+                    writer.assert_called_once_with(ROOT, [(profile, allow)])
+                    method_name = f"test_{profile['name']}_shm_open_is_denied"
+                    method = getattr(Recorded, method_name)
+                    self.assertTrue(getattr(method, "__unittest_expecting_failure__", False))
+                    self.assertIn(FINDINGS[profile["name"]], method.__doc__)
+                    result = unittest.TestResult()
+                    try:
+                        with patch(__name__ + ".open_under", side_effect=[refused, deny]) as opened, patch.object(
+                            os.path, "isfile", return_value=True
+                        ), patch.object(result, "addError", wraps=result.addError) as added:
+                            Recorded(method_name).run(result)
+                        self.assertEqual(opened.call_count, 1)
+                        self.assertEqual(len(result.errors), 1)
+                        self.assertEqual(str(added.call_args.args[1][1]), expected)
+                        self.assertEqual(result.failures, [])
+                        self.assertEqual(result.expectedFailures, [])
+                        self.assertEqual(result.unexpectedSuccesses, [])
+                        self.assertEqual(result.skipped, [])
+                        self.assertFalse(result.wasSuccessful())
+                    finally:
+                        Recorded.doClassCleanups()
+
         wrong_exit = sbx.Result(
             exit_code=2,
             stdout=DENY_STDOUT,
