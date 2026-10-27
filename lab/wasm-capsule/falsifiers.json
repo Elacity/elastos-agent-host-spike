@@ -3053,8 +3053,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/run.rs",
-          "old": "//! machine, not the Component ABI. Both engines are test-only, not endorsed.",
-          "new": "//! machine, not the Component ABI. Both engines are test-only; neither is\n//! endorsed."
+          "old": "//! machine, not the Component ABI. Both engines are test-only, not endorsed.\n//! The runner gives the engines no host function of its own, so a granted\n//! import is only let through verification, not hosted (wc-009b). The grants\n//! are a lab stand-in, not admission.",
+          "new": "//! machine, not the Component ABI. Both engines are test-only; neither is\n//! endorsed. The runner gives the engines no host function of its own, so a\n//! granted import is only let through verification, not hosted (wc-009b). The\n//! grants are a lab stand-in, not admission."
         }
       ],
       "tests": [
