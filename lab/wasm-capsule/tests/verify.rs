@@ -12,6 +12,9 @@
 //! whose right is not the one its typed lab operation (`LAB_OPERATIONS`)
 //! needs is refused.
 //!
+//! Task 064: `BUS_V1_INTERFACES` equals the Runtime's `ALLOWED_BUS_IMPORTS`,
+//! and `bus_imports` is cx-wasm-audit's `audit_component` with that list.
+//!
 //! Every test key is made fresh in memory inside its test, with no fixed seed,
 //! and is never written, kept in a constant or printed. The signature stays in
 //! memory too: there is no signature file. The tests share one process, so
@@ -33,8 +36,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use wasm_capsule_audit::{audit, DeclaredImport, Refusal as AuditRefusal};
 use wasm_capsule_tools::verify::{
-    read_grants, verify_bundle, verify_checked, Effect, GrantsReason, GrantsRefusal, LabOperation,
-    VerifiedBundle, VerifyRefusal, GRANTS_LABEL, GRANTS_SCHEMA, LAB_OPERATIONS,
+    bus_imports, read_grants, verify_bundle, verify_checked, Effect, GrantsReason, GrantsRefusal,
+    LabOperation, VerifiedBundle, VerifyRefusal, BUS_V1_INTERFACES, GRANTS_LABEL, GRANTS_SCHEMA,
+    LAB_OPERATIONS,
 };
 use wasm_capsule_tools::{bundle_identity, CAPSULE_MANIFEST};
 
@@ -990,9 +994,16 @@ fn verifier_has_one_check_path() {
         1,
         "the tools crate audits a module in more than one place"
     );
-    for other in ["verify_name_signature", "audit_component"] {
-        assert!(!all.contains(other), "the tools crate uses {other}");
-    }
+    assert!(
+        !all.contains("verify_name_signature"),
+        "the tools crate uses verify_name_signature"
+    );
+    // Task 064: the one component audit, in `bus_imports`.
+    assert_eq!(
+        calls(&all, "audit_component"),
+        1,
+        "the tools crate audits a component in more than one place, or nowhere"
+    );
     // One manifest read and one grants read: two parses in the whole crate,
     // one in each reader, and one call of each reader beside its definition.
     assert_eq!(
@@ -1078,6 +1089,7 @@ fn verified_bundle_is_sealed() {
     assert_eq!(
         public,
         [
+            "bus_imports",
             "cid",
             "entries",
             "entrypoint",
@@ -1253,4 +1265,108 @@ fn key_and_seed_files_are_ignored_by_git() {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// Task 064: the Runtime's admission file, read only by
+/// `bus_interfaces_are_the_runtime_admission_list`.
+const RUNTIME_COMPONENT_RS: &str = "../../elastos/crates/elastos-server/src/component.rs";
+
+/// The line that opens the Runtime's list of allowed Bus imports, exactly.
+const ALLOWED_BUS_IMPORTS_HEAD: &str = "const ALLOWED_BUS_IMPORTS: &[&str] = &[";
+
+#[test]
+fn bus_interfaces_are_the_runtime_admission_list() {
+    let path = lane_dir().join(RUNTIME_COMPONENT_RS);
+    let source = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let lines: Vec<&str> = source.lines().collect();
+    let heads: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| **line == ALLOWED_BUS_IMPORTS_HEAD)
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(
+        heads.len(),
+        1,
+        "{} holds {ALLOWED_BUS_IMPORTS_HEAD:?} {} times, not once",
+        path.display(),
+        heads.len()
+    );
+    let body = &lines[heads[0] + 1..];
+    let end = body
+        .iter()
+        .position(|line| line.trim() == "];")
+        .unwrap_or_else(|| panic!("ALLOWED_BUS_IMPORTS has no closing `];`"));
+    let names: Vec<&str> = body[..end]
+        .iter()
+        .map(|line| {
+            line.trim()
+                .strip_prefix('"')
+                .and_then(|rest| rest.strip_suffix("\","))
+                .filter(|name| !name.contains('"'))
+                .unwrap_or_else(|| {
+                    panic!("ALLOWED_BUS_IMPORTS holds a line that is not \"<name>\",: {line:?}")
+                })
+        })
+        .collect();
+    assert_eq!(
+        names, BUS_V1_INTERFACES,
+        "BUS_V1_INTERFACES is not the Runtime's ALLOWED_BUS_IMPORTS, in order"
+    );
+}
+
+/// A component whose one import section imports `names`, each an empty
+/// instance, in order.
+fn component_importing(names: &[&str]) -> Vec<u8> {
+    let imports: String = names
+        .iter()
+        .map(|name| format!(r#"(import "{name}" (instance))"#))
+        .collect();
+    wat::parse_str(format!("(component {imports})")).expect("parse the component fixture")
+}
+
+#[test]
+fn bus_imports_lists_the_bus_interfaces_a_component_imports() {
+    let names = ["elastos:bus/providers@1.0.0", "elastos:bus/runtime@1.0.0"];
+    assert_eq!(
+        bus_imports(&component_importing(&names)),
+        Ok(names.map(String::from).to_vec())
+    );
+}
+
+#[test]
+fn bus_imports_refuses_an_interface_outside_bus_v1_by_name() {
+    for name in [
+        "wasi:cli/environment@0.2.0",
+        "elastos:bus/runtime@2.0.0",
+        // The world's export, not an import.
+        "elastos:bus/lifecycle@1.0.0",
+    ] {
+        let refusal = bus_imports(&component_importing(&[name]))
+            .expect_err(&format!("{name} must be refused"));
+        assert_eq!(
+            refusal,
+            VerifyRefusal::Audit(AuditRefusal::UndeclaredInterface { name: name.into() }),
+            "{name}"
+        );
+        assert_eq!(
+            refusal.to_string(),
+            format!("undeclared interface {name}"),
+            "{name}"
+        );
+    }
+    let refusal = bus_imports(&component_importing(&["wasi:cli/environment@0.2.0"]))
+        .expect_err("wasi:cli/environment@0.2.0 must be refused");
+    assert_eq!(
+        refusal.to_string(),
+        "undeclared interface wasi:cli/environment@0.2.0"
+    );
+}
+
+#[test]
+fn bus_imports_refuses_a_core_module() {
+    let refusal = bus_imports(IMPORTING_MODULE).expect_err("a core module must be refused");
+    assert_eq!(refusal, VerifyRefusal::Audit(AuditRefusal::NotAComponent));
+    assert_eq!(refusal.to_string(), "not a component");
 }

@@ -1993,8 +1993,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/README.md",
-          "old": "`falsifiers.json` holds 191 planted bugs",
-          "new": "`falsifiers.json` holds 190 planted bugs"
+          "old": "`falsifiers.json` holds 192 planted bugs",
+          "new": "`falsifiers.json` holds 191 planted bugs"
         }
       ],
       "tests": [
@@ -3085,8 +3085,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/README.md",
-          "old": "outside the 191",
-          "new": "outside the 190"
+          "old": "outside the 192",
+          "new": "outside the 191"
         }
       ],
       "tests": [
@@ -3139,6 +3139,28 @@
       ],
       "tests": [
         "receipt_labels_each_engine_peak_as_process_rss_not_linear_memory"
+      ]
+    },
+    {
+      "id": "F-WC9B-BUS-LIST-WIDENED",
+      "title": "the lab's Bus v1 interface list gains wasi:cli/environment@0.2.0 as a sixth entry",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "pub const BUS_V1_INTERFACES: [&str; 5] = [\n",
+          "new": "pub const BUS_V1_INTERFACES: [&str; 6] = [\n"
+        },
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    \"elastos:bus/providers@1.0.0\",\n];\n",
+          "new": "    \"elastos:bus/providers@1.0.0\",\n    \"wasi:cli/environment@0.2.0\",\n];\n"
+        }
+      ],
+      "tests": [
+        "bus_interfaces_are_the_runtime_admission_list",
+        "bus_imports_refuses_an_interface_outside_bus_v1_by_name"
       ]
     }
   ]

@@ -60,6 +60,14 @@
 //! lab stand-in, not admission; no manifest field is added, and the module's
 //! own import section stays the declaration. Imports are not type-checked;
 //! see README's typed lab operations gap.
+//!
+//! Task 064 (wc-009b, first half): the Bus path, beside the core path above.
+//! The contract already exists: world `product-capsule-v1` of package
+//! `elastos:bus@1.0.0` (`elastos/wit/elastos-bus-v1.wit`). [`BUS_V1_INTERFACES`]
+//! holds its five import names, equal to the Runtime's `ALLOWED_BUS_IMPORTS`,
+//! and [`bus_imports`] passes a component to cx-wasm-audit's `audit_component`
+//! with that list, with no check of its own. No Bus host exists in the lab, and
+//! no engine links or runs a component. A lab stand-in, not admission.
 
 use std::fmt;
 use std::fs;
@@ -72,7 +80,7 @@ use capsule_identity::{
 };
 use elastos_common::CapsuleManifest;
 use serde_json::{Map, Value};
-use wasm_capsule_audit::{audit, Refusal as AuditRefusal};
+use wasm_capsule_audit::{audit, audit_component, Refusal as AuditRefusal};
 
 /// One import, `module` and `name`: the audit's own type, which the grants
 /// reader returns and the verifier takes.
@@ -124,6 +132,30 @@ pub const LAB_OPERATIONS: &[LabOperation] = &[LabOperation {
     right: "call",
     effect: Effect::None,
 }];
+
+/// The Bus v1 interfaces a capsule may import, in the Runtime's order: the
+/// imports of world `product-capsule-v1` in `elastos/wit/elastos-bus-v1.wit`
+/// plus their shared `types`, exactly the Runtime's `ALLOWED_BUS_IMPORTS` in
+/// `elastos/crates/elastos-server/src/component.rs` (a test holds the two
+/// equal). `lifecycle` is the world's export, so it is not here. A lab
+/// stand-in, not admission.
+pub const BUS_V1_INTERFACES: [&str; 5] = [
+    "elastos:bus/types@1.0.0",
+    "elastos:bus/runtime@1.0.0",
+    "elastos:bus/identity@1.0.0",
+    "elastos:bus/capabilities@1.0.0",
+    "elastos:bus/providers@1.0.0",
+];
+
+/// The Bus interfaces the lab would link for `component`: cx-wasm-audit's
+/// `audit_component` with [`BUS_V1_INTERFACES`], and nothing else. Its list is
+/// the component's own import names in section order; its refusal (an import
+/// outside Bus v1, or bytes that are not a component, a core module too) is
+/// returned as [`VerifyRefusal::Audit`], unchanged. No Bus host exists in the
+/// lab, so nothing is linked. A lab stand-in, not admission.
+pub fn bus_imports(component: &[u8]) -> Result<Vec<String>, VerifyRefusal> {
+    audit_component(component, &BUS_V1_INTERFACES).map_err(VerifyRefusal::Audit)
+}
 
 /// The lab grants file's `schema`, exactly.
 pub const GRANTS_SCHEMA: &str = "wc-009.lab-grants/v2";
@@ -211,7 +243,8 @@ pub enum VerifyRefusal {
     ManifestUnreadable { reason: String },
     /// No checked entry has the manifest's `entrypoint` path.
     EntrypointMissing { entrypoint: String },
-    /// The cx-wasm-audit crate refused the entrypoint module.
+    /// The cx-wasm-audit crate refused the entrypoint module, or (from
+    /// [`bus_imports`]) a component.
     Audit(AuditRefusal),
     /// The module imports, granted, an import with no entry in
     /// [`LAB_OPERATIONS`].
