@@ -19,6 +19,7 @@
           not_joined: "Community not joined",
           left: "Left Community",
           joined_unreachable: "Community unreachable",
+          recovery_exhausted: "Community can't connect. Restart Home to reconnect.",
           live: "Community live",
         };
         if (communityStatus) {

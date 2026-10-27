@@ -330,22 +330,13 @@ pub async fn run_serve(
             None
         } else {
             let api_url = format!("http://{}", addr);
-            let shell_mode = std::env::var("ELASTOS_SHELL_MODE").unwrap_or_else(|_| "auto".into());
-            let stdin_cfg = if shell_mode == "cli" {
-                std::process::Stdio::inherit()
-            } else {
-                std::process::Stdio::piped()
-            };
-            match tokio::process::Command::new(&shell_path)
-                .env("ELASTOS_API", &api_url)
-                .env("ELASTOS_TOKEN", &shell_session.token)
-                .env("ELASTOS_SHELL_MODE", &shell_mode)
-                .stdin(stdin_cfg)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::inherit())
-                .kill_on_drop(true)
-                .spawn()
-            {
+            let (mut command, shell_mode) = shell_capsule_command(
+                &shell_path,
+                &api_url,
+                &shell_session.token,
+                std::env::var("ELASTOS_SHELL_MODE").ok(),
+            );
+            match command.spawn() {
                 Ok(child) => {
                     tracing::info!(
                         "Spawned shell capsule (PID {}, mode={})",
@@ -497,6 +488,40 @@ pub async fn run_serve(
     Ok(())
 }
 
+/// The command that starts the shell capsule for a server's own API, and the
+/// decision mode it runs in. `requested_mode` is `ELASTOS_SHELL_MODE`.
+///
+/// The shell gets the terminal only for an explicit `cli`; otherwise its stdin
+/// is a pipe, so without a requested mode the shell's own default (no TTY)
+/// is `agent`: grants come only from the policy file. Pass `agent` explicitly so
+/// the logged mode is the one the shell runs. Any explicit mode, including
+/// `auto` for development, is passed through unchanged.
+pub(crate) fn shell_capsule_command(
+    shell_path: &std::path::Path,
+    api_url: &str,
+    token: &str,
+    requested_mode: Option<String>,
+) -> (tokio::process::Command, String) {
+    let mode = requested_mode
+        .filter(|mode| !mode.is_empty())
+        .unwrap_or_else(|| "agent".into());
+    let stdin = if mode == "cli" {
+        std::process::Stdio::inherit()
+    } else {
+        std::process::Stdio::piped()
+    };
+    let mut command = tokio::process::Command::new(shell_path);
+    command
+        .env("ELASTOS_API", api_url)
+        .env("ELASTOS_TOKEN", token)
+        .env("ELASTOS_SHELL_MODE", &mode)
+        .stdin(stdin)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true);
+    (command, mode)
+}
+
 /// The first VM capsule gets the same Capsule session the supervisor gives every
 /// capsule other than the shell. Its token is readable inside the guest.
 async fn create_initial_vm_session(
@@ -575,5 +600,44 @@ mod tests {
             shell_route_status(registry, &shell.token).await,
             StatusCode::OK
         );
+    }
+
+    fn shell_env(command: &tokio::process::Command, key: &str) -> Option<String> {
+        command
+            .as_std()
+            .get_envs()
+            .find(|(name, _)| *name == std::ffi::OsStr::new(key))
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn spawned_shell_without_a_requested_mode_runs_agent_not_auto() {
+        let shell = std::path::Path::new("/nonexistent/shell");
+        for requested in [None, Some(String::new())] {
+            let (command, mode) =
+                shell_capsule_command(shell, "http://127.0.0.1:1", "tok", requested.clone());
+            assert_eq!(mode, "agent", "{requested:?}");
+            assert_eq!(
+                shell_env(&command, "ELASTOS_SHELL_MODE").as_deref(),
+                Some("agent"),
+                "{requested:?}"
+            );
+        }
+        for explicit in ["auto", "cli", "agent"] {
+            let (command, mode) =
+                shell_capsule_command(shell, "http://127.0.0.1:1", "tok", Some(explicit.into()));
+            assert_eq!(mode, explicit);
+            assert_eq!(
+                shell_env(&command, "ELASTOS_SHELL_MODE").as_deref(),
+                Some(explicit)
+            );
+        }
+        let (command, _) = shell_capsule_command(shell, "http://127.0.0.1:1", "tok", None);
+        assert_eq!(
+            shell_env(&command, "ELASTOS_API").as_deref(),
+            Some("http://127.0.0.1:1")
+        );
+        assert_eq!(shell_env(&command, "ELASTOS_TOKEN").as_deref(), Some("tok"));
     }
 }

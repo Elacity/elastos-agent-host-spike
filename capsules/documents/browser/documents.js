@@ -1,7 +1,4 @@
 import { createHomeNavigationClient } from "/apps/home/home-navigation-client.js";
-import {
-  createHomeClipboardClient,
-} from "/apps/home/home-clipboard-client.js?v=home-20260726a";
 
 const state = {
   homeToken: new URLSearchParams(window.location.hash.replace(/^#/, "")).get("home_token") || "",
@@ -25,18 +22,15 @@ const state = {
   pendingConfirmation: null,
   pendingChatAttachmentId: "",
 };
+// Launched by Home: framed, with the Home token Home put in the launch
+// address. Decided once here; the current address may change later.
+const DOCUMENTS_INSIDE_HOME = window.top !== window && !!state.homeToken;
 const homeOrigin = new URLSearchParams(window.location.search).get("home_origin") || "";
 const homeNavigation = createHomeNavigationClient({ homeToken: state.homeToken, homeOrigin });
 const DOCUMENTS_WINDOW_CLOSE_REQUEST_TYPE =
   "elastos.documents.window-close.request/v1";
 const DOCUMENTS_WINDOW_CLOSE_RESULT_TYPE =
   "elastos.documents.window-close.result/v1";
-const homeClipboard = createHomeClipboardClient({
-  targetId: "documents",
-  homeOrigin,
-  homeToken: state.homeToken,
-});
-homeClipboard.start();
 
 const elements = {
   documentsShell: document.getElementById("documents-shell"),
@@ -58,7 +52,6 @@ const elements = {
   findNext: document.getElementById("find-next"),
   findClose: document.getElementById("find-close"),
   contextMenu: document.getElementById("context-menu"),
-  copyPublishedLink: document.getElementById("copy-published-link"),
   editor: document.getElementById("editor"),
   preview: document.getElementById("preview"),
   previewPanel: document.getElementById("preview-panel"),
@@ -141,19 +134,44 @@ function renderInlineMarkdown(text) {
     } else if (match[3] !== undefined) {
       html += "<em>" + renderInlineMarkdown(match[3]) + "</em>";
     } else {
-      html += '<a href="' + safeMarkdownHref(match[5]) + '" rel="noopener noreferrer">' + renderInlineMarkdown(match[4]) + "</a>";
+      html += renderMarkdownLink(match[5], renderInlineMarkdown(match[4]));
     }
     offset = match.index + match[0].length;
   }
   return html + escapeHtml(text.slice(offset));
 }
 
-function safeMarkdownHref(value) {
-  const href = String(value || "").trim();
-  if (/^(https?:\/\/|elastos:\/\/|localhost:\/\/|#|\/(?!\/)|\.{1,2}\/)/i.test(href)) {
-    return escapeHtml(href);
+// Inside Home rendered Markdown has no href at all: any navigation would
+// replace the Documents frame (or its address), and a replaced frame cannot
+// answer Home's close request. A web link (same origin included) asks Home
+// through `activateMarkdownLink` (#436, as Chat); a link to a place in the
+// document scrolls there without touching the address; every other link
+// (relative paths, elastos://, localhost://, refused addresses) is plain
+// text. Outside Home links are normal anchors. `DOCUMENTS_INSIDE_HOME` is
+// decided once at launch, never from the current address.
+function renderMarkdownLink(value, labelHtml) {
+  const href = markdownHref(value);
+  if (!DOCUMENTS_INSIDE_HOME) {
+    return '<a href="' + escapeHtml(href) + '" rel="noopener noreferrer">' + labelHtml + "</a>";
   }
-  return "#";
+  if (/^https?:\/\//i.test(href)) {
+    return '<a data-open-external="' + escapeHtml(href) + '" role="link" tabindex="0">' + labelHtml + "</a>";
+  }
+  if (href.length > 1 && href.startsWith("#")) {
+    return '<a data-scroll-to="' + escapeHtml(href.slice(1)) + '" role="link" tabindex="0">' + labelHtml + "</a>";
+  }
+  return "<span>" + labelHtml + "</span>";
+}
+
+// Browsers drop tabs and newlines from an address and read "\" as "/", so
+// spellings such as "/\host", "/<tab>/host" or "\\host" would reach another
+// host; any address with a control character or backslash is refused.
+function markdownHref(value) {
+  const href = String(value || "").trim();
+  if (/[\u0000-\u001f\u007f\\]/.test(href)) {
+    return "#";
+  }
+  return /^(https?:\/\/|elastos:\/\/|localhost:\/\/|#|\/(?!\/)|\.{1,2}\/)/i.test(href) ? href : "#";
 }
 
 function headingSlug(text, number) {
@@ -166,6 +184,7 @@ function headingSlug(text, number) {
 
 function renderMarkdownDocument(source, options) {
   const interactiveTasks = !!(options && options.interactiveTasks);
+  const inline = (text) => renderInlineMarkdown(text);
   const lines = String(source || "").replace(/\r\n/g, "\n").split("\n");
   const blocks = [];
   const outline = [];
@@ -200,7 +219,7 @@ function renderMarkdownDocument(source, options) {
       headingIndex += 1;
       const title = heading[2].trim();
       const id = headingSlug(title, headingIndex);
-      blocks.push("<h" + heading[1].length + ' id="' + id + '">' + renderInlineMarkdown(title) + "</h" + heading[1].length + ">");
+      blocks.push("<h" + heading[1].length + ' id="' + id + '">' + inline(title) + "</h" + heading[1].length + ">");
       outline.push({ depth: heading[1].length, title: title, id: id });
       index += 1;
       continue;
@@ -209,7 +228,7 @@ function renderMarkdownDocument(source, options) {
     if (/^>\s?/.test(line)) {
       const quote = [];
       while (index < lines.length && /^>\s?/.test(lines[index])) {
-        quote.push(renderInlineMarkdown(lines[index].replace(/^>\s?/, "")));
+        quote.push(inline(lines[index].replace(/^>\s?/, "")));
         index += 1;
       }
       blocks.push("<blockquote><p>" + quote.join("<br>") + "</p></blockquote>");
@@ -224,8 +243,8 @@ function renderMarkdownDocument(source, options) {
         const checked = !!taskMatch && String(taskMatch[1]).toLowerCase() === "x";
         const label = taskMatch ? taskMatch[2] : taskLine.replace(/^[-*]\s+/, "");
         const checkbox = interactiveTasks
-          ? '<label class="task-item-label"><input class="task-checkbox" type="checkbox" aria-label="Toggle task completion" data-source-line="' + String(index) + '"' + (checked ? " checked" : "") + '><span>' + renderInlineMarkdown(label) + "</span></label>"
-          : '<span>' + renderInlineMarkdown((checked ? "[x] " : "[ ] ") + label) + "</span>";
+          ? '<label class="task-item-label"><input class="task-checkbox" type="checkbox" aria-label="Toggle task completion" data-source-line="' + String(index) + '"' + (checked ? " checked" : "") + '><span>' + inline(label) + "</span></label>"
+          : '<span>' + inline((checked ? "[x] " : "[ ] ") + label) + "</span>";
         items.push('<li class="task-item">' + checkbox + "</li>");
         index += 1;
       }
@@ -236,7 +255,7 @@ function renderMarkdownDocument(source, options) {
     if (/^[-*]\s+/.test(line)) {
       const items = [];
       while (index < lines.length && /^[-*]\s+/.test(lines[index])) {
-        items.push("<li>" + renderInlineMarkdown(lines[index].replace(/^[-*]\s+/, "")) + "</li>");
+        items.push("<li>" + inline(lines[index].replace(/^[-*]\s+/, "")) + "</li>");
         index += 1;
       }
       blocks.push("<ul>" + items.join("") + "</ul>");
@@ -246,7 +265,7 @@ function renderMarkdownDocument(source, options) {
     if (/^\d+\.\s+/.test(line)) {
       const items = [];
       while (index < lines.length && /^\d+\.\s+/.test(lines[index])) {
-        items.push("<li>" + renderInlineMarkdown(lines[index].replace(/^\d+\.\s+/, "")) + "</li>");
+        items.push("<li>" + inline(lines[index].replace(/^\d+\.\s+/, "")) + "</li>");
         index += 1;
       }
       blocks.push("<ol>" + items.join("") + "</ol>");
@@ -254,11 +273,11 @@ function renderMarkdownDocument(source, options) {
     }
 
     if (/^\|.*\|$/.test(line) && index + 1 < lines.length && /^\|?[\s:-]+\|[\s|:-]*$/.test(lines[index + 1])) {
-      const headerCells = line.split("|").slice(1, -1).map((cell) => "<th>" + renderInlineMarkdown(cell.trim()) + "</th>");
+      const headerCells = line.split("|").slice(1, -1).map((cell) => "<th>" + inline(cell.trim()) + "</th>");
       index += 2;
       const rows = [];
       while (index < lines.length && /^\|.*\|$/.test(lines[index])) {
-        const cells = lines[index].split("|").slice(1, -1).map((cell) => "<td>" + renderInlineMarkdown(cell.trim()) + "</td>");
+        const cells = lines[index].split("|").slice(1, -1).map((cell) => "<td>" + inline(cell.trim()) + "</td>");
         rows.push("<tr>" + cells.join("") + "</tr>");
         index += 1;
       }
@@ -273,11 +292,11 @@ function renderMarkdownDocument(source, options) {
 
     const paragraph = [];
     while (index < lines.length && lines[index].trim() && !/^(#{1,6})\s+/.test(lines[index]) && !/^```/.test(lines[index]) && !/^>\s?/.test(lines[index]) && !/^[-*]\s+/.test(lines[index]) && !/^\d+\.\s+/.test(lines[index]) && !/^(\*{3,}|-{3,}|_{3,})\s*$/.test(lines[index])) {
-      paragraph.push(renderInlineMarkdown(lines[index]));
+      paragraph.push(inline(lines[index]));
       index += 1;
     }
     if (!paragraph.length) {
-      blocks.push("<p>" + renderInlineMarkdown(line) + "</p>");
+      blocks.push("<p>" + inline(line) + "</p>");
       index += 1;
       continue;
     }
@@ -577,6 +596,59 @@ function announceHomeChrome() {
   syncHomeMenuManifest();
 }
 
+// Home frames apps without popups or top navigation, so inside Home a web
+// link in a Markdown view has no href (renderMarkdownLink) and asks Home to
+// show the exact address and open it only when the person chooses Open
+// (#436, the same request as Chat's links). Without the Home session it
+// refuses and says so. A link to a place in the document scrolls there.
+// Nothing navigates either way.
+function activateMarkdownLink(event) {
+  if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") {
+    return;
+  }
+  const link = event.target instanceof Element ? event.target.closest("[data-open-external], [data-scroll-to]") : null;
+  if (!link) {
+    return;
+  }
+  event.preventDefault();
+  const selection = window.getSelection();
+  if (event.type === "click" && selection && !selection.isCollapsed && selection.containsNode(link, true)) {
+    return;
+  }
+  if (link.hasAttribute("data-scroll-to")) {
+    const target = document.getElementById(link.getAttribute("data-scroll-to") || "");
+    if (target) {
+      target.scrollIntoView({ block: "start" });
+    }
+    return;
+  }
+  if (!canAnnounceHomeChrome()) {
+    const message = "Open Documents from Home to open web links.";
+    if (state.mode === "share") {
+      elements.shareSubtitle.textContent = message;
+    } else {
+      setStatus(message, "warning");
+    }
+    return;
+  }
+  const url = link.getAttribute("data-open-external") || "";
+  window.top.postMessage({ type: "home:open-external", url, homeToken: state.homeToken }, homeOrigin);
+}
+
+// Every Markdown view renders through here, so each one gets the inside-Home
+// link policy (renderMarkdownLink) and the handlers for its controls.
+const markdownLinkContainers = new WeakSet();
+function renderMarkdownInto(container, markdown, options) {
+  const rendered = renderMarkdownDocument(markdown, options);
+  container.innerHTML = rendered.html;
+  if (!markdownLinkContainers.has(container)) {
+    markdownLinkContainers.add(container);
+    container.addEventListener("click", activateMarkdownLink);
+    container.addEventListener("keydown", activateMarkdownLink);
+  }
+  return rendered;
+}
+
 function chooseInCapsule(options) {
   if (state.pendingConfirmation) {
     closeConfirmModal("cancel");
@@ -635,7 +707,6 @@ function openContextMenu(x, y, docDid) {
     actions.push({ action: "duplicate", label: "Duplicate" });
     if (documentItem.latest_published_cid) {
       actions.push({ action: "unpublish", label: "Unpublish" });
-      actions.push({ action: "copy-published-link", label: "Copy Published Link" });
     } else {
       actions.push({ action: "publish", label: "Publish" });
     }
@@ -845,8 +916,7 @@ function closeFindBar() {
 }
 
 function refreshPreviewFromEditor() {
-  const rendered = renderMarkdownDocument(elements.editor.value || "", { interactiveTasks: true });
-  elements.preview.innerHTML = rendered.html;
+  const rendered = renderMarkdownInto(elements.preview, elements.editor.value || "", { interactiveTasks: true });
   renderOutline(rendered.outline);
   if (!elements.findBar.classList.contains("hidden")) {
     updateFindMatches({ preserveIndex: true });
@@ -980,33 +1050,6 @@ function setDirty(dirty) {
   renderDocumentsList();
 }
 
-function setPublishedUri(uri) {
-  const cleanUri = typeof uri === "string" ? uri.trim() : "";
-  if (!cleanUri) {
-    elements.copyPublishedLink.classList.add("hidden");
-    elements.copyPublishedLink.disabled = true;
-    delete elements.copyPublishedLink.dataset.copyUri;
-    return;
-  }
-  elements.copyPublishedLink.classList.remove("hidden");
-  elements.copyPublishedLink.disabled = false;
-  elements.copyPublishedLink.dataset.copyUri = cleanUri;
-}
-
-async function copyTextToClipboard(text) {
-  await homeClipboard.writeText(text, { purpose: "resource.uri" });
-}
-
-async function copyPublishedUri(uri) {
-  const cleanUri = typeof uri === "string" ? uri.trim() : "";
-  if (!cleanUri.startsWith("elastos://")) {
-    return;
-  }
-  await copyTextToClipboard(cleanUri);
-  setStatus("Copied link.");
-  scheduleStatusClear();
-}
-
 function renderHistory() {
   elements.historyPanel.innerHTML = "";
   const revisions = state.current && Array.isArray(state.current.publish_history)
@@ -1019,20 +1062,10 @@ function renderHistory() {
   revisions.forEach((revision, index) => {
     const item = window.document.createElement("div");
     item.className = "history-item";
-    const uri = "elastos://" + revision.cid;
     item.innerHTML =
       '<span class="history-kicker">Revision ' + escapeHtml(String(revisions.length - index)) + "</span>" +
       '<span class="history-title">' + escapeHtml(shortCid(revision.cid)) + "</span>" +
-      '<span class="history-meta">' + escapeHtml(formatTime(revision.published_at)) + "</span>" +
-      '<button class="history-link" type="button" data-copy-uri="' + escapeHtml(uri) + '">Copy link</button>';
-    item.querySelector(".history-link").addEventListener("click", async (event) => {
-      try {
-        await copyPublishedUri(event.currentTarget.dataset.copyUri || "");
-      } catch (error) {
-        console.error("documents copy history link failed", error);
-        setStatus(readableDocumentsError(error, "Copy failed."), "warning");
-      }
-    });
+      '<span class="history-meta">' + escapeHtml(formatTime(revision.published_at)) + "</span>";
     elements.historyPanel.appendChild(item);
   });
 }
@@ -1075,7 +1108,6 @@ function renderCurrentDocument() {
     elements.editor.value = "";
     elements.editor.disabled = true;
     elements.preview.innerHTML = '<div class="empty-state">Create or open a document.</div>';
-    setPublishedUri("");
     renderHistory();
     renderOutline([]);
     setStatus("No document selected.");
@@ -1088,12 +1120,6 @@ function renderCurrentDocument() {
   elements.titleInput.value = state.current.title;
   elements.editor.value = state.current.body;
   refreshPreviewFromEditor();
-
-  if (state.current.latest_published_cid) {
-    setPublishedUri("elastos://" + state.current.latest_published_cid);
-  } else {
-    setPublishedUri("");
-  }
 
   renderHistory();
   clearStatus();
@@ -1862,11 +1888,10 @@ async function publishCurrent() {
       throw new Error("Save the document before publishing.");
     }
     setStatus("Publishing…");
-    const response = await documentsProviderApi("publish", {
+    await documentsProviderApi("publish", {
       doc_did: state.current.doc_did,
     });
     await selectDocument(state.current.doc_did, { force: true });
-    setPublishedUri(response.uri);
     setStatus("Published.");
     scheduleStatusClear();
   } catch (error) {
@@ -1973,10 +1998,6 @@ async function runContextMenuAction(action) {
   }
   if (action === "unpublish") {
     await unpublishCurrent();
-    return;
-  }
-  if (action === "copy-published-link" && current.latest_published_cid) {
-    await copyPublishedUri("elastos://" + current.latest_published_cid);
     return;
   }
   if (action === "delete") {
@@ -2277,7 +2298,10 @@ function setSharePreview(title, markdown, subtitle, pills) {
   document.title = title ? title + " · Documents" : "Documents";
   elements.shareTitle.textContent = title || "Documents";
   elements.shareSubtitle.textContent = subtitle || "Read-only markdown surface.";
-  elements.sharePreview.innerHTML = '<article class="markdown-body">' + renderMarkdownDocument(markdown || "").html + "</article>";
+  const article = document.createElement("article");
+  article.className = "markdown-body";
+  elements.sharePreview.replaceChildren(article);
+  renderMarkdownInto(article, markdown || "");
   elements.shareTopline.innerHTML = "";
   (pills || []).forEach((pill) => {
     const span = document.createElement("span");
@@ -2296,7 +2320,7 @@ async function loadShareBundle(options) {
   elements.shareShell.classList.remove("hidden");
 
   const params = new URLSearchParams(window.location.search);
-  const requestedFile = params.get("file");
+  const requestedFile = (options && options.file) || params.get("file");
 
   try {
     const files = await loadJson(basePath + "_files.json");
@@ -2315,9 +2339,25 @@ async function loadShareBundle(options) {
     files.forEach((file) => {
       const link = document.createElement("a");
       link.className = "share-doc-link" + (file === activeFile ? " active" : "");
-      const linkParams = new URLSearchParams(window.location.search);
-      linkParams.set("file", file);
-      link.href = window.location.pathname + "?" + linkParams.toString();
+      if (DOCUMENTS_INSIDE_HOME) {
+        // Inside Home a navigation would replace the Documents frame (and
+        // drop its Home token), so the chosen file opens in place.
+        link.setAttribute("role", "link");
+        link.tabIndex = 0;
+        const open = (event) => {
+          if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") {
+            return;
+          }
+          event.preventDefault();
+          void loadShareBundle({ ...options, file });
+        };
+        link.addEventListener("click", open);
+        link.addEventListener("keydown", open);
+      } else {
+        const linkParams = new URLSearchParams(window.location.search);
+        linkParams.set("file", file);
+        link.href = window.location.pathname + "?" + linkParams.toString();
+      }
       link.innerHTML =
         '<span class="share-doc-title">' + escapeHtml(file.replace(/\.md$/i, "")) + "</span>" +
         '<span class="share-doc-meta">' + escapeHtml(file) + "</span>";
@@ -2439,12 +2479,3 @@ function loadLockedMode() {
     await loadShareMode();
   }
 })();
-
-elements.copyPublishedLink.addEventListener("click", async () => {
-  try {
-    await copyPublishedUri(elements.copyPublishedLink.dataset.copyUri || "");
-  } catch (error) {
-    console.error("documents copy link failed", error);
-    setStatus(readableDocumentsError(error, "Copy failed."), "warning");
-  }
-});

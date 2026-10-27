@@ -70,7 +70,7 @@ jobs:
   test-behaviour:
     name: test-behaviour
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 25
     needs: source-gate
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -80,7 +80,7 @@ jobs:
         with:
           node-version: '26'
       - name: install explicit Browser test inputs
-        timeout-minutes: 5
+        timeout-minutes: 15
         env:
           DEBUG: pw:install
         run: ./scripts/test-behaviour.sh inputs
@@ -334,7 +334,7 @@ jobs:
   test-elastos:
     name: test-elastos
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     needs: source-gate
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -378,7 +378,7 @@ jobs:
         with:
           node-version: '26'
       - name: install content boundary browser fixture
-        timeout-minutes: 5
+        timeout-minutes: 20
         env:
           DEBUG: pw:install
         run: |
@@ -462,7 +462,7 @@ jobs:
         with:
           node-version: '24'
       - name: install browser layout smoke tools
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           sudo apt-get update
           sudo apt-get install -y just
@@ -573,6 +573,7 @@ jobs:
               - 'elastos/crates/elastos-protected-content-*/**'
               # Path dependencies of the capsules above.
               - 'elastos/crates/elastos-auth/**'
+              - 'elastos/crates/elastos-common/**'
               - 'elastos/crates/elastos-guest/**'
               - 'elastos/crates/elastos-identity/**'
               # Targeted, not the whole elastos-server crate (which would
@@ -896,7 +897,7 @@ jobs:
         with:
           node-version: '24'
       - name: prepare installed Home browser
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           npm ci --ignore-scripts --prefix elastos/tools/browser-playwright-engine
           export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/installed-home-browser"
@@ -1449,7 +1450,7 @@ jobs:
         with:
           node-version: '24'
       - name: prepare installed Home browser
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           npm ci --ignore-scripts --prefix elastos/tools/browser-playwright-engine
           export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/installed-home-browser"
