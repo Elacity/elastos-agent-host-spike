@@ -1,0 +1,18 @@
+id: R6-3
+file: src/lib.rs
+test: invalid_grant_host_id_does_not_skip_the_bind
+--- old
+            if validated_name(&grant.host_id).is_none()
+                || grant.host_id != review.host_id
+                || grant.host_id != self.id
+            {
+                return Err(Refuse::ForeignHost);
+            }
+--- new
+            if validated_name(&review.host_id).is_some()
+                && validated_name(&grant.host_id).is_some()
+                && grant.host_id != review.host_id
+            {
+                return Err(Refuse::ForeignHost);
+            }
+--- end
