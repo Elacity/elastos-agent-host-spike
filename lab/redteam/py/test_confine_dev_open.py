@@ -305,11 +305,27 @@ def outcome_name(opened):
 
 
 def parse_line(stdout):
-    """Four ``(name, fd, n, errno, want_read)`` tuples, or None."""
+    """Four tuples, or None for a malformed line; numeric text must be canonical."""
     match = _LINE.fullmatch(stdout)
     if match is None:
         return None
-    numbers = [int(part) for part in match.groups()]
+    numbers = []
+    for index, part in enumerate(match.groups()):
+        name = DEVICE_NAMES[index // 3]
+        field = ("fd", "n", "errno")[index % 3]
+        try:
+            number = int(part)
+        except ValueError as caught:
+            raise HarnessError(
+                f"unparseable {name} {field} integer {part!r} is a harness error, "
+                "not a deny and not an allow"
+            ) from caught
+        if part != str(number):
+            raise HarnessError(
+                f"noncanonical {name} {field} integer {part!r} is a harness error, "
+                "not a deny and not an allow"
+            )
+        numbers.append(number)
     parsed = []
     for index, (name, _path, want_read) in enumerate(DEVICES):
         fd, n, err = numbers[index * 3:(index + 1) * 3]
@@ -1749,6 +1765,32 @@ class DevOpenRules(unittest.TestCase):
                 ),
                 phrase + ": " + repr(stdout),
             ))
+        for name, _path, want_read in DEVICES:
+            read_n = 16 if want_read else -1
+            numeric_cases = [
+                ("fd", "-01", "-01", -1, 1),
+                ("fd", "03", "03", read_n, 0),
+                ("fd", "-0", "-0", read_n, 0),
+                ("n", "-01", -1, "-01", 1),
+                ("n", "-0", 3, "-0", 0),
+                ("errno", "01", -1, -1, "01"),
+                ("errno", "00", 3, read_n, "00"),
+                ("errno", "-0", 3, read_n, "-0"),
+            ]
+            if want_read:
+                numeric_cases.append(("n", "016", 3, "016", 0))
+            for field, text, fd, n, err in numeric_cases:
+                label = f"noncanonical {name} {field} integer {text!r}"
+                samples.append((
+                    label,
+                    sbx.Result(
+                        exit_code=0,
+                        stdout=stdout_with(name, fd, n, err),
+                        stderr="",
+                        argv=["/private/devop"],
+                    ),
+                    label + " is a harness error, not a deny and not an allow",
+                ))
         pair = stdout_for_names(("zero", "random"))
         samples.append((
             "nonempty deny stderr",
@@ -1763,6 +1805,14 @@ class DevOpenRules(unittest.TestCase):
                 exit_code=0, stdout=pair, stderr=noise, argv=["/private/devop"],
             ),
             "nonempty allow stderr is a harness error, not an allow: " + repr(noise),
+        ))
+        samples.append((
+            "nonempty stderr",
+            sbx.Result(
+                exit_code=0, stdout="opened\n", stderr=noise, argv=["/private/devop"],
+            ),
+            "nonempty stderr is a harness error, not a deny and not an allow: "
+            f"stdout={'opened' + chr(10)!r} stderr={noise!r}",
         ))
         malformed = "opened\n"
         samples.append((
@@ -1780,7 +1830,8 @@ class DevOpenRules(unittest.TestCase):
 
         Two- and three-device opens are allows, not malformed lines. Wrong
         errno on a denied device and on an allowed device is neither a deny
-        nor an allow. These results launch nothing.
+        nor an allow. Padded integers and negative zero in every numeric
+        field are harness errors. These results launch nothing.
         """
         self.assertEqual(stdout_for_names(()), DENY_STDOUT)
         self.assertEqual(stdout_for_names(DEVICE_NAMES), ALL_STDOUT)
@@ -1886,6 +1937,26 @@ class DevOpenRules(unittest.TestCase):
                     label for label, _result, expected in samples if expected == message
                 )],
             )
+        # Conversion limits also produce HarnessError with the field's reason.
+        # Inject the conversion failure so this holds for every Python digit limit.
+        parts = _LINE.fullmatch(DENY_STDOUT).groups()
+        for index, part in enumerate(parts):
+            name = DEVICE_NAMES[index // 3]
+            field = ("fd", "n", "errno")[index % 3]
+            expected = (
+                f"unparseable {name} {field} integer {part!r} is a harness error, "
+                "not a deny and not an allow"
+            )
+            with self.subTest(conversion=field, device=name), patch(
+                __name__ + ".int",
+                side_effect=[int(value) for value in parts[:index]] + [ValueError()],
+                create=True,
+            ):
+                with self.assertRaises(HarnessError) as caught:
+                    classify(sbx.Result(
+                        exit_code=0, stdout=DENY_STDOUT, stderr="", argv=[],
+                    ))
+            self.assertEqual(str(caught.exception), expected)
         self.launch_guard.assert_not_called()
 
     def test_unsandboxed_failure_is_an_error(self):
@@ -2554,7 +2625,10 @@ class DevOpenRules(unittest.TestCase):
                 self.launch_guard.assert_not_called()
 
     def test_harness_error_stays_error(self):
-        """An injected harness error stays an error. It is not a deny, an allow, or a skip."""
+        """Every refusal, including padded integers and negative zero, stays an error.
+
+        Check each profile after its allow has been recorded and marked expected.
+        """
         allow = sbx.Result(
             exit_code=0,
             stdout=stdout_for_names(("zero",)),
