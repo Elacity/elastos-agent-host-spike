@@ -100,15 +100,20 @@ file. It binds those lines to the component id the Runtime printed for
 this launch (a `[run]` line or API, never the guest or the jsonl
 itself). A missing assigned id is not a match: NEEDS RUNTIME, never
 PASS. A foreign `capsule_id` is a FAIL. Session id must equal this
-launch, must be an unguessable 128-bit hex minted host-side, and must
-not alias `capsule_id` or `identity::context().session`. `session-1`
-is refused. `module_hash` is the only hash field and must be of the
-staged bytes that will be executed. `guest_function` must be
-`request_journal_grants`. Receipts carry a strictly increasing `seq`.
+launch, must be an unguessable 128-bit hex minted host-side from a
+CSPRNG, recorded in a host-held used set, and must not alias
+`capsule_id` or `identity::context().session`. `session-1`, a 32-hex
+value below `2^64` (clock, pid, or zeros), and a session reused across
+runs are refused. `module_hash` is the only hash field and must be of
+the staged bytes hashed from the same opened fd that load will
+execute; a rename-swap between hash and load FAILs. `guest_function`
+must be `request_journal_grants`. Receipts carry a strictly increasing
+`seq` with checked arithmetic; wrap at `u64::MAX` is refused.
 Duplicate JSON keys and a `capsule_id` with whitespace FAIL. The lock
-records the real receipt size; a same-inode shrink or a rewrite after
-`run_until` FAIL. The cargo test itself refuses PASS while any of
-those fields is missing.
+records the real receipt size; a same-inode shrink, a rewrite after
+`run_until`, a dangling symlink journal, a UTF-8 BOM, or a truncated
+final line FAIL. One complete line is not a bind. The cargo test
+itself refuses PASS while any of those fields is missing.
 
 The Runtime today writes `capsule_id` as `component-<uuid>` and leaves
 `principal_id` null. It does not print that id, and it does not record
@@ -201,6 +206,14 @@ when each test fails at its refusal assertion.
 | F-A8-rewrite-after-run | accept a same-inode rewrite after `run_until` | `rewrite_after_seal_fails` | CAUGHT |
 | F-A8-dup-keys | last-wins duplicate JSON keys | `duplicate_json_keys_fail` | CAUGHT |
 | F-A8-capsule-trim | trim `capsule_id` whitespace | `capsule_id_whitespace_fails` | CAUGHT |
+| F-A8-session-from-time | accept a 32-hex session from the clock | `session_from_time_is_refused` | CAUGHT |
+| F-A8-session-from-pid | accept a 32-hex session from the pid | `session_from_pid_is_refused` | CAUGHT |
+| F-A8-session-zeros | accept the all-zero 32-hex session | `session_all_zeros_is_refused` | CAUGHT |
+| F-A8-session-reused | allow the same session on a second bind | `session_reused_across_runs_is_refused` | CAUGHT |
+| F-A8-seq-wrap | let `seq` wrap from `u64::MAX` to `0` | `receipt_seq_wrap_is_refused` | CAUGHT |
+| F-A8-toctou-rename | skip the post-load inode and hash recheck | `staged_rename_between_hash_and_load_fails` | CAUGHT |
+| F-A8-symlink-journal | treat a dangling symlink journal as absent | `dangling_symlink_journal_is_refused` | CAUGHT |
+| F-A8-bom-truncated | drop a BOM or truncated line and bind the rest | `bom_or_truncated_journal_is_refused` | CAUGHT |
 
 Under F-A1-runtime the Runtime still refused the WASI build, through its
 core-module import check, with a different reason; the exact-reason assertion

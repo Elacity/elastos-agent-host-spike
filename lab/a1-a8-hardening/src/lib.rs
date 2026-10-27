@@ -7,6 +7,7 @@
 
 use serde::de::{self, Deserialize, Deserializer, MapAccess, Visitor};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -234,6 +235,56 @@ pub fn executed_bytes_hash(staged: &[u8], claimed: &[u8]) -> Result<String, Stri
     Ok(staged_hash)
 }
 
+/// Host-held seal of a staged component, hashed from one opened fd.
+#[derive(Clone, Debug)]
+pub struct StagedSeal {
+    pub path: PathBuf,
+    pub inode: u64,
+    pub size: u64,
+    pub hash: String,
+}
+
+/// Open the staged path, refuse a symlink, and hash the bytes from that
+/// same fd. A later rename-swap changes the inode or hash.
+pub fn seal_staged_bytes(path: &Path) -> Result<StagedSeal, String> {
+    let link = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if link.file_type().is_symlink() {
+        return Err("staged component must not be a symlink".into());
+    }
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    let meta = file.metadata().map_err(|error| error.to_string())?;
+    if meta.ino() != link.ino() || meta.len() != link.len() {
+        return Err("module_hash must be of the exact bytes executed".into());
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 != meta.len() {
+        return Err("module_hash must be of the exact bytes executed".into());
+    }
+    Ok(StagedSeal {
+        path: path.to_path_buf(),
+        inode: meta.ino(),
+        size: meta.len(),
+        hash: sha256(&bytes),
+    })
+}
+
+/// Re-open the staged path after load and refuse if the inode, size, or
+/// hash moved. Closes the rename-swap window between hash and load.
+pub fn executed_bytes_still_sealed(seal: &StagedSeal) -> Result<String, String> {
+    let again = seal_staged_bytes(&seal.path)?;
+    if again.inode != seal.inode || again.size != seal.size || again.hash != seal.hash {
+        return Err("module_hash must be of the exact bytes executed".into());
+    }
+    Ok(seal.hash.clone())
+}
+
+/// Seal the staged entrypoint the Runtime `load` path will open.
+pub fn seal_staged_component(capsule: &Path, manifest: &[u8]) -> Result<StagedSeal, String> {
+    seal_staged_bytes(&capsule.join(entrypoint(manifest)))
+}
+
 /// The root component's import names, read independently of the Runtime.
 /// Names that wit-component generates for types and functions are left out,
 /// as the Runtime's own check skips them.
@@ -349,6 +400,7 @@ pub struct Home {
     finished: bool,
     launch_receipts: Mutex<Option<ReceiptCursor>>,
     receipt_seal: Mutex<Option<ReceiptSeal>>,
+    used_sessions: Mutex<HashSet<String>>,
 }
 
 struct Spawned {
@@ -394,7 +446,25 @@ impl Home {
             finished: false,
             launch_receipts: Mutex::new(None),
             receipt_seal: Mutex::new(None),
+            used_sessions: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Record a host-minted session once. A second insert is reuse.
+    pub fn record_session(&self, session: &str) -> Result<(), String> {
+        if !is_session_id(session) {
+            return Err(format!(
+                "session_id must be an unguessable per-launch id: {session}"
+            ));
+        }
+        let mut used = self
+            .used_sessions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !used.insert(session.to_string()) {
+            return Err(format!("session_id reused across runs: {session}"));
+        }
+        Ok(())
     }
 
     pub fn home(&self) -> &Path {
@@ -520,14 +590,18 @@ impl Home {
 
     /// Fail if a leftover or planted receipt file is already in this Home.
     /// Called before the snapshot and again at spawn so the check covers
-    /// the whole window from snapshot through `elastos run`.
+    /// the whole window from snapshot through `elastos run`. A dangling
+    /// symlink is a planted journal: `exists()` misses it.
     pub fn assert_receipts_absent(&self) {
         let path = self.receipts_path();
-        assert!(
-            !path.exists(),
-            "capability-requests.jsonl must not exist before the guest is launched ({})",
-            path.display()
-        );
+        match fs::symlink_metadata(&path) {
+            Ok(_) => panic!(
+                "capability-requests.jsonl must not exist before the guest is launched ({})",
+                path.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("capability-requests.jsonl: {error}"),
+        }
     }
 
     /// Record the real size and inode at first sight. A later shrink of
@@ -975,6 +1049,9 @@ pub fn authorship_gaps(
     if records.is_empty() || records.iter().any(|record| record.seq.is_none()) {
         missing.push("receipt seq");
     }
+    if records.len() != 2 {
+        missing.push("write-then-read pair");
+    }
     Ok(missing)
 }
 
@@ -989,10 +1066,13 @@ fn refuse_seq(records: &[CapabilityRequestRecord]) -> Result<(), String> {
     }
     let nums: Vec<u64> = records.iter().map(|record| record.seq.unwrap()).collect();
     for pair in nums.windows(2) {
-        if pair[1] != pair[0] + 1 {
-            return Err(format!(
-                "receipt seq must be strictly increasing without gaps or repeats; host records: {records:?}"
-            ));
+        match pair[0].checked_add(1) {
+            Some(next) if pair[1] == next => {}
+            _ => {
+                return Err(format!(
+                    "receipt seq must be strictly increasing without gaps or repeats; wrap at u64::MAX is refused; host records: {records:?}"
+                ));
+            }
         }
     }
     Ok(())
@@ -1025,6 +1105,11 @@ pub fn read_capability_requests_since(
         .map_err(|_| None)?;
     let mut text = String::new();
     file.read_to_string(&mut text).map_err(|_| None)?;
+    if text.as_bytes().starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return Err(Some(
+            "capability-requests.jsonl must not start with a BOM".into(),
+        ));
+    }
     if !text.is_empty() && !text.ends_with('\n') {
         if let Some(last) = text.rfind('\n') {
             text.truncate(last + 1);
@@ -1039,13 +1124,7 @@ pub fn read_capability_requests_since(
         }
         match parse_capability_record(line) {
             Ok(record) => records.push(record),
-            Err(reason)
-                if reason.contains("duplicate JSON key")
-                    || reason.contains("receipt seq must be") =>
-            {
-                return Err(Some(reason));
-            }
-            Err(_) => {}
+            Err(reason) => return Err(Some(reason)),
         }
     }
     Ok(records)
@@ -1092,6 +1171,12 @@ pub fn records_from_sealed_receipts(
             "capability-requests.jsonl rewritten after run; host receipts are the sealed copy"
                 .to_string(),
         );
+    }
+    if current.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return Err("capability-requests.jsonl must not start with a BOM".into());
+    }
+    if !current.is_empty() && !current.ends_with(b"\n") {
+        return Err("capability-requests.jsonl truncated final line".into());
     }
     let cursor = ReceiptCursor {
         path: path.to_path_buf(),
@@ -1141,10 +1226,33 @@ pub fn assigned_session_id(text: &str) -> Option<String> {
 }
 
 /// Unguessable per-launch id: 32 lowercase hex digits (128 bits), minted
-/// host-side. Optional `session-` prefix. `session-1` is refused.
+/// host-side from a CSPRNG. Optional `session-` prefix. `session-1` is
+/// refused. Values below `2^64` are time, pid, or zero derived.
 pub fn is_session_id(word: &str) -> bool {
     let hex = word.strip_prefix("session-").unwrap_or(word);
-    hex.len() == 32 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    if hex.len() != 32 || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return false;
+    }
+    let Ok(value) = u128::from_str_radix(hex, 16) else {
+        return false;
+    };
+    value >= (1u128 << 64)
+}
+
+/// Mint a 128-bit session from the host CSPRNG. Record it with
+/// [`Home::record_session`] so it cannot be reused across runs.
+pub fn mint_session_id() -> String {
+    for _ in 0..8 {
+        let mut bytes = [0u8; 16];
+        File::open("/dev/urandom")
+            .and_then(|mut file| file.read_exact(&mut bytes))
+            .expect("read the host CSPRNG");
+        let value = u128::from_be_bytes(bytes);
+        if value >= (1u128 << 64) {
+            return format!("{value:032x}");
+        }
+    }
+    panic!("host CSPRNG did not yield a 128-bit session")
 }
 
 fn is_component_id(word: &str) -> bool {

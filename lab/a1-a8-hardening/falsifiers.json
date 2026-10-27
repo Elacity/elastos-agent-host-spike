@@ -306,7 +306,7 @@
       "edits": [
         {
           "file": "src/lib.rs",
-          "old": "pub fn is_session_id(word: &str) -> bool {\n    let hex = word.strip_prefix(\"session-\").unwrap_or(word);\n    hex.len() == 32 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))\n}",
+          "old": "pub fn is_session_id(word: &str) -> bool {\n    let hex = word.strip_prefix(\"session-\").unwrap_or(word);\n    if hex.len() != 32 || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {\n        return false;\n    }\n    let Ok(value) = u128::from_str_radix(hex, 16) else {\n        return false;\n    };\n    value >= (1u128 << 64)\n}",
           "new": "pub fn is_session_id(word: &str) -> bool {\n    let Some(rest) = word\n        .strip_prefix(\"session-\")\n        .or_else(|| word.strip_prefix(\"session:\"))\n    else {\n        return false;\n    };\n    !rest.is_empty()\n        && rest\n            .bytes()\n            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')\n}"
         }
       ],
@@ -431,6 +431,174 @@
       ],
       "tests": [
         "capsule_id_whitespace_fails"
+      ]
+    },
+    {
+      "id": "F-A8-session-from-time",
+      "title": "accept a 32-hex session minted from the clock",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "session_id must be an unguessable per-launch id"
+      ],
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    let Ok(value) = u128::from_str_radix(hex, 16) else {\n        return false;\n    };\n    value >= (1u128 << 64)",
+          "new": "    let Ok(_value) = u128::from_str_radix(hex, 16) else {\n        return false;\n    };\n    true"
+        }
+      ],
+      "tests": [
+        "session_from_time_is_refused"
+      ]
+    },
+    {
+      "id": "F-A8-session-from-pid",
+      "title": "accept a 32-hex session minted from the pid",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "session_id must be an unguessable per-launch id"
+      ],
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    let Ok(value) = u128::from_str_radix(hex, 16) else {\n        return false;\n    };\n    value >= (1u128 << 64)",
+          "new": "    let Ok(_value) = u128::from_str_radix(hex, 16) else {\n        return false;\n    };\n    true"
+        }
+      ],
+      "tests": [
+        "session_from_pid_is_refused"
+      ]
+    },
+    {
+      "id": "F-A8-session-zeros",
+      "title": "accept the all-zero 32-hex session",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "session_id must be an unguessable per-launch id"
+      ],
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    let Ok(value) = u128::from_str_radix(hex, 16) else {\n        return false;\n    };\n    value >= (1u128 << 64)",
+          "new": "    let Ok(_value) = u128::from_str_radix(hex, 16) else {\n        return false;\n    };\n    true"
+        }
+      ],
+      "tests": [
+        "session_all_zeros_is_refused"
+      ]
+    },
+    {
+      "id": "F-A8-session-reused",
+      "title": "allow the same session on a second bind",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "session_id reused across runs"
+      ],
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        if !used.insert(session.to_string()) {\n            return Err(format!(\"session_id reused across runs: {session}\"));\n        }",
+          "new": "        let _ = used.insert(session.to_string());"
+        }
+      ],
+      "tests": [
+        "session_reused_across_runs_is_refused"
+      ]
+    },
+    {
+      "id": "F-A8-seq-wrap",
+      "title": "let seq wrap from u64::MAX to 0",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "wrap at u64::MAX is refused"
+      ],
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        match pair[0].checked_add(1) {\n            Some(next) if pair[1] == next => {}",
+          "new": "        match Some(pair[0].wrapping_add(1)) {\n            Some(next) if pair[1] == next => {}"
+        }
+      ],
+      "tests": [
+        "receipt_seq_wrap_is_refused"
+      ]
+    },
+    {
+      "id": "F-A8-toctou-rename",
+      "title": "skip the post-load inode and hash recheck",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "module_hash must be of the exact bytes executed"
+      ],
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if again.inode != seal.inode || again.size != seal.size || again.hash != seal.hash {\n        return Err(\"module_hash must be of the exact bytes executed\".into());\n    }\n    Ok(seal.hash.clone())",
+          "new": "    let _ = again;\n    Ok(seal.hash.clone())"
+        }
+      ],
+      "tests": [
+        "staged_rename_between_hash_and_load_fails"
+      ]
+    },
+    {
+      "id": "F-A8-symlink-journal",
+      "title": "treat a dangling symlink journal as absent via exists()",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "capability-requests.jsonl must not exist before the guest is launched"
+      ],
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "        match fs::symlink_metadata(&path) {\n            Ok(_) => panic!(\n                \"capability-requests.jsonl must not exist before the guest is launched ({})\",\n                path.display()\n            ),\n            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}\n            Err(error) => panic!(\"capability-requests.jsonl: {error}\"),\n        }",
+          "new": "        assert!(\n            !path.exists(),\n            \"capability-requests.jsonl must not exist before the guest is launched ({})\",\n            path.display()\n        );"
+        }
+      ],
+      "tests": [
+        "dangling_symlink_journal_is_refused"
+      ]
+    },
+    {
+      "id": "F-A8-bom-truncated",
+      "title": "drop a BOM or truncated final line and bind the remaining complete receipt",
+      "command": "lab",
+      "expect": "caught",
+      "fail_needles": [
+        "capability-requests.jsonl must not start with a BOM",
+        "capability-requests.jsonl truncated final line"
+      ],
+      "edits": [
+        {
+          "file": "src/lib.rs",
+          "old": "    if text.as_bytes().starts_with(&[0xEF, 0xBB, 0xBF]) {\n        return Err(Some(\n            \"capability-requests.jsonl must not start with a BOM\".into(),\n        ));\n    }\n",
+          "new": ""
+        },
+        {
+          "file": "src/lib.rs",
+          "old": "            Err(reason) => return Err(Some(reason)),",
+          "new": "            Err(reason)\n                if reason.contains(\"duplicate JSON key\")\n                    || reason.contains(\"receipt seq must be\") =>\n            {\n                return Err(Some(reason));\n            }\n            Err(_) => {}"
+        },
+        {
+          "file": "src/lib.rs",
+          "old": "    if records.len() != 2 {\n        missing.push(\"write-then-read pair\");\n    }\n",
+          "new": ""
+        },
+        {
+          "file": "src/lib.rs",
+          "old": "    if current.starts_with(&[0xEF, 0xBB, 0xBF]) {\n        return Err(\"capability-requests.jsonl must not start with a BOM\".into());\n    }\n    if !current.is_empty() && !current.ends_with(b\"\\n\") {\n        return Err(\"capability-requests.jsonl truncated final line\".into());\n    }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "bom_or_truncated_journal_is_refused"
       ]
     }
   ]
