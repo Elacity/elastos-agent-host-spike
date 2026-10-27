@@ -16,10 +16,12 @@
 // The structure follows examples/docs-viewer/surface/browser/reader.js.
 
 import { MAX_BLOCKS, cut, drawBlock, readBlock } from "./docs-render.js";
+import { launchToken, pageClient } from "./page-client.js";
+
+export { launchToken, TOKEN_HEADER } from "./page-client.js";
 
 export const VIEW_ROUTE = "/api/viewers/archive-reader/view";
 export const VIEW_SCHEMA = "elastos.archive-viewer.view/v1";
-export const TOKEN_HEADER = "x-elastos-home-token";
 
 // The same bounds the archive-viewer core applies (examples/archive-viewer):
 // P8's 256 entries and the request's eight shown entries.
@@ -39,11 +41,6 @@ const KINDS = { file: "File", directory: "Directory", archive: "Archive", other:
 
 function kindLabel(kind) {
   return typeof kind === "string" && Object.hasOwn(KINDS, kind) ? KINDS[kind] : "Other";
-}
-
-/** The launch token from `#home_token=...`, or "". */
-export function launchToken(hash) {
-  return new URLSearchParams(String(hash || "").replace(/^#/, "")).get("home_token") || "";
 }
 
 function isCount(value) {
@@ -156,30 +153,10 @@ export function readView(value) {
 
 /** The only request this page makes. */
 export function readerClient(fetchFn, token) {
+  const client = pageClient(fetchFn, VIEW_ROUTE, token, "Archive could not read this", MAX_MESSAGE_CHARS);
   return {
-    async view() {
-      const response = await fetchFn(VIEW_ROUTE, {
-        method: "GET",
-        headers: { [TOKEN_HEADER]: token },
-        credentials: "omit",
-        cache: "no-store",
-        redirect: "error",
-      });
-      if (!response.ok) {
-        let reason = "";
-        try {
-          const body = await response.json();
-          reason = body && typeof body.error === "string" ? body.error : "";
-        } catch {
-          reason = "";
-        }
-        const error = new Error(
-          cut(reason.trim() || null, MAX_MESSAGE_CHARS, `Archive could not read this (${response.status}).`),
-        );
-        error.status = response.status;
-        throw error;
-      }
-      return response.json();
+    view() {
+      return client.get();
     },
   };
 }
