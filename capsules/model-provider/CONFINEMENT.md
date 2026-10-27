@@ -605,6 +605,8 @@ profile does not grant".
   `sandbox_available` with `macos` and a missing path, and that call fails
   the test with the gate's reason. A present path on `macos` returns true.
   It needs no sandbox.
+- `falsifier_section_names_every_list_id`: the Id column matches the list, a
+  dropped F-cc39a fails, and the test needs no sandbox.
 
 `journal_corrupt` is the provider's existing code for an unavailable journal,
 and `journal_access_denied` is its code for a refused journal create or write
@@ -659,9 +661,9 @@ python3 -I examples/agent-host/falsify.py --from capsules/model-provider/confine
 `confine-falsifiers.json` holds this profile's falsifiers for the shared
 runner. Every entry uses `expect: caught`. F-cc12a uses command `wallet`,
 because the one shape check is in the wallet crate, and every other entry
-uses command `provider`. Each mutates `confine.sb` only, except the eighteen
+uses command `provider`. Each mutates `confine.sb` only, except the nineteen
 entries that edit `tests/confine/main.rs`.
-The eighteen are: F-cc1e removes the outside-read
+The nineteen are: F-cc1e removes the outside-read
 fixture rule, F-cc8-rm-journal removes the outside-create fixture grant,
 F-cc15a, F-cc15b and F-cc15c each undo one part of how the Runtime socket
 stand-in counts connections, F-cc16a, F-cc16b and F-cc16c each undo one
@@ -673,7 +675,7 @@ keeps none of the stderr lines `Provider::ended` reads, and F-cc29a skips
 the digest compare in refuse_changed_provider_executable, and F-cc31a
 renames `model_provider_ops_under_profile`, and F-cc30b,
 F-cc30c, F-cc30d and F-cc30e each change the declared-rights path in
-allow_rules_trace_to_declared_rights.
+allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match return Ok before it compares.
 
 | Id | Mutation | Named test | Why the test fails |
 | --- | --- | --- | --- |
@@ -727,13 +729,14 @@ allow_rules_trace_to_declared_rights.
 | F-cc37a | `(allow file-read-data (literal "/tmp/cc-same-line-allow"))` is written after `(deny network*)` on the same line | `allow_rules_trace_to_declared_rights` | That allow has no declared right and no platform baseline. |
 | F-cc38a | `(allow` is written on its own line after the root pin, then `file-read* (literal "/tmp/cc-unclosed"))` on the next line | `platform_baseline_rules_stay_narrow` | The allow form does not close. |
 | F-cc39a | A line `(` is written after the root pin, then `allow file-read* (literal "/tmp/cc-split-allow"))` on the next line | `platform_baseline_rules_stay_narrow` and `allow_rules_trace_to_declared_rights` | The allow form does not close. |
+| F-cc40a | In the test, `falsifier_section_ids_match` returns `Ok` before it compares | `falsifier_section_names_every_list_id` | A table that drops F-cc39a is accepted. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
 same for the outside-create grant: the refusal that test observes is the
 create, not the inspect before it. The runner rebuilds the test for both, and
 for the F-cc15, F-cc16, F-cc17, F-cc19 and F-cc29a entries, and for F-cc30b,
-F-cc30c, F-cc30d, F-cc30e and F-cc31a. F-cc30a and F-cc30f need no rebuild:
+F-cc30c, F-cc30d, F-cc30e F-cc31a and F-cc40a. F-cc30a and F-cc30f need no rebuild:
 the test reads confine.sb at runtime. Its startup recovery restores
 `tests/confine/main.rs` after a killed run (provider task 015), as it restores
 `confine.sb`. F-cc35a needs no rebuild: the test reads confine.sb at runtime.
@@ -745,6 +748,7 @@ F-cc36a needs no rebuild: sandbox-exec reads confine.sb at launch.
 F-cc37a needs no rebuild: the test reads confine.sb at runtime.
 F-cc38a needs no rebuild: the test reads confine.sb at runtime.
 F-cc39a needs no rebuild: the test reads confine.sb at runtime.
+F-cc40a needs a rebuild: it edits tests/confine/main.rs.
 
 The list is a Mac gate. On a Mac without `/usr/bin/sandbox-exec` the unmutated
 suite fails, so a list run there is no evidence. Off macOS, when
@@ -753,7 +757,7 @@ entry reads SURVIVED there. The entries whose tests need no sandbox (F-cc12a,
 F-cc15a, F-cc15b, F-cc15c, F-cc16a, F-cc16b, F-cc16c, F-cc17a, F-cc17b,
 F-cc29a, F-cc30a, F-cc30b, F-cc30c, F-cc30d, F-cc30e, F-cc30f, F-cc31a,
 F-cc35a, F-cc35b, F-cc35c, F-cc35d, F-cc35e, F-cc35f, F-cc35g, F-cc37a,
-F-cc38a and F-cc39a) are
+F-cc38a, F-cc39a and F-cc40a) are
 CAUGHT on any host that builds their crate. F-cc12a reads the profile files
 and is CAUGHT on any host that builds the wallet crate. The model-provider
 entries among them are CAUGHT on any Unix host where `tests/confine/main.rs`
