@@ -1,0 +1,6 @@
+subject-run-1 exit=0 manager-before=cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a
+subject-run-2 exit=0
+subject-run-3 exit=0
+manager-after=cd4772f1190b67e307aa47556de63a9a10eafa41ef348dbf5ee9b76636066b2a
+independent replant: 46 plants, 53 CAUGHT, 0 SURVIVED, manager restored
+hunts: cargo r7_ exit=0; subject worktree clean

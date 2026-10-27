@@ -24,3 +24,9 @@ checks that plants restore `manager.rs` byte-for-byte, independently
 replants every named plant, and runs the new r7 hunts.
 
 Findings: `REVIEW.md`.
+
+Verdict on this machine: A12 Linux lab half **FIX** (FIFO hang,
+weak overflow pin, TMPDIR mid-run false FAIL). A6 **BLOCKED
+(RA-6)**. Mac owner commands stay **NOT RUN**. The author's 46
+plants / 53 CAUGHT lines hold. Headings `34/39` and `12/14` are
+plants / CAUGHT-lines, not a miss rate.

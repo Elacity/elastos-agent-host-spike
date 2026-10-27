@@ -1,0 +1,62 @@
+subject HEAD 4564a30f1384f1b9d070762eb8e4a8e727bd2959
+plant files 46
+parsed 46 plant files
+old-list 34 names
+
+ALL PLANTS
+group  id                           tests
+OLD    F-A12-DROP-ROOTS             2 tests::a12_census_lists_runtime_storage,tests::a12_planted_storage_file_is_caught
+OLD    F-A6-NO-TOKEN-CHECK          1 tests::a6_sibling_presenting_owner_token_is_refused
+NEW    M-A12-BIND-PASS              1 tests::a12_bind_mount_is_not_run
+NEW    M-A12-DETACHED-AFTER-PASS    1 tests::a12_detached_after_return_is_not_run
+OLD    M-A12-HANDLE-EMPTY-OK        1 tests::a12_empty_file_handle_is_not_run
+OLD    M-A12-HARDCODE-FAIL          1 tests::a12_clean_isolated_root_passes
+OLD    M-A12-HASH-CAP-64K           1 tests::a12_large_file_inplace_rewrite_mtime_restored_is_found
+OLD    M-A12-HASH-MTIME             1 tests::a12_large_file_inplace_rewrite_mtime_restored_is_found
+NEW    M-A12-IGNORE-OVERFLOW        1 tests::a12_inotify_overflow_check_is_pinned
+NEW    M-A12-IGNORE-WATCH-ADD       1 tests::a12_watch_add_failures_fail_closed
+OLD    M-A12-INODE-REUSE            1 tests::a12_inode_reuse_same_path_is_found
+NEW    M-A12-NO-HANDLE-FOLLOW       1 tests::a12_hardlink_out_then_delete_dest_is_found
+OLD    M-A12-NO-HANDLE              1 tests::a12_same_bytes_inode_reuse_is_found
+NEW    M-A12-NO-HOME-WATCH          1 tests::a12_rename_watched_to_unwatched_dest_is_found
+OLD    M-A12-NO-ISOLATION           1 tests::a12_outside_isolation_tmp_root_is_refused
+OLD    M-A12-NO-LIVE-WATCH          1 tests::a12_create_then_delete_between_snapshots_is_found
+OLD    M-A12-NO-MARKER              1 tests::a12_leftover_without_marker_is_found
+NEW    M-A12-NO-OPENAT2             1 tests::a12_write_uses_openat2_beneath_no_symlinks
+OLD    M-A12-NO-RECHECK             1 tests::a12_write_isolated_leftover_rechecks_tmp_root
+NEW    M-A12-NO-RECURSE-WATCH       3 tests::a12_subdir_create_then_delete_is_found,tests::a12_preopen_dirfd_create_then_delete_is_found,tests::a12_otmpfile_linkat_unlink_in_subdir_is_found
+OLD    M-A12-NO-SYSTEM-TEMPS        1 tests::a12_run_window_watches_var_tmp_and_dev_shm
+NEW    M-A12-PIDNS-PASS             1 tests::a12_pid_namespace_is_not_run
+OLD    M-A12-RENAME-ROOT            1 tests::a12_renamed_root_is_found_by_created_set
+OLD    M-A12-RENAME-UNRELATED       1 tests::a12_renamed_to_unrelated_name_is_found
+NEW    M-A12-RUN-USER-PASS          1 tests::a12_run_user_uid_is_not_run
+OLD    M-A12-SIBLING-WATCH          1 tests::a12_run_window_watches_tmpdir_xdg_library
+NEW    M-A12-SKIP-HOME-CACHE        1 tests::a12_home_cache_watched_when_xdg_cache_set
+OLD    M-A12-SNAP-AFTER-WRITE       1 tests::a12_snapshot_before_runtime_fails_if_already_wrote
+OLD    M-A12-SNAP-IGNORE-LIVE       1 tests::a12_snapshot_before_runtime_fails_if_live_tmp_elastos_wrote
+OLD    M-A12-SPARSE-READ            1 tests::a12_sparse_hole_hash_differs_from_written_zeros
+OLD    M-A12-SYMLINK-ROOT           1 tests::a12_symlink_root_is_scanned_through
+OLD    M-A12-TMP-DOTDOT             2 tests::a12_isolation_parent_tmp_root_is_refused,tests::a12_nested_dotdot_tmp_root_is_refused
+OLD    M-A12-TMP-LIVE-SYMLINK       1 tests::a12_symlink_to_live_home_tmp_root_is_refused
+OLD    M-A12-TMP-SLASH              1 tests::a12_slash_tmp_root_is_refused
+OLD    M-A12-TMP-UNSET              1 tests::a12_unset_tmp_root_is_refused
+OLD    M-A12-TOCTOU-FOLLOW          2 tests::a12_tmp_root_symlink_swap_after_check_cannot_write_outside,tests::a12_parent_dir_swap_after_check_cannot_write_outside
+NEW    M-A12-WATCH-SYSCTL-PASS      1 tests::a12_watch_sysctl_is_not_run
+OLD    M-A6-CLAIM-RESIDENT          1 tests::a6_resident_two_instances_is_blocked
+OLD    M-A6-CLAIMED-NO-RA6          1 tests::a6_two_other_live_pids_are_blocked
+OLD    M-A6-COMMENT-STEP4           2 tests::a6_sibling_presenting_owner_token_is_refused,tests::a6_resident_two_instances_is_blocked
+OLD    M-A6-EMPTY-TOKEN             1 tests::a6_empty_token_capsule_is_refused
+OLD    M-A6-INSPECT-ALWAYS-SOME     1 tests::a6_sleep_child_is_not_proven_resident
+OLD    M-A6-LIVE-PIDS               1 tests::a6_this_process_and_pid1_cannot_pass
+OLD    M-A6-PREFIX-BIND             1 tests::a6_prefix_capsule_id_is_refused
+OLD    M-A6-PROVE-ALWAYS-OK         2 tests::a6_this_process_and_pid1_cannot_pass,tests::a6_sleep_child_is_not_proven_resident
+OLD    M-A6-STUB-OK                 1 tests::a6_resident_two_instances_is_blocked
+
+COUNT
+old plants 34 / 39 test lines
+new plants 12 / 14 test lines
+total plants 46 / 53 test lines
+old plants omitted from disk: none
+unknown: none
+heading 34/39 means 34 old plants and 39 CAUGHT lines, not 34 of 39 caught
+heading 12/14 means 12 new plants and 14 CAUGHT lines, not 12 of 14 caught

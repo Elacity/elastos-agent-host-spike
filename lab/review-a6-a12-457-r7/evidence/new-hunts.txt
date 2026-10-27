@@ -1,0 +1,157 @@
+r7 hunts at 4564a30f1384f1b9d070762eb8e4a8e727bd2959
+   Compiling ring v0.17.14
+   Compiling rustls v0.23.46
+   Compiling rustls-webpki v0.103.16
+   Compiling tokio-rustls v0.26.6
+   Compiling hyper-rustls v0.27.10
+   Compiling reqwest v0.12.28
+   Compiling elastos-storage v0.8.0 (/tmp/pr457-r7/elastos/crates/elastos-storage)
+   Compiling elastos-runtime v0.8.0 (/tmp/pr457-r7/elastos/crates/elastos-runtime)
+   Compiling a6-a12-evidence-fix v0.0.0 (/tmp/pr457-r7/lab/a6-a12-evidence-fix)
+warning: unused variable: `id`
+  --> src/review_probes.rs:90:22
+   |
+90 | fn leftovers_or_skip(id: &str, before: &a12::FsSnapshot) -> Option<Result<Vec<PathBuf>, String>> {
+   |                      ^^ help: if this is intentional, prefix it with an underscore: `_id`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `a6-a12-evidence-fix` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.93s
+     Running unittests src/lib.rs (target-build/debug/deps/a6_a12_evidence_fix-65fbd77d138d32f0)
+
+running 23 tests
+HUNT r7-before-snapshot: EXPECTED | create+unlink before snapshot is not a run leftover; census stayed clean of that path
+test review_probes::r7_created_then_unlinked_before_snapshot ... ok
+test review_probes::r7_hardlink_out_dest_is_listed has been running for over 60 seconds
+HUNT r7-hardlink-out: CAUGHT | outside hardlink dest listed
+test review_probes::r7_hardlink_out_dest_is_listed ... ok
+HUNT r7-detached-hostpart: NOT RUN | leftovers_in_run_window returns before a setsid/double-fork child writes; detached write after return is NOT RUN, never a clean-window PASS
+HUNT r7-bind-hostpart: NOT RUN | mount --bind and unshare -m refused; bind leftover is NOT RUN, never PASS
+HUNT r7-pidns-hostpart: NOT RUN | unshare -p refused (unshare: unshare failed: Operation not permitted); pid-namespace leftover is NOT RUN, never PASS
+HUNT r7-run-user-hostpart: NOT RUN | /run/user/1000 is absent; /run/user leftover is NOT RUN, never PASS
+HUNT r7-watch-sysctl-hostpart: NOT RUN | max_user_watches write refused (Permission denied (os error 13)); watch sysctl is NOT RUN, never PASS
+test review_probes::r7_host_parts_stay_not_run ... ok
+test review_probes::r7_home_cache_while_xdg_set has been running for over 60 seconds
+HUNT r7-home-cache: CAUGHT | $HOME/.cache leftover listed with XDG set
+test review_probes::r7_home_cache_while_xdg_set ... ok
+HUNT r7-overflow-load: CAUGHT | load overflow fail-closed: inotify queue overflow; leftover watch fail closed
+test review_probes::r7_inotify_overflow_under_load ... ok
+HUNT r7-memfd: OUT OF SCOPE | anonymous memfd has no directory entry; A12 watches disk paths. Not a leftover after the process exits.
+test review_probes::r7_memfd_create_anonymous ... ok
+HUNT r7-mount-ns: NOT RUN | unshare -m refused (unshare: unshare failed: Operation not permitted); mount-namespace escape must stay NOT RUN, never PASS
+test review_probes::r7_mount_namespace_escape ... ok
+HUNT r7-mkfifo: SURVIVED | python open() on the FIFO timed out; census File::open has no O_NONBLOCK, so a leftover fifo can hang leftovers_in_run_window
+test review_probes::r7_mkfifo ... ok
+HUNT r7-otmpfile-unlink: CAUGHT | O_TMPFILE+unlink ghost listed
+test review_probes::r7_otmpfile_unlink_in_subdir ... ok
+HUNT r7-ra6-current: BLOCKED | ask=RA-6 RA-6: Runtime does not host two resident capsule instances in one process. Bus v2 / RT4 still owns resident lifecycle. Owner A6 rows use fixture deny across Homes, not validate step 4. See lab/a6-a12-evidence-fix/RA-6.md.
+test review_probes::r7_ra6_ready_journey_still_blocked ... ok
+test review_probes::r7_proc_self_fd_write_after_unlink has been running for over 60 seconds
+HUNT r7-proc-fd: CAUGHT | create+unlink then /proc/self/fd write produced a live-watch leftover
+test review_probes::r7_proc_self_fd_write_after_unlink ... ok
+test review_probes::r7_rename_across_mounts has been running for over 60 seconds
+HUNT r7-rename-xdev: CAUGHT | copy+unlink across /var/tmp -> /dev/shm listed dest
+test review_probes::r7_rename_across_mounts ... ok
+test review_probes::r7_rename_out_dest has been running for over 60 seconds
+HUNT r7-rename-out: CAUGHT | rename dest leftover listed
+test review_probes::r7_rename_out_dest ... ok
+test review_probes::r7_scm_rights_helper_write has been running for over 60 seconds
+HUNT r7-scm-rights: CAUGHT | SCM_RIGHTS helper write left a named leftover
+test review_probes::r7_scm_rights_helper_write ... ok
+test review_probes::r7_setsid_write_after_return has been running for over 60 seconds
+HUNT r7-detached-after-return: SURVIVED | setsid child wrote under /var/tmp after leftovers_in_run_window returned Ok; HostPart is NOT RUN, not a closed PASS
+test review_probes::r7_setsid_write_after_return ... ok
+HUNT r7-openat2-pin: CAUGHT | openat2 flags still in source
+HUNT r7-overflow-pin: CAUGHT | IN_Q_OVERFLOW if still in drain
+HUNT r7-watch-add-pin: CAUGHT | watch.add errors propagate
+HUNT r7-fifo-open-pin: SURVIVED | hash_whole_file_sparse uses blocking File::open; a FIFO leftover can hang the census
+test review_probes::r7_source_pins ... ok
+test review_probes::r7_shm_open_in_dev_shm has been running for over 60 seconds
+HUNT r7-shm-open: CAUGHT | /dev/shm shm_open leftover listed
+test review_probes::r7_shm_open_in_dev_shm ... ok
+test review_probes::r7_subdir_create_then_delete has been running for over 60 seconds
+HUNT r7-subdir-ephemeral: CAUGHT | subdir create-then-delete listed
+test review_probes::r7_subdir_create_then_delete ... ok
+test review_probes::r7_system_temp_false_fail has been running for over 60 seconds
+HUNT r7-system-temps: CLEAN | no leftovers during a quiet window after systemd-tmpfiles --create --user
+test review_probes::r7_system_temp_false_fail ... ok
+test review_probes::r7_tmpdir_changed_mid_run has been running for over 60 seconds
+HUNT r7-tmpdir-mid: FALSE-FAIL | pre-existing file in the new TMPDIR was treated as a leftover after TMPDIR changed mid-run
+test review_probes::r7_tmpdir_changed_mid_run ... ok
+test review_probes::r7_unix_socket_file has been running for over 60 seconds
+HUNT r7-unix-socket: CAUGHT | unix socket file listed
+test review_probes::r7_unix_socket_file ... ok
+test review_probes::r7_write_after_watch_torn_down has been running for over 60 seconds
+HUNT r7-after-watch: SURVIVED | write after leftovers_in_run_window returned is invisible; LIVE_WATCH is not dropped, but the returned Ok([]) is not a closed window
+test review_probes::r7_write_after_watch_torn_down ... ok
+test review_probes::r7_xdg_runtime_dir has been running for over 60 seconds
+HUNT r7-xdg-runtime: CAUGHT | XDG_RUNTIME_DIR leftover listed (roots_contain=true)
+test review_probes::r7_xdg_runtime_dir ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 71 filtered out; finished in 622.36s
+
+new-hunts cargo r7_ exit=0
+
+== R7-IGNORE-OVERFLOW: drop IN_Q_OVERFLOW fail-closed ==
+
+== plant R7-IGNORE-OVERFLOW against tests::a12_inotify_overflow_check_is_pinned cargo_exit=0 ==
+   Compiling a6-a12-evidence-fix v0.0.0 (/tmp/pr457-r7/lab/a6-a12-evidence-fix)
+warning: unused variable: `id`
+  --> src/review_probes.rs:90:22
+   |
+90 | fn leftovers_or_skip(id: &str, before: &a12::FsSnapshot) -> Option<Result<Vec<PathBuf>, String>> {
+   |                      ^^ help: if this is intentional, prefix it with an underscore: `_id`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `a6-a12-evidence-fix` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.69s
+     Running unittests src/lib.rs (target-build/debug/deps/a6_a12_evidence_fix-65fbd77d138d32f0)
+
+running 1 test
+A12 inotify drain still fails closed on IN_Q_OVERFLOW
+test tests::a12_inotify_overflow_check_is_pinned ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 93 filtered out; finished in 0.00s
+HUNT R7-IGNORE-OVERFLOW SURVIVED against tests::a12_inotify_overflow_check_is_pinned (named test stayed green)
+
+== R7-NO-OPENAT2: resolve 0 ==
+
+== plant R7-NO-OPENAT2 against tests::a12_write_uses_openat2_beneath_no_symlinks cargo_exit=101 ==
+428 | const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+    |       ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `RESOLVE_BENEATH` is never used
+   --> src/a12.rs:429:7
+    |
+429 | const RESOLVE_BENEATH: u64 = 0x08;
+    |       ^^^^^^^^^^^^^^^
+
+warning: `a6-a12-evidence-fix` (lib test) generated 3 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.68s
+     Running unittests src/lib.rs (target-build/debug/deps/a6_a12_evidence_fix-65fbd77d138d32f0)
+
+running 1 test
+
+thread 'tests::a12_write_uses_openat2_beneath_no_symlinks' (16876) panicked at src/lib.rs:995:9:
+openat2 dropped RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test tests::a12_write_uses_openat2_beneath_no_symlinks ... FAILED
+
+failures:
+
+failures:
+    tests::a12_write_uses_openat2_beneath_no_symlinks
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 93 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+HUNT R7-NO-OPENAT2 CAUGHT by tests::a12_write_uses_openat2_beneath_no_symlinks
+
+== R7-SKIP-HOME-CACHE: drop HOME fallback when XDG is set ==
+757:            if !roots.iter().any(|root| root == &path) {
+HUNT R7-HOME-CACHE-SOURCE CAUGHT: HOME fallback is present
+new-hunts finished probe_exit=0

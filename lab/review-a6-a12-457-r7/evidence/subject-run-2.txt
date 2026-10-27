@@ -1,0 +1,223 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running unittests src/lib.rs (target-build/debug/deps/a6_a12_evidence_fix-65fbd77d138d32f0)
+
+running 71 tests
+A12 roots: ["/tmp/a6-a12-pack.ahKckW/list-roots-11953-1793066333802431191-0/storage", "/tmp/a6-a12-pack.ahKckW/list-roots-11953-1793066333802431191-0"]
+test tests::a12_census_lists_runtime_storage ... ok
+runtime-temp census: PASS leftovers:0 roots:["/tmp/a6-a12-pack.ahKckW/clean-pass-11953-1793066333803623005-1/does-not-exist"]
+test tests::a12_clean_isolated_root_passes ... ok
+NOT RUN: mount --bind and unshare -m refused; bind leftover is NOT RUN, never PASS
+test tests::a12_bind_mount_is_not_run ... ok
+NOT RUN: leftovers_in_run_window returns before a setsid/double-fork child writes; detached write after return is NOT RUN, never a clean-window PASS
+test tests::a12_detached_after_return_is_not_run ... ok
+A12 create-then-delete leftover found at /var/tmp/a6-a12-r5-transient-11953-1793066333803907983.txt
+test tests::a12_create_then_delete_between_snapshots_is_found ... ok
+A12 empty file handle is NOT RUN: name_to_handle_at empty handle; FileId NOT RUN
+A12 ELASTOS_TMP_ROOT kept leftovers out of /tmp/elastos
+test tests::a12_empty_file_handle_is_not_run ... ok
+test tests::a12_elastos_tmp_root_writes_nothing_under_shared_tmp ... ok
+A12 empty root is leftover: /tmp/a6-a12-pack.ahKckW/empty-root-11953-1793066371722370869-3
+A12 empty ELASTOS_TMP_ROOT refused: ELASTOS_TMP_ROOT is empty
+test tests::a12_empty_root_is_leftover ... ok
+test tests::a12_empty_tmp_root_is_refused ... ok
+A12 HOME, live Home, and relative ELASTOS_TMP_ROOT refused
+test tests::a12_home_and_live_home_tmp_root_are_refused ... ok
+A12 hardlink-out dest leftover found at /home/ubuntu/a12-hl-out-11953-1793066371722897174/keep.txt
+test tests::a12_hardlink_out_then_delete_dest_is_found ... ok
+A12 inode-reuse leftover found at /tmp/a6-a12-pack.ahKckW/inode-reuse-11953-1793066408900845817-4/slot.txt
+test tests::a12_inode_reuse_same_path_is_found ... ok
+A12 inotify drain still fails closed on IN_Q_OVERFLOW
+test tests::a12_inotify_overflow_check_is_pinned ... ok
+A12 nested leftover: /tmp/a6-a12-pack.ahKckW/nested-11953-1793066408907161186-5/storage/a6-a12-evidence-fix-planted
+test tests::a12_isolated_walk_catches_a_nested_file ... ok
+A12 ELASTOS_TMP_ROOT=$ISOLATION/.. refused: ELASTOS_TMP_ROOT refuses '..' component in /tmp/a6-a12-pack.ahKckW/..
+test tests::a12_isolation_parent_tmp_root_is_refused ... ok
+A12 large-file last-byte rewrite leftover found at /tmp/a6-a12-pack.ahKckW/large-rewrite-11953-1793066408907488009-6/big.bin
+test tests::a12_large_file_inplace_rewrite_mtime_restored_is_found ... ok
+A12 no-marker leftover found after rename to moved-away
+test tests::a12_leftover_without_marker_is_found ... ok
+A12 ELASTOS_TMP_ROOT=$ISOLATION/hold/../.. refused: ELASTOS_TMP_ROOT refuses '..' component in /tmp/a6-a12-pack.ahKckW/hold/../..
+test tests::a12_nested_dotdot_tmp_root_is_refused ... ok
+test tests::a12_home_cache_watched_when_xdg_cache_set has been running for over 60 seconds
+A12 $HOME/.cache leftover found while XDG_CACHE_HOME was set
+test tests::a12_home_cache_watched_when_xdg_cache_set ... ok
+A12 ELASTOS_TMP_ROOT=/var/tmp refused: ELASTOS_TMP_ROOT /var/tmp is not under isolated mktemp /tmp/a6-a12-pack.ahKckW
+test tests::a12_outside_isolation_tmp_root_is_refused ... ok
+A12 parent-dir swap after check refused: Err("ELASTOS_TMP_ROOT refuses symlink /tmp/a6-a12-pack.ahKckW/parent-swap-11953 in /tmp/a6-a12-pack.ahKckW/parent-swap-11953/child")
+test tests::a12_parent_dir_swap_after_check_cannot_write_outside ... ok
+NOT RUN: unshare -p refused (unshare: unshare failed: Operation not permitted); pid-namespace leftover is NOT RUN, never PASS
+test tests::a12_pid_namespace_is_not_run ... ok
+test tests::a12_otmpfile_linkat_unlink_in_subdir_is_found has been running for over 60 seconds
+A12 O_TMPFILE+linkat unlink leftover found at /var/tmp/a12-otmp-sub-11953-1793066437141533359/gone.txt
+A12 planted-file falsifier: runtime-temp census: FAIL leftovers:3 paths:["/tmp/a6-a12-pack.ahKckW/plant-storage-11953-1793066437143129736-8", "/tmp/a6-a12-pack.ahKckW/plant-storage-11953-1793066437143129736-8/storage", "/tmp/a6-a12-pack.ahKckW/plant-storage-11953-1793066437143129736-8/storage/a6-a12-evidence-fix-planted"]
+test tests::a12_otmpfile_linkat_unlink_in_subdir_is_found ... ok
+test tests::a12_planted_storage_file_is_caught ... ok
+A12 preopen-dirfd create-then-delete leftover found at /var/tmp/a12-preopen-dir-11953-1793066472106956893/gone.txt
+test tests::a12_preopen_dirfd_create_then_delete_is_found ... ok
+A12 renamed leftover found by created set under /tmp/a6-a12-pack.ahKckW/rename-parent-11953-1793066507197656162-9/named-root.bak
+test tests::a12_renamed_root_is_found_by_created_set ... ok
+A12 unrelated rename leftover found under /tmp/a6-a12-pack.ahKckW/unrelated-11953-1793066507198382750-10/moved-away
+test tests::a12_renamed_to_unrelated_name_is_found ... ok
+NOT RUN: /run/user/1000 is absent; /run/user leftover is NOT RUN, never PASS
+test tests::a12_run_user_uid_is_not_run ... ok
+test tests::a12_rename_watched_to_unwatched_dest_is_found has been running for over 60 seconds
+A12 rename-to-unwatched dest leftover found at /home/ubuntu/a12-ren-dest-11953-1793066507197233207.txt
+test tests::a12_rename_watched_to_unwatched_dest_is_found ... ok
+test tests::a12_run_window_watches_tmpdir_xdg_library has been running for over 60 seconds
+A12 run-window watches found TMPDIR, XDG, and Library leftovers
+test tests::a12_run_window_watches_tmpdir_xdg_library ... ok
+A12 same-bytes inode-reuse leftover found at /tmp/a6-a12-pack.ahKckW/same-bytes-reuse-11953-1793066569353041092-11/slot.txt
+test tests::a12_same_bytes_inode_reuse_is_found ... ok
+test tests::a12_run_window_watches_var_tmp_and_dev_shm has been running for over 60 seconds
+A12 run-window watches found /var/tmp and /dev/shm leftovers
+A12 ELASTOS_TMP_ROOT=/ refused: ELASTOS_TMP_ROOT refuses /
+test tests::a12_run_window_watches_var_tmp_and_dev_shm ... ok
+test tests::a12_slash_tmp_root_is_refused ... ok
+A12 late snapshot refused: snapshot must be taken before the Runtime starts; Runtime already wrote
+test tests::a12_snapshot_before_runtime_fails_if_already_wrote ... ok
+A12 live /tmp/elastos late snapshot refused: snapshot must be taken before the Runtime starts; Runtime already wrote
+test tests::a12_snapshot_before_runtime_fails_if_live_tmp_elastos_wrote ... ok
+A12 sparse hole hash 0x7acad88bc970749d != written-zero hash 0x8a39630c2211384
+test tests::a12_sparse_hole_hash_differs_from_written_zeros ... ok
+A12 symlink loop refused: could not resolve symlink root /tmp/a6-a12-pack.ahKckW/loop-11953-1793066604601047477-15/loop-root
+test tests::a12_symlink_loop_does_not_pass_as_clean ... ok
+A12 symlink root scanned through to /tmp/a6-a12-pack.ahKckW/symlink-real-11953-1793066604601706928-17/storage/a6-a12-evidence-fix-planted
+test tests::a12_symlink_root_is_scanned_through ... ok
+A12 ELASTOS_TMP_ROOT symlink to live Home refused: ELASTOS_TMP_ROOT refuses symlink /tmp/a6-a12-pack.ahKckW/live-via-symlink-11953 in /tmp/a6-a12-pack.ahKckW/live-via-symlink-11953
+test tests::a12_symlink_to_live_home_tmp_root_is_refused ... ok
+A12 TOCTOU swap after check refused: Err("ELASTOS_TMP_ROOT refuses symlink /tmp/a6-a12-pack.ahKckW/toctou-hold-11953 in /tmp/a6-a12-pack.ahKckW/toctou-hold-11953")
+test tests::a12_tmp_root_symlink_swap_after_check_cannot_write_outside ... ok
+A12 subdir create-then-delete leftover found at /var/tmp/a12-subwatch-11953-1793066604598097281/gone.txt
+test tests::a12_subdir_create_then_delete_is_found ... okA12 unset ELASTOS_TMP_ROOT refused: ELASTOS_TMP_ROOT is unset; pack must set an isolated mktemp dir
+
+test tests::a12_unset_tmp_root_is_refused ... ok
+NOT RUN: max_user_watches write refused (Permission denied (os error 13)); watch sysctl is NOT RUN, never PASS
+test tests::a12_watch_sysctl_is_not_run ... ok
+A12 write_isolated_leftover still re-checks tmp_root before open
+test tests::a12_write_isolated_leftover_rechecks_tmp_root ... ok
+A12 openat2 still pins RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS
+test tests::a12_write_uses_openat2_beneath_no_symlinks ... ok
+A12 watch.add failures fail closed
+test tests::a12_watch_add_failures_fail_closed ... ok
+A6 does not claim two resident instances; RA-6 is the Runtime ask
+test tests::a6_does_not_claim_resident_instances ... ok
+empty ResidentPair FAIL: Ok from stub with empty ResidentPair: FAIL (Runtime does not report two distinct live resident instance ids/pids, each holding its own grant)
+test tests::a6_empty_resident_pair_cannot_pass ... ok
+A6 case variant: WrongCapsule { expected:instance-1 got:INSTANCE-1 }
+test tests::a6_case_variant_capsule_id_is_refused ... ok
+A6 empty-token refusal: WrongCapsule { expected:"" got:instance-2 }
+test tests::a6_empty_token_capsule_is_refused ... ok
+A6 expired token: TokenExpired
+test tests::a6_expired_token_is_refused ... ok
+A6 journey: instance-1 may use its Runtime session token (capsule=instance-1)
+test tests::a6_owner_may_use_own_session_token ... ok
+A6 owner other-resource: WrongResource
+test tests::a6_owner_other_resource_is_wrong_resource ... ok
+A6 prefix refusal: WrongCapsule { expected:instance-1 got:instance-1-evil }
+test tests::a6_prefix_capsule_id_is_refused ... ok
+BLOCKED (RA-6): RA-6: Runtime does not host two resident capsule instances in one process. Bus v2 / RT4 still owns resident lifecycle. Owner A6 rows use fixture deny across Homes, not validate step 4. See lab/a6-a12-evidence-fix/RA-6.md.
+test tests::a6_resident_two_instances_is_blocked ... ok
+A6 revoked token: TokenRevoked
+test tests::a6_revoked_token_is_refused ... ok
+A6 other-action sibling: WrongCapsule { expected:instance-1 got:instance-2 }
+test tests::a6_sibling_other_action_token_is_wrong_capsule ... ok
+A6 other-resource sibling: WrongCapsule { expected:instance-1 got:instance-2 }
+test tests::a6_sibling_other_resource_token_is_wrong_capsule ... ok
+sleep pid 12024 is not a resident: pid 12024 is not positively proven a resident capsule instance hosted by this Runtime (instance instance-1)
+test tests::a6_sleep_child_is_not_proven_resident ... ok
+A6 tampered base64: from_base64 refused (failed to deserialize token: invalid value: integer `67108864`, expected variant index 0 <= i < 6)
+test tests::a6_tampered_base64_is_refused ... ok
+this pid + pid 1 FAIL: pid 11953 is this lab process, not a resident capsule instance hosted by this Runtime
+test tests::a6_this_process_and_pid1_cannot_pass ... ok
+two sleep pids BLOCKED (RA-6): claimed resident pair requires RA-6 runtime proof: RA-6: Runtime does not host two resident capsule instances in one process. Bus v2 / RT4 still owns resident lifecycle. Owner A6 rows use fixture deny across Homes, not validate step 4. See lab/a6-a12-evidence-fix/RA-6.md.
+test tests::a6_two_other_live_pids_are_blocked ... ok
+A6 refusal: WrongCapsule { expected:instance-1 got:instance-2 }
+test tests::a6_sibling_presenting_owner_token_is_refused ... ok
+NOT RUN: ThrowawayHome::new refused: throwaway Homes require macOS. Mac: ELASTOS_TMP_ROOT=<isolated-mktemp> cargo test --manifest-path lab/agent-conformance/Cargo.toml --test runtime cleanup_census_refuses_each_leftover -- --nocapture
+combined wrap caught leftover after a storage-creating run: ThrowawayHome::new refused: throwaway Homes require macOS. Mac: ELASTOS_TMP_ROOT=<isolated-mktemp> cargo test --manifest-path lab/agent-conformance/Cargo.toml --test runtime cleanup_census_refuses_each_leftover -- --nocapture; runtime-temp census: FAIL leftovers:3 paths:["/tmp/a6-a12-pack.ahKckW/combined-11953-1793066639477492028-18", "/tmp/a6-a12-pack.ahKckW/combined-11953-1793066639477492028-18/storage", "/tmp/a6-a12-pack.ahKckW/combined-11953-1793066639477492028-18/storage/a6-a12-evidence-fix-planted"]
+test tests::combined_cleanup_calls_existing_census_and_isolated_temps ... ok
+A6 unicode zwsp: WrongCapsule got_len=13
+test tests::a6_zero_width_capsule_id_is_refused ... ok
+request_capability still sends every request to pending, so a live grant does not change the answer
+test tests::existing_a6_request_path_sends_every_request_to_pending ... ok
+existing cleanup census still inspects only the throwaway TMPDIR and labels outside-root BLOCKED
+test tests::existing_census_ignores_runtime_storage ... ok
+cleanup_census_refuses_each_leftover still plants only under the throwaway TMPDIR
+test tests::existing_cleanup_leftover_test_plants_only_in_home_temp ... ok
+NOT RUN: ThrowawayHome::new refused: throwaway Homes require macOS. Mac: ELASTOS_TMP_ROOT=<isolated-mktemp> cargo test --manifest-path lab/agent-conformance/Cargo.toml --test runtime cleanup_census_refuses_each_leftover -- --nocapture
+test tests::existing_harness_throwaway_home_on_this_host ... ok
+existing A6 journeys still refuse the sibling by fixture deny, not by presenting a session token
+test tests::existing_a6_journeys_do_not_present_a_session_token ... ok
+CAUGHT F-A12-DROP-ROOTS by tests::a12_census_lists_runtime_storage
+CAUGHT F-A12-DROP-ROOTS by tests::a12_planted_storage_file_is_caught
+CAUGHT F-A6-NO-TOKEN-CHECK by tests::a6_sibling_presenting_owner_token_is_refused
+CAUGHT M-A12-BIND-PASS by tests::a12_bind_mount_is_not_run
+CAUGHT M-A12-DETACHED-AFTER-PASS by tests::a12_detached_after_return_is_not_run
+CAUGHT M-A12-HANDLE-EMPTY-OK by tests::a12_empty_file_handle_is_not_run
+CAUGHT M-A12-HARDCODE-FAIL by tests::a12_clean_isolated_root_passes
+CAUGHT M-A12-HASH-CAP-64K by tests::a12_large_file_inplace_rewrite_mtime_restored_is_found
+CAUGHT M-A12-HASH-MTIME by tests::a12_large_file_inplace_rewrite_mtime_restored_is_found
+CAUGHT M-A12-IGNORE-OVERFLOW by tests::a12_inotify_overflow_check_is_pinned
+CAUGHT M-A12-IGNORE-WATCH-ADD by tests::a12_watch_add_failures_fail_closed
+CAUGHT M-A12-INODE-REUSE by tests::a12_inode_reuse_same_path_is_found
+CAUGHT M-A12-NO-HANDLE-FOLLOW by tests::a12_hardlink_out_then_delete_dest_is_found
+CAUGHT M-A12-NO-HANDLE by tests::a12_same_bytes_inode_reuse_is_found
+test tests::planted_bugs_are_caught has been running for over 60 seconds
+CAUGHT M-A12-NO-HOME-WATCH by tests::a12_rename_watched_to_unwatched_dest_is_found
+CAUGHT M-A12-NO-ISOLATION by tests::a12_outside_isolation_tmp_root_is_refused
+CAUGHT M-A12-NO-LIVE-WATCH by tests::a12_create_then_delete_between_snapshots_is_found
+CAUGHT M-A12-NO-MARKER by tests::a12_leftover_without_marker_is_found
+CAUGHT M-A12-NO-OPENAT2 by tests::a12_write_uses_openat2_beneath_no_symlinks
+CAUGHT M-A12-NO-RECHECK by tests::a12_write_isolated_leftover_rechecks_tmp_root
+CAUGHT M-A12-NO-RECURSE-WATCH by tests::a12_subdir_create_then_delete_is_found
+CAUGHT M-A12-NO-RECURSE-WATCH by tests::a12_preopen_dirfd_create_then_delete_is_found
+CAUGHT M-A12-NO-RECURSE-WATCH by tests::a12_otmpfile_linkat_unlink_in_subdir_is_found
+CAUGHT M-A12-NO-SYSTEM-TEMPS by tests::a12_run_window_watches_var_tmp_and_dev_shm
+CAUGHT M-A12-PIDNS-PASS by tests::a12_pid_namespace_is_not_run
+CAUGHT M-A12-RENAME-ROOT by tests::a12_renamed_root_is_found_by_created_set
+CAUGHT M-A12-RENAME-UNRELATED by tests::a12_renamed_to_unrelated_name_is_found
+CAUGHT M-A12-RUN-USER-PASS by tests::a12_run_user_uid_is_not_run
+CAUGHT M-A12-SIBLING-WATCH by tests::a12_run_window_watches_tmpdir_xdg_library
+CAUGHT M-A12-SKIP-HOME-CACHE by tests::a12_home_cache_watched_when_xdg_cache_set
+CAUGHT M-A12-SNAP-AFTER-WRITE by tests::a12_snapshot_before_runtime_fails_if_already_wrote
+CAUGHT M-A12-SNAP-IGNORE-LIVE by tests::a12_snapshot_before_runtime_fails_if_live_tmp_elastos_wrote
+CAUGHT M-A12-SPARSE-READ by tests::a12_sparse_hole_hash_differs_from_written_zeros
+CAUGHT M-A12-SYMLINK-ROOT by tests::a12_symlink_root_is_scanned_through
+CAUGHT M-A12-TMP-DOTDOT by tests::a12_isolation_parent_tmp_root_is_refused
+CAUGHT M-A12-TMP-DOTDOT by tests::a12_nested_dotdot_tmp_root_is_refused
+CAUGHT M-A12-TMP-LIVE-SYMLINK by tests::a12_symlink_to_live_home_tmp_root_is_refused
+CAUGHT M-A12-TMP-SLASH by tests::a12_slash_tmp_root_is_refused
+CAUGHT M-A12-TMP-UNSET by tests::a12_unset_tmp_root_is_refused
+CAUGHT M-A12-TOCTOU-FOLLOW by tests::a12_tmp_root_symlink_swap_after_check_cannot_write_outside
+CAUGHT M-A12-TOCTOU-FOLLOW by tests::a12_parent_dir_swap_after_check_cannot_write_outside
+CAUGHT M-A12-WATCH-SYSCTL-PASS by tests::a12_watch_sysctl_is_not_run
+CAUGHT M-A6-CLAIM-RESIDENT by tests::a6_resident_two_instances_is_blocked
+CAUGHT M-A6-CLAIMED-NO-RA6 by tests::a6_two_other_live_pids_are_blocked
+CAUGHT M-A6-COMMENT-STEP4 by tests::a6_sibling_presenting_owner_token_is_refused
+CAUGHT M-A6-COMMENT-STEP4 by tests::a6_resident_two_instances_is_blocked
+CAUGHT M-A6-EMPTY-TOKEN by tests::a6_empty_token_capsule_is_refused
+CAUGHT M-A6-INSPECT-ALWAYS-SOME by tests::a6_sleep_child_is_not_proven_resident
+CAUGHT M-A6-LIVE-PIDS by tests::a6_this_process_and_pid1_cannot_pass
+CAUGHT M-A6-PREFIX-BIND by tests::a6_prefix_capsule_id_is_refused
+CAUGHT M-A6-PROVE-ALWAYS-OK by tests::a6_this_process_and_pid1_cannot_pass
+CAUGHT M-A6-PROVE-ALWAYS-OK by tests::a6_sleep_child_is_not_proven_resident
+CAUGHT M-A6-STUB-OK by tests::a6_resident_two_instances_is_blocked
+test tests::planted_bugs_are_caught ... ok
+
+test result: ok. 71 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 621.27s
+
+
+A6/A12 evidence-fix: lib tests finished. See FINDINGS.md and RA-6.md.
+ELASTOS_TMP_ROOT=/tmp/a6-a12-pack.ahKckW (isolated mktemp; cleaned on exit).
+
+Mac pack commands (same isolated ELASTOS_TMP_ROOT):
+ELASTOS_TMP_ROOT=/tmp/a6-a12-pack.ahKckW ELASTOS_TMP_ISOLATION=/tmp/a6-a12-pack.ahKckW \
+  cargo test --manifest-path lab/agent-conformance/Cargo.toml --test effects \
+  two_instances_overlap_with_separate_grants -- --nocapture
+ELASTOS_TMP_ROOT=/tmp/a6-a12-pack.ahKckW ELASTOS_TMP_ISOLATION=/tmp/a6-a12-pack.ahKckW \
+  cargo test --manifest-path lab/agent-conformance/Cargo.toml --test effects \
+  instance_grant_does_not_authorise_sibling -- --nocapture
+ELASTOS_TMP_ROOT=/tmp/a6-a12-pack.ahKckW ELASTOS_TMP_ISOLATION=/tmp/a6-a12-pack.ahKckW \
+  cargo test --manifest-path lab/agent-conformance/Cargo.toml --test runtime \
+  cleanup_census_refuses_each_leftover -- --nocapture
+Resident A6/A12 and ThrowawayHome census: NOT RUN (need macOS).
