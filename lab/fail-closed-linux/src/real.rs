@@ -21,7 +21,7 @@ use std::ffi::CStr;
 use std::io;
 use std::os::fd::RawFd;
 use std::os::raw::{c_int, c_long};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 /// The real kernel. `fault_write` is the child's end of the close-on-exec
@@ -65,6 +65,10 @@ static ACK_READ: AtomicI32 = AtomicI32::new(-1);
 /// Provider pid init is tracing. Used to resume ptrace stops while waiting
 /// for the identity ack.
 static TRACE_PID: AtomicI32 = AtomicI32::new(-1);
+/// Set when init has CONTed the post-exec ptrace stop. The parent can send
+/// the identity ack while that stop is still in flight; a single WNOHANG
+/// after ack can miss it.
+static EXEC_RESUMED: AtomicBool = AtomicBool::new(false);
 
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 
@@ -398,19 +402,9 @@ impl Kernel for RealKernel {
                 return Err(errno());
             }
             TRACE_PID.store(provider, Ordering::Relaxed);
+            EXEC_RESUMED.store(false, Ordering::Relaxed);
             wait_for_identity_ack();
-            let mut status = 0;
-            let stopped = unsafe { libc::waitpid(provider, &mut status, libc::WNOHANG) };
-            if stopped == provider && libc::WIFSTOPPED(status) {
-                unsafe {
-                    libc::ptrace(
-                        libc::PTRACE_CONT,
-                        provider,
-                        std::ptr::null_mut::<libc::c_void>(),
-                        std::ptr::null_mut::<libc::c_void>(),
-                    )
-                };
-            }
+            resume_exec_stop(provider);
             reap_namespace();
         }
         close_ack();
@@ -987,6 +981,39 @@ fn parse_ppid(stat: &str) -> Option<u32> {
     parts.next()?.parse().ok()
 }
 
+fn resume_traced_stop(pid: libc::pid_t) -> bool {
+    let mut status = 0;
+    let stopped = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    if stopped == pid && libc::WIFSTOPPED(status) {
+        unsafe {
+            libc::ptrace(
+                libc::PTRACE_CONT,
+                stopped,
+                std::ptr::null_mut::<libc::c_void>(),
+                std::ptr::null_mut::<libc::c_void>(),
+            )
+        };
+        EXEC_RESUMED.store(true, Ordering::Relaxed);
+        return true;
+    }
+    false
+}
+
+fn resume_exec_stop(pid: libc::pid_t) {
+    if EXEC_RESUMED.load(Ordering::Relaxed) {
+        return;
+    }
+    // The parent can ack once `/proc/<pid>/exe` matches, before waitpid
+    // reports TRACEEXEC. Spin until that stop is CONTed so a later
+    // waitpid(-1) plant cannot leave the provider stopped.
+    for _ in 0..200 {
+        if resume_traced_stop(pid) {
+            return;
+        }
+        unsafe { libc::usleep(1000) };
+    }
+}
+
 fn wait_for_identity_ack() {
     let fd = ACK_READ.load(Ordering::Relaxed);
     if fd < 0 {
@@ -1000,18 +1027,7 @@ fn wait_for_identity_ack() {
         // Resume a ptrace stop so exec can finish while we wait for ack.
         let traced = TRACE_PID.load(Ordering::Relaxed);
         if traced > 0 {
-            let mut status = 0;
-            let stopped = unsafe { libc::waitpid(traced, &mut status, libc::WNOHANG) };
-            if stopped == traced && libc::WIFSTOPPED(status) {
-                unsafe {
-                    libc::ptrace(
-                        libc::PTRACE_CONT,
-                        stopped,
-                        std::ptr::null_mut::<libc::c_void>(),
-                        std::ptr::null_mut::<libc::c_void>(),
-                    )
-                };
-            }
+            resume_traced_stop(traced);
         }
         let mut pfd = libc::pollfd {
             fd,
