@@ -12,78 +12,136 @@ pub fn cargo_toml_path_depends_on_grant_binding(cargo_toml: &str) -> bool {
 
 /// Decode escapes in TOML basic strings, so an escaped link stays visible.
 ///
-/// Text outside a string, and every literal string (`'...'` or `'''...'''`),
-/// is copied unchanged. Only a basic string (`"..."` or `"""..."""`) decodes
-/// `\\`, `\"`, `\b`, `\t`, `\n`, `\f`, `\r`, `\uXXXX` and `\UXXXXXXXX`.
-/// An escape that is unknown, short or not a Unicode scalar stays as source.
+/// Text outside a string, a comment, and every literal string (`'...'` or
+/// `'''...'''`), is copied unchanged. Only a basic string (`"..."` or
+/// `"""..."""`) decodes `\\`, `\"`, `\b`, `\t`, `\n`, `\f`, `\r`, `\uXXXX`
+/// and `\UXXXXXXXX`. An escape that is unknown, short or not a Unicode scalar
+/// stays as source. One or two quote characters just inside a multiline
+/// closing delimiter are string text, not the start of a new string.
 fn decode_toml_basic_strings(cargo_toml: &str) -> String {
     let bytes = cargo_toml.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
         match bytes[index] {
-            b'\'' => {
-                let quote: &[u8] = if bytes[index..].starts_with(b"'''") {
-                    b"'''"
-                } else {
-                    b"'"
-                };
-                let start = index;
-                index += quote.len();
-                index = match find_quote(bytes, index, quote) {
-                    Some(end) => end + quote.len(),
-                    None => bytes.len(),
-                };
-                decoded.extend_from_slice(&bytes[start..index]);
+            b'#' => {
+                let end = bytes[index..]
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or(bytes.len(), |offset| index + offset);
+                decoded.extend_from_slice(&bytes[index..end]);
+                index = end;
             }
-            b'"' => {
-                let quote: &[u8] = if bytes[index..].starts_with(b"\"\"\"") {
-                    b"\"\"\""
-                } else {
-                    b"\""
-                };
-                index += quote.len();
-                decoded.extend_from_slice(quote);
-                while index < bytes.len() && !bytes[index..].starts_with(quote) {
-                    if bytes[index] == b'\\' {
-                        match decode_escape(bytes, index) {
-                            Some((scalar, next)) => {
-                                let mut buffer = [0u8; 4];
-                                decoded
-                                    .extend_from_slice(scalar.encode_utf8(&mut buffer).as_bytes());
-                                index = next;
-                            }
-                            None => {
-                                decoded.push(b'\\');
-                                index += 1;
-                            }
-                        }
-                    } else {
-                        decoded.push(bytes[index]);
-                        index += 1;
-                    }
-                }
-                if bytes[index..].starts_with(quote) {
-                    decoded.extend_from_slice(quote);
-                    index += quote.len();
-                }
-            }
+            b'\'' => index = copy_literal(bytes, index, &mut decoded),
+            b'"' => index = copy_basic(bytes, index, &mut decoded),
             byte => {
                 decoded.push(byte);
                 index += 1;
             }
         }
     }
-    String::from_utf8(decoded).unwrap_or_default()
+    String::from_utf8(decoded).expect("decoder splits only at ASCII bytes, so it stays UTF-8")
 }
 
-/// The next occurrence of `quote` at or after `from`.
-fn find_quote(bytes: &[u8], from: usize, quote: &[u8]) -> Option<usize> {
+/// Copy one literal string unchanged and return the index just past it.
+fn copy_literal(bytes: &[u8], start: usize, decoded: &mut Vec<u8>) -> usize {
+    if bytes[start..].starts_with(b"'''") {
+        decoded.extend_from_slice(b"'''");
+        copy_multiline(bytes, start + 3, b'\'', false, decoded)
+    } else {
+        decoded.push(b'\'');
+        let end = find_byte(bytes, start + 1, b'\'').map_or(bytes.len(), |end| end + 1);
+        decoded.extend_from_slice(&bytes[start + 1..end]);
+        end
+    }
+}
+
+/// Copy one basic string, decoding its escapes, and return the index past it.
+fn copy_basic(bytes: &[u8], start: usize, decoded: &mut Vec<u8>) -> usize {
+    if bytes[start..].starts_with(b"\"\"\"") {
+        decoded.extend_from_slice(b"\"\"\"");
+        copy_multiline(bytes, start + 3, b'"', true, decoded)
+    } else {
+        decoded.push(b'"');
+        let mut index = start + 1;
+        while index < bytes.len() && bytes[index] != b'"' {
+            if bytes[index] == b'\\' {
+                index = copy_escape(bytes, index, decoded);
+            } else {
+                decoded.push(bytes[index]);
+                index += 1;
+            }
+        }
+        if index < bytes.len() {
+            decoded.push(b'"');
+            index += 1;
+        }
+        index
+    }
+}
+
+/// Copy multiline string content up to and including its closing delimiter.
+///
+/// A run of three or more quote characters ends the string; the last three are
+/// the delimiter and any earlier quote of that run is content.
+fn copy_multiline(
+    bytes: &[u8],
+    mut index: usize,
+    quote: u8,
+    decode: bool,
+    decoded: &mut Vec<u8>,
+) -> usize {
+    while index < bytes.len() {
+        if bytes[index] == quote {
+            let run = quote_run(bytes, index, quote);
+            if run >= 3 {
+                decoded.extend_from_slice(&bytes[index..index + run - 3]);
+                index += run - 3;
+                decoded.extend_from_slice(&bytes[index..index + 3]);
+                return index + 3;
+            }
+            decoded.extend_from_slice(&bytes[index..index + run]);
+            index += run;
+        } else if decode && bytes[index] == b'\\' {
+            index = copy_escape(bytes, index, decoded);
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    index
+}
+
+/// Decode one escape at `index`, or copy it as source, and return the next.
+fn copy_escape(bytes: &[u8], index: usize, decoded: &mut Vec<u8>) -> usize {
+    match decode_escape(bytes, index) {
+        Some((scalar, next)) => {
+            let mut buffer = [0u8; 4];
+            decoded.extend_from_slice(scalar.encode_utf8(&mut buffer).as_bytes());
+            next
+        }
+        None => {
+            decoded.push(b'\\');
+            index + 1
+        }
+    }
+}
+
+/// The next occurrence of `byte` at or after `from`.
+fn find_byte(bytes: &[u8], from: usize, byte: u8) -> Option<usize> {
     bytes
         .get(from..)?
-        .windows(quote.len())
-        .position(|window| window == quote)
+        .iter()
+        .position(|found| *found == byte)
         .map(|offset| from + offset)
+}
+
+/// How many `quote` bytes start at `index`.
+fn quote_run(bytes: &[u8], index: usize, quote: u8) -> usize {
+    bytes[index..]
+        .iter()
+        .take_while(|byte| **byte == quote)
+        .count()
 }
 
 /// Decode one backslash escape at `index`, with the index just past it.
@@ -148,4 +206,17 @@ gb = { path = \"../grant-bind\\u0069ng\", package = \"grant-bind\\u0069ng\" }\n"
     let literal = "gb = { path = '../grant-bind\\u0069ng', package = 'grant-bind\\u0069ng' }\n";
     assert!(!literal.contains("grant-binding"));
     assert!(!cargo_toml_path_depends_on_grant_binding(literal));
+    let comment = "# don't edit\n[dependencies]\ngb = { path = \"../grant-bind\\u0069ng\", package = \"grant-bind\\u0069ng\" }\n";
+    assert!(!comment.contains("grant-binding"));
+    assert!(comment.contains("\\u0069"));
+    assert!(cargo_toml_path_depends_on_grant_binding(comment));
+    let quoted_comment = "# the \"quoted note\ngb = { path = \"../grant-bind\\u0069ng\" }\n";
+    assert!(!quoted_comment.contains("grant-binding"));
+    assert!(cargo_toml_path_depends_on_grant_binding(quoted_comment));
+    let quoted_run = "a = \"\"\"x\"\"\"\"\ngb = { path = \"../grant-bind\\u0069ng\" }\n";
+    assert!(!quoted_run.contains("grant-binding"));
+    assert!(cargo_toml_path_depends_on_grant_binding(quoted_run));
+    let literal_run = "a = '''x''''\ngb = { path = \"../grant-bind\\u0069ng\" }\n";
+    assert!(!literal_run.contains("grant-binding"));
+    assert!(cargo_toml_path_depends_on_grant_binding(literal_run));
 }
