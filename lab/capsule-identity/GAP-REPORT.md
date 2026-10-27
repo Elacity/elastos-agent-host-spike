@@ -31,6 +31,10 @@
   the task's first commit). Every citation in the new section is at that commit; 021's lab citations stay at
   `01f6add1f`, and the Runtime citations stay at `c641bcff2`. Claim scope: read at one more commit; only `git`
   was run, and no issue was read again. The citation count is under "Open Runtime issues".
+- **Revision (task 033, 2026-10-27):** adds one dated paragraph, "B1 through a lab stand-in (27 Oct, tasks 032
+  and 033)", after "B1 and B2 (Anders, 26 Oct)". Its lab base is `693c3681db472d565a2ce07abc9ec2c9a7e0b7e0`
+  (`git rev-parse HEAD` before the task's first commit); it names tests and README sections, not lines. No
+  Runtime file was read again, every Runtime citation stays at `c641bcff2`, and no issue was read.
 
 Each cited file under `elastos/` or `scripts/`, checked with
 `git diff --stat 3beb816438fd567145a8d725e22465bd83277cf0 c641bcff21d9ceaad769b1ed89529d541ffd8766 -- <file>`:
@@ -830,6 +834,26 @@ not run the tests.
   Not shown: what an ask means, or how one is encoded. The ask-to-operation mapping is in `lab/bus-v2-proposal/`
   (its `CORE-CALLS-PROPOSAL.md`, lane cu-bus-v2-proposal), named here and not cited by line. This lane writes no
   B2 encoding, no ask schema and no mapping.
+
+### B1 through a lab stand-in (27 Oct, tasks 032 and 033)
+
+Added by task 033, on 2026-10-27. Tasks 032 and 033 added `StandInRuntime`, a lab stand-in for the Runtime's
+launch route in this lane's test code (`lab/capsule-identity/tests/common/mod.rs`; README "Lab stand-in launcher
+(M1 check B1)"). Before it launches the signed `agent-host` bundle, it checks in this order: (a) the launch body
+is an object whose only field is `cid`, (b) that text parses as a lab CID, (c) a bundle is stored under it, (d) the
+one walk reads the stored bundle, (e) the CID recomputed from those bytes equals the requested one, (f) a package
+record binds that CID, and (g) the record's signature verifies for a signer in the explicit accepted list. The
+refusals at (a), (b) and (c) come before the CID check and are `pre-CID, not B1 evidence`; (d) to (g) are not.
+A valid publisher signature alone yielded no grant in the stand-in: after the bundle (whose manifest asks for one
+grant in `capabilities`) is launched, twice, the stand-in's grant view, shaped as #309's RA-1
+(`GET /api/capability/list?scope=all_sessions_live`), lists no grant for either session and none at all, and
+the launch answer holds no grant or token key (`standin_valid_signature_alone_yields_no_grant`). The view is
+not a constant: a grant put in through the stand-in's one test seam, `seed_grant`, is listed
+(`standin_grant_view_lists_a_seeded_grant`). It needs no Runtime change to run: it is test code under
+`lab/capsule-identity/`, it edits no file under `elastos/`, and `cargo test` runs it on the Mac. Not shown: the
+Runtime ran nothing here, and no sentence here says it launched, checked, refused or granted anything; the
+Runtime still launches by path (the README section named above cites its launch request); and no #309 ask covers a
+launch by CID, so the stand-in's `cid` request field is a lab field. No shell approval is modelled.
 
 ### Questions with no answer
 
