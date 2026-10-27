@@ -69,9 +69,10 @@ principal `_ada`, `ada.`, or `.ada` is `BadPrincipal` at execute. A NUL in
 the intent is `BadIntent`. `notes/foo/..` is `OutsidePlan` at execute.
 An empty or zero-step plan cannot be approved: the recorded choice is
 Reject, no grant is minted, and execute returns `the plan has no steps`.
-Duplicate steps in one plan (`[journal, journal]`) are refused at approval:
-no grants, no bus calls, and execute returns
-`the plan lists a step more than once`.
+Duplicate resources in one plan (`[journal, journal]`) are refused at
+approval: no grants, no bus calls, and execute returns
+`the plan lists a step more than once`. Two steps may share an id when
+their resources differ.
 A bus reply `stored`, or any reply other than the exact storage BLOCKED
 token, returns `the bus bridge did not answer` and does not spend the grant.
 A failed execute leaves the grant unused, so a retry is not `GrantSpent`.

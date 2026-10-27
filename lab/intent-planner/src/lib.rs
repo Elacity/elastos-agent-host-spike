@@ -624,8 +624,8 @@ fn plain_intent(intent: &str) -> bool {
     !intent.contains('\0')
 }
 
-/// An empty step list, or a repeated `step.id` or resource, cannot be
-/// approved and cannot execute.
+/// An empty step list, or a repeated resource, cannot be approved and
+/// cannot execute. Two steps may share an id when their resources differ.
 fn plan_steps_admissible(steps: &[Step]) -> Result<(), Refuse> {
     if steps.is_empty() {
         return Err(Refuse::EmptyPlan);
@@ -640,7 +640,7 @@ fn has_duplicate_steps(steps: &[Step]) -> bool {
     steps.iter().enumerate().any(|(index, step)| {
         steps[..index]
             .iter()
-            .any(|prior| prior.id == step.id || prior.resource == step.resource)
+            .any(|prior| prior.resource == step.resource)
     })
 }
 
