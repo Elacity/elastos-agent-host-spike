@@ -35,12 +35,20 @@ half is "The Runtime bridge change" in `../did-provider/CONFINEMENT.md` and
 `../wallet-provider/CONFINEMENT.md`: the Runtime generates each provider's
 profile from its approved declared rights, one generator covers
 `model-provider` too, and the profile it generates for this provider must
-match this file, with the same three parameters bound to the same paths. The
-test that compares them is the Runtime's half. That half is not built. The
-model provider needs nothing from the Runtime beyond that one generator and
-that comparing test, and there is no separate Runtime proposal for the model
-provider (P10). The `sandbox-exec -f confine.sb` launch is the tests' launch
-(see "Tests"), not the Runtime's.
+match this file, with the same three parameters bound to the same paths. A
+lab generator, `generate_profile` in
+`capsules/wallet-provider/tests/confine.rs`, builds a profile from a
+declared-rights file and the contract head.
+`generated_did_and_wallet_profiles_match_their_committed_oracles` requires
+the generated did and wallet profiles to equal their oracles and does not
+read this profile.
+`model_declared_rights_read_on_the_did_and_wallet_template` reads this oracle
+and this declared-rights file. The Runtime's own generator and its comparison
+are not built and stay in `elastos/`, outside this lane. The model provider
+needs nothing from the Runtime beyond that one generator and that comparing
+test, and there is no separate Runtime proposal for the model provider (P10).
+The `sandbox-exec -f confine.sb` launch is the tests' launch (see "Tests"),
+not the Runtime's.
 
 `allow_rules_trace_to_declared_rights` traces every allow rule in this oracle
 to exactly one approved declared right in the `rights` array of
@@ -54,7 +62,8 @@ the page size to place its stack guard page.` for the sysctl read.
 They are Runtime platform baseline,
 technical OS permissions with no user approval prompt, not approved rights.
 The file is a lab stand-in for the Runtime generator's input, not a manifest
-field. The generator itself stays the Runtime's (Anders).
+field. The lab generator is test code.
+The Runtime's own generator is not built (Anders).
 
 `platform_baseline_rules_stay_narrow` fails if `startup-root-directory`
 widens in path or operation, including an added file write, or if
@@ -241,9 +250,9 @@ programs", means the profile applied and refused the exec.
 The launcher starts the provider no other way, as F-cc19a shows. The reason
 reaches the test through the launcher's stderr channel, as F-cc19b shows.
 For the Runtime's refusal of such a start, see "The Runtime bridge change"
-in `../did-provider/CONFINEMENT.md`. That bridge change is not built: the
-Runtime half that generates and enforces the profile is future work in
-`elastos/`, outside this lane.
+in `../did-provider/CONFINEMENT.md`. The lab writer in that did section is
+test code, and the Runtime half that generates and enforces the profile is
+not built and stays in `elastos/`, outside this lane.
 
 ## What the profile does not grant
 
