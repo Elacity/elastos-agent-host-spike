@@ -1,11 +1,13 @@
 //! The kit's own tests: the Bus answers, the write, the refusals and their
-//! `bus-error`, the reads, the URI check, the text checks and the fake.
-//! Moved here from the photo and documents viewers, which had a copy each.
+//! `bus-error`, the reads, the URI check, the input list, the text checks and
+//! the fake. Moved here from the photo and documents viewers, which had a copy
+//! each.
 
 use serde_json::{json, Value};
 
 use crate::bus::{read_window, write_body};
 use crate::fake::{Call, FakeBus};
+use crate::list::{self, ListRules};
 use crate::text::{check_head, check_whole, TextError};
 use crate::uri::check_object_uri;
 use crate::*;
@@ -382,6 +384,154 @@ fn an_input_uri_names_one_object_under_its_folder() {
     ] {
         assert!(check_object_uri(bad, prefix).is_err(), "{bad}");
     }
+}
+
+// --- The input list --------------------------------------------------------------------
+
+// The kit's own literals: no viewer constant is in reach here, and the shelf
+// rules (noun, schema, cap 8, prefix) are what pins "shelf has 9 items, the
+// limit is 8".
+const ALBUM_PREFIX: &str = "localhost://Users/self/Pictures/";
+const SHELF_PREFIX: &str = "localhost://Users/self/Documents/";
+const DOC: &str = "localhost://Users/self/Documents/a.md";
+
+const ALBUM_RULES: ListRules = ListRules {
+    noun: "album",
+    schema: "elastos.photo-viewer.album/v1",
+    limit: 3,
+    prefix: ALBUM_PREFIX,
+    item_fields: &["duration_ms"],
+};
+const SHELF_RULES: ListRules = ListRules {
+    noun: "shelf",
+    schema: "elastos.docs-viewer.shelf/v1",
+    limit: 8,
+    prefix: SHELF_PREFIX,
+    item_fields: &[],
+};
+
+fn album(items: Value) -> Vec<u8> {
+    serde_json::to_vec(&json!({ "schema": ALBUM_RULES.schema, "items": items })).unwrap()
+}
+
+fn album_uris(bytes: &[u8]) -> Result<Vec<String>, String> {
+    list::parse(bytes, &ALBUM_RULES, |_, uri| Ok(uri.to_string()))
+}
+
+#[test]
+fn a_list_with_an_unknown_top_level_field_is_refused() {
+    let bytes = serde_json::to_vec(&json!({
+        "schema": ALBUM_RULES.schema,
+        "items": [{ "uri": A }],
+        "x": 1,
+    }))
+    .unwrap();
+    assert_eq!(
+        album_uris(&bytes).unwrap_err(),
+        r#"album has unknown field "x""#
+    );
+}
+
+#[test]
+fn a_list_with_another_schema_is_refused() {
+    let bytes = serde_json::to_vec(&json!({
+        "schema": "other/v1",
+        "items": [{ "uri": A }],
+    }))
+    .unwrap();
+    assert_eq!(
+        album_uris(&bytes).unwrap_err(),
+        "album schema must be elastos.photo-viewer.album/v1"
+    );
+}
+
+#[test]
+fn a_list_whose_items_is_not_a_list_is_refused() {
+    let bytes = serde_json::to_vec(&json!({
+        "schema": ALBUM_RULES.schema,
+        "items": 3,
+    }))
+    .unwrap();
+    assert_eq!(
+        album_uris(&bytes).unwrap_err(),
+        "album items must be a list"
+    );
+}
+
+#[test]
+fn a_list_with_no_items_is_refused() {
+    assert_eq!(
+        album_uris(&album(json!([]))).unwrap_err(),
+        "album has no items"
+    );
+}
+
+#[test]
+fn a_list_takes_its_cap_and_refuses_one_item_more() {
+    let at_cap: Vec<Value> = (0..SHELF_RULES.limit)
+        .map(|_| json!({ "uri": DOC }))
+        .collect();
+    let bytes =
+        serde_json::to_vec(&json!({ "schema": SHELF_RULES.schema, "items": at_cap })).unwrap();
+    let items = list::parse(&bytes, &SHELF_RULES, |_, uri| Ok(uri.to_string())).unwrap();
+    assert_eq!(items.len(), 8, "the cap is the most items a list may have");
+    let over: Vec<Value> = (0..=SHELF_RULES.limit)
+        .map(|_| json!({ "uri": DOC }))
+        .collect();
+    let bytes =
+        serde_json::to_vec(&json!({ "schema": SHELF_RULES.schema, "items": over })).unwrap();
+    assert_eq!(
+        list::parse(&bytes, &SHELF_RULES, |_, uri| Ok(uri.to_string())).unwrap_err(),
+        "shelf has 9 items, the limit is 8"
+    );
+}
+
+#[test]
+fn an_item_that_is_not_an_object_is_refused() {
+    assert_eq!(
+        album_uris(&album(json!([{ "uri": A }, 7]))).unwrap_err(),
+        "album item 1: must be a JSON object"
+    );
+}
+
+#[test]
+fn an_item_with_an_unknown_field_is_refused() {
+    assert_eq!(
+        album_uris(&album(json!([{ "uri": A }, { "uri": A, "token": "t" }]))).unwrap_err(),
+        r#"album item 1: unknown field "token""#
+    );
+}
+
+#[test]
+fn an_item_whose_uri_is_not_a_string_is_refused() {
+    assert_eq!(
+        album_uris(&album(json!([{ "uri": A }, { "uri": 7 }]))).unwrap_err(),
+        "album item 1: uri must be a string"
+    );
+}
+
+#[test]
+fn an_item_uri_under_another_folder_is_refused() {
+    assert_eq!(
+        album_uris(&album(json!([{ "uri": A }, { "uri": DOC }]))).unwrap_err(),
+        "album item 1: uri must start with localhost://Users/self/Pictures/"
+    );
+}
+
+#[test]
+fn an_item_takes_the_fields_its_caller_allows() {
+    let items = list::parse(
+        &album(json!([{ "uri": A, "duration_ms": 5 }])),
+        &ALBUM_RULES,
+        |item, uri| {
+            Ok((
+                uri.to_string(),
+                item.get("duration_ms").and_then(Value::as_u64),
+            ))
+        },
+    )
+    .unwrap();
+    assert_eq!(items, [(A.to_string(), Some(5))]);
 }
 
 // --- Text ------------------------------------------------------------------------------

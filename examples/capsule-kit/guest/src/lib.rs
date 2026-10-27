@@ -6,6 +6,7 @@
 //!   the one-pass answer parser;
 //! - [`read`]: the refusals that stop a run, the grant, the bounded and the
 //!   counted reads;
+//! - [`list`]: the strict input-list parser of an app's input;
 //! - [`uri`]: the object URI check of an input list;
 //! - [`text`]: is this text (UTF-8, no control character but tab and line ends);
 //! - [`image`]: PNG, JPEG and WebP magic bytes and frame dimensions;
@@ -13,10 +14,11 @@
 //! - [`component`] (feature `wit`, wasm32 only): the `elastos:bus@v1` glue and
 //!   `lifecycle.run`.
 //!
-//! [`text`], [`image`] and [`uri`] need no feature, so a Bus v2 guest can use
-//! them without carrying any Bus v1 binding.
+//! [`list`], [`text`], [`image`] and [`uri`] need no feature, so a Bus v2
+//! guest can use them without carrying any Bus v1 binding.
 
 pub mod image;
+pub mod list;
 pub mod text;
 pub mod uri;
 

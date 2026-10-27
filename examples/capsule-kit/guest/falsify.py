@@ -7,13 +7,16 @@ Each falsifier replaces exact text in one file under src/ (it must occur
 once), rebuilds the tests (a mutant that does not compile proves nothing, so
 the run stops), runs every named test, and requires every one to FAIL. The
 file is restored from its saved bytes afterwards, also on error or Ctrl-C.
-The runner is the kit's own (examples/capsule-kit/falsify).
+The runner is the kit's own (examples/capsule-kit/falsify). The input-list
+cases run in the runner's exact-set mode: the whole test file must fail
+exactly the one test each names, so an undeclared failure cannot hide.
 
 The photo and documents viewers also break this crate's code in their own
 falsify scripts, where their own tests must notice (the image checks, the
 URI check, the write).
 """
 import pathlib
+import re
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -118,6 +121,49 @@ CASES = [
 ]
 
 
+# The input list (`list.rs`): one case per rule. Each must fail exactly its own
+# kit test, so these run in the exact-set mode: the whole test file must fail
+# exactly the declared test.
+LIST = [
+    ("a list takes an extra top-level key", "list.rs",
+     '.find(|key| !matches!(key.as_str(), "schema" | "items"))',
+     '.find(|key| !matches!(key.as_str(), "schema" | "items" | "x"))',
+     ["a_list_with_an_unknown_top_level_field_is_refused"]),
+    ("a list skips the schema check", "list.rs",
+     '    if list.get("schema").and_then(Value::as_str) != Some(schema) {',
+     '    if false && list.get("schema").and_then(Value::as_str) != Some(schema) {',
+     ["a_list_with_another_schema_is_refused"]),
+    ("a list takes items that are not a list", "list.rs",
+     '    let items = list\n        .get("items")\n        .and_then(Value::as_array)\n        .ok_or_else(|| format!("{noun} items must be a list"))?;',
+     '    let items = match list.get("items") {\n        Some(Value::Array(items)) => items,\n        _ => return Ok(Vec::new()),\n    };',
+     ["a_list_whose_items_is_not_a_list_is_refused"]),
+    ("a list may be empty", "list.rs",
+     "    if items.is_empty() {",
+     "    if false && items.is_empty() {",
+     ["a_list_with_no_items_is_refused"]),
+    ("a list takes one item over its cap", "list.rs",
+     "    if items.len() > limit {",
+     "    if items.len() >= limit {",
+     ["a_list_takes_its_cap_and_refuses_one_item_more"]),
+    ("an item need not be an object", "list.rs",
+     '    let object = value\n        .as_object()\n        .ok_or_else(|| "must be a JSON object".to_string())?;',
+     "    let empty = serde_json::Map::new();\n    let object = value.as_object().unwrap_or(&empty);",
+     ["an_item_that_is_not_an_object_is_refused"]),
+    ("an item takes an extra field", "list.rs",
+     '    key == "uri" || rules.item_fields.contains(&key)',
+     '    key == "uri" || rules.item_fields.contains(&key) || key == "token"',
+     ["an_item_with_an_unknown_field_is_refused"]),
+    ("an item uri need not be a string", "list.rs",
+     '    let uri = value\n        .get("uri")\n        .and_then(Value::as_str)\n        .ok_or_else(|| "uri must be a string".to_string())?;',
+     '    let uri = value\n        .get("uri")\n        .and_then(Value::as_str)\n        .unwrap_or("");',
+     ["an_item_whose_uri_is_not_a_string_is_refused"]),
+    ("an item uri skips the caller's prefix", "list.rs",
+     "    check_object_uri(uri, rules.prefix)?;",
+     '    check_object_uri(uri, "localhost://Users/self/")?;',
+     ["an_item_uri_under_another_folder_is_refused"]),
+]
+
+
 def build():
     kit.cargo_compiles(HERE, ["--lib"])
 
@@ -126,9 +172,30 @@ def test_fails(name):
     return kit.cargo_test_fails(HERE, ["--lib"], f"tests::{name}")
 
 
+def test_failures():
+    """Every test that fails in the whole test file while a mutant is in place."""
+    result = kit.run(["cargo", "test", "--locked", "--lib"], HERE)
+    if "test result:" not in result.stdout:
+        print(result.stdout[-3000:], result.stderr[-3000:])
+        raise SystemExit("a falsifier stops the tests")
+    failed = set()
+    for line in result.stdout.splitlines():
+        match = re.match(r"^test (tests::\S+) \.\.\. FAILED$", line)
+        if match:
+            failed.add(match.group(1).split("::", 1)[-1])
+    return failed
+
+
 def main():
     cases = [(name, HERE / "src" / relative, [(old, new)], tests) for name, relative, old, new, tests in CASES]
-    kit.main([(cases, build, test_fails, None, True)], done=f"all {len(CASES)} kit guest falsifiers caught")
+    list_cases = [(name, HERE / "src" / relative, [(old, new)], tests) for name, relative, old, new, tests in LIST]
+    kit.main(
+        [
+            (cases, build, test_fails, None, True),
+            (list_cases, build, test_fails, None, True, test_failures),
+        ],
+        done=f"all {len(CASES) + len(LIST)} kit guest falsifiers caught",
+    )
 
 
 if __name__ == "__main__":

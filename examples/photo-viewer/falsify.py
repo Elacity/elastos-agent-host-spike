@@ -55,7 +55,7 @@ GUEST = [
     ),
     (
         "unknown album fields allowed",
-        "src/album.rs",
+        "../capsule-kit/guest/src/list.rs",
         '.find(|key| !matches!(key.as_str(), "schema" | "items"))',
         '.find(|key| !matches!(key.as_str(), "schema" | "items" | "x"))',
         ["malformed_albums_stop_before_any_image_is_read"],
