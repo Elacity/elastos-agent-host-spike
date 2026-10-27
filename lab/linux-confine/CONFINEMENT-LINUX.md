@@ -13,9 +13,13 @@ Guest result: confine 25/25, providers 4/4, Landlock ABI 7, IOCTL_DEV
 EACCES, nine in-guest plants CAUGHT (including skip-netns, drop-seccomp,
 and widen-Landlock). The guest has a NIC besides `lo`. The host exits
 non-zero if a suite fails, is missing, is short, is missing an `LC_MARK`
-serial line, qemu exits non-zero, or qemu hits the hard timeout. The
-guest nonce stays in a root-only file until after the test uid finishes.
-That guest is still not Jetson and not native aarch64.
+serial line, a suite has two `LC_MARK` lines, `guest_exit.txt` is not
+exactly one canonical line, the nonce does not match the host pre-boot
+hash, an evidence file predates that run, qemu exits non-zero, or qemu
+hits the hard timeout. The host writes the nonce hash outside the 9p
+share before qemu starts. The guest nonce stays in a root-only file
+until after the test uid finishes. That guest is still not Jetson and
+not native aarch64.
 
 C9 asks for namespaces, capabilities, seccomp and Landlock, with permitted and
 denied rows. The Linux map also says the filter refuses a new process and every

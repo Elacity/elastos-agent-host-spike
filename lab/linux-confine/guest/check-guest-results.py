@@ -2,15 +2,19 @@
 """Check aarch64 guest evidence and write RESULTS.txt from live files.
 
 Exit 0 only when every standing suite passed with the exact expected
-counts, every official plant is CAUGHT, every suite has an LC_MARK
-serial line that matches the 9p files and the host nonce, qemu exited
-0 without a timeout, and the guest proved the test uid could not read
-the nonce. Missing files, missing marks, stale files, a short or
-inflated suite, or an abnormal qemu exit are a failure.
+counts, every official plant is CAUGHT, every suite has exactly one
+LC_MARK serial line that matches the 9p files and the host nonce, qemu
+exited 0 without a timeout, guest_exit.txt is exactly one canonical
+line, the nonce matches the host pre-boot hash, evidence files do not
+predate that run, and the guest proved the test uid could not read the
+nonce. Duplicate marks, a substring guest_exit, a replayed tree, missing
+files, stale files, a short or inflated suite, or an abnormal qemu exit
+are a failure.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import re
@@ -24,6 +28,9 @@ MARK_LINE = re.compile(
     r"passed=(?P<passed>\d+) failed=(?P<failed>\d+) ignored=(?P<ignored>\d+) "
     r"status=(?P<status>\S+)"
 )
+GUEST_EXIT_LINE = re.compile(r"^guest_exit=(0|[1-9][0-9]*)$")
+PREBOOT_HASH_LINE = re.compile(r"^nonce_sha256=([0-9a-f]{64})$")
+PREBOOT_START_LINE = re.compile(r"^run_start=(0|[1-9][0-9]*)$")
 
 
 def load_json(path: pathlib.Path):
@@ -76,14 +83,79 @@ def collect_nonce_problems(nonce: str, guest_results: str, console: str, marks: 
     return problems
 
 
+def collect_marks(console: str) -> tuple[dict, list[str]]:
+    marks = {}
+    problems = []
+    for match in MARK_LINE.finditer(console):
+        name = match.group("suite")
+        if name in marks:
+            problems.append(f"{name}: duplicate LC_MARK serial line")
+        marks[name] = match.groupdict()
+    return marks, problems
+
+
+def parse_guest_exit(text: str):
+    lines = text.splitlines()
+    if len(lines) != 1:
+        return None
+    match = GUEST_EXIT_LINE.fullmatch(lines[0])
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def collect_preboot_problems(
+    evidence: pathlib.Path, nonce: str, preboot: pathlib.Path | None
+) -> list[str]:
+    problems = []
+    if preboot is None or not preboot.is_file():
+        problems.append("pre-boot nonce record missing")
+        return problems
+    evidence_real = evidence.resolve()
+    preboot_real = preboot.resolve()
+    try:
+        preboot_real.relative_to(evidence_real)
+    except ValueError:
+        pass
+    else:
+        problems.append("pre-boot nonce record is inside the guest-writable evidence dir")
+        return problems
+    digest = None
+    run_start = None
+    for raw in preboot.read_text(errors="replace").splitlines():
+        hashed = PREBOOT_HASH_LINE.fullmatch(raw)
+        started = PREBOOT_START_LINE.fullmatch(raw)
+        if hashed:
+            digest = hashed.group(1)
+        elif started:
+            run_start = int(started.group(1))
+    if digest is None:
+        problems.append("pre-boot nonce hash missing or not sha256 hex")
+    elif hashlib.sha256(nonce.encode()).hexdigest() != digest:
+        problems.append("nonce does not match the pre-boot record")
+    if run_start is None:
+        problems.append("pre-boot run_start missing")
+    else:
+        for child in sorted(evidence.iterdir()):
+            if not child.is_file() or child.name == "RESULTS.txt":
+                continue
+            if int(child.stat().st_mtime) < run_start:
+                problems.append(f"{child.name}: evidence file predates the run start")
+    return problems
+
+
 def main() -> int:
     if len(sys.argv) < 4:
-        print("usage: check-guest-results.py EVIDENCE EXPECTED.json nonce", file=sys.stderr)
+        print(
+            "usage: check-guest-results.py EVIDENCE EXPECTED.json nonce [mode [PREBOOT]]",
+            file=sys.stderr,
+        )
         return 2
     evidence = pathlib.Path(sys.argv[1])
     expected = load_json(pathlib.Path(sys.argv[2]))
     nonce = sys.argv[3]
     mode = sys.argv[4] if len(sys.argv) > 4 else "full"
+    preboot = pathlib.Path(sys.argv[5]) if len(sys.argv) > 5 else None
     problems: list[str] = []
 
     guest_results = read(evidence / "guest-results.txt")
@@ -99,8 +171,10 @@ def main() -> int:
     elif qemu_exit != 0:
         problems.append(f"qemu_exit={qemu_exit} is non-zero/abnormal")
 
-    marks = {m.group("suite"): m.groupdict() for m in MARK_LINE.finditer(console)}
+    marks, mark_problems = collect_marks(console)
+    problems.extend(mark_problems)
     problems.extend(collect_nonce_problems(nonce, guest_results, console, marks))
+    problems.extend(collect_preboot_problems(evidence, nonce, preboot))
 
     if mode == "full":
         if "tester_nonce_readable=1" in console:
@@ -185,7 +259,8 @@ def main() -> int:
                 problems.append(f"{plant}: status={status} (want NOT_RUN)")
 
     guest_exit = read(evidence / "guest-exit.txt")
-    if mode == "full" and "guest_exit=0" not in guest_exit:
+    guest_exit_value = parse_guest_exit(guest_exit)
+    if mode == "full" and guest_exit_value != 0:
         problems.append(f"guest_exit.txt did not report 0: {guest_exit.strip()!r}")
 
     label = expected.get("label", "")

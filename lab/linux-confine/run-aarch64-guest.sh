@@ -62,6 +62,20 @@ mkdir -p "$WORK/dl" "$EVIDENCE"
 find "$EVIDENCE" -maxdepth 1 -type f \
     \( -name '*.status' -o -name '*.exit' -o -name '*.txt' -o -name 'LABEL.txt' \) \
     -delete
+# Hash the nonce on the host before any guest-writable evidence is written.
+# The guest 9p share never sees this file.
+python3 - "$NONCE" "$WORK/host-preboot.txt" <<'PY'
+import hashlib
+import sys
+import time
+from pathlib import Path
+
+nonce, path = sys.argv[1], sys.argv[2]
+Path(path).write_text(
+    f"nonce_sha256={hashlib.sha256(nonce.encode()).hexdigest()}\n"
+    f"run_start={int(time.time())}\n"
+)
+PY
 echo "$LABEL" > "$EVIDENCE/LABEL.txt"
 # Nonce stays off the 9p share until qemu has exited. The guest test uid
 # must not be able to read it from evidence/ or from /etc/lc-guest.env.
@@ -386,7 +400,7 @@ fi
 echo "=== host check of guest results ==="
 set +e
 if [ "$MODE" = "smoke" ]; then
-    python3 "$LAB/guest/check-guest-results.py" "$EVIDENCE" "$EXPECTED" "$NONCE" smoke
+    python3 "$LAB/guest/check-guest-results.py" "$EVIDENCE" "$EXPECTED" "$NONCE" smoke "$WORK/host-preboot.txt"
     check_rc=$?
     # Smoke does not run the suites; only the label and nonce matter.
     if grep -q "LABEL=$LABEL" "$QEMU_LOG"; then
@@ -394,7 +408,7 @@ if [ "$MODE" = "smoke" ]; then
         check_rc=0
     fi
 elif [ "$MODE" = "fail-closed" ]; then
-    python3 "$LAB/guest/check-guest-results.py" "$EVIDENCE" "$EXPECTED" "$NONCE" fail-closed
+    python3 "$LAB/guest/check-guest-results.py" "$EVIDENCE" "$EXPECTED" "$NONCE" fail-closed "$WORK/host-preboot.txt"
     check_rc=$?
     if [ "$check_rc" -eq 0 ]; then
         echo "fail-closed probe unexpectedly passed the host check" >&2
@@ -405,7 +419,7 @@ elif [ "$MODE" = "fail-closed" ]; then
     echo "wrote $EVIDENCE"
     exit 1
 else
-    python3 "$LAB/guest/check-guest-results.py" "$EVIDENCE" "$EXPECTED" "$NONCE" full
+    python3 "$LAB/guest/check-guest-results.py" "$EVIDENCE" "$EXPECTED" "$NONCE" full "$WORK/host-preboot.txt"
     check_rc=$?
 fi
 set -e

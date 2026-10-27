@@ -9,11 +9,14 @@ file fails.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -129,13 +132,44 @@ def populate(
     (ev / "summary.txt").write_text("\n".join(console) + "\n")
 
 
-def run_check(ev: pathlib.Path, nonce: str, checker: pathlib.Path = CHECK) -> int:
-    return subprocess.run(
-        [sys.executable, str(checker), str(ev), str(HERE / "expected.json"), nonce, "full"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    ).returncode
+def write_preboot(path: pathlib.Path, nonce: str, run_start: int | None = None) -> None:
+    if run_start is None:
+        run_start = int(time.time()) - 60
+    digest = hashlib.sha256(nonce.encode()).hexdigest()
+    path.write_text(f"nonce_sha256={digest}\nrun_start={run_start}\n")
+
+
+def run_check(
+    ev: pathlib.Path,
+    nonce: str,
+    checker: pathlib.Path = CHECK,
+    preboot: pathlib.Path | None = None,
+) -> int:
+    cleanup = None
+    if preboot is None:
+        handle, name = tempfile.mkstemp(prefix="lc-host-preboot-", suffix=".txt")
+        os.close(handle)
+        preboot = pathlib.Path(name)
+        cleanup = preboot
+        write_preboot(preboot, nonce)
+    try:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(checker),
+                str(ev),
+                str(HERE / "expected.json"),
+                nonce,
+                "full",
+                str(preboot),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        ).returncode
+    finally:
+        if cleanup is not None:
+            cleanup.unlink(missing_ok=True)
 
 
 def apply_mutant(src: str, mutant_id: str) -> str:
@@ -153,8 +187,17 @@ def apply_mutant(src: str, mutant_id: str) -> str:
         old = "    problems.extend(collect_nonce_problems(nonce, guest_results, console, marks))"
         new = "    problems.extend([])"
     elif mutant_id == "M5":
-        old = '    if mode == "full" and "guest_exit=0" not in guest_exit:'
-        new = '    if False and mode == "full" and "guest_exit=0" not in guest_exit:'
+        old = "    if mode == \"full\" and guest_exit_value != 0:"
+        new = "    if False and mode == \"full\" and guest_exit_value != 0:"
+    elif mutant_id == "M9":
+        old = '        if name in marks:\n            problems.append(f"{name}: duplicate LC_MARK serial line")'
+        new = '        if False and name in marks:\n            problems.append(f"{name}: duplicate LC_MARK serial line")'
+    elif mutant_id == "M10":
+        old = "    lines = text.splitlines()\n    if len(lines) != 1:\n        return None\n    match = GUEST_EXIT_LINE.fullmatch(lines[0])\n    if match is None:\n        return None\n    return int(match.group(1))"
+        new = '    if "guest_exit=0" in text:\n        return 0\n    return None'
+    elif mutant_id == "M11":
+        old = "    problems.extend(collect_preboot_problems(evidence, nonce, preboot))"
+        new = "    problems.extend([])"
     elif mutant_id == "M6":
         old = "    passed, failed, ignored = (int(x) for x in matches[-1])"
         new = "    passed, failed, ignored = (int(x) for x in matches[0])"
@@ -312,6 +355,62 @@ class CheckGuestResults(unittest.TestCase):
             populate(ev, NONCE, isolation=False)
             self.assertEqual(run_check(ev, NONCE), 1)
 
+    def test_duplicate_lc_mark_last_wins_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = pathlib.Path(tmp)
+            populate(ev, NONCE)
+            console = (ev / "qemu-console.txt").read_text().splitlines()
+            console.append(mark_line(NONCE, "elf", 6, 0, 0))
+            (ev / "qemu-console.txt").write_text("\n".join(console) + "\n")
+            self.assertEqual(run_check(ev, NONCE), 1)
+
+    def test_guest_exit_must_be_one_canonical_line(self):
+        cases = (
+            "guest_exit=01\n",
+            "guest_exit=1\n# later guest_exit=0\n",
+            "guest_exit=0\nguest_exit=0\n",
+            "status=ok guest_exit=0 extra\n",
+        )
+        for text in cases:
+            with tempfile.TemporaryDirectory() as tmp:
+                ev = pathlib.Path(tmp)
+                populate(ev, NONCE, guest_exit=text)
+                self.assertEqual(run_check(ev, NONCE), 1, msg=repr(text))
+
+    def test_replay_old_tree_old_nonce_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            ev.mkdir()
+            populate(ev, NONCE)
+            yesterday = int(time.time()) - 86400
+            for child in ev.iterdir():
+                if child.is_file():
+                    os.utime(child, (yesterday, yesterday))
+            preboot = root / "host-preboot.txt"
+            write_preboot(preboot, NONCE, run_start=int(time.time()))
+            self.assertEqual(run_check(ev, NONCE, preboot=preboot), 1)
+            now = int(time.time())
+            for child in ev.iterdir():
+                if child.is_file():
+                    os.utime(child, (now, now))
+            write_preboot(preboot, "other-nonce", run_start=now - 60)
+            self.assertEqual(run_check(ev, NONCE, preboot=preboot), 1)
+            missing = subprocess.run(
+                [
+                    sys.executable,
+                    str(CHECK),
+                    str(ev),
+                    str(HERE / "expected.json"),
+                    NONCE,
+                    "full",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(missing.returncode, 1)
+
 
 class MutantsAreCaught(unittest.TestCase):
     """Each r2 mutant lets one extra-probe fixture through. The live checker does not."""
@@ -410,6 +509,43 @@ class MutantsAreCaught(unittest.TestCase):
             self.assertEqual(run_check(ev, NONCE), 1)
             self.assertEqual(run_check(ev, NONCE, mutant), 0)
 
+    def test_m9_last_wins_duplicate_marks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = pathlib.Path(tmp) / "ev"
+            ev.mkdir()
+            populate(ev, NONCE)
+            console = (ev / "qemu-console.txt").read_text().splitlines()
+            console.append(mark_line(NONCE, "elf", 6, 0, 0))
+            (ev / "qemu-console.txt").write_text("\n".join(console) + "\n")
+            mutant = self._mutant_checker(pathlib.Path(tmp), "M9")
+            self.assertEqual(run_check(ev, NONCE), 1)
+            self.assertEqual(run_check(ev, NONCE, mutant), 0)
+
+    def test_m10_substring_guest_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = pathlib.Path(tmp) / "ev"
+            ev.mkdir()
+            populate(ev, NONCE, guest_exit="guest_exit=01\n")
+            mutant = self._mutant_checker(pathlib.Path(tmp), "M10")
+            self.assertEqual(run_check(ev, NONCE), 1)
+            self.assertEqual(run_check(ev, NONCE, mutant), 0)
+
+    def test_m11_skip_preboot_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ev = root / "ev"
+            ev.mkdir()
+            populate(ev, NONCE)
+            yesterday = int(time.time()) - 86400
+            for child in ev.iterdir():
+                if child.is_file():
+                    os.utime(child, (yesterday, yesterday))
+            preboot = root / "host-preboot.txt"
+            write_preboot(preboot, NONCE, run_start=int(time.time()))
+            mutant = self._mutant_checker(root, "M11")
+            self.assertEqual(run_check(ev, NONCE, preboot=preboot), 1)
+            self.assertEqual(run_check(ev, NONCE, mutant, preboot=preboot), 0)
+
 
 class HostScriptNonceIsolation(unittest.TestCase):
     def test_wrapper_keeps_nonce_off_guest_paths_until_after_qemu(self):
@@ -421,6 +557,11 @@ class HostScriptNonceIsolation(unittest.TestCase):
         before, after = text.split("=== boot qemu-system-aarch64 TCG ===", 1)
         self.assertNotIn('echo "$NONCE" > "$EVIDENCE/nonce.txt"', before)
         self.assertIn('echo "$NONCE" > "$EVIDENCE/nonce.txt"', after)
+        self.assertIn('"$WORK/host-preboot.txt"', before)
+        self.assertIn("nonce_sha256=", before)
+        self.assertIn("run_start=", before)
+        self.assertNotIn('echo "$NONCE" > "$WORK/host-preboot.txt"', before)
+        self.assertIn('"$WORK/host-preboot.txt"', after)
         self.assertIn("timeout --foreground --signal=KILL", after)
         self.assertIn("< /dev/null", after)
         self.assertIn('QEMU_LOG="$WORK/qemu-console.txt"', after)
