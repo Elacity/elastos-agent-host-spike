@@ -179,14 +179,22 @@ use std::process::Command;
 /// fails. Task 096's WP124 makes the stand-in use wallet's root layout for did,
 /// so `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
 /// fails because the did start is refused at its first `init`. Task 099's
-/// WP126 makes the absent-tool check never fire, so did's case (c) is answered
+/// WP125 makes the absent-tool check never fire, so did's case (c) is answered
 /// by the wrong-tool reason and lacks `is absent`; and WP126 drops the OS from
-/// the wrong-tool reason, so did's case (c2) lacks `macos`. Task 100's WP127
+/// the wrong-tool reason, so did's case (c2) lacks `on macos`. Task 100's WP127
 /// appends a write grant on `STORAGE_PARENT` to the stand-in's generated
 /// profile for did, so
 /// `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
-/// fails on the sibling write case, which answers `ok`.
-const EXPECTED_FALSIFIERS: usize = 125;
+/// fails on the sibling write case, which answers `ok`. Task 101's WP128
+/// returns `did_provider_dir().join("target/debug/did-provider")` from the one
+/// build-output reader instead of the reported `executable`, so
+/// `did_binary_is_the_executable_the_build_reports` fails on its fixture path
+/// while `standin_launcher_finds_the_built_did_binary` alone still passes
+/// because the guessed file exists after did's build; and WP129 returns
+/// `wallet_dir(base)` for the unknown-name arm of `provider_storage_root`, so
+/// `provider_storage_root_refuses_an_unknown_provider_name` fails because no
+/// refusal comes.
+const EXPECTED_FALSIFIERS: usize = 127;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

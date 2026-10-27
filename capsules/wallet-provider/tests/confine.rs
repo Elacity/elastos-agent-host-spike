@@ -361,6 +361,39 @@ fn did_provider_binary() -> &'static Path {
     BINARY.as_path()
 }
 
+/// The `did-provider` bin artifact's `executable` that cargo's JSON output
+/// reports, or a refusal that names `did-provider` and `executable`.
+///
+/// `build_did_provider_binary` feeds this function did's build output, and
+/// `did_binary_is_the_executable_the_build_reports` feeds it fixture lines.
+/// One reader serves both, so the output has one parser and no other place
+/// reads a path from the build (P10).
+fn did_binary_executable(build_output: &str) -> Result<PathBuf, String> {
+    for line in build_output.lines() {
+        let Ok(message) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if message["reason"].as_str() != Some("compiler-artifact") {
+            continue;
+        }
+        if message["target"]["name"].as_str() != Some(DID_PROVIDER) {
+            continue;
+        }
+        let is_bin = message["target"]["kind"]
+            .as_array()
+            .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("bin")));
+        if !is_bin {
+            continue;
+        }
+        if let Some(executable) = message["executable"].as_str() {
+            return Ok(PathBuf::from(executable));
+        }
+    }
+    Err(format!(
+        "cargo's JSON output carries no {DID_PROVIDER} bin artifact that names an executable"
+    ))
+}
+
 fn build_did_provider_binary() -> PathBuf {
     let manifest = did_provider_dir().join("Cargo.toml");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
@@ -388,42 +421,48 @@ fn build_did_provider_binary() -> PathBuf {
         manifest.display()
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        let Ok(message) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if message["reason"].as_str() != Some("compiler-artifact") {
-            continue;
-        }
-        if message["target"]["name"].as_str() != Some(DID_PROVIDER) {
-            continue;
-        }
-        let is_bin = message["target"]["kind"]
-            .as_array()
-            .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("bin")));
-        if !is_bin {
-            continue;
-        }
-        if let Some(executable) = message["executable"].as_str() {
-            return PathBuf::from(executable);
-        }
-    }
-    panic!(
-        "the did-provider build must report its bin artifact's executable; \
-         standard output: {stdout}"
-    );
+    did_binary_executable(&stdout)
+        .unwrap_or_else(|reason| panic!("{reason}; standard output: {stdout}"))
 }
 
 /// The storage root a provider name keeps under `base`. did-provider keeps
 /// its identity state at `<base>/did`; wallet-provider keeps its state under
 /// `wallet_dir(base)`. The launcher and the oracle both read this one
-/// derivation, so a did start cannot drift into wallet's layout.
+/// derivation, so a did start cannot drift into wallet's layout. Any other
+/// name is refused, because the stand-in serves these two and a guessed layout
+/// would be a fallback (P11).
 fn provider_storage_root(name: &str, base: &Path) -> PathBuf {
-    if name == DID_PROVIDER {
-        base.join("did")
-    } else {
-        wallet_dir(base)
+    match name {
+        DID_PROVIDER => base.join("did"),
+        WALLET_PROVIDER => wallet_dir(base),
+        other => panic!(
+            "the stand-in serves only {DID_PROVIDER} and {WALLET_PROVIDER}, \
+             so {other} has no storage root layout"
+        ),
     }
+}
+
+/// The layout derivation refuses a provider name it does not serve, and the
+/// refusal names the name and both served names.
+///
+/// The test calls the derivation only and starts nothing.
+///
+/// Falsifier: WP129 returns `wallet_dir(base)` for the unknown-name arm, so
+/// this test fails because no refusal comes.
+#[test]
+fn provider_storage_root_refuses_an_unknown_provider_name() {
+    let base = Path::new("/fixture/base");
+    let refusal = std::panic::catch_unwind(|| provider_storage_root("model-provider", base))
+        .expect_err("an unknown provider name must be refused");
+    let message = refusal
+        .downcast_ref::<String>()
+        .unwrap_or_else(|| panic!("the refusal must be a formatted reason"));
+    assert_eq!(
+        message.as_str(),
+        "the stand-in serves only did-provider and wallet-provider, \
+         so model-provider has no storage root layout",
+        "the refusal must name the unknown provider and both served names"
+    );
 }
 
 /// The three parameter bindings the tests make for one provider's storage
@@ -451,10 +490,10 @@ fn storage_parent(name: &str, base: &Path) -> PathBuf {
         .to_path_buf()
 }
 
-/// The `init` config the stand-in sends for `name` at `base`. Every provider
-/// receives `base_path`; did also receives the isolated fixture device key so
-/// its `get_did` answers, as the Runtime passes a provider its config. The
-/// stand-in builds this one config for both providers.
+/// The `init` config the stand-in sends for `name` at `base`. The stand-in
+/// sends `base_path` to both providers, and did also receives the isolated
+/// fixture device key so its `get_did` answers. It builds this one config for
+/// both providers.
 fn provider_init_config(name: &str, base: &Path) -> Value {
     let mut config = json!({ "base_path": base.display().to_string() });
     if name == DID_PROVIDER {
@@ -2557,9 +2596,8 @@ fn prepare_outside_write_case(case: &str, base: &Path) {
     if case == FRESH_OUTSIDE_CASE {
         return;
     }
-    let outside_wallet = wallet_dir(base);
-    fs::create_dir_all(outside_wallet.parent().expect("outside wallet parent"))
-        .expect("outside parent fixture");
+    let parent = storage_parent(WALLET_PROVIDER, base);
+    fs::create_dir_all(parent).expect("outside parent fixture");
 }
 
 /// A write outside the wallet directory is denied by the profile, and the
@@ -2661,12 +2699,13 @@ fn confined_outside_read_is_denied() {
         .expect("write read fixture profile");
     let key_path = outside_wallet.join(WALLET_KEY_FILE);
     let store_path = outside_wallet.join("wallet-state.json");
+    let outside_parent = storage_parent(WALLET_PROVIDER, &outside);
     let mut provider = ConfinedProvider::start_with_profile(
         &root,
         read_profile.path(),
         &[
             ("READ_FIXTURE_WALLET", &outside_wallet),
-            ("READ_FIXTURE_PARENT", outside_wallet.parent().unwrap()),
+            ("READ_FIXTURE_PARENT", outside_parent.as_path()),
             ("READ_FIXTURE_KEY", &key_path),
             ("READ_FIXTURE_STORE", &store_path),
         ],
@@ -3337,6 +3376,55 @@ fn generator_refuses_an_unnamed_right_and_the_start_is_refused() {
     }
 }
 
+/// The one build-output reader returns the executable the build reports, and
+/// refuses output that names no did bin artifact.
+///
+/// The fixture output holds a `did-provider` lib artifact, another crate's bin
+/// artifact and the `did-provider` bin artifact whose `executable` is
+/// `/fixture/out/did-provider`, outside any `target` directory. Output without
+/// a `did-provider` bin artifact gives the reader's refusal, which names
+/// `did-provider` and `executable`. The test starts no process and needs no
+/// sandbox.
+///
+/// Falsifier: WP128 returns
+/// `did_provider_dir().join("target/debug/did-provider")` instead of the
+/// reported `executable`, so this test fails on the fixture path.
+/// `standin_launcher_finds_the_built_did_binary` alone still passes under
+/// WP128, because the guessed file exists after did's build.
+#[test]
+fn did_binary_is_the_executable_the_build_reports() {
+    let lib = json!({
+        "reason": "compiler-artifact",
+        "target": { "name": DID_PROVIDER, "kind": ["lib"] },
+        "executable": null,
+    });
+    let other_bin = json!({
+        "reason": "compiler-artifact",
+        "target": { "name": WALLET_PROVIDER, "kind": ["bin"] },
+        "executable": "/fixture/out/wallet-provider",
+    });
+    let did_bin = json!({
+        "reason": "compiler-artifact",
+        "target": { "name": DID_PROVIDER, "kind": ["bin"] },
+        "executable": "/fixture/out/did-provider",
+    });
+    let output = [lib.clone(), other_bin.clone(), did_bin]
+        .map(|line| line.to_string())
+        .join("\n");
+    assert_eq!(
+        did_binary_executable(&output).expect("the did-provider bin artifact must be read"),
+        PathBuf::from("/fixture/out/did-provider"),
+        "the reader must return the executable the build reports"
+    );
+    let without_did_bin = [lib, other_bin].map(|line| line.to_string()).join("\n");
+    let reason = did_binary_executable(&without_did_bin)
+        .expect_err("output without a did-provider bin artifact must be refused");
+    assert!(
+        reason.contains(DID_PROVIDER) && reason.contains("executable"),
+        "the refusal must name did-provider and executable: {reason}"
+    );
+}
+
 /// The stand-in finds the did binary through one build of did's manifest.
 ///
 /// `did_provider_binary` runs `cargo build --locked --offline --manifest-path
@@ -3422,7 +3510,7 @@ fn standin_launcher_finds_the_built_did_binary() {
 /// `Ok(provider)` for an `init` answer that is not `ok`, so (f) is Started.
 /// WP125 makes the absent-tool check never fire, so (c) reads the wrong-tool
 /// reason instead; WP126 drops the OS from the wrong-tool reason, so (c2)
-/// loses `macos`.
+/// loses `on macos`.
 fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
     let present = std::env::current_exe().expect("the test executable path must be available");
     let absent = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/absent-sandbox-exec");
@@ -3453,14 +3541,14 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
             "(c) macos without the tool",
             "macos",
             absent.as_path(),
-            vec!["macos", "is absent", absent_text.as_str()],
+            vec!["on macos", "is absent", absent_text.as_str()],
             vec![SANDBOX_EXEC],
         ),
         (
             "(c2) macos with another tool",
             "macos",
             present.as_path(),
-            vec!["macos", present_text.as_str(), SANDBOX_EXEC],
+            vec!["on macos", present_text.as_str(), SANDBOX_EXEC],
             vec![],
         ),
     ];
@@ -3656,8 +3744,7 @@ fn standin_refusals_for(name: &str, provider: &Path, declared: &Value) {
     let profile_root = tempfile::tempdir().expect("temporary profile root");
     let profile_dir = resolved(profile_root.path());
     let planted = provider_storage_root(name, &base);
-    fs::create_dir_all(planted.parent().expect("storage parent"))
-        .expect("prepare the storage parent");
+    fs::create_dir_all(storage_parent(name, &base)).expect("prepare the storage parent");
     fs::write(&planted, b"not a directory").expect("plant a regular file at the storage root");
     let refusal = standin_spawn_confined_provider(
         std::env::consts::OS,
@@ -3779,8 +3866,7 @@ fn standin_launcher_starts_wallet_confined_under_the_generated_profile() {
     let outside = tempfile::tempdir().expect("temporary outside directory");
     let outside = resolved(outside.path());
     let outside_wallet = wallet_dir(&outside);
-    fs::create_dir_all(outside_wallet.parent().expect("outside wallet parent"))
-        .expect("outside parent fixture");
+    fs::create_dir_all(storage_parent(WALLET_PROVIDER, &outside)).expect("outside parent fixture");
     let denied = provider.init(&outside);
     assert_storage_error(&denied);
     assert!(
