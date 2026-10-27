@@ -2435,6 +2435,71 @@
       ]
     },
     {
+      "id": "PV128",
+      "title": "the grant-binding crate row is absent, so its list command is unknown and its manifest is never checked",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"grant-binding\": (REPO / \"lab\" / \"grant-binding\" / \"Cargo.toml\", ()),\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "provider spec uses locked manifest",
+        "a grant-binding entry loads and runs its crate"
+      ]
+    },
+    {
+      "id": "PV129",
+      "title": "the grant-binding row names the agent-conformance manifest",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "\"grant-binding\": (REPO / \"lab\" / \"grant-binding\" / \"Cargo.toml\", ()),",
+          "new": "\"grant-binding\": (REPO / \"lab\" / \"agent-conformance\" / \"Cargo.toml\", ()),"
+        }
+      ],
+      "tests": [
+        "provider spec uses locked manifest"
+      ]
+    },
+    {
+      "id": "PV130",
+      "title": "startup recovery skips grant-binding's first target",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"lab/grant-binding/src/ask.rs\",\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
+      "id": "PV131",
+      "title": "startup recovery skips grant-binding's last target",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"lab/grant-binding/src/ops.rs\",\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
       "id": "MP24",
       "title": "a Runtime-forwarded answer is read as a failure",
       "command": "provider",
