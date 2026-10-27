@@ -42,9 +42,12 @@ directories. This crate runs no Kubo, and no Kubo is installed on this Mac.
 So the lab CID follows the Kubo v0.40.1 profile, computed by the lab: no Kubo has
 computed any pin, and [Claim scope](#claim-scope) states the gate before the
 lab CID may be called more than that.
-The tests pin only the single-block, non-sharded subset of that profile: one
-raw leaf per file and one block per directory. Anything bigger is refused, not
-named another way.
+The tests pin only the non-sharded subset of that profile with files of up to
+one tree level: a file of one raw leaf, a file of 2 to 174 raw leaves under one
+balanced file root (trickle off, `max-file-links` 174; task 048), and one
+block per directory. Anything bigger is refused, not named another way. The
+file root's bytes are the lab's reading of the profile, which no Kubo has
+checked (see [Claim scope](#claim-scope)).
 
 To recompute a lab CID by hand:
 
@@ -54,12 +57,25 @@ To recompute a lab CID by hand:
    file's bytes (an empty file is an empty block). Its CID is the 36 bytes
    `01 55 12 20` and the SHA-256 of the block: CID version 1, the raw codec
    `0x55`, the multihash code `0x12` (sha2-256) and length `0x20` (32). Its
-   Tsize is its length. A file of 262145 bytes or more is refused with its
-   path, its length and the limit: there is no chunked file DAG.
-3. Each path part but the last is a **directory**: `browser/app.js` is a
+   Tsize is its length.
+3. A file of more than 262144 bytes is split into 262144-byte chunks, the
+   last one shorter, and each chunk is a raw leaf as in step 2. One dag-pb
+   **file root** links them all (the balanced layout, one level). Its block
+   is, for each leaf in order, field 2 (`0x12`, length) holding a link: field
+   1 (`0x0a`, length) the leaf's CID bytes, field 2 with an empty name
+   (`12 00`), field 3 (`0x18`) the leaf's length as a varint. Then field 1
+   (`0x0a`, length) holds the UnixFS data: `08 02` (type 2, a file), `18` and
+   the file's length as a varint (filesize, field 3), and for each leaf `20`
+   and its length as a varint (blocksizes, field 4, one tag per value, not
+   packed). There is no Data field (field 2). The root's CID is
+   `01 70 12 20` and the SHA-256 of its block, and the Tsize of a link to it
+   is its block's length plus its leaves' lengths. A file needing more than
+   174 leaves (`max-file-links`), so more than 45613056 bytes, would need a
+   second tree level and is refused with its path, its length and the limit.
+4. Each path part but the last is a **directory**: `browser/app.js` is a
    directory `browser` with a link named `app.js`. The root is the directory
    of the bundle's entries. No empty directory is ever made.
-4. A directory's **block** is dag-pb. Sort its children by name bytes. For each
+5. A directory's **block** is dag-pb. Sort its children by name bytes. For each
    child, write protobuf field 2 (tag `0x12`, then the length as a varint)
    holding a link: field 1 (`0x0a`, length) the child's CID bytes, field 2
    (`0x12`, length) its name in UTF-8, field 3 (`0x18`) its Tsize as a varint.
@@ -70,11 +86,11 @@ To recompute a lab CID by hand:
    is the root) and the limit: there is no HAMT shard. Kubo shards later, by
    an estimate of its links' size, so this refusal comes first and fails
    closed.
-5. A directory's CID is `01 70 12 20` and the SHA-256 of its block (the dag-pb
+6. A directory's CID is `01 70 12 20` and the SHA-256 of its block (the dag-pb
    codec `0x70`). The Tsize of a link to a directory is the length of its
    block plus the Tsizes of its own links. Every varint inside a CID here is
    one byte.
-6. **Print** the root's 36 CID bytes as `b` (the multibase prefix) and their
+7. **Print** the root's 36 CID bytes as `b` (the multibase prefix) and their
    RFC 4648 base32, in the lowercase alphabet
    `abcdefghijklmnopqrstuvwxyz234567`, with no `=` padding: 288 bits make 58
    characters, the last one padded with two zero bits. The result is 59
@@ -113,6 +129,20 @@ def field(number, data):  # protobuf, wire type 2
 def cid(codec, block):
     return bytes([0x01, codec, 0x12, 0x20]) + hashlib.sha256(block).digest()
 
+def file_node(data):  # a file's bytes; returns (CID bytes, Tsize)
+    if len(data) <= 262144:
+        return cid(0x55, data), len(data)
+    chunks = [data[at:at + 262144] for at in range(0, len(data), 262144)]
+    assert len(chunks) <= 174
+    links = b""
+    unixfs = b"\x08\x02\x18" + varint(len(data))
+    for chunk in chunks:
+        link = field(1, cid(0x55, chunk)) + field(2, b"")
+        links += field(2, link + b"\x18" + varint(len(chunk)))
+        unixfs += b"\x20" + varint(len(chunk))
+    block = links + field(1, unixfs)
+    return cid(0x70, block), len(block) + len(data)
+
 def directory(tree):  # {name: bytes or a dict}; returns (CID bytes, Tsize)
     links = b""
     total = 0
@@ -121,8 +151,7 @@ def directory(tree):  # {name: bytes or a dict}; returns (CID bytes, Tsize)
         if isinstance(child, dict):
             child_cid, tsize = directory(child)
         else:
-            assert len(child) <= 262144
-            child_cid, tsize = cid(0x55, child), len(child)
+            child_cid, tsize = file_node(child)
         link = field(1, child_cid) + field(2, name.encode("utf-8"))
         links += field(2, link + b"\x18" + varint(tsize))
         total += tsize
@@ -143,11 +172,15 @@ def lab_cid(files):  # {bundle path: bytes}
 ```
 
 In Rust, the walk (`checked_bundle`, which `lab_cid` runs too) reads a bundle,
-and `encode_entries` takes each file's SHA-256 and length and hands them to
-`encode_listed_files`, the encoder (task 047; see
-[naming a closure listing](#naming-a-closure-listing)). They are the only code
-that names a bundle; tests call them and copy neither. `naming_hash` holds the
-one naming hash, and leaves and directory blocks share it. The encoder also
+and `encode_entries` makes each file's node from its bytes with `file_node`
+(one raw leaf, or `file_root` over its leaves) and hands the nodes to
+`encode_tree`, the one tree builder. `encode_listed_files` (task 047; see
+[naming a closure listing](#naming-a-closure-listing)) makes one raw leaf per
+listed file and hands them to the same `encode_tree` (task 048). Every leaf is
+made by `raw_leaf`, and directory blocks and file roots write their links with
+one `put_links`. They are the only code that names a bundle; tests call them
+and copy none. `naming_hash` holds the one naming hash, and leaves, file roots
+and directory blocks share it. The encoder also
 refuses what the walk can never give but a caller of the encoder could: a path
 with an empty, `.` or `..` part, two entries with one path, and one path that
 is both a file and a directory (`a` and `a/b`, in either order). `check_name` checks a
@@ -172,7 +205,9 @@ rules and not from the Rust code, in
 | Raw leaves, codec `0x55` | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18c (`0x70`) |
 | Directory codec `0x70`, dag-pb | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18r (`0x71`) |
 | Chunk size 262144: a file of exactly that size is one block | `single_block_at_the_chunk_limit_has_the_pinned_cid` | F-CI18d (262143) |
-| A larger file is refused | `file_over_the_chunk_limit_is_refused` | F-CI18e (no refusal) |
+| A file over one leaf is a balanced root of raw leaves: empty link names, type 2, filesize, blocksizes, and a Tsize of its block and its leaves | `file_over_one_leaf_has_the_pinned_cid` | F-CI48a (no name field), F-CI48b (no blocksizes), F-CI48c (no filesize), F-CI48d (Tsize without the root block) |
+| At most 174 leaves; one more is refused | `file_of_174_leaves_is_named_and_one_byte_more_is_refused` | F-CI18e (no leaf-limit refusal), F-CI48e (the limit is 175) |
+| The listing call names a file of at most one leaf; a listed file over one chunk is refused and named from its bytes instead | `listed_file_over_the_chunk_limit_is_refused`, `listed_file_over_one_leaf_names_the_bytes_call` | F-CI47c (`encode_listed_files` has no size refusal) |
 | Links sorted by name bytes | `lab_cid_matches_the_pinned_value_for_each_fixture`, `lab_cid_does_not_depend_on_listing_order` | F-CI18f (reverse), F-CI1a (no sort) |
 | Directory type 1 | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18g (5) |
 | A directory block over 262144 bytes is refused, no HAMT | `directory_over_the_hamt_threshold_is_refused` | F-CI18h (no refusal) |
@@ -195,6 +230,17 @@ committed) is `bafybeibt53faomuek2j4yihvseuib2h6fosmkzympgilbnay2xevciasb4`;
 `bafybeic2y3c3met6txd62reatxwqjnodhfejchfmltmd6dnpyhtah7l5we`; and
 `content-sample` with a file named fifty `名` and `.txt` holding `long name`
 and a newline is `bafybeih6g5cy7asndjexb7bazovwryqyj4faxvababcjrbe4jxayhzvgmy`.
+Task 048 adds two more, also built in a temp dir and in memory and never
+committed: `content-sample` with `sample.example` as 262145 zero bytes (two
+leaves, 262144 and 1 bytes) is
+`bafybeidbd7gfhommypeks66twpnbbb3lwovdqe6iwtmdxptgcq5jqbaaby`; and
+`content-sample` with an added `core/big.bin` of 600000 bytes, byte `i` being
+`i % 251` (three leaves, 262144, 262144 and 75712 bytes, one directory down),
+is `bafybeidpgwbsi22cbsmthqupvn37xphujhs6fnzyuy64uc6nsauc6bftqe`. Both were
+first computed by a `python3 -I` script written from the hand rules above,
+before any Rust code named them; that script used Python's own `base64` for
+the printed form and gave `content-sample`'s pin too. The 174-leaf test builds
+a 45613056-byte file and one of 45613057 bytes in memory and pins no value.
 The directory-block test builds 1100 empty files with 200-byte names in a temp
 dir.
 
@@ -221,21 +267,22 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    (`python3 -I could not run: <error>`), a non-zero exit (even after it
    printed a valid CID), no output, or more than one line is refused with its
    own reason, and the test asserts each of these reasons.
-5. For each of the 12 pins, the Python answer, the pin constant and the
+5. For each of the 14 pins, the Python answer, the pin constant and the
    printed `encode_entries` result for the same files must be equal, and the
-   test asserts that it checked exactly 12 bundles. The 12 are the seven
+   test asserts that it checked exactly 14 bundles. The 14 are the seven
    pinned fixtures (`content-sample`, `web-app`, `agent-host`, `provider`,
    `model`, `provider-variant-a`, `provider-variant-b`), the recipe, the
    chunk-limit, empty-file and long-name bundles above, which are built as
-   entries in memory, and the photo stand-in consumer copy (task 047, see
-   [naming a closure listing](#naming-a-closure-listing)). `wc001-core` has no pin, because its `capsule.wasm` is
+   entries in memory, the photo stand-in consumer copy (task 047, see
+   [naming a closure listing](#naming-a-closure-listing)), and the two-leaf
+   and three-leaf file bundles (task 048), also built in memory. `wc001-core` has no pin, because its `capsule.wasm` is
    built on each machine, so it is not checked here.
 
 | Rule | Named test | Falsifier |
 | --- | --- | --- |
 | README's rule agrees with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19a (the block's `0x55` becomes `0x70` before it runs) |
 | Rust agrees with README's rule, not only with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19b (the encoder's `RAW_CODEC` becomes `0x56`) |
-| A missing block is no pass: exactly 12 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
+| A missing block is no pass: exactly 14 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
 | An interpreter that cannot start fails the test | `readme_python_recomputes_every_lab_cid_pin` | F-CI19d (a program that does not exist) |
 | A non-zero exit is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19e (exit status not checked) |
 | No output is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19f (empty answer taken) |
@@ -679,15 +726,20 @@ A lab whose own walk already lists each file's path, size and SHA-256 gets the
 lab CID from `encode_listed_files(&[ListedFile])` (task 047). `ListedFile` is
 `{ path: String, size: u64, sha256: [u8; 32] }`. A raw leaf needs only the
 SHA-256 and the length of its bytes (step 2 of [the encoding](#the-encoding)),
-so such a listing is enough for the single-block profile. It is the one
-encoder, not a copy: `encode_entries` is each entry's SHA-256 and length and
-then `encode_listed_files`, and `lab_cid` is the walk and then
-`encode_entries`, so the directory encoding exists once
-(`check_name_uses_the_single_naming_path` checks it). It reads no file and
+so such a listing is enough for a file of one leaf. It is no second
+encoder: `encode_listed_files` makes each leaf with `raw_leaf`, the leaf rule
+`encode_entries` uses too, and both hand their nodes to `encode_tree`, the one
+tree builder, and `lab_cid` is the walk and then `encode_entries`, so the
+directory encoding exists once (`check_name_uses_the_single_naming_path`
+checks it). It reads no file and
 checks no manifest. So the lab CID names the bytes only if each `sha256` and
 `size` are those of the bytes: the caller's walk owns that. A `size` over
 262144 is refused with `FileOverChunkLimit` and the file's path, and the path
-refusals are the ones `encode_entries` gives. There is no hex form: a caller
+refusals are the ones `encode_entries` gives. Since task 048 a file over one
+leaf has a lab CID, but only from its bytes: a listed file's one SHA-256 names
+a single raw leaf, and a file root needs each leaf's SHA-256. So the refusal's
+text says to name such a file with `encode_entries` (or `lab_cid`), which take
+the bytes; `ListedFile` keeps its three fields. There is no hex form: a caller
 decodes its own hex.
 
 It is for the photo lane (Flint's 28 Oct note; Rong's DR-1, one identity rule;
@@ -735,6 +787,7 @@ not loosen, skip or copy the manifest check.
 | README's Python rule recomputes the photo pin | `readme_python_recomputes_every_lab_cid_pin` | F-CI47a |
 | `lab_cid` refuses the exact PH6 folder with `ManifestUnparsed`, as the Runtime type does | `lab_cid_refuses_the_photo_manifest_the_runtime_type_refuses` | F-CI1g (a manifest the Runtime type refuses is read as plain JSON) |
 | A listed file over one chunk is refused with its path; one of exactly one chunk is a leaf | `listed_file_over_the_chunk_limit_is_refused` | F-CI47c (`encode_listed_files` has no size refusal) |
+| A listed file over one leaf is still refused, its text names its path, its length and `encode_entries`, and `encode_entries` names the same file from its bytes (task 048) | `listed_file_over_one_leaf_names_the_bytes_call` | F-CI47c |
 
 The tests are in `tests/closure_listing.rs`. Task 047 also named
 `lab_cid_refuses_the_photo_manifest_the_runtime_type_refuses` on F-CI1g, task
@@ -1591,8 +1644,10 @@ Kubo itself (none is installed on this Mac). The outside check is the
 README's Python block, written from the byte rules: the committed test
 `readme_python_recomputes_every_lab_cid_pin` runs it with `python3 -I` (Python
 3.9.6 on this Mac) and requires it to give every pin and the Rust encoder's
-value for the same files. The tests pin the single-block, non-sharded subset
-of the profile only.
+value for the same files. The tests pin the non-sharded subset of the
+profile only, with files of up to one tree level (one raw leaf, or since task
+048 a balanced file root over 2 to 174 raw leaves). The file root's bytes are
+the lab's reading of the profile, and Kubo has not checked them either.
 
 The claim is "Kubo v0.40.1 profile, computed by the lab", and nothing more.
 No offline Kubo cross-check has been run (Kubo v0.40.1, the same profile
@@ -1713,7 +1768,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 268 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 273 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1756,7 +1811,8 @@ and task 037's F-CI37a to F-CI37c (see
 F-CI44a to F-CI44c (see
 [asks come only from the signed bytes](#asks-come-only-from-the-signed-bytes-m1-check-b2-no-schema-part)),
 and task 047's F-CI47a to F-CI47c (see
-[naming a closure listing](#naming-a-closure-listing)).
+[naming a closure listing](#naming-a-closure-listing)), and task 048's
+F-CI48a to F-CI48e (see [the encoding](#the-encoding)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -1871,6 +1927,27 @@ encoder holds a digest and no bytes now, so the first bytes of the digest stand
 in for the file's bytes; its title says so. F-CI1g (task 005's) also names
 `lab_cid_refuses_the_photo_manifest_the_runtime_type_refuses`. Every other
 older edit's text is still found exactly once.
+Task 048's entries all edit `src/lib.rs`: F-CI48a on the link-name line of
+`put_links` (F-CI1b's and F-CI1p's anchor; entries may share one), which it
+skips for an empty name, so only a file root's links change; F-CI48b and
+F-CI48c in `file_root_block`; F-CI48d on `file_root`'s Tsize line; F-CI48e on
+`MAX_FILE_LINKS`. Each anchor is found exactly once. Task 048 moved the leaf
+into one `raw_leaf`, which `encode_listed_files`, `file_node` and `file_root`
+all call, so the leaf's line is now `(cid_bytes(RAW_CODEC, sha256), size)`.
+Four edits anchor there now, each with its same bug and tests: F-CI18c (the
+dag-pb codec), F-CI18i (an inline CID for at most 32 bytes), F-CI18n (an empty
+file as a dag-pb file node) and F-CI47b (every leaf's Tsize 0). Without the
+move they would plant only in the listing call, and `lab_cid` would no longer
+see them. The root line F-CI47a anchors on is now in `encode_tree`, where no
+`ListedFile` is in scope, so its planted code lists the tree's files (path,
+the leaf CID's digest, Tsize) itself; its title, bug and tests are the same.
+The one-leaf refusal F-CI18e removed is now only the listing call's (F-CI47c
+removes it), so F-CI18e, keeping its id, now removes the 174-leaf refusal and
+names `file_of_174_leaves_is_named_and_one_byte_more_is_refused`; its title
+says so. F-CI47c also names `listed_file_over_one_leaf_names_the_bytes_call`.
+Task 048 split `directory_block`'s link loop into `put_links` with the same
+lines, so F-CI1b, F-CI1p and F-CI1q keep their text, and every other older
+edit's text is still found exactly once.
 
 ### The inventory check
 
@@ -2016,6 +2093,13 @@ At task 047, run with the ids `F-CI47 F-CI18 F-CI1g` (the new entries, the
 four task 018 entries it moved, with the rest of task 018's, and F-CI1g, which
 gained a test), it reported `summary: 23 CAUGHT of 23` (`baseline: 16 named
 tests pass without an edit, 0 do not`). The whole list was not run at task 047.
+At task 048, run with the ids `F-CI48 F-CI18e F-CI47c`, it reported
+`summary: 7 CAUGHT of 7` (`baseline: 4 named tests pass without an edit, 0 do
+not`); run with the prefixes `F-CI1 F-CI18 F-CI19 F-CI47 F-CI48` (every edit in
+`src/lib.rs`'s encoder and every entry task 048 moved, with F-CI10 to F-CI17,
+which the prefix `F-CI1` also selects), it reported
+`summary: 134 CAUGHT of 134` (`baseline: 80 named tests pass without an edit,
+0 do not`). The whole list was not run at task 048.
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029,
 030, 031 and 032 prove each of their falsifiers by break, named test fails, revert.
