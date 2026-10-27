@@ -54,7 +54,6 @@ impl Verifier {
             .expect("resolved grant")
             .identity
             .clone();
-        let _admission = crate::ledger::hold_admission();
         self.stage_admitted_identity(&identity);
         self.admit(ask.amount);
         Ok(ask.amount)

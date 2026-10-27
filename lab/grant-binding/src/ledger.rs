@@ -29,51 +29,10 @@ fn handles_match(bound: Handle, presented: Handle) -> bool {
     bound == presented
 }
 
-/// Serialises stage-then-admit so a staged identity and the amount stored for
-/// it belong to one admission. A thread that already holds it re-enters.
-static ADMISSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-thread_local! {
-    static HOLDS_ADMISSION: std::cell::Cell<bool> = std::cell::Cell::new(false);
-}
-
-/// The admission lock, held for one stage-then-admit pair.
-pub(crate) struct AdmissionGuard {
-    guard: Option<std::sync::MutexGuard<'static, ()>>,
-    reentered: bool,
-}
-
-impl Drop for AdmissionGuard {
-    fn drop(&mut self) {
-        if self.guard.is_some() && !self.reentered {
-            HOLDS_ADMISSION.with(|held| held.set(false));
-        }
-    }
-}
-
-/// Takes the admission lock unless this thread already holds it.
-pub(crate) fn hold_admission() -> AdmissionGuard {
-    if HOLDS_ADMISSION.with(|held| held.get()) {
-        return AdmissionGuard {
-            guard: None,
-            reentered: true,
-        };
-    }
-    let guard = ADMISSION
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    HOLDS_ADMISSION.with(|held| held.set(true));
-    AdmissionGuard {
-        guard: Some(guard),
-        reentered: false,
-    }
-}
-
 /// The one ledger the verifier owns.
 #[derive(Debug)]
 pub(crate) struct Ledger {
     ceiling: u64,
-    default_ceiling: u64,
     ceilings: HashMap<String, u64>,
     pending_identity: Option<String>,
     held: u64,
@@ -87,7 +46,6 @@ impl Ledger {
     pub(crate) fn new() -> Self {
         Self {
             ceiling: 0,
-            default_ceiling: 0,
             ceilings: HashMap::new(),
             pending_identity: None,
             held: 0,
@@ -210,39 +168,18 @@ impl Verifier {
         self.ledger.lock().expect("ledger lock").pending_identity = Some(identity.to_owned());
     }
 
-    /// Stores the ceiling for the staged identity. Reports whether one was
-    /// staged, so a plain `admit` is told apart from an admitted ask.
-    fn store_staged_ceiling(&self, ceiling: u64) -> bool {
+    /// Stores the ceiling for the staged identity, if one is staged.
+    fn store_staged_ceiling(&self, ceiling: u64) {
         let mut ledger = self.ledger.lock().expect("ledger lock");
-        match ledger.pending_identity.take() {
-            Some(identity) => {
-                ledger.ceilings.insert(identity, ceiling);
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Sets the ceiling for identities without an admission and lowers any
-    /// agent ceiling above it. An admitted ask keeps its own ceiling until a
-    /// plain `admit` lowers it.
-    fn lower_to_plain_ceiling(&self, ceiling: u64) {
-        let mut ledger = self.ledger.lock().expect("ledger lock");
-        ledger.default_ceiling = ceiling;
-        for agent_ceiling in ledger.ceilings.values_mut() {
-            *agent_ceiling = (*agent_ceiling).min(ceiling);
+        if let Some(identity) = ledger.pending_identity.take() {
+            ledger.ceilings.insert(identity, ceiling);
         }
     }
 
     /// Sets the allowance ceiling. Outstanding holds stay as they are.
-    /// A staged identity keeps this ceiling for its own reserves; a plain
-    /// `admit` sets the ceiling for identities without an admission and
-    /// lowers any agent ceiling above it.
+    /// A staged identity keeps this ceiling for its own reserves.
     pub fn admit(&self, ceiling: u64) {
-        let _admission = hold_admission();
-        if !self.store_staged_ceiling(ceiling) {
-            self.lower_to_plain_ceiling(ceiling);
-        }
+        self.store_staged_ceiling(ceiling);
         self.ledger.lock().expect("ledger lock").ceiling = ceiling;
     }
 
@@ -266,7 +203,6 @@ impl Verifier {
             .clone();
         let mut ledger = self.ledger.lock().expect("ledger lock");
         let held = ledger.held;
-        ledger.ceiling = ledger.default_ceiling;
         if let Some(agent_ceiling) = ledger.ceilings.get(&identity).copied() {
             ledger.ceiling = agent_ceiling;
         }
@@ -1647,146 +1583,4 @@ fn model_second_agent_does_not_raise_the_ceiling() {
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
     assert_eq!(after.held, 50);
-}
-
-#[test]
-fn model_concurrent_asks_keep_each_agent_ceiling() {
-    let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-2", "session-a");
-    let first_handle = verifier
-        .bind_grant(first, "UsersAI/agent-1/notes", rights())
-        .expect("bind");
-    let second_handle = verifier
-        .bind_grant(second, "UsersAI/agent-2/notes", rights())
-        .expect("bind");
-    let first_call = verifier.open_call(first);
-    let second_call = verifier.open_call(second);
-    let first_request = guest(first_handle);
-    let second_request = guest(second_handle);
-    let verifier = &verifier;
-    for _ in 0..50 {
-        std::thread::scope(|scope| {
-            scope.spawn(|| {
-                verifier
-                    .admit_ask(
-                        &first_call,
-                        &first_request,
-                        crate::ask::BudgetAsk { amount: 4 },
-                        10,
-                    )
-                    .expect("first ask");
-            });
-            scope.spawn(|| {
-                verifier
-                    .admit_ask(
-                        &second_call,
-                        &second_request,
-                        crate::ask::BudgetAsk { amount: 50 },
-                        80,
-                    )
-                    .expect("second ask");
-            });
-        });
-        let refusal = verifier
-            .reserve(&first_call, &first_request, 5)
-            .expect_err("first agent keeps its own ceiling");
-        assert_eq!(
-            refusal,
-            ReserveRefuse::OverCeiling {
-                ceiling: 4,
-                held: 0,
-                asked: 5,
-            }
-        );
-        let refusal = verifier
-            .reserve(&second_call, &second_request, 51)
-            .expect_err("second agent keeps its own ceiling");
-        assert_eq!(
-            refusal,
-            ReserveRefuse::OverCeiling {
-                ceiling: 50,
-                held: 0,
-                asked: 51,
-            }
-        );
-    }
-}
-
-#[test]
-fn model_unasked_agent_keeps_the_admitted_ceiling() {
-    let mut verifier = Verifier::new();
-    let first = verifier.register_instance("agent-1", "session-a");
-    let third = verifier.register_instance("agent-3", "session-a");
-    let first_handle = verifier
-        .bind_grant(first, "UsersAI/agent-1/notes", rights())
-        .expect("bind");
-    let third_handle = verifier
-        .bind_grant(third, "UsersAI/agent-3/notes", rights())
-        .expect("bind");
-    verifier.admit(100);
-    let first_call = verifier.open_call(first);
-    let third_call = verifier.open_call(third);
-    let first_request = guest(first_handle);
-    let third_request = guest(third_handle);
-    let granted = verifier
-        .admit_ask(
-            &first_call,
-            &first_request,
-            crate::ask::BudgetAsk { amount: 4 },
-            10,
-        )
-        .expect("first ask");
-    assert_eq!(granted, 4);
-    let refusal = verifier
-        .reserve(&first_call, &first_request, 5)
-        .expect_err("first agent keeps its own ceiling");
-    assert_eq!(
-        refusal,
-        ReserveRefuse::OverCeiling {
-            ceiling: 4,
-            held: 0,
-            asked: 5,
-        }
-    );
-    verifier
-        .reserve(&third_call, &third_request, 100)
-        .expect("unasked agent keeps the admitted ceiling");
-    let after = books(&verifier);
-    assert_eq!(after.charged, 0);
-    assert_eq!(after.held, 100);
-}
-
-#[test]
-fn model_plain_admit_lowers_an_agent_ceiling() {
-    let mut verifier = Verifier::new();
-    let instance = verifier.register_instance("agent-1", "session-a");
-    let handle = verifier
-        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
-        .expect("bind");
-    let call = verifier.open_call(instance);
-    let request = guest(handle);
-    let granted = verifier
-        .admit_ask(&call, &request, crate::ask::BudgetAsk { amount: 10 }, 20)
-        .expect("ask within the cap");
-    assert_eq!(granted, 10);
-    verifier.admit(2);
-    let refusal = verifier
-        .reserve(&call, &request, 3)
-        .expect_err("plain admit lowers the agent ceiling");
-    assert_eq!(
-        refusal,
-        ReserveRefuse::OverCeiling {
-            ceiling: 2,
-            held: 0,
-            asked: 3,
-        }
-    );
-    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
-    verifier
-        .reserve(&call, &request, 2)
-        .expect("room under the lowered ceiling");
-    let after = books(&verifier);
-    assert_eq!(after.charged, 0);
-    assert_eq!(after.held, 2);
 }

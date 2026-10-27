@@ -1,9 +1,0 @@
-id: F-A7-admitlower
-file: src/ledger.rs
-test: ledger::model_plain_admit_lowers_an_agent_ceiling
---- old
-        for agent_ceiling in ledger.ceilings.values_mut() {
-            *agent_ceiling = (*agent_ceiling).min(ceiling);
-        }
---- new
---- end
