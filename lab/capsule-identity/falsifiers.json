@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028 and 029). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code or the check of this list's inventory (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029 and 030). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code or the check of this list's inventory (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -3987,6 +3987,38 @@
       ],
       "tests": [
         "the_falsifier_inventory_refuses_what_it_cannot_read"
+      ]
+    },
+    {
+      "id": "F-CI30a",
+      "title": "the claim scan does not trim _ from a word's ends, so a claim with an underscore-marked word is missed",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    '_', // emphasis\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "the_claim_scan_finds_a_claim_however_it_is_written"
+      ]
+    },
+    {
+      "id": "F-CI30b",
+      "title": "the claim scan removes only one leading quote marker, not a run, so a claim over two nested blockquote lines is missed",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    body.trim_start_matches(|c: char| c == '>' || c.is_whitespace())\n",
+          "new": "    body.trim_start().strip_prefix('>').unwrap_or(body.trim_start()).trim_start()\n"
+        }
+      ],
+      "tests": [
+        "the_claim_scan_finds_a_claim_however_it_is_written"
       ]
     }
   ]
