@@ -557,6 +557,50 @@ fn model_forged_child_journal_does_not_remove_the_right() {
 }
 
 #[test]
+fn model_forged_append_does_not_remove_the_right() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: false,
+            child_journal: false,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    verifier
+        .operate(&call, &request, Operation::Append)
+        .expect("guest claim does not remove the append right");
+}
+
+#[test]
+fn model_forged_overwrite_does_not_remove_the_right() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: true,
+            child_journal: false,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_overwrite);
+    verifier
+        .operate(&call, &request, Operation::Overwrite)
+        .expect("guest claim does not remove the overwrite right");
+}
+
+#[test]
 fn model_owned_root_needs_a_resource_segment() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
