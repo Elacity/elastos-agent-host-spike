@@ -3,7 +3,8 @@
 Grade row 10 (local model ops) counts the provider falsifiers as caught.
 That count holds while each ``old`` anchor still occurs once, on the
 updated text, the way ``falsify.py`` applies it. This probe judges every
-provider entry on this base. The selftest and PV
+provider entry on this base. An id captured before a removal is reported
+absent. MP02, MP05, and MP11 stay required. The selftest and PV
 entries in the same file stay out of the checks; ``load_json`` still has
 to accept the whole file. The ``about`` text is the runner's path rule
 for every list, and this probe leaves it alone.
@@ -40,6 +41,7 @@ from test_agent_host_falsifier_honesty import (
 
 REPO = Path(__file__).resolve().parents[3]
 MODEL_FILE = "capsules/model-provider/falsifiers.json"
+SCORE_IDS = ("MP02", "MP05", "MP11")
 FINDING_ID = "provider-001"
 FINDING_NAME = "lab/redteam/findings/provider-001.md"
 FINDING = REPO / FINDING_NAME
@@ -76,17 +78,29 @@ def provider_base():
     return snapshot, data, provider_entries(document)
 
 
-def row_problems(entries):
-    """Problems for every provider entry on this base.
+def live_required(entries):
+    """Entry ids, then any score id those entries omit."""
+    required = [entry["id"] for entry in entries]
+    for ident in SCORE_IDS:
+        if ident not in required:
+            required.append(ident)
+    return required
 
-    An empty list is one problem. A command other than ``provider`` or an
-    expect other than ``caught`` is a problem. The ids are the entries on
-    this base, not a fixed list.
+
+def row_problems(entries, required):
+    """Problems for these entries against ``required``.
+
+    ``required`` is the id sequence captured before a plant. The three
+    score ids are part of that sequence when the caller uses
+    ``live_required``. An empty entry list is one problem. An id
+    captured before a removal is reported absent. MP02, MP05, and MP11
+    stay required.
     """
     if not entries:
         return [Problem(
             "entries", "", MODEL_FILE, "provider entries are empty")]
     problems = []
+    present = []
     for entry in entries:
         if entry["command"] != "provider":
             problems.append(Problem(
@@ -96,12 +110,23 @@ def row_problems(entries):
             problems.append(Problem(
                 "expect", entry["id"], MODEL_FILE,
                 f"expect is {entry['expect']!r}, not caught"))
+        present.append(entry["id"])
+    seen = set()
+    for ident in required:
+        if ident in seen:
+            continue
+        seen.add(ident)
+        if ident not in present:
+            problems.append(Problem(
+                "id", ident, MODEL_FILE,
+                f"{ident} is absent from the provider entries"))
     return problems
 
 
 def provider_problems(entries, read):
     """Row, caught-without-a-test, and anchor problems for the provider entries."""
-    return [*row_problems(entries), *caught_without_tests(entries), *anchors_of(entries, read)]
+    return [*row_problems(entries, live_required(entries)),
+            *caught_without_tests(entries), *anchors_of(entries, read)]
 
 
 def require_digest(data, expected):
@@ -228,24 +253,34 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
         self.assertEqual(str(caught.exception), "NaN is not strict JSON")
 
     def test_provider_ids_are_the_row_10_list(self):
-        """Every provider entry on this base is caught and names a test."""
+        """Every provider entry on this base is caught and names a test.
+
+        An id captured before a removal is reported absent. MP02, MP05, and
+        MP11 stay required.
+        """
         _snapshot, _data, entries = provider_base()
-        self.assertEqual(row_problems(entries), [])
-        self.assertGreaterEqual(len(entries), 1)
+        self.assertEqual(row_problems(entries, live_required(entries)), [])
+        self.assertGreaterEqual(len(entries), 2)
+        present = [entry["id"] for entry in entries]
+        self.assertEqual(SCORE_IDS, ("MP02", "MP05", "MP11"))
+        for ident in SCORE_IDS:
+            self.assertIn(ident, present)
         self.assertEqual([entry["command"] for entry in entries], ["provider"] * len(entries))
         self.assertEqual([entry["expect"] for entry in entries], ["caught"] * len(entries))
         self.assertEqual(caught_without_tests(entries), [])
 
-        self.assertEqual(row_problems([]), [Problem(
-            "entries", "", MODEL_FILE, "provider entries are empty")])
+        empty = [Problem(
+            "entries", "", MODEL_FILE, "provider entries are empty")]
+        self.assertEqual(row_problems([], ()), empty)
+        self.assertEqual(row_problems([], SCORE_IDS), empty)
         planted = copy.deepcopy(entries)
         planted[0]["command"] = "host"
-        self.assertEqual(row_problems(planted), [Problem(
+        self.assertEqual(row_problems(planted, [entry["id"] for entry in planted]), [Problem(
             "command", planted[0]["id"], MODEL_FILE,
             "command is 'host', not provider")])
         planted = copy.deepcopy(entries)
         planted[0]["expect"] = "survives"
-        self.assertEqual(row_problems(planted), [Problem(
+        self.assertEqual(row_problems(planted, [entry["id"] for entry in planted]), [Problem(
             "expect", planted[0]["id"], MODEL_FILE,
             "expect is 'survives', not caught")])
 
@@ -254,6 +289,50 @@ class ModelProviderFalsifierHonesty(unittest.TestCase):
         self.assertEqual(caught_without_tests(planted), [Problem(
             "caught", planted[0]["id"], "falsifiers.json",
             "caught, but names no test")])
+
+        # Captured before the removal. Rebuilding this list from the planted
+        # entries would hide the absence.
+        required = [entry["id"] for entry in entries]
+        removed = required[0]
+        self.assertEqual(required.count(removed), 1)
+        planted = copy.deepcopy(entries)
+        del planted[0]
+        self.assertGreaterEqual(len(planted), 1)
+        absent = Problem(
+            "id", removed, MODEL_FILE,
+            f"{removed} is absent from the provider entries")
+        self.assertEqual(row_problems(planted, required), [absent])
+        self.assertEqual(row_problems(planted, required + [removed]), [absent])
+
+        self.assertEqual(required.count("MP02"), 1)
+        dropped = [entry for entry in copy.deepcopy(entries) if entry["id"] != "MP02"]
+        self.assertEqual(row_problems(dropped, required), [Problem(
+            "id", "MP02", MODEL_FILE,
+            "MP02 is absent from the provider entries")])
+
+        self.assertEqual(required.count("MP05"), 1)
+        without_mp05 = [
+            entry for entry in copy.deepcopy(entries) if entry["id"] != "MP05"]
+        self.assertEqual(
+            row_problems(without_mp05, live_required(without_mp05)), [Problem(
+                "id", "MP05", MODEL_FILE,
+                "MP05 is absent from the provider entries")])
+
+        mixed = copy.deepcopy(entries)
+        mixed_removed = mixed.pop(0)["id"]
+        mixed[0]["command"] = "host"
+        self.assertEqual(row_problems(mixed, required), [
+            Problem(
+                "command", mixed[0]["id"], MODEL_FILE,
+                "command is 'host', not provider"),
+            Problem(
+                "id", mixed_removed, MODEL_FILE,
+                f"{mixed_removed} is absent from the provider entries"),
+        ])
+
+        longer = copy.deepcopy(entries)
+        longer.append({"id": "MP-extra", "command": "provider", "expect": "caught"})
+        self.assertEqual(row_problems(longer, required), [])
 
     def test_provider_anchors_occur_once(self):
         """Each provider ``old`` is found once, in order, by ``anchor_problems``.
