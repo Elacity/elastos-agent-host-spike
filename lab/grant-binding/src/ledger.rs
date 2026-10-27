@@ -1436,6 +1436,36 @@ fn model_timeout_on_a_sibling_instance_is_refused() {
 }
 
 #[test]
+fn model_forged_instance_does_not_move_the_timeout() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let unknown = verifier
+        .settle(&call, &guest(handle), reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let request = GuestRequest {
+        forged_instance: Some(sibling),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_instance, Some(sibling));
+    verifier
+        .timeout_hold(&call, &request, reservation)
+        .expect("forged instance does not move the timeout");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
 fn model_unknown_from_another_handle_does_not_mark_the_hold() {
     let mut verifier = Verifier::new();
     let first = verifier.register_instance("agent-1", "session-a");

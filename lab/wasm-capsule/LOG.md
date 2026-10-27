@@ -1287,3 +1287,34 @@
   CARGO_INCREMENTAL=0`: `cargo test --locked` (128 passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt
   -p wasm-capsule-tools -- --check` exit 0. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
   lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 049 (M1 A8 lab half: the host secret test fails on an empty engine environment record). Base
+  `286b983b6`. `tests/run.rs` only, plus docs and one `falsifiers.json` test name; no runner change. `host_secret_shim`
+  now writes each record with `|| failed '<record>'`, a shell function that prints `shim: cannot write the record
+  <record>` to stderr and exits 70 before `exec`. New helper `HostSecretCase::recorded_env` reads each of the four
+  environment records (2 engines x `version`/`run`), asserts it is not empty and holds the exact line `_=/usr/bin/env`,
+  and panics naming the engine, the start and the record path; the inner test calls it before its unchanged absence
+  checks. Gap on the base (the proof it was real): both `/usr/bin/env > ` lines in `host_secret_shim` changed to `: > `
+  by `sed -i ''` on `286b983b6`, then `cargo test --locked --test run
+  host_secret_fixture_never_reaches_either_real_engine -- --exact`: "test result: ok. 1 passed"; file copied back,
+  `git diff --exit-code` exit 0. Hand proofs on this branch (hand-proven, pending R1; `tests/run.rs` is no recovery
+  target), same command, the fixed file copied back after each and `cmp` clean against it (the branch is uncommitted,
+  so `cmp`, not `git diff`, is the byte-for-byte check): (a) the same `: > ` plant: outer panic at "the child
+  host_secret_fixture_run_inside_the_child did not pass (exit status: 101)", child panic "wasmtime version: the
+  environment record <tmp>/records/wasmtime.version.env is empty or was not written by /usr/bin/env (no line
+  _=/usr/bin/env): []"; (b) both `/usr/bin/env` changed to `/usr/bin/false`: same outer panic, child panic "the
+  two-engine runner refused: <tmp>/shims/wasmtime: wasmtime --version failed (exit status: 70): shim: cannot write the
+  record <tmp>/records/wasmtime.version.env". F-WC5-ENGINE-ENV's `tests` now also names
+  `host_secret_fixture_never_reaches_either_real_engine`; by hand with `env_clear()` dropped (`tools/src/run.rs`
+  copied back, `git diff --exit-code -- tools/src/run.rs` exit 0) the child failed at "wasmtime version: the
+  environment has HOME: HOME=<tmp>/home". Canonical runner, from the repo root, `RUST_TEST_THREADS=2
+  CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json
+  F-WC5-ENGINE-ENV`: "baseline: 2 named tests pass without an edit, 0 do not", "F-WC5-ENGINE-ENV CAUGHT", "summary: 1
+  CAUGHT of 1". README: A8 paragraph names the record check and the shim's exit 70; "Task 049" paragraph; hand-proven
+  total 66 -> 68; total (184) and runner-caught (120) unchanged, so F-WC-README-COUNT's anchor is unchanged. All 184
+  entries' 193 anchors found exactly once. A8 PASS lines on this Mac (wasmtime 45.0.1, wasmer 7.5.0): each record
+  `["PWD=<lane folder>", "SHLVL=1", "_=/usr/bin/env"]`, "PASS: neither engine got the HOME folder, HOME or the marker",
+  "PASS: the host secret reached neither real engine nor either output". Gates in `lab/wasm-capsule/`, with
+  `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (128 passed, 3 ignored, 0 failed), `cargo test
+  --locked --workspace` (155 passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools
+  -- --check` exit 0. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and
+  `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.

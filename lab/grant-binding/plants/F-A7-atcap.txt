@@ -1,0 +1,8 @@
+id: F-A7-atcap
+file: src/ask.rs
+test: ask::model_ask_at_the_cap_is_admitted
+--- old
+        if ask.amount > cap {
+--- new
+        if ask.amount >= cap {
+--- end
