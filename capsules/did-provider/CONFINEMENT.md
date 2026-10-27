@@ -13,8 +13,13 @@ The Runtime generates the provider's profile from the provider's approved
 declared rights; it does not load a profile that the provider supplies.
 `confine.sb` in this folder is the test oracle: the profile the Runtime
 generates for this provider must match it, with the same three parameters bound
-to the same paths. The test that compares them is the Runtime's half, outside
-this lane. The one contract check, `check_profile_contract`, holds every oracle
+to the same paths. A lab generator, `generate_profile` in
+`capsules/wallet-provider/tests/confine.rs`, builds this profile from the
+declared-rights file and the contract head, and
+`generated_did_and_wallet_profiles_match_their_committed_oracles` requires it
+to equal this oracle; the Runtime's own generator and its comparison are not
+built and stay in `elastos/`, outside this lane.
+The one contract check, `check_profile_contract`, holds every oracle
 to these terms, and the generated profile meets them too: `(version 1)` first,
 `(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
 no network allow, exactly one `process-exec` allow, the shared exec rule, only
@@ -49,8 +54,9 @@ not accepted rights. Its status label says "Runtime platform baseline for the
 did-provider executable on macOS, not approved rights". The model provider's
 `capsules/model-provider/tests/fixtures/confine/declared-rights.json` uses the
 same template, and `model_declared_rights_read_on_the_did_and_wallet_template`
-reads it. The generator stays the Runtime's. Each platform-baseline rule in
-this provider's `tests/fixtures/confine/declared-rights.json` gives one
+reads it. The lab generator is test code, and the Runtime's own generator is
+not built. Each platform-baseline rule in this provider's
+`tests/fixtures/confine/declared-rights.json` gives one
 justification that starts with the did-provider executable prefix,
 `macOS did-provider executable bound as PROVIDER_EXECUTABLE:`, and gives a
 reason; the `startup-root-directory` justification uses this document's

@@ -3388,6 +3388,8 @@ const SHARED_RULES: [&str; 3] = [
     r#"(allow file-read* (literal (param "STORAGE_PARENT")))"#,
     r#"(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))"#,
 ];
+/// The three head forms every file profile starts with, in profile order.
+const PROFILE_HEAD: [&str; 3] = ["(version 1)", "(deny default)", "(deny network*)"];
 /// The right ids the shared contract names. A declared-rights file may claim
 /// only these.
 const CONTRACT_RIGHTS: [&str; 2] = ["storage", "bound-executable"];
@@ -3563,74 +3565,7 @@ struct DeclaredClaim {
 /// its id whenever the profile holds it. Each refusal starts with the provider
 /// name and quotes the rule or names the id (P11).
 fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<(), String> {
-    if declared["role"].as_str() != Some(DECLARED_RIGHTS_ROLE) {
-        return Err(format!(
-            "{name} declared-rights file must give the role {DECLARED_RIGHTS_ROLE:?}"
-        ));
-    }
-    if declared["provider"].as_str() != Some(name) {
-        return Err(format!(
-            "{name} declared-rights file must name the provider {name}"
-        ));
-    }
-    let Some(rights) = declared["rights"].as_array() else {
-        return Err(format!(
-            "{name} declared-rights file must hold a rights list"
-        ));
-    };
-    let Some(baseline) = declared[PLATFORM_BASELINE].as_object() else {
-        return Err(format!(
-            "{name} declared-rights file must hold a platform baseline"
-        ));
-    };
-    let status = platform_baseline_status(name);
-    if baseline.get("status").and_then(Value::as_str) != Some(status.as_str()) {
-        return Err(format!(
-            "{name} platform baseline must give the status {status:?}"
-        ));
-    }
-    let Some(baseline_rules) = baseline.get("rules").and_then(Value::as_array) else {
-        return Err(format!("{name} platform baseline must hold a rules list"));
-    };
-    let rights = declared_claims(name, "declared rights list", rights)?;
-    let baseline = declared_claims(name, "platform baseline rules", baseline_rules)?;
-    for claim in &rights {
-        if !CONTRACT_RIGHTS.contains(&claim.id.as_str()) {
-            return Err(format!(
-                "{name} declares {}, which the shared contract does not name",
-                claim.id
-            ));
-        }
-    }
-    for claim in &baseline {
-        if !PLATFORM_BASELINE_IDS.contains(&claim.id.as_str()) {
-            return Err(format!(
-                "{name} declares {}, which the shared contract does not name",
-                claim.id
-            ));
-        }
-    }
-    let prefix = platform_baseline_justification(name);
-    for (entry, claim) in baseline_rules.iter().zip(&baseline) {
-        let Some(justification) = entry["justification"].as_str() else {
-            return Err(format!(
-                "{name} platform baseline {} must give a string justification",
-                claim.id
-            ));
-        };
-        if !justification.starts_with(&prefix) {
-            return Err(format!(
-                "{name} platform baseline {} justification must start with {prefix:?}",
-                claim.id
-            ));
-        }
-        if justification[prefix.len()..].trim().is_empty() {
-            return Err(format!(
-                "{name} platform baseline {} justification gives no reason after {prefix:?}",
-                claim.id
-            ));
-        }
-    }
+    let (rights, baseline) = declared_entries(name, declared)?;
     let claims: Vec<&DeclaredClaim> = rights.iter().chain(baseline.iter()).collect();
     for claim in &claims {
         if claim.rules.is_empty() {
@@ -3705,6 +3640,118 @@ fn check_declared_rights(name: &str, profile: &str, declared: &Value) -> Result<
         }
     }
     Ok(())
+}
+
+/// The rights claims and the platform-baseline claims of `declared`, each
+/// proven to hold an id the shared contract names and a rules list of strings,
+/// and each platform-baseline entry proven to give a justification that starts
+/// with the provider's executable prefix and a reason after it.
+///
+/// The one declared-rights check and the one lab generator both read the
+/// declared entries through this function (P10). It refuses, in this order: a
+/// document without the role, provider, rights list or platform baseline; a
+/// platform baseline without its own status sentence; a platform baseline
+/// without its rules list; an entry of the declared rights list or the
+/// platform-baseline rules list without a string id, whose reason names that
+/// list and the entry; an entry without a rules list; a rule that is not a
+/// string; an id the shared contract does not name; and a platform-baseline
+/// entry without a justification that starts with the provider's prefix and
+/// gives a reason. Each refusal starts with the provider name and quotes the
+/// rule or names the id (P11).
+fn declared_entries(
+    name: &str,
+    declared: &Value,
+) -> Result<(Vec<DeclaredClaim>, Vec<DeclaredClaim>), String> {
+    if declared["role"].as_str() != Some(DECLARED_RIGHTS_ROLE) {
+        return Err(format!(
+            "{name} declared-rights file must give the role {DECLARED_RIGHTS_ROLE:?}"
+        ));
+    }
+    if declared["provider"].as_str() != Some(name) {
+        return Err(format!(
+            "{name} declared-rights file must name the provider {name}"
+        ));
+    }
+    let Some(rights) = declared["rights"].as_array() else {
+        return Err(format!(
+            "{name} declared-rights file must hold a rights list"
+        ));
+    };
+    let Some(baseline) = declared[PLATFORM_BASELINE].as_object() else {
+        return Err(format!(
+            "{name} declared-rights file must hold a platform baseline"
+        ));
+    };
+    let status = platform_baseline_status(name);
+    if baseline.get("status").and_then(Value::as_str) != Some(status.as_str()) {
+        return Err(format!(
+            "{name} platform baseline must give the status {status:?}"
+        ));
+    }
+    let Some(baseline_rules) = baseline.get("rules").and_then(Value::as_array) else {
+        return Err(format!("{name} platform baseline must hold a rules list"));
+    };
+    let rights = declared_claims(name, "declared rights list", rights)?;
+    let baseline = declared_claims(name, "platform baseline rules", baseline_rules)?;
+    for claim in &rights {
+        if !CONTRACT_RIGHTS.contains(&claim.id.as_str()) {
+            return Err(format!(
+                "{name} declares {}, which the shared contract does not name",
+                claim.id
+            ));
+        }
+    }
+    for claim in &baseline {
+        if !PLATFORM_BASELINE_IDS.contains(&claim.id.as_str()) {
+            return Err(format!(
+                "{name} declares {}, which the shared contract does not name",
+                claim.id
+            ));
+        }
+    }
+    let prefix = platform_baseline_justification(name);
+    for (entry, claim) in baseline_rules.iter().zip(&baseline) {
+        let Some(justification) = entry["justification"].as_str() else {
+            return Err(format!(
+                "{name} platform baseline {} must give a string justification",
+                claim.id
+            ));
+        };
+        if !justification.starts_with(&prefix) {
+            return Err(format!(
+                "{name} platform baseline {} justification must start with {prefix:?}",
+                claim.id
+            ));
+        }
+        if justification[prefix.len()..].trim().is_empty() {
+            return Err(format!(
+                "{name} platform baseline {} justification gives no reason after {prefix:?}",
+                claim.id
+            ));
+        }
+    }
+    Ok((rights, baseline))
+}
+
+/// The one lab generator for a file profile: the contract head, then every
+/// rule of every rights claim in file order, then every rule of every
+/// platform-baseline claim in file order, one form per line. It emits no
+/// comment and nothing else, it reads and writes no file, and it refuses an id
+/// the shared contract does not name through `declared_entries`.
+fn generate_profile(name: &str, declared: &Value) -> Result<String, String> {
+    let (rights, baseline) = declared_entries(name, declared)?;
+    let mut profile = String::new();
+    for form in PROFILE_HEAD {
+        profile.push_str(form);
+        profile.push('\n');
+    }
+    for claim in rights.iter().chain(&baseline) {
+        for rule in &claim.rules {
+            profile.push_str(rule);
+            profile.push('\n');
+        }
+    }
+    Ok(profile)
 }
 
 /// The declared entries of `entries`, each proven to hold a string id and a
@@ -4367,6 +4414,89 @@ fn every_did_and_wallet_allow_rule_traces_to_one_declared_right() {
         let declared =
             read_declared_rights(name, &declared_path).unwrap_or_else(|err| panic!("{err}"));
         check_declared_rights(name, &profile, &declared).unwrap_or_else(|err| panic!("{err}"));
+    }
+}
+
+/// The one lab generator builds each did and wallet profile from its
+/// declared-rights file and the contract head, and the generated profile
+/// equals that provider's committed `confine.sb`, the test oracle.
+///
+/// The test reads `capsules/did-provider/confine.sb` and
+/// `capsules/wallet-provider/confine.sb` with `read_allow_rule_profile`, reads
+/// each provider's `tests/fixtures/confine/declared-rights.json` with
+/// `read_declared_rights`, then requires `check_profile_contract` and
+/// `check_declared_rights` to accept the generated profile. The committed
+/// profile holds only allow forms after its head, so the order of those forms
+/// does not change what is granted and the test compares them as sorted
+/// lists; the head keeps its order. A mismatch fails with the provider name,
+/// the forms only the generated profile holds and the forms only the committed
+/// one holds. The Runtime's own generator and its comparison are not built.
+/// The test reads files and starts no process, so it runs on every platform.
+///
+/// Falsifier: WP105 makes `generate_profile` emit
+/// `(allow file-read* (literal "/private/var/cc-confine-generated"))` after
+/// the head; this test fails because that rule is in neither declared-rights
+/// file.
+#[test]
+fn generated_did_and_wallet_profiles_match_their_committed_oracles() {
+    let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("capsules/wallet-provider must sit under capsules/");
+    for name in allow_rule_profiles() {
+        let profile_path = capsules.join(name).join("confine.sb");
+        let committed =
+            read_allow_rule_profile(name, &profile_path).unwrap_or_else(|err| panic!("{err}"));
+        let declared_path = capsules
+            .join(name)
+            .join("tests/fixtures/confine/declared-rights.json");
+        let declared =
+            read_declared_rights(name, &declared_path).unwrap_or_else(|err| panic!("{err}"));
+        let generated = generate_profile(name, &declared).unwrap_or_else(|err| panic!("{err}"));
+        check_profile_contract(name, &generated).unwrap_or_else(|err| panic!("{err}"));
+        check_declared_rights(name, &generated, &declared).unwrap_or_else(|err| panic!("{err}"));
+        let generated_forms = profile_forms(&generated);
+        let committed_forms = profile_forms(&committed);
+        let head = |forms: &[String]| {
+            forms
+                .iter()
+                .take(PROFILE_HEAD.len())
+                .map(String::as_str)
+                .eq(PROFILE_HEAD)
+        };
+        assert!(
+            head(&generated_forms),
+            "{name} generated profile must start with {PROFILE_HEAD:?}: {generated}"
+        );
+        assert!(
+            head(&committed_forms),
+            "{name} committed profile must start with {PROFILE_HEAD:?}: {committed}"
+        );
+        let mut generated_rest: Vec<String> = generated_forms
+            .iter()
+            .skip(PROFILE_HEAD.len())
+            .cloned()
+            .collect();
+        let mut committed_rest: Vec<String> = committed_forms
+            .iter()
+            .skip(PROFILE_HEAD.len())
+            .cloned()
+            .collect();
+        generated_rest.sort();
+        committed_rest.sort();
+        if generated_rest != committed_rest {
+            let only_generated: Vec<&String> = generated_rest
+                .iter()
+                .filter(|form| !committed_rest.contains(form))
+                .collect();
+            let only_committed: Vec<&String> = committed_rest
+                .iter()
+                .filter(|form| !generated_rest.contains(form))
+                .collect();
+            panic!(
+                "{name} generated profile differs from its committed oracle: only in generated \
+                 {only_generated:?}, only in committed {only_committed:?}"
+            );
+        }
     }
 }
 
