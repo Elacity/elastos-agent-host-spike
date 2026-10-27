@@ -1,7 +1,7 @@
 //! Static lab import pre-check. The Runtime owns enforcement.
 
 use std::fmt;
-use wasmparser::{Encoding, Parser, Payload, Validator};
+use wasmparser::{Encoding, MemoryType, Parser, Payload, Validator};
 
 pub const AUDIT_API: u32 = 1;
 
@@ -79,6 +79,37 @@ pub fn audit_component(wasm: &[u8], declared_interfaces: &[&str]) -> Result<Vec<
         }
     }
     Ok(interfaces)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryLimits {
+    pub minimum: u64,
+    pub maximum: Option<u64>,
+    pub memory64: bool,
+    pub shared: bool,
+}
+
+pub fn memories(wasm: &[u8]) -> Result<Vec<MemoryLimits>, Refusal> {
+    let mut defined = Vec::new();
+    inspect(wasm, Encoding::Module, |payload| {
+        if let Payload::MemorySection(section) = payload {
+            for memory in section {
+                let ty = memory.map_err(|_| Refusal::Malformed)?;
+                defined.push(memory_limits(ty));
+            }
+        }
+        Ok(())
+    })?;
+    Ok(defined)
+}
+
+fn memory_limits(ty: MemoryType) -> MemoryLimits {
+    MemoryLimits {
+        minimum: ty.initial,
+        maximum: ty.maximum,
+        memory64: ty.memory64,
+        shared: ty.shared,
+    }
 }
 
 // Validate the full input first. Imports describe outside authority only at

@@ -2437,9 +2437,8 @@ fn allow_rules_trace_to_declared_rights() {
 /// after the sysctl pin. F-cc35c, F-cc35d and F-cc35e append literal reads
 /// whose filenames contain STORAGE_ROOT, STORAGE_PARENT or PROVIDER_EXECUTABLE.
 /// F-cc35f keeps both pins and appends
-/// `(allow file-write* (literal "/tmp/cc35-write-only"))` to the profile and
-/// to `startup-root-directory` in the declared-rights fixture.
-/// F-cc35g adds `(allow file* (literal "/tmp/cc35-wildcard"))` to both files
+/// `(allow file-write* (literal "/tmp/cc35-write-only"))` to the profile only.
+/// F-cc35g adds `(allow file* (literal "/tmp/cc35-wildcard"))` to the profile only
 /// while keeping both pins.
 #[test]
 fn platform_baseline_rules_stay_narrow() {
@@ -2674,6 +2673,54 @@ fn platform_baseline_rules_stay_narrow() {
         "startup-sysctl widened: pin occurs 2 times",
     );
 
+    // A trimmed line that contains `(allow` must close on that line. The
+    // scan below keeps only a line that starts with `(allow `, so an unclosed
+    // form would otherwise leave both pins in place.
+    fn allow_form_closes(profile: &str) -> Result<(), String> {
+        for line in profile.lines() {
+            if line.starts_with(";;") {
+                continue;
+            }
+            let line = line.trim();
+            if !line.contains("(allow") {
+                continue;
+            }
+            let mut open = 0usize;
+            let mut close = 0usize;
+            for ch in line.chars() {
+                if ch == '(' {
+                    open += 1;
+                } else if ch == ')' {
+                    close += 1;
+                }
+            }
+            if open != close {
+                return Err(format!("allow form does not close: {line}"));
+            }
+        }
+        Ok(())
+    }
+
+    let unclosed = [
+        "(allow file-read-data (literal \"/\"))",
+        "(allow",
+        "file-read* (literal \"/tmp/cc-unclosed\"))",
+        "(allow sysctl-read)",
+    ]
+    .join("\n");
+    let unclosed_message = allow_form_closes(&unclosed).unwrap_err();
+    assert!(
+        unclosed_message.contains("allow form does not close"),
+        "{unclosed_message}"
+    );
+    assert!(unclosed_message.contains("(allow"), "{unclosed_message}");
+    assert!(
+        !unclosed_message.contains("startup-root-directory widened"),
+        "{unclosed_message}"
+    );
+    let committed_allows = [exec, root, sysctl, parent, storage].join("\n");
+    assert_eq!(allow_form_closes(&committed_allows), Ok(()));
+
     let profile_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("confine.sb");
     let profile = fs::read_to_string(&profile_path).unwrap_or_else(|err| {
         panic!(
@@ -2681,6 +2728,9 @@ fn platform_baseline_rules_stay_narrow() {
             profile_path.display()
         )
     });
+    if let Err(reason) = allow_form_closes(&profile) {
+        panic!("{reason}");
+    }
     // Whole lines that start with `;;` are comments. Allow lines are the
     // trimmed lines that start with `(allow `.
     let allow_lines: Vec<&str> = profile
