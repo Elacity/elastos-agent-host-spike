@@ -315,43 +315,95 @@ fi
 
 # 7. A2 journey in this clone only. Wait for run.sh and its children.
 a2_journey_out="$a2_workdir/journey.out"
-: > "$a2_journey_out"
+a2_wait_py="$a2_workdir/wait_journey.py"
+cat > "$a2_wait_py" <<'A2WAIT'
+import os
+import subprocess
+import sys
+import time
+
+
+def group_pids(pgid):
+    found = []
+    if os.path.isdir("/proc"):
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            path = os.path.join("/proc", name, "stat")
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+            except OSError:
+                continue
+            rparen = text.rfind(")")
+            if rparen < 0:
+                continue
+            fields = text[rparen + 2 :].split()
+            if len(fields) < 3:
+                continue
+            try:
+                if int(fields[2]) == pgid:
+                    found.append(int(name))
+            except ValueError:
+                continue
+        return found
+    try:
+        out = subprocess.check_output(["ps", "-ax", "-o", "pid=", "-o", "pgid="], text=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            if int(parts[1]) == pgid:
+                found.append(int(parts[0]))
+        except ValueError:
+            continue
+    return found
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+child = os.fork()
+if child == 0:
+    try:
+        os.setpgrp()
+    except PermissionError:
+        pass
+    os.execvp("bash", ["bash", "lab/a2-e2e-resume/run.sh"])
+_, status = os.waitpid(child, 0)
+rc = os.waitstatus_to_exitcode(status)
+deadline = time.time() + 7200
+empty = 0
+while time.time() < deadline:
+    live = group_pids(child)
+    if live is None:
+        sys.stderr.write("cannot list run.sh process group\n")
+        raise SystemExit(1)
+    still = [pid for pid in live if pid != child and alive(pid)]
+    if not still:
+        empty += 1
+        if empty >= 2:
+            raise SystemExit(rc)
+    else:
+        empty = 0
+    time.sleep(0.2)
+sys.stderr.write("run.sh or one of its children was still running after 7200s\n")
+raise SystemExit(1)
+A2WAIT
 set +e
-python3 -I -c 'import os, subprocess; os.setpgrp(); raise SystemExit(subprocess.call(["bash", "lab/a2-e2e-resume/run.sh"]))' > "$a2_journey_out" 2>&1 &
-a2_journey_pid=$!
-a2_pgid=$a2_journey_pid
-a2_waited=0
-a2_empty=0
-while [ "$a2_waited" -lt 7200 ]; do
-  a2_live=$(ps -ax -o pid= -o pgid= 2>/dev/null | awk -v g="$a2_pgid" 'NF >= 2 && ($2 + 0) == (g + 0) { print $1 }')
-  a2_busy=0
-  if kill -0 "$a2_journey_pid" 2>/dev/null; then
-    a2_busy=1
-  fi
-  for a2_p in $a2_live; do
-    if kill -0 "$a2_p" 2>/dev/null; then
-      a2_busy=1
-    fi
-  done
-  if [ "$a2_busy" -eq 0 ]; then
-    a2_empty=$((a2_empty + 1))
-    if [ "$a2_empty" -ge 2 ]; then
-      break
-    fi
-  else
-    a2_empty=0
-  fi
-  a2_waited=$((a2_waited + 1))
-  sleep 1
-done
-wait "$a2_journey_pid"
+python3 -I "$a2_wait_py" > "$a2_journey_out" 2>&1
 a2_journey_rc=$?
 set -e
 cat "$a2_journey_out"
 printf 'JOURNEY run.sh -> %s\n' "$a2_journey_rc"
-if [ "$a2_waited" -ge 7200 ]; then
-  a2_finish "FAIL" "run.sh or one of its children was still running after 7200s"
-fi
 
 a2_live=$(a2_hash_file "$a2_wasm")
 a2_pin_now=$(tr -d ' \t\r\n' < "$a2_pin")
