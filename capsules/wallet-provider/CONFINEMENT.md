@@ -968,8 +968,9 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Append a write grant on `STORAGE_PARENT` to the stand-in's generated profile
   for did (WP127):
   `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
-  fails at did's launched-profile check, because the launched file holds a form
-  the committed oracle does not, and the suite never starts.
+  fails at did's launched-profile check, where `check_declared_rights` refuses
+  the appended allow form because no declared right names it, and the suite
+  never starts.
 - Return `did_provider_dir().join("target/debug/did-provider")` from the one
   build-output reader instead of the reported `executable` (WP128):
   `did_binary_is_the_executable_the_build_reports` fails because its fixture
@@ -994,15 +995,20 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Append `(allow file-read* (literal "/private/etc/hosts"))` to the file the
   stand-in launches, after the writer (WP133):
   `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
-  fails at did's launched-profile check. The generator text test reads
-  `generate_profile`'s own text and no suite case reads that path, so neither
-  catches this edit; only the comparison of the launched file does.
+  fails at did's launched-profile check, where `check_declared_rights` refuses
+  the appended allow form because no declared right names it, and no suite case
+  reads that path.
 - Remove `(deny network*)` from the file the stand-in launches, after the
-  writer (WP134): the same test fails at did's launched-profile check, because
-  the launched file no longer starts with the contract head. The generator
-  text test reads `generate_profile`'s own text and no suite case opens a
-  socket, so neither catches this edit; only the comparison of the launched
-  file does.
+  writer (WP134): the same test fails at that launched-profile check, where
+  `check_profile_contract` refuses the profile without its explicit network
+  denial, and no suite case opens a socket.
+- Append `(deny file-write* (literal "/private/var/cc-confine-launched"))` to
+  the file the stand-in launches, after the writer (WP138): the same test fails
+  at did's launched-profile check, where `compare_profile_to_its_oracle` alone
+  catches it, because the head keeps its order and neither contract check reads
+  a deny form, so the panic names that form under "only in generated".
+  Removing the comparison call leaves the journey green under this entry's
+  plant, so this entry is the one that scores that call.
 - Move the `DECLARED_CONFINED_OS` lookup back above the missing-primitive check
   (WP135):
   `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` fails
