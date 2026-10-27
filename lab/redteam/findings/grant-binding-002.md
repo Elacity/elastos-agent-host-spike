@@ -1,5 +1,0 @@
-grant-binding-002 lab/grant-binding/src/link.rs 6a0fbd834c87e1ff3f246158c0669670537ca1da sha256 0cc4da8b8931bd12c18c6d83b2f985542089ab8cfe5fe51f02e3c803f6c2f7f5
-
-probe: test_escaped_path_dependency_matches_cargo
-observed: detector returned false
-cargo metadata package: grant-binding
