@@ -16,7 +16,8 @@
 //! 5. the engine is started once, by that same path, as
 //!    `run --invoke digest <memory cap> <absolute module path> 1592590337`,
 //!    with stdin null and an empty environment. It gets no folder, env or
-//!    network flag;
+//!    network flag. Task 043: the runner waits for it at most the run budget
+//!    (below), applied from outside the engine;
 //! 6. task 039: once the engine has exited (its outcome is read first), the
 //!    module file, if this run made it, and then the run folder are removed,
 //!    on every outcome after step 3: a module write that was refused, an
@@ -53,8 +54,23 @@
 //! ` -W `; LOG) is refused as a rejected cap, naming the argument; the module
 //! is never run again without its cap. Any other nonzero exit stays a failed
 //! run. `run_engine` makes no `--version` query and does not check the
-//! version: [`run`], the entry that starts both engines, checks the pins. The
-//! runner promises no fuel or time limit, and none other than the memory cap.
+//! version: [`run`], the entry that starts both engines, checks the pins.
+//!
+//! Task 043 (M1 A7 lab half): every module run has a wall-clock budget, the
+//! caller's explicit [`RunControl`]; there is no default, and none is read from
+//! the environment or a file. A zero budget is refused before anything is made
+//! or started. The budget counts from just after the engine is started. The
+//! runner reads the engine's stdout and stderr on a thread each, so a full pipe
+//! never blocks it, and polls `try_wait` every [`WAIT_POLL`]. An engine still
+//! running when the budget has passed is sent SIGKILL by the runner, reaped,
+//! its run folder removed (step 6) and the run refused as `BudgetExceeded`;
+//! what it printed is dropped. The budget is applied by the runner alone:
+//! nothing is given to the engine or the guest (no fuel or timeout flag, the
+//! argv is unchanged), so the guest can neither see nor change it. It is
+//! wall-clock time, not CPU time, and each module run gets its own. The
+//! `--version` queries have no budget. A runner process that is itself killed
+//! leaves its engine running (as it leaves its folder). No fuel limit is
+//! promised, and no limit other than this budget and the memory cap.
 //!
 //! The runner reads no environment variable and no file, and parses no
 //! manifest or module: the verified value already holds the bytes its lab CID
@@ -75,9 +91,10 @@
 //! wc-005b: [`run`] is the two-engine runner. It takes a [`RunInput`]: the
 //! bundle path, its in-memory name signature, the accepted signer DIDs, the
 //! granted imports (wc-009a: the caller's list from the lab grants file, read
-//! by [`crate::verify::read_grants`]), both engine program paths and a work
-//! root. In order:
+//! by [`crate::verify::read_grants`]), both engine program paths, a work root
+//! and (task 043) the run control both module runs get. In order:
 //!
+//! 0. task 043: a zero run budget is refused, before anything else;
 //! 1. wc-004's [`verify_bundle`] is called once, with the granted imports
 //!    passed unchanged. A refusal is returned unchanged; nothing is written and
 //!    no engine is started, so a module with an import that is not granted
@@ -127,10 +144,12 @@ use capsule_identity::{LabCid, NameSignature};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, DirBuilder};
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 /// The export the runner calls: the capsule's one function.
 pub const DIGEST_EXPORT: &str = "digest";
@@ -173,6 +192,31 @@ const CAP_REJECTED_PREFIX: &str = "error: ";
 /// The text in that line that names the `-W` option (LOG, task 038's two
 /// probes).
 const CAP_REJECTED_OPTION: &str = " -W ";
+
+/// How often the runner asks a running engine whether it has exited (task
+/// 043). A run that passed its budget is stopped at most this much later.
+pub const WAIT_POLL: Duration = Duration::from_millis(10);
+
+/// Task 043: the caller's explicit control over a module run: its wall-clock
+/// budget. There is no default; the runner reads none from the environment or
+/// a file. Each module run gets the whole budget, counted from its own start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunControl {
+    budget: Duration,
+}
+
+impl RunControl {
+    /// A control with a wall-clock `budget` per module run. A zero budget is
+    /// made, but refused by [`run_engine`] and [`run`] before any start.
+    pub const fn new(budget: Duration) -> RunControl {
+        RunControl { budget }
+    }
+
+    /// The wall-clock budget of one module run.
+    pub fn budget(&self) -> Duration {
+        self.budget
+    }
+}
 
 /// A host engine: test-only, not endorsed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,6 +314,20 @@ pub enum Reason {
     /// The engine succeeded, but its module file or its run folder could not
     /// be removed after it exited (task 039).
     RunDirNotRemoved(io::Error),
+    /// The run control's budget is zero; nothing was made or started (task
+    /// 043).
+    BudgetZero,
+    /// The engine still ran when its budget had passed; the runner stopped it
+    /// with SIGKILL and reaped it (task 043).
+    BudgetExceeded { engine: Engine, budget: Duration },
+    /// The runner could not send SIGKILL to an engine it was stopping (task
+    /// 043).
+    EngineNotStopped { engine: Engine, error: io::Error },
+    /// The runner could not learn whether the engine had exited, or could not
+    /// reap it (task 043).
+    EngineNotWaited { engine: Engine, error: io::Error },
+    /// The engine's stdout or stderr could not be read (task 043).
+    OutputNotRead { engine: Engine, error: io::Error },
 }
 
 impl fmt::Display for Reason {
@@ -353,6 +411,21 @@ impl fmt::Display for Reason {
                 f,
                 "the run folder cannot be removed after the engine exited: {error}"
             ),
+            Reason::BudgetZero => write!(f, "the run budget is zero: no engine is started"),
+            Reason::BudgetExceeded { engine, budget } => write!(
+                f,
+                "{engine} still ran at its run budget of {} ms: the runner stopped it with SIGKILL",
+                budget.as_millis()
+            ),
+            Reason::EngineNotStopped { engine, error } => {
+                write!(f, "the runner could not stop {engine} with SIGKILL: {error}")
+            }
+            Reason::EngineNotWaited { engine, error } => {
+                write!(f, "the runner could not wait for {engine}: {error}")
+            }
+            Reason::OutputNotRead { engine, error } => {
+                write!(f, "{engine}'s output could not be read: {error}")
+            }
         }
     }
 }
@@ -397,20 +470,33 @@ pub struct EngineRun {
 
 /// Run `engine`, the program at the absolute path `program`, once on
 /// `bundle`'s verified entrypoint bytes, written into a new folder inside
-/// `work_root`, which is removed again once the engine has exited. The steps
-/// and their order are in the module docs; the first refusal is the answer.
-/// Success returns the engine's exit status and stdout.
+/// `work_root`, which is removed again once the engine has exited. Task 043:
+/// the engine runs at most `control`'s budget; a zero budget is refused first.
+/// The steps and their order are in the module docs; the first refusal is the
+/// answer. Success returns the engine's exit status and stdout.
 pub fn run_engine(
     bundle: &VerifiedBundle,
     engine: Engine,
     program: &Path,
     work_root: &Path,
+    control: &RunControl,
 ) -> Result<EngineRun, Refusal> {
+    check_budget(control, work_root)?;
     check_program(program)?;
     check_work_root(work_root)?;
     let run_dir = make_run_dir(work_root, engine)?;
-    let outcome = write_and_start(bundle, engine, program, &run_dir);
+    let outcome = write_and_start(bundle, engine, program, &run_dir, control);
     finish_run(&run_dir, outcome)
+}
+
+/// Task 043: a zero budget is refused, with `work_root` as its path, before
+/// any folder is made or any engine started: no engine can run inside it.
+/// [`run_engine`] and [`run`] both check it here.
+fn check_budget(control: &RunControl, work_root: &Path) -> Result<(), Refusal> {
+    if control.budget().is_zero() {
+        return Err(Refusal::new(work_root, Reason::BudgetZero));
+    }
+    Ok(())
 }
 
 /// Step 3: one new folder, `<work_root>/<engine name>`, with mode `0o700`. A
@@ -429,16 +515,22 @@ fn make_run_dir(work_root: &Path, engine: Engine) -> Result<PathBuf, Refusal> {
 }
 
 /// Steps 4 and 5, in the run folder step 3 made: write the verified
-/// entrypoint as its module file, then start the engine on it once. Every
-/// outcome, a refusal too, goes to [`finish_run`].
+/// entrypoint as its module file, then start the engine on it once, within
+/// `control`'s budget. Every outcome, a refusal too, goes to [`finish_run`].
 fn write_and_start(
     bundle: &VerifiedBundle,
     engine: Engine,
     program: &Path,
     run_dir: &Path,
+    control: &RunControl,
 ) -> Result<EngineRun, Refusal> {
     let module = run_dir.join(MODULE_FILE);
     write_new_file(&module, &bundle.entrypoint().content).map_err(module_refusal)?;
+    // Task 043: `control` bound into the one start, so the call below, which
+    // falsifiers.json entries anchor, keeps its four arguments.
+    let start_engine = |engine, program, module: &Path, memory_mb| {
+        start_engine(engine, program, module, memory_mb, control)
+    };
     start_engine(engine, program, &module, bundle.memory_mb())
 }
 
@@ -578,26 +670,30 @@ fn engine_command(program: &Path) -> Command {
 }
 
 /// Start `program` once with the fixed argv and the memory cap for
-/// `memory_mb`, stdin null and an empty environment, and wait for it. A
-/// nonzero exit is refused with its stderr: as a rejected cap when
-/// [`cap_rejected`] says the engine rejected the cap argument it was given
-/// (task 038), else as a failed run. The engine is never started again
-/// without its cap. The cap argument it returns is read back from the argv
-/// the process was started with.
+/// `memory_mb`, stdin null and an empty environment, and wait for it within
+/// `control`'s budget ([`wait_within_budget`], task 043). A nonzero exit is
+/// refused with its stderr: as a rejected cap when [`cap_rejected`] says the
+/// engine rejected the cap argument it was given (task 038), else as a failed
+/// run. The engine is never started again without its cap. The cap argument
+/// it returns is read back from the argv the process was started with.
 fn start_engine(
     engine: Engine,
     program: &Path,
     module: &Path,
     memory_mb: u32,
+    control: &RunControl,
 ) -> Result<EngineRun, Refusal> {
     let mut command = engine_command(program);
-    let output = command
+    let child = command
         .args(["run", "--invoke", DIGEST_EXPORT])
         .args(memory_cap_args(engine, memory_mb))
         .arg(module)
         .arg(DIGEST_ARGUMENT)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| Refusal::new(program, Reason::EngineDidNotStart { engine, error }))?;
+    let output = wait_within_budget(engine, program, child, control)?;
     if !output.status.success() {
         let status = output.status;
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -622,6 +718,94 @@ fn start_engine(
         memory_mb,
         memory_cap: memory_cap_given(&command),
     })
+}
+
+/// Task 043: wait for `child`, the engine [`start_engine`] has just started,
+/// until it exits or `control`'s budget, counted from this call, has passed.
+/// Its stdout and stderr are each read on a thread of their own, so a full
+/// pipe never blocks it, and `try_wait` is asked every [`WAIT_POLL`]. An
+/// engine that exits in time gives its output, as `Command::output` would.
+/// One still running at the budget is stopped ([`stop_engine`]), both readers
+/// are joined, its output is dropped, and the run is refused as
+/// `BudgetExceeded`. The runner gives the engine nothing: the budget is never
+/// in its argv. A failed `try_wait` stops the engine too, and is refused with
+/// its OS cause; so is a failed read of either pipe.
+fn wait_within_budget(
+    engine: Engine,
+    program: &Path,
+    mut child: Child,
+    control: &RunControl,
+) -> Result<Output, Refusal> {
+    let started = Instant::now();
+    let stdout = read_pipe(child.stdout.take());
+    let stderr = read_pipe(child.stderr.take());
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= control.budget() => {
+                stop_engine(engine, program, &mut child)?;
+                let _dropped = (joined(stdout), joined(stderr));
+                let budget = control.budget();
+                return Err(Refusal::new(
+                    program,
+                    Reason::BudgetExceeded { engine, budget },
+                ));
+            }
+            Ok(None) => thread::sleep(WAIT_POLL),
+            Err(error) => {
+                stop_engine(engine, program, &mut child)?;
+                let _dropped = (joined(stdout), joined(stderr));
+                return Err(Refusal::new(
+                    program,
+                    Reason::EngineNotWaited { engine, error },
+                ));
+            }
+        }
+    };
+    let output = joined(stdout).and_then(|stdout| Ok((stdout, joined(stderr)?)));
+    let (stdout, stderr) =
+        output.map_err(|error| Refusal::new(program, Reason::OutputNotRead { engine, error }))?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Task 043: stop an engine the runner gives up on: SIGKILL (`Child::kill`),
+/// then reap it (`Child::wait`). Neither failure is ignored: a failed kill is
+/// refused with its own reason and OS cause, and the engine is then neither
+/// waited for nor its pipes read to their end, since it may still run.
+fn stop_engine(engine: Engine, program: &Path, child: &mut Child) -> Result<(), Refusal> {
+    child
+        .kill()
+        .map_err(|error| Refusal::new(program, Reason::EngineNotStopped { engine, error }))?;
+    child
+        .wait()
+        .map_err(|error| Refusal::new(program, Reason::EngineNotWaited { engine, error }))?;
+    Ok(())
+}
+
+/// A thread reading one engine pipe to its end (task 043).
+type PipeReader = JoinHandle<io::Result<Vec<u8>>>;
+
+/// Task 043: read `pipe` to its end on a thread of its own. A missing pipe or
+/// a reader thread that could not start is an error, never an empty output.
+fn read_pipe(pipe: Option<impl Read + Send + 'static>) -> io::Result<PipeReader> {
+    let mut pipe = pipe.ok_or_else(|| io::Error::other("the engine's pipe was not made"))?;
+    thread::Builder::new().spawn(move || {
+        let mut bytes = Vec::new();
+        io::copy(&mut pipe, &mut bytes)?;
+        Ok(bytes)
+    })
+}
+
+/// What a [`read_pipe`] reader read, once its thread has ended; a reader that
+/// did not start, failed or panicked is an error.
+fn joined(reader: io::Result<PipeReader>) -> io::Result<Vec<u8>> {
+    reader?
+        .join()
+        .unwrap_or_else(|_| Err(io::Error::other("the reader thread panicked")))
 }
 
 /// The memory cap argument `command` was started with: the argument after
@@ -718,6 +902,9 @@ pub struct RunInput<'a> {
     pub wasmer: &'a Path,
     /// The work root both run folders are made in.
     pub work_root: &'a Path,
+    /// Task 043: the control each module run gets: each its own budget,
+    /// `wasmtime`'s and then `wasmer`'s, never one shared clock.
+    pub control: &'a RunControl,
 }
 
 /// A two-engine run that passed: the verified lab CID, each engine's observed
@@ -852,8 +1039,16 @@ impl Error for TwoEngineRefusal {}
 /// Verify `input.bundle` once, ask both engines their version, then run it on
 /// `wasmtime` and then on `wasmer`, and require byte-identical stdout. The
 /// steps and their order are in the module docs; the first refusal is the
-/// answer.
+/// answer. Task 043: a zero budget in `input.control` is refused first, as
+/// [`run_engine`] refuses it, before any `--version` query.
 pub fn run(input: &RunInput) -> Result<TwoEngineRun, TwoEngineRefusal> {
+    check_budget(input.control, input.work_root).map_err(TwoEngineRefusal::Engine)?;
+    // Task 043: both module runs get `input.control`, each counting its own
+    // budget from its own start. Bound here, so the two calls below, which
+    // falsifiers.json entries anchor, keep their four arguments.
+    let run_engine = |bundle: &VerifiedBundle, engine, program: &Path, work_root: &Path| {
+        run_engine(bundle, engine, program, work_root, input.control)
+    };
     let bundle = verify_bundle(input.bundle, input.signature, input.accepted, input.granted)
         .map_err(TwoEngineRefusal::Verify)?;
     let wasmtime_version =
