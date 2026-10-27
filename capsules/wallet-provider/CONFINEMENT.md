@@ -818,6 +818,12 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   because case (b) writes a profile for the unnamed baseline rule.
 - Make the lab writer create the profile path before it calls the generator
   (WP108): the same test fails because both cases create the refused path.
+- Append `(deny file-write* (literal "/private/var/cc-confine-generated"))`
+  after the declared rules in `generate_profile` (WP109):
+  `generated_did_and_wallet_profiles_match_their_committed_oracles` fails only
+  at the sorted-tail comparison, because the head keeps its order and neither
+  contract check reads a deny form, so the panic names that form under "only in
+  generated".
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
