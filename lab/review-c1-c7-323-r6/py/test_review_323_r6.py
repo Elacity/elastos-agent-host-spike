@@ -324,10 +324,16 @@ class HuntExtractCopyDrift(unittest.TestCase):
         shared = rust_named_fn_source(WALLET_READER.read_text(), "profile_characters")
         probe_lib = (REVIEW / "probe/src/lib.rs").read_text()
         extracted = rust_named_fn_source(probe_lib, "profile_characters")
-        # extract.py prefixes pub
+        def body(text: str) -> str:
+            for prefix in ("pub fn profile_characters", "fn profile_characters"):
+                if text.startswith(prefix):
+                    return text[len(prefix) :]
+            return text
+
         self.assertEqual(
-            extracted.replace("pub fn profile_characters", "fn profile_characters", 1),
-            shared.replace("fn profile_characters", "fn profile_characters", 1),
+            body(extracted),
+            body(shared),
+            "extract.py profile_characters drifted from sbpl_reader.rs",
         )
         self.assertIn(
             "the profile must refuse a Scheme character literal #\\",
