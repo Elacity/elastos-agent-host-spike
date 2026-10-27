@@ -860,12 +860,13 @@ fn wait_for_terminal(
 /// `operations_table_cells_stay_lab_claims` runs on that same section after
 /// the real-file missing-test check and returns ok. A data row starts with
 /// `| ` and its first non-empty cell is not `Operation` and not `---`. The
-/// Right cell is the fourth non-empty cell: `storage` or
-/// `no named test shows this`. The Linux cell is the seventh non-empty cell:
-/// `designed, not enforced`. An in-memory row whose Right cell is `network`
-/// panics, and the panic contains `network` and `right`. An in-memory row
-/// whose Linux cell is `enforced` panics, and the panic contains `enforced`
-/// and `Linux`.
+/// Right cell passes when `entry_id` read that id from the fixture's `rights`
+/// array, or the cell is `no named test shows this`. The Linux cell is the
+/// seventh non-empty cell: `designed, not enforced`. An in-memory row whose
+/// Right cell is `network` panics, and the panic contains `network` and
+/// `right`. A `storage` cell whose id list is only `bound-executable` panics
+/// with `storage` and `right`. The enforced panic contains the backticked
+/// cell `` `enforced` ``.
 ///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
 /// test no longer finds that function. F-cc49a drops the `generated_`
@@ -954,10 +955,12 @@ fn operations_section_cites_existing_tests() {
     }
     // Right is the fourth non-empty cell. Linux is the seventh. Header and
     // separator rows are not data rows, so their cells are not claims.
-    fn operations_table_cells_stay_lab_claims(section: &str) -> Result<(), String> {
+    fn operations_table_cells_stay_lab_claims(
+        section: &str,
+        right_ids: &[&str],
+    ) -> Result<(), String> {
         const RIGHT_PLACE: usize = 4;
         const LINUX_PLACE: usize = 7;
-        const APPROVED_RIGHT: &str = "storage";
         const UNSHOWN_RIGHT: &str = "no named test shows this";
         const LINUX_CLAIM: &str = "designed, not enforced";
         for line in section.lines() {
@@ -976,7 +979,7 @@ fn operations_section_cites_existing_tests() {
                 continue;
             }
             let right = cells.get(RIGHT_PLACE - 1).copied().unwrap_or("");
-            if right != APPROVED_RIGHT && right != UNSHOWN_RIGHT {
+            if !right_ids.contains(&right) && right != UNSHOWN_RIGHT {
                 return Err(format!("right cell `{right}` is not an approved right id"));
             }
             let linux = cells.get(LINUX_PLACE - 1).copied().unwrap_or("");
@@ -988,9 +991,9 @@ fn operations_section_cites_existing_tests() {
         }
         Ok(())
     }
-    fn caught_lab_claim_panic(section: &str) -> String {
+    fn caught_lab_claim_panic(section: &str, right_ids: &[&str]) -> String {
         match catch_unwind(AssertUnwindSafe(|| {
-            if let Err(reason) = operations_table_cells_stay_lab_claims(section) {
+            if let Err(reason) = operations_table_cells_stay_lab_claims(section, right_ids) {
                 panic!("{reason}");
             }
         })) {
@@ -1038,18 +1041,35 @@ fn operations_section_cites_existing_tests() {
     require_cited_tests("`model_`", source_without_the_function);
     require_cited_tests("`generated_`", source_without_the_function);
 
+    let approved_ids = ["storage", "bound-executable"];
     let network_row = "| init | in | out | network | effect | rule | designed, not enforced |";
-    let network_panic = caught_lab_claim_panic(network_row);
+    let network_panic = caught_lab_claim_panic(network_row, &approved_ids);
     assert!(
         network_panic.contains("network") && network_panic.contains("right"),
         "{network_panic}"
     );
-    let enforced_row = "| init | in | out | storage | effect | rule | enforced |";
-    let enforced_panic = caught_lab_claim_panic(enforced_row);
+    let storage_row = "| init | in | out | storage | effect | rule | designed, not enforced |";
+    let storage_panic = caught_lab_claim_panic(storage_row, &["bound-executable"]);
     assert!(
-        enforced_panic.contains("enforced") && enforced_panic.contains("Linux"),
-        "{enforced_panic}"
+        storage_panic.contains("storage") && storage_panic.contains("right"),
+        "{storage_panic}"
     );
+    let bound_row =
+        "| init | in | out | bound-executable | effect | rule | designed, not enforced |";
+    assert_eq!(
+        operations_table_cells_stay_lab_claims(bound_row, &approved_ids),
+        Ok(())
+    );
+    let startup_row =
+        "| init | in | out | startup-root-directory | effect | rule | designed, not enforced |";
+    let startup_panic = caught_lab_claim_panic(startup_row, &approved_ids);
+    assert!(
+        startup_panic.contains("startup-root-directory") && startup_panic.contains("right"),
+        "{startup_panic}"
+    );
+    let enforced_row = "| init | in | out | storage | effect | rule | enforced |";
+    let enforced_panic = caught_lab_claim_panic(enforced_row, &approved_ids);
+    assert!(enforced_panic.contains("`enforced`"), "{enforced_panic}");
 
     let doc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("CONFINEMENT.md");
     let doc = fs::read_to_string(&doc_path).unwrap_or_else(|err| {
@@ -1076,7 +1096,21 @@ fn operations_section_cites_existing_tests() {
         "the trace citation must be a required test name"
     );
     require_cited_tests(section, &source);
-    operations_table_cells_stay_lab_claims(section)
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECLARED_RIGHTS_FIXTURE);
+    let fixture_text = fs::read_to_string(&fixture_path).unwrap_or_else(|err| {
+        panic!(
+            "the declared-rights fixture {} must be readable: {err}",
+            fixture_path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&fixture_text)
+        .unwrap_or_else(|err| panic!("the declared-rights fixture must be JSON: {err}"));
+    let rights = fixture
+        .get("rights")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("declared rights must be an array"));
+    let right_ids: Vec<&str> = rights.iter().map(entry_id).collect();
+    operations_table_cells_stay_lab_claims(section, &right_ids)
         .expect("the real operations section keeps its Right and Linux lab claims");
 }
 
@@ -4262,6 +4296,13 @@ fn allow_form_closes(profile: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn entry_id(entry: &Value) -> &str {
+    entry
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("a declared entry has no id"))
+}
+
 /// Every allow rule in `confine.sb` traces to exactly one approved declared
 /// right or one platform-baseline rule in the declared-rights fixture.
 ///
@@ -4277,12 +4318,6 @@ fn allow_form_closes(profile: &str) -> Result<(), String> {
 /// line. F-cc30f repeats the STORAGE_ROOT allow.
 #[test]
 fn allow_rules_trace_to_declared_rights() {
-    fn entry_id(entry: &Value) -> &str {
-        entry
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| panic!("a declared entry has no id"))
-    }
     fn rule_strings(entry: &Value) -> Vec<&str> {
         let Some(rules) = entry.get("rules") else {
             return Vec::new();

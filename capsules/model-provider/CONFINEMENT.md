@@ -483,8 +483,9 @@ cited `model_` or `generated_` test name, and
 `allow_rules_trace_to_declared_rights`, is a function in
 `tests/confine/main.rs`. The check covers `model_` names, `generated_` names,
 and `allow_rules_trace_to_declared_rights`. The same test requires each Right
-cell to be an approved right id or `no named test shows this`, and each Linux
-cell to be `designed, not enforced`.
+cell to be an id `entry_id` reads from the `rights` array of
+`tests/fixtures/confine/declared-rights.json`, or `no named test shows this`,
+and each Linux cell must be `designed, not enforced`.
 
 | Operation | Inputs | Outputs | Right | Effect | macOS rule and test | Linux |
 | --- | --- | --- | --- | --- | --- | --- |
