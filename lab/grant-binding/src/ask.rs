@@ -117,6 +117,36 @@ fn model_over_budget_ask_is_refused() {
 }
 
 #[test]
+fn model_ask_at_the_cap_is_admitted() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = super::guest(handle);
+    let granted = verifier
+        .admit_ask(&call, &request, BudgetAsk { amount: 5 }, 5)
+        .expect("ask at the cap");
+    assert_eq!(granted, 5);
+    verifier
+        .reserve(&call, &request, 5)
+        .expect("hold the granted ask");
+    let refusal = verifier
+        .reserve(&call, &request, 1)
+        .expect_err("past the granted ceiling");
+    assert_eq!(
+        refusal,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 5,
+            held: 5,
+            asked: 1,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+}
+
+#[test]
 fn model_admit_ask_on_a_sibling_instance_is_refused() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
@@ -147,4 +177,106 @@ fn model_admit_ask_on_a_sibling_instance_is_refused() {
             asked: 1,
         }
     );
+}
+
+#[test]
+fn model_forged_ceiling_does_not_replace_the_admitted_amount() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_ceiling: 9,
+        ..super::guest(handle)
+    };
+    assert_eq!(request.forged_ceiling, 9);
+    let granted = verifier
+        .admit_ask(&call, &request, BudgetAsk { amount: 4 }, 10)
+        .expect("ask within the cap");
+    assert_eq!(granted, 4);
+    verifier
+        .reserve(&call, &request, 4)
+        .expect("hold the granted ask");
+    let refusal = verifier
+        .reserve(&call, &request, 1)
+        .expect_err("past the granted ceiling");
+    assert_eq!(
+        refusal,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 4,
+            asked: 1,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+}
+
+#[test]
+fn model_reported_usage_does_not_shrink_the_admitted_amount() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..super::guest(handle)
+    };
+    assert_eq!(request.reported_usage, 1);
+    let granted = verifier
+        .admit_ask(&call, &request, BudgetAsk { amount: 4 }, 10)
+        .expect("ask within the cap");
+    assert_eq!(granted, 4);
+    verifier
+        .reserve(&call, &request, 4)
+        .expect("hold the granted ask");
+    let refusal = verifier
+        .reserve(&call, &request, 1)
+        .expect_err("past the granted ceiling");
+    assert_eq!(
+        refusal,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 4,
+            asked: 1,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+}
+
+#[test]
+fn model_forged_identity_does_not_replace_the_admitted_amount() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..super::guest(handle)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    let granted = verifier
+        .admit_ask(&call, &request, BudgetAsk { amount: 4 }, 10)
+        .expect("ask within the cap");
+    assert_eq!(granted, 4);
+    verifier
+        .reserve(&call, &request, 4)
+        .expect("hold the granted ask");
+    let refusal = verifier
+        .reserve(&call, &request, 1)
+        .expect_err("past the granted ceiling");
+    assert_eq!(
+        refusal,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 4,
+            asked: 1,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
 }

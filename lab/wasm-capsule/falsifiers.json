@@ -548,14 +548,14 @@
     },
     {
       "id": "F-WC3-IO-CAUSE-MANIFEST",
-      "title": "capsule.json's creation refusal drops the system's cause",
+      "title": "the shared writer's creation refusal drops the system's cause",
       "command": "lab",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
-          "old": "\"capsule.json cannot be created: {error}\"",
-          "new": "\"capsule.json cannot be created\""
+          "old": "\"cannot be created as a new file: {error}\"",
+          "new": "\"cannot be created as a new file\""
         }
       ],
       "tests": [
@@ -580,14 +580,14 @@
     },
     {
       "id": "F-WC3-IO-CAUSE-WRITE",
-      "title": "capsule.json's write refusal drops the writer's cause",
+      "title": "the shared writer's write refusal drops the writer's cause",
       "command": "lab",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
-          "old": "\"capsule.json cannot be written: {error}\"",
-          "new": "\"capsule.json cannot be written\""
+          "old": "\"was created, but its bytes cannot be written: {error}\"",
+          "new": "\"was created, but its bytes cannot be written\""
         }
       ],
       "tests": [
@@ -1265,8 +1265,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/run.rs",
-          "old": "        WriteReason::ManifestNotCreated(error) => Reason::ModuleNotCreated(error),\n",
-          "new": "        WriteReason::ManifestNotCreated(_) => Reason::ModuleNotCreated(io::Error::other(\"cannot create\")),\n"
+          "old": "        WriteReason::FileNotCreated(error) => Reason::ModuleNotCreated(error),\n",
+          "new": "        WriteReason::FileNotCreated(_) => Reason::ModuleNotCreated(io::Error::other(\"cannot create\")),\n"
         }
       ],
       "tests": [
@@ -1281,8 +1281,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/run.rs",
-          "old": "        WriteReason::ManifestNotWritten(error) => Reason::ModuleNotWritten(error),\n",
-          "new": "        WriteReason::ManifestNotWritten(_) => Reason::ModuleNotWritten(io::Error::other(\"cannot write\")),\n"
+          "old": "        WriteReason::FileNotWritten(error) => Reason::ModuleNotWritten(error),\n",
+          "new": "        WriteReason::FileNotWritten(_) => Reason::ModuleNotWritten(io::Error::other(\"cannot write\")),\n"
         }
       ],
       "tests": [
@@ -1350,7 +1350,8 @@
         }
       ],
       "tests": [
-        "engine_starts_with_an_empty_environment"
+        "engine_starts_with_an_empty_environment",
+        "host_secret_fixture_never_reaches_either_real_engine"
       ]
     },
     {
@@ -1687,7 +1688,7 @@
         {
           "file": "../../lab/wasm-capsule/tools/src/receipt.rs",
           "old": "    write_new_file(path, render(run).as_bytes())\n",
-          "new": "    std::fs::write(path, render(run)).map_err(|error| RunRefusal {\n        path: path.to_path_buf(),\n        reason: crate::bundle::Reason::ManifestNotCreated(error),\n    })\n"
+          "new": "    std::fs::write(path, render(run)).map_err(|error| RunRefusal {\n        path: path.to_path_buf(),\n        reason: crate::bundle::Reason::FileNotCreated(error),\n    })\n"
         }
       ],
       "tests": [
@@ -1992,8 +1993,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/README.md",
-          "old": "`falsifiers.json` holds 182 planted bugs",
-          "new": "`falsifiers.json` holds 181 planted bugs"
+          "old": "`falsifiers.json` holds 185 planted bugs",
+          "new": "`falsifiers.json` holds 184 planted bugs"
         }
       ],
       "tests": [
@@ -2993,6 +2994,55 @@
       ],
       "tests": [
         "cancelled_run_settles_as_cancelled_and_leaves_nothing_on_both_engines"
+      ]
+    },
+    {
+      "id": "F-WC-B4-TYPE-GAP-HIDDEN",
+      "title": "README's import type gap loses its not, so it calls a typed lab operation a type check",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/README.md",
+          "old": "so a typed lab operation is not a type check; this blocks",
+          "new": "so a typed lab operation is a type check; this blocks"
+        }
+      ],
+      "tests": [
+        "import_type_gap_is_a_named_row_and_nothing_claims_a_type_check"
+      ]
+    },
+    {
+      "id": "F-WC-B4-TYPE-CHECK-CLAIMED",
+      "title": "README's typed lab operations list calls env.f type-checked",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/README.md",
+          "old": "- `env.f`: inputs `()`, outputs `()`, right `call`, effect `none`\n",
+          "new": "- `env.f`: inputs `()`, outputs `()`, right `call`, effect `none` (type-checked)\n"
+        }
+      ],
+      "tests": [
+        "import_type_gap_is_a_named_row_and_nothing_claims_a_type_check"
+      ]
+    },
+    {
+      "id": "F-WC5-WRITER-NAMES-MANIFEST",
+      "title": "the shared writer's create reason names capsule.json again, so a receipt it cannot write is refused under the wrong file's name",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/bundle.rs",
+          "old": "write!(f, \"cannot be created as a new file: {error}\")",
+          "new": "write!(f, \"capsule.json cannot be created as a new file: {error}\")"
+        }
+      ],
+      "tests": [
+        "receipt_write_refuses_an_existing_path",
+        "refusal_receipt_write_refuses_an_existing_path"
       ]
     }
   ]

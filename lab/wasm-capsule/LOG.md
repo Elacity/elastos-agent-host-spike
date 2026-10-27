@@ -1265,3 +1265,89 @@
   ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0. Retired-label
   greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn --exclude-dir=target
   'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 046 (M1 B4 lab half: the import type gap is a named row and no text claims a type check). Base
+  `f2d9235fe`. Docs: ADOPTION "## Gaps for Anders" gets item 4, `**Import Wasm types are not checked.**`, holding the
+  one gap sentence (`TYPE_GAP` in `tests/docs.rs`) and the facts (the audit's v1 API returns module and name only,
+  `audit/INTERFACE.md`; closing it needs each import's function type from cx-wasm-audit's one module reader and a
+  check against `LAB_OPERATIONS`; until then an `env.f` import of another Wasm type than `() -> ()` passes
+  `verify_checked`'s typed-operation check); item 3's trailing type sentence now points to item 4. README's "### Typed
+  lab operations (M1 B4 lab half)" holds the same sentence in place of its old one; `tools/src/verify.rs`'s module
+  doc keeps only a pointer (doc comment only). No code, no `LAB_OPERATIONS` change, no new dependency. Test
+  `import_type_gap_is_a_named_row_and_nothing_claims_a_type_check` (reuses `lane_file`, `sections`, `lines_at`,
+  `OPERATIONS_SECTION`; `readme_lists_each_typed_lab_operation` now reads the section through the shared
+  `operations_lines`). Falsifiers (anchors in `README.md`, each found once): by hand, F-WC-B4-TYPE-GAP-HIDDEN panicked
+  at `tests/docs.rs:411` "README.md holds the import type gap 0 times, not once", and F-WC-B4-TYPE-CHECK-CLAIMED at
+  `tests/docs.rs:454` "a line names a type check without the word \"not\": [\"README.md:980: - `env.f`: ... effect
+  `none` (type-checked)\"]"; README copied back, `cmp` clean. Hand check outside the counts (ADOPTION is no recovery
+  target): item 4's number dropped, the test panicked at `tests/docs.rs:439` "has no numbered item starting". Canonical
+  runner, from the repo root, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py
+  --from lab/wasm-capsule/falsifiers.json F-WC-B4-TYPE-GAP-HIDDEN F-WC-B4-TYPE-CHECK-CLAIMED F-WC-README-COUNT`:
+  "baseline: 2 named tests pass without an edit, 0 do not", "summary: 3 CAUGHT of 3" (F-WC-README-COUNT re-anchored
+  to 184). All 184 anchors found exactly once. Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2
+  CARGO_INCREMENTAL=0`: `cargo test --locked` (128 passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt
+  -p wasm-capsule-tools -- --check` exit 0. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' --
+  lab/wasm-capsule/` and `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 049 (M1 A8 lab half: the host secret test fails on an empty engine environment record). Base
+  `286b983b6`. `tests/run.rs` only, plus docs and one `falsifiers.json` test name; no runner change. `host_secret_shim`
+  now writes each record with `|| failed '<record>'`, a shell function that prints `shim: cannot write the record
+  <record>` to stderr and exits 70 before `exec`. New helper `HostSecretCase::recorded_env` reads each of the four
+  environment records (2 engines x `version`/`run`), asserts it is not empty and holds the exact line `_=/usr/bin/env`,
+  and panics naming the engine, the start and the record path; the inner test calls it before its unchanged absence
+  checks. Gap on the base (the proof it was real): both `/usr/bin/env > ` lines in `host_secret_shim` changed to `: > `
+  by `sed -i ''` on `286b983b6`, then `cargo test --locked --test run
+  host_secret_fixture_never_reaches_either_real_engine -- --exact`: "test result: ok. 1 passed"; file copied back,
+  `git diff --exit-code` exit 0. Hand proofs on this branch (hand-proven, pending R1; `tests/run.rs` is no recovery
+  target), same command, the fixed file copied back after each and `cmp` clean against it (the branch is uncommitted,
+  so `cmp`, not `git diff`, is the byte-for-byte check): (a) the same `: > ` plant: outer panic at "the child
+  host_secret_fixture_run_inside_the_child did not pass (exit status: 101)", child panic "wasmtime version: the
+  environment record <tmp>/records/wasmtime.version.env is empty or was not written by /usr/bin/env (no line
+  _=/usr/bin/env): []"; (b) both `/usr/bin/env` changed to `/usr/bin/false`: same outer panic, child panic "the
+  two-engine runner refused: <tmp>/shims/wasmtime: wasmtime --version failed (exit status: 70): shim: cannot write the
+  record <tmp>/records/wasmtime.version.env". F-WC5-ENGINE-ENV's `tests` now also names
+  `host_secret_fixture_never_reaches_either_real_engine`; by hand with `env_clear()` dropped (`tools/src/run.rs`
+  copied back, `git diff --exit-code -- tools/src/run.rs` exit 0) the child failed at "wasmtime version: the
+  environment has HOME: HOME=<tmp>/home". Canonical runner, from the repo root, `RUST_TEST_THREADS=2
+  CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json
+  F-WC5-ENGINE-ENV`: "baseline: 2 named tests pass without an edit, 0 do not", "F-WC5-ENGINE-ENV CAUGHT", "summary: 1
+  CAUGHT of 1". README: A8 paragraph names the record check and the shim's exit 70; "Task 049" paragraph; hand-proven
+  total 66 -> 68; total (184) and runner-caught (120) unchanged, so F-WC-README-COUNT's anchor is unchanged. All 184
+  entries' 193 anchors found exactly once. A8 PASS lines on this Mac (wasmtime 45.0.1, wasmer 7.5.0): each record
+  `["PWD=<lane folder>", "SHLVL=1", "_=/usr/bin/env"]`, "PASS: neither engine got the HOME folder, HOME or the marker",
+  "PASS: the host secret reached neither real engine nor either output". Gates in `lab/wasm-capsule/`, with
+  `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`: `cargo test --locked` (128 passed, 3 ignored, 0 failed), `cargo test
+  --locked --workspace` (155 passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools
+  -- --check` exit 0. Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and
+  `grep -rn --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.
+- 27 Oct, task 050 (shared file writer refusal names no fixed file; M1 A7 lab half, P11). Base `db4be8812`. The shared
+  writer's two reasons in `tools/src/bundle.rs` are renamed `ManifestNotCreated` -> `FileNotCreated` and
+  `ManifestNotWritten` -> `FileNotWritten`, with texts that name no file: `cannot be created as a new file: <cause>` and
+  `was created, but its bytes cannot be written: <cause>`. So a receipt the writer cannot create reads `<receipt path>:
+  cannot be created as a new file: File exists (os error 17)`, not `<receipt path>: capsule.json cannot be created:
+  ...` (044's PASS review, claude, round 1). `write_new_file` stays the one writer; `write_receipt` and
+  `write_refused_receipt` still return its refusal unchanged; `run.rs`'s `module_refusal` only renames its two match
+  arms (the runner's `ModuleNotCreated`/`ModuleNotWritten` texts are unchanged). Tests: `bundle_io_refusals_keep_path_and_cause`
+  checks each variant and the new exact texts (the `<tmp>/missing/capsule.json` case keeps its full-text check, so the
+  manifest is named by its path); `runner_io_refusals_keep_path_and_cause` uses the new names;
+  `receipt_write_refuses_an_existing_path` and `refusal_receipt_write_refuses_an_existing_path` assert the new variant
+  and text and that the refusal holds no `capsule.json`. README: "Writing it." and the refusal receipt's write
+  sentence say the writer's reason names no file, with the new example line; `tools/bundle` step 4 shows both new
+  texts; the run budget's known limits add that after the kill `joined` waits for end-of-file on the engine's stdout
+  and stderr, so an engine whose child holds those pipes open would keep the runner past the budget (the pinned engines
+  start no child; no test covers it; 043's PASS review, claude, round 1). New falsifier F-WC5-WRITER-NAMES-MANIFEST
+  (`capsule.json ` put back at the front of the create reason). Five entries re-anchored to the new names and texts,
+  each the same bug: F-WC3-IO-CAUSE-MANIFEST, F-WC3-IO-CAUSE-WRITE, F-WC5-IO-MODULE-CREATE, F-WC5-IO-MODULE-WRITE,
+  F-WC5-RECEIPT-OVERWRITE (its plant now builds `crate::bundle::Reason::FileNotCreated`). Canonical runner, from the
+  repo root, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py --from
+  lab/wasm-capsule/falsifiers.json F-WC3-IO-CAUSE-MANIFEST F-WC3-IO-CAUSE-WRITE F-WC5-IO-MODULE-CREATE
+  F-WC5-IO-MODULE-WRITE F-WC5-RECEIPT-OVERWRITE F-WC5-WRITER-NAMES-MANIFEST`: "baseline: 4 named tests pass without an
+  edit, 0 do not", "F-WC3-IO-CAUSE-MANIFEST CAUGHT", "F-WC3-IO-CAUSE-WRITE CAUGHT", "F-WC5-IO-MODULE-CREATE CAUGHT",
+  "F-WC5-IO-MODULE-WRITE CAUGHT", "F-WC5-RECEIPT-OVERWRITE CAUGHT", "F-WC5-WRITER-NAMES-MANIFEST CAUGHT", "summary: 6
+  CAUGHT of 6". Then the same command with F-WC-README-COUNT (re-anchored to 185): "baseline: 1 named tests pass without
+  an edit, 0 do not", "F-WC-README-COUNT CAUGHT", "summary: 1 CAUGHT of 1". `git status --short` after the runs listed
+  only this task's six edited files, with no `*.falsify-original` left. README: total 184 -> 185, runner-caught 120 ->
+  121; hand-proven stays 68 (no label changes; F-WC3-IO-CAUSE-MANIFEST and -WRITE stay in task 009's hand-proven
+  count). All 185 entries' 194 anchors found exactly once. Gates in `lab/wasm-capsule/`, with `RUST_TEST_THREADS=2
+  CARGO_INCREMENTAL=0`: `cargo test --locked` (128 passed, 3 ignored, 0 failed), `cargo test --locked --workspace` (155
+  passed, 3 ignored, 0 failed), `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check` exit 0.
+  Retired-label greps from the repo root (`git grep -n 'lab-''sha256' -- lab/wasm-capsule/` and `grep -rn
+  --exclude-dir=target 'lab-''sha256' lab/wasm-capsule/`): both empty, exit 1.

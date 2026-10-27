@@ -53,6 +53,9 @@ generated text, hosted init creates `runs/`, and the local offer answers
 `internal_error`.
 `generated_profile_denies_the_hosted_connect` launches the stand-in text, the
 stand-in counts zero connections, and this is not the Runtime's refusal.
+`standin_launch_uses_the_generated_profile` drops the storage write from the
+generated text, `Launch::Profile` applies that file, and `init` answers
+`journal_access_denied`. This is not the Runtime's refusal.
 `model_declared_rights_read_on_the_did_and_wallet_template` reads this oracle
 and this declared-rights file. The Runtime's own generator and its comparison
 are not built and stay in `elastos/`, outside this lane. The model provider
@@ -154,6 +157,16 @@ This test has no unconfined control. F-cc1c (see Falsifiers) is the evidence
 that the profile refuses the read: with the `STORAGE_PARENT` read widened to
 its subtree, the same `runs_get` returns the run.
 
+The outside content open is refused under the oracle and under the stand-in
+file plus the one metadata rule. The sequence above is the oracle. After its
+shutdown, a fresh storage stores one run and reads it back under
+`Launch::Profile` on the file `standin_profile` writes.
+`write_standin_profile` puts that file under the case's `storage.base`, and
+the one fixture writer appends `READ_FIXTURE_RULE`. `Launch::Fixture` applies
+that file. The launched stand-in profile contains the rule and has no line
+that starts with `;;`. The in-root create's message is
+`Hosted external HTTPS is paused.` This evidence is for the lab launcher.
+
 ## Writes outside the storage root
 
 The profile grants writes only under `STORAGE_ROOT`. Two confined tests send
@@ -163,20 +176,32 @@ the same redirected `init`: `STORAGE_ROOT/escape` is a link to
 `RunJournal::open` in `src/journal.rs` inspects the journal root and then
 `runs/`, and creates a missing `runs/`. Each test watches one refused step:
 
-- The profile refuses the metadata inspect of the outside path, before any
-  write. `init` answers `journal_corrupt`. Test: `model_outside_write_denied`.
-- When only a metadata read of the outside path is added, the sandbox refuses
-  the journal create, and the provider reports `journal_access_denied`
-  (provider task 012). It logs the create of `<journal_dir>/runs` with
-  `Operation not permitted`. Test:
-  `model_outside_create_reports_access_denied`.
+- The same journey runs under the oracle and under the generated stand-in
+  file. Both refuse the metadata inspect of the outside path, before any
+  write, and then recover. `init` answers `journal_corrupt`. The outside
+  sibling keeps its entries, modes and bytes. A later normal `init` on
+  `STORAGE_ROOT` succeeds, and `shutdown` exits cleanly. The evidence is
+  the lab launcher's. It makes no claim that the Runtime enforced the
+  profile or that B3 is complete. Test: `model_outside_write_denied`.
+- The same journey runs under the oracle copy and under the stand-in file
+  plus the one metadata rule. When only that metadata read of the outside
+  path is added, the sandbox refuses the journal create, and the provider
+  reports `journal_access_denied` (provider task 012). It logs the create of
+  `<journal_dir>/runs` with `Operation not permitted`. The launched stand-in
+  copy has no line that starts with `;;`. The evidence is for the lab
+  launcher. Test: `model_outside_create_reports_access_denied`.
 
-The second test runs a test-time copy of `confine.sb` with one fixture grant:
-`file-read-metadata` of `outside/inner`, bound as a resolved path. It is
-metadata only. The fixture adds no content read and no write. The inspect of
-`runs/`, which does not exist yet, needs no grant: the sandbox answers it with
-not-found. The test also checks that the outside sibling keeps its entries,
-modes and bytes, and that a later normal `init` on `STORAGE_ROOT` succeeds.
+The same journey runs under the oracle copy and under the stand-in file plus
+the one metadata rule. The oracle case runs a test-time copy of `confine.sb`
+with one fixture grant: `file-read-metadata` of `outside/inner`, bound as a
+resolved path. The generated case reads the declared fixture, writes the
+stand-in text under that case's storage, and the one fixture writer appends
+the same grant. The launched stand-in copy has no line that starts with
+`;;`. The grant is metadata only. The fixture adds no content read and no
+write. The inspect of `runs/`, which does not exist yet, needs no grant: the
+sandbox answers it with not-found. Each case checks that the outside sibling
+keeps its entries, modes and bytes, and that a later normal `init` on
+`STORAGE_ROOT` succeeds. The evidence is for the lab launcher.
 
 `redirect_journal_materializes_outside_when_unconfined` is the control for
 both tests: the same fixture and request without a profile create the journal
@@ -226,12 +251,27 @@ exit 65, because exit 65 means the profile did not apply, and it is not exit
 last parenthesis of the `STORAGE_ROOT` allow, so this launch exits 65 and
 `byte_different_file_at_bound_path_starts` fails because the profile did not
 apply. A process still running
-after 2 seconds, or any other exit, is the outcome the test allows. The
+after 2 seconds, or any other exit, is the outcome the test allows.
+`generated_profile_starts_a_byte_different_file` runs the same show under
+the stand-in file: the launched file has no `;;` line, the recorded path is
+that file, and the evidence is for the lab launcher. The
 launch helper records the sha256
 when it binds `PROVIDER_EXECUTABLE` and refuses with a digest-mismatch reason
 when the file changes (`bound_executable_digest_mismatch_refuses_start`).
 That refusal is a lab stand-in for the Runtime's launch-by-hash check, not the
 Runtime's check. This stand-in counts toward no M1 check.
+
+`generated_profile_refuses_an_unbound_copy` starts that same unbound copy
+under the file the stand-in writes. The launched file has no `;;` line. The
+copy is refused with exit 71 and `Operation not permitted`. The launcher
+records the profile path it applies, and the test requires that path to be
+the stand-in file. This evidence is for the lab launcher.
+
+`generated_profile_bound_copy_serves` starts the copy bound as
+`PROVIDER_EXECUTABLE` under the file the stand-in writes. The copy answers
+`init`, creates `runs/`, and shuts down cleanly. The launched file has no
+`;;` line, and the recorded path is that file. This evidence is for the lab
+launcher.
 
 F-cc14b adds one line, `(allow process-exec)`, after the exec rule, and F-cc14c
 adds `(allow process-exec (subpath (param "STORAGE_ROOT")))`. Both keep the
@@ -271,6 +311,12 @@ removed exits 65 through `assert_startup_is_refused`. The value is
 `json!({})`, so the `rights` key is absent;
 `generated_model_profile_matches_the_oracle` already refuses a present value
 that is not a list, on the same line. The Runtime's own refusal is not built.
+
+`generated_profile_refuses_an_unbound_root` writes the stand-in file and
+starts it with `STORAGE_ROOT` unbound. The launch exits 65 through
+`assert_startup_is_refused`. The reason contains
+`invalid data type of path filter`. The launched file has no `;;` line.
+The recorded path is that file. This evidence is for the lab launcher.
 
 ## What the profile does not grant
 
@@ -435,13 +481,13 @@ cited `model_` test name in this section is a function in `tests/confine/main.rs
 | Operation | Inputs | Outputs | Right | Effect | macOS rule and test | Linux |
 | --- | --- | --- | --- | --- | --- | --- |
 | init | `op`, `config` | ok: `status`, `data` (`provider`, `protocol_version`, `offers_ready` from `StatusResponse`). error: `status`, `code`, `message`. | storage | writes: creates `runs/` under `STORAGE_ROOT`. refuses: an outside `init` answers `journal_corrupt`; the refused create answers `journal_access_denied`. A local offer's refusal is the citation in "The local engine" and `model_local_offer_fails_closed_under_profile`. | `model_provider_ops_under_profile` shows the creation of `runs/` under `STORAGE_ROOT`. The parent read rule is `(allow file-read* (literal (param "STORAGE_PARENT")))`; removing it is F-cc1-rm-parent and `model_provider_ops_under_profile` fails. The `STORAGE_ROOT` subpath rule is `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`; removing it is F-cc1-rm-storage and `model_provider_ops_under_profile` fails. `model_outside_write_denied` shows an outside `init` answers `journal_corrupt`. `model_outside_create_reports_access_denied` shows the refused create answers `journal_access_denied`. | designed, not enforced |
-| status | `op` | ok: `status`, `data` (`provider`, `protocol_version`, `offers_ready` from `StatusResponse`). error: `status`, `code`, `message`. | no named test shows this | the storage tree after `init` is unchanged | `model_provider_ops_under_profile` shows the answer equals `init`'s. `model_status_offers_and_shutdown_leave_storage_unchanged` shows the storage tree after `init` is the same after this call, and no named test shows a read inside `STORAGE_ROOT` or a socket. | designed, not enforced |
-| shutdown | `op` | ok: `status`, `data` (`shutdown`). error: `status`, `code`, `message`. | no named test shows this | the storage tree after `init` is unchanged | `Provider::shutdown`, used by `model_provider_ops_under_profile` and `model_bound_copy_serves_under_profile`, shows `data.shutdown` true and a clean exit. `model_status_offers_and_shutdown_leave_storage_unchanged` shows the storage tree after `init` is the same after this call, and no named test shows a read inside `STORAGE_ROOT` or a socket. | designed, not enforced |
-| offers_list | `op` | ok: `status`, `data` (`schema`, `provider`, `protocol_version`, `offers`, `offer_revisions`). error: `status`, `code`, `message`. | no named test shows this | the storage tree after `init` is unchanged | `model_provider_ops_under_profile` shows `data.offers` and the configured offer id. The same call answers again in `model_outside_read_denied`, `model_local_offer_fails_closed_under_profile` and `model_hosted_run_fails_closed_under_profile`. `model_status_offers_and_shutdown_leave_storage_unchanged` shows the storage tree after `init` is the same after this call, and no named test shows a read inside `STORAGE_ROOT` or a socket. | designed, not enforced |
+| status | `op` | ok: `status`, `data` (`provider`, `protocol_version`, `offers_ready` from `StatusResponse`). error: `status`, `code`, `message`. | no named test shows this | the storage tree after `init` is unchanged | `model_provider_ops_under_profile` shows the answer equals `init`'s. `model_status_offers_and_shutdown_leave_storage_unchanged` shows the storage tree after `init` is the same after this call, and no named test shows a read inside `STORAGE_ROOT` or a socket. The same journey runs under the stand-in file, which has no `;;` line. | designed, not enforced |
+| shutdown | `op` | ok: `status`, `data` (`shutdown`). error: `status`, `code`, `message`. | no named test shows this | the storage tree after `init` is unchanged | `Provider::shutdown`, used by `model_provider_ops_under_profile` and `model_bound_copy_serves_under_profile`, shows `data.shutdown` true and a clean exit. `model_status_offers_and_shutdown_leave_storage_unchanged` shows the storage tree after `init` is the same after this call, and no named test shows a read inside `STORAGE_ROOT` or a socket. The same journey runs under the stand-in file, which has no `;;` line. | designed, not enforced |
+| offers_list | `op` | ok: `status`, `data` (`schema`, `provider`, `protocol_version`, `offers`, `offer_revisions`). error: `status`, `code`, `message`. | no named test shows this | the storage tree after `init` is unchanged | `model_provider_ops_under_profile` shows `data.offers` and the configured offer id. The same call answers again in `model_outside_read_denied`, `model_local_offer_fails_closed_under_profile` and `model_hosted_run_fails_closed_under_profile`. `model_status_offers_and_shutdown_leave_storage_unchanged` shows the storage tree after `init` is the same after this call, and no named test shows a read inside `STORAGE_ROOT` or a socket. The same journey runs under the stand-in file, which has no `;;` line. | designed, not enforced |
 | runs_create | `op`, `offer_id`, `operation`, `input`, `runtime_binding`, `expected_execution_binding_hash` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`). error: `status`, `code`, `message`. | storage | writes one run under `STORAGE_ROOT`. | `model_outside_read_denied` stores one run with this op before `runs_get` reads it back. `model_hosted_run_fails_closed_under_profile` sends `runs_create`, then `runs_get` until the run is terminal, and the hosted Runtime socket stand-in counts zero connections. The run's `status` is `failed` and `terminal.error.code` is `transport_interrupted`. The profile rule is `(deny network*)`. The test does not show which call connects. `generated_profile_denies_the_hosted_connect` launches this denial under the stand-in text, the stand-in counts zero connections, and `terminal.error.code` is `transport_interrupted`. `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` for the `STORAGE_ROOT` write. The profile denies the hosted Runtime socket with `(deny network*)`. That denial is not a grant. | designed, not enforced |
 | runs_get | `op`, `run_id`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`). error: `status`, `code`, `message`. | storage | reads inside `STORAGE_ROOT`. refuses that read once the record is outside it. The hosted test settles by reading this op until the run is terminal. | `model_outside_read_denied` shows the read inside `STORAGE_ROOT` and `journal_corrupt` once the record is outside it. A `STORAGE_ROOT` read under `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`. The outside read is refused under the fixture profile `READ_FIXTURE_RULE`. That refusal is a denial, not a grant. `model_hosted_run_fails_closed_under_profile` sends `runs_create`, then `runs_get` until the run is terminal, and the hosted Runtime socket stand-in counts zero connections. The run's `status` is `failed` and `terminal.error.code` is `transport_interrupted`. The profile rule is `(deny network*)`. The profile denies the hosted Runtime socket with `(deny network*)`. That denial is not a grant. The test does not show which call connects. | designed, not enforced |
-| runs_events | `op`, `run_id`, `after_sequence`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `next_cursor`, `has_more`, `events` from `RunEventsPage`). error: `status`, `code`, `message`. | storage | reads the stored terminal run and does not write. | `model_terminal_run_page_and_cancel_read_under_profile` shows `schema` `elastos.model.run-events/v1`, `run_id` equal to the create data's `run_id`, `has_more` false, and a last event whose `kind` is `failed`. The storage snapshot after both calls equals the snapshot after create. A live cancel is not shown. | designed, not enforced |
-| runs_cancel | `op`, `run_id`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`). error: `status`, `code`, `message`. | storage | reads the stored terminal run and does not write. | `model_terminal_run_page_and_cancel_read_under_profile` shows the data equals the create data. The storage snapshot after both calls equals the snapshot after create. A live cancel is not shown. | designed, not enforced |
+| runs_events | `op`, `run_id`, `after_sequence`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `next_cursor`, `has_more`, `events` from `RunEventsPage`). error: `status`, `code`, `message`. | storage | reads the stored terminal run and does not write. | `model_terminal_run_page_and_cancel_read_under_profile` shows `schema` `elastos.model.run-events/v1`, `run_id` equal to the create data's `run_id`, `has_more` false, and a last event whose `kind` is `failed`. The storage snapshot after both calls equals the snapshot after create. A live cancel is not shown. The same journey runs under the stand-in file, which has no `;;` line. | designed, not enforced |
+| runs_cancel | `op`, `run_id`, `runtime_binding` | ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`). error: `status`, `code`, `message`. | storage | reads the stored terminal run and does not write. | `model_terminal_run_page_and_cancel_read_under_profile` shows the data equals the create data. The storage snapshot after both calls equals the snapshot after create. A live cancel is not shown. The same journey runs under the stand-in file, which has no `;;` line. | designed, not enforced |
 
 ## Host-OS status
 
@@ -479,31 +525,45 @@ profile does not grant".
   `STORAGE_ROOT` does not. The test drives `init`, `status` and `offers_list`,
   checks each answer, and checks that `init` created `runs/` under
   `STORAGE_ROOT`. It then shuts the provider down and requires a clean exit.
-- `model_outside_write_denied`: the fixture creates `STORAGE_ROOT` to hold a
-  link: `STORAGE_ROOT/escape` is a symlink to `STORAGE_PARENT/outside`, a
-  sibling of the journal root. `init` names the journal path
-  `STORAGE_ROOT/escape/inner`, so the path looks inside the root but leads
-  outside. The link is an intermediate because the provider refuses a
-  symlinked journal root, run directory or run file. `outside/inner` already
-  exists because the provider also refuses to create a directory under a
-  symlinked parent. The test requires:
+- `model_outside_write_denied`: the same journey runs under the oracle
+  (`Launch::Confined`) and under the generated stand-in file. Each case
+  prepares its own redirect fixture. The generated case reads the declared
+  fixture, builds the stand-in text, writes that file under the case's
+  storage, and applies it with `Launch::Profile` and `canonical_bindings`.
+  The fixture creates `STORAGE_ROOT` to hold a link: `STORAGE_ROOT/escape`
+  is a symlink to `STORAGE_PARENT/outside`, a sibling of the journal root.
+  `init` names the journal path `STORAGE_ROOT/escape/inner`, so the path
+  looks inside the root but leads outside. The link is an intermediate
+  because the provider refuses a symlinked journal root, run directory or
+  run file. `outside/inner` already exists because the provider also refuses
+  to create a directory under a symlinked parent. The refusal is the
+  metadata inspect. Recovery is the later normal `init`. Each case requires:
   - the answer `status: error`, `code: journal_corrupt`;
   - the provider's stderr line
     `[model-provider] journal_corrupt: ... <journal path>: Operation not permitted`;
   - the outside sibling unchanged: the same entries, modes and bytes;
-  - a later normal `init` on `STORAGE_ROOT` succeeds.
+  - `STORAGE_ROOT/runs` absent after the refusal;
+  - a later normal `init` on `STORAGE_ROOT` passes `assert_serving` and
+    creates `runs/`;
+  - `shutdown` exits cleanly.
+  The evidence is the lab launcher's. It makes no claim that the Runtime
+  enforced the profile or that B3 is complete.
 - `redirect_journal_materializes_outside_when_unconfined`: the control. The
   same fixture and the same request, without the profile, answer `status: ok`
   and create the journal (`outside/inner/runs`) under the outside sibling.
 - `model_outside_read_denied`: a stored run reads back from `STORAGE_ROOT`,
   and the same `runs_get` is refused once the record lives in a sibling of the
-  root. See "Reads outside the storage root".
+  root. The outside content open is refused under the oracle and under the
+  stand-in file plus the one metadata rule. The launched stand-in profile has
+  no `;;` line. This evidence is for the lab launcher. See "Reads outside the
+  storage root".
 - `model_outside_create_reports_access_denied`: the same redirected `init`
-  under a test-time copy of `confine.sb` that adds only a metadata read of the
-  outside journal root. The sandbox refuses the journal create, and the
-  answer is `journal_access_denied`. Its control is
-  `redirect_journal_materializes_outside_when_unconfined`. See "Writes
-  outside the storage root".
+  runs under the oracle copy and under the stand-in file plus the one
+  metadata rule. The launched stand-in copy has no line that starts with
+  `;;`. The sandbox refuses the journal create, and the answer is
+  `journal_access_denied`. Its control is
+  `redirect_journal_materializes_outside_when_unconfined`. The evidence is
+  for the lab launcher. See "Writes outside the storage root".
 - `model_local_offer_fails_closed_under_profile`: an `init` whose one offer is
   a local engine offer fails closed under the profile, writes nothing, and
   leaves the provider in service. See "What the profile does not grant".
@@ -548,6 +608,15 @@ profile does not grant".
   `PROVIDER_EXECUTABLE`, never answers `init`. `sandbox-exec` exits 71 and logs
   the refused `execvp()` with `Operation not permitted`, and nothing is
   written. See "Starting other programs".
+- `generated_profile_refuses_an_unbound_copy`: the stand-in file starts the
+  unbound copy. The copy is refused with exit 71 and `Operation not permitted`.
+  The launched file has no `;;` line. This evidence is for the lab launcher.
+  See "Starting other programs".
+- `generated_profile_bound_copy_serves`: the stand-in file starts the copy
+  bound as `PROVIDER_EXECUTABLE`. The copy answers `init`, creates `runs/`,
+  and shuts down cleanly. The launched file has no `;;` line, and the
+  recorded path is that file. This evidence is for the lab launcher.
+  See "Starting other programs".
 - `model_bound_copy_serves_under_profile`: the control. A copy made the same
   way, bound as `PROVIDER_EXECUTABLE` and started under the same profile,
   answers `init`, creates `runs/` and exits cleanly after `shutdown`.
@@ -562,7 +631,10 @@ profile does not grant".
   The profile binds PROVIDER_EXECUTABLE by path.
   A process still running after 2 seconds, or any other exit, is the outcome
   the test allows. The real binary's digest is
-  unchanged. It runs under `sandbox-exec`, as the other confined tests do.
+  unchanged. `generated_profile_starts_a_byte_different_file` runs the same
+  show under the stand-in file: the launched file has no `;;` line, the
+  recorded path is that file, and the evidence is for the lab launcher.
+  It runs under `sandbox-exec`, as the other confined tests do.
 - `bound_executable_digest_mismatch_refuses_start`: the launch helper records
   the sha256 of a copy of `/usr/bin/true`, one byte is appended, and the
   start that passes the recorded digest panics with `PROVIDER_EXECUTABLE
@@ -639,9 +711,17 @@ profile does not grant".
   `json!({})`, so the `rights` key is absent.
   `generated_model_profile_matches_the_oracle` already refuses a present
   `rights` value that is not a list, on the same line.
+- `generated_profile_refuses_an_unbound_root`: the stand-in file with
+  `STORAGE_ROOT` unbound exits 65 through `assert_startup_is_refused`. The
+  reason contains `invalid data type of path filter`. The launched file has
+  no `;;` line. The recorded path is that file. This evidence is for the lab
+  launcher.
 - `generated_profile_denies_the_hosted_connect`: `Launch::Profile` applies
   the generated text, the stand-in counts zero connections, and the run
   settles `transport_interrupted`.
+- `standin_launch_uses_the_generated_profile`: `Launch::Profile` applies a
+  generated profile whose storage write was dropped, and `init` answers
+  `journal_access_denied`.
 
 `journal_corrupt` is the provider's existing code for an unavailable journal,
 and `journal_access_denied` is its code for a refused journal create or write
@@ -696,9 +776,9 @@ python3 -I examples/agent-host/falsify.py --from capsules/model-provider/confine
 `confine-falsifiers.json` holds this profile's falsifiers for the shared
 runner. Every entry uses `expect: caught`. F-cc12a uses command `wallet`,
 because the one shape check is in the wallet crate, and every other entry
-uses command `provider`. Each mutates `confine.sb` only, except the twenty-three
+uses command `provider`. Each mutates `confine.sb` only, except the twenty-six
 entries that edit `tests/confine/main.rs`.
-The twenty-three are: F-cc1e removes the outside-read
+The twenty-six are: F-cc1e removes the outside-read
 fixture rule, F-cc8-rm-journal removes the outside-create fixture grant,
 F-cc15a, F-cc15b and F-cc15c each undo one part of how the Runtime socket
 stand-in counts connections, F-cc16a, F-cc16b and F-cc16c each undo one
@@ -710,7 +790,7 @@ keeps none of the stderr lines `Provider::ended` reads, and F-cc29a skips
 the digest compare in refuse_changed_provider_executable, and F-cc31a
 renames `model_provider_ops_under_profile`, and F-cc30b,
 F-cc30c, F-cc30d and F-cc30e each change the declared-rights path in
-allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match return Ok before it compares. F-cc41a makes standin_profile return the oracle file and ignore the declared value. F-cc42a makes write_standin_profile write an allow-default profile and ignore the generated text, so generated_profile_permits_init_and_denies_the_local_offer and standin_refuses_a_start_it_cannot_apply fail. F-cc43a makes standin_profile return an empty profile when the rights list is missing, so standin_refuses_a_start_it_cannot_apply and generated_model_profile_matches_the_oracle fail. F-cc44a makes standin_profile emit (allow network*) instead of (deny network*).
+allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match return Ok before it compares. F-cc41a makes standin_profile return the oracle file and ignore the declared value. F-cc42a makes write_standin_profile write an allow-default profile and ignore the generated text, so generated_profile_permits_init_and_denies_the_local_offer and standin_refuses_a_start_it_cannot_apply fail. F-cc43a makes standin_profile return an empty profile when the rights list is missing, so standin_refuses_a_start_it_cannot_apply and generated_model_profile_matches_the_oracle fail. F-cc44a makes standin_profile emit (allow network*) instead of (deny network*). F-cc45a makes standin_launch_uses_the_generated_profile start under the committed oracle instead of the generated file. F-cc46a makes Launch::Program pass the committed oracle to sandboxed instead of the profile it was given, so generated_profile_refuses_an_unbound_copy fails because the recorded profile path is the committed oracle. F-cc47a makes generated_profile_refuses_an_unbound_root start under the committed oracle instead of the stand-in file, so that test fails because the recorded profile path is the committed oracle. Both files exit 65.
 
 | Id | Mutation | Named test | Why the test fails |
 | --- | --- | --- | --- |
@@ -726,8 +806,8 @@ allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match 
 | F-cc1e | Remove the outside-read fixture rule from the test | `model_outside_read_denied` | `runs_get` stops at the record's existence check (`model run is unreadable`), before the open, so the check for EPERM on the open fails. |
 | F-cc7a | `(deny default)` becomes `(allow default)`; `(version 1)` stays first | `model_local_offer_fails_closed_under_profile` | The local offer's `init` answers `ok`. `(deny network*)` stays, so no run could complete; the test sends none. |
 | F-cc7b | One line, `(allow file-read*)`, is added after the last rule; `(deny default)` and every other rule stay | `model_local_offer_fails_closed_under_profile` | With reads alone added, the same `init` answers `ok`. So the test watches the profile's read boundary at `base_path`, not only `(deny default)`. |
-| F-cc8a | `(deny default)` becomes `(allow default)`; `(version 1)` stays first | `model_outside_create_reports_access_denied` | The redirected `init` answers `ok`. |
-| F-cc8c | One line, `(allow file-write* (subpath (param "STORAGE_PARENT")))`, is added after the `STORAGE_ROOT` rule; `(deny default)` and every other rule stay | `model_outside_create_reports_access_denied` | The create succeeds and `runs/` appears under the outside sibling. The provider's next inspect, of the new `runs/`, is refused, so `init` answers `journal_corrupt`, not `journal_access_denied`. So the test watches the write grant itself. |
+| F-cc8a | `(deny default)` becomes `(allow default)`; `(version 1)` stays first | `model_outside_create_reports_access_denied` | The plant edits `confine.sb` and the stand-in case launches the generated file. The oracle copy's redirected `init` answers `ok`. |
+| F-cc8c | One line, `(allow file-write* (subpath (param "STORAGE_PARENT")))`, is added after the `STORAGE_ROOT` rule; `(deny default)` and every other rule stay | `model_outside_create_reports_access_denied` | The plant edits `confine.sb` and the stand-in case launches the generated file. The oracle copy's create succeeds and `runs/` appears under the outside sibling. The provider's next inspect, of the new `runs/`, is refused, so `init` answers `journal_corrupt`, not `journal_access_denied`. So the test watches the write grant itself. |
 | F-cc8-rm-journal | Remove the outside-create fixture grant from the test | `model_outside_create_reports_access_denied` | The sandbox refuses the inspect of the outside journal root before the create, so `init` answers `journal_corrupt`. |
 | F-cc10a | `(deny default)` becomes `(allow default)` and `(deny network*)` is removed; `(version 1)` stays first | `model_hosted_run_fails_closed_under_profile` | The hosted run's request reaches the Runtime socket stand-in. `(allow default)` alone is not enough: `(deny network*)` still refuses the connect. |
 | F-cc10b | `(deny network*)` becomes `(allow network*)`; nothing else changes | `model_hosted_run_fails_closed_under_profile` | The request reaches the stand-in, so the network denial alone holds this edge. This is the widening a hosted grant would add. |
@@ -766,16 +846,19 @@ allow_rules_trace_to_declared_rights. F-cc40a makes falsifier_section_ids_match 
 | F-cc39a | A line `(` is written after the root pin, then `allow file-read* (literal "/tmp/cc-split-allow"))` on the next line | `platform_baseline_rules_stay_narrow` and `allow_rules_trace_to_declared_rights` | The allow form does not close. |
 | F-cc40a | In the test, `falsifier_section_ids_match` returns `Ok` before it compares | `falsifier_section_names_every_list_id` | A table that drops F-cc39a is accepted. |
 | F-cc41a | In the test, `standin_profile` returns the oracle file and ignores the declared value | `generated_model_profile_matches_the_oracle` | A changed declared rule still matches the oracle. |
-| F-cc42a | In the test, `write_standin_profile` writes an allow-default profile and ignores the generated text | `generated_profile_permits_init_and_denies_the_local_offer` and `standin_refuses_a_start_it_cannot_apply` | The local offer's init answers ok, and the broken generated text is ignored so the launch does not exit 65. |
+| F-cc42a | In the test, `write_standin_profile` writes an allow-default profile and ignores the generated text | `generated_profile_permits_init_and_denies_the_local_offer`, `standin_refuses_a_start_it_cannot_apply` and `model_outside_write_denied` | The local offer's init answers ok, the broken generated text is ignored so the launch does not exit 65, and the generated case's redirected `init` answers `ok`. |
 | F-cc43a | In the test, `standin_profile` returns an empty profile when the rights list is missing | `standin_refuses_a_start_it_cannot_apply` and `generated_model_profile_matches_the_oracle` | The missing rights list is accepted. |
 | F-cc44a | In the test, `standin_profile` emits `(allow network*)` instead of `(deny network*)` | `generated_profile_denies_the_hosted_connect` and `generated_model_profile_matches_the_oracle` | The stand-in counts a connection and the generated head's third line is `(allow network*)`. |
+| F-cc45a | In the test, the launch uses the committed oracle instead of the generated file | `standin_launch_uses_the_generated_profile` | `init` answers ok because the launch uses the committed oracle, which still has the storage write. |
+| F-cc46a | In the test, `Launch::Program` passes the committed oracle to `sandboxed` instead of the profile it was given | `generated_profile_refuses_an_unbound_copy` | The recorded profile path is the committed oracle. The copy is still refused with exit 71. |
+| F-cc47a | In the test, `generated_profile_refuses_an_unbound_root` starts under the committed oracle instead of the stand-in file | `generated_profile_refuses_an_unbound_root` | The recorded profile path is the committed oracle. Both files exit 65. |
 
 F-cc1e proves that the fixture rule is needed, so the refusal the test
 observes is the content open, not a precursor stat. F-cc8-rm-journal does the
 same for the outside-create grant: the refusal that test observes is the
 create, not the inspect before it. The runner rebuilds the test for both, and
 for the F-cc15, F-cc16, F-cc17, F-cc19 and F-cc29a entries, and for F-cc30b,
-F-cc30c, F-cc30d, F-cc30e F-cc31a, F-cc40a, F-cc41a, F-cc42a, F-cc43a and F-cc44a. F-cc30a and F-cc30f need no rebuild:
+F-cc30c, F-cc30d, F-cc30e F-cc31a, F-cc40a, F-cc41a, F-cc42a, F-cc43a, F-cc44a, F-cc45a, F-cc46a and F-cc47a. F-cc30a and F-cc30f need no rebuild:
 the test reads confine.sb at runtime. Its startup recovery restores
 `tests/confine/main.rs` after a killed run (provider task 015), as it restores
 `confine.sb`. F-cc35a needs no rebuild: the test reads confine.sb at runtime.
@@ -789,7 +872,7 @@ F-cc38a needs no rebuild: the test reads confine.sb at runtime.
 F-cc39a needs no rebuild: the test reads confine.sb at runtime.
 F-cc40a needs a rebuild: it edits tests/confine/main.rs.
 F-cc41a needs a rebuild: it edits tests/confine/main.rs.
-F-cc42a needs a rebuild: it edits tests/confine/main.rs. F-cc42a needs the sandbox: the named tests launch the provider. F-cc43a needs a rebuild: it edits tests/confine/main.rs. F-cc44a needs a rebuild: it edits tests/confine/main.rs. F-cc44a needs the sandbox: the hosted test launches the provider.
+F-cc42a needs a rebuild: it edits tests/confine/main.rs. F-cc42a needs the sandbox: the named tests launch the provider. F-cc43a needs a rebuild: it edits tests/confine/main.rs. F-cc44a needs a rebuild: it edits tests/confine/main.rs. F-cc44a needs the sandbox: the hosted test launches the provider. F-cc45a needs a rebuild: it edits tests/confine/main.rs. F-cc45a needs the sandbox: the named test launches the provider. F-cc46a needs a rebuild: it edits tests/confine/main.rs. F-cc46a needs the sandbox: the named test launches the provider. F-cc47a needs a rebuild: it edits tests/confine/main.rs. F-cc47a needs the sandbox: the named test launches the provider.
 
 The list is a Mac gate. On a Mac without `/usr/bin/sandbox-exec` the unmutated
 suite fails, so a list run there is no evidence. Off macOS, when

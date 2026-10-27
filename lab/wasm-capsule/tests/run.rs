@@ -550,7 +550,7 @@ fn runner_io_refusals_keep_path_and_cause() {
         path: module.clone(),
         reason,
     };
-    let created = module_refusal(writer(WriteReason::ManifestNotCreated(
+    let created = module_refusal(writer(WriteReason::FileNotCreated(
         io::Error::from_raw_os_error(17),
     )));
     assert!(
@@ -565,7 +565,7 @@ fn runner_io_refusals_keep_path_and_cause() {
             module.display()
         )
     );
-    let written = module_refusal(writer(WriteReason::ManifestNotWritten(
+    let written = module_refusal(writer(WriteReason::FileNotWritten(
         io::Error::from_raw_os_error(28),
     )));
     assert!(
@@ -2133,7 +2133,7 @@ fn receipt_write_refuses_an_existing_path() {
             .unwrap_or_else(|| panic!("{kind}: the receipt was written over an existing path"));
         assert_eq!(&refusal.path, path, "{kind}");
         match &refusal.reason {
-            WriteReason::ManifestNotCreated(error) => {
+            WriteReason::FileNotCreated(error) => {
                 assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{kind}");
                 assert_eq!(error.raw_os_error(), Some(17), "{kind}");
             }
@@ -2143,10 +2143,16 @@ fn receipt_write_refuses_an_existing_path() {
             .err()
             .unwrap_or_else(|| panic!("{kind}: the shared writer wrote over an existing path"));
         assert_eq!(refusal.to_string(), own.to_string(), "{kind}");
+        // The writer's reason names no file: the receipt's path is the only
+        // name, so the refusal never names the bundle's manifest.
+        assert!(
+            !refusal.to_string().contains("capsule.json"),
+            "{kind}: the refusal names capsule.json: {refusal}"
+        );
         assert_eq!(
             refusal.to_string(),
             format!(
-                "{}: capsule.json cannot be created: File exists (os error 17)",
+                "{}: cannot be created as a new file: File exists (os error 17)",
                 path.display()
             ),
             "{kind}"
@@ -4914,7 +4920,7 @@ fn refusal_receipt_write_refuses_an_existing_path() {
             .unwrap_or_else(|| panic!("{kind}: the receipt was written over an existing path"));
         assert_eq!(&write_refusal.path, path, "{kind}");
         match &write_refusal.reason {
-            WriteReason::ManifestNotCreated(error) => {
+            WriteReason::FileNotCreated(error) => {
                 assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{kind}");
                 assert_eq!(error.raw_os_error(), Some(17), "{kind}");
             }
@@ -4924,10 +4930,16 @@ fn refusal_receipt_write_refuses_an_existing_path() {
             .err()
             .unwrap_or_else(|| panic!("{kind}: the shared writer wrote over an existing path"));
         assert_eq!(write_refusal.to_string(), own.to_string(), "{kind}");
+        // The writer's reason names no file: the refusal receipt's path is the
+        // only name, so the refusal never names the bundle's manifest.
+        assert!(
+            !write_refusal.to_string().contains("capsule.json"),
+            "{kind}: the refusal names capsule.json: {write_refusal}"
+        );
         assert_eq!(
             write_refusal.to_string(),
             format!(
-                "{}: capsule.json cannot be created: File exists (os error 17)",
+                "{}: cannot be created as a new file: File exists (os error 17)",
                 path.display()
             ),
             "{kind}"
@@ -5354,6 +5366,21 @@ impl HostSecretCase {
             .map(str::to_owned)
             .collect()
     }
+
+    /// Task 049: the recorded environment lines of `engine`'s `kind` start,
+    /// read only if the record is not empty and holds the exact line
+    /// `_=/usr/bin/env`, which proves `/usr/bin/env` wrote it. An empty or
+    /// foreign record would pass every absence check, so it fails here.
+    fn recorded_env(&self, engine: Engine, kind: &str) -> Vec<String> {
+        let env = self.recorded_lines(engine, kind, "env");
+        assert!(
+            !env.is_empty() && env.iter().any(|line| line == "_=/usr/bin/env"),
+            "{engine} {kind}: the environment record {} is empty or was not written by \
+             /usr/bin/env (no line _=/usr/bin/env): {env:?}",
+            self.record(engine, kind, "env").display()
+        );
+        env
+    }
 }
 
 /// A recording shim for `engine` at `case.shim(engine)`: started for
@@ -5362,17 +5389,20 @@ impl HostSecretCase {
 /// shell's exported environment, the one `exec` passes on) into the case's
 /// records, then `exec`s the real engine at the absolute path `real` with the
 /// same arguments. No engine runs inside an engine: the shim is replaced by it.
+/// Task 049: a record write that fails exits 70 with one stderr line naming
+/// the record, before `exec`, so the real engine never starts unrecorded.
 fn host_secret_shim(case: &HostSecretCase, engine: Engine, real: &Path) -> PathBuf {
     let records = |kind: &str, what: &str| case.record(engine, kind, what).display().to_string();
     let script = format!(
         concat!(
             "#!/bin/sh\n",
+            "failed() {{ echo \"shim: cannot write the record $1\" >&2; exit 70; }}\n",
             "if [ \"$1\" = --version ]; then\n",
-            "printf '%s\\n' \"$@\" > '{version_argv}'\n",
-            "/usr/bin/env > '{version_env}'\n",
+            "printf '%s\\n' \"$@\" > '{version_argv}' || failed '{version_argv}'\n",
+            "/usr/bin/env > '{version_env}' || failed '{version_env}'\n",
             "else\n",
-            "printf '%s\\n' \"$@\" > '{run_argv}'\n",
-            "/usr/bin/env > '{run_env}'\n",
+            "printf '%s\\n' \"$@\" > '{run_argv}' || failed '{run_argv}'\n",
+            "/usr/bin/env > '{run_env}' || failed '{run_env}'\n",
             "fi\n",
             "exec '{real}' \"$@\"\n",
         ),
@@ -5437,8 +5467,10 @@ fn host_secret_fixture_never_reaches_either_real_engine() {
 /// signs the built capsule with a fresh key, reads an empty grants file and
 /// calls `run` with both recording shims. For each engine: the module run's
 /// argv has no preopen, env or network flag ([`argv_faults`]) and no argument
-/// holding the `HOME` folder; neither start's environment has `HOME` or a value
-/// holding the `HOME` folder or the marker; its stdout is `FIXED_OUTPUT` and a
+/// holding the `HOME` folder; each start's environment record is not empty and
+/// holds `_=/usr/bin/env` ([`HostSecretCase::recorded_env`], task 049), and
+/// neither has `HOME` or a value holding the `HOME` folder or the marker; its
+/// stdout is `FIXED_OUTPUT` and a
 /// newline, holding neither.
 #[test]
 #[ignore = "run only as the child of host_secret_fixture_never_reaches_either_real_engine, which sets HOME to its fixture"]
@@ -5504,7 +5536,7 @@ fn host_secret_fixture_run_inside_the_child() {
             "{engine_kind}: the version query's argv"
         );
         for kind in ["version", "run"] {
-            let env = case.recorded_lines(engine_kind, kind, "env");
+            let env = case.recorded_env(engine_kind, kind);
             for line in &env {
                 assert!(
                     !line.starts_with("HOME="),

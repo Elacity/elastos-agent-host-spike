@@ -1,0 +1,8 @@
+id: F-A7-askusage
+file: src/ask.rs
+test: ask::model_reported_usage_does_not_shrink_the_admitted_amount
+--- old
+        self.admit(ask.amount);
+--- new
+        self.admit(ask.amount.saturating_sub(request.reported_usage));
+--- end

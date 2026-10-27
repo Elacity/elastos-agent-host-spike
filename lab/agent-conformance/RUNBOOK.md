@@ -404,21 +404,23 @@ AC-002-ARGS` in `falsifiers.json` until their named tests,
 `agent_cannot_read_other_agent_memory` and `agent_memory_under_own_principal`,
 respectively, become live. Then return each mutation to the active list and
 run it; forcing today's placeholders supplies zero falsifier evidence.
-F-ac2c adds the absent `fixtures/no-policy.json` file using its `new` text in
-`falsifiers.json` (`old: ""` denotes an absent file for this manual step).
-The entry allows every effect attempted by this instance: its one read.
-Run `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml
---test effects no_policy_file_does_not_mean_allow -- --exact --nocapture` with
-the usual offline environment and heavy-build lease. Require a successful
-guest read, one observed grant, and the refusal test's FAIL. Remove only this
-added policy file and rerun the identical command; require PASS. A build
-failure, unrelated error, SKIPPED or BLOCKED result cannot catch a falsifier.
+F-ac2c plants the `NotFound` arm of `Fixture::no_policy` in
+`tests/common/grants.rs`. A missing policy file is treated as a grant of the
+one read. The planted arm keeps that match, binds the error as `_error`, and
+returns `Ok((Self::parse(GRANT)?, true))` for the `granted.txt` read. Apply
+it with the one runner:
+`python3 -I examples/agent-host/falsify.py --from lab/agent-conformance/falsifiers.json F-report-blocker-list F-ac1c F-ac2c F-agent-host-p7`.
+This list uses the `agent-conformance` command. An ignored test, or a test
+that exists only in `tests/agent_host.rs`, still reads `NOT RUN` from it.
+`fixtures/no-policy.json` stays absent. A build failure, unrelated error,
+SKIPPED or BLOCKED result cannot catch a falsifier.
 
 F-ac2-human and F-ac2-write change the respective probe activation to succeed
 without its Bus refusal. Each named refusal test must fail, then pass when the
 original probe bytes are restored. All mutations remain inside fixtures or the
-one probe. The provider lane owns shared-runner support; these lab falsifiers
-continue to run by hand. The existing report records every launched variant's
+one probe. This list uses the `agent-conformance` command. An ignored test,
+or a test that exists only in `tests/agent_host.rs`, still reads `NOT RUN`
+from it. The existing report records every launched variant's
 component SHA-256 and complete bundle lab CID.
 
 ## Fake host-file refusal (M1 A8)

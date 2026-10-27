@@ -393,6 +393,78 @@ fn model_child_journal_create_without_the_right_is_refused() {
 }
 
 #[test]
+fn model_forged_child_journal_does_not_skip_the_right() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: true,
+            child_journal: false,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let refusal = verifier
+        .create_child_journal(&call, &request, "UsersAI/agent-1/journal/page.md")
+        .expect_err("forged child journal does not skip the right");
+    assert_eq!(refusal, OperateRefuse::ChildJournalNotGranted);
+    assert_eq!(refusal.to_string(), "child journal is its own right");
+}
+
+#[test]
+fn model_forged_append_does_not_skip_the_right() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: true,
+            child_journal: false,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    let refusal = verifier
+        .create_child_journal(&call, &request, "UsersAI/agent-1/journal/page.md")
+        .expect_err("forged append does not skip the right");
+    assert_eq!(refusal, OperateRefuse::ChildJournalNotGranted);
+    assert_eq!(refusal.to_string(), "child journal is its own right");
+}
+
+#[test]
+fn model_forged_overwrite_does_not_skip_the_right() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: true,
+            child_journal: false,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_overwrite);
+    let refusal = verifier
+        .create_child_journal(&call, &request, "UsersAI/agent-1/journal/page.md")
+        .expect_err("forged overwrite does not skip the right");
+    assert_eq!(refusal, OperateRefuse::ChildJournalNotGranted);
+    assert_eq!(refusal.to_string(), "child journal is its own right");
+}
+
+#[test]
 fn model_child_journal_create_on_a_sibling_instance_is_refused() {
     let mut verifier = Verifier::new();
     let first = verifier.register_instance("agent-1", "session-a");

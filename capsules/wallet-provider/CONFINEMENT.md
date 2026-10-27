@@ -123,8 +123,8 @@ test code, and it is not the Runtime. It copies the inputs of the Runtime's
 provider launch entry, `ProviderBridge::spawn(binary_path, config)` with
 `ProviderConfig.base_path`, because draft PR #309 names no provider-launch ask
 that this stand-in could map to. The stand-in owns the start decision for the
-lab proofs: a start it cannot confine is refused with a reason and starts
-nothing.
+lab proofs: a start it cannot confine is refused with a reason and returns no
+provider.
 
 The stand-in refuses in the order of these steps:
 
@@ -132,27 +132,50 @@ The stand-in refuses in the order of these steps:
    names that OS and the list where the stand-in applies confinement.
 2. An absent `sandbox-exec` is refused with a reason that names the OS and the
    path.
-3. A refusal of `write_generated_profile` is returned unchanged.
-4. A start that `sandbox-exec` refuses, or an `init` that does not answer
-   `ok`, is refused with the `try_send` failure or the answer.
+3. A present confinement tool that is not `SANDBOX_EXEC` is refused with a
+   reason that names the OS, the given path and `SANDBOX_EXEC`, because the
+   tool the stand-in checks is the one `start_under` runs.
+4. A `binary_path` that is not a file is refused with a reason that names the
+   provider and that path, before any profile is written.
+5. A refusal of `write_generated_profile` is returned unchanged.
+6. A start that `sandbox-exec` refuses is refused with the `try_send`
+   failure.
+7. An `init` that does not answer `ok` is refused with the answer.
 
 Otherwise the stand-in writes the profile that the lab generator builds from
 the declared rights, creates the shared ancestors, and starts the named binary
 under that profile through `start_under` with the three canonical bindings. It
-sends `init` with `base_path` and is Started only when `init` answers `ok`. The
+sends the provider's `init` config, which holds `base_path` and, for did, the
+isolated fixture device key, and is Started only when `init` answers `ok`. The
 stand-in never starts the binary outside `sandbox-exec`.
+
+Both file-profile providers start through this one stand-in:
+`wallet-provider` here and `did-provider` in the same test file, each with its
+own committed declared-rights file, binary and storage-root layout. did's
+start binds `<base>/did` as `STORAGE_ROOT` and `<base>` as `STORAGE_PARENT`.
+`standin_launcher_starts_did_confined_under_the_generated_profile` holds the
+did journey, and
+`standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
+compares did's suite on the committed `confine.sb` and on a stand-in start,
+through the same record type and comparison as the wallet suite.
 
 `standin_launcher_refuses_a_start_it_cannot_confine` holds the refusals, and
 `standin_launcher_starts_wallet_confined_under_the_generated_profile` holds
 the full wallet journey through the stand-in.
 `standin_start_matches_the_oracle_on_the_permitted_and_denied_suite` runs one
 suite of permitted and denied cases on a provider started under the committed
-`confine.sb` and on one Started by the stand-in, and requires the two records
-to agree entry by entry, and
+`confine.sb` and on one Started by the stand-in. Each case is pushed with its
+class, and every record must hold the cases of `SUITE_CASES` in order with
+their names and classes, so a case that drops out or changes class fails with
+the case named. A refusal keeps its answer's `status`, its `code` and the
+stable start of its message, so two refusals that differ only in code do not
+compare equal. The comparison then requires the two records to agree entry by
+entry, and
 `standin_start_runs_under_the_generated_profile_not_the_committed_file`
 requires the stand-in to refuse a start when the generated profile drops the
-wallet-root write. The stand-in's start matches the committed profile on the
-permitted and denied suite.
+wallet-root write. The stand-in's start matches the committed `confine.sb` on
+the permitted and denied suite in the lab, and this section makes no claim
+about a Runtime launch.
 
 ## The model provider's inline profile
 
@@ -893,6 +916,37 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Write the generated profile but start under the committed `confine.sb`
   (WP117): `standin_start_runs_under_the_generated_profile_not_the_committed_file`
   fails because the start is then Started instead of refused.
+- Remove the stand-in's check that the confinement tool is `SANDBOX_EXEC`
+  (WP118): `standin_launcher_refuses_a_start_it_cannot_confine` fails on case
+  (c2), which runs the real `sandbox-exec` and returns Started.
+- Remove the stand-in's binary-file check (WP119): the same test fails on case
+  (c3), which panics in `resolved` with "wallet directory must resolve".
+- Return `Ok(provider)` for an `init` answer that is not `ok` (WP120): the same
+  test fails on case (f), which returns Started instead of the answer.
+- Remove the suite's planted-key push (WP121):
+  `standin_start_matches_the_oracle_on_the_permitted_and_denied_suite` fails
+  because the record holds eight entries where `SUITE_CASES` holds nine, and
+  the failure names the missing case.
+- Drop the refusal `code` from `suite_entry` (WP122):
+  `suite_entry_keeps_the_refusal_code` fails because two refusals that differ
+  only in `code` then compare equal.
+- Record every bound result as `Ok` in `wallet_suite_entry` (WP123):
+  `wallet_suite_entry_records_an_inner_refusal_as_refused` fails because the
+  inner refusal reads `Ok`.
+- Use wallet's root layout for a did start in the stand-in (WP124):
+  `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
+  fails because the did start is refused at its first `init`.
+- Make the stand-in's absent-tool check never fire (WP125):
+  `standin_launcher_refuses_a_start_it_cannot_confine` fails on case (c),
+  which then reads the wrong-tool reason and lacks `is absent`.
+- Drop the OS from the stand-in's wrong-tool reason (WP126): the same test
+  fails on case (c2), whose reason then lacks `macos`.
+- Append a write grant on `STORAGE_PARENT` to the stand-in's generated profile
+  for did (WP127):
+  `standin_did_start_matches_its_oracle_on_the_permitted_and_denied_suite`
+  fails on the sibling write beneath the base, which answers `ok` where the
+  committed `confine.sb` refuses it. The unrelated outside write and the
+  planted read still pass, so only that case catches it.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
