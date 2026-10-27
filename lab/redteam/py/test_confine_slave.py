@@ -988,9 +988,12 @@ class SlaveProbe(unittest.TestCase):
             self.assertEqual(text.count(FILE_GRANT), 0)
             self.assertEqual(text.count(IOCTL_LINE), 0)
             return
-        self.assertEqual(text.count(PLANT), 1)
-        self.assertEqual(text.count(FILE_GRANT), 1)
-        self.assertEqual(text.count(IOCTL_LINE), 1)
+        # An observed allow does not identify the grants in the source.
+        for line in (PLANT, FILE_GRANT, IOCTL_LINE):
+            if line in text:
+                self.assertEqual(text.count(line), 1)
+            else:
+                self.assertEqual(text.count(line), 0)
 
     def _assert_baseline(self, name, text, baseline):
         self.assertEqual(baseline.count(PLANT), 0)
@@ -1002,10 +1005,13 @@ class SlaveProbe(unittest.TestCase):
             self.assertEqual(baseline.count(FILE_GRANT), 0)
             self.assertEqual(baseline.count(IOCTL_LINE), 0)
             return
-        self.assertEqual(baseline.count(FILE_GRANT), 1)
-        self.assertEqual(baseline.count(IOCTL_LINE), 1)
-        self.assertNotEqual(baseline.count(FILE_GRANT), 0)
-        self.assertNotEqual(baseline.count(IOCTL_LINE), 0)
+        self.assertEqual(baseline, text.replace(PLANT, "", 1))
+        for line in (FILE_GRANT, IOCTL_LINE):
+            if line in text:
+                self.assertEqual(baseline.count(line), 1)
+                self.assertNotEqual(baseline.count(line), 0)
+            else:
+                self.assertEqual(baseline.count(line), 0)
 
     def _expect_copy(self, profile, path, stdout):
         repo = os.fspath(profile["path"])
@@ -1041,11 +1047,11 @@ class SlaveProbe(unittest.TestCase):
         """The plant beside the two setup lines opens the slave.
 
         The zero-count reads the plant baseline from ``_source_for_plant``.
-        A recorded allow strips one exact plant line and does not strip the
-        file-grant line or the ioctl line. On a clean source those three
+        A recorded allow strips an exact plant line when present and keeps the
+        file-grant line and the ioctl line. On a clean source those three
         counts are zero and ``(deny default)`` occurs once. After the strip,
-        the plant count is zero. A recorded source has one file-grant line
-        and one ioctl line.
+        the plant count is zero. Each setup line keeps its source count,
+        including when an allow was observed from unchanged source text.
 
         Setup plus the plant prints the full allow, and the deny check
         fails. Setup without the plant prints the ptsname line, and the
@@ -2379,29 +2385,53 @@ class SlaveRules(unittest.TestCase):
         """Run every probe with injected tools and profile text.
 
         No added lines, and the file-grant line, the ioctl line, and the
-        plant together on each profile, keep the suite green. Only the deny
-        test of a profile whose text contains all three lines is an expected
-        failure. One wallet copy that contains the plant and neither setup
-        line prints the open-fail line, the deny check passes, and that copy
+        plant together on each profile, keep the suite green. Partial and
+        full allows from unchanged source text, or with either or both setup
+        lines, also keep the suite green. Only the deny test of a profile
+        whose result allows is an expected failure. One wallet copy that
+        contains the plant and neither setup line prints the open-fail line,
+        the deny check passes, and that copy
         is not the injected module text. The plant still runs, nothing
         skips, and the result is successful.
         """
         method_names = unittest.defaultTestLoader.getTestCaseNames(SlaveProbe)
-        scenarios = ((), ("wallet",), ("did",), ("model",), ("wallet", "did", "model"))
-        for allowed in scenarios:
-            with self.subTest(allowed=allowed), tempfile.TemporaryDirectory(
+        source_texts = {
+            profile["name"]: profile["path"].read_text(encoding="utf-8")
+            for profile in PROFILES
+        }
+        allowed_profiles = ((), ("wallet",), ("did",), ("model",), ("wallet", "did", "model"))
+        scenarios = [
+            (allowed, FILE_GRANT + IOCTL_LINE + PLANT, None)
+            for allowed in allowed_profiles
+        ] + [
+            (allowed, setup, stdout)
+            for allowed in allowed_profiles[1:]
+            for setup in ("", FILE_GRANT, IOCTL_LINE, FILE_GRANT + IOCTL_LINE)
+            for stdout in (PARTIAL_ALLOW, FULL_ALLOW)
+        ]
+        for allowed, added_lines, observed_stdout in scenarios:
+            with self.subTest(
+                allowed=allowed, added_lines=added_lines, stdout=observed_stdout
+            ), tempfile.TemporaryDirectory(
                 prefix="ccrt-slave-suite-"
             ) as tmp:
                 repo = Path(tmp).resolve()
                 profiles = []
+                observations = {}
+                source_copies = {}
                 for original in PROFILES:
                     profile = dict(original)
                     profile["path"] = repo / profile["rel"]
                     profile["path"].parent.mkdir(parents=True, exist_ok=True)
                     text = "(version 1)\n(deny default)\n(deny network*)\n"
+                    if observed_stdout is not None:
+                        text = source_texts[profile["name"]]
                     if profile["name"] in allowed:
-                        text += FILE_GRANT + IOCTL_LINE + PLANT
+                        text += added_lines
+                        if observed_stdout is not None:
+                            observations[profile["path"]] = observed_stdout
                     profile["path"].write_text(text, encoding="utf-8")
+                    source_copies[profile["path"]] = text
                     profiles.append(profile)
 
                 def injected_compile(parent, root, source_text):
@@ -2433,7 +2463,9 @@ class SlaveRules(unittest.TestCase):
                     self.assertEqual(kwargs["timeout"], 5)
                     self.assertEqual(tuple(kwargs["args"]), ())
                     text = Path(kwargs["profile"]).read_text(encoding="utf-8")
-                    stdout = injected_stdout(text)
+                    stdout = observations.get(
+                        Path(kwargs["profile"]), injected_stdout(text)
+                    )
                     return sbx.Result(
                         exit_code=0,
                         stdout=stdout,
@@ -2505,7 +2537,10 @@ class SlaveRules(unittest.TestCase):
                         self.assertIn(sha256_file(profile["path"]), body)
                         self.assertIn("a" * 40, body)
                         self.assertIn("PR fixture", body)
-                        self.assertIn("observed: pts and slave ", body)
+                        if observed_stdout == PARTIAL_ALLOW:
+                            self.assertIn("observed: pts " + PARTIAL_ALLOW.strip(), body)
+                        else:
+                            self.assertIn("observed: pts and slave ", body)
                         self.assertIn("helper: ", body)
                         self.assertIn(
                             body,
@@ -2541,6 +2576,8 @@ class SlaveRules(unittest.TestCase):
                     self.assertEqual(denied.stderr, "")
                     self.assertEqual(denied.exit_code, 0)
                     self.assertEqual(classify(denied), "deny")
+                    for path, text in source_copies.items():
+                        self.assertEqual(path.read_text(encoding="utf-8"), text)
                 self.launch_guard.assert_not_called()
 
     def test_harness_error_stays_error(self):
