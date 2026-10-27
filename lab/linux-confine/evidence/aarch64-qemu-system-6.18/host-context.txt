@@ -8,12 +8,13 @@ qemu=QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)
 cross_cc=aarch64-linux-gnu-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
 rustc=rustc 1.91.0 (f8297e351 2025-10-28)
 mode=full
-repo=/tmp/lc-wt-c9-r3
-head=05a7195b6e21b0b1edda0b49bd00730fac5de5da
-kernel=/tmp/lc-c9-r3-work/kernel/boot/vmlinuz-virt
-helper_dir=/tmp/lc-wt-c9-r3/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-baad48e38b48b3e4/out
-worktree_under_tmp=1 baked helpers must stay visible after guest /tmp tmpfs
--rw-r--r-- 1 ubuntu ubuntu 60M Oct 27 00:11 /tmp/lc-c9-r3-work/guest.cpio.gz
+repo=/workspace
+head=7ad5d7ad7792484c938d075badcfe90937f25bac
+kernel=/tmp/linux-confine-aarch64-r4/kernel/boot/vmlinuz-virt
+helper_dir=/workspace/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-c224bc819a663556/out
+-rw-r--r-- 1 ubuntu ubuntu 63M Oct 27 00:52 /tmp/linux-confine-aarch64-r4/guest.cpio.gz
 qemu_timeout_sec=600
 qemu_exit=0
-nonce=b2f657486859b29d6f4395c8215e68ac
+nonce=c11deb8b7f72f2fca90e87be325ed42e
+work=/tmp/linux-confine-aarch64-r4
+run_id=a6c5dfb68ca6cabd88d84e27fcf0c5f6

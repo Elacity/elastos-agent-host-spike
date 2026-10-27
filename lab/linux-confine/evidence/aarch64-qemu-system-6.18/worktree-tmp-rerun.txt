@@ -1,82 +1,22 @@
-# /tmp worktree rerun after C9 r3 leftover checker fixes.
-# repo=/tmp/lc-wt-c9-r3
-# head=05a7195b6e21b0b1edda0b49bd00730fac5de5da
-# helper_dir=/tmp/lc-wt-c9-r3/target-build/aarch64-unknown-linux-gnu/debug/build/linux-confine-baad48e38b48b3e4/out
-# worktree_under_tmp=1
-# tmp_mount=tmpfs+baked
-# guest_nics=dummy0 eth0 lo
-# nonce_file_mode=400
-# env_has_nonce=0
-# evidence_nonce_during_run=0
-# tester_nonce_readable=0
-# host_preboot=/tmp/lc-c9-r3-work/host-preboot.txt (written before qemu)
-# nonce_sha256=4635bf47e49963f5dcdd8bae381fbf282b65732fb07f87d1a62d08cc067e0d56
-# qemu_timeout_sec=600
-# qemu_exit=0
-# nonce=b2f657486859b29d6f4395c8215e68ac
-# host_exit=0
-# checker_unit_tests=34 passed (original 28 plus leftover tests and M9-M11)
-# fail_closed_exit=1 (required)
+# C9 r4 leftover rerun at 7ad5d7ad
+# LC_GUEST_WORK=/tmp/linux-confine-aarch64-r4
 # label=aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
-
-# Live rust last lines:
-# elf 6 passed; 0 failed; 0 ignored in 0.50s
-# aarch64 2 passed; 0 failed; 1 ignored in 0.04s
-# confine 25 passed; 0 failed; 0 ignored in 2.95s
-# providers 4 passed; 0 failed; 0 ignored in 12.54s
-
-# GENERATED RESULTS from that guest run follow.
-
-# GENERATED from this guest run. Not a hand write-up.
-# nonce=b2f657486859b29d6f4395c8215e68ac
-# source=/tmp/lc-wt-c9-r3/lab/linux-confine/evidence/aarch64-qemu-system-6.18
-# mode=full
-
-C9 linux-confine on aarch64 guest kernel 6.18 under qemu-system TCG (emulated CPU)
-
-Never native aarch64. Never Jetson.
-
-## Standing suites (live rust output)
-
-| suite | status | exit | passed | failed | ignored | expected passed |
-| --- | --- | --- | --- | --- | --- | --- |
-| elf | PASS | 0 | 6 | 0 | 0 | 6 |
-| aarch64 | PASS | 0 | 2 | 0 | 1 | 2 |
-| confine | PASS | 0 | 25 | 0 | 0 | 25 |
-| providers | PASS | 0 | 4 | 0 | 0 | 4 |
-
-## In-guest plants (live status files)
-
-| id | result |
-| --- | --- |
-| F-LC-CAPBND | CAUGHT |
-| F-LC-BLOCK | CAUGHT |
-| F-LC-STORAGE | CAUGHT |
-| F-LC-PROVIDER-SOCKET | CAUGHT |
-| F-LC-SOCKET | CAUGHT |
-| F-LC-ANY-ERRNO | CAUGHT |
-| F-LC-SKIP-NETNS | CAUGHT |
-| F-LC-DROP-SECCOMP | CAUGHT |
-| F-LC-WIDE-ROOT | CAUGHT |
-| F-LC-WRONG-ARCH-CC | NOT_RUN |
-| F-LC-QEMU-USER-LANDLOCK | NOT_RUN |
-
-## Guest markers
-
-nonce=b2f657486859b29d6f4395c8215e68ac
-guest_exit=0
-qemu_exit=0
-
-Host-only plants F-LC-WRONG-ARCH-CC and F-LC-QEMU-USER-LANDLOCK stay NOT RUN.
-make-char / make-block stay NOT PROVEN (no CAP_MKNOD).
-socketpair(AF_UNIX) stays the named C9 departure.
-
-This is an emulated CPU (qemu-system TCG) with a real aarch64 kernel.
-It is not a Jetson and not any other aarch64 board.
-
-## Host check PASSED
-
-Every standing suite matched its expected counts.
-Every suite had an LC_MARK serial line that matched the 9p files.
-Every official in-guest plant was CAUGHT.
-qemu exited 0 without a timeout.
+# qemu=QEMU emulator version 8.2.2
+# cross_cc=aarch64-linux-gnu-gcc 13.3.0
+# rustc=1.91.0
+#
+# full: HOST_EXIT=0
+#   elf 6/0/0, aarch64 2/0/1, confine 25/0/0, providers 4/0/0
+#   nine in-guest plants CAUGHT
+#   guest_exit=0 qemu_exit=0
+#   work= and run_id= appended after qemu
+# fail-closed: HOST_EXIT=1 (check_rc=1)
+# LC_QEMU_TIMEOUT=2 smoke: HOST_EXIT=1 qemu_exit=137
+#   guest did not print the required TCG label
+#
+# checker: 52 passed (34 kept + 9 r4 tests + M12-M20)
+# plants-r4.py: 10 CAUGHT, 0 SURVIVED
+#
+# Native aarch64 / Jetson: NOT RUN
+# make-char / make-block: NOT RUN
+# socketpair(AF_UNIX): named C9 departure

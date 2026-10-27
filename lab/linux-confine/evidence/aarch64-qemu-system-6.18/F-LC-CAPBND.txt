@@ -1,7 +1,7 @@
 
 running 1 test
 test confined_process_cap_bnd_is_zero ... 
-thread 'confined_process_cap_bnd_is_zero' (808) panicked at tests/providers.rs:343:5:
+thread 'confined_process_cap_bnd_is_zero' (801) panicked at tests/providers.rs:343:5:
 assertion `left == right` failed: capability bounding set did not drop: CapBnd: 000001ffffffffff
   left: 2199023255551
  right: 0
@@ -14,9 +14,9 @@ stack backtrace:
    3: core::panicking::assert_failed
              at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/panicking.rs:394:5
    4: providers::confined_process_cap_bnd_is_zero
-             at ./tmp/lc-wt-c9-r3/lab/linux-confine/tests/providers.rs:343:5
+             at ./workspace/lab/linux-confine/tests/providers.rs:343:5
    5: providers::confined_process_cap_bnd_is_zero::{{closure}}
-             at ./tmp/lc-wt-c9-r3/lab/linux-confine/tests/providers.rs:326:38
+             at ./workspace/lab/linux-confine/tests/providers.rs:326:38
    6: core::ops::function::FnOnce::call_once
              at ./rustc/f8297e351a40c1439a467bbbb6879088047f50b3/library/core/src/ops/function.rs:250:5
    7: core::ops::function::FnOnce::call_once
@@ -29,5 +29,5 @@ failures:
 failures:
     confined_process_cap_bnd_is_zero
 
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 1.32s
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 1.29s
 
