@@ -1,7 +1,9 @@
 //! Static lab import pre-check. The Runtime owns enforcement.
 
 use std::fmt;
-use wasmparser::{Encoding, MemoryType, Parser, Payload, Validator};
+use wasmparser::{
+    Encoding, Import, ImportSectionReader, MemoryType, Parser, Payload, TypeRef, Validator,
+};
 
 pub const AUDIT_API: u32 = 1;
 
@@ -39,8 +41,7 @@ pub fn audit(wasm: &[u8], declared: &[DeclaredImport]) -> Result<Vec<DeclaredImp
     let mut imports = Vec::new();
     inspect(wasm, Encoding::Module, |payload| {
         if let Payload::ImportSection(section) = payload {
-            for import in section.into_imports() {
-                let import = import.map_err(|_| Refusal::Malformed)?;
+            for import in module_imports(section)? {
                 imports.push(DeclaredImport {
                     module: import.module.to_owned(),
                     name: import.name.to_owned(),
@@ -90,17 +91,32 @@ pub struct MemoryLimits {
 }
 
 pub fn memories(wasm: &[u8]) -> Result<Vec<MemoryLimits>, Refusal> {
-    let mut defined = Vec::new();
+    let mut limits = Vec::new();
     inspect(wasm, Encoding::Module, |payload| {
-        if let Payload::MemorySection(section) = payload {
+        if let Payload::ImportSection(section) = payload {
+            for import in module_imports(section)? {
+                if let TypeRef::Memory(ty) = import.ty {
+                    limits.push(memory_limits(ty));
+                }
+            }
+        } else if let Payload::MemorySection(section) = payload {
             for memory in section {
                 let ty = memory.map_err(|_| Refusal::Malformed)?;
-                defined.push(memory_limits(ty));
+                limits.push(memory_limits(ty));
             }
         }
         Ok(())
     })?;
-    Ok(defined)
+    Ok(limits)
+}
+
+fn module_imports<'a>(section: ImportSectionReader<'a>) -> Result<Vec<Import<'a>>, Refusal> {
+    let mut read = Vec::new();
+    for import in section.into_imports() {
+        let import = import.map_err(|_| Refusal::Malformed)?;
+        read.push(import);
+    }
+    Ok(read)
 }
 
 fn memory_limits(ty: MemoryType) -> MemoryLimits {

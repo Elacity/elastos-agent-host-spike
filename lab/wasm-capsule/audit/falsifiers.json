@@ -831,7 +831,8 @@
         }
       ],
       "tests": [
-        "defined_memory_reports_its_page_limits"
+        "defined_memory_reports_its_page_limits",
+        "imported_memory_reports_its_page_limits"
       ]
     }
   ]

@@ -535,6 +535,23 @@ fn defined_memory_reports_its_page_limits() {
 }
 
 #[test]
+fn imported_memory_reports_its_page_limits() {
+    let wasm = wat::parse_str(
+        r#"(module (import "env" "fd" (func)) (import "env" "memory" (memory 2 8)))"#,
+    )
+    .unwrap();
+    assert_eq!(
+        memories(&wasm),
+        Ok(vec![MemoryLimits {
+            minimum: 2,
+            maximum: Some(8),
+            memory64: false,
+            shared: false,
+        }])
+    );
+}
+
+#[test]
 fn memory_without_a_maximum_reports_none() {
     let empty = wat::parse_str("(module)").unwrap();
     assert_eq!(memories(&empty), Ok(vec![]));
