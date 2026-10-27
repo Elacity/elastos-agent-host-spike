@@ -44,6 +44,8 @@ tools/src/receipt.rs  wc-005c's run receipt: `render` and `write_receipt`
 tools/src/bin/bundle.rs  the `bundle` binary: parse, run, print, exit status
 tests/                host-side named tests + the shape reader (never in the capsule)
   common/             build driver (and the copy layout) + minimal wasm shape reader
+                      (core Wasm and the `digest` signature only; it reads no imports,
+                      the zero-import check reads through `audit/`, task 053)
   bundle_builds/      small stand-in build scripts for `tools/bundle`'s tests
 falsifiers.json       planted bugs, each caught by a named test (provider format)
 rust-toolchain.toml   pins rustc 1.91.0 + the wasm target (for adoption)
@@ -1818,9 +1820,16 @@ Limits, not claimed:
 - `the_receipt_names_the_exact_toolchain` — receipt rustc/target match the build.
 - `receipt_hashes_match_artifact_and_lockfile` — receipt hashes match the files.
 - `built_capsule_has_the_required_wasm_shape` — core Wasm, zero imports, digest sig.
+  Task 053: the zero imports are read only through `wasm_capsule_audit::audit`
+  (`audit(&bytes, &[])` returns `Ok` with an empty list), the lab's one module
+  reader (P10); the shape reader checks only core Wasm and the `digest`
+  signature.
 - plus crafted-byte coverage of the shape reader. Task 037 removed task 032's
   three memory tests with the shape reader's memory parse: the shape reader
-  reads no memory.
+  reads no memory. Task 053 removed its import count: it reads no imports, and
+  `refuses_a_module_with_an_import_section` (in place of
+  `counts_an_import_and_is_not_the_required_shape`) holds its one exact refusal
+  of a module with an import section, which names `wasm_capsule_audit::audit`.
 
 The lab name, in `tests/lab_cid.rs` (through `wasm_capsule_tools::bundle_identity`):
 
@@ -2120,7 +2129,8 @@ Task 019's two:
 - `readme_falsifier_total_matches_falsifiers_json` (`tests/docs.rs`) — counts
   the `"falsifiers"` entries with `serde_json`, finds the total sentence that
   opens "## Falsifiers" exactly once, and fails naming both numbers when they
-  differ.
+  differ. Since task 052 it also finds the one "outside the N" in that
+  section and fails naming both numbers when N is not the total.
 
 wc-009a's run tests (task 020), in `tests/run.rs`. Each signs its bundle with a
 fresh key, writes a lab grants file beside the bundle, reads it with
@@ -2458,31 +2468,33 @@ gives `67108864` on both (`real_receipt_names_both_installed_engines`).
 
 ## Falsifiers
 
-`falsifiers.json` holds 185 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 188 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
 seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
 031, two task 032, one task 035, three task 036, five task 038, three task
 039, one task 040, one task 041, two task 043, one task 044, one task
-033, two task 034, one task 045, two task 046 and one task 050.
+033, two task 034, one task 045, two task 046, one task 050 and three task
+052.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 121, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 124, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046 and 050: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
-+ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1), each run by the canonical runner with its summary
+029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046, 050 and 052: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
++ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1 + 3), each run by the canonical runner with its summary
 line quoted.
-Hand-proven, pending R1: 68, each counted once: the 64 entries of the sections
+Hand-proven, pending R1: 69, each counted once: the 64 entries of the sections
 marked so (wc-001, tasks 010 and 009, wc-004 and wc-008: 9 + 7 + 23 + 21 + 4),
-and four proofs with no `falsifiers.json` entry, outside the 184 (task 036's
+and five proofs with no `falsifiers.json` entry, outside the 188 (task 036's
 `/bin/bash` 3.2 guard in `tests/reproducible.rs`, task 042's killed-run
-stop and task 049's two environment record proofs in `tests/run.rs`; neither
-file is a recovery target, so a proof that edits one is a hand proof), each
+stop and task 049's two environment record proofs in `tests/run.rs`, and task
+053's import-section refusal in `tests/common/wasm_shape.rs`; none of these
+files is a recovery target, so a proof that edits one is a hand proof), each
 proved by the repo's break →
 named test fails → revert method with `cargo test` in this workspace. Their
 labels stay until each is run by the canonical runner and its summary line is
@@ -2846,19 +2858,16 @@ entry's one named test fails at its assertion:
 Task 026 also re-anchored F-WC-README-COUNT to the new total, the same bug as
 before.
 
-Task 026's five planted bugs outside `README.md`, each hand-proven, pending R1
-(`ADOPTION.md` and `tools/src/run.rs` are not recovery targets, so they have no
-`falsifiers.json` entry and are outside every count above; LOG.md, task 026):
+Task 026's three planted bugs in `ADOPTION.md`, each hand-proven, pending R1
+(`ADOPTION.md` is not a recovery target, so they have no `falsifiers.json`
+entry and are outside every count above; LOG.md, task 026). Task 026's two
+planted bugs in `tools/src/run.rs` are runner-caught since task 052 (below):
 
 - F-WC-ENGINE-ADOPTION — ADOPTION loses the engine ruling
   (`engines_are_labelled_test_only_not_endorsed`, which says "not endorsed",
   at its count assertion).
 - F-WC-ENDORSE-ADOPTION — ADOPTION's "not endorsed" claim-scope line goes back
   to the base's wording (that test, at its line assertion).
-- F-WC-ENGINE-RUN-MODULE-DOC and F-WC-ENGINE-RUN-ENUM-DOC — the module doc, or
-  the doc on `pub enum Engine`, in `tools/src/run.rs` goes back to the base's
-  wording, so it no longer says "test-only, not endorsed" (that test, at its
-  module-doc or enum-doc assertion).
 - F-WC9B0-ADOPTION — ADOPTION loses the discovery-only ruling
   (`hosting_discovery_is_not_the_import_path`, at its ADOPTION assertion).
 
@@ -3298,3 +3307,41 @@ F-WC5-RECEIPT-OVERWRITE (its planted `fs::write` builds the renamed
 new total. The canonical runner reports all six CAUGHT (LOG.md, task 050). Each
 keeps its own evidence label above: F-WC3-IO-CAUSE-MANIFEST and -WRITE stay in
 task 009's hand-proven count, and this task changes no label.
+
+Task 052's three, runner-caught (the canonical runner's summary line is in
+LOG.md, task 052). Two were planted by hand in task 026 and get their entries
+now: `tools/src/run.rs` has been a recovery target since provider 026 (PR
+#242), which merged before task 026 did, so task 026's reason for leaving them
+out did not hold. Each anchor is found exactly once, and each named test fails
+at its assertion:
+
+- F-WC-ENGINE-RUN-MODULE-DOC — the module doc of `tools/src/run.rs` goes back
+  to the base's wording, so no module doc line says "test-only, not endorsed"
+  (`engines_are_labelled_test_only_not_endorsed`, which says "not endorsed",
+  at its module-doc assertion).
+- F-WC-ENGINE-RUN-ENUM-DOC — the doc on `pub enum Engine` goes back to the
+  base's wording, so it no longer says "test-only, not endorsed" (that test, at
+  its enum-doc assertion).
+- F-WC-README-OUTSIDE-COUNT — the hand-proven sentence's "outside the N"
+  becomes one less than the file holds, the stale figure task 050 left
+  (`readme_falsifier_total_matches_falsifiers_json`, at its "outside the N"
+  comparison).
+
+Task 052 also re-anchors F-WC-README-COUNT to the new total, the same bug as
+before, and keeps its runner-caught label above.
+
+Task 053's one, hand-proven, pending R1 (LOG.md, task 053). It has no
+`falsifiers.json` entry and is kept out of the runner-caught total:
+`tests/common/wasm_shape.rs` is not a recovery target. It is the fifth proof
+with no entry in the hand-proven sentence above (69):
+
+- The shape reader's section-2 arm goes back to skipping the section
+  (`2 => {}`), so a module with an import section is read, not refused
+  (`refuses_a_module_with_an_import_section`, at its exact-reason assertion).
+
+Task 053 also moves `built_capsule_has_the_required_wasm_shape`'s zero-import
+check onto `wasm_capsule_audit::audit`. The canonical runner reports
+F-WC1-IMPORT and F-WC1-SIG CAUGHT (LOG.md, task 053), and F-WC1-IMPORT is now
+caught by the audit assertion, which names `env.host_entropy`. No entry
+changes (both anchors are in `capsule/src/lib.rs`), and this task changes no
+label: both stay in wc-001's hand-proven count.
