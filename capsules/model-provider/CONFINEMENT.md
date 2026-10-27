@@ -544,8 +544,10 @@ profile does not grant".
   rule in that file. `startup-root-directory` and `startup-sysctl` are on
   the platform-baseline list. The test reads the profile and the fixture
   from disk. It starts no process and needs no sandbox. An allow written
-  after another form on the same line is taken from that `(allow `, and
-  check 2 fails. `F-cc37a` writes that allow after `(deny network*)`.
+  after another form on the same line is taken from that `(allow `. A new
+  grant fails check 2. `F-cc37a` writes that allow after `(deny network*)`.
+  A same-line copy of a declared rule is kept, and check 3 fails with
+  `declared rule matches more than one allow line`.
 - `platform_baseline_rules_stay_narrow`: `startup-root-directory` stays
   `(allow file-read-data (literal "/"))` and `startup-sysctl` stays
   `(allow sysctl-read)`. Each pin is written in the test. A wider path or
