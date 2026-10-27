@@ -1,0 +1,14 @@
+id: F-B2-guestinst
+file: src/ops.rs
+test: ops::model_forged_instance_does_not_move_the_child_grant
+--- old
+        self.bind_grant(grant.instance, path, grant.rights)
+            .map_err(OperateRefuse::Binding)
+--- new
+        self.bind_grant(
+            request.forged_instance.unwrap_or(grant.instance),
+            path,
+            grant.rights,
+        )
+        .map_err(OperateRefuse::Binding)
+--- end
