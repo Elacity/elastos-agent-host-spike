@@ -52,6 +52,21 @@ Recorded on this Linux x86_64 host, zsh 5.9, with the macOS shim.
 C1-C7 on macOS is **NOT RUN ON MAC** until Sash pastes the block on
 Apple Silicon and that run's `summary.txt` ends with `C1-C7: PASS.`
 
+| Case | Last line | Plant | Result |
+| --- | --- | --- | --- |
+| happy path | `C1-C7: PASS.` | 32 PASS rows; descendant of `ea25c4d6` | CAUGHT |
+| missing test | `C1-C7: NOT RUN.` | `model/model_outside_write_denied` missing | CAUGHT |
+| duplicate row | `C1-C7: FAIL.` | two PASS lines for one wallet test | CAUGHT |
+| ignored count >0 | `C1-C7: FAIL.` | all-PASS rows and `ignored: 1` | CAUGHT |
+| exit 1 with PASS rows | `C1-C7: FAIL.` | 32 PASS rows and `run.sh` exit 1 | CAUGHT |
+| late rewrite | `C1-C7: FAIL.` | background 8s rewrite to FAIL | CAUGHT |
+| stale summary | `C1-C7: NOT RUN.` | `C17_SUMMARY` already holds PASS | CAUGHT |
+| missing pin | `C1-C7: NOT RUN.` | no `ea25c4d6` object | CAUGHT |
+| planted failing row | `C1-C7: FAIL.` | one wallet row FAIL | CAUGHT |
+| created `~/.elastos` | `C1-C7: FAIL.` | `run.sh` creates `$HOME/.elastos` | CAUGHT |
+| missing sandbox-exec | `C1-C7: NOT RUN.` | Darwin shim without `sandbox-exec` | CAUGHT |
+| PASS then FAIL | `C1-C7: FAIL.` | same row `PASS` then `FAIL` | CAUGHT |
+
 ## Before Sash pastes
 
 - Native Apple Silicon Terminal. Rosetta is a named NOT RUN.

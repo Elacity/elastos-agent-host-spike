@@ -11,7 +11,7 @@ probe_dir="$lane/probe"
 pin=ea25c4d6d58f1dc08d29173b45349bfeb80903f3
 
 # Exactly the 32 named macOS sandbox-exec tests (ignored on Linux).
-# did's ignored_falsifier_fixture is not in this list.
+# The did ignored fixture is not in this list.
 wallet_tests='
 confined_provider_serves_wallet_operations_under_its_root
 confined_outside_write_is_denied

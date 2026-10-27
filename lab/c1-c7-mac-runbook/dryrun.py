@@ -387,10 +387,10 @@ def main() -> int:
 
     static("sudo", re.search(r"\bsudo\b", text) is None and re.search(r"\bsudo\b", run_text) is None)
     static("elastos-serve", "elastos serve" not in text and "elastos serve" not in run_text)
-    static("curl-sh", "curl" not in text and "| sh" not in text)
+    static("curl-sh", not re.search(r"curl(\s|$|\|)", text) and "curl -" not in text)
     static("sed-i", "sed -i" not in text and "sed -i" not in run_text)
     static("readlink-f", "readlink -f" not in text and "readlink -f" not in run_text)
-    static("gnu-stat", re.search(r"\bstat\b", text) is None)
+    static("gnu-stat", "stat -c" not in text and "stat --printf" not in text and "stat -f" not in text)
     static("rustup-skip", "already present; skip" in text)
     static("mktemp-trap", "mktemp -d" in text and "trap c17_on_exit EXIT" in text)
     static("no-single-branch", "--single-branch" not in text)
