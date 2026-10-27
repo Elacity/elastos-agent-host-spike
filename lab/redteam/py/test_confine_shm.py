@@ -7,10 +7,11 @@ always exits 0. A deny is stdout ``fd=-1 errno=1`` and empty stderr. An
 allow is stdout ``fd=<integer >= 0> errno=0`` and empty stderr.
 
 The three profiles are the live files. ``setUpModule`` records each sha256.
-``tearDownModule`` compares the digest at the end through ``changed`` from
-``test_confine_mach``. An owner edit between those two points raises
-``the probe changed <rel>``. A difference from an older measurement is not
-a failure. This file stores no commit, pull request, or digest.
+``tearDownModule`` and the falsifier's end check call ``require_unchanged``,
+which compares the digest through ``changed`` from ``test_confine_mach``.
+An owner edit between those two points raises ``the probe changed <rel>``.
+A difference from an older measurement is not a failure. This file stores
+no commit, pull request, or digest.
 
 An allow on a real profile is CRITICAL. Wallet or did:
 ``findings/CRITICAL-confine-042.md``. Model:
@@ -248,7 +249,8 @@ def compile_shm(parent, root, source_text):
     """Compile ``source_text`` with ``/usr/bin/cc`` into ``<root>/shm``.
 
     The source file sits in ``parent``. This does not start ``sandbox-exec``.
-    A compiler failure is a harness error, not a skip.
+    A nonzero exit, stderr on exit 0, or a missing executable is a harness
+    error, not a skip.
     """
     require_storage_path(parent)
     require_storage_path(root)
@@ -268,6 +270,13 @@ def compile_shm(parent, root, source_text):
         raise HarnessError(
             f"{CC} failed with exit {completed.returncode}: {detail} "
             "-- a harness error, not a skip and not a deny"
+        )
+    # A warning on exit 0 is not a compiled helper. Nonempty stderr stays a
+    # harness error, with its own reason, distinct from a nonzero exit.
+    if completed.stderr != "":
+        raise HarnessError(
+            "compiler stderr is a harness error, not a skip and not a deny: "
+            + repr(completed.stderr)
         )
     require_storage_path(binary)
     if not os.access(binary, os.X_OK):
@@ -473,10 +482,19 @@ def setUpModule():
         START_SHA[rel] = sha256_file(profile["path"])
 
 
+def require_unchanged(before):
+    """The profile digest still matches ``before``.
+
+    ``changed`` owns the comparison and the refusal text. This is the one
+    end check for module teardown and for the falsifier.
+    """
+    for profile in PROFILES:
+        changed(profile["rel"], before[profile["rel"]], sha256_file(profile["path"]))
+
+
 def tearDownModule():
     """The digest at the end equals the digest from ``setUpModule``."""
-    for profile in PROFILES:
-        changed(profile["rel"], START_SHA[profile["rel"]], sha256_file(profile["path"]))
+    require_unchanged(START_SHA)
 
 
 class ShmOpenProbe(unittest.TestCase):
@@ -610,8 +628,8 @@ class ShmOpenProbe(unittest.TestCase):
         with ``(allow default)`` is not the plant. Deleting ``(deny default)``
         on the wallet copy still denies. The repo profile bytes stay unchanged.
         """
-        originals = {
-            profile["path"]: profile["path"].read_bytes() for profile in PROFILES
+        before = {
+            profile["rel"]: sha256_file(profile["path"]) for profile in PROFILES
         }
         directory = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-shm-profile-"))
         self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
@@ -679,9 +697,7 @@ class ShmOpenProbe(unittest.TestCase):
                     self.assertEqual(denied.stderr, "")
                     self.assertEqual(denied.exit_code, 0)
         finally:
-            for profile in PROFILES:
-                if profile["path"].read_bytes() != originals[profile["path"]]:
-                    raise AssertionError(f"the probe changed {profile['rel']}")
+            require_unchanged(before)
 
     def _source_for_plant(self, name, text):
         """The text the temp plant edits. A recorded allow does not skip this.
@@ -954,6 +970,266 @@ class ShmOpenClassifier(unittest.TestCase):
         finally:
             PROFILES = saved
             START_SHA.pop(rel, None)
+
+    def test_compile_stderr_is_an_error(self):
+        """Exit 0 with compiler stderr is its own harness error.
+
+        The injected result is ``CompletedProcess(returncode=0, stdout="",
+        stderr="compiler warning\\n")`` and the executable check is true.
+        A nonzero exit, a missing executable, and an unresolved storage path
+        each keep a different reason. Empty stderr still returns the binary.
+        """
+        parent = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-shm-cc-parent-"))
+        root = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-shm-cc-root-"))
+        self.addCleanup(shutil.rmtree, parent, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        binary = os.path.join(root, "shm")
+        source = "int main(void) { return 0; }\n"
+        reasons = []
+
+        def compiled(completed, access=None):
+            runners = patch.object(subprocess, "run", return_value=completed)
+            if access is None:
+                with runners:
+                    return compile_shm(parent, root, source)
+            with runners, patch.object(os, "access", return_value=access):
+                return compile_shm(parent, root, source)
+
+        exit_cases = (
+            (
+                "cc error\n",
+                "",
+                f"{CC} failed with exit 1: cc error "
+                "-- a harness error, not a skip and not a deny",
+            ),
+            (
+                "",
+                "stdout only\n",
+                f"{CC} failed with exit 1: stdout only "
+                "-- a harness error, not a skip and not a deny",
+            ),
+            (
+                "",
+                "",
+                f"{CC} failed with exit 1: no compiler output "
+                "-- a harness error, not a skip and not a deny",
+            ),
+            (
+                "Operation not permitted\n",
+                "",
+                f"{CC} failed with exit 65: Operation not permitted "
+                "-- a harness error, not a skip and not a deny",
+            ),
+        )
+        for stderr, stdout, expected in exit_cases:
+            code = 65 if "Operation not permitted" in stderr else 1
+            with self.subTest(exit=code, stderr=stderr, stdout=stdout):
+                completed = subprocess.CompletedProcess(
+                    args=[CC], returncode=code, stdout=stdout, stderr=stderr,
+                )
+                with self.assertRaises(HarnessError) as caught:
+                    compiled(completed)
+                self.assertEqual(str(caught.exception), expected)
+                reasons.append(expected)
+
+        warning = subprocess.CompletedProcess(
+            args=[CC], returncode=0, stdout="", stderr="compiler warning\n",
+        )
+        stderr_reason = (
+            "compiler stderr is a harness error, not a skip and not a deny: "
+            + repr("compiler warning\n")
+        )
+        with self.assertRaises(HarnessError) as caught:
+            compiled(warning, access=True)
+        self.assertEqual(str(caught.exception), stderr_reason)
+        self.assertNotIn("SKIPPED", stderr_reason)
+        reasons.append(stderr_reason)
+
+        silent = subprocess.CompletedProcess(
+            args=[CC], returncode=0, stdout="", stderr="",
+        )
+        with self.assertRaises(HarnessError) as caught:
+            compiled(silent)
+        missing = f"{CC} wrote no executable at {binary}"
+        self.assertEqual(str(caught.exception), missing)
+        reasons.append(missing)
+        self.assertEqual(compiled(silent, access=True), binary)
+
+        def refuse_cc(*_args, **_kwargs):
+            raise AssertionError("compiler started")
+
+        for label, compile_parent, compile_root in (
+            ("parent", "/var/folders/cc/shm-parent", root),
+            ("root", parent, "/var/folders/cc/shm-root"),
+        ):
+            bad = compile_parent if label == "parent" else compile_root
+            expected = (
+                f"execvp: {bad} contains /var/folders without the /private prefix"
+            )
+            with self.subTest(path=label), patch.object(
+                subprocess, "run", side_effect=refuse_cc
+            ):
+                with self.assertRaises(HarnessError) as caught:
+                    compile_shm(compile_parent, compile_root, source)
+            self.assertEqual(str(caught.exception), expected)
+            self.assertNotIn("/private/var/folders", str(caught.exception))
+            reasons.append(expected)
+
+        self.assertEqual(len(set(reasons)), len(reasons))
+        self.launch_guard.assert_not_called()
+
+    def test_falsifier_change_check_calls_changed(self):
+        """The profile-change check calls ``changed`` with the two digests.
+
+        Different before and after bytes are injected. Module teardown and
+        the falsifier's end check both reach ``changed``. A local compare
+        that raises ``the probe changed <rel>`` is not this rule.
+        """
+        source = Path(__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Raise):
+                segment = ast.get_source_segment(source, node) or ""
+                self.assertNotIn("the probe changed", segment)
+
+        global PROFILES
+        clean = b"(version 1)\n(deny default)\n"
+        directory = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-shm-bytes-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        profiles = []
+        for name in ("wallet", "did", "model"):
+            path = Path(directory) / f"{name}.sb"
+            path.write_bytes(clean)
+            profiles.append({
+                "name": name,
+                "provider": f"{name}-provider",
+                "rel": f"tmp/{name}-confine.sb",
+                "path": path,
+            })
+        profiles = tuple(profiles)
+        wallet = profiles[0]
+        before_digest = sha256_file(wallet["path"])
+        preview = Path(directory) / "after.sb"
+        preview.write_bytes(clean + b"\n")
+        after_bytes = preview.read_bytes()
+        after_digest = sha256_file(preview)
+        self.assertNotEqual(clean, after_bytes)
+        self.assertNotEqual(before_digest, after_digest)
+        equal_pairs = [
+            (item["rel"], sha256_file(item["path"]), sha256_file(item["path"]))
+            for item in profiles
+        ]
+        seen = []
+        real_changed = changed
+
+        def spy(name, start, end):
+            seen.append((name, start, end))
+            return real_changed(name, start, end)
+
+        saved = PROFILES
+        saved_sha = dict(START_SHA)
+        try:
+            with self.subTest(path="direct"):
+                PROFILES = profiles
+                seen.clear()
+                with patch(__name__ + ".changed", new=spy):
+                    require_unchanged({
+                        item["rel"]: sha256_file(item["path"]) for item in profiles
+                    })
+                self.assertEqual(seen, equal_pairs)
+                seen.clear()
+                wallet["path"].write_bytes(after_bytes)
+                with patch(__name__ + ".changed", new=spy):
+                    with self.assertRaises(AssertionError) as caught:
+                        require_unchanged({
+                            item["rel"]: before_digest if item is wallet else sha256_file(item["path"])
+                            for item in profiles
+                        })
+                self.assertEqual(seen, [(wallet["rel"], before_digest, after_digest)])
+                self.assertEqual(
+                    str(caught.exception), f"the probe changed {wallet['rel']}"
+                )
+                wallet["path"].write_bytes(clean)
+
+            class Plant(ShmOpenProbe):
+                recorded_allows = {}
+
+            state = {"mutate": False}
+
+            def fake_denied(profile):
+                profile = os.fspath(profile)
+                text = Path(profile).read_text(encoding="utf-8")
+                if "(allow ipc-posix-shm)" in text:
+                    raise NotDenied(sbx.Result(
+                        exit_code=0,
+                        stdout="fd=3 errno=0\n",
+                        stderr="",
+                        argv=[
+                            sbx.SANDBOX_EXEC, "-f", profile,
+                            "/private/shm", "/ccrt042",
+                        ],
+                    ))
+                if state["mutate"] and profile.endswith(os.sep + "wallet-deleted.sb"):
+                    wallet["path"].write_bytes(after_bytes)
+                return sbx.Result(
+                    exit_code=0,
+                    stdout=DENY_STDOUT,
+                    stderr="",
+                    argv=[sbx.SANDBOX_EXEC, "-f", profile],
+                )
+
+            case = Plant("test_falsifier_allow_ipc_posix_shm_is_caught")
+            try:
+                with patch(__name__ + ".PROFILES", profiles), patch(
+                    __name__ + ".require_denied", new=fake_denied
+                ), patch(__name__ + ".changed", new=spy):
+                    with self.subTest(path="falsifier-equal"):
+                        seen.clear()
+                        state["mutate"] = False
+                        case.test_falsifier_allow_ipc_posix_shm_is_caught()
+                        self.assertEqual(seen, equal_pairs)
+                    with self.subTest(path="falsifier-changed"):
+                        seen.clear()
+                        state["mutate"] = True
+                        wallet["path"].write_bytes(clean)
+                        with self.assertRaises(AssertionError) as caught:
+                            case.test_falsifier_allow_ipc_posix_shm_is_caught()
+                        self.assertEqual(
+                            seen, [(wallet["rel"], before_digest, after_digest)]
+                        )
+                        self.assertEqual(
+                            str(caught.exception),
+                            f"the probe changed {wallet['rel']}",
+                        )
+            finally:
+                case.doCleanups()
+
+            with self.subTest(path="teardown"):
+                tear_path = Path(directory) / "teardown.sb"
+                tear_path.write_bytes(clean)
+                tear_before = sha256_file(tear_path)
+                tear_path.write_bytes(clean + b"\n")
+                tear_after = sha256_file(tear_path)
+                tear_rel = "tmp/teardown-confine.sb"
+                self.assertNotEqual(tear_before, tear_after)
+                START_SHA.clear()
+                START_SHA[tear_rel] = tear_before
+                PROFILES = ({
+                    "name": "temp",
+                    "rel": tear_rel,
+                    "path": tear_path,
+                },)
+                seen.clear()
+                with patch(__name__ + ".changed", new=spy):
+                    with self.assertRaises(AssertionError) as caught:
+                        tearDownModule()
+                self.assertEqual(seen, [(tear_rel, tear_before, tear_after)])
+                self.assertEqual(str(caught.exception), f"the probe changed {tear_rel}")
+        finally:
+            PROFILES = saved
+            START_SHA.clear()
+            START_SHA.update(saved_sha)
+        self.launch_guard.assert_not_called()
 
     @staticmethod
     def refusal_samples():

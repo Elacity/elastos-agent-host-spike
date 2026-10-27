@@ -1622,8 +1622,10 @@ class GrantReplayProbe(unittest.TestCase):
 
         The owner's detector reads that raw text. A pass writes
         grant-binding-002. A caught failure writes nothing and says the
-        detector returned true. An error propagates. A false detector
-        result is not a skip.
+        detector returned true. The absence check still sees no file.
+        Bytes that were already recorded are put back after that check,
+        so this probe does not remove an older finding. An error
+        propagates. A false detector result is not a skip.
         """
         self.assertNotIn(self._testMethodName, PROBE_NAMES)
         self.assertNotIn(self._testMethodName, STALE_NAMES)
@@ -1647,45 +1649,57 @@ class GrantReplayProbe(unittest.TestCase):
             self.target,
         )
         print(f"escaped link outcome: {outcome.kind}", file=sys.stderr, flush=True)
-        if outcome.kind == "failed" and outcome.caught and LINK_FINDING.is_file():
-            LINK_FINDING.unlink()
-        returned = record_escaped_link(outcome, meta_code, meta_output, LINK_FINDING)
-        start = meta_output.find("{")
-        parsed, _end = json.JSONDecoder().raw_decode(meta_output, start)
-        names = [package["name"] for package in parsed["packages"]]
-        print(
-            f"escaped metadata packages: {', '.join(names)}",
-            file=sys.stderr,
-            flush=True,
-        )
-        grant_dir = next(
-            Path(package["manifest_path"]).resolve().parent
-            for package in parsed["packages"]
-            if package["name"] == "grant-binding"
-        )
-        self.assertEqual(grant_dir, (self.work / "grant-binding").resolve())
-        self.assertIn("grant-binding", names)
-        self.assertFalse(FINDING.is_file())
-        if outcome.kind == "passed":
-            document = live_escaped_document()
-            self.assertEqual(link_pin_line(), document.splitlines()[0])
-            self.assertEqual(returned, document)
-            self.assertEqual(LINK_FINDING.read_text(), returned)
-            self.assertEqual(LINK_FINDING.read_text().splitlines()[0], link_pin_line())
-            self.assertEqual(
-                LINK_FINDING.read_text().splitlines()[2:],
-                [
-                    "probe: test_escaped_path_dependency_matches_cargo",
-                    "observed: detector returned false",
-                    "cargo metadata package: grant-binding",
-                ],
+        prior_finding = LINK_FINDING.read_bytes() if LINK_FINDING.is_file() else None
+        try:
+            if outcome.kind == "failed" and outcome.caught and LINK_FINDING.is_file():
+                LINK_FINDING.unlink()
+            returned = record_escaped_link(outcome, meta_code, meta_output, LINK_FINDING)
+            start = meta_output.find("{")
+            parsed, _end = json.JSONDecoder().raw_decode(meta_output, start)
+            names = [package["name"] for package in parsed["packages"]]
+            print(
+                f"escaped metadata packages: {', '.join(names)}",
+                file=sys.stderr,
+                flush=True,
             )
-        elif outcome.kind == "failed" and outcome.caught:
-            self.assertFalse(LINK_FINDING.is_file())
-            self.assertEqual(returned, names)
-            print("detector returned true", file=sys.stderr, flush=True)
-        else:
-            self.fail(f"escaped link outcome: {outcome.kind}")
+            grant_dir = next(
+                Path(package["manifest_path"]).resolve().parent
+                for package in parsed["packages"]
+                if package["name"] == "grant-binding"
+            )
+            self.assertEqual(grant_dir, (self.work / "grant-binding").resolve())
+            self.assertIn("grant-binding", names)
+            self.assertFalse(FINDING.is_file())
+            if outcome.kind == "passed":
+                document = live_escaped_document()
+                self.assertEqual(link_pin_line(), document.splitlines()[0])
+                self.assertEqual(returned, document)
+                self.assertEqual(LINK_FINDING.read_text(), returned)
+                self.assertEqual(LINK_FINDING.read_text().splitlines()[0], link_pin_line())
+                self.assertEqual(
+                    LINK_FINDING.read_text().splitlines()[2:],
+                    [
+                        "probe: test_escaped_path_dependency_matches_cargo",
+                        "observed: detector returned false",
+                        "cargo metadata package: grant-binding",
+                    ],
+                )
+            elif outcome.kind == "failed" and outcome.caught:
+                self.assertFalse(LINK_FINDING.is_file())
+                self.assertEqual(returned, names)
+                print("detector returned true", file=sys.stderr, flush=True)
+            else:
+                self.fail(f"escaped link outcome: {outcome.kind}")
+        finally:
+            if (
+                prior_finding is not None
+                and outcome.kind == "failed"
+                and outcome.caught
+                and not LINK_FINDING.is_file()
+            ):
+                LINK_FINDING.write_bytes(prior_finding)
+        if prior_finding is not None and outcome.kind == "failed" and outcome.caught:
+            self.assertEqual(LINK_FINDING.read_bytes(), prior_finding)
 
     def test_escaped_probe_errors_are_probe_errors(self):
         """Each metadata or link error is its own ProbeError and writes nothing.
