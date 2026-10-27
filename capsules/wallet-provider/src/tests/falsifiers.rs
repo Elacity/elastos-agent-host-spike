@@ -185,7 +185,9 @@ use std::process::Command;
 /// appends a write grant on `STORAGE_PARENT` to the stand-in's generated
 /// profile for did after the writer, so
 /// `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
-/// fails at did's launched-profile check and the suite never starts. Task 101's
+/// fails at did's launched-profile check, where `check_declared_rights` refuses
+/// the appended allow form because no declared right names it; the suite never
+/// starts. Task 101's
 /// WP128
 /// returns `did_provider_dir().join("target/debug/did-provider")` from the one
 /// build-output reader instead of the reported `executable`, so
@@ -207,11 +209,19 @@ use std::process::Command;
 /// into
 /// `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`,
 /// which reads the file the stand-in launched; WP133 appends one allow form the
-/// suite does not exercise to that file, and WP134 removes `(deny network*)`
-/// from it, so the journey fails at did's launched-profile check for each. The
-/// generator text test reads `generate_profile`'s own text and the suite runs
-/// neither change, so only the launched file's comparison catches them.
-const EXPECTED_FALSIFIERS: usize = 135;
+/// suite does not exercise to that file, so the journey fails at did's
+/// launched-profile check, where `check_declared_rights` refuses the appended
+/// allow form because no declared right names it; and WP134 removes
+/// `(deny network*)` from it, so the journey fails at that check, where
+/// `check_profile_contract` refuses the profile without its explicit network
+/// denial. Task 108 adds WP138, which appends
+/// `(deny file-write* (literal "/private/var/cc-confine-launched"))` to the file
+/// the stand-in launches after the writer; only `compare_profile_to_its_oracle`
+/// catches it, at did's launched-profile check, because the head keeps its
+/// order, the contract checks read only allow forms and no suite case reads
+/// that literal, so the journey fails at its launched profile and its oracle
+/// disagree panic, which names the planted form.
+const EXPECTED_FALSIFIERS: usize = 136;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
