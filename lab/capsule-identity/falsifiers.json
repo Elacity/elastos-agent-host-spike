@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025 and 023). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan or the claim scan of the lane's docs and code (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028 and 029). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code or the check of this list's inventory (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -3907,6 +3907,86 @@
       ],
       "tests": [
         "the_claim_scan_finds_a_claim_however_it_is_written"
+      ]
+    },
+    {
+      "id": "F-CI29a",
+      "title": "the inventory check drops (a), so a task with entries that about does not name passes",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "            found.push(format!(\n                \"task {task} has falsifiers but `about` does not name it\"\n            ));\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "the_falsifier_inventory_finds_each_mismatch"
+      ]
+    },
+    {
+      "id": "F-CI29b",
+      "title": "the inventory check drops (b), so a task about names with no entry passes",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "            found.push(format!(\"`about` names task {task}, which has no falsifier\"));\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "the_falsifier_inventory_finds_each_mismatch"
+      ]
+    },
+    {
+      "id": "F-CI29c",
+      "title": "the inventory check drops the count compare, so a stale README count passes",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        found.push(format!(\n            \"README says {count} planted bugs; the list holds {}\",\n            ids.len()\n        ));\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "the_falsifier_inventory_finds_each_mismatch"
+      ]
+    },
+    {
+      "id": "F-CI29d",
+      "title": "an id's task number is read from its first digit only, so F-CI27d reads as task 002",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    let task = format!(\"{number:0>3}\");\n",
+          "new": "    let task = format!(\"{:0>3}\", &number[..1]);\n"
+        }
+      ],
+      "tests": [
+        "the_falsifier_inventory_matches_the_list"
+      ]
+    },
+    {
+      "id": "F-CI29e",
+      "title": "an about with no (tasks ...) list reads as naming no task, not as a refusal",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        0 => return Err(\"`about` holds no \\\"(tasks ...)\\\" list\".to_owned()),\n",
+          "new": "        0 => return Ok(Vec::new()),\n"
+        }
+      ],
+      "tests": [
+        "the_falsifier_inventory_refuses_what_it_cannot_read"
       ]
     }
   ]
