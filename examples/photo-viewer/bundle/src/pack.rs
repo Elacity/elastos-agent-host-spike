@@ -6,6 +6,7 @@
 //! - `capsule.json`;
 //! - for a page (`execution: web-projection`), every file in the folder of its
 //!   entrypoint (for example all of `browser/`), which must not be the root;
+//! - for passive photo content, the entrypoint's `images/` folder;
 //! - for anything else, the entrypoint file alone (for example the built
 //!   `.component.wasm`).
 //!
@@ -34,7 +35,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::admit::{check_cid_form, parse_manifest};
+use crate::admit::{check_cid_form, parse_manifest, validate_content_stand_in};
 use crate::listing::{
     c_name, check_prefixes, check_segment, check_unique_under_case_folding, closure_cid, open_at,
     open_dir, open_in, open_regular_in, real_path, stat_at, walk_regular_files, Kind,
@@ -188,6 +189,33 @@ fn pack_inner(
         None => return Err(Refusal::ManifestMissing),
     };
     let mut manifest = parse_manifest(&manifest_bytes)?;
+    for (name, cid) in requires {
+        check_cid_form(cid)?;
+        if name.is_empty() {
+            return Err(Refusal::ClaimMalformed("a requirement with no name".into()));
+        }
+    }
+    if !requires.is_empty() {
+        let mut list: Vec<Value> = manifest
+            .get("requires")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for (name, cid) in requires {
+            list.retain(|requirement| {
+                requirement.get("name").and_then(Value::as_str) != Some(name)
+            });
+            list.push(json!({ "name": name, "kind": "capsule", "cid": cid }));
+        }
+        manifest["requires"] = Value::Array(list);
+    }
+    // This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    // Validate the final manifest, including command-line requirements,
+    // through the same profile owner used by dependency resolution.
+    let content = manifest["role"] == "content";
+    if content {
+        validate_content_stand_in(&manifest, "unpacked", &[])?;
+    }
     let entrypoint = manifest
         .get("entrypoint")
         .and_then(Value::as_str)
@@ -198,17 +226,12 @@ fn pack_inner(
     for segment in &segments {
         check_segment(segment)?;
     }
-    for (name, cid) in requires {
-        check_cid_form(cid)?;
-        if name.is_empty() {
-            return Err(Refusal::ClaimMalformed("a requirement with no name".into()));
-        }
-    }
     let into = check_destination(into)?;
 
     // What ships, as paths relative to the source.
     let mut files: Vec<String> = Vec::new();
-    if manifest.get("execution").and_then(Value::as_str) == Some("web-projection") {
+    // This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    if content || manifest.get("execution").and_then(Value::as_str) == Some("web-projection") {
         if segments.len() < 2 {
             return Err(Refusal::PackEntrypointMissing(format!(
                 "a page's entrypoint must be in a folder of its own, not {entrypoint}"
@@ -273,6 +296,10 @@ fn pack_inner(
             .filter(|file| *file != "capsule.json")
             .map(String::as_str),
     );
+    // This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    if content {
+        validate_content_stand_in(&manifest, "unpacked", &planned)?;
+    }
     check_unique_under_case_folding(planned)?;
     hook(Hook::Plan);
 
@@ -303,18 +330,6 @@ fn pack_inner(
     let shipped = if requires.is_empty() {
         manifest_bytes
     } else {
-        let mut list: Vec<Value> = manifest
-            .get("requires")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        for (name, cid) in requires {
-            list.retain(|requirement| {
-                requirement.get("name").and_then(Value::as_str) != Some(name)
-            });
-            list.push(json!({ "name": name, "kind": "capsule", "cid": cid }));
-        }
-        manifest["requires"] = Value::Array(list);
         let mut bytes = serde_json::to_vec_pretty(&manifest).expect("a manifest serializes");
         bytes.push(b'\n');
         bytes

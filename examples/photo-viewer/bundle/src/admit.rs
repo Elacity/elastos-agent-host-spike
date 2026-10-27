@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use semver::Version;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::listing::{cid_of, read_closure, Entry};
 use crate::{io, Refusal, SignedClaim, TrustPolicy};
@@ -180,17 +180,138 @@ pub fn load(store: &Path, cid: &str) -> Result<Loaded, Refusal> {
     })
 }
 
+// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+// Compile the kit's URI owner directly: this slice adds no dependency or copied rule.
+#[path = "../../../capsule-kit/guest/src/uri.rs"]
+mod stand_in_uri;
+
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// Optional closure identity for diagnostics. A bare manifest has no closure
+/// CID; callers with a packed/loaded closure pass `(&manifest, cid.as_str())`.
+/// This context supplies neither admission nor execution permission.
+pub struct StandInResolveManifest<'a> {
+    manifest: &'a Value,
+    cid: &'a str,
+}
+
+impl<'a> From<&'a Value> for StandInResolveManifest<'a> {
+    fn from(manifest: &'a Value) -> Self {
+        Self {
+            manifest,
+            cid: "unpacked",
+        }
+    }
+}
+
+impl<'a> From<(&'a Value, &'a str)> for StandInResolveManifest<'a> {
+    fn from((manifest, cid): (&'a Value, &'a str)) -> Self {
+        Self { manifest, cid }
+    }
+}
+
+/// This test code stands in for the Runtime's launch by CID, which does not exist yet.
+/// Validate the passive photo profile and normalize its viewer to one capsule
+/// requirement. `paths` is the planned or loaded listing, when available.
+/// Before packing, the diagnostic identity is `unpacked`.
+pub fn validate_content_stand_in(
+    manifest: &Value,
+    cid: &str,
+    paths: &[&str],
+) -> Result<Value, Refusal> {
+    let invalid = |detail: String| Refusal::ContentBindingInvalid {
+        cid: cid.to_string(),
+        detail,
+    };
+    let fields = manifest
+        .as_object()
+        .ok_or_else(|| invalid("manifest must be an object".into()))?;
+    if manifest["schema"] != "elastos.capsule/v1"
+        || manifest["role"] != "content"
+        || manifest["type"] != "data"
+    {
+        return Err(invalid(
+            "schema, role and type must describe passive photo content".into(),
+        ));
+    }
+    for field in fields.keys() {
+        if !matches!(
+            field.as_str(),
+            "schema"
+                | "name"
+                | "version"
+                | "description"
+                | "role"
+                | "type"
+                | "entrypoint"
+                | "viewer"
+        ) {
+            return Err(invalid(format!(
+                "field {field} is outside the passive photo profile"
+            )));
+        }
+    }
+    let entrypoint = manifest["entrypoint"].as_str().unwrap_or_default();
+    if entrypoint.rsplit_once('/').map(|(folder, _)| folder) != Some("images") {
+        return Err(invalid(
+            "entrypoint must name a regular file directly in images/".into(),
+        ));
+    }
+    for path in std::iter::once(entrypoint)
+        .chain(paths.iter().copied().filter(|path| *path != "capsule.json"))
+    {
+        stand_in_uri::check_object_uri(path, "images/")
+            .map_err(|reason| invalid(format!("{path}: {reason}")))?;
+    }
+    let viewer = &manifest["viewer"];
+    if viewer
+        .as_object()
+        .is_some_and(|fields| fields.keys().any(|field| field != "name" && field != "cid"))
+    {
+        return Err(invalid("viewer must have only name and cid".into()));
+    }
+    if viewer.is_string()
+        || viewer.is_null()
+        || viewer
+            .as_object()
+            .is_some_and(|fields| !fields.contains_key("cid"))
+    {
+        return Err(Refusal::ContentCoreUnpinned(cid.to_string()));
+    }
+    let viewer = viewer
+        .as_object()
+        .ok_or_else(|| invalid("viewer must be an object with only name and cid".into()))?;
+    if viewer.len() != 2 || !viewer.contains_key("name") || !viewer.contains_key("cid") {
+        return Err(invalid("viewer must have only name and cid".into()));
+    }
+    let name = viewer["name"]
+        .as_str()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| invalid("viewer.name must be a nonempty string".into()))?;
+    let viewer_cid = viewer["cid"]
+        .as_str()
+        .ok_or_else(|| invalid("viewer.cid must be a CID string".into()))?;
+    check_cid_form(viewer_cid).map_err(|_| invalid("viewer.cid must be a CID string".into()))?;
+    Ok(json!({ "name": name, "kind": "capsule", "cid": viewer_cid }))
+}
+
 /// The surface names its core by `requires[].cid` (review answer 7). A name
 /// alone never selects a capsule.
-pub fn resolve_requires(
-    manifest: &Value,
+pub fn resolve_requires<'a>(
+    source: impl Into<StandInResolveManifest<'a>>,
     installed: &[Installed],
 ) -> Result<Vec<Installed>, Refusal> {
-    let requires = manifest
-        .get("requires")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let source = source.into();
+    let manifest = source.manifest;
+    // This test code stands in for the Runtime's launch by CID, which does not exist yet.
+    let requires = if manifest["role"] == "content" {
+        vec![validate_content_stand_in(manifest, source.cid, &[])?]
+    } else {
+        manifest
+            .get("requires")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
     let mut cores = Vec::new();
     for requirement in requires
         .iter()
