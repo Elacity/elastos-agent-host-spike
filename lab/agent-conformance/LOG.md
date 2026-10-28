@@ -12630,3 +12630,251 @@ The supervisor gate, `cargo test --locked --manifest-path lab/agent-conformance/
 
 - Rerun: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.17 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` exit 0, real 278.67 seconds, inside the 600-second bound. Targets in order: lib 73 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0.
 - Proof after that rerun: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_lists_every_pending_request -- --exact` exit 0, 1 passed and 0 failed, real 0.10 seconds.
+
+## 079 — Record an approved use on the one audit list
+
+079: `record_use` appends one `capability_use` after `protected_write` or `protected_read` succeeds. `get_audit` answers `GET /api/audit`. A client is refused before that list is read. The list is newest first. `total_in_memory` counts every stored event before the type filter and before the limit. A refusal appends nothing. The lab event has no `token` key and no `token_id` key. The body has no `current_epoch` key. `standin_approved_use_is_on_the_audit_list` fails on each hand-run plant and passes when they are restored. A PASS gives the Runtime no A15 credit. `session_id` still equals the instance id.
+
+The spec check extends that test. It stores 1,001 events and asserts the default 100 and the maximum 1,000. It checks each refusal reason for both protected methods, and it checks that the stored bytes stay. It checks component-2's complete event and the `req-once` resource. The limit plant and the type plant are separate, and so are the two bound plants.
+
+### Quotes from the contract (read only)
+
+`docs/AGENT_ARCHITECTURE.md`, Request flow, step 9:
+
+```text
+9. Runtime dispatches an approved operation to the owning provider and records
+   the result in the same audit path used for a human action.
+```
+
+This task is that record for a protected use. It is not a grant, and it does not mint a token.
+
+`elastos/crates/elastos-runtime/src/primitives/audit.rs`, `AuditEvent::CapabilityUse` field names: `timestamp`, `token_id`, `capsule_id`, `resource`, `action`, `success`. The newest-first comments are `Returns the most recent limit events, newest first.` on `recent_events`, and `Returns the most recent events matching the filter, newest first.` on `recent_events_filtered`. `elastos/crates/elastos-server/src/api/handlers/capability.rs` says `List of audit events (newest first)`. The query names are `limit` (default 100, max 1000) and `type`. The handler body also has `current_epoch`. This stand-in does not copy that logger and does not write a file. The lab event therefore has no `token_id` and no `token` key. The lab body has no `current_epoch`.
+
+### Plants
+
+Each plant was applied alone. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_approved_use_is_on_the_audit_list -- --exact`. The planted crate compiled, and that test failed on its assertion. The file was restored before the next plant. Restored, that test passes. No `falsifiers.json` id. Panic lines are `src/../standin-runtime/mod.rs`.
+
+F-standin-audit-stub: the start of `get_audit` returns `Ok` of `{"events":[],"total_in_memory":0}` before the caller check. Failed at `src/../standin-runtime/mod.rs:11041:9`: `a client is refused before the store is read`, left `Ok` of `{"events":[],"total_in_memory":0}`, right `Err((403, "This endpoint requires shell privileges"))`.
+
+Old:
+
+```text
+    ) -> Result<Value, (u16, String)> {
+        require_shell(caller)?;
+```
+
+New:
+
+```text
+    ) -> Result<Value, (u16, String)> {
+        return Ok(json!({ "events": [], "total_in_memory": 0 }));
+        require_shell(caller)?;
+```
+
+F-standin-audit-before: the start of `protected_write` calls `record_use` and then continues, so the missing-grant write is listed. Failed at `src/../standin-runtime/mod.rs:11066:9`: `an unknown grant appends nothing`, left `total_in_memory` 1 with `request_id` `req-missing`, right `{"events":[],"total_in_memory":0}`.
+
+Old:
+
+```text
+    ) -> Result<String, (u16, String)> {
+        let resolved = self.resolve_protected_uri(instance_id, uri)?;
+```
+
+New:
+
+```text
+    ) -> Result<String, (u16, String)> {
+        self.record_use(request_id, instance_id, uri, "write");
+        let resolved = self.resolve_protected_uri(instance_id, uri)?;
+```
+
+F-standin-audit-guest: `record_use` stores the guest uri. The read still uses the resolved uri. Failed at `src/../standin-runtime/mod.rs:10888:9`: `the approved write records the resolved uri`, left resource `localhost://UsersAI/self/journal`, right resource `localhost://UsersAI/763281cf1e57227a6b99d89d/journal`.
+
+Old, the write call:
+
+```text
+        self.record_use(request_id, instance_id, &resolved, "write");
+```
+
+New, the write call:
+
+```text
+        self.record_use(request_id, instance_id, uri, "write");
+```
+
+Old, the read call:
+
+```text
+        self.record_use(request_id, instance_id, &resolved, "read");
+```
+
+New, the read call:
+
+```text
+        self.record_use(request_id, instance_id, uri, "read");
+```
+
+F-standin-audit-oldest: `get_audit` returns insertion order, so the write stays ahead of the later read. Failed at `src/../standin-runtime/mod.rs:10887:9`: `the later read is ahead of the earlier write`, left `request_id` `req-a` action `write`, right `request_id` `req-read` action `read`.
+
+Old:
+
+```text
+            .iter()
+            .rev()
+            .filter(|event| match event_type {
+```
+
+New:
+
+```text
+            .iter()
+            .filter(|event| match event_type {
+```
+
+F-standin-audit-clock: `record_use` stores `at` `0` for every event. Failed at `src/../standin-runtime/mod.rs:11216:9`: `the later write records the test instant`, left `0`, right `4`.
+
+Old:
+
+```text
+            event_type: "capability_use",
+            at: self.instant,
+```
+
+New:
+
+```text
+            event_type: "capability_use",
+            at: 0,
+```
+
+F-standin-audit-limit: `get_audit` ignores `limit` and still filters `type`. Failed at `src/../standin-runtime/mod.rs:11241:9`: `limit 1 keeps one event`, left `Some(4)`, right `Some(1)`.
+
+Old:
+
+```text
+                None => true,
+            })
+            .take(cap)
+            .map(audit_entry)
+```
+
+New:
+
+```text
+                None => true,
+            })
+            .map(audit_entry)
+```
+
+F-standin-audit-type: `get_audit` ignores `event_type` and still applies `limit`. Failed at `src/../standin-runtime/mod.rs:11276:9`: `a capsule_launch filter keeps no capability_use event`, left the four stored `capability_use` events, right `[]`.
+
+Old:
+
+```text
+            .filter(|event| match event_type {
+                Some(wanted) => event.event_type == wanted,
+                None => true,
+            })
+```
+
+New:
+
+```text
+            .filter(|_event| true)
+```
+
+F-standin-audit-default: `limit: None` returns every stored event. Failed at `src/../standin-runtime/mod.rs:11923:9`: `the default limit keeps 100 events`, left `Some(1001)`, right `Some(100)`.
+
+Old:
+
+```text
+            None => AUDIT_DEFAULT_LIMIT,
+```
+
+New:
+
+```text
+            None => self.audit.len(),
+```
+
+F-standin-audit-max: a limit above 1000 is not capped. Failed at `src/../standin-runtime/mod.rs:11939:9`: `a limit above 1000 keeps 1000 events`, left `Some(1001)`, right `Some(1000)`.
+
+Old:
+
+```text
+            Some(n) => n.min(AUDIT_MAX_LIMIT),
+```
+
+New:
+
+```text
+            Some(n) => n,
+```
+
+F-standin-audit-read-refusal: the start of `protected_read` calls `record_use` and then continues, so the absent read is listed. Failed at `src/../standin-runtime/mod.rs:11165:9`: `an absent read appends nothing`, left `2`, right `1`.
+
+Old:
+
+```text
+    ) -> Result<Vec<u8>, (u16, String)> {
+        let resolved = self.resolve_protected_uri(instance_id, uri)?;
+```
+
+New:
+
+```text
+    ) -> Result<Vec<u8>, (u16, String)> {
+        self.record_use(request_id, instance_id, uri, "read");
+        let resolved = self.resolve_protected_uri(instance_id, uri)?;
+```
+
+F-standin-audit-session: `record_use` stores `session_id` `component-1` for every event. Failed at `src/../standin-runtime/mod.rs:10888:9`: `component-2 records its own session and resource`, left `session_id` `component-1`, right `session_id` `component-2`.
+
+Old:
+
+```text
+            event_type: "capability_use",
+            at: self.instant,
+            request_id: request_id.to_owned(),
+            session_id: session_id.to_owned(),
+            resource: resource.to_owned(),
+```
+
+New:
+
+```text
+            event_type: "capability_use",
+            at: self.instant,
+            request_id: request_id.to_owned(),
+            session_id: "component-1".to_owned(),
+            resource: resource.to_owned(),
+```
+
+F-standin-audit-resource: `record_use` stores the previous event's resource. Failed at `src/../standin-runtime/mod.rs:10893:9`: `the once use records its own resource`, left the journal uri, right `localhost://UsersAI/763281cf1e57227a6b99d89d/once`.
+
+Old:
+
+```text
+    fn record_use(&mut self, request_id: &str, session_id: &str, resource: &str, action: &str) {
+        self.audit.push(AuditUse {
+```
+
+New:
+
+```text
+    fn record_use(&mut self, request_id: &str, session_id: &str, resource: &str, action: &str) {
+        let resource = self
+            .audit
+            .last()
+            .map(|event| event.resource.clone())
+            .unwrap_or_else(|| resource.to_owned());
+        self.audit.push(AuditUse {
+```
+
+### Gates
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.27 seconds. `RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 320.54 seconds, inside the 600-second bound. Targets in order: lib 74 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.27 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_approved_use_is_on_the_audit_list -- --exact` exit 0, 1 passed and 0 failed, real 0.28 seconds.
+
+Principles: `record_use` at `standin-runtime/mod.rs:909` is the one append. `protected_write` calls it at `:872` after the bytes are stored. `protected_read` calls it at `:900` after the bytes are found. `get_audit` at `:932` is `&self`. `require_shell` at `:938` refuses a client with `This endpoint requires shell privileges` (`:1491`) before `self.audit.len()` at `:939`. The list walks newest first at `:947`. `total_in_memory` is the store length before `take` at `:952`. The event resource is the resolved uri at `:915`. The body keys are `events` and `total_in_memory` at `:955`. A PASS gives the Runtime no A15 credit. `session_id` still equals the instance id.

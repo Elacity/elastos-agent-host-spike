@@ -46,6 +46,12 @@
 //! is every session's pending records, sorted by `session_id` then
 //! `request_id`. `expires_at` is `requested_at` plus `REQUEST_TIMEOUT_SECS`.
 //! The list does not grant and does not settle.
+//!
+//! `get_audit` answers `GET /api/audit` from one list. A client is refused
+//! before that list is read. `record_use` appends one `capability_use` after
+//! `protected_write` or `protected_read` succeeds. The list is newest first.
+//! A refusal appends nothing. The lab event has no token, and the body has
+//! no epoch.
 
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -57,6 +63,8 @@ const FAILED_KEEP_SECS: u64 = 60;
 const REQUEST_TIMEOUT_SECS: u64 = 300;
 const MAX_PENDING_REQUESTS: usize = 1024;
 const MAX_PENDING_PER_SESSION: usize = 32;
+const AUDIT_DEFAULT_LIMIT: usize = 100;
+const AUDIT_MAX_LIMIT: usize = 1000;
 
 /// Authenticated caller. A method argument, not a JSON field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,12 +153,23 @@ struct Request {
     settled_by: Option<&'static str>,
 }
 
+struct AuditUse {
+    event_type: &'static str,
+    at: u64,
+    request_id: String,
+    session_id: String,
+    resource: String,
+    action: String,
+    success: bool,
+}
+
 pub struct StandIn {
     grants: Vec<Grant>,
     requests: Vec<Request>,
     admitted: Vec<Admitted>,
     instances: Vec<Instance>,
     protected_objects: BTreeMap<String, Vec<u8>>,
+    audit: Vec<AuditUse>,
     next_id: u64,
     next_request: u64,
     instant: u64,
@@ -164,6 +183,7 @@ impl StandIn {
             admitted: Vec::new(),
             instances: Vec::new(),
             protected_objects: BTreeMap::new(),
+            audit: Vec::new(),
             next_id: 1,
             next_request: 1,
             instant: 0,
@@ -831,7 +851,7 @@ impl StandIn {
     ///
     /// Resolves the uri from the principal copied at launch, then the one
     /// authorise check for that uri and `write`. On `Ok` the bytes replace any
-    /// previous value at that exact uri.
+    /// previous value at that exact uri, then `record_use` appends one event.
     pub fn protected_write(
         &mut self,
         instance_id: &str,
@@ -849,6 +869,7 @@ impl StandIn {
         )?;
         self.protected_objects
             .insert(resolved.clone(), bytes.to_vec());
+        self.record_use(request_id, instance_id, &resolved, "write");
         Ok(resolved)
     }
 
@@ -856,6 +877,7 @@ impl StandIn {
     ///
     /// Resolves the uri from the principal copied at launch, then the one
     /// authorise check for that uri and `read`, then returns the stored bytes.
+    /// `record_use` appends one event after those bytes are found.
     pub fn protected_read(
         &mut self,
         instance_id: &str,
@@ -870,10 +892,70 @@ impl StandIn {
             request_id,
             Some((uri, "read")),
         )?;
-        self.protected_objects
+        let stored = self
+            .protected_objects
             .get(&resolved)
             .cloned()
-            .ok_or_else(|| (404, "protected object is absent".to_owned()))
+            .ok_or_else(|| (404, "protected object is absent".to_owned()))?;
+        self.record_use(request_id, instance_id, &resolved, "read");
+        Ok(stored)
+    }
+
+    /// Appends one approved use and returns nothing.
+    ///
+    /// `protected_write` and `protected_read` are the only callers, and each
+    /// calls this once after the bytes are stored or found. `at` is the test
+    /// instant. The resource is the resolved uri.
+    fn record_use(&mut self, request_id: &str, session_id: &str, resource: &str, action: &str) {
+        self.audit.push(AuditUse {
+            event_type: "capability_use",
+            at: self.instant,
+            request_id: request_id.to_owned(),
+            session_id: session_id.to_owned(),
+            resource: resource.to_owned(),
+            action: action.to_owned(),
+            success: true,
+        });
+    }
+
+    /// `GET /api/audit`.
+    ///
+    /// The shell receives the one audit list, newest first. A client is status
+    /// 403 with `This endpoint requires shell privileges`, and that check runs
+    /// before the store is read. The body's only keys are `events` and
+    /// `total_in_memory`. `total_in_memory` counts every stored event before
+    /// the type filter and before the limit. `limit: None` keeps at most 100
+    /// events. A limit above 1000 keeps at most 1000. `limit: Some(0)` keeps
+    /// none. An event's keys are `type`, `at`, `request_id`, `session_id`,
+    /// `resource`, `action` and `success`. There is no token and the body has
+    /// no epoch. This method does not change the store.
+    pub fn get_audit(
+        &self,
+        caller: Caller<'_>,
+        limit: Option<usize>,
+        event_type: Option<&str>,
+    ) -> Result<Value, (u16, String)> {
+        require_shell(caller)?;
+        let total_in_memory = self.audit.len();
+        let cap = match limit {
+            None => AUDIT_DEFAULT_LIMIT,
+            Some(n) => n.min(AUDIT_MAX_LIMIT),
+        };
+        let events = self
+            .audit
+            .iter()
+            .rev()
+            .filter(|event| match event_type {
+                Some(wanted) => event.event_type == wanted,
+                None => true,
+            })
+            .take(cap)
+            .map(audit_entry)
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "events": events,
+            "total_in_memory": total_in_memory,
+        }))
     }
 
     /// The one resolver for `Users/self` and `UsersAI/self`.
@@ -1368,6 +1450,18 @@ fn request_expires_at(requested_at: u64) -> u64 {
     requested_at.saturating_add(REQUEST_TIMEOUT_SECS)
 }
 
+fn audit_entry(event: &AuditUse) -> Value {
+    json!({
+        "type": event.event_type,
+        "at": event.at,
+        "request_id": event.request_id,
+        "session_id": event.session_id,
+        "resource": event.resource,
+        "action": event.action,
+        "success": event.success,
+    })
+}
+
 fn pending_entry(request: &Request) -> Value {
     json!({
         "request_id": request.request_id,
@@ -1798,7 +1892,7 @@ fn bridge_error(message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn keys(value: &Value) -> BTreeSet<String> {
         value
@@ -10746,6 +10840,1160 @@ mod tests {
             "running",
             "",
             "the stand-in did the work: component-2 stays running",
+        );
+    }
+
+    fn shell_audit(standin: &StandIn, limit: Option<usize>, event_type: Option<&str>) -> Value {
+        let body = standin
+            .get_audit(Caller::Shell, limit, event_type)
+            .expect("the stand-in did the work: the shell reads the audit list");
+        assert_keys(
+            &body,
+            &["events", "total_in_memory"],
+            "the stand-in did the work: the audit body's only keys are events and total_in_memory",
+        );
+        body
+    }
+
+    fn audit_total(standin: &StandIn) -> u64 {
+        shell_audit(standin, None, None)["total_in_memory"]
+            .as_u64()
+            .expect("the stand-in did the work: total_in_memory is a count")
+    }
+
+    fn assert_capability_use(
+        event: &Value,
+        at: u64,
+        request_id: &str,
+        session_id: &str,
+        resource: &str,
+        action: &str,
+        message: &str,
+    ) {
+        assert_keys(
+            event,
+            &[
+                "action",
+                "at",
+                "request_id",
+                "resource",
+                "session_id",
+                "success",
+                "type",
+            ],
+            &format!(
+                "the stand-in did the work: {message} has type, at, request_id, session_id, resource, action and success"
+            ),
+        );
+        assert_eq!(
+            event,
+            &json!({
+                "type": "capability_use",
+                "at": at,
+                "request_id": request_id,
+                "session_id": session_id,
+                "resource": resource,
+                "action": action,
+                "success": true,
+            }),
+            "the stand-in did the work: {message}"
+        );
+    }
+
+    fn refusal<T>(result: Result<T, (u16, String)>) -> Result<(), (u16, String)> {
+        result.map(|_| ())
+    }
+
+    fn kept_refusal(
+        standin: &StandIn,
+        kept: &BTreeMap<String, Vec<u8>>,
+        total: u64,
+        result: Result<(), (u16, String)>,
+        status: u16,
+        reason: &str,
+        message: &str,
+    ) {
+        assert_eq!(
+            result,
+            Err((status, reason.to_owned())),
+            "the stand-in did the work: {message}"
+        );
+        assert_eq!(
+            &standin.protected_objects, kept,
+            "the stand-in did the work: {message} leaves the stored bytes"
+        );
+        assert_eq!(
+            audit_total(standin),
+            total,
+            "the stand-in did the work: {message} appends nothing"
+        );
+    }
+
+    macro_rules! refuse {
+        ($standin:ident, $kept:ident, $total:expr, $call:expr, $status:expr, $reason:expr, $message:expr) => {{
+            let result = refusal($call);
+            kept_refusal(
+                &$standin, &$kept, $total, result, $status, $reason, $message,
+            );
+        }};
+    }
+
+    #[test]
+    fn standin_approved_use_is_on_the_audit_list() {
+        let digest_a_hex = crate::identity::sha256(b"agent-ada");
+        let digest_b_hex = crate::identity::sha256(b"agent-bob");
+        let digest_a = &digest_a_hex[..24];
+        let digest_b = &digest_b_hex[..24];
+        let resolved = format!("localhost://UsersAI/{digest_a}/journal");
+        let resolved_b = format!("localhost://UsersAI/{digest_b}/journal");
+        let once_resolved = format!("localhost://UsersAI/{digest_a}/once");
+        let guest = "localhost://UsersAI/self/journal";
+        let once_guest = "localhost://UsersAI/self/once";
+        let dot_guest = "localhost://UsersAI/self/../journal";
+        let other_guest = "localhost://UsersAI/self/other";
+        let users_guest = "localhost://Users/someone/journal";
+        let public_guest = "localhost://Public/note";
+        let missing_guest = "localhost://UsersAI/self/missing";
+        let usersai_reason = "UsersAI roots must use UsersAI/self";
+        let users_reason =
+            "localhost://Users roots must use Users/self or the active principal root";
+        let needs_reason = "protected storage needs a Users/self or UsersAI/self resource";
+        let principal_reason = "requires the principal from the verified launch";
+        let dot_reason = "protected path rejects ..";
+        let wrong_action_read = "wrong action: expected write, got read";
+        let wrong_action_write = "wrong action: expected read, got write";
+        let wrong_resource = "wrong resource: expected localhost://UsersAI/self/journal, got localhost://UsersAI/self/other";
+        let wrong_capsule = "wrong capsule: expected component-1, got component-2";
+
+        let mut standin = StandIn::new();
+        standin
+            .admit_resident("/capsules/journal-a", "journal-a", Start::Ok)
+            .expect("the stand-in admits journal-a");
+        standin
+            .admit_resident("/capsules/journal-b", "journal-b", Start::Ok)
+            .expect("the stand-in admits journal-b");
+        assert_eq!(
+            standin.bind_verified_principal("/capsules/journal-a", "agent-ada"),
+            Ok(()),
+            "the stand-in did the work: journal-a binds agent-ada"
+        );
+        assert_eq!(
+            standin.bind_verified_principal("/capsules/journal-b", "agent-bob"),
+            Ok(()),
+            "the stand-in did the work: journal-b binds agent-bob"
+        );
+        let launch_a = standin
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/journal-a"}))
+            .expect("the stand-in launches journal-a");
+        assert_eq!(
+            launch_a,
+            json!({
+                "id": "component-1",
+                "name": "journal-a",
+                "status": "starting",
+                "session_id": "component-1",
+            }),
+            "the stand-in did the work: component-1 session_id equals its id"
+        );
+        let launch_b = standin
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/journal-b"}))
+            .expect("the stand-in launches journal-b");
+        assert_eq!(
+            launch_b,
+            json!({
+                "id": "component-2",
+                "name": "journal-b",
+                "status": "starting",
+                "session_id": "component-2",
+            }),
+            "the stand-in did the work: component-2 session_id equals its id"
+        );
+        standin
+            .finish_start("component-1")
+            .expect("the stand-in finishes component-1");
+        standin
+            .finish_start("component-2")
+            .expect("the stand-in finishes component-2");
+        assert_named_capsule(
+            &standin,
+            "component-1",
+            "journal-a",
+            "running",
+            "",
+            "component-1 is running",
+        );
+        assert_named_capsule(
+            &standin,
+            "component-2",
+            "journal-b",
+            "running",
+            "",
+            "component-2 is running",
+        );
+
+        let empty = json!({ "events": [], "total_in_memory": 0 });
+        assert_eq!(
+            shell_audit(&standin, None, None),
+            empty,
+            "the stand-in did the work: the shell audit list starts empty"
+        );
+        assert_eq!(
+            standin.get_audit(
+                Caller::Client {
+                    session_id: "component-1",
+                },
+                None,
+                None,
+            ),
+            Err((403, "This endpoint requires shell privileges".to_owned())),
+            "the stand-in did the work: a client is refused before the store is read"
+        );
+        assert_eq!(
+            shell_audit(&standin, None, None),
+            empty,
+            "the stand-in did the work: a client refusal leaves the shell list empty"
+        );
+        assert_eq!(
+            standin.protected_write("component-1", "req-missing", guest, b"nope"),
+            Err((400, "unknown grant: req-missing".to_owned())),
+            "the stand-in did the work: an unknown grant cannot write"
+        );
+        assert!(
+            standin.protected_objects.is_empty(),
+            "the stand-in did the work: an unknown grant stores nothing"
+        );
+        assert_eq!(
+            shell_audit(&standin, None, None),
+            empty,
+            "the stand-in did the work: an unknown grant appends nothing"
+        );
+
+        standin.seed_grant(
+            "req-a",
+            "component-1",
+            guest,
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-read",
+            "component-1",
+            guest,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-b",
+            "component-2",
+            guest,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        assert_eq!(
+            standin.authorise(
+                Caller::Client {
+                    session_id: "component-1",
+                },
+                "req-a",
+            ),
+            Ok(()),
+            "the stand-in did the work: the owning client is authorised"
+        );
+        assert_eq!(
+            shell_audit(&standin, None, None),
+            empty,
+            "the stand-in did the work: authorise appends nothing"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-a"),
+            (Life::Live, false),
+            "the stand-in did the work: authorise leaves a session grant live"
+        );
+
+        let wrote = standin
+            .protected_write("component-1", "req-a", guest, b"journal-v1")
+            .expect("the stand-in did the work: the approved write is stored");
+        assert_eq!(
+            wrote, resolved,
+            "the stand-in did the work: the approved write returns the resolved uri"
+        );
+        assert!(
+            !wrote.contains("agent-ada") && !wrote.contains("/self"),
+            "the stand-in did the work: the resolved uri hides the principal and /self"
+        );
+        let listed = shell_audit(&standin, None, None);
+        assert_eq!(
+            listed["total_in_memory"],
+            json!(1),
+            "the stand-in did the work: one approved write is one stored event"
+        );
+        assert_eq!(
+            listed["events"].as_array().map(Vec::len),
+            Some(1),
+            "the stand-in did the work: the shell list has one event"
+        );
+        assert_capability_use(
+            &listed["events"][0],
+            0,
+            "req-a",
+            "component-1",
+            &resolved,
+            "write",
+            "the approved write records the resolved uri",
+        );
+
+        assert_eq!(
+            standin.protected_read("component-2", "req-b", guest),
+            Err((404, "protected object is absent".to_owned())),
+            "the stand-in did the work: the sibling root has no journal"
+        );
+        assert_eq!(
+            standin.protected_objects.get(&resolved),
+            Some(&b"journal-v1".to_vec()),
+            "the stand-in did the work: an absent read leaves the stored bytes"
+        );
+        assert_eq!(
+            audit_total(&standin),
+            1,
+            "the stand-in did the work: an absent read appends nothing"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-read", guest),
+            Ok(b"journal-v1".to_vec()),
+            "the stand-in did the work: the owner reads the stored journal"
+        );
+        let two = shell_audit(&standin, None, None);
+        assert_eq!(
+            two["total_in_memory"],
+            json!(2),
+            "the stand-in did the work: the approved read is the second stored event"
+        );
+        assert_capability_use(
+            &two["events"][0],
+            0,
+            "req-read",
+            "component-1",
+            &resolved,
+            "read",
+            "the later read is ahead of the earlier write",
+        );
+        assert_capability_use(
+            &two["events"][1],
+            0,
+            "req-a",
+            "component-1",
+            &resolved,
+            "write",
+            "the earlier write follows the later read",
+        );
+        assert_eq!(
+            shell_audit(&standin, None, None),
+            two,
+            "the stand-in did the work: a second shell read returns the same body"
+        );
+
+        standin.set_instant(4);
+        assert_eq!(
+            standin.protected_write("component-1", "req-a", guest, b"journal-v2"),
+            Ok(resolved.clone()),
+            "the stand-in did the work: the later write returns the same resolved uri"
+        );
+        let three = shell_audit(&standin, None, None);
+        assert_eq!(
+            three["total_in_memory"],
+            json!(3),
+            "the stand-in did the work: the later write is the third stored event"
+        );
+        assert_eq!(
+            three["events"][0]["at"],
+            json!(4),
+            "the stand-in did the work: the later write records the test instant"
+        );
+        assert_eq!(
+            three["events"][0]["action"],
+            json!("write"),
+            "the stand-in did the work: the later event is a write"
+        );
+        assert_eq!(
+            three["events"][0]["request_id"],
+            json!("req-a"),
+            "the stand-in did the work: the later write keeps its request id"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-read", guest),
+            Ok(b"journal-v2".to_vec()),
+            "the stand-in did the work: the owner reads the later journal"
+        );
+        let one = shell_audit(&standin, Some(1), None);
+        assert_eq!(
+            one["total_in_memory"],
+            json!(4),
+            "the stand-in did the work: limit 1 leaves the stored count"
+        );
+        assert_eq!(
+            one["events"].as_array().map(Vec::len),
+            Some(1),
+            "the stand-in did the work: limit 1 keeps one event"
+        );
+        assert_capability_use(
+            &one["events"][0],
+            4,
+            "req-read",
+            "component-1",
+            &resolved,
+            "read",
+            "limit 1 keeps the newest read",
+        );
+        let none = shell_audit(&standin, Some(0), None);
+        assert_eq!(
+            none["events"],
+            json!([]),
+            "the stand-in did the work: limit 0 keeps no event"
+        );
+        assert_eq!(
+            none["total_in_memory"],
+            json!(4),
+            "the stand-in did the work: limit 0 leaves the stored count"
+        );
+        let typed = shell_audit(&standin, Some(1001), Some("capability_use"));
+        assert_eq!(
+            typed["events"].as_array().map(Vec::len),
+            Some(4),
+            "the stand-in did the work: a high limit keeps every capability_use event"
+        );
+        assert_eq!(
+            typed["total_in_memory"],
+            json!(4),
+            "the stand-in did the work: a type filter leaves the stored count"
+        );
+        let other_type = shell_audit(&standin, None, Some("capsule_launch"));
+        assert_eq!(
+            other_type["events"],
+            json!([]),
+            "the stand-in did the work: a capsule_launch filter keeps no capability_use event"
+        );
+        assert_eq!(
+            other_type["total_in_memory"],
+            json!(4),
+            "the stand-in did the work: an empty type filter leaves the stored count"
+        );
+
+        assert_eq!(
+            standin.protected_write("component-9", "req-a", guest, b"other"),
+            Err((400, "unknown instance: component-9".to_owned())),
+            "the stand-in did the work: an unknown instance cannot write"
+        );
+        assert_eq!(
+            standin.protected_objects.get(&resolved),
+            Some(&b"journal-v2".to_vec()),
+            "the stand-in did the work: an unknown instance leaves the stored bytes"
+        );
+        assert_eq!(
+            audit_total(&standin),
+            4,
+            "the stand-in did the work: an unknown instance appends nothing"
+        );
+
+        standin.seed_grant(
+            "req-once",
+            "component-1",
+            once_guest,
+            "write",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        assert_eq!(
+            standin.protected_write("component-1", "req-once", once_guest, b"once-v1"),
+            Ok(once_resolved.clone()),
+            "the stand-in did the work: the once write returns its resolved uri"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: the once grant is exhausted"
+        );
+        assert_eq!(
+            audit_total(&standin),
+            5,
+            "the stand-in did the work: the once write is the fifth stored event"
+        );
+        assert_eq!(
+            standin.protected_write("component-1", "req-once", once_guest, b"once-v2"),
+            Err((400, "grant is not live: Exhausted".to_owned())),
+            "the stand-in did the work: an exhausted grant cannot write"
+        );
+        assert_eq!(
+            standin.protected_objects.get(&once_resolved),
+            Some(&b"once-v1".to_vec()),
+            "the stand-in did the work: an exhausted grant leaves the stored bytes"
+        );
+        assert_eq!(
+            audit_total(&standin),
+            5,
+            "the stand-in did the work: an exhausted grant appends nothing"
+        );
+        assert_named_capsule(
+            &standin,
+            "component-1",
+            "journal-a",
+            "running",
+            "",
+            "component-1 stays running",
+        );
+        assert_named_capsule(
+            &standin,
+            "component-2",
+            "journal-b",
+            "running",
+            "",
+            "component-2 stays running",
+        );
+
+        let five = shell_audit(&standin, None, None);
+        assert_capability_use(
+            &five["events"][0],
+            4,
+            "req-once",
+            "component-1",
+            &once_resolved,
+            "write",
+            "the once use records its own resource",
+        );
+        standin.seed_grant(
+            "req-b-write",
+            "component-2",
+            guest,
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        assert_eq!(
+            standin.protected_write("component-2", "req-b-write", guest, b"bob-v1"),
+            Ok(resolved_b.clone()),
+            "the stand-in did the work: component-2 stores under its own principal"
+        );
+        assert!(
+            !resolved_b.contains("agent-bob") && !resolved_b.contains("/self"),
+            "the stand-in did the work: component-2's resolved uri hides the principal and /self"
+        );
+        let six = shell_audit(&standin, None, None);
+        assert_eq!(
+            six["total_in_memory"],
+            json!(6),
+            "the stand-in did the work: component-2's write is the sixth stored event"
+        );
+        assert_capability_use(
+            &six["events"][0],
+            4,
+            "req-b-write",
+            "component-2",
+            &resolved_b,
+            "write",
+            "component-2 records its own session and resource",
+        );
+        assert_capability_use(
+            &six["events"][1],
+            4,
+            "req-once",
+            "component-1",
+            &once_resolved,
+            "write",
+            "the once resource stays on its event",
+        );
+
+        standin
+            .admit_resident("/capsules/journal-stop", "journal-stop", Start::Ok)
+            .expect("the stand-in admits journal-stop");
+        standin
+            .bind_verified_principal("/capsules/journal-stop", "agent-stop")
+            .expect("the stand-in binds agent-stop");
+        let launch_stop = standin
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/journal-stop"}))
+            .expect("the stand-in launches journal-stop");
+        assert_eq!(
+            launch_stop["id"], "component-3",
+            "the stand-in did the work: the stopped instance is component-3"
+        );
+        standin
+            .finish_start("component-3")
+            .expect("the stand-in finishes component-3");
+        standin
+            .delete_capsule(Caller::Shell, "component-3", &stop_body())
+            .expect("the stand-in stops component-3");
+        standin.seed_grant(
+            "req-stop",
+            "component-3",
+            guest,
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin
+            .admit_resident(
+                "/capsules/journal-fail",
+                "journal-fail",
+                Start::Error("start refused".to_owned()),
+            )
+            .expect("the stand-in admits journal-fail");
+        standin
+            .bind_verified_principal("/capsules/journal-fail", "agent-fail")
+            .expect("the stand-in binds agent-fail");
+        let launch_fail = standin
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/journal-fail"}))
+            .expect("the stand-in launches journal-fail");
+        assert_eq!(
+            launch_fail["id"], "component-4",
+            "the stand-in did the work: the failed instance is component-4"
+        );
+        standin
+            .finish_start("component-4")
+            .expect("the stand-in finishes component-4");
+        standin.seed_grant(
+            "req-fail",
+            "component-4",
+            guest,
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin
+            .admit_resident("/capsules/journal-plain", "journal-plain", Start::Ok)
+            .expect("the stand-in admits journal-plain");
+        let launch_plain = standin
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/journal-plain"}))
+            .expect("the stand-in launches journal-plain");
+        assert_eq!(
+            launch_plain["id"], "component-5",
+            "the stand-in did the work: the unbound instance is component-5"
+        );
+        standin
+            .finish_start("component-5")
+            .expect("the stand-in finishes component-5");
+        standin.seed_grant(
+            "req-plain",
+            "component-5",
+            guest,
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-revoked",
+            "component-1",
+            guest,
+            "write",
+            "session",
+            1,
+            Life::Revoked,
+            false,
+        );
+        standin.seed_grant(
+            "req-expired",
+            "component-1",
+            guest,
+            "write",
+            "session",
+            1,
+            Life::Expired,
+            false,
+        );
+        standin.seed_grant(
+            "req-absent",
+            "component-1",
+            missing_guest,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        assert_named_capsule(
+            &standin,
+            "component-3",
+            "journal-stop",
+            "stopped",
+            "stopped: stop one",
+            "component-3 is stopped",
+        );
+        assert_named_capsule(
+            &standin,
+            "component-4",
+            "journal-fail",
+            "failed",
+            "start refused",
+            "component-4 is failed",
+        );
+        assert_named_capsule(
+            &standin,
+            "component-1",
+            "journal-a",
+            "running",
+            "",
+            "component-1 stays running after the other instances",
+        );
+        assert_named_capsule(
+            &standin,
+            "component-2",
+            "journal-b",
+            "running",
+            "",
+            "component-2 stays running after the other instances",
+        );
+
+        let total = audit_total(&standin);
+        assert_eq!(
+            total, 6,
+            "the stand-in did the work: preparing a refusal appends nothing"
+        );
+        let kept = standin.protected_objects.clone();
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_write("component-3", "req-stop", guest, b"stop"),
+            400,
+            "instance is not live: stopped",
+            "a stopped instance cannot write"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_read("component-3", "req-stop", guest),
+            400,
+            "instance is not live: stopped",
+            "a stopped instance cannot read"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_write("component-4", "req-fail", guest, b"fail"),
+            400,
+            "instance is not live: failed",
+            "a failed instance cannot write"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_read("component-4", "req-fail", guest),
+            400,
+            "instance is not live: failed",
+            "a failed instance cannot read"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_write("component-1", "req-a", dot_guest, b"dot"),
+            400,
+            dot_reason,
+            "a .. write is refused"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_read("component-1", "req-read", dot_guest),
+            400,
+            dot_reason,
+            "a .. read is refused"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_write("component-1", "req-a", &resolved, b"root"),
+            400,
+            usersai_reason,
+            "an explicit UsersAI root cannot write"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_read("component-1", "req-read", &resolved),
+            400,
+            usersai_reason,
+            "an explicit UsersAI root cannot read"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_write("component-1", "req-a", users_guest, b"root"),
+            400,
+            users_reason,
+            "another Users root cannot write"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_read("component-1", "req-read", users_guest),
+            400,
+            users_reason,
+            "another Users root cannot read"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_write("component-1", "req-a", public_guest, b"root"),
+            400,
+            needs_reason,
+            "a resource outside Users cannot write"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_read("component-1", "req-read", public_guest),
+            400,
+            needs_reason,
+            "a resource outside Users cannot read"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_write("component-5", "req-plain", guest, b"plain"),
+            400,
+            principal_reason,
+            "an unbound instance cannot write"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_read("component-5", "req-plain", guest),
+            400,
+            principal_reason,
+            "an unbound instance cannot read"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_read("component-9", "req-read", guest),
+            400,
+            "unknown instance: component-9",
+            "an unknown instance cannot read"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_read("component-1", "req-missing", guest),
+            400,
+            "unknown grant: req-missing",
+            "an unknown grant cannot read"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_write("component-1", "req-revoked", guest, b"revoked"),
+            400,
+            "grant is not live: Revoked",
+            "a revoked grant cannot write"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_read("component-1", "req-revoked", guest),
+            400,
+            "grant is not live: Revoked",
+            "a revoked grant cannot read"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_write("component-1", "req-expired", guest, b"expired"),
+            400,
+            "grant is not live: Expired",
+            "an expired grant cannot write"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_read("component-1", "req-expired", guest),
+            400,
+            "grant is not live: Expired",
+            "an expired grant cannot read"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_write("component-2", "req-a", guest, b"stolen"),
+            403,
+            wrong_capsule,
+            "a sibling cannot write with component-1's grant"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_read("component-2", "req-read", guest),
+            403,
+            wrong_capsule,
+            "a sibling cannot read with component-1's grant"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_read("component-1", "req-a", guest),
+            403,
+            wrong_action_read,
+            "a write grant cannot read"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_write("component-1", "req-read", guest, b"nope"),
+            403,
+            wrong_action_write,
+            "a read grant cannot write"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_write("component-1", "req-a", other_guest, b"other"),
+            403,
+            wrong_resource,
+            "a journal grant cannot write another path"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_read("component-1", "req-read", other_guest),
+            403,
+            wrong_resource,
+            "a journal grant cannot read another path"
+        );
+        refuse!(
+            standin,
+            kept,
+            total,
+            standin.protected_read("component-1", "req-absent", missing_guest),
+            404,
+            "protected object is absent",
+            "an absent object cannot be read"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-a"),
+            (Life::Live, false),
+            "the stand-in did the work: a refusal spends nothing"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-read"),
+            (Life::Live, false),
+            "the stand-in did the work: a refused read spends nothing"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-stop"),
+            (Life::Live, false),
+            "the stand-in did the work: a stopped instance spends nothing"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-fail"),
+            (Life::Live, false),
+            "the stand-in did the work: a failed instance spends nothing"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: the exhausted once grant stays exhausted"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-b-write"),
+            (Life::Live, false),
+            "the stand-in did the work: component-2's session grant stays live"
+        );
+
+        standin.seed_grant(
+            "req-read-once",
+            "component-1",
+            guest,
+            "read",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-read-once", guest),
+            Ok(b"journal-v2".to_vec()),
+            "the stand-in did the work: the first read of a once grant returns the journal"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-read-once"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: the once read is spent"
+        );
+        let once_read = shell_audit(&standin, Some(1), None);
+        assert_eq!(
+            once_read["total_in_memory"],
+            json!(total + 1),
+            "the stand-in did the work: the once read is recorded"
+        );
+        assert_capability_use(
+            &once_read["events"][0],
+            4,
+            "req-read-once",
+            "component-1",
+            &resolved,
+            "read",
+            "the once read records the resolved uri",
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-read-once", guest),
+            Err((400, "grant is not live: Exhausted".to_owned())),
+            "the stand-in did the work: a second once read is refused"
+        );
+        assert_eq!(
+            shell_audit(&standin, Some(1), None),
+            once_read,
+            "the stand-in did the work: an exhausted read appends nothing"
+        );
+        assert_eq!(
+            &standin.protected_objects, &kept,
+            "the stand-in did the work: an exhausted read leaves the stored bytes"
+        );
+
+        while standin.audit.len() < 1000 {
+            standin
+                .protected_write("component-1", "req-a", guest, b"fill")
+                .expect("the stand-in did the work: a session grant fills the audit list");
+        }
+        standin.seed_grant(
+            "req-tail",
+            "component-1",
+            guest,
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        assert_eq!(
+            standin.protected_write("component-1", "req-tail", guest, b"tail"),
+            Ok(resolved.clone()),
+            "the stand-in did the work: the newest use returns the resolved uri"
+        );
+        assert_eq!(
+            standin.audit.len(),
+            1001,
+            "the stand-in did the work: the audit list holds 1001 events"
+        );
+        let default_list = shell_audit(&standin, None, None);
+        assert_eq!(
+            default_list["total_in_memory"],
+            json!(1001),
+            "the stand-in did the work: the default read counts every stored event"
+        );
+        assert_eq!(
+            default_list["events"].as_array().map(Vec::len),
+            Some(100),
+            "the stand-in did the work: the default limit keeps 100 events"
+        );
+        assert_eq!(
+            default_list["events"][0]["request_id"],
+            json!("req-tail"),
+            "the stand-in did the work: the default window starts with the newest use"
+        );
+        let max_list = shell_audit(&standin, Some(1001), None);
+        assert_eq!(
+            max_list["total_in_memory"],
+            json!(1001),
+            "the stand-in did the work: a limit above 1000 counts every stored event"
+        );
+        assert_eq!(
+            max_list["events"].as_array().map(Vec::len),
+            Some(1000),
+            "the stand-in did the work: a limit above 1000 keeps 1000 events"
+        );
+        assert_eq!(
+            max_list["events"][0]["request_id"],
+            json!("req-tail"),
+            "the stand-in did the work: the maximum window starts with the newest use"
+        );
+        let max_typed = shell_audit(&standin, Some(1001), Some("capability_use"));
+        assert_eq!(
+            max_typed["events"].as_array().map(Vec::len),
+            Some(1000),
+            "the stand-in did the work: the capability_use filter keeps the maximum window"
+        );
+        assert_eq!(
+            max_typed["total_in_memory"],
+            json!(1001),
+            "the stand-in did the work: the capability_use filter leaves the stored count"
+        );
+        let missed = shell_audit(&standin, None, Some("capsule_launch"));
+        assert_eq!(
+            missed["events"],
+            json!([]),
+            "the stand-in did the work: a capsule_launch filter keeps no event from a long list"
+        );
+        assert_eq!(
+            missed["total_in_memory"],
+            json!(1001),
+            "the stand-in did the work: a capsule_launch filter leaves the long stored count"
+        );
+        let zero = shell_audit(&standin, Some(0), None);
+        assert_eq!(
+            zero["events"],
+            json!([]),
+            "the stand-in did the work: limit 0 keeps no event when the list is long"
+        );
+        assert_eq!(
+            zero["total_in_memory"],
+            json!(1001),
+            "the stand-in did the work: limit 0 leaves the long stored count"
+        );
+        assert_named_capsule(
+            &standin,
+            "component-1",
+            "journal-a",
+            "running",
+            "",
+            "component-1 stays running after the audit fill",
+        );
+        assert_named_capsule(
+            &standin,
+            "component-2",
+            "journal-b",
+            "running",
+            "",
+            "component-2 stays running after the audit fill",
         );
     }
 }

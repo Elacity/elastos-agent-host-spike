@@ -72,6 +72,8 @@ After one instance has ended, `post_capability_grant` of the survivor's pending 
 
 `StandIn::get_capability_pending` answers `GET /api/capability/pending`. A client is refused. The list is the pending records of every session, sorted by `session_id` then `request_id`. `expires_at` is `requested_at` plus `REQUEST_TIMEOUT_SECS`. The list does not grant and does not settle. `get_capability_requests` stays the per-session record. A PASS gives the Runtime no A15 credit. `session_id` still equals the instance id.
 
+`StandIn::get_audit` answers `GET /api/audit`. A client is refused. `record_use` appends one `capability_use` after `protected_write` or `protected_read` succeeds. The list is newest first. `total_in_memory` counts every stored event. A refusal appends nothing. The lab event has no token, and the body has no epoch. A PASS gives the Runtime no A15 credit. `session_id` still equals the instance id.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.
