@@ -1202,6 +1202,121 @@ fn model_forged_child_journal_does_not_move_the_use_grant() {
 }
 
 #[test]
+fn model_forged_overwrite_does_not_move_the_use_grant() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_overwrite);
+    let decision = verifier
+        .use_grant(call, &request)
+        .expect("forged overwrite does not move the use grant");
+    assert_eq!(decision.instance, instance);
+    assert_eq!(decision.identity, "agent-1");
+    assert_eq!(decision.session, "session-a");
+}
+
+#[test]
+fn model_forged_identity_does_not_move_the_use_grant() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    let decision = verifier
+        .use_grant(call, &request)
+        .expect("forged identity does not move the use grant");
+    assert_eq!(decision.instance, instance);
+    assert_eq!(decision.identity, "agent-1");
+    assert_eq!(decision.session, "session-a");
+}
+
+#[test]
+fn model_forged_session_does_not_move_the_use_grant() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    let decision = verifier
+        .use_grant(call, &request)
+        .expect("forged session does not move the use grant");
+    assert_eq!(decision.instance, instance);
+    assert_eq!(decision.identity, "agent-1");
+    assert_eq!(decision.session, "session-a");
+}
+
+#[test]
+fn model_forged_ceiling_does_not_move_the_use_grant() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_ceiling: 1,
+        ..guest(handle)
+    };
+    assert!(request.forged_ceiling > 0);
+    let decision = verifier
+        .use_grant(call, &request)
+        .expect("forged ceiling does not move the use grant");
+    assert_eq!(decision.instance, instance);
+    assert_eq!(decision.identity, "agent-1");
+    assert_eq!(decision.session, "session-a");
+}
+
+#[test]
+fn model_reported_usage_does_not_move_the_use_grant() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(handle)
+    };
+    assert!(request.reported_usage > 0);
+    let decision = verifier
+        .use_grant(call, &request)
+        .expect("reported usage does not move the use grant");
+    assert_eq!(decision.instance, instance);
+    assert_eq!(decision.identity, "agent-1");
+    assert_eq!(decision.session, "session-a");
+}
+
+#[test]
 fn model_use_path_dotdot_is_refused() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
