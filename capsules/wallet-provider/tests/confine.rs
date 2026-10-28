@@ -6889,33 +6889,34 @@ fn inside_string(text: &str, index: usize) -> bool {
 }
 
 /// `text` with every `//` line comment and every `/* ... */` block comment
-/// removed. A `//` or `/*` inside a string literal stays part of that string, a
+/// removed, and Rust strings decoded and quoted in ordinary escaped form.
+/// Normalizing raw strings here lets every declaration scanner use the same
+/// quoted-string boundary, including raw strings holding quotes or backslashes.
+/// A `//` or `/*` inside a string literal stays part of that string, a
 /// line comment ends at its newline and keeps it, so the items around it keep
 /// their own lines, and a block comment keeps its newlines and one space so the
 /// tokens around it stay apart. Block comments can nest.
 fn without_comments(text: &str) -> String {
     let mut kept = String::with_capacity(text.len());
-    let mut characters = text.chars().peekable();
-    let mut in_string = false;
-    let mut quote_escape = false;
-    while let Some(character) = characters.next() {
-        if in_string {
-            if character == '"' && !quote_escape {
-                in_string = false;
-                quote_escape = false;
-            } else {
-                quote_escape = character == '\\' && !quote_escape;
+    let mut characters = text.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
+        let rest = &text[index..];
+        if character == '"'
+            || (character == 'r' && rest[1..].trim_start_matches('#').starts_with('"'))
+        {
+            let (value, length) = rust_string_literal(rest)
+                .unwrap_or_else(|reason| panic!("wire field reader: {reason}"));
+            kept.push_str(&format!("{value:?}"));
+            while characters
+                .peek()
+                .is_some_and(|(at, _)| *at < index + length)
+            {
+                characters.next();
             }
-            kept.push(character);
             continue;
         }
-        if character == '"' {
-            in_string = true;
-            kept.push(character);
-            continue;
-        }
-        if character == '/' && characters.peek() == Some(&'/') {
-            for next in characters.by_ref() {
+        if character == '/' && characters.peek().is_some_and(|(_, next)| *next == '/') {
+            for (_, next) in characters.by_ref() {
                 if next == '\n' {
                     kept.push('\n');
                     break;
@@ -6923,15 +6924,15 @@ fn without_comments(text: &str) -> String {
             }
             continue;
         }
-        if character == '/' && characters.peek() == Some(&'*') {
+        if character == '/' && characters.peek().is_some_and(|(_, next)| *next == '*') {
             characters.next();
             let mut depth = 1usize;
             kept.push(' ');
-            while let Some(next) = characters.next() {
-                if next == '/' && characters.peek() == Some(&'*') {
+            while let Some((_, next)) = characters.next() {
+                if next == '/' && characters.peek().is_some_and(|(_, next)| *next == '*') {
                     characters.next();
                     depth += 1;
-                } else if next == '*' && characters.peek() == Some(&'/') {
+                } else if next == '*' && characters.peek().is_some_and(|(_, next)| *next == '/') {
                     characters.next();
                     depth -= 1;
                     if depth == 0 {
@@ -6946,6 +6947,102 @@ fn without_comments(text: &str) -> String {
         kept.push(character);
     }
     kept
+}
+
+/// Decode one Rust string literal and return its byte length. Ordinary strings
+/// support Rust's simple, ASCII and Unicode escapes and line continuations;
+/// raw strings end at their matching quote and hash delimiter. A malformed or
+/// unsupported literal has an explicit reason instead of supplying a wire name.
+fn rust_string_literal(text: &str) -> Result<(String, usize), &'static str> {
+    if let Some(raw) = text.strip_prefix('r') {
+        let hashes = raw.len() - raw.trim_start_matches('#').len();
+        let body = raw[hashes..]
+            .strip_prefix('"')
+            .ok_or("expected a Rust string literal")?;
+        let closing = format!("\"{}", "#".repeat(hashes));
+        let end = body.find(&closing).ok_or("unterminated raw Rust string")?;
+        return Ok((
+            body[..end].replace("\r\n", "\n"),
+            2 + hashes + end + closing.len(),
+        ));
+    }
+    let body = text
+        .strip_prefix('"')
+        .ok_or("expected a Rust string literal")?;
+    let mut characters = body.char_indices().peekable();
+    let mut value = String::new();
+    while let Some((index, character)) = characters.next() {
+        match character {
+            '"' => return Ok((value, index + 2)),
+            '\r' if characters.peek().is_some_and(|(_, next)| *next == '\n') => {
+                characters.next();
+                value.push('\n');
+            }
+            '\\' => {
+                let (_, escape) = characters.next().ok_or("unterminated Rust string escape")?;
+                match escape {
+                    '\\' | '"' | '\'' => value.push(escape),
+                    'n' => value.push('\n'),
+                    'r' => value.push('\r'),
+                    't' => value.push('\t'),
+                    '0' => value.push('\0'),
+                    'x' => {
+                        let mut byte = 0;
+                        for _ in 0..2 {
+                            let digit = characters
+                                .next()
+                                .and_then(|(_, digit)| digit.to_digit(16))
+                                .ok_or("invalid Rust ASCII escape")?;
+                            byte = byte * 16 + digit;
+                        }
+                        if byte > 0x7f {
+                            return Err("Rust ASCII escape exceeds 0x7f");
+                        }
+                        value.push(char::from_u32(byte).unwrap());
+                    }
+                    'u' => {
+                        if characters.next().map(|(_, next)| next) != Some('{') {
+                            return Err("invalid Rust Unicode escape");
+                        }
+                        let mut scalar = 0;
+                        let mut digits = 0;
+                        loop {
+                            let (_, digit) = characters
+                                .next()
+                                .ok_or("unterminated Rust Unicode escape")?;
+                            match digit {
+                                '}' if digits > 0 => break,
+                                '_' if digits > 0 => continue,
+                                _ => {
+                                    let digit = digit
+                                        .to_digit(16)
+                                        .filter(|_| digits < 6)
+                                        .ok_or("invalid Rust Unicode escape")?;
+                                    scalar = scalar * 16 + digit;
+                                    digits += 1;
+                                }
+                            }
+                        }
+                        value.push(char::from_u32(scalar).ok_or("invalid Rust Unicode scalar")?);
+                    }
+                    '\n' | '\r' => {
+                        if escape == '\r' && characters.next().map(|(_, next)| next) != Some('\n') {
+                            return Err("invalid Rust line continuation");
+                        }
+                        while characters
+                            .peek()
+                            .is_some_and(|(_, next)| matches!(next, ' ' | '\t' | '\n' | '\r'))
+                        {
+                            characters.next();
+                        }
+                    }
+                    _ => return Err("unsupported Rust string escape"),
+                }
+            }
+            _ => value.push(character),
+        }
+    }
+    Err("unterminated Rust string literal")
 }
 
 /// The index of the `}` that closes a body whose opening brace sits directly
@@ -7017,22 +7114,54 @@ fn declaration_items(text: &str) -> Vec<&str> {
 /// before its `:`, without its leading attributes and without a `pub`
 /// qualifier.
 ///
-/// Only a `serde` attribute that stands before the field's name is read, so a
-/// `rename` inside a comment or inside another attribute's string never names
-/// the field.
+/// Only a `serde` attribute that stands before the field's name is read, and
+/// only its `rename` entry supplies the decoded Rust string. Spacing around
+/// `=` is immaterial; text inside another entry's value stays in that value.
+/// Split serialize/deserialize renames and expressions are refused explicitly.
 fn field_wire_name(field: &str) -> String {
     let mut declared = field.trim_start();
-    while let Some(attributes) = declared.strip_prefix("#[") {
-        let Some(end) = attribute_end(attributes) else {
-            break;
-        };
+    let mut renamed = None;
+    while let Some(attribute) = declared.strip_prefix('#') {
+        let attributes = attribute
+            .trim_start()
+            .strip_prefix('[')
+            .expect("wire field reader: expected a bracketed field attribute");
+        let end =
+            attribute_end(attributes).expect("wire field reader: unterminated field attribute");
         if is_serde_attribute(&attributes[..end]) {
-            if let Some(rest) = attributes[..end].split("rename = \"").nth(1) {
-                let end = rest.find('"').unwrap_or(rest.len());
-                return rest[..end].to_string();
+            let (_, arguments) = attributes[..end].split_once('(').unwrap();
+            let arguments = arguments
+                .trim_end()
+                .strip_suffix(')')
+                .expect("wire field reader: unterminated serde attribute");
+            for entry in declaration_items(arguments) {
+                let entry = entry.trim();
+                let entry = entry.strip_prefix("r#").unwrap_or(entry);
+                let key_end = entry
+                    .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                    .unwrap_or(entry.len());
+                if &entry[..key_end] != "rename" {
+                    continue;
+                }
+                let literal = entry[key_end..].trim_start().strip_prefix('=')
+                    .expect("wire field reader: unsupported serde rename syntax; expected rename = <Rust string literal>")
+                    .trim_start();
+                let (name, length) = rust_string_literal(literal)
+                    .unwrap_or_else(|reason| panic!("wire field reader: serde rename: {reason}"));
+                assert!(
+                    literal[length..].trim().is_empty(),
+                    "wire field reader: unsupported tokens after serde rename string"
+                );
+                assert!(
+                    renamed.replace(name).is_none(),
+                    "wire field reader: duplicate serde rename"
+                );
             }
         }
         declared = attributes[end + 1..].trim_start();
+    }
+    if let Some(name) = renamed {
+        return name;
     }
     declared
         .split(':')
@@ -7047,6 +7176,8 @@ fn field_wire_name(field: &str) -> String {
 /// Whether the text of one attribute, after its `#[`, is `serde(...)`. A longer
 /// path such as `serde_with(...)` is another attribute.
 fn is_serde_attribute(attribute: &str) -> bool {
+    let attribute = attribute.trim_start();
+    let attribute = attribute.strip_prefix("r#").unwrap_or(attribute);
     attribute
         .trim_start()
         .strip_prefix("serde")
@@ -9726,7 +9857,10 @@ const FIXTURE_OPERATIONS: [&str; 4] = [
 /// stale cell when a comment holds an old enum before the active declaration,
 /// an omitted field after a rename whose string contains delimiters, and an
 /// omitted field when a multiline string holds a copy of the active arm without
-/// it. It keeps escaped quotes inside attribute strings.
+/// it. Raw and escaped Rust rename strings require their decoded wire names,
+/// with the same rule for ordinary fields, envelope fields and params fields.
+/// Other attribute values cannot supply a rename. Unsupported rename syntax
+/// is refused with a reason. It keeps escaped quotes inside attribute strings.
 /// It refuses a
 /// `wallet_contract` row that omits an envelope
 /// name, names another kind, names another `params` name, omits `params`, and
@@ -10321,6 +10455,227 @@ fn operations_table_row_check_refuses_each_bad_table() {
             )],
             "an Inputs cell with {case} must be refused"
         );
+    }
+
+    // Rule 5: serde reads Rust string values, independently of their spelling
+    // and the spacing around `=`. Exercise each use of the shared field reader,
+    // with a following field to expose a lost raw-string delimiter boundary.
+    for (attribute, wire_name, encoded_name) in [
+        (
+            r##"#[serde(rename = r#"wire_name"#)]"##,
+            "wire_name",
+            "field_name",
+        ),
+        (
+            r##"#[serde(rename=r"wire_name")]"##,
+            "wire_name",
+            "field_name",
+        ),
+        (
+            r####"#[serde(rename = r###"wire_name"###)]"####,
+            "wire_name",
+            "field_name",
+        ),
+        (
+            r##"#[serde(rename = r#"\u{77}ire_name"#)]"##,
+            r"\u{77}ire_name",
+            "wire_name",
+        ),
+        (
+            r##"#[serde(rename = r#"wire_name\"#)]"##,
+            "wire_name\\",
+            "field_name",
+        ),
+        (
+            r#"# [r#serde(r#rename="wire_name")]"#,
+            "wire_name",
+            "field_name",
+        ),
+        (
+            r#"#[serde(rename = "\u{77}ire_name")]"#,
+            "wire_name",
+            r"\u{77}ire_name",
+        ),
+        (
+            r#"#[serde(rename = "\u{0000_77}ire_name")]"#,
+            "wire_name",
+            r"\u{0000_77}ire_name",
+        ),
+        (
+            r#"#[serde(rename = "\x77ire_name")]"#,
+            "wire_name",
+            r"\x77ire_name",
+        ),
+        (
+            r#"#[serde(rename = "wire\"name")]"#,
+            "wire\"name",
+            r#"wire\"name"#,
+        ),
+        (
+            r#"#[serde(rename = "wire\\name")]"#,
+            r"wire\name",
+            r"wire\\name",
+        ),
+        (
+            r#"#[serde(rename = "wire\'name")]"#,
+            "wire'name",
+            r"wire\'name",
+        ),
+        (
+            r#"#[serde(rename = "\u{1f680}_name")]"#,
+            "🚀_name",
+            r"\u{1f680}_name",
+        ),
+        (
+            "#[serde(rename\t=\n\"wire_\\\n    name\")]",
+            "wire_name",
+            "field_name",
+        ),
+        (
+            "#[serde(rename = \"wire_\\\r\n\tname\")]",
+            "wire_name",
+            "field_name",
+        ),
+        (
+            r###"#[serde(rename = r##"wire"#,)]}/*//\name"##)]"###,
+            "wire\"#,)]}/*//\\name",
+            "field_name",
+        ),
+        (
+            r##"#[serde(alias = r#"rename = "decoy""#, default, rename = "wire_name")]"##,
+            "wire_name",
+            "decoy",
+        ),
+        (
+            r#"#[serde(alias = "rename = \"decoy\"", rename = "wire_name", default)]"#,
+            "wire_name",
+            "decoy",
+        ),
+        (
+            r##"#[doc = r#"rename = "decoy" /*"#] #[serde(rename /* spacing */ = "wire_name")]"##,
+            "wire_name",
+            "decoy",
+        ),
+    ] {
+        for (source, path, anchor, item, rust_name, operation, expected_fields, expected_cell) in [
+            (
+                ROW_FIXTURE_PROVIDER, &provider_source,
+                "#[serde(rename = \"wire_name\")]\n        field_name: Option<Value>,",
+                "Init", "field_name", "init",
+                vec!["config", wire_name, "required"],
+                format!("`op`, `config`, `{wire_name}`, `required`"),
+            ),
+            (
+                ROW_FIXTURE_PROVIDER, &provider_source,
+                "#[serde(rename = \"_runtime_invocation\")]\n        runtime_invocation: Box<RuntimeInvocationEnvelope>,",
+                "WalletContract", "runtime_invocation", "wallet_contract list_accounts",
+                vec!["request", wire_name, "required"],
+                format!("`op`, `request` (`kind: list_accounts`, `params` (`include_revoked`)), `{wire_name}`, `required`"),
+            ),
+            (
+                ROW_FIXTURE_CONTRACT, &contract_source,
+                "include_revoked: bool,",
+                "ListAccounts", "include_revoked", "wallet_contract list_accounts",
+                vec![wire_name, "required"],
+                format!("`op`, `request` (`kind: list_accounts`, `params` (`{wire_name}`, `required`)), `_runtime_invocation`"),
+            ),
+        ] {
+            let replacement = format!("{attribute}\n        {rust_name}: String, required: String,");
+            assert_eq!(source.matches(anchor).count(), 1, "rename fixture has one anchor");
+            let changed = source.replacen(anchor, &replacement, 1);
+            assert_eq!(
+                wire_field_names(&changed, item),
+                Some(expected_fields.into_iter().map(str::to_string).collect()),
+                "{item} must read the decoded value of {attribute} and keep the following field"
+            );
+            fs::write(path, changed).expect("rename literal fixture");
+            let complete = passing.replacen(&fixture_inputs(operation), &expected_cell, 1);
+            assert_eq!(
+                row_problems("fixture-provider", &complete, provider.path()),
+                Vec::<String>::new(),
+                "the decoded wire name of {attribute} must pass in {operation}"
+            );
+            let read = if operation == "init" {
+                provider_paths.clone()
+            } else {
+                format!("{provider_paths} with {}", contract_source.display())
+            };
+            for incorrect in [rust_name, encoded_name] {
+                let cell = expected_cell.replacen(&format!("`{wire_name}`"), &format!("`{incorrect}`"), 1);
+                assert_ne!(cell, expected_cell, "the rename fixture must change its Inputs cell");
+                let document = passing.replacen(&fixture_inputs(operation), &cell, 1);
+                assert_eq!(
+                    row_problems("fixture-provider", &document, provider.path()),
+                    vec![format!(
+                        "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {operation} \
+                         holds the Inputs cell {cell}, and {read} names {expected_cell}"
+                    )],
+                    "{attribute} must refuse the incorrect name {incorrect:?} in {operation}"
+                );
+            }
+            fs::write(path, source).expect("rename literal fixture restore");
+        }
+    }
+
+    // Control characters stay decoded too, although a table cell cannot hold
+    // every such character. The string reader also pins its explicit refusals.
+    for (literal, expected) in [
+        (r#""\t\n\r\0""#, "\t\n\r\0"),
+        ("\"wire\r\nname\"", "wire\nname"),
+        ("r#\"wire\r\nname\"#", "wire\nname"),
+    ] {
+        let source = format!("Item {{ #[serde(rename = {literal})] field: String }}");
+        assert_eq!(
+            wire_field_names(&source, "Item"),
+            Some(vec![expected.to_string()])
+        );
+    }
+    for (literal, reason) in [
+        (
+            "concat!(\"wire\", \"_name\")",
+            "expected a Rust string literal",
+        ),
+        ("r#name", "expected a Rust string literal"),
+        ("r#\"name", "unterminated raw Rust string"),
+        ("\"name", "unterminated Rust string literal"),
+        ("\"name\\", "unterminated Rust string escape"),
+        (r#""\q""#, "unsupported Rust string escape"),
+        (r#""\xgg""#, "invalid Rust ASCII escape"),
+        (r#""\x80""#, "Rust ASCII escape exceeds 0x7f"),
+        (r#""\u77""#, "invalid Rust Unicode escape"),
+        (r#""\u{}""#, "invalid Rust Unicode escape"),
+        (r#""\u{_77}""#, "invalid Rust Unicode escape"),
+        (r#""\u{0000077}""#, "invalid Rust Unicode escape"),
+        ("\"\\u{77", "unterminated Rust Unicode escape"),
+        (r#""\u{d800}""#, "invalid Rust Unicode scalar"),
+        (r#""\u{110000}""#, "invalid Rust Unicode scalar"),
+        ("\"name\\\rnext\"", "invalid Rust line continuation"),
+    ] {
+        assert_eq!(rust_string_literal(literal), Err(reason), "{literal:?}");
+    }
+    for (attribute, reason) in [
+        (r#"#[serde(rename(deserialize = "wire_name"))]"#,
+         "wire field reader: unsupported serde rename syntax; expected rename = <Rust string literal>"),
+        (r#"#[serde(rename = concat!("wire", "_name"))]"#,
+         "wire field reader: serde rename: expected a Rust string literal"),
+        (r#"#[serde(rename = "wire_name"suffix)]"#,
+         "wire field reader: unsupported tokens after serde rename string"),
+        (r#"#[serde(rename = "one", rename = "two")]"#,
+         "wire field reader: duplicate serde rename"),
+        (r#"#[serde(rename = "one")] #[serde(rename = "two")]"#,
+         "wire field reader: duplicate serde rename"),
+        (r#"#[serde(rename = "wire_name")"#,
+         "wire field reader: unterminated field attribute"),
+        (r#"#[serde(rename = "wire_name"]"#,
+         "wire field reader: unterminated serde attribute"),
+        ("#serde",
+         "wire field reader: expected a bracketed field attribute"),
+    ] {
+        let refusal = std::panic::catch_unwind(|| field_wire_name(&format!("{attribute} field: String")))
+            .expect_err("unsupported rename syntax must stop the check");
+        let message = refusal.downcast_ref::<String>().map(String::as_str)
+            .or_else(|| refusal.downcast_ref::<&str>().copied());
+        assert_eq!(message, Some(reason), "{attribute} must keep its refusal reason");
     }
 
     // Rule 5: a commented copy of an old enclosing enum cannot hide a field
