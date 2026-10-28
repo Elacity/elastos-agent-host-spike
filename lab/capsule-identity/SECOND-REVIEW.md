@@ -3,7 +3,7 @@
 - PR #234 (task 019), merge d44f2d30d: Verdict: PASS (runner at the base: `summary: 10 CAUGHT of 10`)
 - PR #244 (task 020), merge f26d5d036: Verdict: PASS (runner at the base: `summary: 6 CAUGHT of 6`)
 - PR #247 (task 021), merge 6fe61d88e: Verdict: FOLLOWUP (citations: 69 checked, 69 match)
-- FOLLOWUP: lab/capsule-identity/GAP-REPORT.md:848 says the lab "sits in no admission or launch path", but since task 032 (PR #587, merge 58fe29b8a) README says only "no Runtime admission or launch path" and that the lab's stand-in launcher, in test code, calls it; hand check: `sed -n 845,849p lab/capsule-identity/GAP-REPORT.md` against `sed -n 14,17p lab/capsule-identity/README.md`, and `git show 58fe29b8a^1:lab/capsule-identity/README.md | sed -n 16p` (the old wording) against `git show 58fe29b8a:lab/capsule-identity/README.md | sed -n 16p`.
+- FOLLOWUP: lab/capsule-identity/GAP-REPORT.md:848 says the lab "sits in no admission or launch path", but since task 032 (PR #587, merge 58fe29b8a) README says only "no Runtime admission or launch path" and that the lab's stand-in launcher, in test code, calls it; hand check: `sed -n 845,849p lab/capsule-identity/GAP-REPORT.md` against `sed -n 14,17p lab/capsule-identity/README.md`, and `git show 58fe29b8a^1:lab/capsule-identity/README.md | sed -n 16p` (the old wording) against `git show 58fe29b8a:lab/capsule-identity/README.md | sed -n 16p`. Closed by task 038.
 
 Why: Flint's 27 Oct 12:06 note (Sasha's "nothing idle", to reopen and close S1 after
 Rong's review rong-20261027-1010) asks the claude and cursor pair to re-read three merges
@@ -15,9 +15,8 @@ Base commit of this review: `4390c59002bdc8738cc7f031b64dcb695ec187fa` (`4390c59
 Each merge is judged as merged, with `git show <merge>:<path>`. Then each promise says
 "still true at 4390c5900", or which later merge changed it (from
 `git log --oneline --first-parent <merge>..HEAD -- <file>`). This file fixes nothing; each
-`FOLLOWUP:` line is for the planner to turn into a later task. A claim that the lab value
-is the same as the Runtime's value or Kubo's output is written here as "an equality
-claim".
+`FOLLOWUP:` line is for the planner to turn into a later task. A claim of the kind README's
+"Claim scope" keeps out of every lane doc is written here only as "an equality claim".
 
 ## PR #234 (task 019), merge d44f2d30d
 
@@ -107,7 +106,7 @@ Principles check:
 7. Tests prove it: yes. One named test, ten falsifiers, run at the base: `summary: 10 CAUGHT of 10`.
 8. Separate decisions: yes. The check compares identity values only and holds no
    admission or budget step (`tests/cross_implementation.rs:158-172` at d44f2d30d;
-   README `:14` at 4390c5900: "It never answers \"may this run?\"").
+   README `:15` at 4390c5900: "It never answers \"may this run?\"").
 
 ## PR #244 (task 020), merge f26d5d036
 
@@ -233,7 +232,9 @@ and B2 (Anders, 26 Oct)\"").
   launcher, in test code, calls the library (README `:14-17` at 4390c5900). The quoted
   citation is still right at its recorded commit; the report's own sentence now says
   more than README does. Task 033 is building and edits `GAP-REPORT.md`; the planner can
-  check whether it already covers this sentence.
+  check whether it already covers this sentence. Added by task 038: 033 left the sentence in
+  place (at its merge `f94d89ac6` it is `GAP-REPORT.md:872`, and this record's commit
+  `2029a6c3c` was made on that tree), and task 038 fixed it.
 - Promise 6 (citations counted "N found, N match"). At the merge, `:115-118` says 69 found,
   69 match. Checked by a run: every `` `path:line` `` followed by a quoted text in the
   lines 021 added was compared with line `line` of `git show <commit>:<path>`, at
