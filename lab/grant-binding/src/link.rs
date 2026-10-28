@@ -20,28 +20,13 @@ pub fn cargo_toml_path_depends_on_grant_binding(cargo_toml: &str) -> bool {
 /// Writes one manifest and a dummy source file, then checks that file.
 ///
 /// Cargo is spawned by `metadata_names`, once, from the check below.
-/// Cargo's own manifest rejection is not a link. Every other metadata
-/// failure still stops this check with that failure's reason.
+/// An unsuccessful Cargo exit is not a link. Operational failures still stop
+/// this check with their own reasons.
 fn dependency_names(cargo_toml: &str) -> bool {
     with_manifest_dir(&std::env::temp_dir(), |dir| {
         stage_manifest(dir, cargo_toml)?;
         let manifest = dir.join("Cargo.toml");
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            manifest_depends_on_grant_binding(&manifest)
-        })) {
-            Ok(is_link) => Ok(is_link),
-            Err(panic) => {
-                let reason = panic
-                    .downcast_ref::<String>()
-                    .map(String::as_str)
-                    .or_else(|| panic.downcast_ref::<&str>().copied());
-                if reason == Some("dependency check failed: cargo metadata rejected the manifest") {
-                    Ok(false)
-                } else {
-                    std::panic::resume_unwind(panic)
-                }
-            }
-        }
+        Ok(manifest_depends_on_grant_binding(&manifest))
     })
     .unwrap_or_else(|error| panic!("dependency check failed: {error}"))
 }
@@ -60,8 +45,6 @@ enum MetadataRefuse {
     WriteManifest,
     WriteSource,
     LaunchCargo,
-    CargoRejected,
-    CargoFailed,
     DecodeOutput,
     ResolveManifest,
     ManifestParent,
@@ -81,8 +64,6 @@ impl fmt::Display for MetadataRefuse {
             Self::WriteManifest => "cannot write temporary Cargo.toml",
             Self::WriteSource => "cannot write temporary src/lib.rs",
             Self::LaunchCargo => "cannot launch cargo metadata",
-            Self::CargoRejected => "cargo metadata rejected the manifest",
-            Self::CargoFailed => "cargo metadata failed",
             Self::DecodeOutput => "cargo metadata output is not UTF-8",
             Self::ResolveManifest => "cannot resolve input manifest path",
             Self::ManifestParent => "input manifest path has no parent directory",
@@ -170,10 +151,9 @@ fn metadata_dependency_names(dir: &Path, cargo_toml: &str) -> Result<Vec<String>
 
 /// One `cargo metadata --offline --no-deps` parse.
 ///
-/// Cargo status 101 stops the check: cargo rejected the manifest. Any other
-/// unsuccessful status stops the check because cargo failed. Launch and decode
-/// failures stop the check with their own reasons. The list is dependency
-/// names, plus member names when this directory is the workspace root.
+/// An unsuccessful Cargo exit returns an empty list. Launch and decode failures
+/// stop the check with their own reasons. The list is dependency names, plus
+/// member names when this directory is the workspace root.
 fn metadata_names(manifest: &Path) -> Vec<String> {
     let manifest = fs::canonicalize(manifest).unwrap_or_else(|_| {
         panic!(
@@ -205,10 +185,8 @@ fn metadata_names(manifest: &Path) -> Vec<String> {
         Ok(output) => output,
         Err(_) => panic!("dependency check failed: {}", MetadataRefuse::LaunchCargo),
     };
-    match output.status.code() {
-        Some(0) => {}
-        Some(101) => panic!("dependency check failed: {}", MetadataRefuse::CargoRejected),
-        _ => panic!("dependency check failed: {}", MetadataRefuse::CargoFailed),
+    if !output.status.success() {
+        return Vec::new();
     }
     let json = match String::from_utf8(output.stdout) {
         Ok(json) => json,
@@ -707,38 +685,63 @@ fn model_metadata_output_failure_and_nonzero_exit_stay_distinct() {
         )
         .unwrap();
         fs::write(root.join("gb/src/lib.rs"), "").unwrap();
-        let _ = manifest_depends_on_grant_binding(&root.join("Cargo.toml"));
-        return;
-    }
-    with_manifest_dir(&std::env::temp_dir(), |dir| {
-        let cargo = dir.join("cargo-fixture");
-        for status in [0, 1] {
+        let manifest = root.join("Cargo.toml");
+        let cargo = PathBuf::from(std::env::var_os("CARGO").unwrap());
+        for status in [0, 1, 101] {
             fs::write(
                 &cargo,
                 format!("#!/bin/sh\nprintf '\\377'\nexit {status}\n"),
             )
             .unwrap();
             fs::set_permissions(&cargo, fs::Permissions::from_mode(0o700)).unwrap();
-            let output = metadata_test_child(dir, Some(&cargo));
             if status == 0 {
-                assert_metadata_child_failure(output, "cargo metadata output is not UTF-8");
+                for direct in [true, false] {
+                    let panic = std::panic::catch_unwind(|| {
+                        if direct {
+                            manifest_depends_on_grant_binding(&manifest)
+                        } else {
+                            cargo_toml_path_depends_on_grant_binding(&package_manifest(""))
+                        }
+                    })
+                    .unwrap_err();
+                    assert_eq!(
+                        panic.downcast_ref::<String>().unwrap(),
+                        "dependency check failed: cargo metadata output is not UTF-8"
+                    );
+                }
             } else {
-                assert_metadata_child_failure(output, "cargo metadata failed");
+                assert_eq!(metadata_names(&manifest), Vec::<String>::new(), "{status}");
+                assert!(!manifest_depends_on_grant_binding(&manifest), "{status}");
+                assert!(
+                    !cargo_toml_path_depends_on_grant_binding(&package_manifest("")),
+                    "{status}"
+                );
             }
-            let _ = fs::remove_dir_all(dir.join("ws"));
-            assert_eq!(
-                fs::read_dir(dir).unwrap().count(),
-                1,
-                "only the fixture remains"
-            );
         }
+        fs::remove_dir_all(&root).unwrap();
+        return;
+    }
+    with_manifest_dir(&std::env::temp_dir(), |dir| {
+        let cargo = dir.join("cargo-fixture");
+        let output = metadata_test_child(dir, Some(&cargo));
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_dir(dir).unwrap().count(),
+            1,
+            "only the fixture remains"
+        );
         Ok(())
     })
     .unwrap();
 }
 
 #[test]
-fn model_metadata_rejection_stops_with_a_reason() {
+fn model_metadata_rejection_returns_an_empty_list() {
     let root = std::env::temp_dir().join(format!("gb-reject-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
@@ -747,13 +750,11 @@ fn model_metadata_rejection_stops_with_a_reason() {
         "[workspace]\nmembers = [\"missing\"]\n",
     )
     .unwrap();
-    let panic =
-        std::panic::catch_unwind(|| manifest_depends_on_grant_binding(&root.join("Cargo.toml")))
-            .unwrap_err();
     assert_eq!(
-        panic.downcast_ref::<String>().map(String::as_str),
-        Some("dependency check failed: cargo metadata rejected the manifest")
+        metadata_names(&root.join("Cargo.toml")),
+        Vec::<String>::new()
     );
+    assert!(!manifest_depends_on_grant_binding(&root.join("Cargo.toml")));
     assert!(!cargo_toml_path_depends_on_grant_binding(
         "[workspace]\nmembers = [\"missing\"]\n"
     ));
@@ -763,25 +764,21 @@ fn model_metadata_rejection_stops_with_a_reason() {
 #[test]
 fn model_metadata_cleanup_failure_keeps_both_reasons() {
     with_manifest_dir(&std::env::temp_dir(), |parent| {
-        for failed in [false, true] {
+        for (result, reason) in [
+            (Ok(false), "cannot remove temporary manifest directory"),
+            (Ok(true), "cannot remove temporary manifest directory"),
+            (
+                Err(MetadataRefuse::LaunchCargo),
+                "cannot launch cargo metadata; cannot remove temporary manifest directory",
+            ),
+        ] {
             let error = with_manifest_dir(parent, |dir| {
                 fs::remove_dir(dir).unwrap();
                 fs::write(dir, "block directory cleanup").unwrap();
-                if failed {
-                    Err(MetadataRefuse::LaunchCargo)
-                } else {
-                    Ok(())
-                }
+                result
             })
             .unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                if failed {
-                    "cannot launch cargo metadata; cannot remove temporary manifest directory"
-                } else {
-                    "cannot remove temporary manifest directory"
-                }
-            );
+            assert_eq!(error.to_string(), reason);
         }
         Ok(())
     })
@@ -1379,6 +1376,72 @@ fn model_metadata_path_failures_have_exact_reasons() {
             fs::write(&package.manifest_path, text).unwrap();
         }
         assert_eq!(names_for_manifest(&seen, &manifest).unwrap().len(), 3);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn model_metadata_path_failures_stop_both_entry_points() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if std::env::var_os("GRANT_BINDING_METADATA_TEST_CHILD").is_some() {
+        let cargo = PathBuf::from(std::env::var_os("CARGO").unwrap());
+        fs::write(&cargo, "#!/bin/sh\ncat \"$CARGO.json\"\n").unwrap();
+        fs::set_permissions(&cargo, fs::Permissions::from_mode(0o700)).unwrap();
+        with_manifest_dir(&std::env::temp_dir(), |dir| {
+            stage_manifest(dir, &package_manifest(""))?;
+            let manifest = dir.join("Cargo.toml");
+            let root = dir.canonicalize().unwrap();
+            for (json, reason) in [
+                (
+                    "{\"packages\":[]}".to_owned(),
+                    "dependency check failed: cargo metadata has no workspace root",
+                ),
+                (
+                    format!("{{\"workspace_root\":{:?},\"packages\":[]}}", root.join("missing")),
+                    "dependency check failed: cannot resolve metadata workspace root",
+                ),
+                (
+                    format!(
+                        "{{\"workspace_root\":{root:?},\"workspace_members\":[\"missing\"],\"packages\":[{{\"id\":\"missing\",\"name\":\"grant-binding\",\"manifest_path\":{:?},\"dependencies\":[]}}]}}",
+                        root.join("missing/Cargo.toml")
+                    ),
+                    "dependency check failed: cannot resolve metadata package manifest path",
+                ),
+            ] {
+                fs::write(cargo.with_extension("json"), json).unwrap();
+                for direct in [true, false] {
+                    let panic = std::panic::catch_unwind(|| {
+                        if direct {
+                            manifest_depends_on_grant_binding(&manifest)
+                        } else {
+                            cargo_toml_path_depends_on_grant_binding(&package_manifest(""))
+                        }
+                    })
+                    .unwrap_err();
+                    assert_eq!(panic.downcast_ref::<String>().unwrap(), reason);
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        return;
+    }
+    with_manifest_dir(&std::env::temp_dir(), |dir| {
+        let output = metadata_test_child(dir, Some(&dir.join("cargo-fixture")));
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_dir(dir).unwrap().count(),
+            2,
+            "only fixtures remain"
+        );
         Ok(())
     })
     .unwrap();
