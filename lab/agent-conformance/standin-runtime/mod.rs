@@ -61,7 +61,7 @@
 
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 const LIVE_SCOPE: &str = "all_sessions_live";
 const RESIDENT_WORLD: &str = "resident-capsule";
@@ -196,22 +196,32 @@ impl StandIn {
         }
     }
 
+    /// Pieces of path text between `/`. Empty pieces are dropped. `.` and `..` stay.
+    fn slash_pieces(text: &str) -> Vec<&str> {
+        text.split('/').filter(|piece| !piece.is_empty()).collect()
+    }
+
     /// Lab test seam, not a route.
     ///
     /// The `run` launcher's storage directory follows the selected Home: it is
     /// `harness::data_dir(home)` joined with `storage`. The fixed shared temp
-    /// path is refused before that rule runs on it. This call creates nothing.
+    /// path is refused before that rule runs on it. A raw `.` or `..` segment
+    /// in the Home text is refused. This call creates nothing.
     pub fn storage_for_home(home: &Path) -> Result<PathBuf, (u16, String)> {
         const SHARED_TEMP: &str = "/tmp/elastos/storage";
         const NEEDS_HOME: &str = "storage needs a selected Home";
         const SHARED_REASON: &str = "shared temp directory is not agent storage";
 
         let refused = |reason: &str| Err((400, reason.to_owned()));
-        if home.as_os_str().is_empty()
-            || !home.is_absolute()
-            || home
-                .components()
-                .any(|part| matches!(part, Component::CurDir | Component::ParentDir))
+        if home.as_os_str().is_empty() || !home.is_absolute() {
+            return refused(NEEDS_HOME);
+        }
+        let Some(text) = home.to_str() else {
+            return refused(NEEDS_HOME);
+        };
+        if Self::slash_pieces(text)
+            .iter()
+            .any(|piece| *piece == "." || *piece == "..")
         {
             return refused(NEEDS_HOME);
         }
@@ -230,8 +240,9 @@ impl StandIn {
     ///
     /// The two named storage cases are refused here. A symbolic link at the
     /// storage directory is refused and not followed. A regular file under it
-    /// whose link count is above 1 is refused and not read. This call creates
-    /// nothing.
+    /// whose link count is above 1 is refused and not read. An entry is one
+    /// raw piece, and `foo/.` is refused. An absolute entry is refused. This
+    /// call creates nothing.
     pub fn confirm_storage(home: &Path, entry: &str) -> Result<PathBuf, (u16, String)> {
         const LINK_REASON: &str = "storage directory is a symbolic link";
         const ENTRY_REASON: &str = "storage entry stays under the selected Home";
@@ -243,10 +254,10 @@ impl StandIn {
         if entry.is_empty() {
             return Ok(storage);
         }
-        let mut parts = Path::new(entry).components();
-        match (parts.next(), parts.next()) {
-            (Some(Component::Normal(_)), None) => {}
-            _ => return Err((400, ENTRY_REASON.to_owned())),
+        let pieces = Self::slash_pieces(entry);
+        let absolute = entry.starts_with('/');
+        if absolute || pieces.len() != 1 || pieces[0] == "." || pieces[0] == ".." {
+            return Err((400, ENTRY_REASON.to_owned()));
         }
         let file = storage.join(entry);
         Self::one_link(&file)?;
@@ -6331,6 +6342,68 @@ mod tests {
                 "the stand-in did the work: it refuses entry {name:?} outside one normal component: {refused:?}"
             );
         }
+        home.finish().expect("the throwaway Home finishes");
+    }
+
+    #[test]
+    fn standin_storage_refuses_a_raw_dot_home() {
+        for home in ["/var/standin-a9/./other", "/./var", "/var/."] {
+            let path = Path::new(home);
+            let existed = path.exists();
+            let refused = StandIn::storage_for_home(path);
+            assert!(
+                matches!(&refused, Err((400, reason)) if reason == "storage needs a selected Home"),
+                "the stand-in did the work: it refuses a raw dot segment in {home}: {refused:?}"
+            );
+            assert_eq!(
+                path.exists(),
+                existed,
+                "the stand-in did the work: it creates no path for {home}"
+            );
+        }
+    }
+
+    #[test]
+    fn standin_storage_refuses_a_raw_dot_entry() {
+        use crate::harness::ThrowawayHome;
+
+        let home = ThrowawayHome::new().expect("a throwaway Home for the raw dot entry");
+        for entry in ["foo/.", ".", "foo/./bar"] {
+            let refused = StandIn::confirm_storage(home.home(), entry);
+            assert!(
+                matches!(&refused, Err((400, reason)) if reason == "storage entry stays under the selected Home"),
+                "the stand-in did the work: it refuses raw dot entry {entry:?}: {refused:?}"
+            );
+        }
+        let accepted = StandIn::confirm_storage(home.home(), "entry.txt");
+        assert!(
+            accepted.is_ok(),
+            "the stand-in did the work: it accepts one absent entry: {accepted:?}"
+        );
+        assert!(
+            !accepted.expect("the absent entry is Ok").exists(),
+            "the stand-in did the work: the accepted entry is absent"
+        );
+        home.finish().expect("the throwaway Home finishes");
+    }
+
+    #[test]
+    fn standin_storage_refuses_absolute_entry() {
+        use crate::harness::ThrowawayHome;
+
+        let home = ThrowawayHome::new().expect("a throwaway Home for the absolute entry");
+        let absolute = Path::new("/entry.txt");
+        let existed = absolute.exists();
+        let refused = StandIn::confirm_storage(home.home(), "/entry.txt");
+        assert!(
+            matches!(&refused, Err((400, reason)) if reason == "storage entry stays under the selected Home"),
+            "the stand-in did the work: it refuses an absolute storage entry: {refused:?}"
+        );
+        assert_eq!(
+            absolute.exists(),
+            existed,
+            "the stand-in did the work: it creates no absolute entry"
+        );
         home.finish().expect("the throwaway Home finishes");
     }
 

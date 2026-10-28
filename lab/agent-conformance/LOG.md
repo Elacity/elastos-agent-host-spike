@@ -13861,4 +13861,114 @@ New:
 - `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 247.84 seconds, inside the 600-second bound. Targets: lib 80 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0.
 - Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_stop_revoke_joins_the_audit_list -- --exact`: exit 0, 1 passed, real 1.54 seconds.
 
+## 090
+
+090: `slash_pieces` is the one storage segment check, so a raw `.` in the Home text or in an entry is refused, and an absolute entry stays refused. A PASS gives the Runtime no A9 credit.
+
+### Quote from the ask (read only, `513988ebd`)
+
+Smallest change:
+
+In `run_cmd.rs`, replace the three calls (`:62`, `:70`, `:236`) with
+
+```rust
+let runtime = crate::create_runtime(crate::default_data_dir().join("storage")).await?;
+```
+
+This is the expression `capsule_cmd.rs:149` already uses. One file, three
+lines, no new flag.
+
+Risks bullet:
+
+- **Per-Home, not per-instance.** Two `run` clients of one Home now share
+  `<data dir>/storage`. They shared `/tmp/elastos/storage` before. The two
+  labs reach separate directories by giving each client its own Home. agent-
+  conformance already does this for its two-instance journeys.
+
+### Plants
+
+Each plant was applied alone. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::NAME -- --exact`. The planted crate compiled, and that test failed on its assertion. The file was restored before the next plant. Restored, that test passes. No `falsifiers.json` id. Panic lines are `src/../standin-runtime/mod.rs`.
+
+F-standin-a9-dot-home: `storage_for_home` uses `Path::components` for the segment test, so a `.` piece is dropped. Failed at `src/../standin-runtime/mod.rs:6353:13`: `the stand-in did the work: it refuses a raw dot segment in /var/standin-a9/./other`, left `Ok("/var/standin-a9/./other/Library/Application Support/elastos/storage")`. Real 1.61 seconds.
+
+Old:
+
+```text
+        let Some(text) = home.to_str() else {
+            return refused(NEEDS_HOME);
+        };
+        if Self::slash_pieces(text)
+            .iter()
+            .any(|piece| *piece == "." || *piece == "..")
+        {
+            return refused(NEEDS_HOME);
+        }
+```
+
+New:
+
+```text
+        if home.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        }) {
+            return refused(NEEDS_HOME);
+        }
+```
+
+F-standin-a9-dot-entry: `confirm_storage` uses `Path::components` for the entry test, so `foo/.` is one normal piece. Failed at `src/../standin-runtime/mod.rs:6373:13`: `the stand-in did the work: it refuses raw dot entry "foo/."`, left `Ok` of that Home's storage joined with `foo/.`. Real 1.53 seconds.
+
+Old:
+
+```text
+        let pieces = Self::slash_pieces(entry);
+        let absolute = entry.starts_with('/');
+        if absolute || pieces.len() != 1 || pieces[0] == "." || pieces[0] == ".." {
+            return Err((400, ENTRY_REASON.to_owned()));
+        }
+```
+
+New:
+
+```text
+        let mut parts = Path::new(entry).components();
+        match (parts.next(), parts.next()) {
+            (Some(std::path::Component::Normal(_)), None) => {}
+            _ => return Err((400, ENTRY_REASON.to_owned())),
+        }
+```
+
+F-standin-a9-absolute-entry: the absolute guard is removed, so `/entry.txt` is one piece and `storage.join` replaces the storage root. Failed at `src/../standin-runtime/mod.rs:6397:9`: `the stand-in did the work: it refuses an absolute storage entry: Ok("/entry.txt")`. Real 1.50 seconds.
+
+Old:
+
+```text
+        let pieces = Self::slash_pieces(entry);
+        let absolute = entry.starts_with('/');
+        if absolute || pieces.len() != 1 || pieces[0] == "." || pieces[0] == ".." {
+            return Err((400, ENTRY_REASON.to_owned()));
+        }
+```
+
+New:
+
+```text
+        let pieces = Self::slash_pieces(entry);
+        if pieces.len() != 1 || pieces[0] == "." || pieces[0] == ".." {
+            return Err((400, ENTRY_REASON.to_owned()));
+        }
+```
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.15 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 273.84 seconds, inside the 600-second bound. Targets: lib 83 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0.
+- Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_storage_refuses_a_raw_dot_home -- --exact`: exit 0, 1 passed, real 1.30 seconds.
+- Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_storage_refuses_a_raw_dot_entry -- --exact`: exit 0, 1 passed, real 0.08 seconds.
+- Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_storage_refuses_absolute_entry -- --exact`: exit 0, 1 passed, real 0.06 seconds.
+
 
