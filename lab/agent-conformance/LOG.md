@@ -12878,3 +12878,343 @@ New:
 - Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.27 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_approved_use_is_on_the_audit_list -- --exact` exit 0, 1 passed and 0 failed, real 0.28 seconds.
 
 Principles: `record_use` at `standin-runtime/mod.rs:909` is the one append. `protected_write` calls it at `:872` after the bytes are stored. `protected_read` calls it at `:900` after the bytes are found. `get_audit` at `:932` is `&self`. `require_shell` at `:938` refuses a client with `This endpoint requires shell privileges` (`:1491`) before `self.audit.len()` at `:939`. The list walks newest first at `:947`. `total_in_memory` is the store length before `take` at `:952`. The event resource is the resolved uri at `:915`. The body keys are `events` and `total_in_memory` at `:955`. A PASS gives the Runtime no A15 credit. `session_id` still equals the instance id.
+
+## 080 — Hostcall returns a protected read or write
+
+080: a `resource_invoke` on `localhost://Users/` or `localhost://UsersAI/` calls `protected_read` or `protected_write` through the one `bridge_envelope`. A write success is `{"stored":true}`. A read success is the stored text. The response has no token, no principal, and no resolved root. A method error keeps `code` `denied` and drops the numeric status. A resolved root in that reason is rewritten to the guest form. Stored text is returned unchanged, including when it contains a principal name. Bytes that are not UTF-8 are refused with `protected read is not utf-8`. Any other invoke still calls `authorise` and returns `data` null. The plants below fail the named test and pass when restored. A PASS gives the Runtime no A15 credit. `session_id` still equals the instance id.
+
+The spec check is applied. `wrong resource` can name a resolved root, so the hostcall redacts that reason. The privacy rule covers Runtime-supplied metadata, and approved stored text can contain `agent-ada`. `protected_read` returns bytes, and a JSON string needs text, so invalid UTF-8 has its own refusal. The main test also round-trips `localhost://Users/self`, refuses a missing, null, numeric, boolean, or array write body, and reads once through a `once` grant.
+
+### Quotes from the contract (read only)
+
+`docs/AGENT_ARCHITECTURE.md`, Request flow, step 10:
+
+```text
+10. The result returns to the Agent Host and Home without exposing provider
+    credentials or broader authority.
+```
+
+This task is that return for a `Users/self` or `UsersAI/self` invoke. It is not a second hostcall.
+
+`elastos/crates/elastos-guest/src/runtime.rs`, `RuntimeRequest::ResourceInvoke` fields: `uri`, `operation`, `body`, `token`.
+
+### Plants
+
+Each plant was applied alone. The planted crate compiled, and the named test failed on its assertion. The file was restored before the next plant. Restored, the tests pass. No `falsifiers.json` id. Panic lines are `src/../standin-runtime/mod.rs`.
+
+The command for the main-test plants was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_returns_the_protected_result -- --exact`.
+
+F-standin-bridge-protected-skip: the Users arm calls `authorise` and returns `data` null, and does not call `protected_write`. Failed at `src/../standin-runtime/mod.rs:8633:9`: `an object write body is refused`, left `data` null with `type` `ok`, right the error `protected write body must be a string`.
+
+Old:
+
+```text
+                if protected_invoke(uri) {
+                    self.bridge_protected_invoke(request, capsule_id, token, uri)
+                } else {
+```
+
+New:
+
+```text
+                if protected_invoke(uri) {
+                    let invoke_caller = Caller::Client {
+                        session_id: capsule_id,
+                    };
+                    match self.authorise(invoke_caller, token) {
+                        Ok(()) => bridge_ok(Value::Null),
+                        Err((_status, message)) => bridge_error(&message),
+                    }
+                } else {
+```
+
+F-standin-bridge-double-spend: the Users write arm calls `authorise` and then `protected_write`. Failed at `src/../standin-runtime/mod.rs:8611:9`: `the once write returns stored`, left `grant is not live: Exhausted`, right `{"stored":true}`.
+
+Old:
+
+```text
+                let Some(text) = request.get("body").and_then(Value::as_str) else {
+                    return bridge_error("protected write body must be a string");
+                };
+                match self.protected_write(capsule_id, token, uri, text.as_bytes()) {
+```
+
+New:
+
+```text
+                let Some(text) = request.get("body").and_then(Value::as_str) else {
+                    return bridge_error("protected write body must be a string");
+                };
+                let _ = self.authorise(
+                    Caller::Client {
+                        session_id: capsule_id,
+                    },
+                    token,
+                );
+                match self.protected_write(capsule_id, token, uri, text.as_bytes()) {
+```
+
+F-standin-bridge-returns-root: the write success puts the resolved uri in `response.data`. Failed at `src/../standin-runtime/mod.rs:8605:9`: `the approved write returns stored`, left `localhost://UsersAI/763281cf1e57227a6b99d89d/journal`, right `{"stored":true}`.
+
+Old:
+
+```text
+                    Ok(_resolved) => bridge_ok(json!({ "stored": true })),
+```
+
+New:
+
+```text
+                    Ok(resolved) => bridge_ok(Value::String(resolved)),
+```
+
+F-standin-bridge-principal-caller: the Users arm uses `principal.unwrap_or(capsule_id)` as the instance id. Failed at `src/../standin-runtime/mod.rs:8610:9`: `the approved write returns stored`, left `unknown instance: agent-ada`, right `{"stored":true}`.
+
+Old:
+
+```text
+                    self.bridge_protected_invoke(request, capsule_id, token, uri)
+```
+
+New:
+
+```text
+                    self.bridge_protected_invoke(
+                        request,
+                        principal.unwrap_or(capsule_id),
+                        token,
+                        uri,
+                    )
+```
+
+F-standin-bridge-all-protected: every `resource_invoke` calls `protected_read`, including the Public uri. Failed at `src/../standin-runtime/mod.rs:8625:9`: `an object write body is refused`, left `wrong action: expected write, got read`, right `protected write body must be a string`.
+
+Old:
+
+```text
+            "resource_invoke" => {
+                let token = invoke_token(request)?;
+                let uri = invoke_uri(request);
+                if protected_invoke(uri) {
+                    self.bridge_protected_invoke(request, capsule_id, token, uri)
+                } else {
+                    let invoke_caller = Caller::Client {
+                        session_id: capsule_id,
+                    };
+                    match self.authorise(invoke_caller, token) {
+                        Ok(()) => bridge_ok(Value::Null),
+                        Err((_status, message)) => bridge_error(&message),
+                    }
+                }
+            }
+```
+
+New:
+
+```text
+            "resource_invoke" => {
+                let token = invoke_token(request)?;
+                let uri = invoke_uri(request);
+                match self.protected_read(capsule_id, token, uri) {
+                    Ok(bytes) => match String::from_utf8(bytes) {
+                        Ok(text) => bridge_ok(Value::String(text)),
+                        Err(_bytes) => bridge_error("protected read is not utf-8"),
+                    },
+                    Err((_status, message)) => {
+                        bridge_error(&self.redact_protected_reason(capsule_id, &message))
+                    }
+                }
+            }
+```
+
+F-standin-bridge-users-only: `protected_invoke` matches only `localhost://UsersAI/`. Failed at `src/../standin-runtime/mod.rs:8605:9`: `the Users write returns stored`, left `data` null, right `{"stored":true}`.
+
+Old:
+
+```text
+fn protected_invoke(uri: &str) -> bool {
+    uri.starts_with("localhost://Users/") || uri.starts_with("localhost://UsersAI/")
+}
+```
+
+New:
+
+```text
+fn protected_invoke(uri: &str) -> bool {
+    uri.starts_with("localhost://UsersAI/")
+}
+```
+
+F-standin-bridge-body-bypass: a missing, null, numeric, boolean, or array write body is stored as an empty string. An object body stays refused. Failed at `src/../standin-runtime/mod.rs:8631:9`: `a missing write body is refused`, left `{"stored":true}`, right `protected write body must be a string`.
+
+Old:
+
+```text
+                let Some(text) = request.get("body").and_then(Value::as_str) else {
+                    return bridge_error("protected write body must be a string");
+                };
+                match self.protected_write(capsule_id, token, uri, text.as_bytes()) {
+```
+
+New:
+
+```text
+                let text = match request.get("body") {
+                    Some(Value::String(text)) => text.clone(),
+                    Some(Value::Object(_)) => {
+                        return bridge_error("protected write body must be a string");
+                    }
+                    _ => String::new(),
+                };
+                match self.protected_write(capsule_id, token, uri, text.as_bytes()) {
+```
+
+F-standin-bridge-read-authorise: the Users read arm calls `authorise` and then `protected_read`. Failed at `src/../standin-runtime/mod.rs:8613:9`: `the once read returns the stored text`, left `grant is not live: Exhausted`, right `journal-v1`.
+
+Old:
+
+```text
+            "read" => match self.protected_read(capsule_id, token, uri) {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(text) => bridge_ok(Value::String(text)),
+                    Err(_bytes) => bridge_error("protected read is not utf-8"),
+                },
+                Err((_status, message)) => {
+                    bridge_error(&self.redact_protected_reason(capsule_id, &message))
+                }
+            },
+```
+
+New:
+
+```text
+            "read" => {
+                let _ = self.authorise(
+                    Caller::Client {
+                        session_id: capsule_id,
+                    },
+                    token,
+                );
+                match self.protected_read(capsule_id, token, uri) {
+                    Ok(bytes) => match String::from_utf8(bytes) {
+                        Ok(text) => bridge_ok(Value::String(text)),
+                        Err(_bytes) => bridge_error("protected read is not utf-8"),
+                    },
+                    Err((_status, message)) => {
+                        bridge_error(&self.redact_protected_reason(capsule_id, &message))
+                    }
+                }
+            }
+```
+
+F-standin-bridge-read-body: a read whose body is not an object is refused. Failed at `src/../standin-runtime/mod.rs:8610:9`: `a null read body is ignored`, left `protected write body must be a string`, right `journal-v1`.
+
+Old: the `read` arm above.
+
+New:
+
+```text
+            "read" => match request.get("body") {
+                Some(body) if !body.is_object() => {
+                    bridge_error("protected write body must be a string")
+                }
+                _ => match self.protected_read(capsule_id, token, uri) {
+                    Ok(bytes) => match String::from_utf8(bytes) {
+                        Ok(text) => bridge_ok(Value::String(text)),
+                        Err(_bytes) => bridge_error("protected read is not utf-8"),
+                    },
+                    Err((_status, message)) => {
+                        bridge_error(&self.redact_protected_reason(capsule_id, &message))
+                    }
+                },
+            },
+```
+
+F-standin-bridge-operation: an operation other than `read` or `write` calls `protected_write` when the body is a string. Failed at `src/../standin-runtime/mod.rs:8637:9`: `list is not a protected operation`, left `{"stored":true}`, right `protected operation is read or write`.
+
+Old:
+
+```text
+            _ => bridge_error("protected operation is read or write"),
+```
+
+New:
+
+```text
+            _ => {
+                let Some(text) = request.get("body").and_then(Value::as_str) else {
+                    return bridge_error("protected operation is read or write");
+                };
+                match self.protected_write(capsule_id, token, uri, text.as_bytes()) {
+                    Ok(_resolved) => bridge_ok(json!({ "stored": true })),
+                    Err((_status, message)) => {
+                        bridge_error(&self.redact_protected_reason(capsule_id, &message))
+                    }
+                }
+            }
+```
+
+F-standin-bridge-verbatim: the write error is forwarded unchanged. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_redacts_protected_errors -- --exact`. Failed at `src/../standin-runtime/mod.rs:8625:9`: `the hostcall redacts the resolved Users root`, left `wrong resource: expected localhost://Users/763281cf1e57227a6b99d89d/journal, got localhost://Users/self/other`, right the same sentence with `localhost://Users/self/journal`.
+
+Old:
+
+```text
+                match self.protected_write(capsule_id, token, uri, text.as_bytes()) {
+                    Ok(_resolved) => bridge_ok(json!({ "stored": true })),
+                    Err((_status, message)) => {
+                        bridge_error(&self.redact_protected_reason(capsule_id, &message))
+                    }
+                }
+```
+
+New:
+
+```text
+                match self.protected_write(capsule_id, token, uri, text.as_bytes()) {
+                    Ok(_resolved) => bridge_ok(json!({ "stored": true })),
+                    Err((_status, message)) => bridge_error(&message),
+                }
+```
+
+F-standin-bridge-payload: the read success replaces `agent-ada` with `capsule`. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_preserves_payload_text -- --exact`. Failed at `src/../standin-runtime/mod.rs:8605:9`: `the payload read returns the stored text`, left `capsule 763281cf1e57227a6b99d89d`, right `agent-ada 763281cf1e57227a6b99d89d`.
+
+Old:
+
+```text
+                    Ok(text) => bridge_ok(Value::String(text)),
+```
+
+New:
+
+```text
+                    Ok(text) => bridge_ok(Value::String(text.replace("agent-ada", "capsule"))),
+```
+
+F-standin-bridge-lossy: invalid UTF-8 is decoded with `from_utf8_lossy` and returned as success. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_refuses_invalid_utf8 -- --exact`. Failed at `src/../standin-runtime/mod.rs:8626:9`: `invalid utf-8 is refused`, left `type` `ok` with the replacement characters, right `protected read is not utf-8`.
+
+Old:
+
+```text
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(text) => bridge_ok(Value::String(text)),
+                    Err(_bytes) => bridge_error("protected read is not utf-8"),
+                },
+```
+
+New:
+
+```text
+                Ok(bytes) => {
+                    bridge_ok(Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+                },
+```
+
+### Gates
+
+`RUST_TEST_THREADS=2` and `CARGO_INCREMENTAL=0`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.16 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 284.92 seconds, inside the 600-second bound. Targets in order: lib 78 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.25 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_returns_the_protected_result -- --exact` exit 0, 1 passed and 0 failed, real 9.94 seconds.
+
+Principles: `protected_invoke` at `standin-runtime/mod.rs:1951` selects the guest uri. `bridge_envelope` at `:502` calls `bridge_protected_invoke` for that uri and does not call `authorise` there. The other invoke arm still calls `authorise` at `:507` and returns `data` null at `:508`. `bridge_protected_invoke` at `:541` calls `protected_read` or `protected_write` with `capsule_id`. `principal` is unused at `:481`. `protected_write` still calls `authorise_presented` at `:931`. `redact_protected_reason` at `:569` rewrites a resolved root through `resolve_protected_uri`. A write body that is not a string is `protected write body must be a string` at `:552`. Any other operation is `protected operation is read or write` at `:561`. Invalid UTF-8 is `protected read is not utf-8` at `:544`. A PASS gives the Runtime no A15 credit. `session_id` still equals the instance id.

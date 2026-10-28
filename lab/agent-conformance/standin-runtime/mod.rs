@@ -27,9 +27,11 @@
 //! seconds old. A granted or denied record and its instance stay.
 //!
 //! `bridge_envelope` is the one hostcall. A capability line calls
-//! `post_capability_request` for the given capsule id. An invoke line calls
-//! `authorise` for that capsule id. The principal argument does not choose
-//! the caller.
+//! `post_capability_request` for the given capsule id. A `resource_invoke`
+//! on `localhost://Users/` or `localhost://UsersAI/` calls `protected_read`
+//! or `protected_write` for that capsule id. Any other invoke calls
+//! `authorise` for that capsule id and returns `data` null. The principal
+//! argument does not choose the caller.
 //!
 //! `bind_verified_principal` stores the principal the launch verified.
 //! `post_capsules` copies that principal onto the new instance.
@@ -464,9 +466,12 @@ impl StandIn {
     /// Lab test seam, not a route.
     ///
     /// The one hostcall. A `request_capability` line calls
-    /// `post_capability_request` for `capsule_id`. A `resource_invoke` line
-    /// calls `authorise` for `capsule_id`. `principal` does not choose the
-    /// caller. This method reads no clock and no disk.
+    /// `post_capability_request` for `capsule_id`. A `resource_invoke` whose
+    /// uri starts with `localhost://Users/` or `localhost://UsersAI/` calls
+    /// `protected_read` or `protected_write` for `capsule_id`. Any other
+    /// invoke calls `authorise` for `capsule_id` and returns `data` null.
+    /// `principal` does not choose the caller. This method reads no clock
+    /// and no disk.
     pub fn bridge_envelope(
         &mut self,
         line: &str,
@@ -492,12 +497,17 @@ impl StandIn {
             }
             "resource_invoke" => {
                 let token = invoke_token(request)?;
-                let invoke_caller = Caller::Client {
-                    session_id: capsule_id,
-                };
-                match self.authorise(invoke_caller, token) {
-                    Ok(()) => bridge_ok(Value::Null),
-                    Err((_status, message)) => bridge_error(&message),
+                let uri = invoke_uri(request);
+                if protected_invoke(uri) {
+                    self.bridge_protected_invoke(request, capsule_id, token, uri)
+                } else {
+                    let invoke_caller = Caller::Client {
+                        session_id: capsule_id,
+                    };
+                    match self.authorise(invoke_caller, token) {
+                        Ok(()) => bridge_ok(Value::Null),
+                        Err((_status, message)) => bridge_error(&message),
+                    }
                 }
             }
             _ => bridge_error("unsupported bridge request"),
@@ -507,6 +517,64 @@ impl StandIn {
             "response": response,
         }))
         .map_err(|err| format!("Invalid JSON: {err}"))
+    }
+
+    /// One protected invoke on the hostcall.
+    ///
+    /// `read` calls `protected_read` and ignores `body`. `write` calls
+    /// `protected_write` only when `body` is a JSON string. The instance id
+    /// is `capsule_id`. A method error keeps `code` `denied` and drops the
+    /// numeric status. A resolved root in that reason is rewritten to the
+    /// guest form. The stored text is returned unchanged.
+    fn bridge_protected_invoke(
+        &mut self,
+        request: &Value,
+        capsule_id: &str,
+        token: &str,
+        uri: &str,
+    ) -> Value {
+        let operation = request
+            .get("operation")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        match operation {
+            "read" => match self.protected_read(capsule_id, token, uri) {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(text) => bridge_ok(Value::String(text)),
+                    Err(_bytes) => bridge_error("protected read is not utf-8"),
+                },
+                Err((_status, message)) => {
+                    bridge_error(&self.redact_protected_reason(capsule_id, &message))
+                }
+            },
+            "write" => {
+                let Some(text) = request.get("body").and_then(Value::as_str) else {
+                    return bridge_error("protected write body must be a string");
+                };
+                match self.protected_write(capsule_id, token, uri, text.as_bytes()) {
+                    Ok(_resolved) => bridge_ok(json!({ "stored": true })),
+                    Err((_status, message)) => {
+                        bridge_error(&self.redact_protected_reason(capsule_id, &message))
+                    }
+                }
+            }
+            _ => bridge_error("protected operation is read or write"),
+        }
+    }
+
+    /// Rewrites a resolved `Users` or `UsersAI` root back to the guest form.
+    ///
+    /// `protected_write` and `protected_read` can name that root in
+    /// `wrong resource`. The stored text is not passed here.
+    fn redact_protected_reason(&self, instance_id: &str, message: &str) -> String {
+        let mut redacted = message.to_owned();
+        if let Ok(root) = self.resolve_protected_uri(instance_id, "localhost://Users/self") {
+            redacted = redacted.replace(&root, "localhost://Users/self");
+        }
+        if let Ok(root) = self.resolve_protected_uri(instance_id, "localhost://UsersAI/self") {
+            redacted = redacted.replace(&root, "localhost://UsersAI/self");
+        }
+        redacted
     }
 
     /// Lab observation, not a route.
@@ -1872,6 +1940,16 @@ fn invoke_token(request: &Value) -> Result<&str, String> {
         Some(Value::String(token)) => Ok(token),
         Some(_) => Err("Invalid JSON: token must be a string".to_owned()),
     }
+}
+
+/// The invoke `uri` string, or `""` when `uri` is absent or not a string.
+fn invoke_uri(request: &Value) -> &str {
+    request.get("uri").and_then(Value::as_str).unwrap_or("")
+}
+
+/// A protected invoke. Any other uri stays on the `authorise` arm.
+fn protected_invoke(uri: &str) -> bool {
+    uri.starts_with("localhost://Users/") || uri.starts_with("localhost://UsersAI/")
 }
 
 fn bridge_ok(data: Value) -> Value {
@@ -11994,6 +12072,727 @@ mod tests {
             "running",
             "",
             "component-2 stays running after the audit fill",
+        );
+    }
+
+    fn host_pair(
+        standin: &mut StandIn,
+        line: &str,
+        capsule_id: &str,
+        principal: Option<&str>,
+    ) -> Result<(String, Value), String> {
+        let raw = standin.bridge_envelope(line, capsule_id, principal)?;
+        assert_eq!(
+            raw.trim(),
+            raw,
+            "the stand-in did the work: the hostcall returns one JSON object with no trailing text"
+        );
+        let parsed: Value = serde_json::from_str(&raw).unwrap_or_else(|err| {
+            panic!(
+                "the stand-in did the work: the hostcall returns one JSON object: {err}; raw {raw:?}"
+            )
+        });
+        Ok((raw, parsed))
+    }
+
+    fn assert_no_protected_leak(raw: &str, digest: &str, principal: &str, message: &str) {
+        assert!(
+            !raw.contains(principal),
+            "the stand-in did the work: {message} names no principal"
+        );
+        assert!(
+            !raw.contains(digest),
+            "the stand-in did the work: {message} names no resolved root"
+        );
+        assert!(
+            !raw.contains("token"),
+            "the stand-in did the work: {message} has no token"
+        );
+        assert!(
+            !raw.contains("audit"),
+            "the stand-in did the work: {message} has no audit"
+        );
+    }
+
+    fn running_ada() -> StandIn {
+        let mut standin = StandIn::new();
+        standin
+            .admit_resident("/capsules/journal-a", "journal-a", Start::Ok)
+            .expect("the stand-in admits journal-a");
+        assert_eq!(
+            standin.bind_verified_principal("/capsules/journal-a", "agent-ada"),
+            Ok(()),
+            "the stand-in did the work: journal-a binds agent-ada"
+        );
+        let launched = standin
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/journal-a"}))
+            .expect("the stand-in launches journal-a");
+        assert_eq!(
+            launched["id"], "component-1",
+            "the stand-in did the work: the launch id is component-1"
+        );
+        standin
+            .finish_start("component-1")
+            .expect("the stand-in finishes component-1");
+        standin
+    }
+
+    #[test]
+    fn standin_hostcall_returns_the_protected_result() {
+        let digest_a_hex = crate::identity::sha256(b"agent-ada");
+        let digest_a = &digest_a_hex[..24];
+        let guest = "localhost://UsersAI/self/journal";
+        let once_guest = "localhost://UsersAI/self/once";
+        let users_guest = "localhost://Users/self/note";
+        let object_line = r#"{"id":3,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/journal","operation":"write","body":{"bytes":"journal-v1"},"token":"req-w"}}"#;
+        let write_line = r#"{"id":4,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/journal","operation":"write","body":"journal-v1","token":"req-w"}}"#;
+        let read_line = r#"{"id":5,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/journal","operation":"read","body":{},"token":"req-r"}}"#;
+        let sibling_line = r#"{"id":5,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/journal","operation":"read","body":{},"token":"req-b"}}"#;
+        let wrong_line = r#"{"id":4,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/journal","operation":"write","body":"other","token":"req-w"}}"#;
+        let once_line = r#"{"id":6,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/once","operation":"write","body":"once-v1","token":"req-once"}}"#;
+        let once_read = r#"{"id":7,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/journal","operation":"read","body":{},"token":"req-once-read"}}"#;
+        let list_line = r#"{"id":9,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/journal","operation":"list","body":"journal-v1","token":"req-w"}}"#;
+        let public_line = r#"{"id":8,"request":{"type":"resource_invoke","uri":"localhost://Public/resident-instances/shared.txt","operation":"read","body":{},"token":"req-pub"}}"#;
+        let users_write = r#"{"id":15,"request":{"type":"resource_invoke","uri":"localhost://Users/self/note","operation":"write","body":"note-v1","token":"req-users-w"}}"#;
+        let users_read = r#"{"id":16,"request":{"type":"resource_invoke","uri":"localhost://Users/self/note","operation":"read","body":{},"token":"req-users-r"}}"#;
+
+        let mut standin = StandIn::new();
+        standin
+            .admit_resident("/capsules/journal-a", "journal-a", Start::Ok)
+            .expect("the stand-in admits journal-a");
+        standin
+            .admit_resident("/capsules/journal-b", "journal-b", Start::Ok)
+            .expect("the stand-in admits journal-b");
+        assert_eq!(
+            standin.bind_verified_principal("/capsules/journal-a", "agent-ada"),
+            Ok(()),
+            "the stand-in did the work: journal-a binds agent-ada"
+        );
+        assert_eq!(
+            standin.bind_verified_principal("/capsules/journal-b", "agent-bob"),
+            Ok(()),
+            "the stand-in did the work: journal-b binds agent-bob"
+        );
+        let launch_a = standin
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/journal-a"}))
+            .expect("the stand-in launches journal-a");
+        let launch_b = standin
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/journal-b"}))
+            .expect("the stand-in launches journal-b");
+        assert_eq!(
+            launch_a["id"], "component-1",
+            "the stand-in did the work: journal-a is component-1"
+        );
+        assert_eq!(
+            launch_b["id"], "component-2",
+            "the stand-in did the work: journal-b is component-2"
+        );
+        standin
+            .finish_start("component-1")
+            .expect("the stand-in finishes component-1");
+        standin
+            .finish_start("component-2")
+            .expect("the stand-in finishes component-2");
+        assert_named_capsule(
+            &standin,
+            "component-1",
+            "journal-a",
+            "running",
+            "",
+            "component-1 is running",
+        );
+        assert_named_capsule(
+            &standin,
+            "component-2",
+            "journal-b",
+            "running",
+            "",
+            "component-2 is running",
+        );
+        standin.seed_grant(
+            "req-w",
+            "component-1",
+            guest,
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-r",
+            "component-1",
+            guest,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-b",
+            "component-2",
+            guest,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-once",
+            "component-1",
+            once_guest,
+            "write",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-once-read",
+            "component-1",
+            guest,
+            "read",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-pub",
+            "component-1",
+            SHARED_RESOURCE,
+            "read",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-users-w",
+            "component-1",
+            users_guest,
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-users-r",
+            "component-1",
+            users_guest,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+
+        let (raw, parsed) = host_pair(&mut standin, object_line, "component-1", Some("agent-ada"))
+            .expect("the stand-in did the work: an object write body is one response");
+        assert_host_error(
+            &parsed,
+            3,
+            "protected write body must be a string",
+            "an object write body is refused",
+        );
+        assert_no_protected_leak(&raw, digest_a, "agent-ada", "an object write body");
+        assert_eq!(
+            standin.protected_read("component-1", "req-r", guest),
+            Err((404, "protected object is absent".to_owned())),
+            "the stand-in did the work: an object write body stores nothing"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-w"),
+            (Life::Live, false),
+            "the stand-in did the work: an object write body leaves the grant live"
+        );
+
+        let (raw, parsed) = host_pair(&mut standin, write_line, "component-1", Some("agent-ada"))
+            .expect("the stand-in did the work: the approved write is one response");
+        assert_host_ok(
+            &parsed,
+            4,
+            json!({ "stored": true }),
+            "the approved write returns stored",
+        );
+        assert_no_protected_leak(&raw, digest_a, "agent-ada", "the approved write");
+        assert_eq!(
+            standin.protected_read("component-1", "req-r", guest),
+            Ok(b"journal-v1".to_vec()),
+            "the stand-in did the work: the approved write stores journal-v1"
+        );
+
+        let (raw, parsed) = host_pair(&mut standin, read_line, "component-1", None)
+            .expect("the stand-in did the work: the approved read is one response");
+        assert_host_ok(
+            &parsed,
+            5,
+            json!("journal-v1"),
+            "the approved read returns the stored text",
+        );
+        assert_no_protected_leak(&raw, digest_a, "agent-ada", "the approved read");
+
+        for (line, message) in [
+            (
+                r#"{"id":5,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/journal","operation":"read","token":"req-r"}}"#,
+                "a missing read body is ignored",
+            ),
+            (
+                r#"{"id":5,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/journal","operation":"read","body":null,"token":"req-r"}}"#,
+                "a null read body is ignored",
+            ),
+            (
+                r#"{"id":5,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/journal","operation":"read","body":1,"token":"req-r"}}"#,
+                "a numeric read body is ignored",
+            ),
+        ] {
+            let (raw, parsed) = host_pair(&mut standin, line, "component-1", None)
+                .expect("the stand-in did the work: a read body is one response");
+            assert_host_ok(&parsed, 5, json!("journal-v1"), message);
+            assert_no_protected_leak(&raw, digest_a, "agent-ada", message);
+        }
+
+        let (raw, sibling) = host_pair(
+            &mut standin,
+            sibling_line,
+            "component-2",
+            Some("component-1"),
+        )
+        .expect("the stand-in did the work: the other capsule's read is one response");
+        assert_host_error(
+            &sibling,
+            5,
+            "protected object is absent",
+            "the other capsule reads its own absent object",
+        );
+        assert_no_protected_leak(&raw, digest_a, "agent-ada", "the other capsule's read");
+        assert_eq!(
+            standin.protected_read("component-1", "req-r", guest),
+            Ok(b"journal-v1".to_vec()),
+            "the stand-in did the work: the other capsule's read leaves journal-v1"
+        );
+
+        let (raw, wrong) = host_pair(&mut standin, wrong_line, "component-2", Some("component-1"))
+            .expect("the stand-in did the work: the other capsule's write is one response");
+        assert_host_error(
+            &wrong,
+            4,
+            "wrong capsule: expected component-1, got component-2",
+            "the other capsule's write is refused",
+        );
+        assert!(
+            wrong["response"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("wrong capsule"),
+            "the stand-in did the work: the other capsule's write names wrong capsule"
+        );
+        assert_no_protected_leak(&raw, digest_a, "agent-ada", "the other capsule's write");
+        assert_eq!(
+            standin.protected_read("component-1", "req-r", guest),
+            Ok(b"journal-v1".to_vec()),
+            "the stand-in did the work: the other capsule's write leaves journal-v1"
+        );
+
+        for (line, message) in [
+            (
+                r#"{"id":10,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/once","operation":"write","token":"req-once"}}"#,
+                "a missing write body is refused",
+            ),
+            (
+                r#"{"id":11,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/once","operation":"write","body":null,"token":"req-once"}}"#,
+                "a null write body is refused",
+            ),
+            (
+                r#"{"id":12,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/once","operation":"write","body":1,"token":"req-once"}}"#,
+                "a numeric write body is refused",
+            ),
+            (
+                r#"{"id":13,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/once","operation":"write","body":true,"token":"req-once"}}"#,
+                "a boolean write body is refused",
+            ),
+            (
+                r#"{"id":14,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/once","operation":"write","body":[],"token":"req-once"}}"#,
+                "an array write body is refused",
+            ),
+        ] {
+            let (raw, parsed) = host_pair(&mut standin, line, "component-1", None)
+                .expect("the stand-in did the work: a non-string write body is one response");
+            assert_host_error(
+                &parsed,
+                parsed["id"].as_u64().unwrap(),
+                "protected write body must be a string",
+                message,
+            );
+            assert_no_protected_leak(&raw, digest_a, "agent-ada", message);
+            assert_eq!(
+                standin.protected_read("component-1", "req-r", guest),
+                Ok(b"journal-v1".to_vec()),
+                "the stand-in did the work: {message} leaves the stored bytes"
+            );
+            assert_eq!(
+                grant_record(&standin, "req-once"),
+                (Life::Live, false),
+                "the stand-in did the work: {message} leaves the once grant live"
+            );
+            assert!(
+                standin
+                    .protected_objects
+                    .keys()
+                    .all(|key| !key.ends_with("/once")),
+                "the stand-in did the work: {message} stores nothing"
+            );
+        }
+
+        let (raw, once_read_body) = host_pair(&mut standin, once_read, "component-1", None)
+            .expect("the stand-in did the work: the once read is one response");
+        assert_host_ok(
+            &once_read_body,
+            7,
+            json!("journal-v1"),
+            "the once read returns the stored text",
+        );
+        assert_no_protected_leak(&raw, digest_a, "agent-ada", "the once read");
+        assert_eq!(
+            grant_record(&standin, "req-once-read"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: the once read stores Exhausted"
+        );
+        let (raw, once_read_again) = host_pair(&mut standin, once_read, "component-1", None)
+            .expect("the stand-in did the work: the second once read is one response");
+        assert_host_error(
+            &once_read_again,
+            7,
+            "grant is not live: Exhausted",
+            "a second once read finds the grant exhausted",
+        );
+        assert_no_protected_leak(&raw, digest_a, "agent-ada", "the second once read");
+        assert_eq!(
+            standin.protected_read("component-1", "req-r", guest),
+            Ok(b"journal-v1".to_vec()),
+            "the stand-in did the work: the once read leaves journal-v1"
+        );
+
+        let (raw, once_body) = host_pair(&mut standin, once_line, "component-1", None)
+            .expect("the stand-in did the work: the once write is one response");
+        assert_host_ok(
+            &once_body,
+            6,
+            json!({ "stored": true }),
+            "the once write returns stored",
+        );
+        assert_no_protected_leak(&raw, digest_a, "agent-ada", "the once write");
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: the once write stores Exhausted"
+        );
+        let (raw, once_again) = host_pair(&mut standin, once_line, "component-1", None)
+            .expect("the stand-in did the work: the second once write is one response");
+        assert_host_error(
+            &once_again,
+            6,
+            "grant is not live: Exhausted",
+            "a second once write finds the grant exhausted",
+        );
+        assert_no_protected_leak(&raw, digest_a, "agent-ada", "the second once write");
+
+        let (raw, listed) = host_pair(&mut standin, list_line, "component-1", None)
+            .expect("the stand-in did the work: a list invoke is one response");
+        assert_host_error(
+            &listed,
+            9,
+            "protected operation is read or write",
+            "list is not a protected operation",
+        );
+        assert_no_protected_leak(&raw, digest_a, "agent-ada", "a list invoke");
+        assert_eq!(
+            grant_record(&standin, "req-w"),
+            (Life::Live, false),
+            "the stand-in did the work: list leaves the write grant live"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-r", guest),
+            Ok(b"journal-v1".to_vec()),
+            "the stand-in did the work: list stores nothing"
+        );
+
+        let (raw, users_written) = host_pair(&mut standin, users_write, "component-1", None)
+            .expect("the stand-in did the work: the Users write is one response");
+        assert_host_ok(
+            &users_written,
+            15,
+            json!({ "stored": true }),
+            "the Users write returns stored",
+        );
+        assert_no_protected_leak(&raw, digest_a, "agent-ada", "the Users write");
+        let (raw, users_body) = host_pair(&mut standin, users_read, "component-1", None)
+            .expect("the stand-in did the work: the Users read is one response");
+        assert_host_ok(
+            &users_body,
+            16,
+            json!("note-v1"),
+            "the Users read returns the stored text",
+        );
+        assert_no_protected_leak(&raw, digest_a, "agent-ada", "the Users read");
+
+        let (raw, public) = host_pair(&mut standin, public_line, "component-1", Some("agent-ada"))
+            .expect("the stand-in did the work: the public invoke is one response");
+        assert_host_ok(
+            &public,
+            8,
+            Value::Null,
+            "the public invoke returns data null",
+        );
+        assert_no_protected_leak(&raw, digest_a, "agent-ada", "the public invoke");
+        assert_eq!(
+            grant_record(&standin, "req-pub"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: the public invoke stores Exhausted"
+        );
+        assert_named_capsule(
+            &standin,
+            "component-1",
+            "journal-a",
+            "running",
+            "",
+            "component-1 stays running",
+        );
+        assert_named_capsule(
+            &standin,
+            "component-2",
+            "journal-b",
+            "running",
+            "",
+            "component-2 stays running",
+        );
+    }
+
+    #[test]
+    fn standin_hostcall_redacts_protected_errors() {
+        let digest_a_hex = crate::identity::sha256(b"agent-ada");
+        let digest_a = &digest_a_hex[..24];
+        let users_grant = format!("localhost://Users/{digest_a}/journal");
+        let usersai_grant = format!("localhost://UsersAI/{digest_a}/journal");
+        let users_leaked =
+            format!("wrong resource: expected {users_grant}, got localhost://Users/self/other");
+        let usersai_leaked =
+            format!("wrong resource: expected {usersai_grant}, got localhost://UsersAI/self/other");
+        let users_redacted =
+            "wrong resource: expected localhost://Users/self/journal, got localhost://Users/self/other";
+        let usersai_redacted = "wrong resource: expected localhost://UsersAI/self/journal, got localhost://UsersAI/self/other";
+        let mut standin = running_ada();
+        standin.seed_grant(
+            "req-users-root",
+            "component-1",
+            &users_grant,
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-usersai-root",
+            "component-1",
+            &usersai_grant,
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-users-root",
+                "localhost://Users/self/other",
+                b"nope",
+            ),
+            Err((403, users_leaked)),
+            "the stand-in did the work: the protected method names the resolved Users root"
+        );
+        let users_line = r#"{"id":1,"request":{"type":"resource_invoke","uri":"localhost://Users/self/other","operation":"write","body":"nope","token":"req-users-root"}}"#;
+        let (raw, parsed) = host_pair(&mut standin, users_line, "component-1", Some("agent-ada"))
+            .expect("the stand-in did the work: the Users refusal is one response");
+        assert_host_error(
+            &parsed,
+            1,
+            users_redacted,
+            "the hostcall redacts the resolved Users root",
+        );
+        assert_no_protected_leak(&raw, digest_a, "agent-ada", "the redacted Users error");
+        assert_eq!(
+            grant_record(&standin, "req-users-root"),
+            (Life::Live, false),
+            "the stand-in did the work: the redacted Users error leaves the grant live"
+        );
+
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-usersai-root",
+                "localhost://UsersAI/self/other",
+                b"nope",
+            ),
+            Err((403, usersai_leaked)),
+            "the stand-in did the work: the protected method names the resolved UsersAI root"
+        );
+        let usersai_line = r#"{"id":2,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/other","operation":"write","body":"nope","token":"req-usersai-root"}}"#;
+        let (raw, parsed) = host_pair(&mut standin, usersai_line, "component-1", Some("agent-ada"))
+            .expect("the stand-in did the work: the UsersAI refusal is one response");
+        assert_host_error(
+            &parsed,
+            2,
+            usersai_redacted,
+            "the hostcall redacts the resolved UsersAI root",
+        );
+        assert_no_protected_leak(&raw, digest_a, "agent-ada", "the redacted UsersAI error");
+        assert_eq!(
+            grant_record(&standin, "req-usersai-root"),
+            (Life::Live, false),
+            "the stand-in did the work: the redacted UsersAI error leaves the grant live"
+        );
+        assert!(
+            standin.protected_objects.is_empty(),
+            "the stand-in did the work: a redacted refusal stores nothing"
+        );
+    }
+
+    #[test]
+    fn standin_hostcall_preserves_payload_text() {
+        let digest_a_hex = crate::identity::sha256(b"agent-ada");
+        let digest_a = &digest_a_hex[..24];
+        let payload = format!("agent-ada {digest_a}");
+        let mut standin = running_ada();
+        standin.seed_grant(
+            "req-w",
+            "component-1",
+            "localhost://UsersAI/self/journal",
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-r",
+            "component-1",
+            "localhost://UsersAI/self/journal",
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        let write_line = format!(
+            r#"{{"id":1,"request":{{"type":"resource_invoke","uri":"localhost://UsersAI/self/journal","operation":"write","body":"{payload}","token":"req-w"}}}}"#
+        );
+        let (raw, parsed) = host_pair(&mut standin, &write_line, "component-1", Some("agent-ada"))
+            .expect("the stand-in did the work: the payload write is one response");
+        assert_host_ok(
+            &parsed,
+            1,
+            json!({ "stored": true }),
+            "the payload write returns stored",
+        );
+        assert_no_protected_leak(&raw, digest_a, "agent-ada", "the payload write");
+        let read_line = r#"{"id":2,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/journal","operation":"read","body":{},"token":"req-r"}}"#;
+        let (raw, parsed) = host_pair(&mut standin, read_line, "component-1", None)
+            .expect("the stand-in did the work: the payload read is one response");
+        assert_host_ok(
+            &parsed,
+            2,
+            json!(payload),
+            "the payload read returns the stored text",
+        );
+        assert!(
+            raw.contains("agent-ada"),
+            "the stand-in did the work: the stored text keeps the principal name"
+        );
+        assert!(
+            raw.contains(digest_a),
+            "the stand-in did the work: the stored text keeps the digest the grant approved"
+        );
+        assert!(
+            !raw.contains("token"),
+            "the stand-in did the work: the payload read has no token"
+        );
+        assert!(
+            !raw.contains("audit"),
+            "the stand-in did the work: the payload read has no audit"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-r", "localhost://UsersAI/self/journal"),
+            Ok(payload.into_bytes()),
+            "the stand-in did the work: the stored bytes keep the payload"
+        );
+    }
+
+    #[test]
+    fn standin_hostcall_refuses_invalid_utf8() {
+        let bytes = vec![0xFF, 0xFE];
+        let mut standin = running_ada();
+        standin.seed_grant(
+            "req-utf8-w",
+            "component-1",
+            "localhost://UsersAI/self/bytes",
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-utf8-r",
+            "component-1",
+            "localhost://UsersAI/self/bytes",
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        assert!(
+            standin
+                .protected_write(
+                    "component-1",
+                    "req-utf8-w",
+                    "localhost://UsersAI/self/bytes",
+                    &bytes
+                )
+                .is_ok(),
+            "the stand-in did the work: the invalid bytes are stored"
+        );
+        let line = r#"{"id":2,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/bytes","operation":"read","body":{},"token":"req-utf8-r"}}"#;
+        let (raw, parsed) = host_pair(&mut standin, line, "component-1", None)
+            .expect("the stand-in did the work: the utf-8 refusal is one response");
+        assert_host_error(
+            &parsed,
+            2,
+            "protected read is not utf-8",
+            "invalid utf-8 is refused",
+        );
+        assert!(
+            !raw.contains('\u{FFFD}'),
+            "the stand-in did the work: the refusal is not lossy text"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-utf8-r"),
+            (Life::Live, false),
+            "the stand-in did the work: the utf-8 refusal leaves the session grant live"
+        );
+        assert_eq!(
+            standin.protected_read(
+                "component-1",
+                "req-utf8-r",
+                "localhost://UsersAI/self/bytes"
+            ),
+            Ok(bytes),
+            "the stand-in did the work: the refusal leaves the stored bytes"
         );
     }
 }
