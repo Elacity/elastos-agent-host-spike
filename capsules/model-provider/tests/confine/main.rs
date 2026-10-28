@@ -889,6 +889,16 @@ fn wait_for_terminal(
 /// an attribute without a field and unsupported attributes such as
 /// `#[serde(skip)]` or combined rename options.
 ///
+/// `operations_outputs_match_the_answers` splits each Outputs cell at its
+/// first `error:`, holds the error spans to `error_response`'s keys and the
+/// ok spans to `ok_response`'s keys followed by that row's `from` struct or
+/// its one `json!`. It reads `fn handle_offers_list` in `src/state.rs` and the
+/// `ProviderOperation::Shutdown =>` arm in `src/execution.rs` through the one
+/// `json_literal_keys` reader. In-memory answers cover the matching cell, a
+/// missing and an extra struct field, a dropped error key, a changed wrapper
+/// key, reordered keys, a nested key, a dropped `json!` key, zero and two
+/// literals, the `unsupported` ok side and a row without `from`.
+///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
 /// test no longer finds that function. F-cc49a drops the `generated_`
 /// acceptance, so the in-memory stand-in citation fails. F-cc50a drops the
@@ -1213,17 +1223,18 @@ fn operations_section_cites_existing_tests() {
     /// name the struct. The body runs from that `{` to the line whose trim is
     /// `}`. A blank line or a line whose trim starts with `//` is skipped. One
     /// attribute line above a field may be `#[serde(rename = "...")]`, which
-    /// gives the wire name, or `#[serde(default)]` or
-    /// `#[serde(default, skip_serializing_if = "...")]`, which keep the Rust
-    /// name. These are complete attribute forms with one non-empty, unescaped
-    /// quoted value; extra options are rejected. A field line's trim starts
-    /// with `pub `, then the name, then `:`.
+    /// gives the wire name, or `#[serde(default)]`,
+    /// `#[serde(default, skip_serializing_if = "...")]` or
+    /// `#[serde(skip_serializing_if = "...")]`, which keep the Rust name and
+    /// keep the key required. These are complete attribute forms with one
+    /// non-empty, unescaped quoted value; extra options are rejected. A field
+    /// line's trim starts with `pub `, then the name, then `:`.
     ///
     /// The compare reads struct text, not serde's output. A later
-    /// `#[serde(skip)]` is rejected until this rule is widened. A
-    /// `#[serde(default)]` field is required. A nested type stays one name.
-    /// This reader does not read `src/execution.rs` or `src/state.rs`, and it
-    /// does not check an Outputs cell.
+    /// `#[serde(skip)]` is rejected, so a field the answer leaves out is a
+    /// refusal and no pass. A `#[serde(default)]` field is required. A nested
+    /// type stays one name. This reader does not read `src/execution.rs` or
+    /// `src/state.rs`; the Outputs compare reads both beside it.
     fn struct_field_names(source: &str, struct_name: &str) -> Result<Option<Vec<String>>, String> {
         let marker = format!("struct {struct_name} {{");
         let occurrences = source.matches(&marker).count();
@@ -1285,9 +1296,11 @@ fn operations_section_cites_existing_tests() {
                     match (
                         quoted_value("#[serde(rename = \""),
                         quoted_value("#[serde(default, skip_serializing_if = \""),
+                        quoted_value("#[serde(skip_serializing_if = \""),
                     ) {
-                        (Some(wire_name), _) => wire_name.to_string(),
-                        (_, Some(_)) => rust_name.trim().to_string(),
+                        (Some(wire_name), _, _) => wire_name.to_string(),
+                        (_, Some(_), _) => rust_name.trim().to_string(),
+                        (_, _, Some(_)) => rust_name.trim().to_string(),
                         _ => {
                             return Err(format!(
                                 "struct {struct_name}: unsupported attribute line `{line}`"
@@ -1393,6 +1406,260 @@ fn operations_section_cites_existing_tests() {
             Err(reason) => reason,
             Ok(()) => panic!("the compare accepts: {section} {source}"),
         }
+    }
+    // The answer source at `path`, or an error that names that path.
+    fn read_answer_source(path: &Path) -> Result<String, String> {
+        fs::read_to_string(path)
+            .map_err(|err| format!("answer source {} must be readable: {err}", path.display()))
+    }
+    /// The top-level `"key":` names of the one `json!({` literal in `region`,
+    /// in source order.
+    ///
+    /// A region with no `json!({` and a region with two are separate errors,
+    /// and both name `json`. The reader returns the top-level names and does
+    /// not descend into a value, so a nested object's keys stay inside that
+    /// value. It skips a string whole, so a `{` inside one is no brace. A
+    /// call such as `ok_response(` is not a second literal.
+    ///
+    /// Honesty limit: this reads literal text, not a serialized answer. A key
+    /// a helper adds at run time is not read. Nested values (`offers`,
+    /// `terminal`, `events`, `config`) stay one name. A `#[serde(skip)]`
+    /// attribute is rejected by the shared `struct_field_names`, not counted.
+    /// The reader does not read the keys inside `result` or inside an event's
+    /// `data`.
+    fn json_literal_keys(region: &str) -> Result<Vec<String>, String> {
+        const OPENER: &str = "json!({";
+        let openings = region.matches(OPENER).count();
+        if openings == 0 {
+            return Err("json: the region has no `json!({` literal".to_string());
+        }
+        if openings > 1 {
+            return Err(format!(
+                "json: the region has {openings} `json!({{` literals, not one"
+            ));
+        }
+        let body =
+            &region[region.find(OPENER).expect("the count found one opener") + OPENER.len()..];
+        let bytes = body.as_bytes();
+        let mut keys = Vec::new();
+        let mut depth = 1usize;
+        let mut index = 0;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'"' => {
+                    let mut end = index + 1;
+                    let mut escaped = false;
+                    while end < bytes.len() {
+                        match bytes[end] {
+                            b'\\' if !escaped => {
+                                escaped = true;
+                                end += 1;
+                                continue;
+                            }
+                            b'"' if !escaped => break,
+                            _ => {}
+                        }
+                        escaped = false;
+                        end += 1;
+                    }
+                    if end >= bytes.len() {
+                        return Err("json: a string in the literal never closes".to_string());
+                    }
+                    let mut next = end + 1;
+                    while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+                        next += 1;
+                    }
+                    if depth == 1 && next < bytes.len() && bytes[next] == b':' {
+                        keys.push(body[index + 1..end].to_string());
+                    }
+                    index = end + 1;
+                }
+                b'{' | b'[' => {
+                    depth += 1;
+                    index += 1;
+                }
+                b'}' | b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    index += 1;
+                }
+                _ => index += 1,
+            }
+        }
+        if depth != 0 {
+            return Err("json: the literal never closes".to_string());
+        }
+        Ok(keys)
+    }
+    // The lines of one function, from the line that holds `marker` through the
+    // line before the next declaration line.
+    fn function_region<'a>(source: &'a str, marker: &str) -> Result<&'a str, String> {
+        let Some(at) = source.find(marker) else {
+            return Err(format!("the source has no `{marker}`"));
+        };
+        let start = source[..at].rfind('\n').map_or(0, |index| index + 1);
+        let mut offset = start;
+        for line in source[start..].split_inclusive('\n') {
+            let trimmed = line.trim_start();
+            if offset > start
+                && (trimmed.starts_with("fn ")
+                    || trimmed.starts_with("pub fn ")
+                    || trimmed.starts_with("pub(crate) fn "))
+            {
+                return Ok(&source[start..offset]);
+            }
+            offset += line.len();
+        }
+        Ok(&source[start..])
+    }
+    // The lines of the one `ProviderOperation::Shutdown =>` match arm, from
+    // its line through the line before the next arm or the match close.
+    fn shutdown_arm_region(source: &str) -> Result<&str, String> {
+        const MARKER: &str = "ProviderOperation::Shutdown =>";
+        let occurrences = source.matches(MARKER).count();
+        if occurrences == 0 {
+            return Err(format!("`src/execution.rs` has no `{MARKER}`"));
+        }
+        if occurrences > 1 {
+            return Err(format!(
+                "`src/execution.rs` has {occurrences} `{MARKER}` arms"
+            ));
+        }
+        let at = source.find(MARKER).expect("the count found one arm");
+        let start = source[..at].rfind('\n').map_or(0, |index| index + 1);
+        let mut offset = start;
+        for line in source[start..].split_inclusive('\n') {
+            let trimmed = line.trim();
+            if offset > start && (trimmed.starts_with("ProviderOperation::") || trimmed == "}") {
+                return Ok(&source[start..offset]);
+            }
+            offset += line.len();
+        }
+        Ok(&source[start..])
+    }
+    // The backtick names of one side equal the keys of one answer `json!`, in
+    // order. A mismatch names the operation and the name or key with no
+    // partner.
+    fn compare_output_keys(
+        operation: &str,
+        side: &str,
+        names: &[&str],
+        keys: &[String],
+    ) -> Result<(), String> {
+        for index in 0..names.len().max(keys.len()) {
+            match (names.get(index), keys.get(index)) {
+                (Some(name), Some(key)) if *name == key.as_str() => {}
+                (Some(name), Some(key)) => {
+                    return Err(format!(
+                        "operation `{operation}` {side} name `{name}` has no partner; the key there is `{key}`"
+                    ));
+                }
+                (Some(name), None) => {
+                    return Err(format!(
+                        "operation `{operation}` {side} name `{name}` has no partner in the answer"
+                    ));
+                }
+                (None, Some(key)) => {
+                    return Err(format!(
+                        "operation `{operation}` {side} key `{key}` has no partner in the cell"
+                    ));
+                }
+                (None, None) => break,
+            }
+        }
+        Ok(())
+    }
+    /// Each Outputs cell's error backtick spans equal the keys of the one
+    /// `json!` in `error_response`; its ok spans start with the keys of
+    /// `ok_response` and then equal that row's `from` struct or its one
+    /// `json!`.
+    ///
+    /// The cell is split at its first `error:`. A `from` row's last span is a
+    /// struct in `src/contract.rs`, read through `struct_field_names`, and the
+    /// spans between `data` and that name equal its fields. A row without
+    /// `from` is `offers_list`, read from `fn handle_offers_list` in
+    /// `src/state.rs`, or `shutdown`, read from the
+    /// `ProviderOperation::Shutdown =>` arm in `src/execution.rs`; any other
+    /// row without `from` fails. The `unsupported` row has an empty ok side,
+    /// and an ok side on it fails.
+    ///
+    /// Honesty limit: this reads struct text and `json!` literals, not
+    /// serialized output. A key a helper adds at run time is not read. Nested
+    /// values (`offers`, `terminal`, `events`, `config`) stay one name. A
+    /// `#[serde(skip)]` attribute is rejected by the shared reader, so the
+    /// check refuses a field the answer leaves out instead of counting it.
+    /// The check does not read the keys inside `result` or inside an event's
+    /// `data`.
+    fn operations_outputs_match_the_answers(
+        section: &str,
+        contract_source: &str,
+        state_source: &str,
+        execution_source: &str,
+    ) -> Result<(), String> {
+        const OUTPUTS_PLACE: usize = 3;
+        let ok_keys = json_literal_keys(function_region(contract_source, "fn ok_response")?)?;
+        let error_keys = json_literal_keys(function_region(contract_source, "fn error_response")?)?;
+        for cells in section.lines().filter_map(operation_row_cells) {
+            let operation = cells[0];
+            let cell = cells.get(OUTPUTS_PLACE - 1).copied().unwrap_or("");
+            let Some((ok_side, error_side)) = cell.split_once("error:") else {
+                return Err(format!(
+                    "operation `{operation}` Outputs cell has no `error:` side"
+                ));
+            };
+            compare_output_keys(
+                operation,
+                "error",
+                &cell_backtick_names(error_side),
+                &error_keys,
+            )?;
+            let names = cell_backtick_names(ok_side);
+            if operation == "unsupported" {
+                if names.is_empty() {
+                    continue;
+                }
+                return Err(format!(
+                    "operation `unsupported` has an ok side: {}",
+                    names.join(", ")
+                ));
+            }
+            if names.len() < 2 {
+                return Err(format!(
+                    "operation `{operation}` Outputs ok side has fewer than two names"
+                ));
+            }
+            compare_output_keys(operation, "ok", &names[..2], &ok_keys)?;
+            if ok_side.contains("from") {
+                let struct_name = names[names.len() - 1];
+                let Some(struct_fields) = struct_field_names(contract_source, struct_name)? else {
+                    return Err(format!(
+                        "operation `{operation}` names struct `{struct_name}`, which `src/contract.rs` does not declare"
+                    ));
+                };
+                compare_output_keys(
+                    operation,
+                    "ok `data`",
+                    &names[2..names.len() - 1],
+                    &struct_fields,
+                )?;
+            } else {
+                let answer_keys = match operation {
+                    "offers_list" => {
+                        json_literal_keys(function_region(state_source, "fn handle_offers_list")?)?
+                    }
+                    "shutdown" => json_literal_keys(shutdown_arm_region(execution_source)?)?,
+                    other => {
+                        return Err(format!(
+                            "operation `{other}` Outputs ok side names no `from` struct and no answer `json!`"
+                        ));
+                    }
+                };
+                compare_output_keys(operation, "ok `data`", &names[2..], &answer_keys)?;
+            }
+        }
+        Ok(())
     }
     fn rows(names: &[&str]) -> String {
         names.iter().map(|name| format!("| {name} |\n")).collect()
@@ -1897,6 +2164,225 @@ fn operations_section_cites_existing_tests() {
         "struct InitRequest: attribute line has no field `#[serde(default)]`"
     );
 
+    // The Outputs compare reads the ok side and the error side against the one
+    // answer writer. Each in-memory row uses the same writer text.
+    fn outputs_row(operation: &str, outputs: &str) -> String {
+        format!(
+            "| {operation} | in | {outputs} | none: needs no declared right | effect | rule | designed, not enforced |"
+        )
+    }
+    fn answer_contract(structs: &str) -> String {
+        const WRITERS: &str = r#"pub fn ok_response(data: Value) -> Value {
+    serde_json::json!({
+        "status": "ok",
+        "data": data,
+    })
+}
+
+pub fn error_response(code: &str, message: &str) -> Value {
+    serde_json::json!({
+        "status": "error",
+        "code": code,
+        "message": message,
+    })
+}
+
+"#;
+        format!("{WRITERS}{structs}")
+    }
+    fn outputs_failure(
+        section: &str,
+        contract_source: &str,
+        state_source: &str,
+        execution_source: &str,
+    ) -> String {
+        match operations_outputs_match_the_answers(
+            section,
+            contract_source,
+            state_source,
+            execution_source,
+        ) {
+            Err(reason) => reason,
+            Ok(()) => panic!("the compare accepts: {section}"),
+        }
+    }
+    let status_struct = "pub struct StatusResponse {\n    pub provider: String,\n    pub protocol_version: String,\n    pub offers_ready: usize,\n}\n";
+    let init_outputs = "ok: `status`, `data` (`provider`, `protocol_version`, `offers_ready` from `StatusResponse`). error: `status`, `code`, `message`.";
+    let init_row = outputs_row("init", init_outputs);
+    let answers = answer_contract(status_struct);
+    assert_eq!(
+        operations_outputs_match_the_answers(&init_row, &answers, "", ""),
+        Ok(())
+    );
+
+    // A struct field the cell does not name, and a cell name the struct does
+    // not have, each fail with the operation and that name.
+    let short_status = status_struct.replace("    pub offers_ready: usize,\n", "");
+    let failure = outputs_failure(&init_row, &answer_contract(&short_status), "", "");
+    assert!(
+        failure.contains("init") && failure.contains("offers_ready"),
+        "{failure}"
+    );
+    let long_status = status_struct.replace(
+        "    pub offers_ready: usize,\n",
+        "    pub offers_ready: usize,\n    pub extra: bool,\n",
+    );
+    let failure = outputs_failure(&init_row, &answer_contract(&long_status), "", "");
+    assert!(
+        failure.contains("init") && failure.contains("extra"),
+        "{failure}"
+    );
+    // A standalone `skip_serializing_if` keeps the field's key required.
+    let run_view_struct = "pub struct RunView {\n    pub schema: String,\n    #[serde(skip_serializing_if = \"Option::is_none\")]\n    pub terminal: Option<String>,\n}\n";
+    let run_view_row = outputs_row(
+        "runs_get",
+        "ok: `status`, `data` (`schema`, `terminal` from `RunView`). error: `status`, `code`, `message`.",
+    );
+    assert_eq!(
+        operations_outputs_match_the_answers(
+            &run_view_row,
+            &answer_contract(run_view_struct),
+            "",
+            ""
+        ),
+        Ok(())
+    );
+
+    // An error side that drops a key fails.
+    let missing_message = init_outputs.replace(
+        "error: `status`, `code`, `message`.",
+        "error: `status`, `code`.",
+    );
+    let failure = outputs_failure(&outputs_row("init", &missing_message), &answers, "", "");
+    assert!(failure.contains("message"), "{failure}");
+
+    // A changed wrapper key and a reordered pair each fail.
+    let renamed_ok = answers.replace("\"data\": data,", "\"result\": data,");
+    let failure = outputs_failure(&init_row, &renamed_ok, "", "");
+    assert!(
+        failure.contains("init") && failure.contains("result"),
+        "{failure}"
+    );
+    let reordered_ok = answers.replace(
+        "\"status\": \"ok\",\n        \"data\": data,",
+        "\"data\": data,\n        \"status\": \"ok\",",
+    );
+    assert_ne!(reordered_ok, answers, "the reorder must change the writer");
+    let failure = outputs_failure(&init_row, &reordered_ok, "", "");
+    assert!(
+        failure.contains("init") && failure.contains("status") && failure.contains("data"),
+        "{failure}"
+    );
+
+    // The two `json!` rows read their one literal.
+    let offers_outputs = "ok: `status`, `data` (`schema`, `provider`, `protocol_version`, `offers`). error: `status`, `code`, `message`.";
+    let offers_full = "ok: `status`, `data` (`schema`, `provider`, `protocol_version`, `offers`, `offer_revisions`). error: `status`, `code`, `message`.";
+    let offers_state = r#"    pub fn handle_offers_list(&self, request: OffersListRequest) -> Result<Value, ProviderFault> {
+        Ok(ok_response(json!({
+            "schema": crate::contract::OFFERS_LIST_SCHEMA,
+            "provider": PROVIDER_ID,
+            "protocol_version": PROVIDER_PROTOCOL_VERSION,
+            "offers": offers,
+            "offer_revisions": offer_revisions,
+        })))
+    }
+
+    pub fn handle_runs_create(
+"#;
+    assert_eq!(
+        operations_outputs_match_the_answers(
+            &outputs_row("offers_list", offers_full),
+            &answers,
+            offers_state,
+            ""
+        ),
+        Ok(())
+    );
+    let failure = outputs_failure(
+        &outputs_row("offers_list", offers_outputs),
+        &answers,
+        offers_state,
+        "",
+    );
+    assert!(
+        failure.contains("offers_list") && failure.contains("offer_revisions"),
+        "{failure}"
+    );
+    let shutdown_outputs = "ok: `status`, `data` (`shutdown`). error: `status`, `code`, `message`.";
+    let shutdown_arm = r#"            ProviderOperation::Status => self.status_response(),
+            ProviderOperation::Shutdown => Ok(ok_response(serde_json::json!({
+                "shutdown": true
+            }))),
+            ProviderOperation::OffersList => {
+"#;
+    assert_eq!(
+        operations_outputs_match_the_answers(
+            &outputs_row("shutdown", shutdown_outputs),
+            &answers,
+            "",
+            shutdown_arm
+        ),
+        Ok(())
+    );
+
+    // The `unsupported` row has only the error side. Any other row without
+    // `from` fails.
+    assert_eq!(
+        operations_outputs_match_the_answers(
+            &outputs_row("unsupported", "error: `status`, `code`, `message`."),
+            &answers,
+            "",
+            ""
+        ),
+        Ok(())
+    );
+    let failure = outputs_failure(
+        &outputs_row(
+            "unsupported",
+            "ok: `status`, `data`. error: `status`, `code`, `message`.",
+        ),
+        &answers,
+        "",
+        "",
+    );
+    assert!(failure.contains("unsupported"), "{failure}");
+    let failure = outputs_failure(
+        &outputs_row(
+            "runs_get",
+            "ok: `status`, `data` (`schema`). error: `status`, `code`, `message`.",
+        ),
+        &answers,
+        "",
+        "",
+    );
+    assert!(failure.contains("runs_get"), "{failure}");
+
+    // The one json reader refuses zero and two literals with separate
+    // reasons, and it keeps a nested key inside its value.
+    let no_literal = json_literal_keys("fn answer() {}")
+        .expect_err("a region with no `json!({` must be refused");
+    assert!(no_literal.contains("json"), "{no_literal}");
+    let two_literals = json_literal_keys("json!({}) json!({})")
+        .expect_err("a region with two `json!({` must be refused");
+    assert!(two_literals.contains("json"), "{two_literals}");
+    assert_ne!(
+        no_literal, two_literals,
+        "each refusal states its own reason"
+    );
+    assert_eq!(
+        json_literal_keys("json!({ \"outer\": { \"inner\": true }, \"next\": 1 })"),
+        Ok(vec!["outer".to_string(), "next".to_string()])
+    );
+
+    // An unreadable answer source is an error that names its path.
+    let missing_answer = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/no_such_answer_source.rs");
+    let failure =
+        read_answer_source(&missing_answer).expect_err("a missing answer source must be refused");
+    assert!(
+        failure.contains(&missing_answer.display().to_string()),
+        "{failure}"
+    );
+
     let doc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("CONFINEMENT.md");
     let doc = fs::read_to_string(&doc_path).unwrap_or_else(|err| {
         panic!(
@@ -1949,6 +2435,19 @@ fn operations_section_cites_existing_tests() {
         .expect("the real Operation cells equal the parse_request arms");
     operations_inputs_match_the_request_structs(section, &contract_source)
         .expect("the real Inputs cells equal each operation's request struct fields");
+    let state_answer_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/state.rs");
+    let state_answer_source =
+        read_answer_source(&state_answer_path).unwrap_or_else(|reason| panic!("{reason}"));
+    let execution_answer_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/execution.rs");
+    let execution_answer_source =
+        read_answer_source(&execution_answer_path).unwrap_or_else(|reason| panic!("{reason}"));
+    operations_outputs_match_the_answers(
+        section,
+        &contract_source,
+        &state_answer_source,
+        &execution_answer_source,
+    )
+    .expect("the real Outputs cells equal the answer keys");
 }
 
 /// The Id cells in `section` are the same set as `ids`.
