@@ -525,6 +525,137 @@ FILE_ASK_LINES = {
     IS_WRITE_NUMBER: IS_WRITE_QUOTE,
 }
 
+PROVIDER_REL = "elastos/crates/elastos-server/src/provider_resource.rs"
+
+SCHEME_NUMBER = 123
+SCHEME_SPAN = PROVIDER_REL + ":123"
+SCHEME_LINES = (
+    "/// Canonical capability action for provider operations where the Runtime owns",
+    "/// the operation-to-action contract directly.",
+    "pub fn provider_operation_action(scheme: &str, op: &str) -> Option<Action> {",
+    "    #[cfg(test)]",
+    '    if scheme == "test" {',
+    "        return (op == \"read\").then_some(Action::Read);",
+    "    }",
+    "    match scheme {",
+    '        "localhost" | "webspace" => localhost_op_required_action(op),',
+    '        "did" => execute_op_required_action(op),',
+    '        "availability" => match op {',
+    '            "status" => Some(Action::Read),',
+    '            "ensure" => Some(Action::Write),',
+    "            _ => None,",
+    "        },",
+    '        "block-graph" => match op {',
+    '            "status" | "export_graph" => Some(Action::Read),',
+    '            "import_graph" => Some(Action::Write),',
+    "            _ => None,",
+    "        },",
+    '        "chain" => chain_op_required_action(op),',
+    '        "content" => match op {',
+    '            "status" | "fetch" => Some(Action::Read),',
+    '            "publish" | "ensure" | "repair" | "unpublish" => Some(Action::Write),',
+    "            _ => None,",
+    "        },",
+    '        "drm" | "rights" | "key" | "decrypt" => read_only_provider_action(op),',
+    '        "net" => match op {',
+    '            "status" | "resolve" => Some(Action::Read),',
+    '            "connect" | "stream" | "http" => Some(Action::Write),',
+    "            _ => None,",
+    "        },",
+    '        "exit" => match op {',
+    '            "status" | "discover_remote_carrier_exits" | "quote" => Some(Action::Read),',
+    '            "open_stream" | "close_stream" | "http_fetch" => Some(Action::Write),',
+    "            _ => None,",
+    "        },",
+    '        "browser-engine" => match op {',
+    '            "status" | "readiness" | "page_status" | "diagnostics" | "inspect" => {',
+    "                Some(Action::Read)",
+    "            }",
+    '            "launch" | "attach_stream" | "input" | "webrtc_signal" => Some(Action::Write),',
+    '            "close_page" => Some(Action::Delete),',
+    "            _ => None,",
+    "        },",
+    '        "wallet" => wallet_op_required_action(op),',
+    '        "ipfs" => ipfs_op_required_action(op),',
+    '        "model" => match op {',
+    '            "offers_list" | "runs_get" | "runs_events" => Some(Action::Read),',
+    '            "runs_create" | "runs_cancel" => Some(Action::Execute),',
+    "            _ => None,",
+    "        },",
+    '        "object" => object_op_required_action(op),',
+    '        "operator-drive-adapter" => match op {',
+    '            "status" | "metadata_index" | "read_bytes" => Some(Action::Read),',
+    '            "write_bytes" => Some(Action::Write),',
+    "            _ => None,",
+    "        },",
+    '        "peer" => match op {',
+    '            "init" | "connect" | "remember_peer" | "gossip_join" | "gossip_leave"',
+    '            | "gossip_send" | "get_ticket" | "get_node_id" | "list_peers" | "list_topics"',
+    '            | "list_topic_peers" | "gossip_join_peers" | "gossip_recv" => Some(Action::Message),',
+    "            _ => None,",
+    "        },",
+    '        "tunnel" => {',
+    '            Some(Action::Admin).filter(|_| matches!(op, "start" | "stop" | "status" | "ping"))',
+    "        }",
+    '        "inspect" => inspect_op_required_action(op),',
+    "        _ => None,",
+    "    }",
+    "}",
+)
+SCHEME_QUOTE = SCHEME_LINES[8]
+
+READ_ACTION_NUMBER = 189
+READ_ACTION_SPAN = PROVIDER_REL + ":189"
+READ_ACTION_LINES = (
+    '        "read" | "list" | "stat" | "exists" | "resolve" | "ping" => Some(Action::Read),',
+)
+READ_ACTION_QUOTE = READ_ACTION_LINES[0]
+
+WRITE_ACTION_NUMBER = 190
+WRITE_ACTION_SPAN = PROVIDER_REL + ":190"
+WRITE_ACTION_LINES = (
+    "fn localhost_op_required_action(op: &str) -> Option<Action> {",
+    "    match op {",
+    '        "read" | "list" | "stat" | "exists" | "resolve" | "ping" => Some(Action::Read),',
+    '        "write" | "mkdir" => Some(Action::Write),',
+    '        "delete" => Some(Action::Delete),',
+    "        _ => None,",
+    "    }",
+    "}",
+)
+WRITE_ACTION_QUOTE = WRITE_ACTION_LINES[3]
+
+DEFAULT_ACTION_NUMBER = 192
+DEFAULT_ACTION_SPAN = PROVIDER_REL + ":192"
+DEFAULT_ACTION_QUOTE = WRITE_ACTION_LINES[5]
+
+# The four provider quotes, their pinned lines, their walk and their index.
+PROVIDER_CASES = (
+    ("scheme", SCHEME_NUMBER, SCHEME_SPAN, SCHEME_LINES, 8),
+    ("read_action", READ_ACTION_NUMBER, READ_ACTION_SPAN, READ_ACTION_LINES, 0),
+    ("write_action", WRITE_ACTION_NUMBER, WRITE_ACTION_SPAN, WRITE_ACTION_LINES, 3),
+    ("default_action", DEFAULT_ACTION_NUMBER, DEFAULT_ACTION_SPAN, WRITE_ACTION_LINES, 5),
+)
+
+# The groups one provider body cites, in the order it emits them.
+PROVIDER_GROUPS = ("scheme", "read_action", "write_action", "default_action")
+
+# The order in which the provider decisions read their pinned lines.
+PROVIDER_DECISION_ORDER = (
+    SCHEME_NUMBER,
+    READ_ACTION_NUMBER,
+    WRITE_ACTION_NUMBER,
+    DEFAULT_ACTION_NUMBER,
+)
+
+# One correct pinned line for every provider decision.
+PROVIDER_LINES = {
+    SCHEME_NUMBER: SCHEME_QUOTE,
+    READ_ACTION_NUMBER: READ_ACTION_QUOTE,
+    WRITE_ACTION_NUMBER: WRITE_ACTION_QUOTE,
+    DEFAULT_ACTION_NUMBER: DEFAULT_ACTION_QUOTE,
+}
+
 
 class CitationCheckTests(unittest.TestCase):
     def _temp_root(self):
@@ -1046,6 +1177,13 @@ class CitationCheckTests(unittest.TestCase):
             rows[number - 1] = text
         return ("\n".join(rows[:count]) + "\n").encode("utf-8")
 
+    def _provider_source(self, count=DEFAULT_ACTION_NUMBER, lines=None):
+        """A committed provider file with one correct line per provider decision."""
+        rows = ["// filler"] * DEFAULT_ACTION_NUMBER
+        for number, text in (lines or PROVIDER_LINES).items():
+            rows[number - 1] = text
+        return ("\n".join(rows[:count]) + "\n").encode("utf-8")
+
     def _changed(self, lines, index):
         """Return LINES with the one line at INDEX altered by one character."""
         rows = list(lines)
@@ -1173,6 +1311,38 @@ class CitationCheckTests(unittest.TestCase):
             ("is_write", [IS_WRITE_SPAN], list(is_write)),
             ("no_write", [NO_WRITE_SPAN], list(no_write)),
             ("deny", [DENY_SPAN], [deny] + list(DENY_LINES[1:])),
+        )
+        parts = []
+        for name, spans, lines in blocks:
+            if name not in chosen:
+                continue
+            prose = " ".join(
+                self._cited(span, copies.get(name, 1)) for span in spans
+            )
+            parts.append(prose + "\n")
+            if indented:
+                parts.append("".join("    " + line + "\n" for line in lines))
+            parts.append("\n")
+        return "".join(parts)
+
+    def _provider_body(
+        self,
+        scheme=SCHEME_LINES,
+        read_action=READ_ACTION_LINES,
+        write_action=WRITE_ACTION_LINES,
+        default_action=WRITE_ACTION_LINES,
+        groups=None,
+        copies=None,
+        indented=True,
+    ):
+        """A draft that cites the provider spans and indents their walks."""
+        copies = copies or {}
+        chosen = PROVIDER_GROUPS if groups is None else tuple(groups)
+        blocks = (
+            ("scheme", [SCHEME_SPAN], list(scheme)),
+            ("read_action", [READ_ACTION_SPAN], list(read_action)),
+            ("write_action", [WRITE_ACTION_SPAN], list(write_action)),
+            ("default_action", [DEFAULT_ACTION_SPAN], list(default_action)),
         )
         parts = []
         for name, spans, lines in blocks:
@@ -4780,4 +4950,432 @@ class CitationCheckTests(unittest.TestCase):
             "`" + IS_WRITE_SPAN + "`",
             self.test_is_write_fn_line_does_not_stand_for_line_3290,
             "CAUGHT is-write-fn-line",
+        )
+
+    def _provider_case(self, name):
+        for case in PROVIDER_CASES:
+            if case[0] == name:
+                return case
+        raise KeyError(name)
+
+    def test_live_draft_provider_quotes_match_their_pinned_lines(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        self.assertEqual(check.scheme_quote(text), SCHEME_QUOTE)
+        self.assertEqual(check.read_action_quote(text), READ_ACTION_QUOTE)
+        self.assertEqual(check.write_action_quote(text), WRITE_ACTION_QUOTE)
+        self.assertEqual(check.default_action_quote(text), DEFAULT_ACTION_QUOTE)
+        for span, count in (
+            (SCHEME_SPAN, 71),
+            (READ_ACTION_SPAN, 1),
+            (WRITE_ACTION_SPAN, 8),
+            (DEFAULT_ACTION_SPAN, 8),
+        ):
+            self.assertEqual(
+                len(check._remainders(text, "`" + span + "`")), count, span
+            )
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        for name, number, span, lines, index in PROVIDER_CASES:
+            self.assertEqual(
+                check.pinned_line(root, sha, PROVIDER_REL, number),
+                lines[index],
+                span,
+            )
+        self.assertEqual(check.problems(root), [])
+
+    def test_provider_selectors_are_absent_below_their_index(self):
+        for name, number, span, lines, index in PROVIDER_CASES:
+            selector = getattr(check, name + "_quote")
+            self.assertIsNone(selector("No provider span here.\n"), span)
+            self.assertIsNone(
+                selector(self._provider_body(groups=[name], indented=False)), span
+            )
+            self.assertIsNone(
+                selector(
+                    self._provider_body(groups=[name], **{name: lines[:index]})
+                ),
+                span,
+            )
+
+    def test_provider_fixture_reads_each_pinned_line_once(self):
+        got, reads = self._pinned_reads(
+            self._provider_body(), {PROVIDER_REL: self._provider_source()}
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, list(PROVIDER_DECISION_ORDER))
+
+    def _assert_provider_quote_mismatch(self, name):
+        _, number, span, lines, index = self._provider_case(name)
+        expected = "refuse: quoted line does not match " + span
+        changed = self._changed(lines, index)
+        if name == "default_action":
+            body = self._provider_body(
+                groups=["write_action", "default_action"],
+                write_action=changed,
+                default_action=changed,
+            )
+        else:
+            body = self._provider_body(groups=[name], **{name: changed})
+        got, reads = self._pinned_reads(
+            body, {PROVIDER_REL: self._provider_source()}
+        )
+        self.assertEqual(got, [expected])
+        if name == "default_action":
+            self.assertEqual(reads, [WRITE_ACTION_NUMBER, DEFAULT_ACTION_NUMBER])
+        else:
+            self.assertEqual(reads, [number])
+        root = self._draft(body, {PROVIDER_REL: self._provider_source()})
+        (root / PROVIDER_REL).write_bytes(
+            self._provider_source(
+                lines={**PROVIDER_LINES, number: "// edited in the worktree"}
+            )
+        )
+        self.assertEqual(check.problems(root), [expected])
+        root = self._draft(
+            self._provider_body(groups=[name]),
+            {PROVIDER_REL: self._provider_source()},
+        )
+        (root / PROVIDER_REL).write_bytes(
+            self._provider_source(
+                lines={**PROVIDER_LINES, number: "// edited in the worktree"}
+            )
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_scheme_quoted_line_mismatch_is_refused(self):
+        self._assert_provider_quote_mismatch("scheme")
+
+    def test_read_action_quoted_line_mismatch_is_refused(self):
+        self._assert_provider_quote_mismatch("read_action")
+
+    def test_write_action_quoted_line_mismatch_is_refused(self):
+        self._assert_provider_quote_mismatch("write_action")
+
+    def test_default_action_quoted_line_mismatch_is_refused(self):
+        self._assert_provider_quote_mismatch("default_action")
+
+    def test_scheme_did_line_does_not_stand_for_line_123(self):
+        body = self._provider_body(
+            groups=["scheme"], scheme=self._changed(SCHEME_LINES, 9)
+        )
+        got, reads = self._pinned_reads(
+            body, {PROVIDER_REL: self._provider_source()}
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [SCHEME_NUMBER])
+
+    def test_read_action_block_arm_does_not_stand_for_line_189(self):
+        body = self._provider_body(
+            groups=["read_action", "write_action"],
+            write_action=self._changed(WRITE_ACTION_LINES, 2),
+        )
+        got, reads = self._pinned_reads(
+            body, {PROVIDER_REL: self._provider_source()}
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [READ_ACTION_NUMBER, WRITE_ACTION_NUMBER])
+
+    def test_write_action_delete_line_does_not_stand_for_line_190(self):
+        body = self._provider_body(
+            groups=["write_action"],
+            write_action=self._changed(WRITE_ACTION_LINES, 4),
+        )
+        got, reads = self._pinned_reads(
+            body, {PROVIDER_REL: self._provider_source()}
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [WRITE_ACTION_NUMBER])
+
+    def test_default_action_delete_line_does_not_stand_for_line_192(self):
+        changed = self._changed(WRITE_ACTION_LINES, 4)
+        body = self._provider_body(
+            groups=["write_action", "default_action"],
+            write_action=changed,
+            default_action=changed,
+        )
+        got, reads = self._pinned_reads(
+            body, {PROVIDER_REL: self._provider_source()}
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [WRITE_ACTION_NUMBER, DEFAULT_ACTION_NUMBER])
+
+    def test_scheme_walk_other_lines_do_not_stand_for_line_123(self):
+        for index in (0, 7, 9, 70):
+            body = self._provider_body(
+                groups=["scheme"], scheme=self._changed(SCHEME_LINES, index)
+            )
+            got, reads = self._pinned_reads(
+                body, {PROVIDER_REL: self._provider_source()}
+            )
+            self.assertEqual(got, [], index)
+            self.assertEqual(reads, [SCHEME_NUMBER], index)
+
+    def test_write_walk_other_lines_do_not_stand_for_190_or_192(self):
+        for index in (0, 2, 4, 7):
+            changed = self._changed(WRITE_ACTION_LINES, index)
+            body = self._provider_body(
+                groups=["write_action", "default_action"],
+                write_action=changed,
+                default_action=changed,
+            )
+            got, reads = self._pinned_reads(
+                body, {PROVIDER_REL: self._provider_source()}
+            )
+            self.assertEqual(got, [], index)
+            self.assertEqual(
+                reads, [WRITE_ACTION_NUMBER, DEFAULT_ACTION_NUMBER], index
+            )
+
+    def test_provider_spans_without_an_indented_line_add_no_refusal(self):
+        got, reads = self._pinned_reads(
+            self._provider_body(indented=False),
+            {PROVIDER_REL: self._provider_source()},
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [])
+
+    def test_provider_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        for name, number, span, lines, index in PROVIDER_CASES:
+            expected = "refuse: quoted line is not in the pinned commit: " + span
+            got, reads = self._pinned_reads(
+                self._provider_body(groups=[name]),
+                {PROVIDER_REL: self._provider_source(count=number - 1)},
+                {PROVIDER_REL: self._provider_source()},
+            )
+            self.assertEqual(got, [expected], span)
+            self.assertEqual(reads, [number], span)
+
+    def test_two_provider_spans_are_refused(self):
+        for name, number, span, lines, index in PROVIDER_CASES:
+            expected = "refuse: quoted line is not one line: " + span
+            body = self._provider_body(groups=[name], copies={name: 2})
+            got, reads = self._pinned_reads(
+                body, {PROVIDER_REL: self._provider_source()}
+            )
+            self.assertEqual(got, [expected], span)
+            self.assertEqual(reads, [], span)
+
+    def test_draft_without_a_provider_span_adds_no_refusal(self):
+        for name, number, span, lines, index in PROVIDER_CASES:
+            groups = [group for group in PROVIDER_GROUPS if group != name]
+            got, reads = self._pinned_reads(
+                self._provider_body(groups=groups),
+                {PROVIDER_REL: self._provider_source()},
+            )
+            self.assertEqual(got, [], span)
+            self.assertEqual(
+                reads,
+                [n for n in PROVIDER_DECISION_ORDER if n != number],
+                span,
+            )
+
+    def test_cover_mismatch_stops_the_scheme_decision(self):
+        body = self._provider_body(
+            groups=["scheme"], scheme=self._changed(SCHEME_LINES, 8)
+        ) + self._file_ask_body(
+            groups=["cover"], cover=self._changed(COVER_LINES, 5)
+        )
+        got, reads = self._pinned_reads(
+            body,
+            {
+                OWNED_REL: self._file_ask_source(),
+                PROVIDER_REL: self._provider_source(),
+            },
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + COVER_SPAN]
+        )
+        self.assertEqual(reads, [COVER_NUMBER])
+
+    def test_is_write_mismatch_stops_the_scheme_decision(self):
+        body = self._provider_body(
+            groups=["scheme"], scheme=self._changed(SCHEME_LINES, 8)
+        ) + self._edit_walk_body(
+            groups=["is_write"], is_write=self._changed(IS_WRITE_LINES, 2)
+        )
+        got, reads = self._pinned_reads(
+            body,
+            {
+                OWNED_REL: self._file_ask_source(),
+                PROVIDER_REL: self._provider_source(),
+            },
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + IS_WRITE_SPAN]
+        )
+        self.assertEqual(reads, [IS_WRITE_NUMBER])
+
+    def test_scheme_mismatch_stops_the_read_action_decision(self):
+        body = self._provider_body(
+            groups=["scheme", "read_action"],
+            scheme=self._changed(SCHEME_LINES, 8),
+            read_action=self._changed(READ_ACTION_LINES, 0),
+        )
+        got, reads = self._pinned_reads(
+            body, {PROVIDER_REL: self._provider_source()}
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + SCHEME_SPAN]
+        )
+        self.assertEqual(reads, [SCHEME_NUMBER])
+
+    def test_read_action_mismatch_stops_the_write_action_decision(self):
+        body = self._provider_body(
+            groups=["scheme", "read_action", "write_action"],
+            read_action=self._changed(READ_ACTION_LINES, 0),
+        )
+        got, reads = self._pinned_reads(
+            body, {PROVIDER_REL: self._provider_source()}
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + READ_ACTION_SPAN]
+        )
+        self.assertEqual(reads, [SCHEME_NUMBER, READ_ACTION_NUMBER])
+
+    def test_write_action_mismatch_stops_the_default_action_decision(self):
+        body = self._provider_body(
+            groups=["write_action", "default_action"],
+            write_action=self._changed(WRITE_ACTION_LINES, 3),
+            default_action=self._changed(WRITE_ACTION_LINES, 5),
+        )
+        got, reads = self._pinned_reads(
+            body, {PROVIDER_REL: self._provider_source()}
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + WRITE_ACTION_SPAN]
+        )
+        self.assertEqual(reads, [WRITE_ACTION_NUMBER])
+
+    def test_absent_read_action_line_stops_the_write_action_decision(self):
+        body = self._provider_body(groups=["read_action", "write_action"])
+        got, reads = self._pinned_reads(
+            body,
+            {PROVIDER_REL: self._provider_source(count=READ_ACTION_NUMBER - 1)},
+            {PROVIDER_REL: self._provider_source()},
+        )
+        self.assertEqual(
+            got,
+            [
+                "refuse: quoted line is not in the pinned commit: "
+                + READ_ACTION_SPAN
+            ],
+        )
+        self.assertEqual(reads, [READ_ACTION_NUMBER])
+
+    def test_absent_write_action_line_stops_the_default_action_decision(self):
+        body = self._provider_body(
+            groups=["write_action", "default_action"],
+            default_action=self._changed(WRITE_ACTION_LINES, 5),
+        )
+        got, reads = self._pinned_reads(
+            body,
+            {PROVIDER_REL: self._provider_source(count=WRITE_ACTION_NUMBER - 1)},
+            {PROVIDER_REL: self._provider_source()},
+        )
+        self.assertEqual(
+            got,
+            [
+                "refuse: quoted line is not in the pinned commit: "
+                + WRITE_ACTION_SPAN
+            ],
+        )
+        self.assertEqual(reads, [WRITE_ACTION_NUMBER])
+
+    def test_provider_quote_refusal_waits_for_a_known_pin(self):
+        body = self._provider_body(
+            groups=["scheme"], scheme=self._changed(SCHEME_LINES, 8)
+        )
+        files = {PROVIDER_REL: self._provider_source()}
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+        self.assertEqual(
+            check.problems(
+                self._raw_draft("Pinned commit: HEAD\n" + body, files)
+            ),
+            ["refuse: pinned commit is not one 40-hex commit"],
+        )
+        self.assertEqual(
+            check.problems(
+                self._raw_draft(
+                    "Pinned commit: " + "f" * 40 + "\n" + body, files, commit=True
+                )
+            ),
+            ["refuse: pinned commit is not a commit: " + "f" * 40],
+        )
+
+    def test_falsifier_scheme_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_scheme_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT scheme-quoted-line",
+        )
+
+    def test_falsifier_scheme_did_line_is_caught(self):
+        self._caught_walk_index(
+            "scheme_quote",
+            9,
+            "`" + SCHEME_SPAN + "`",
+            self.test_scheme_did_line_does_not_stand_for_line_123,
+            "CAUGHT scheme-did-line",
+        )
+
+    def test_falsifier_read_action_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_read_action_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT read-action-quoted-line",
+        )
+
+    def test_falsifier_read_action_block_arm_is_caught(self):
+        self._caught_walk_index(
+            "read_action_quote",
+            2,
+            "`" + WRITE_ACTION_SPAN + "`",
+            self.test_read_action_block_arm_does_not_stand_for_line_189,
+            "CAUGHT read-action-block-arm",
+        )
+
+    def test_falsifier_write_action_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_write_action_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT write-action-quoted-line",
+        )
+
+    def test_falsifier_write_action_delete_line_is_caught(self):
+        self._caught_walk_index(
+            "write_action_quote",
+            4,
+            "`" + WRITE_ACTION_SPAN + "`",
+            self.test_write_action_delete_line_does_not_stand_for_line_190,
+            "CAUGHT write-action-delete-line",
+        )
+
+    def test_falsifier_default_action_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_default_action_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT default-action-quoted-line",
+        )
+
+    def test_falsifier_default_action_delete_line_is_caught(self):
+        self._caught_walk_index(
+            "default_action_quote",
+            4,
+            "`" + DEFAULT_ACTION_SPAN + "`",
+            self.test_default_action_delete_line_does_not_stand_for_line_192,
+            "CAUGHT default-action-delete-line",
         )
