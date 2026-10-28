@@ -1387,38 +1387,6 @@ mod uf_approval_refusal_tests {
         )
     }
 
-    fn personal_sign_payload(account_id: &str, address: &str) -> Value {
-        json!({
-            "schema": "elastos.browser.wallet-signature-request/v1",
-            "method": "personal_sign",
-            "params": [REASON, address],
-            "message": REASON,
-            "address": address,
-            "account_id": account_id,
-            "chain_namespace": EVM_CHAIN,
-            "page_url": "https://dapp.example/sign",
-            "origin": "https://dapp.example",
-            "requires_wallet_approval": true
-        })
-    }
-
-    fn transaction_payload(from: &str) -> Value {
-        json!({
-            "schema": "elastos.chain.unsigned_transaction_intent/v1",
-            "transaction_type": "eip155_legacy",
-            "from": from,
-            "to": "0x2222222222222222222222222222222222222222",
-            "value": "0x0",
-            "data": "0x",
-            "chain_id": 20,
-            "nonce": "0x7",
-            "gas_price": "0x3b9aca00",
-            "gas_limit": "0x5208",
-            "requires_wallet_approval": true,
-            "wallet_intent": "transaction_intent"
-        })
-    }
-
     fn signature_request(
         request_id: &str,
         account_id: &str,
@@ -1453,7 +1421,16 @@ mod uf_approval_refusal_tests {
             account_id,
             EVM_CHAIN,
             "browser_personal_sign",
-            personal_sign_payload(account_id, address),
+            json!({
+                "schema": "elastos.browser.wallet-signature-request/v1",
+                "method": "personal_sign",
+                "message": REASON,
+                "address": address,
+                "account_id": account_id,
+                "chain_namespace": EVM_CHAIN,
+                "page_url": "https://dapp.example/sign",
+                "requires_wallet_approval": true
+            }),
         ));
         assert!(
             matches!(response, Response::Ok { .. }),
@@ -1521,7 +1498,7 @@ mod uf_approval_refusal_tests {
     #[test]
     fn approval_refuses_invalid_stored_rights_result() {
         let (_dir, mut provider) = init_provider();
-        let (account_id, address) = managed_account(&mut provider);
+        let (account_id, _) = linked_external_account(&mut provider);
         let context = VerifiedWalletInvocationContext::new(
             PRINCIPAL,
             SESSION,
@@ -1554,11 +1531,11 @@ mod uf_approval_refusal_tests {
             proof_binding_id: request.authority.proof_binding_id.clone(),
             account_id: account_id.clone(),
             chain_namespace: EVM_CHAIN.to_string(),
-            intent: "browser_personal_sign".to_string(),
+            intent: "auth_challenge".to_string(),
             requested_by_actor: "library".to_string(),
             resource: "elastos://wallet/protected-content/rights/sign".to_string(),
             reason: REASON.to_string(),
-            payload: personal_sign_payload(&account_id, &address),
+            payload: json!({ "challenge": REASON }),
             expires_at: now.saturating_add(APPROVAL_REQUEST_TTL_SECS),
         });
         assert!(
@@ -1844,6 +1821,8 @@ mod uf_approval_refusal_tests {
     /// Catches removal of the transaction signature exclusion (`:615`): without
     /// it a connector reports a signature for a transaction approval, so the
     /// settlement reads a signature the chain never produced.
+    /// The stored intent is changed after handoff approval to reach the
+    /// completion guard, which reads no transaction payload fields.
     #[test]
     fn approval_refuses_transaction_completion_with_signature() {
         let (_dir, mut provider) = init_provider();
@@ -1853,14 +1832,16 @@ mod uf_approval_refusal_tests {
             &request_id,
             &account_id,
             EVM_CHAIN,
-            "transaction_intent",
-            transaction_payload(&address),
+            "auth_challenge",
+            json!({ "challenge": REASON }),
         ));
         assert!(
             matches!(recorded, Response::Ok { .. }),
             "the approval must be recorded, got {recorded:?}"
         );
         approve_handoff(&mut provider, &request_id);
+        let index = index_of(&provider, &request_id);
+        provider.store.approval_requests[index].intent = "transaction_intent".to_string();
         let payload_hash = stored_payload_hash(&provider, &request_id);
         assert_eq!(
             provider.complete_connector_handoff(completion(&request_id, &payload_hash, &address)),
@@ -1874,6 +1855,8 @@ mod uf_approval_refusal_tests {
     /// Catches removal of the transaction hash guard (`:621`): without it a
     /// transaction approval completes with no transaction, so the record names
     /// a broadcast that no hash identifies.
+    /// The stored intent is changed after handoff approval, as in
+    /// `approval_refuses_transaction_completion_with_signature`.
     #[test]
     fn approval_refuses_transaction_completion_without_hash() {
         let (_dir, mut provider) = init_provider();
@@ -1883,14 +1866,16 @@ mod uf_approval_refusal_tests {
             &request_id,
             &account_id,
             EVM_CHAIN,
-            "transaction_intent",
-            transaction_payload(&address),
+            "auth_challenge",
+            json!({ "challenge": REASON }),
         ));
         assert!(
             matches!(recorded, Response::Ok { .. }),
             "the approval must be recorded, got {recorded:?}"
         );
         approve_handoff(&mut provider, &request_id);
+        let index = index_of(&provider, &request_id);
+        provider.store.approval_requests[index].intent = "transaction_intent".to_string();
         let payload_hash = stored_payload_hash(&provider, &request_id);
         let mut handoff = completion(&request_id, &payload_hash, &address);
         handoff.signature = None;
