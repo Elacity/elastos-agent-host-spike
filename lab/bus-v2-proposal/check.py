@@ -61,6 +61,18 @@ WRITE_MARKER = "`" + WRITE_SPAN + "`"
 READ_SPAN = "examples/agent-host/src/lib.rs:3850"
 READ_MARKER = "`" + READ_SPAN + "`"
 
+# Its quotation is the Read arm, remainder 8 after the kind span, source line 8187.
+KIND_READ_SPAN = "examples/agent-host/src/lib.rs:8187"
+KIND_READ_MARKER = "`" + KIND_READ_SPAN + "`"
+
+# Its quotation is the Edit arm, remainder 9 after the kind span, source line 8188.
+KIND_EDIT_SPAN = "examples/agent-host/src/lib.rs:8188"
+KIND_EDIT_MARKER = "`" + KIND_EDIT_SPAN + "`"
+
+# Its quotation is the Restore arm, remainder 11 after the kind span, source line 8190.
+KIND_RESTORE_SPAN = "examples/agent-host/src/lib.rs:8190"
+KIND_RESTORE_MARKER = "`" + KIND_RESTORE_SPAN + "`"
+
 # The draft indents a quotation by exactly four spaces.
 DRAFT_INDENT = "    "
 
@@ -294,6 +306,30 @@ def read_quote(text):
     return remainders[17]
 
 
+def kind_read_quote(text):
+    """Return the ninth quotation after the read span, or None when absent."""
+    remainders = _remainders(text, KIND_READ_MARKER)
+    if len(remainders) < 9:
+        return None
+    return remainders[8]
+
+
+def kind_edit_quote(text):
+    """Return the tenth quotation after the edit span, or None when absent."""
+    remainders = _remainders(text, KIND_EDIT_MARKER)
+    if len(remainders) < 10:
+        return None
+    return remainders[9]
+
+
+def kind_restore_quote(text):
+    """Return the twelfth quotation after the restore span, or None when absent."""
+    remainders = _remainders(text, KIND_RESTORE_MARKER)
+    if len(remainders) < 12:
+        return None
+    return remainders[11]
+
+
 def quoted_line_matches(quoted, source):
     """True only when the quotation equals the pinned source line."""
     return quoted == source
@@ -457,8 +493,56 @@ def _read_quote_refusal(root, text, sha):
     return None
 
 
+def _kind_read_quote_refusal(root, text, sha):
+    """Return the 8187 refusal, or None when that quote is absent or matches."""
+    if text.count(KIND_READ_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + KIND_READ_SPAN
+    quoted = kind_read_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(KIND_READ_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + KIND_READ_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + KIND_READ_SPAN
+    return None
+
+
+def _kind_edit_quote_refusal(root, text, sha):
+    """Return the 8188 refusal, or None when that quote is absent or matches."""
+    if text.count(KIND_EDIT_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + KIND_EDIT_SPAN
+    quoted = kind_edit_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(KIND_EDIT_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + KIND_EDIT_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + KIND_EDIT_SPAN
+    return None
+
+
+def _kind_restore_quote_refusal(root, text, sha):
+    """Return the 8190 refusal, or None when that quote is absent or matches."""
+    if text.count(KIND_RESTORE_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + KIND_RESTORE_SPAN
+    quoted = kind_restore_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(KIND_RESTORE_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + KIND_RESTORE_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + KIND_RESTORE_SPAN
+    return None
+
+
 def _quote_refusals(root, text, sha):
-    """Return the quote refusals in source order: 3526, 3549, 3754, 3755, 3757, 3767, 3849, 3850, 8149, 8162, then 8168."""
+    """Return the quote refusals in source order: 3526, 3549, 3754, 3755, 3757, 3767, 3849, 3850, 8149, 8162, 8168, 8187, 8188, then 8190."""
     deny = _deny_quote_refusal(root, text, sha)
     if deny is not None:
         return [deny]
@@ -497,9 +581,18 @@ def _quote_refusals(root, text, sha):
     if marker is not None:
         return [marker]
     launching = _launching_quote_refusal(root, text, sha)
-    if launching is None:
+    if launching is not None:
+        return [launching]
+    kind_read = _kind_read_quote_refusal(root, text, sha)
+    if kind_read is not None:
+        return [kind_read]
+    kind_edit = _kind_edit_quote_refusal(root, text, sha)
+    if kind_edit is not None:
+        return [kind_edit]
+    kind_restore = _kind_restore_quote_refusal(root, text, sha)
+    if kind_restore is None:
         return []
-    return [launching]
+    return [kind_restore]
 
 
 def _past_end(number, rel, count):
