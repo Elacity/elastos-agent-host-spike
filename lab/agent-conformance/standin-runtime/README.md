@@ -66,7 +66,7 @@ After one instance has ended, `post_capability_grant` of the survivor's pending 
 
 `StandIn::bridge_envelope` is the one hostcall. two-capsule-run passes the envelope line, the capsule id and the principal and does not copy this module. This lane does not run the component bytes. A capability line calls `post_capability_request` for that capsule id. An invoke line calls `authorise` for that capsule id, and the principal argument does not choose the caller. A PASS gives the Runtime no A3 credit. `session_id` still equals the instance id.
 
-`bind_verified_principal` stores the principal the launch verified. The launch body still rejects `principal_id`. `protected_write` stores under `Users/self` or `UsersAI/self` resolved from that principal. The digest is `identity::sha256`. A constant principal is not the root. Another `UsersAI` root is refused. A PASS gives the Runtime no A15 credit, and the UsersAI binding rows stay blocked. `session_id` still equals the instance id.
+`bind_verified_principal` stores the principal the launch verified. The launch body still rejects `principal_id`. `protected_write` stores under `Users/self` or `UsersAI/self` resolved from that principal. The digest is `identity::sha256`. A constant principal is not the root. Another `UsersAI` root is refused. `protected_write` and `protected_read` present that uri and `write` or `read` to the one `authorise` check. A different action is `wrong action`. A different object is `wrong resource`. Either refusal stores nothing and spends nothing. A PASS gives the Runtime no A15 credit, and the UsersAI binding rows stay blocked. `session_id` still equals the instance id.
 
 ## Callers
 

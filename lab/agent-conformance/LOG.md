@@ -12048,3 +12048,110 @@ New:
 | 8. Identity, admission and allowance stay separate? | Yes | `bind_verified_principal` at `:901` stores the verified principal. `admit_resident` at `:864` still only admits the path. `authorise` at `:741` still spends the grant. |
 
 A passing row gives the real Runtime no A15 credit. The UsersAI binding rows stay blocked.
+
+### Round 2 — grant resource and action
+
+`protected_write` and `protected_read` present the guest uri and `write` or `read` to `authorise_presented`, the one check `authorise` calls. After the unknown, not-live and wrong-caller refusals, a different action is `wrong action` and a different resolved object is `wrong resource`. Either refusal stores nothing and spends nothing. `authorise` stays `(&mut self, caller, request_id)`. No `falsifiers.json` id.
+
+Each plant was applied alone, the crate compiled, and `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_protected_storage_uses_the_launch_principal -- --exact` failed on an assertion. The file was restored before the next plant. Restored, that test passes.
+
+F-standin-grant-ignores-presented: the presented match is dropped. Failed at planted `standin-runtime/mod.rs:8984:9` (restored `:8999`): `a Starting write grant cannot read`, left `Ok` of `start-v1`, right `Err((403, "wrong action: expected write, got read"))`.
+
+Old:
+
+```text
+        if let Some((requested, action)) = presented {
+            let grant_action = self.grants[index].action.clone();
+            let grant_resource = self.grants[index].resource.clone();
+            if grant_action != action {
+                return Err(wrong_action(&grant_action, action));
+            }
+            let session_id = self.grants[index].session_id.clone();
+            let wanted = self.resolve_protected_uri(&session_id, requested)?;
+            let granted = match self.resolve_protected_uri(&session_id, &grant_resource) {
+                Ok(uri) => uri,
+                Err(_) => return Err(wrong_resource(&grant_resource, requested)),
+            };
+            if wanted != granted {
+                return Err(wrong_resource(&grant_resource, requested));
+            }
+        }
+```
+
+New:
+
+```text
+        let _ = presented;
+```
+
+F-standin-read-ignores-grant: `protected_read` calls `authorise` with no presented uri or action. Failed at planted `standin-runtime/mod.rs:8998:9` (restored `:8999`): `a Starting write grant cannot read`, left `Ok` of `start-v1`, right `Err((403, "wrong action: expected write, got read"))`.
+
+Old:
+
+```text
+        self.authorise_presented(
+            Caller::Client {
+                session_id: instance_id,
+            },
+            request_id,
+            Some((uri, "read")),
+        )?;
+```
+
+New:
+
+```text
+        self.authorise(
+            Caller::Client {
+                session_id: instance_id,
+            },
+            request_id,
+        )?;
+```
+
+F-standin-write-ignores-grant: `protected_write` calls `authorise` with no presented uri or action. Failed at planted `standin-runtime/mod.rs:9186:9` (restored `:9187`): `a read-only journal grant cannot write another path`, left `Ok("localhost://UsersAI/763281cf1e57227a6b99d89d/other")`, right `Err((403, "wrong action: expected read, got write"))`.
+
+Old:
+
+```text
+        self.authorise_presented(
+            Caller::Client {
+                session_id: instance_id,
+            },
+            request_id,
+            Some((uri, "write")),
+        )?;
+```
+
+New:
+
+```text
+        self.authorise(
+            Caller::Client {
+                session_id: instance_id,
+            },
+            request_id,
+        )?;
+```
+
+F-standin-spend-before-match: a `once` grant is stored `Exhausted` before the presented match. Failed at `standin-runtime/mod.rs:9464:9`: `a once journal grant cannot write another path`, left `Err((400, "grant is not live: Exhausted"))`, right `Err((403, "wrong resource: expected localhost://UsersAI/self/journal, got localhost://UsersAI/self/other"))`.
+
+Old: the `duration == "once"` assignment stays after the presented match.
+
+New: that assignment is moved to just before `if let Some((requested, action)) = presented`.
+
+F-standin-resource-before-action: the resolved-object compare runs before the action compare. Failed at `standin-runtime/mod.rs:9187:9`: `a read-only journal grant cannot write another path`, left `Err((403, "wrong resource: expected localhost://UsersAI/self/journal, got localhost://UsersAI/self/other"))`, right `Err((403, "wrong action: expected read, got write"))`.
+
+Old: `wrong_action` returns before `resolve_protected_uri` compares the objects.
+
+New: the object compare returns `wrong_resource` before `wrong_action`.
+
+### Round 2 gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged. The forbidden `git diff` is empty. After the plants were restored, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` has no plant.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.17 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 282.72 seconds, inside the 600-second bound. Targets in order: lib 71 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.16 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_protected_storage_uses_the_launch_principal -- --exact` exit 0, 1 passed and 0 failed, real 0.17 seconds.
+
+Round 2 principles: the allowance compare is `authorise_presented` at `standin-runtime/mod.rs:771`. `protected_write` calls it at `:806` and `protected_read` at `:829`, before any store. A mismatch returns `wrong action` or `wrong resource` and spends nothing. The root is still `identity::sha256` at `:873`. `bind_verified_principal` at `:935` and `admit_resident` at `:908` stay separate. `post_capsules` copies the principal at `:1012`. A PASS gives the Runtime no A15 credit. The UsersAI binding rows stay blocked.

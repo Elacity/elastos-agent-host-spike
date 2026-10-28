@@ -738,7 +738,22 @@ impl StandIn {
     ///
     /// `Ok(())` means the grant authorises that caller, and a `once` grant
     /// stores `Exhausted`. This method reads no clock, no disk and no WIT file.
+    /// Storage presents its uri and action through the same check.
     pub fn authorise(&mut self, caller: Caller<'_>, request_id: &str) -> Result<(), (u16, String)> {
+        self.authorise_presented(caller, request_id, None)
+    }
+
+    /// One authorise check. `presented` is the storage uri and `write` or `read`.
+    ///
+    /// Unknown, not-live and wrong-caller refusals come first. A different
+    /// action is `wrong action`. A different object is `wrong resource`. Either
+    /// spends nothing. A missing presentation is the grant's own caller check.
+    fn authorise_presented(
+        &mut self,
+        caller: Caller<'_>,
+        request_id: &str,
+        presented: Option<(&str, &str)>,
+    ) -> Result<(), (u16, String)> {
         let Some(index) = self
             .grants
             .iter()
@@ -746,14 +761,30 @@ impl StandIn {
         else {
             return Err(unknown_grant(request_id));
         };
-        let grant = &self.grants[index];
-        if !is_live(grant.life) {
-            return Err(grant_not_live(grant.life));
+        let life = self.grants[index].life;
+        if !is_live(life) {
+            return Err(grant_not_live(life));
         }
-        if !session_authorises(grant, caller) {
-            return Err(wrong_capsule(grant, caller));
+        if !session_authorises(&self.grants[index], caller) {
+            return Err(wrong_capsule(&self.grants[index], caller));
         }
-        if grant.duration == "once" {
+        if let Some((requested, action)) = presented {
+            let grant_action = self.grants[index].action.clone();
+            let grant_resource = self.grants[index].resource.clone();
+            if grant_action != action {
+                return Err(wrong_action(&grant_action, action));
+            }
+            let session_id = self.grants[index].session_id.clone();
+            let wanted = self.resolve_protected_uri(&session_id, requested)?;
+            let granted = match self.resolve_protected_uri(&session_id, &grant_resource) {
+                Ok(uri) => uri,
+                Err(_) => return Err(wrong_resource(&grant_resource, requested)),
+            };
+            if wanted != granted {
+                return Err(wrong_resource(&grant_resource, requested));
+            }
+        }
+        if self.grants[index].duration == "once" {
             self.grants[index].life = Life::Exhausted;
         }
         Ok(())
@@ -761,8 +792,9 @@ impl StandIn {
 
     /// Lab test seam, not a route.
     ///
-    /// Resolves the uri from the principal copied at launch, then `authorise`.
-    /// On `Ok` the bytes replace any previous value at that exact uri.
+    /// Resolves the uri from the principal copied at launch, then the one
+    /// authorise check for that uri and `write`. On `Ok` the bytes replace any
+    /// previous value at that exact uri.
     pub fn protected_write(
         &mut self,
         instance_id: &str,
@@ -771,11 +803,12 @@ impl StandIn {
         bytes: &[u8],
     ) -> Result<String, (u16, String)> {
         let resolved = self.resolve_protected_uri(instance_id, uri)?;
-        self.authorise(
+        self.authorise_presented(
             Caller::Client {
                 session_id: instance_id,
             },
             request_id,
+            Some((uri, "write")),
         )?;
         self.protected_objects
             .insert(resolved.clone(), bytes.to_vec());
@@ -784,8 +817,8 @@ impl StandIn {
 
     /// Lab test seam, not a route.
     ///
-    /// Resolves the uri from the principal copied at launch, then `authorise`,
-    /// then returns the stored bytes.
+    /// Resolves the uri from the principal copied at launch, then the one
+    /// authorise check for that uri and `read`, then returns the stored bytes.
     pub fn protected_read(
         &mut self,
         instance_id: &str,
@@ -793,11 +826,12 @@ impl StandIn {
         uri: &str,
     ) -> Result<Vec<u8>, (u16, String)> {
         let resolved = self.resolve_protected_uri(instance_id, uri)?;
-        self.authorise(
+        self.authorise_presented(
             Caller::Client {
                 session_id: instance_id,
             },
             request_id,
+            Some((uri, "read")),
         )?;
         self.protected_objects
             .get(&resolved)
@@ -1359,6 +1393,17 @@ fn wrong_capsule(grant: &Grant, caller: Caller<'_>) -> (u16, String) {
         reason.push_str(&format!(", got {session_id}"));
     }
     (403, reason)
+}
+
+fn wrong_action(expected: &str, got: &str) -> (u16, String) {
+    (403, format!("wrong action: expected {expected}, got {got}"))
+}
+
+fn wrong_resource(expected: &str, got: &str) -> (u16, String) {
+    (
+        403,
+        format!("wrong resource: expected {expected}, got {got}"),
+    )
 }
 
 /// One not-live reason. `delete_capsule` and `finish_start` both use it.
@@ -8777,7 +8822,11 @@ mod tests {
             "the stand-in did the work: {message} spends nothing"
         );
         assert_eq!(
-            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            standin.protected_read(
+                "component-1",
+                "req-a-read",
+                "localhost://UsersAI/self/journal"
+            ),
             Ok(b"journal-v1".to_vec()),
             "the stand-in did the work: {message} leaves the stored journal"
         );
@@ -8927,6 +8976,16 @@ mod tests {
             Life::Live,
             false,
         );
+        open.seed_grant(
+            "req-start-read",
+            "component-2",
+            "localhost://UsersAI/self/journal",
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
         assert_eq!(
             open.protected_write(
                 "component-2",
@@ -8941,6 +9000,20 @@ mod tests {
             open.protected_read(
                 "component-2",
                 "req-start",
+                "localhost://UsersAI/self/journal"
+            ),
+            Err((403, "wrong action: expected write, got read".to_owned())),
+            "the stand-in did the work: a Starting write grant cannot read"
+        );
+        assert_eq!(
+            grant_record(&open, "req-start"),
+            (Life::Live, false),
+            "the stand-in did the work: the refused Starting read spends nothing"
+        );
+        assert_eq!(
+            open.protected_read(
+                "component-2",
+                "req-start-read",
                 "localhost://UsersAI/self/journal"
             ),
             Ok(b"start-v1".to_vec()),
@@ -9066,6 +9139,26 @@ mod tests {
             Life::Live,
             false,
         );
+        standin.seed_grant(
+            "req-a-read",
+            "component-1",
+            "localhost://UsersAI/self/journal",
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-b-read",
+            "component-2",
+            "localhost://UsersAI/self/journal",
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
         assert_eq!(
             standin.protected_write(
                 "component-1",
@@ -9083,6 +9176,54 @@ mod tests {
         );
         assert_eq!(
             standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            Err((403, "wrong action: expected write, got read".to_owned())),
+            "the stand-in did the work: a write grant cannot read the journal"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-a"),
+            (Life::Live, false),
+            "the stand-in did the work: the refused read spends nothing"
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-a-read",
+                "localhost://UsersAI/self/other",
+                b"other-v1",
+            ),
+            Err((403, "wrong action: expected read, got write".to_owned())),
+            "the stand-in did the work: a read-only journal grant cannot write another path"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-a-read"),
+            (Life::Live, false),
+            "the stand-in did the work: the read-only refusal spends nothing"
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-a",
+                "localhost://UsersAI/self/other",
+                b"other-v1",
+            ),
+            Err((
+                403,
+                "wrong resource: expected localhost://UsersAI/self/journal, got localhost://UsersAI/self/other"
+                    .to_owned(),
+            )),
+            "the stand-in did the work: a journal grant cannot write another path"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-a"),
+            (Life::Live, false),
+            "the stand-in did the work: the other-path refusal spends nothing"
+        );
+        assert_eq!(
+            standin.protected_read(
+                "component-1",
+                "req-a-read",
+                "localhost://UsersAI/self/journal"
+            ),
             Ok(b"journal-v1".to_vec()),
             "the stand-in did the work: the owner reads the stored journal"
         );
@@ -9097,6 +9238,20 @@ mod tests {
         );
         assert_eq!(
             standin.protected_read("component-2", "req-b", "localhost://UsersAI/self/journal"),
+            Err((403, "wrong action: expected write, got read".to_owned())),
+            "the stand-in did the work: component-2's write grant cannot read"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-b"),
+            (Life::Live, false),
+            "the stand-in did the work: component-2's refused read spends nothing"
+        );
+        assert_eq!(
+            standin.protected_read(
+                "component-2",
+                "req-b-read",
+                "localhost://UsersAI/self/journal"
+            ),
             Err((404, "protected object is absent".to_owned())),
             "the stand-in did the work: the sibling root has no journal"
         );
@@ -9109,7 +9264,11 @@ mod tests {
             }
         }
         assert_eq!(
-            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            standin.protected_read(
+                "component-1",
+                "req-a-read",
+                "localhost://UsersAI/self/journal"
+            ),
             Ok(b"journal-v1".to_vec()),
             "the stand-in did the work: a refused sibling read leaves the journal"
         );
@@ -9126,7 +9285,11 @@ mod tests {
             }
         }
         assert_eq!(
-            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            standin.protected_read(
+                "component-1",
+                "req-a-read",
+                "localhost://UsersAI/self/journal"
+            ),
             Ok(b"journal-v1".to_vec()),
             "the stand-in did the work: a sibling write leaves the journal"
         );
@@ -9141,7 +9304,11 @@ mod tests {
             "the stand-in did the work: component-2 stores under its own principal"
         );
         assert_eq!(
-            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            standin.protected_read(
+                "component-1",
+                "req-a-read",
+                "localhost://UsersAI/self/journal"
+            ),
             Ok(b"journal-v1".to_vec()),
             "the stand-in did the work: component-1 keeps its own journal"
         );
@@ -9157,21 +9324,82 @@ mod tests {
                 "localhost://Users/self/journal",
                 b"person-v1",
             ),
+            Err((
+                403,
+                "wrong resource: expected localhost://UsersAI/self/journal, got localhost://Users/self/journal"
+                    .to_owned(),
+            )),
+            "the stand-in did the work: a UsersAI grant cannot write Users"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-a"),
+            (Life::Live, false),
+            "the stand-in did the work: the Users refusal spends nothing"
+        );
+        standin.seed_grant(
+            "req-person",
+            "component-1",
+            "localhost://Users/self/journal",
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-person-read",
+            "component-1",
+            "localhost://Users/self/journal",
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-b-person-read",
+            "component-2",
+            "localhost://Users/self/journal",
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-person",
+                "localhost://Users/self/journal",
+                b"person-v1",
+            ),
             Ok(person_a.clone()),
             "the stand-in did the work: Users/self stores under the same principal"
         );
         assert_eq!(
-            standin.protected_read("component-1", "req-a", "localhost://Users/self/journal"),
+            standin.protected_read(
+                "component-1",
+                "req-person-read",
+                "localhost://Users/self/journal"
+            ),
             Ok(b"person-v1".to_vec()),
             "the stand-in did the work: the owner reads the Users journal"
         );
         assert_eq!(
-            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            standin.protected_read(
+                "component-1",
+                "req-a-read",
+                "localhost://UsersAI/self/journal"
+            ),
             Ok(b"journal-v1".to_vec()),
             "the stand-in did the work: the Users write leaves the UsersAI journal"
         );
         assert_eq!(
-            standin.protected_read("component-2", "req-b", "localhost://Users/self/journal"),
+            standin.protected_read(
+                "component-2",
+                "req-b-person-read",
+                "localhost://Users/self/journal"
+            ),
             Err((404, "protected object is absent".to_owned())),
             "the stand-in did the work: component-2 does not see the Users journal"
         );
@@ -9206,7 +9434,11 @@ mod tests {
             "the stand-in did the work: an unknown grant cannot write"
         );
         assert_eq!(
-            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            standin.protected_read(
+                "component-1",
+                "req-a-read",
+                "localhost://UsersAI/self/journal"
+            ),
             Ok(b"journal-v1".to_vec()),
             "the stand-in did the work: a missing grant stores nothing"
         );
@@ -9219,6 +9451,43 @@ mod tests {
             1,
             Life::Live,
             false,
+        );
+        assert_eq!(
+            standin.protected_read(
+                "component-1",
+                "req-shape",
+                "localhost://UsersAI/self/journal"
+            ),
+            Err((403, "wrong action: expected write, got read".to_owned())),
+            "the stand-in did the work: a once write grant cannot read"
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-shape",
+                "localhost://UsersAI/self/other",
+                b"shape-other",
+            ),
+            Err((
+                403,
+                "wrong resource: expected localhost://UsersAI/self/journal, got localhost://UsersAI/self/other"
+                    .to_owned(),
+            )),
+            "the stand-in did the work: a once journal grant cannot write another path"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-shape"),
+            (Life::Live, false),
+            "the stand-in did the work: a mismatched once grant stays live"
+        );
+        assert_eq!(
+            standin.protected_read(
+                "component-1",
+                "req-a-read",
+                "localhost://UsersAI/self/journal"
+            ),
+            Ok(b"journal-v1".to_vec()),
+            "the stand-in did the work: a mismatched once grant stores nothing"
         );
         shape_refused(
             &mut standin,
@@ -9304,6 +9573,66 @@ mod tests {
             needs_reason,
             "a UsersAI uri without a slash is refused",
         );
+        standin.seed_grant(
+            "req-bare-ai",
+            "component-1",
+            "localhost://UsersAI/self",
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-bare-ai-read",
+            "component-1",
+            "localhost://UsersAI/self",
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-bare-users",
+            "component-1",
+            "localhost://Users/self",
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-bare-users-read",
+            "component-1",
+            "localhost://Users/self",
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-notes",
+            "component-1",
+            "localhost://Users/self/notes",
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-notes-read",
+            "component-1",
+            "localhost://Users/self/notes",
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
         assert_eq!(
             standin.protected_write(
                 "component-1",
@@ -9311,18 +9640,55 @@ mod tests {
                 "localhost://UsersAI/self",
                 b"bare-ai"
             ),
+            Err((
+                403,
+                "wrong resource: expected localhost://UsersAI/self/journal, got localhost://UsersAI/self"
+                    .to_owned(),
+            )),
+            "the stand-in did the work: a journal grant cannot write the bare UsersAI root"
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-bare-ai",
+                "localhost://UsersAI/self",
+                b"bare-ai"
+            ),
             Ok(usersai_a.clone()),
             "the stand-in did the work: bare UsersAI/self resolves to the principal root"
         );
         assert_eq!(
-            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self"),
+            standin.protected_read(
+                "component-1",
+                "req-bare-ai-read",
+                "localhost://UsersAI/self"
+            ),
             Ok(b"bare-ai".to_vec()),
             "the stand-in did the work: the owner reads the bare UsersAI root"
         );
         assert_eq!(
             standin.protected_write(
                 "component-1",
-                "req-a",
+                "req-bare-ai",
+                "localhost://UsersAI/self/journal",
+                b"wide-ai",
+            ),
+            Err((
+                403,
+                "wrong resource: expected localhost://UsersAI/self, got localhost://UsersAI/self/journal"
+                    .to_owned(),
+            )),
+            "the stand-in did the work: a bare UsersAI grant cannot write the journal"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-bare-ai"),
+            (Life::Live, false),
+            "the stand-in did the work: the bare UsersAI refusal spends nothing"
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-bare-users",
                 "localhost://Users/self",
                 b"bare-users"
             ),
@@ -9330,33 +9696,76 @@ mod tests {
             "the stand-in did the work: bare Users/self resolves to the principal root"
         );
         assert_eq!(
-            standin.protected_read("component-1", "req-a", "localhost://Users/self"),
+            standin.protected_read(
+                "component-1",
+                "req-bare-users-read",
+                "localhost://Users/self"
+            ),
             Ok(b"bare-users".to_vec()),
             "the stand-in did the work: the owner reads the bare Users root"
         );
         assert_eq!(
-            standin.protected_write("component-1", "req-a", &users_a, b"root-v2"),
+            standin.protected_write("component-1", "req-bare-users", &users_a, b"root-v2"),
             Ok(users_a.clone()),
             "the stand-in did the work: the active Users root replaces the stored bytes"
         );
         assert_eq!(
-            standin.protected_read("component-1", "req-a", "localhost://Users/self"),
+            standin.protected_read(
+                "component-1",
+                "req-bare-users-read",
+                "localhost://Users/self"
+            ),
             Ok(b"root-v2".to_vec()),
             "the stand-in did the work: the bare Users read sees the replacement"
         );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-bare-users",
+                "localhost://Users/self/journal",
+                b"wide-users",
+            ),
+            Err((
+                403,
+                "wrong resource: expected localhost://Users/self, got localhost://Users/self/journal"
+                    .to_owned(),
+            )),
+            "the stand-in did the work: a bare Users grant cannot write the journal"
+        );
+        assert_eq!(
+            standin.protected_read(
+                "component-1",
+                "req-person-read",
+                "localhost://Users/self/journal"
+            ),
+            Ok(b"person-v1".to_vec()),
+            "the stand-in did the work: the bare Users refusal leaves the journal"
+        );
         let notes_a = format!("localhost://Users/{digest_a}/notes");
         assert_eq!(
-            standin.protected_write("component-1", "req-a", &notes_a, b"notes-v1"),
+            standin.protected_write("component-1", "req-person", &notes_a, b"notes-v1"),
+            Err((
+                403,
+                format!("wrong resource: expected localhost://Users/self/journal, got {notes_a}"),
+            )),
+            "the stand-in did the work: a journal grant cannot write notes"
+        );
+        assert_eq!(
+            standin.protected_write("component-1", "req-notes", &notes_a, b"notes-v1"),
             Ok(notes_a.clone()),
             "the stand-in did the work: a path under the active Users root stays itself"
         );
         assert_eq!(
-            standin.protected_read("component-1", "req-a", &notes_a),
+            standin.protected_read("component-1", "req-notes-read", &notes_a),
             Ok(b"notes-v1".to_vec()),
             "the stand-in did the work: the owner reads the active Users path"
         );
         assert_eq!(
-            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            standin.protected_read(
+                "component-1",
+                "req-a-read",
+                "localhost://UsersAI/self/journal"
+            ),
             Ok(b"journal-v1".to_vec()),
             "the stand-in did the work: the Users root writes leave the journal"
         );
@@ -9371,12 +9780,20 @@ mod tests {
             "the stand-in did the work: a second write replaces the stored journal"
         );
         assert_eq!(
-            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            standin.protected_read(
+                "component-1",
+                "req-a-read",
+                "localhost://UsersAI/self/journal"
+            ),
             Ok(b"journal-v2".to_vec()),
             "the stand-in did the work: the owner reads the replacement"
         );
         assert_eq!(
-            standin.protected_read("component-2", "req-b", "localhost://UsersAI/self/journal"),
+            standin.protected_read(
+                "component-2",
+                "req-b-read",
+                "localhost://UsersAI/self/journal"
+            ),
             Ok(b"bob-v1".to_vec()),
             "the stand-in did the work: the replacement leaves the sibling journal"
         );
@@ -9386,6 +9803,16 @@ mod tests {
             "localhost://UsersAI/self/once",
             "write",
             "once",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-once-read",
+            "component-1",
+            "localhost://UsersAI/self/once",
+            "read",
+            "session",
             1,
             Life::Live,
             false,
@@ -9416,7 +9843,11 @@ mod tests {
             "the stand-in did the work: a second once write is refused"
         );
         assert_eq!(
-            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/once"),
+            standin.protected_read(
+                "component-1",
+                "req-once-read",
+                "localhost://UsersAI/self/once"
+            ),
             Ok(b"once-v1".to_vec()),
             "the stand-in did the work: the exhausted write leaves the stored bytes"
         );
@@ -9426,7 +9857,11 @@ mod tests {
             "the stand-in did the work: an exhausted grant cannot read"
         );
         assert_eq!(
-            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/once"),
+            standin.protected_read(
+                "component-1",
+                "req-once-read",
+                "localhost://UsersAI/self/once"
+            ),
             Ok(b"once-v1".to_vec()),
             "the stand-in did the work: the refused read leaves the stored bytes"
         );
@@ -9450,7 +9885,11 @@ mod tests {
             "the stand-in did the work: an unknown instance cannot read"
         );
         assert_eq!(
-            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            standin.protected_read(
+                "component-1",
+                "req-a-read",
+                "localhost://UsersAI/self/journal"
+            ),
             Ok(b"journal-v2".to_vec()),
             "the stand-in did the work: an unknown instance stores nothing"
         );
@@ -9554,7 +9993,11 @@ mod tests {
             "the stand-in did the work: a failed instance cannot read"
         );
         assert_eq!(
-            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            standin.protected_read(
+                "component-1",
+                "req-a-read",
+                "localhost://UsersAI/self/journal"
+            ),
             Ok(b"journal-v2".to_vec()),
             "the stand-in did the work: an ended instance leaves the stored journal"
         );
