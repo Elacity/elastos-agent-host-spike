@@ -1,0 +1,12 @@
+id: F-A5-casepublic
+file: src/lib.rs
+test: model_case_different_public_segment_is_refused
+--- old
+    if parts.first() == Some(&"Public") {
+        return Err(Refuse::PublicRead);
+    }
+--- new
+    if parts.first().is_some_and(|part| part.eq_ignore_ascii_case("Public")) {
+        return Err(Refuse::PublicRead);
+    }
+--- end
