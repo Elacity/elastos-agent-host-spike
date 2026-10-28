@@ -2241,6 +2241,295 @@ mod tests {
             _ => panic!("Expected error for traversal attempt"),
         }
     }
+
+    /// The serialized form of a response, so a refusal is asserted whole: its
+    /// code, its message and the absence of a `data` field in one comparison.
+    fn refusal_wire(response: &Response) -> serde_json::Value {
+        serde_json::to_value(response).expect("a response serializes")
+    }
+
+    /// Pins `DID key not available`, the one string `get_did` (:244) and
+    /// `sign_bytes` (:261) raise. The chat call passes the sender and timestamp
+    /// check first, so it pins the `sign_bytes` site rather than :274.
+    ///
+    /// Falsifier: answer ok from either `None` arm; the matching assertion
+    /// fails.
+    #[test]
+    fn handler_refuses_a_missing_did_key() {
+        let provider = DidProvider::new();
+        assert_eq!(
+            refusal_wire(&provider.get_did()),
+            serde_json::json!({
+                "status": "error",
+                "code": "not_init",
+                "message": "DID key not available",
+            })
+        );
+        assert_eq!(
+            refusal_wire(&provider.sign_chat_message("did:key:zMissing", 1_714_000_000, "hello")),
+            serde_json::json!({
+                "status": "error",
+                "code": "not_init",
+                "message": "DID key not available",
+            })
+        );
+    }
+
+    /// Pins `No device key provided`, the one string `set_nickname` (:394) and
+    /// `get_persona_did` (:409) raise before any storage work.
+    ///
+    /// Falsifier: remove either `device_key.is_none()`/`None` guard; that call
+    /// then writes or answers ok instead of refusing.
+    #[test]
+    fn handler_refuses_a_missing_device_key() {
+        let mut provider = DidProvider::new();
+        let nickname = provider.set_nickname("alice");
+        let persona = provider.get_persona_did("bot");
+        for response in [&nickname, &persona] {
+            assert_eq!(
+                refusal_wire(response),
+                serde_json::json!({
+                    "status": "error",
+                    "code": "not_init",
+                    "message": "No device key provided",
+                })
+            );
+        }
+    }
+
+    /// Pins `No nickname set` (:388). The provider initialised without a stored
+    /// nickname, so the read that loads one answers "absent".
+    ///
+    /// Falsifier: answer ok from `get_nickname`'s `None` arm; this test fails.
+    #[test]
+    fn handler_refuses_a_missing_nickname() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = init_provider(Some(dir.path().to_str().unwrap()));
+        assert_eq!(
+            refusal_wire(&provider.get_nickname()),
+            serde_json::json!({
+                "status": "error",
+                "code": "not_set",
+                "message": "No nickname set",
+            })
+        );
+    }
+
+    /// Pins `Persona name must be 1-64 characters` (:414). Both ends of the
+    /// range are refused: an empty name and one of 65 characters, so removing
+    /// either term of the length condition fails this test.
+    ///
+    /// Falsifier: remove `name.is_empty() || name.len() > 64`; the empty case
+    /// then reaches the character rule and the 65-character case answers ok.
+    #[test]
+    fn handler_refuses_a_persona_name_of_wrong_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
+        let overlong = "a".repeat(65);
+        for name in ["", overlong.as_str()] {
+            assert_eq!(
+                refusal_wire(&provider.get_persona_did(name)),
+                serde_json::json!({
+                    "status": "error",
+                    "code": "invalid_name",
+                    "message": "Persona name must be 1-64 characters",
+                })
+            );
+        }
+    }
+
+    /// Pins `Persona name must be alphanumeric, hyphens, or underscores`
+    /// (:422). The name is eight characters, so the length check above it
+    /// passes and only the character rule refuses it.
+    ///
+    /// Falsifier: remove the character loop; the name then becomes a path
+    /// segment and the call answers ok.
+    #[test]
+    fn handler_refuses_a_persona_name_with_reserved_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
+        assert_eq!(
+            refusal_wire(&provider.get_persona_did("bad/name")),
+            serde_json::json!({
+                "status": "error",
+                "code": "invalid_name",
+                "message": "Persona name must be alphanumeric, hyphens, or underscores",
+            })
+        );
+    }
+
+    /// Pins `Invalid persona key length` (:440). The stored payload decrypts,
+    /// so the read and decrypt checks pass and only the 32-byte rule refuses.
+    ///
+    /// Falsifier: remove the length check; `copy_from_slice` then panics on the
+    /// short slice instead of the handler refusing it.
+    #[test]
+    fn handler_refuses_a_stored_persona_key_of_wrong_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
+        let storage_key = derive_storage_key(&provider.device_key.expect("init sets a key"));
+        let personas = dir.path().join("did").join("personas");
+        fs::create_dir_all(&personas).unwrap();
+        fs::write(
+            personas.join("bot.enc"),
+            encrypt_data(&storage_key, b"short").expect("short payload seals"),
+        )
+        .unwrap();
+        assert_eq!(
+            refusal_wire(&provider.get_persona_did("bot")),
+            serde_json::json!({
+                "status": "error",
+                "code": "key_error",
+                "message": "Invalid persona key length",
+            })
+        );
+    }
+
+    /// Pins `chat message signing requires sender_id and timestamp` (:274).
+    /// Three cases reach the one condition: an empty sender and a
+    /// whitespace-only sender each carry a valid timestamp, and a valid sender
+    /// carries timestamp zero. The whitespace case catches a lost `trim`.
+    ///
+    /// Falsifier: remove `sender_id.trim().is_empty()`; the first two cases
+    /// reach signing and answer ok. Remove `ts == 0`; the third case answers ok.
+    #[test]
+    fn handler_refuses_missing_chat_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = init_provider(Some(dir.path().to_str().unwrap()));
+        for (sender_id, ts) in [
+            ("", 1_714_000_000),
+            ("  \t ", 1_714_000_000),
+            ("did:key:zMissing", 0),
+        ] {
+            assert_eq!(
+                refusal_wire(&provider.sign_chat_message(sender_id, ts, "hello")),
+                serde_json::json!({
+                    "status": "error",
+                    "code": "invalid_intent",
+                    "message": "chat message signing requires sender_id and timestamp",
+                }),
+                "sender_id {sender_id:?}, ts {ts}"
+            );
+        }
+    }
+
+    /// Pins `Invalid hex data: {e}` (:304), with the text `hex`'s own `Display`
+    /// gives for the first character it refuses on `"zz"`.
+    ///
+    /// Falsifier: replace the format argument or let the decode error through;
+    /// this test fails on the changed or missing refusal.
+    #[test]
+    fn handler_refuses_invalid_hex_data() {
+        let provider = DidProvider::new();
+        let did = encode_signing_key_did(&SigningKey::from_bytes(&[9u8; 32]));
+        assert_eq!(
+            refusal_wire(&provider.verify(&did, "zz", "00")),
+            serde_json::json!({
+                "status": "error",
+                "code": "invalid_data",
+                "message": "Invalid hex data: Invalid character 'z' at position 0",
+            })
+        );
+    }
+
+    /// Pins `Invalid signature: {e}`, raised at two sites: `verify` (:317) and
+    /// `verify_did_recovery` (:366). The signature `"00"` decodes as one byte,
+    /// so it passes the hex check and reaches `Signature::from_slice`, whose
+    /// `Display` is `signature error`. The recovery call carries a request that
+    /// passes `validate_did_recovery_request` and a canonical subject DID.
+    ///
+    /// Falsifier: let a wrong-length signature through either site; that call
+    /// then answers ok with `valid: false` instead of refusing.
+    #[test]
+    fn handler_refuses_an_invalid_signature() {
+        let provider = DidProvider::new();
+        let did = encode_signing_key_did(&SigningKey::from_bytes(&[9u8; 32]));
+        let expected = serde_json::json!({
+            "status": "error",
+            "code": "invalid_signature",
+            "message": "Invalid signature: signature error",
+        });
+        assert_eq!(refusal_wire(&provider.verify(&did, "00", "00")), expected);
+
+        let issued_at = now_ts();
+        let recovery = provider.verify_did_recovery(
+            &did,
+            "person:local:abc123",
+            "localhost://Users/person:local:abc123",
+            "protector:did:abc123",
+            "pdek:abc123",
+            "nonce:abc123",
+            issued_at,
+            issued_at + 300,
+            "00",
+        );
+        assert_eq!(refusal_wire(&recovery), expected);
+    }
+
+    /// Pins `Read failed: {e}` (:454). `did/personas/bot.enc` exists as a
+    /// directory, so the existence check passes and the read is what fails.
+    ///
+    /// Falsifier: replace the read error with a generated key or a decrypt
+    /// attempt; the call no longer answers this reason.
+    #[test]
+    fn handler_refuses_an_unreadable_persona_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
+        let key_path = dir.path().join("did").join("personas").join("bot.enc");
+        fs::create_dir_all(&key_path).unwrap();
+        assert_eq!(
+            refusal_wire(&provider.get_persona_did("bot")),
+            serde_json::json!({
+                "status": "error",
+                "code": "key_error",
+                "message": "Read failed: Is a directory (os error 21)",
+            })
+        );
+    }
+
+    /// Pins `Decrypt failed: {e}` (:451). The stored payload is long enough
+    /// for a nonce and fails authentication, so only the decrypt refuses it.
+    ///
+    /// Falsifier: let the decrypt error fall through to the key length check;
+    /// this test then fails on the changed reason.
+    #[test]
+    fn handler_refuses_a_persona_key_that_fails_decryption() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
+        let personas = dir.path().join("did").join("personas");
+        fs::create_dir_all(&personas).unwrap();
+        fs::write(personas.join("bot.enc"), [0u8; NONCE_LEN + 4]).unwrap();
+        assert_eq!(
+            refusal_wire(&provider.get_persona_did("bot")),
+            serde_json::json!({
+                "status": "error",
+                "code": "key_error",
+                "message": "Decrypt failed: Decryption failed: aead::Error",
+            })
+        );
+    }
+
+    /// Pins `Failed to create dir: {e}` (:459). `did/personas` is a regular
+    /// file, so the persona key path does not exist and `create_dir_all`
+    /// refuses the fresh name.
+    ///
+    /// Falsifier: ignore the `create_dir_all` error and generate the key; this
+    /// test then fails on the changed answer.
+    #[test]
+    fn handler_refuses_a_persona_directory_that_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
+        fs::create_dir_all(dir.path().join("did")).unwrap();
+        fs::write(dir.path().join("did").join("personas"), b"not a directory").unwrap();
+        assert_eq!(
+            refusal_wire(&provider.get_persona_did("bot")),
+            serde_json::json!({
+                "status": "error",
+                "code": "key_error",
+                "message": "Failed to create dir: File exists (os error 17)",
+            })
+        );
+    }
 }
 
 /// The remaining refusal strings of the DID recovery request validator, the
