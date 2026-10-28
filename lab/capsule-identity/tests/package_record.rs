@@ -361,6 +361,8 @@ fn record_paths_share_one_implementation() {
         ("domain_separated_digest(", 4),
         ("fn require_record_cid(", 1),
         ("require_record_cid(", 2),
+        ("sign_cid_record(", 2),
+        ("verify_cid_record(", 2),
         ("signer_did_of(", 4),
         ("verify_ed25519(", 4),
     ] {
@@ -385,9 +387,9 @@ fn record_paths_share_one_implementation() {
     for (item, call) in [
         ("fn package_record_message(", "domain_separated_digest("),
         ("fn variant_binding_message(", "domain_separated_digest("),
-        ("pub fn sign_package_record(", "signer_did_of("),
+        ("pub fn sign_cid_record(", "signer_did_of("),
         ("pub fn sign_variant_binding(", "signer_did_of("),
-        ("pub fn verify_checked_package_record(", "verify_ed25519("),
+        ("pub fn verify_cid_record(", "verify_ed25519("),
         ("pub fn verify_checked_variant_binding(", "verify_ed25519("),
     ] {
         let body = library_item(&code, item);
@@ -401,8 +403,11 @@ fn record_paths_share_one_implementation() {
         assert_eq!(message.matches(call).count(), 1, "{message}");
     }
 
-    let sign = library_item(&code, "pub fn sign_package_record(");
-    for call in ["lab_cid(", "signer_did_of(", "package_record_message("] {
+    // Task 049: the record is built and signed in `sign_cid_record` only,
+    // and checked in `verify_cid_record` only. The folder and checked calls
+    // are the walk or the checked CID, then that call.
+    let sign = library_item(&code, "pub fn sign_cid_record(");
+    for call in ["signer_did_of(", "package_record_message("] {
         assert_eq!(sign.matches(call).count(), 1, "{call}:\n{sign}");
     }
     for own in [
@@ -410,6 +415,7 @@ fn record_paths_share_one_implementation() {
         "domain_separated_digest(",
         "format!",
         "checked_bundle",
+        "lab_cid(",
         "encode_signing_key_did(",
         "fs::",
         "File",
@@ -420,7 +426,39 @@ fn record_paths_share_one_implementation() {
         );
     }
 
-    let checked = library_item(&code, "pub fn verify_checked_package_record(");
+    let folder_sign = library_item(&code, "pub fn sign_package_record(");
+    for call in ["lab_cid(", "sign_cid_record("] {
+        assert_eq!(
+            folder_sign.matches(call).count(),
+            1,
+            "{call}:\n{folder_sign}"
+        );
+    }
+    for own in [
+        "signer_did_of(",
+        "package_record_message(",
+        "package_record_payload(",
+        "PackageRecord {",
+        ".sign(",
+        "Sha256",
+        "domain_separated_digest(",
+        "format!",
+        "checked_bundle",
+        "encode_signing_key_did(",
+        "fs::",
+        "File",
+    ] {
+        assert!(
+            !folder_sign.contains(own),
+            "the folder signer does its own work ({own}):\n{folder_sign}"
+        );
+    }
+
+    let compare = library_item(&code, "fn require_record_cid(");
+    assert_eq!(compare.matches("record.cid != ").count(), 1, "{compare}");
+    assert_eq!(code.matches("record.cid != ").count(), 1, "one CID compare");
+
+    let checked = library_item(&code, "pub fn verify_cid_record(");
     let mut at = Vec::new();
     for call in [
         "decode_signer(",
@@ -432,13 +470,13 @@ fn record_paths_share_one_implementation() {
         assert_eq!(
             checked.matches(call).count(),
             1,
-            "{call} is not the one check in the checked form:\n{checked}"
+            "{call} is not the one check in verify_cid_record:\n{checked}"
         );
         at.push(checked.find(call).expect("found once"));
     }
     assert!(
         at.windows(2).all(|pair| pair[0] < pair[1]),
-        "the checked form's checks are out of order:\n{checked}"
+        "verify_cid_record's checks are out of order:\n{checked}"
     );
     for own in [
         "decode_did_key(",
@@ -453,7 +491,35 @@ fn record_paths_share_one_implementation() {
     ] {
         assert!(
             !checked.contains(own),
-            "the checked form does its own work ({own}):\n{checked}"
+            "verify_cid_record does its own work ({own}):\n{checked}"
+        );
+    }
+
+    let held = library_item(&code, "pub fn verify_checked_package_record(");
+    for call in ["verify_cid_record(", "checked.cid()"] {
+        assert_eq!(held.matches(call).count(), 1, "{call}:\n{held}");
+    }
+    for own in [
+        "decode_signer(",
+        "require_accepted(",
+        "require_record_cid(",
+        "record.cid",
+        "to_string()",
+        "package_record_message(",
+        "package_record_payload(",
+        "verify_ed25519(",
+        "decode_did_key(",
+        "domain_separated_digest(",
+        "Sha256",
+        ".verify(",
+        "format!",
+        "checked_bundle(",
+        "lab_cid(",
+        "fs::",
+    ] {
+        assert!(
+            !held.contains(own),
+            "the checked form does its own work ({own}):\n{held}"
         );
     }
 
@@ -468,6 +534,8 @@ fn record_paths_share_one_implementation() {
         "decode_signer(",
         "require_accepted(",
         "require_record_cid(",
+        "verify_cid_record(",
+        "record.cid",
         "package_record_message(",
         "package_record_payload(",
         "verify_ed25519(",
