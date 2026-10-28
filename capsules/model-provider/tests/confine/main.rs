@@ -845,8 +845,9 @@ fn wait_for_terminal(
 /// line. `cited_test_name` is true for that exact span. Otherwise a backtick
 /// span needs a `model_` or `generated_` prefix and a non-empty tail of
 /// lowercase letters, digits and underscores, so the spans `model_` and
-/// `generated_` stay uncited. `cited_test_names` is the only scan of backtick
-/// spans. `missing_cited_tests` is that list filtered to names the source
+/// `generated_` stay uncited. `cited_test_names` scans backtick spans for test
+/// names. `cell_backtick_names` scans the backtick spans of one Inputs cell.
+/// `missing_cited_tests` is that list filtered to names the source
 /// does not contain as `fn <name>(`. An in-memory section whose only span is
 /// `generated_profile_denies_the_hosted_connect`, read against a source that
 /// has no such function, fails first. The panic contains
@@ -876,6 +877,17 @@ fn wait_for_terminal(
 /// panic contains the backticked cell `` `enforced` ``. An in-memory row with
 /// the old phrase panics with that phrase and `right`. In the true mode, a
 /// wrong Right cell panics with the operation and the rejected cell.
+///
+/// `operations_inputs_match_the_request_structs` reads each Inputs cell's
+/// backtick names and the fields of that operation's request struct in
+/// `src/contract.rs` through `struct_field_names`. A row with no such struct
+/// names `op` alone. A missing name, an extra name or a swap fails with the
+/// operation and the name that has no partner. In-memory sources cover the
+/// matching cell, the missing and extra names, a swap, a rename on both
+/// sides, the complete default attribute forms, a missing struct, two
+/// structs, two attribute lines, invalid body lines, an unfinished body,
+/// an attribute without a field and unsupported attributes such as
+/// `#[serde(skip)]` or combined rename options.
 ///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
 /// test no longer finds that function. F-cc49a drops the `generated_`
@@ -1192,6 +1204,173 @@ fn operations_section_cites_existing_tests() {
         }
         Ok(())
     }
+    /// The wire field names of one request struct in `source`, in source
+    /// order.
+    ///
+    /// Zero occurrences of `struct {struct_name} {` return `Ok(None)`. A
+    /// second occurrence, a second attribute line above one field, an
+    /// unsupported attribute line and any other body line are errors that
+    /// name the struct. The body runs from that `{` to the line whose trim is
+    /// `}`. A blank line or a line whose trim starts with `//` is skipped. One
+    /// attribute line above a field may be `#[serde(rename = "...")]`, which
+    /// gives the wire name, or `#[serde(default)]` or
+    /// `#[serde(default, skip_serializing_if = "...")]`, which keep the Rust
+    /// name. These are complete attribute forms with one non-empty, unescaped
+    /// quoted value; extra options are rejected. A field line's trim starts
+    /// with `pub `, then the name, then `:`.
+    ///
+    /// The compare reads struct text, not serde's output. A later
+    /// `#[serde(skip)]` is rejected until this rule is widened. A
+    /// `#[serde(default)]` field is required. A nested type stays one name.
+    /// This reader does not read `src/execution.rs` or `src/state.rs`, and it
+    /// does not check an Outputs cell.
+    fn struct_field_names(source: &str, struct_name: &str) -> Result<Option<Vec<String>>, String> {
+        let marker = format!("struct {struct_name} {{");
+        let occurrences = source.matches(&marker).count();
+        if occurrences == 0 {
+            return Ok(None);
+        }
+        if occurrences > 1 {
+            return Err(format!(
+                "struct {struct_name}: has a second `struct {struct_name} {{`"
+            ));
+        }
+        let lines: Vec<&str> = source.lines().collect();
+        let declaration = lines
+            .iter()
+            .position(|line| line.contains(&marker))
+            .expect("the occurrence count found the struct");
+        let mut names = Vec::new();
+        let mut attribute: Option<&str> = None;
+        for line in &lines[declaration + 1..] {
+            let trimmed = line.trim();
+            if trimmed == "}" {
+                if let Some(line) = attribute {
+                    return Err(format!(
+                        "struct {struct_name}: attribute line has no field `{line}`"
+                    ));
+                }
+                return Ok(Some(names));
+            }
+            if trimmed.is_empty() || trimmed.starts_with("//") {
+                continue;
+            }
+            if trimmed.starts_with("#[") {
+                if attribute.is_some() {
+                    return Err(format!(
+                        "struct {struct_name}: a field has a second attribute line `{trimmed}`"
+                    ));
+                }
+                attribute = Some(trimmed);
+                continue;
+            }
+            let Some(field) = trimmed.strip_prefix("pub ") else {
+                return Err(format!(
+                    "struct {struct_name}: body line is not a field line `{trimmed}`"
+                ));
+            };
+            let Some((rust_name, _)) = field.split_once(':') else {
+                return Err(format!(
+                    "struct {struct_name}: field line has no `:` `{trimmed}`"
+                ));
+            };
+            let wire_name = match attribute.take() {
+                Some(line) if line == "#[serde(default)]" => rust_name.trim().to_string(),
+                Some(line) => {
+                    let quoted_value = |prefix| {
+                        line.strip_prefix(prefix)
+                            .and_then(|rest| rest.strip_suffix("\")]"))
+                            .filter(|value| !value.is_empty() && !value.contains(['"', '\\']))
+                    };
+                    match (
+                        quoted_value("#[serde(rename = \""),
+                        quoted_value("#[serde(default, skip_serializing_if = \""),
+                    ) {
+                        (Some(wire_name), _) => wire_name.to_string(),
+                        (_, Some(_)) => rust_name.trim().to_string(),
+                        _ => {
+                            return Err(format!(
+                                "struct {struct_name}: unsupported attribute line `{line}`"
+                            ))
+                        }
+                    }
+                }
+                None => rust_name.trim().to_string(),
+            };
+            names.push(wire_name);
+        }
+        Err(format!(
+            "struct {struct_name}: body has no line whose trim is `}}`"
+        ))
+    }
+    // The backtick spans of one Inputs cell, in order.
+    fn cell_backtick_names(cell: &str) -> Vec<&str> {
+        let mut names = Vec::new();
+        let mut rest = cell;
+        while let Some(start) = rest.find('`') {
+            rest = &rest[start + 1..];
+            let Some(end) = rest.find('`') else {
+                break;
+            };
+            names.push(&rest[..end]);
+            rest = &rest[end + 1..];
+        }
+        names
+    }
+    // `runs_events` -> `RunsEventsRequest`.
+    fn request_struct_name(operation: &str) -> String {
+        let mut name = String::new();
+        for part in operation.split('_') {
+            let mut chars = part.chars();
+            if let Some(first) = chars.next() {
+                name.extend(first.to_uppercase());
+                name.push_str(chars.as_str());
+            }
+        }
+        name.push_str("Request");
+        name
+    }
+    // Each Inputs cell's backtick names, in order, equal the fields of that
+    // operation's request struct in `source`; a row with no such struct names
+    // `op` alone. A mismatch names the operation and the name with no partner.
+    fn operations_inputs_match_the_request_structs(
+        section: &str,
+        source: &str,
+    ) -> Result<(), String> {
+        const INPUTS_PLACE: usize = 2;
+        for cells in section.lines().filter_map(operation_row_cells) {
+            let operation = cells[0];
+            let cell_names =
+                cell_backtick_names(cells.get(INPUTS_PLACE - 1).copied().unwrap_or(""));
+            let struct_name = request_struct_name(operation);
+            let field_names = match struct_field_names(source, &struct_name)? {
+                Some(names) => names,
+                None => vec!["op".to_string()],
+            };
+            for index in 0..cell_names.len().max(field_names.len()) {
+                match (cell_names.get(index).copied(), field_names.get(index)) {
+                    (Some(cell_name), Some(field_name)) if cell_name == field_name.as_str() => {}
+                    (Some(cell_name), Some(field_name)) => {
+                        return Err(format!(
+                            "operation `{operation}` Inputs name `{cell_name}` has no partner; the field there is `{field_name}`"
+                        ));
+                    }
+                    (Some(cell_name), None) => {
+                        return Err(format!(
+                            "operation `{operation}` Inputs name `{cell_name}` has no partner in `{struct_name}`"
+                        ));
+                    }
+                    (None, Some(field_name)) => {
+                        return Err(format!(
+                            "operation `{operation}` field `{field_name}` has no partner in the Inputs cell"
+                        ));
+                    }
+                    (None, None) => break,
+                }
+            }
+        }
+        Ok(())
+    }
     fn reader_failure(source: &str) -> String {
         match parse_request_operation_names(source) {
             Err(reason) => reason,
@@ -1200,6 +1379,17 @@ fn operations_section_cites_existing_tests() {
     }
     fn compare_failure(section: &str, source: &str) -> String {
         match operations_match_parse_request(section, source) {
+            Err(reason) => reason,
+            Ok(()) => panic!("the compare accepts: {section} {source}"),
+        }
+    }
+    fn inputs_row(operation: &str, inputs: &str) -> String {
+        format!(
+            "| {operation} | {inputs} | out | storage | effect | rule | designed, not enforced |"
+        )
+    }
+    fn inputs_failure(section: &str, source: &str) -> String {
+        match operations_inputs_match_the_request_structs(section, source) {
             Err(reason) => reason,
             Ok(()) => panic!("the compare accepts: {section} {source}"),
         }
@@ -1542,6 +1732,171 @@ fn operations_section_cites_existing_tests() {
         "{failure}"
     );
 
+    let init_source = "pub struct InitRequest {\n    pub op: String,\n    pub config: String,\n}\n";
+    let init_match = inputs_row("init", "`op`, `config`");
+    assert_eq!(
+        operations_inputs_match_the_request_structs(&init_match, init_source),
+        Ok(())
+    );
+    let failure = inputs_failure(&inputs_row("init", "`op`"), init_source);
+    assert_eq!(
+        failure,
+        "operation `init` field `config` has no partner in the Inputs cell"
+    );
+    assert!(
+        failure.contains("init") && failure.contains("config"),
+        "{failure}"
+    );
+    let failure = inputs_failure(&inputs_row("init", "`op`, `config`, `extra`"), init_source);
+    assert_eq!(
+        failure,
+        "operation `init` Inputs name `extra` has no partner in `InitRequest`"
+    );
+    assert!(
+        failure.contains("init") && failure.contains("extra"),
+        "{failure}"
+    );
+    let failure = inputs_failure(&inputs_row("init", "`config`, `op`"), init_source);
+    assert_eq!(
+        failure,
+        "operation `init` Inputs name `config` has no partner; the field there is `op`"
+    );
+    assert!(failure.contains("init"), "{failure}");
+
+    // A rename gives the wire name on both sides: the Rust name fails and the
+    // wire name passes.
+    let renamed_source = "pub struct InitRequest {\n    pub op: String,\n    #[serde(rename = \"wire_name\")]\n    pub config: String,\n}\n";
+    let failure = inputs_failure(&inputs_row("init", "`op`, `config`"), renamed_source);
+    assert_eq!(
+        failure,
+        "operation `init` Inputs name `config` has no partner; the field there is `wire_name`"
+    );
+    assert!(
+        failure.contains("init") && failure.contains("wire_name"),
+        "{failure}"
+    );
+    assert_eq!(
+        operations_inputs_match_the_request_structs(
+            &inputs_row("init", "`op`, `wire_name`"),
+            renamed_source
+        ),
+        Ok(())
+    );
+
+    // Default attributes keep the Rust field name only in the complete
+    // supported forms. Extra options in either quoted form are refused.
+    for attribute in [
+        "#[serde(default)]",
+        r#"#[serde(default, skip_serializing_if = "Option::is_none")]"#,
+    ] {
+        let source = format!(
+            "pub struct InitRequest {{\n    pub op: String,\n    {attribute}\n    pub config: Option<String>,\n}}\n"
+        );
+        assert_eq!(
+            operations_inputs_match_the_request_structs(&init_match, &source),
+            Ok(()),
+            "{attribute}"
+        );
+    }
+    for attribute in [
+        r#"#[serde(default, skip_serializing_if = "Option::is_none", rename = "wire_name")]"#,
+        r#"#[serde(default, skip_serializing_if = "Option::is_none", skip)]"#,
+        r#"#[serde(default, rename = "wire_name")]"#,
+        r#"#[serde(rename = "wire_name", skip_serializing_if = "Option::is_none")]"#,
+        r#"#[serde(rename = "wire_name", alias = "config")]"#,
+        r#"#[serde(rename = "wire_name", default)]"#,
+        r#"#[serde(rename = "")]"#,
+        r#"#[serde(default, skip_serializing_if = "")]"#,
+        r#"#[serde(rename = "wire\x5fname")]"#,
+        r#"#[serde(default, skip_serializing_if = "Option\x3a\x3ais_none")]"#,
+        r#"#[serde(rename = "wire_name")"#,
+        r#"#[serde(default, skip_serializing_if = "Option::is_none")"#,
+    ] {
+        let source = format!(
+            "pub struct InitRequest {{\n    pub op: String,\n    {attribute}\n    pub config: Option<String>,\n}}\n"
+        );
+        assert_eq!(
+            inputs_failure(&init_match, &source),
+            format!("struct InitRequest: unsupported attribute line `{attribute}`")
+        );
+    }
+
+    // A row with no request struct names `op` alone.
+    assert_eq!(
+        operations_inputs_match_the_request_structs(&inputs_row("status", "`op`"), init_source),
+        Ok(())
+    );
+    let failure = inputs_failure(&inputs_row("status", "`op`, `body`"), init_source);
+    assert_eq!(
+        failure,
+        "operation `status` Inputs name `body` has no partner in `StatusRequest`"
+    );
+    assert!(
+        failure.contains("status") && failure.contains("body"),
+        "{failure}"
+    );
+
+    // A second struct, a second attribute line, a body line that is not a
+    // field, and an unsupported attribute each fail with their own reason.
+    let duplicate_source = "pub struct InitRequest {\n    pub op: String,\n}\npub struct InitRequest {\n    pub op: String,\n}\n";
+    let failure = inputs_failure(&init_match, duplicate_source);
+    assert_eq!(
+        failure,
+        "struct InitRequest: has a second `struct InitRequest {`"
+    );
+    assert!(
+        failure.contains("InitRequest") && failure.contains("second `struct InitRequest {`"),
+        "{failure}"
+    );
+    let stacked_attribute_source = "pub struct InitRequest {\n    #[serde(default)]\n    #[serde(skip_serializing_if = \"Option::is_none\")]\n    pub op: String,\n}\n";
+    let failure = inputs_failure(&init_match, stacked_attribute_source);
+    assert_eq!(
+        failure,
+        "struct InitRequest: a field has a second attribute line `#[serde(skip_serializing_if = \"Option::is_none\")]`"
+    );
+    assert!(
+        failure.contains("InitRequest") && failure.contains("second attribute line"),
+        "{failure}"
+    );
+    let invalid_body_source =
+        "pub struct InitRequest {\n    pub op: String,\n    let config = 1;\n}\n";
+    let failure = inputs_failure(&init_match, invalid_body_source);
+    assert_eq!(
+        failure,
+        "struct InitRequest: body line is not a field line `let config = 1;`"
+    );
+    assert!(
+        failure.contains("InitRequest") && failure.contains("not a field line"),
+        "{failure}"
+    );
+    let skipped_field_source =
+        "pub struct InitRequest {\n    #[serde(skip)]\n    pub config: String,\n}\n";
+    let failure = inputs_failure(&init_match, skipped_field_source);
+    assert_eq!(
+        failure,
+        "struct InitRequest: unsupported attribute line `#[serde(skip)]`"
+    );
+    assert!(
+        failure.contains("InitRequest") && failure.contains("unsupported attribute line"),
+        "{failure}"
+    );
+    let missing_colon_source = "pub struct InitRequest {\n    pub op String,\n}\n";
+    assert_eq!(
+        inputs_failure(&init_match, missing_colon_source),
+        "struct InitRequest: field line has no `:` `pub op String,`"
+    );
+    let unfinished_source = "pub struct InitRequest {\n    pub op: String,\n";
+    assert_eq!(
+        inputs_failure(&init_match, unfinished_source),
+        "struct InitRequest: body has no line whose trim is `}`"
+    );
+    let dangling_attribute_source =
+        "pub struct InitRequest {\n    pub op: String,\n    #[serde(default)]\n}\n";
+    assert_eq!(
+        inputs_failure(&inputs_row("init", "`op`"), dangling_attribute_source),
+        "struct InitRequest: attribute line has no field `#[serde(default)]`"
+    );
+
     let doc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("CONFINEMENT.md");
     let doc = fs::read_to_string(&doc_path).unwrap_or_else(|err| {
         panic!(
@@ -1592,6 +1947,8 @@ fn operations_section_cites_existing_tests() {
         .expect("the real operations section keeps its Right and Linux lab claims");
     operations_match_parse_request(section, &contract_source)
         .expect("the real Operation cells equal the parse_request arms");
+    operations_inputs_match_the_request_structs(section, &contract_source)
+        .expect("the real Inputs cells equal each operation's request struct fields");
 }
 
 /// The Id cells in `section` are the same set as `ids`.

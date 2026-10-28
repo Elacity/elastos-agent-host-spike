@@ -502,7 +502,9 @@ original bytes, and it counts no syscalls. The profile still grants
 stat'ed. Each Linux cell must be `designed, not enforced`.
 `operations_section_cites_existing_tests` also requires the Operation cells, in
 order, to equal the `parse_request` arms, and the `other` arm is the
-`unsupported` row.
+`unsupported` row. `operations_section_cites_existing_tests` requires each Inputs
+cell's backtick names, in order, to equal the fields of that operation's request
+struct in `src/contract.rs`, and a row with no such struct names `op` alone.
 
 | Operation | Inputs | Outputs | Right | Effect | macOS rule and test | Linux |
 | --- | --- | --- | --- | --- | --- | --- |
