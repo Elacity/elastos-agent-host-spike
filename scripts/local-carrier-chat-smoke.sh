@@ -237,9 +237,13 @@ start_runtime() {
     cp "${HOST_DATA_DIR}/components.json" "${DATA_DIR[$name]}/components.json"
     cp -a "${HOST_DATA_DIR}/bin/." "${DATA_DIR[$name]}/bin/"
 
+    # The runtime's shell grants only what this policy file allows.
+    printf '{"allow":["elastos://peer/*"]}\n' >"${HOME_DIR[$name]}/policy.json"
+
     HOME="${HOME_DIR[$name]}" \
     XDG_DATA_HOME="${XDG_DIR[$name]}" \
     ELASTOS_DATA_DIR="${DATA_DIR[$name]}" \
+    ELASTOS_POLICY_FILE="${HOME_DIR[$name]}/policy.json" \
     "${ELASTOS_BIN}" serve --addr "127.0.0.1:${port}" >"${LOG_PATH[$name]}" 2>&1 &
     PID["$name"]=$!
 

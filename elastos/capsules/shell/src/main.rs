@@ -176,7 +176,7 @@ impl DecisionEngine for CliPromptEngine {
 // Reads rules from $ELASTOS_POLICY_FILE (JSON) or ~/.local/share/elastos/policy.json.
 // Format: { "allow": ["elastos://peer/*", "elastos://did/*", "localhost://Users/*"] }
 // Requests matching an allow pattern are granted. Others are denied.
-// If no policy file exists, all requests are denied (fail-closed).
+// A missing, unreadable or malformed policy file allows nothing (fail-closed).
 
 struct PolicyRulesEngine {
     allow_patterns: Vec<String>,
@@ -184,36 +184,11 @@ struct PolicyRulesEngine {
 
 impl PolicyRulesEngine {
     fn load() -> Self {
-        let path = std::env::var("ELASTOS_POLICY_FILE").unwrap_or_else(|_| {
-            let data_dir = std::env::var("HOME")
-                .map(|h| format!("{}/.local/share/elastos/policy.json", h))
-                .unwrap_or_else(|_| "/tmp/elastos/policy.json".into());
-            data_dir
-        });
-
-        let (allow_patterns, source) = match std::fs::read_to_string(&path) {
-            Ok(data) => {
-                if let Ok(policy) = serde_json::from_str::<serde_json::Value>(&data) {
-                    let patterns = policy
-                        .get("allow")
-                        .and_then(|a| a.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    (patterns, format!("file:{}", path))
-                } else {
-                    eprintln!(
-                        "shell: policy file {} is not valid JSON, using built-in defaults",
-                        path
-                    );
-                    (Self::builtin_defaults(), "built-in".into())
-                }
-            }
-            Err(_) => (Self::builtin_defaults(), "built-in".into()),
-        };
+        let path = policy_file_path(
+            std::env::var("ELASTOS_POLICY_FILE").ok(),
+            std::env::var("HOME").ok(),
+        );
+        let (allow_patterns, source) = Self::rules_from_file(path.as_deref());
 
         eprintln!(
             "shell: agent mode — {} allow rules ({})",
@@ -224,19 +199,32 @@ impl PolicyRulesEngine {
         Self { allow_patterns }
     }
 
-    /// Built-in default allow rules for agent mode when no policy file exists.
-    /// Covers the core provider schemes that standard capsules need.
-    fn builtin_defaults() -> Vec<String> {
-        vec![
-            "elastos://peer/*".into(),
-            "elastos://did/*".into(),
-            "localhost://Users/*".into(),
-            "localhost://UsersAI/*".into(),
-            "localhost://Public/*".into(),
-            "localhost://MyWebSite/*".into(),
-            "localhost://Local/*".into(),
-            "localhost://ElastOS/SystemServices/*".into(),
-        ]
+    /// The allow rules in the policy file at `path`, and where they came from.
+    fn rules_from_file(path: Option<&str>) -> (Vec<String>, String) {
+        let Some(path) = path else {
+            return (
+                Vec::new(),
+                "no policy file: ELASTOS_POLICY_FILE and HOME are unset; denying all".into(),
+            );
+        };
+        let data = match std::fs::read_to_string(path) {
+            Ok(data) => data,
+            Err(err) => {
+                return (
+                    Vec::new(),
+                    format!("policy file {path} cannot be read ({err}); denying all"),
+                )
+            }
+        };
+        match parse_allow_rules(&data) {
+            Some(patterns) => (patterns, format!("file:{path}")),
+            None => (
+                Vec::new(),
+                format!(
+                    "policy file {path} is not JSON with an \"allow\" list of strings; denying all"
+                ),
+            ),
+        }
     }
 
     fn matches(&self, resource: &str) -> bool {
@@ -248,6 +236,20 @@ impl PolicyRulesEngine {
             }
         })
     }
+}
+
+fn policy_file_path(policy_file: Option<String>, home: Option<String>) -> Option<String> {
+    policy_file.or_else(|| home.map(|home| format!("{home}/.local/share/elastos/policy.json")))
+}
+
+fn parse_allow_rules(data: &str) -> Option<Vec<String>> {
+    let policy: serde_json::Value = serde_json::from_str(data).ok()?;
+    policy
+        .get("allow")?
+        .as_array()?
+        .iter()
+        .map(|rule| rule.as_str().map(str::to_string))
+        .collect()
 }
 
 impl DecisionEngine for PolicyRulesEngine {
@@ -1315,23 +1317,121 @@ mod tests {
         assert_eq!(resolve_mode("agent", false), "agent");
     }
 
-    #[test]
-    fn builtin_defaults_cover_core_providers() {
-        let defaults = PolicyRulesEngine::builtin_defaults();
-        assert!(defaults.contains(&"elastos://peer/*".to_string()));
-        assert!(defaults.contains(&"elastos://did/*".to_string()));
-        assert!(defaults.contains(&"localhost://Users/*".to_string()));
+    fn users_write_request() -> DecisionRequest {
+        DecisionRequest {
+            _request_id: "r1".into(),
+            session_id: "s1".into(),
+            resource: "localhost://Users/self/Documents/file".into(),
+            action: "write".into(),
+            _requested_at: 0,
+            _expires_at: 0,
+        }
+    }
+
+    struct TestDir(std::path::PathBuf);
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "elastos-shell-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn engine_from_file(path: Option<&str>) -> PolicyRulesEngine {
+        PolicyRulesEngine {
+            allow_patterns: PolicyRulesEngine::rules_from_file(path).0,
+        }
     }
 
     #[test]
-    fn builtin_defaults_used_when_no_policy_file() {
-        // PolicyRulesEngine with builtin defaults should grant peer access
-        let engine = PolicyRulesEngine {
-            allow_patterns: PolicyRulesEngine::builtin_defaults(),
-        };
+    fn agent_mode_denies_everything_without_a_policy_file() {
+        let dir = TestDir::new("missing");
+        let missing = dir.path().join("policy.json");
+        let mut engine = engine_from_file(Some(missing.to_str().unwrap()));
+        assert!(engine.allow_patterns.is_empty());
+        assert_eq!(
+            engine.decide(&users_write_request()).outcome,
+            DecisionOutcome::Deny
+        );
+    }
+
+    #[test]
+    fn agent_mode_denies_everything_with_a_malformed_policy_file() {
+        let dir = TestDir::new("malformed");
+        let path = dir.path().join("policy.json");
+        for data in [
+            "not json",
+            r#"["localhost://Users/*"]"#,
+            r#"{"allow": "localhost://Users/*"}"#,
+            r#"{"allow": ["localhost://Users/*", 7]}"#,
+            r#"{"deny": []}"#,
+        ] {
+            std::fs::write(&path, data).unwrap();
+            let mut engine = engine_from_file(Some(path.to_str().unwrap()));
+            assert!(engine.allow_patterns.is_empty(), "{data}");
+            assert_eq!(
+                engine.decide(&users_write_request()).outcome,
+                DecisionOutcome::Deny,
+                "{data}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_mode_grants_only_the_policy_files_rules() {
+        let dir = TestDir::new("rules");
+        let path = dir.path().join("policy.json");
+        std::fs::write(
+            &path,
+            r#"{"allow": ["elastos://peer/*"], "home_launch_signer_did": "did:key:z6Mk"}"#,
+        )
+        .unwrap();
+        let mut engine = engine_from_file(Some(path.to_str().unwrap()));
+        assert_eq!(engine.allow_patterns, vec!["elastos://peer/*".to_string()]);
         assert!(engine.matches("elastos://peer/some-peer"));
-        assert!(engine.matches("localhost://Users/self/Documents/file"));
-        assert!(!engine.matches("https://external.com/api"));
+        assert_eq!(
+            engine.decide(&users_write_request()).outcome,
+            DecisionOutcome::Deny
+        );
+    }
+
+    #[test]
+    fn policy_file_path_has_no_shared_fallback() {
+        assert_eq!(
+            policy_file_path(
+                Some("/etc/elastos/policy.json".into()),
+                Some("/home/a".into())
+            ),
+            Some("/etc/elastos/policy.json".into())
+        );
+        assert_eq!(
+            policy_file_path(None, Some("/home/a".into())),
+            Some("/home/a/.local/share/elastos/policy.json".into())
+        );
+        assert_eq!(policy_file_path(None, None), None);
+        let mut engine = engine_from_file(None);
+        assert_eq!(
+            engine.decide(&users_write_request()).outcome,
+            DecisionOutcome::Deny
+        );
     }
 
     #[test]

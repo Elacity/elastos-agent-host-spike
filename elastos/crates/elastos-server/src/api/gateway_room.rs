@@ -541,12 +541,18 @@ pub(super) async fn chat_room_summary(
     State(state): State<GatewayState>,
     headers: HeaderMap,
 ) -> Response {
+    let chat_launch =
+        require_home_launch_token_context(&state.data_dir, &headers, CHAT_ROOM_CAPSULE_ID);
     if state.collaboration_chat_product_port.is_none() {
+        // The legacy summary lists guest requests and sessions: Chat or Home only.
+        if let Err(err) = chat_launch {
+            if require_home_token(&state.data_dir, &headers).is_err() {
+                return room_service_error_response(err);
+            }
+        }
         return room_service_summary(State(state)).await;
     }
-    if let Err(err) =
-        require_home_launch_token_context(&state.data_dir, &headers, CHAT_ROOM_CAPSULE_ID)
-    {
+    if let Err(err) = chat_launch {
         return room_service_error_response(err);
     }
     Json(serde_json::json!({
@@ -1593,29 +1599,7 @@ fn participant_card_directory(
     let Some(store) = read_snapshot else {
         return directory;
     };
-    if let Ok(requests) = store.pending_incoming_requests() {
-        for request in requests {
-            directory.relationships.insert(
-                request.requester_profile_did().to_string(),
-                ("pending", None),
-            );
-        }
-    }
-    if let Ok(requests) = store.outgoing_pending_requests(now) {
-        for request in requests {
-            directory
-                .relationships
-                .insert(request.remote_profile_did.clone(), ("requested", None));
-        }
-    }
-    if let Ok(snapshot) = store.snapshot() {
-        for contact in snapshot.contacts() {
-            directory.relationships.insert(
-                contact.remote_profile_did().to_string(),
-                ("contact", Some(contact.conversation_id().to_string())),
-            );
-        }
-    }
+    directory.relationships = gateway_home_system::contact_relationships(store, now);
     if let Some(service) = discovery_service {
         if let Ok(status) = service.read_only_status_from_snapshot(store, &authority.profile, now) {
             directory.discoverable = status

@@ -80,9 +80,21 @@ pub(super) async fn home_cli_terminal_access(
         .uri()
         .path()
         .starts_with("/api/apps/home-cli/terminal/")
-        && !home_terminal_policy_allows(&data_dir)
     {
-        return home_terminal_policy_refusal();
+        if !home_terminal_policy_allows(&data_dir) {
+            return home_terminal_policy_refusal();
+        }
+        // `elastos home` runs as the host user, so a guest's token reaches no
+        // terminal route, the contract and preflight included (#405).
+        if let Ok(context) = require_home_launch_token_for_any_context(
+            &data_dir,
+            request.headers(),
+            &[HOME_CLI_CAPSULE_ID],
+        ) {
+            if !acts_for_host(&data_dir, context.proof_binding_id.as_deref()) {
+                return home_terminal_guest_refusal();
+            }
+        }
     }
     next.run(request).await
 }
@@ -93,6 +105,21 @@ fn home_terminal_policy_refusal() -> Response {
         "Web terminal requires host developer mode and closed guest registration.",
     )
         .into_response()
+}
+
+fn home_terminal_guest_refusal() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        "Only the Home owner can use the web terminal.",
+    )
+        .into_response()
+}
+
+/// A running terminal stays open only while the policy allows it and its
+/// principal still acts for the host; a demoted admin loses it.
+fn home_terminal_session_allowed(data_dir: &FsPath, session: &HomeTerminalSession) -> bool {
+    home_terminal_policy_allows(data_dir)
+        && acts_for_host(data_dir, session.proof_binding_id.as_deref())
 }
 
 #[derive(Debug, Deserialize)]
@@ -202,6 +229,7 @@ struct HomeTerminalSession {
     input_ticket: String,
     principal_id: String,
     auth_session_id: String,
+    proof_binding_id: Option<String>,
     grant_id: String,
     child_pid: Option<u32>,
     created_at_ms: u64,
@@ -256,6 +284,7 @@ struct HomeTerminalCleanupTarget {
 
 enum HomeTerminalStartError {
     PolicyRefused,
+    GuestRefused,
     Capacity(HomeTerminalCapacityError),
     Runtime(anyhow::Error),
 }
@@ -431,6 +460,9 @@ pub(super) async fn home_cli_terminal_start(
         Ok(context) => context,
         Err(err) => return home_error_response(err),
     };
+    if !acts_for_host(&state.data_dir, context.proof_binding_id.as_deref()) {
+        return home_terminal_guest_refusal();
+    }
     let size = match terminal_start_size(start.map(|Json(start)| start)) {
         Ok(size) => size,
         Err(response) => return response,
@@ -480,6 +512,7 @@ pub(super) async fn home_cli_terminal_start(
             .into_response()
         }
         Err(HomeTerminalStartError::PolicyRefused) => home_terminal_policy_refusal(),
+        Err(HomeTerminalStartError::GuestRefused) => home_terminal_guest_refusal(),
         Err(HomeTerminalStartError::Capacity(err)) => home_terminal_capacity_response(err),
         Err(HomeTerminalStartError::Runtime(err)) => home_error_response(err),
     }
@@ -586,7 +619,7 @@ async fn home_terminal_input_socket(
     data_dir: PathBuf,
 ) {
     while let Some(Ok(message)) = socket.recv().await {
-        if !home_terminal_policy_allows(&data_dir) {
+        if !home_terminal_session_allowed(&data_dir, &session) {
             close_home_terminal_session(&session.session_id, "terminal access disabled").await;
             break;
         }
@@ -606,7 +639,7 @@ async fn home_terminal_input_socket(
             break;
         }
         let mut input = session.input.lock().await;
-        if !home_terminal_policy_allows(&data_dir) {
+        if !home_terminal_session_allowed(&data_dir, &session) {
             drop(input);
             close_home_terminal_session(&session.session_id, "terminal access disabled").await;
             break;
@@ -795,6 +828,9 @@ async fn start_home_terminal_session(
     if !home_terminal_policy_allows(data_dir) {
         return Err(HomeTerminalStartError::PolicyRefused);
     }
+    if !acts_for_host(data_dir, context.proof_binding_id.as_deref()) {
+        return Err(HomeTerminalStartError::GuestRefused);
+    }
     let child = command
         .spawn()
         .with_context(|| format!("failed to start terminal process {}", command_spec.label))?;
@@ -806,6 +842,7 @@ async fn start_home_terminal_session(
         input_ticket: format!("input-{}", random_hex_token()),
         principal_id: context.principal_id,
         auth_session_id: context.session_id,
+        proof_binding_id: context.proof_binding_id,
         grant_id: context.grant_id,
         child_pid,
         created_at_ms: now_unix_ms(),
@@ -1170,10 +1207,10 @@ fn spawn_home_terminal_policy_watchdog(session_id: String, data_dir: PathBuf) {
                 HOME_TERMINAL_POLICY_CHECK_INTERVAL_SECS,
             ))
             .await;
-            if home_terminal_session(&session_id).await.is_none() {
+            let Some(session) = home_terminal_session(&session_id).await else {
                 break;
-            }
-            if !home_terminal_policy_allows(&data_dir) {
+            };
+            if !home_terminal_session_allowed(&data_dir, &session) {
                 close_home_terminal_session(&session_id, "terminal access disabled").await;
                 break;
             }
@@ -2873,6 +2910,7 @@ mod tests {
             input_ticket: format!("input-test-{}", random_hex_token()),
             principal_id: "principal-test".to_string(),
             auth_session_id: "session-test".to_string(),
+            proof_binding_id: None,
             grant_id: "grant-test".to_string(),
             child_pid,
             created_at_ms: now_unix_ms(),

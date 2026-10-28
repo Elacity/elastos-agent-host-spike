@@ -285,15 +285,10 @@ async fn test_cid_without_trailing_slash_redirects() {
 }
 
 #[tokio::test]
-async fn test_ipfs_cid_root_serves_cached_raw_file_without_redirect() {
+async fn test_ipfs_cid_root_serves_raw_file_without_redirect() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join(format!("{}.raw", TEST_CIDV1)),
-        b"raw-binary",
-    )
-    .unwrap();
-
-    let state = test_state(dir.path());
+    let (state, _holder) =
+        verified_store_state(dir.path(), &[(TEST_CIDV1, "", b"raw-binary")]).await;
     let app = gateway_router(state);
 
     let resp = app
@@ -320,13 +315,13 @@ async fn test_ipfs_cid_root_serves_cached_raw_file_without_redirect() {
 }
 
 #[tokio::test]
-async fn test_ipfs_cid_root_serves_cached_directory_index_when_raw_file_missing() {
+async fn test_ipfs_cid_root_serves_directory_index_when_cid_is_not_a_file() {
     let dir = tempfile::tempdir().unwrap();
-    let cid_dir = dir.path().join(TEST_CIDV1);
-    std::fs::create_dir_all(&cid_dir).unwrap();
-    std::fs::write(cid_dir.join("index.html"), "<html>ok</html>").unwrap();
-
-    let state = test_state(dir.path());
+    let (state, _holder) = verified_store_state(
+        dir.path(),
+        &[(TEST_CIDV1, "index.html", b"<html>ok</html>")],
+    )
+    .await;
     let app = gateway_router(state);
 
     let resp = app
@@ -429,6 +424,204 @@ async fn test_ipfs_cid_root_without_provider_registry_fails_closed() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+async fn gateway_get(app: &Router, path: &str) -> (StatusCode, Vec<u8>) {
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, body.to_vec())
+}
+
+/// Publish this Home's site as the bundle `TEST_CIDV1`.
+fn write_bundle_site_head(dir: &std::path::Path) {
+    let head_path = edge_site_head_path(dir, MY_WEBSITE_URI);
+    std::fs::create_dir_all(head_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        head_path,
+        serde_json::to_vec(&json!({
+            "payload": {"schema": "elastos.site.head.v1", "target": MY_WEBSITE_URI,
+                "bundle_cid": TEST_CIDV1, "content_digest": "sha256:fixture",
+                "entry_count": 1, "total_bytes": 1, "activated_at": 1},
+            "signature": "fixture", "signer_did": "did:key:fixture"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+/// The request path for `prefix` followed by the literal file `path`, each
+/// segment percent-encoded on its own.
+fn literal_route(prefix: &[&str], path: &str) -> String {
+    // Every byte outside the unreserved set is escaped; `url` path segment
+    // pushing drops tabs and newlines, so it cannot carry every literal name.
+    let encode = |segment: &str| -> String {
+        segment
+            .bytes()
+            .map(|byte| match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    char::from(byte).to_string()
+                }
+                _ => format!("%{byte:02X}"),
+            })
+            .collect()
+    };
+    prefix
+        .iter()
+        .copied()
+        .chain(path.split('/'))
+        .map(|segment| format!("/{}", encode(segment)))
+        .collect()
+}
+
+#[tokio::test]
+async fn gateway_serves_literal_file_paths_exactly_on_every_cid_route() {
+    let dir = tempfile::tempdir().unwrap();
+    write_bundle_site_head(dir.path());
+    let paths = elastos_common::test_fixtures::literal_content_paths();
+    let expected = |path: &str| format!("content of {path:?}").into_bytes();
+    let files: Vec<(String, Vec<u8>)> = paths
+        .iter()
+        .map(|path| (path.clone(), expected(path)))
+        .collect();
+    let files: Vec<(&str, &str, &[u8])> = files
+        .iter()
+        .map(|(path, bytes)| (TEST_CIDV1, path.as_str(), bytes.as_slice()))
+        .collect();
+    let (state, _holder) = verified_store_state(dir.path(), &files).await;
+    let app = gateway_router(state);
+
+    let mut failures = Vec::new();
+    let routes: [(&str, &[&str]); 3] = [
+        ("/s", &["s", TEST_CIDV1]),
+        ("/ipfs", &["ipfs", TEST_CIDV1]),
+        ("published site", &[]),
+    ];
+    for attempt in ["first", "repeat"] {
+        for (route, prefix) in routes {
+            for path in &paths {
+                let (status, body) = gateway_get(&app, &literal_route(prefix, path)).await;
+                if status != StatusCode::OK || body != expected(path) {
+                    failures.push(format!(
+                        "{attempt} {route}: {path:?} -> {status} {:?}",
+                        String::from_utf8_lossy(&body)
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} literal path requests changed:\n{}",
+        failures.len(),
+        paths.len() * routes.len() * 2,
+        failures.join("\n")
+    );
+}
+
+#[tokio::test]
+async fn gateway_reads_ask_the_local_store_for_at_most_the_gateway_file_limit() {
+    let limit = MAX_GATEWAY_FILE_SIZE as u64;
+    let dir = tempfile::tempdir().unwrap();
+    write_bundle_site_head(dir.path());
+    let over = vec![b'x'; MAX_GATEWAY_FILE_SIZE + 1];
+    let (state, _holder, store) = local_store_state(
+        dir.path(),
+        &[
+            (TEST_CIDV1, "", over.as_slice()),
+            (TEST_CIDV1, "big.bin", over.as_slice()),
+            (TEST_CIDV1, "small.txt", b"small"),
+        ],
+    )
+    .await;
+    let app = gateway_router(state);
+
+    for path in [
+        format!("/content/{TEST_CIDV1}"),
+        format!("/s/{TEST_CIDV1}/big.bin"),
+        format!("/ipfs/{TEST_CIDV1}/big.bin"),
+        "/big.bin".to_string(),
+    ] {
+        let (status, _) = gateway_get(&app, &path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    }
+    let (status, body) = gateway_get(&app, &format!("/s/{TEST_CIDV1}/small.txt")).await;
+    assert_eq!((status, body.as_slice()), (StatusCode::OK, &b"small"[..]));
+    let limits = store.whole_limits.lock().unwrap().clone();
+    assert!(!limits.is_empty());
+    assert!(
+        limits.iter().all(|requested| *requested == Some(limit)),
+        "every gateway read carries the gateway file limit: {limits:?}"
+    );
+}
+
+#[tokio::test]
+async fn gateway_serves_cid_content_only_from_the_verified_local_store() {
+    let dir = tempfile::tempdir().unwrap();
+    write_bundle_site_head(dir.path());
+    let (state, holder) = verified_store_state(dir.path(), &[]).await;
+    let app = gateway_router(state);
+
+    for path in [
+        format!("/content/{TEST_CIDV1}"),
+        format!("/ipfs/{TEST_CIDV1}"),
+        format!("/ipfs/{TEST_CIDV1}/"),
+        format!("/ipfs/{TEST_CIDV1}/index.html"),
+        format!("/s/{TEST_CIDV1}/"),
+        format!("/s/{TEST_CIDV1}/index.html"),
+        // A published site whose head names the bundle CID.
+        "/index.html".to_string(),
+    ] {
+        let (status, body) = gateway_get(&app, &path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        assert_ne!(body, HOLDER_BYTES, "{path}");
+    }
+    assert_eq!(
+        holder.reads.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a local miss never reaches availability holders"
+    );
+    for cached in [
+        dir.path().join(TEST_CIDV1),
+        dir.path().join(format!("{TEST_CIDV1}.raw")),
+    ] {
+        assert!(!cached.exists(), "{}", cached.display());
+    }
+}
+
+#[tokio::test]
+async fn gateway_never_serves_entries_in_the_cache_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    // Entries in the cache directory itself, the layout earlier releases wrote.
+    let unverified = b"unverified cache entry";
+    std::fs::write(dir.path().join(format!("{TEST_CIDV1}.raw")), unverified).unwrap();
+    std::fs::create_dir_all(dir.path().join(TEST_CIDV1)).unwrap();
+    std::fs::write(dir.path().join(TEST_CIDV1).join("page.html"), unverified).unwrap();
+    let (state, holder) = verified_store_state(
+        dir.path(),
+        &[
+            (TEST_CIDV1, "", b"verified file"),
+            (TEST_CIDV1, "page.html", b"verified page"),
+        ],
+    )
+    .await;
+    let app = gateway_router(state);
+
+    for (path, expected) in [
+        (format!("/content/{TEST_CIDV1}"), &b"verified file"[..]),
+        (format!("/s/{TEST_CIDV1}/page.html"), &b"verified page"[..]),
+    ] {
+        let (status, body) = gateway_get(&app, &path).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert_eq!(body, expected, "{path}");
+    }
+    assert_eq!(holder.reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn test_traversal_400() {
     let dir = tempfile::tempdir().unwrap();
@@ -451,12 +644,8 @@ async fn test_traversal_400() {
 #[tokio::test]
 async fn test_missing_file_404() {
     let dir = tempfile::tempdir().unwrap();
-    // Pre-populate cache so we don't need IPFS
-    let cid_dir = dir.path().join(TEST_CIDV1);
-    std::fs::create_dir_all(&cid_dir).unwrap();
-    std::fs::write(cid_dir.join("index.html"), "<html></html>").unwrap();
-
-    let state = test_state(dir.path());
+    let (state, _holder) =
+        verified_store_state(dir.path(), &[(TEST_CIDV1, "index.html", b"<html></html>")]).await;
     let app = gateway_router(state);
 
     let resp = app
@@ -1171,14 +1360,6 @@ async fn test_site_head_document_and_headers() {
     let site_root = elastos_common::localhost::my_website_root_path(dir.path());
     std::fs::create_dir_all(&site_root).unwrap();
     std::fs::write(site_root.join("index.html"), "<html>home site</html>").unwrap();
-    let cached_bundle = dir.path().join(TEST_CIDV1);
-    std::fs::create_dir_all(&cached_bundle).unwrap();
-    std::fs::write(
-        cached_bundle.join("index.html"),
-        "<html>published bundle</html>",
-    )
-    .unwrap();
-
     let head_path = edge_site_head_path(dir.path(), MY_WEBSITE_URI);
     std::fs::create_dir_all(head_path.parent().unwrap()).unwrap();
     std::fs::write(
@@ -1187,7 +1368,11 @@ async fn test_site_head_document_and_headers() {
         )
         .unwrap();
 
-    let state = test_state(dir.path());
+    let (state, _holder) = verified_store_state(
+        dir.path(),
+        &[(TEST_CIDV1, "index.html", b"<html>published bundle</html>")],
+    )
+    .await;
     let app = gateway_router(state);
 
     let root_resp = app
@@ -1260,14 +1445,6 @@ async fn test_active_site_head_prefers_bundle_cid() {
     std::fs::create_dir_all(&site_root).unwrap();
     std::fs::write(site_root.join("index.html"), "<html>working tree</html>").unwrap();
 
-    let cached_bundle = dir.path().join(TEST_CIDV1);
-    std::fs::create_dir_all(&cached_bundle).unwrap();
-    std::fs::write(
-        cached_bundle.join("index.html"),
-        "<html>published bundle</html>",
-    )
-    .unwrap();
-
     let head_path = edge_site_head_path(dir.path(), MY_WEBSITE_URI);
     std::fs::create_dir_all(head_path.parent().unwrap()).unwrap();
     std::fs::write(
@@ -1279,7 +1456,12 @@ async fn test_active_site_head_prefers_bundle_cid() {
         )
         .unwrap();
 
-    let app = gateway_router(test_state(dir.path()));
+    let (state, _holder) = verified_store_state(
+        dir.path(),
+        &[(TEST_CIDV1, "index.html", b"<html>published bundle</html>")],
+    )
+    .await;
+    let app = gateway_router(state);
     let resp = app
         .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
         .await
