@@ -749,6 +749,13 @@ tool names a closure by a second rule, a raw CIDv1 over a JSON listing of
 `cid.rs:5`), so one bundle gets two lab names. The photo lane switches its
 `cid_of` to this call itself; this lane edits none of its files.
 
+**Signing the name.** A listing-named closure is signed with
+`sign_cid_record(key, cid)` and checked with `verify_cid_record(cid, record,
+accepted)` (task 049), the one package record
+([below](#lab-package-record-outside-the-bundle)) that the folder and checked
+record calls also make and check, so the photo lane needs no signed record of
+its own.
+
 **The pin.** `consumer-fixtures/photo-stand-in-photo-set/` is a byte-for-byte
 copy of the photo lane's PH6 fixture folder
 `examples/photo-viewer/host-test/fixtures/stand-in-photo-set/` at `d047a069a`.
@@ -788,6 +795,7 @@ not loosen, skip or copy the manifest check.
 | `lab_cid` refuses the exact PH6 folder with `ManifestUnparsed`, as the Runtime type does | `lab_cid_refuses_the_photo_manifest_the_runtime_type_refuses` | F-CI1g (a manifest the Runtime type refuses is read as plain JSON) |
 | A listed file over one chunk is refused with its path; one of exactly one chunk is a leaf | `listed_file_over_the_chunk_limit_is_refused` | F-CI47c (`encode_listed_files` has no size refusal) |
 | A listed file over one leaf is still refused, its text names its path, its length and `encode_entries`, and `encode_entries` names the same file from its bytes (task 048) | `listed_file_over_one_leaf_names_the_bytes_call` | F-CI47c |
+| The listing's lab CID gets the one package record from `sign_cid_record`, with the record's exact payload, and `verify_cid_record` passes it; no folder is walked (task 049) | `a_closure_listing_gets_a_package_record_by_its_cid` | F-CI49c |
 
 The tests are in `tests/closure_listing.rs`. Task 047 also named
 `lab_cid_refuses_the_photo_manifest_the_runtime_type_refuses` on F-CI1g, task
@@ -970,7 +978,9 @@ signs it:
   `verify_checked_signature` and `verify_name_signature`, and task 011's
   package record: `domain_separated_digest`,
   `PackageRecord::package_record_payload`, `sign_package_record`,
-  `verify_checked_package_record` and `verify_package_record`. Each answers
+  `verify_checked_package_record` and `verify_package_record`, and task
+  049's `sign_cid_record` and `verify_cid_record`, the record's one signer
+  and one verifier over a lab CID. Each answers
   "do these bytes match this name" or "did this key sign this name or this
   record". None takes
   or returns a grant, an admission or a launch value. A test keeps the list:
@@ -1032,6 +1042,12 @@ Claim scope: one Mac, these fixtures, test keys only.
 Anders's answer splits the package CID from the publisher. The CID names
 the bytes. A separate signed record names the signer and binds that CID.
 `PackageRecord` is that record, in the lab. It stays outside the bundle.
+The record binds a lab CID however it was computed: a folder walk
+(`lab_cid`), a checked bundle (`checked_bundle`), entries (`encode_entries`)
+or a closure listing (`encode_listed_files`). Since task 049 one call signs it
+and one call checks it, both over a `LabCid`: `sign_cid_record` and
+`verify_cid_record`. The folder and checked calls are the walk, or the checked
+bundle's CID, and then those calls.
 
 **The record.** `PackageRecord` has three fields: `cid` (the printed lab
 CID, exactly as `LabCid`'s `Display` prints it), `signer_did` (a canonical
@@ -1086,23 +1102,25 @@ signature must verify, in Rust, over Python's digest. A short driver
 (`RECORD_DRIVER`) calls the two functions; the test checks that it holds no
 hash, domain, schema, JSON layout or function of its own.
 
-**Sign.** `sign_package_record(key, bundle)` names the bundle with `lab_cid`.
-A refusal from that walk passes through unchanged, and a refused bundle gets
-no record. It sets `signer_did` with the one DID encoder
-(`elastos_identity::encode_signing_key_did`, the same call `sign_bundle`
-uses) and signs the digest above. It writes no file and changes no bundle
-byte. The manifest's `signature` field stays empty.
+**Sign.** `sign_cid_record(key, cid)` is the one place a record is built and
+signed. It sets `cid` to the `LabCid`'s printed form and `signer_did` with the
+one DID encoder (`elastos_identity::encode_signing_key_did`, the same call
+`sign_bundle` uses), and signs the digest above. It reads and writes no file.
+`sign_package_record(key, bundle)` is `lab_cid(bundle)` and then
+`sign_cid_record`. A refusal from that walk passes through unchanged, and a
+refused bundle gets no record. Neither call changes a bundle byte, and the
+manifest's `signature` field stays empty.
 
-**Verify.** `verify_checked_package_record(checked, record, accepted)` checks
-009's `CheckedBundle` in this order. The first refusal is the answer, and it
-reads nothing from disk:
+**Verify.** `verify_cid_record(cid, record, accepted)` is the one place a
+record is checked. It checks in this order. The first refusal is the answer,
+and it reads nothing from disk:
 
 1. Decode `record.signer_did` with the one DID decoder. On error: `signer DID <did> is not a canonical Ed25519 did:key: <the decoder's own text>`.
 2. The DID is an exact member of `accepted`, the explicit list (no trust
    policy). An empty list refuses every signer: `signer <did> is not in the
    accepted list`.
-3. `record.cid` equals `checked.cid()`'s printed form. Otherwise: `record
-   names <record cid>; the bundle names <bundle cid>`.
+3. `record.cid` equals `cid`'s printed form. Otherwise: `record names
+   <record cid>; the bundle names <cid>`.
 4. Ed25519 over the digest of the record domain and
    `package_record_payload(record)`, with the key from step 1. On failure:
    `signature by <did> does not verify over <record cid>`.
@@ -1111,10 +1129,19 @@ Steps 1, 2 and 4 are the name signature's own checks and reasons, from the
 same functions (`decode_signer`, `require_accepted` and one shared Ed25519
 check). Step 3 runs before step 4, so when the payload is hashed its CID is a
 printed lab CID and its DID is canonical: neither holds a character JSON
-would escape. `verify_package_record(bundle, record, accepted)` is
-`checked_bundle(bundle)` and then the checked form. It holds no check of its
-own, so a bundle the walk refuses is refused first, with the walk's reason.
+would escape. `verify_checked_package_record(checked, record, accepted)` is
+`verify_cid_record` over 009's `checked.cid()`, and
+`verify_package_record(bundle, record, accepted)` is `checked_bundle(bundle)`
+and then the checked form. Neither holds a check of its own, so a bundle the
+walk refuses is refused first, with the walk's reason.
 `Ok(())` grants nothing: it is no trust, admission or launch value.
+
+**A name, not bytes.** `sign_cid_record` and `verify_cid_record` sign and
+check a name. They read no byte, so the `LabCid` must come from
+`encode_listed_files`, `encode_entries`, `lab_cid` or `checked_bundle`, which
+name the bytes they read or were given. For a closure listing, the caller's
+walk owns that each `sha256` and `size` are those of the bytes
+([naming a closure listing](#naming-a-closure-listing)).
 
 **What stays.** `NameSignature`, `sign_bundle`, `verify_checked_signature`
 and `verify_name_signature` stay as they are: the in-memory name signature
@@ -1144,7 +1171,10 @@ several CIDs.
 | A malformed DID is refused with the decoder's text, even when listed | `record_malformed_signer_did_is_refused` | F-CI11g, F-CI11p |
 | Two faults at once: the earlier check answers | `record_refusal_order_is_stable` | F-CI11h, F-CI11i, F-CI11j |
 | Signing and the path verifier keep the walk's refusal, whatever the record | `record_paths_preserve_walk_refusals` | F-CI11k, F-CI11l, F-CI11m, F-CI11n, F-CI11o |
-| One payload builder, one digest, one DID encoder and decoder, one Ed25519 check; the path form holds no check of its own | `record_paths_share_one_implementation` | F-CI11t, F-CI11u, F-CI11v, F-CI11w |
+| One payload builder, one digest, one DID encoder and decoder, one Ed25519 check; the record is built and signed only in `sign_cid_record` and checked only in `verify_cid_record`; the folder and checked calls hold no build or check of their own | `record_paths_share_one_implementation` | F-CI11t, F-CI11u, F-CI11v, F-CI11w, F-CI49b |
+| A closure listing's lab CID (the PH6 copy's pin) gets a record with the exact payload, and `verify_cid_record` passes it | `a_closure_listing_gets_a_package_record_by_its_cid` (`tests/closure_listing.rs`) | F-CI49c |
+| For every pinned fixture, `sign_package_record` of the folder equals `sign_cid_record` of its `lab_cid`; on the PH6 copy with `viewer` as a string, a record over the listing's CID passes `verify_package_record` of the folder, and a record from the folder passes `verify_cid_record` over the listing's CID | `the_folder_record_is_the_cid_record` (`tests/closure_listing.rs`) | F-CI49b |
+| `verify_cid_record` refuses as `verify_checked_package_record` does, with the same refusal and text: a record over the PH6 listing checked against the listing with one `sha256` byte changed (naming both CIDs), and the other way round; a signer not listed; an empty list; a flipped signature byte; a malformed DID | `cid_record_refuses_as_the_checked_record_does` (`tests/closure_listing.rs`) | F-CI49a |
 | README's `record_payload` and `record_digest` give `package_record_payload`'s bytes and the signed digest for test-key records over `content-sample` and `web-app` | `readme_python_matches_the_package_record_bytes` (`tests/cross_implementation.rs`) | F-CI20a, F-CI20b, F-CI20c, F-CI20f, F-CI19d |
 
 The tests are in `tests/package_record.rs`. Every refusal test runs both
@@ -1154,7 +1184,9 @@ from the pins in `tests/common/mod.rs`, never from a literal, so a change of
 the printed form changes the pins in one place. The domains in these tests
 are written out, not read from the library, so a changed domain constant
 fails them (F-CI11x). F-CI11u, F-CI11v and F-CI11w also fail 004's
-`signature_paths_share_one_implementation`.
+`signature_paths_share_one_implementation`. Task 049's three tests are in
+`tests/closure_listing.rs`, beside the listing they sign. Every key in them is
+generated in memory.
 
 Claim scope: one Mac, these fixtures, test keys only.
 
@@ -1742,7 +1774,8 @@ tests/check_name.rs      a claimed name is checked, never trusted; one naming pa
 tests/checked_bundle.rs  the name and the bytes it covers; the checked name check
 tests/claims.rs          the claim stays "Kubo v0.40.1 profile, computed by the lab"
 tests/closure_listing.rs a closure listing gets the lab CID of its folder; the PH6
-                         manifest is refused; a listed file over one chunk is refused
+                         manifest is refused; a listed file over one chunk is refused;
+                         the listing's CID gets the one package record
 tests/cross_implementation.rs
                          README's Python rule, the pins and the encoder agree;
                          README's two digest blocks and the signed bytes agree
@@ -1768,7 +1801,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 273 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 276 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1812,7 +1845,9 @@ F-CI44a to F-CI44c (see
 [asks come only from the signed bytes](#asks-come-only-from-the-signed-bytes-m1-check-b2-no-schema-part)),
 and task 047's F-CI47a to F-CI47c (see
 [naming a closure listing](#naming-a-closure-listing)), and task 048's
-F-CI48a to F-CI48e (see [the encoding](#the-encoding)).
+F-CI48a to F-CI48e (see [the encoding](#the-encoding)), and task 049's
+F-CI49a to F-CI49c (see
+[the lab package record](#lab-package-record-outside-the-bundle)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -1948,6 +1983,25 @@ says so. F-CI47c also names `listed_file_over_one_leaf_names_the_bytes_call`.
 Task 048 split `directory_block`'s link loop into `put_links` with the same
 lines, so F-CI1b, F-CI1p and F-CI1q keep their text, and every other older
 edit's text is still found exactly once.
+Task 049's entries all edit `src/lib.rs`: F-CI49a removes the CID compare
+call from `verify_cid_record`, F-CI49b makes `sign_package_record` build and
+sign its own record under the name-signature domain, and F-CI49c makes
+`sign_cid_record` sign the payload of a record with an empty `cid`. Each
+anchor is found exactly once (F-CI49a shares F-CI11r's first anchor, and
+F-CI49b F-CI11e's; entries may share one). Task 049 moved the record's build
+into `sign_cid_record` and its four checks into `verify_cid_record`, and
+`require_record_cid` now takes the `LabCid`. So six edits anchor on lines
+whose text changed, each with its same bug and tests: F-CI11c, F-CI11i,
+F-CI11j, F-CI11p and F-CI11r read `require_record_cid(cid, record)` (F-CI11c's
+rebound record takes `cid.to_string()`, and F-CI11r's path form compares
+against `held.cid()`), and F-CI15ae's anchor is the compare line
+`if record.cid != cid.to_string() {`. `sign_package_record` is now
+`lab_cid(bundle)?` and then `sign_cid_record`, so F-CI11k drops the
+walk's refusal on `let cid = lab_cid(bundle)?;`, and F-CI11e writes the record
+next to the bundle after that call. The titles of F-CI11p to F-CI11v name
+`verify_cid_record`, and F-CI11w's names `sign_cid_record`, where their bug
+is planted now. Every other older edit's text is the same and still found
+exactly once.
 
 ### The inventory check
 
