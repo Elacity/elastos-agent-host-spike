@@ -253,3 +253,11 @@ fn model_lowercase_hex_escape_is_a_link() {
     assert!(lower.contains("\\u006e"));
     assert!(cargo_toml_path_depends_on_grant_binding(lower));
 }
+
+#[test]
+fn model_newline_escape_is_not_a_link() {
+    let escaped = "gb = { path = \"../grant-bindi\\ng\", package = \"grant-bindi\\ng\" }\n";
+    assert!(!escaped.contains("grant-binding"));
+    assert!(escaped.contains("\\n"));
+    assert!(!cargo_toml_path_depends_on_grant_binding(escaped));
+}
