@@ -197,7 +197,8 @@ fn bridge_shaped(signature: &str) -> Option<String> {
         return None;
     }
     let rest = after[close + 1..].trim();
-    let returned = rest.strip_prefix("->")?.trim().trim_end_matches('{').trim();
+    // The opening brace ends the signature even when the body shares its line.
+    let (returned, _) = rest.strip_prefix("->")?.split_once('{')?;
     let returned = normalize_type(returned);
     (returned == "Result<String,String>").then(|| name.to_string())
 }
@@ -288,22 +289,76 @@ fn marker(source: &str, marker: &str) -> String {
 }
 
 fn falsify_command(source: &str) -> String {
-    let mut in_table = false;
+    // Rows are tuples, so their physical line breaks do not delimit entries.
+    // Comments are prose, including a commented-out registration.
+    let source = source
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let Some((_, table)) = source.split_once("PROVIDER_CRATES =") else {
+        return "absent".to_string();
+    };
+    let Some(table) = table.trim_start().strip_prefix('{') else {
+        return "absent".to_string();
+    };
+    let Some((table, _)) = table.split_once('}') else {
+        return "absent".to_string();
+    };
+    for row in split_parameters(table) {
+        let Some((key, value)) = row.split_once(':') else {
+            continue;
+        };
+        let Some(value) = value.trim().strip_prefix('(') else {
+            continue;
+        };
+        let Some(value) = value.strip_suffix(')') else {
+            continue;
+        };
+        let parts = split_parameters(value);
+        let Some(manifest) = parts.first() else {
+            continue;
+        };
+        let mut path = manifest.split('/').map(str::trim);
+        if path.next() != Some("REPO") {
+            continue;
+        }
+        let path = path
+            .map(|part| part.trim_matches(['"', '\'']))
+            .collect::<Vec<_>>()
+            .join("/");
+        if path == "lab/two-capsule-run/Cargo.toml" {
+            return key.trim().trim_matches(['"', '\'']).to_string();
+        }
+    }
+    "absent".to_string()
+}
+
+fn component_build_step(source: &str) -> String {
+    const BUILDER: &str = "scripts/build-component-capsule.sh";
+    // Inspect the command position, including a shell/exec prefix and line
+    // continuations. A comment, assignment or echo argument is not a call.
+    let source = source.replace("\\\n", " ");
     for line in source.lines() {
-        if line.starts_with("PROVIDER_CRATES = {") {
-            in_table = true;
+        let mut words = line.split_whitespace();
+        let mut command = words.next();
+        if command == Some("exec") {
+            command = words.next();
+        }
+        if matches!(command, Some("bash" | "sh")) {
+            command = words.next();
+        }
+        let Some(command) = command else {
             continue;
-        }
-        if in_table && line.starts_with('}') {
-            break;
-        }
-        if !in_table {
-            continue;
-        }
-        if line.contains("two-capsule-run") && line.contains("Cargo.toml") {
-            if let Some((key, _)) = line.split_once(':') {
-                return key.trim().trim_matches('"').to_string();
-            }
+        };
+        let command = command.trim_matches(['"', '\'']);
+        let relative = command
+            .strip_prefix("${REPO_ROOT}/")
+            .or_else(|| command.strip_prefix("$REPO_ROOT/"))
+            .or_else(|| command.strip_prefix("./"))
+            .unwrap_or(command);
+        if relative == BUILDER {
+            return BUILDER.to_string();
         }
     }
     "absent".to_string()
@@ -394,12 +449,20 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn observe(repo: &Path) -> Result<Observed, String> {
-    let log = read(repo, LOG_PATH)?;
-    let bridge_source = read(repo, BRIDGE_PATH)?;
-    let agent_source = read(repo, AGENT_HOST_SRC)?;
-    let manifest = read(repo, AGENT_HOST_MANIFEST)?;
-    let build = read(repo, AGENT_HOST_BUILD)?;
-    let falsify_source = read(repo, FALSIFY_PATH)?;
+    observe_sources(repo, |path| read(repo, path))
+}
+
+// Source fixtures use the same observation path as the on-disk check.
+fn observe_sources(
+    repo: &Path,
+    source: impl Fn(&str) -> Result<String, String>,
+) -> Result<Observed, String> {
+    let log = source(LOG_PATH)?;
+    let bridge_source = source(BRIDGE_PATH)?;
+    let agent_source = source(AGENT_HOST_SRC)?;
+    let manifest = source(AGENT_HOST_MANIFEST)?;
+    let build = source(AGENT_HOST_BUILD)?;
+    let falsify_source = source(FALSIFY_PATH)?;
 
     let entrypoint = json_string(&manifest, "entrypoint")
         .ok_or_else(|| format!("{AGENT_HOST_MANIFEST} has no entrypoint"))?;
@@ -422,7 +485,7 @@ fn observe(repo: &Path) -> Result<Observed, String> {
         agent_host_component,
         agent_host_world: declared_world(&agent_source).unwrap_or_else(|| "absent".to_string()),
         agent_host_entrypoint: entrypoint,
-        agent_host_build: marker(&build, "scripts/build-component-capsule.sh"),
+        agent_host_build: component_build_step(&build),
         agent_host_lifecycle_entry: marker(&agent_source, LIFECYCLE_MARKER),
         agent_host_run: marker(&agent_source, RUN_MARKER),
         agent_host_export: marker(&agent_source, EXPORT_MARKER),
@@ -586,17 +649,21 @@ fn with_field(record: &str, key: &str, value: &str) -> String {
     out
 }
 
-#[test]
-fn discovery_matches_the_tree() {
-    let repo = repo_root();
-    let record = read_record(&repo);
-    let tree = observe(&repo).expect("observe the tree");
-    let problems = mismatches(&repo, &record, &tree);
+fn assert_record_matches(repo: &Path, record: &str, tree: &Observed) {
+    let problems = mismatches(repo, record, tree);
     assert!(
         problems.is_empty(),
         "{}\n{RECORD_STALE}",
         problems.join("\n")
     );
+}
+
+#[test]
+fn discovery_matches_the_tree() {
+    let repo = repo_root();
+    let record = read_record(&repo);
+    let tree = observe(&repo).expect("observe the tree");
+    assert_record_matches(&repo, &record, &tree);
 }
 
 #[test]
@@ -630,6 +697,139 @@ fn bridge_entry_follows_the_hostcall_shape() {
 
     let wrong_error = "impl StandIn {\n    pub fn bridge(&self, line: &str, capsule_id: &str, principal: Option<&str>) -> Result<String, (u16, String)> {\n        Ok(String::new())\n    }\n}\n";
     assert_eq!(bridge_entry(wrong_error), "none");
+}
+
+#[test]
+fn bridge_entry_accepts_equivalent_signature_layouts() {
+    for method in [
+        "pub fn bridge(&self, line: &str, id: &str, principal: Option<&str>) -> Result<String, String> { Ok(line.to_owned()) }",
+        "pub fn bridge(\n        &self,\n        line: &str,\n        id: &str,\n        principal: Option<&str>,\n    ) -> Result<String, String> { Ok(line.to_owned()) }",
+        "pub fn bridge(&self, line: &str, id: &str, principal: Option<&str>)\n        -> Result<String, String>\n    {\n        Ok(line.to_owned())\n    }",
+        "pub fn bridge(&mut self, line: &str, id: &str, principal: Option< &str >) -> std::result::Result< String, String > { Ok(line.to_owned()) }",
+    ] {
+        let source = format!("impl StandIn {{\n    {method}\n}}\n");
+        assert_eq!(bridge_entry(&source), "bridge", "{source}");
+    }
+}
+
+#[test]
+#[should_panic(
+    expected = "field bridge_entry: record says \"none\", tree says \"bridge\"\nthe record is stale; this task does not start activations."
+)]
+fn inline_bridge_stales_the_record() {
+    let repo = repo_root();
+    let source = "impl StandIn {\n    pub fn bridge(&self, line: &str, id: &str, principal: Option<&str>) -> Result<String, String> { Ok(line.to_owned()) }\n}\n";
+    let tree = observe_sources(&repo, |path| {
+        if path == BRIDGE_PATH {
+            Ok(source.to_string())
+        } else {
+            read(&repo, path)
+        }
+    })
+    .expect("observe the bridge fixture");
+    assert_record_matches(&repo, &read_record(&repo), &tree);
+}
+
+#[test]
+fn component_build_requires_an_invocation() {
+    const CALL: &str = "\"${REPO_ROOT}/scripts/build-component-capsule.sh\" \"${HOST_DIR}\"";
+    for source in [
+        CALL.to_string(),
+        format!("#!/usr/bin/env bash\nset -euo pipefail\n{CALL}\n"),
+        format!("    {CALL} # build the component\n"),
+        format!("exec {CALL}\n"),
+        format!("bash \\\n    {CALL}\n"),
+    ] {
+        assert_eq!(
+            component_build_step(&source),
+            "scripts/build-component-capsule.sh",
+            "{source}"
+        );
+    }
+    for source in [
+        format!("# {CALL}\n"),
+        format!("    # {CALL}\n"),
+        format!("echo {CALL}\n"),
+        "BUILDER=\"${REPO_ROOT}/scripts/build-component-capsule.sh\"\n".to_string(),
+        "# Handoff: scripts/build-component-capsule.sh will componentize it.\n".to_string(),
+        "\"${REPO_ROOT}/scripts/build-component-capsule.sh.bak\"\n".to_string(),
+    ] {
+        assert_eq!(component_build_step(&source), "absent", "{source}");
+    }
+}
+
+#[test]
+#[should_panic(
+    expected = "field agent_host_build: record says \"scripts/build-component-capsule.sh\", tree says \"absent\"\nthe record is stale; this task does not start activations."
+)]
+fn commented_component_build_stales_the_record() {
+    let repo = repo_root();
+    // A source fixture changes the build step without editing the other lane.
+    let source = "#!/usr/bin/env bash\nset -euo pipefail\n# \"${REPO_ROOT}/scripts/build-component-capsule.sh\" \"${HOST_DIR}\"\n";
+    let tree = observe_sources(&repo, |path| {
+        if path == AGENT_HOST_BUILD {
+            Ok(source.to_string())
+        } else {
+            read(&repo, path)
+        }
+    })
+    .expect("observe the commented build fixture");
+    assert_record_matches(&repo, &read_record(&repo), &tree);
+}
+
+#[test]
+fn falsify_command_matches_the_complete_manifest() {
+    for source in [
+        "PROVIDER_CRATES = {\n    \"two\": (REPO / \"lab\" / \"two-capsule-run\" / \"Cargo.toml\", ()),\n}\n",
+        "PROVIDER_CRATES = {\n    \"two\": (\n        REPO / \"lab\" / \"two-capsule-run\"\n        / \"Cargo.toml\",\n        (),\n    ),\n}\n",
+        "PROVIDER_CRATES = { 'two': (REPO / 'lab/two-capsule-run/Cargo.toml', ()), }\n",
+        "PROVIDER_CRATES = {\n    \"wrong\": (REPO / \"other/two-capsule-run/Cargo.toml\", ()),\n    \"two\": (REPO / \"lab/two-capsule-run/Cargo.toml\", ()),\n}\n",
+    ] {
+        assert_eq!(falsify_command(source), "two", "{source}");
+    }
+    for source in [
+        "PROVIDER_CRATES = {\n    \"wrong\": (REPO / \"other\" / \"two-capsule-run\" / \"Cargo.toml\", ()),\n}\n",
+        "PROVIDER_CRATES = {\n    \"wrong\": (REPO / \"other/lab/two-capsule-run/Cargo.toml\", ()),\n}\n",
+        "PROVIDER_CRATES = {\n    \"wrong\": (REPO / \"lab/two-capsule-run/Cargo.toml.bak\", ()),\n}\n",
+        "PROVIDER_CRATES = {\n    \"wrong\": (REPO / \"lab/wasm-capsule/Cargo.toml\", (\"lab/two-capsule-run/Cargo.toml\",)),\n}\n",
+        "PROVIDER_CRATES = {\n    # \"two\": (REPO / \"lab/two-capsule-run/Cargo.toml\", ()),\n}\n",
+        "OTHER_CRATES = {\n    \"two\": (REPO / \"lab/two-capsule-run/Cargo.toml\", ()),\n}\nPROVIDER_CRATES = {}\n",
+    ] {
+        assert_eq!(falsify_command(source), "absent", "{source}");
+    }
+}
+
+#[test]
+#[should_panic(
+    expected = "field falsify_command: record says \"absent\", tree says \"two\"\nthe record is stale; this task does not start activations."
+)]
+fn multiline_runner_registration_stales_the_record() {
+    let repo = repo_root();
+    let source = "PROVIDER_CRATES = {\n    \"two\": (\n        REPO / \"lab\" / \"two-capsule-run\"\n        / \"Cargo.toml\",\n        (),\n    ),\n}\n";
+    let tree = observe_sources(&repo, |path| {
+        if path == FALSIFY_PATH {
+            Ok(source.to_string())
+        } else {
+            read(&repo, path)
+        }
+    })
+    .expect("observe the multiline runner fixture");
+    assert_record_matches(&repo, &read_record(&repo), &tree);
+}
+
+#[test]
+fn unrelated_runner_manifest_keeps_the_record_current() {
+    let repo = repo_root();
+    let source = "PROVIDER_CRATES = {\n    \"wrong\": (REPO / \"other\" / \"two-capsule-run\" / \"Cargo.toml\", ()),\n}\n";
+    let tree = observe_sources(&repo, |path| {
+        if path == FALSIFY_PATH {
+            Ok(source.to_string())
+        } else {
+            read(&repo, path)
+        }
+    })
+    .expect("observe the unrelated runner fixture");
+    assert_record_matches(&repo, &read_record(&repo), &tree);
 }
 
 #[test]
