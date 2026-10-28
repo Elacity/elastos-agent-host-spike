@@ -7232,6 +7232,23 @@ class CitationCheckTests(unittest.TestCase):
             parts.append("\n")
         return "".join(parts)
 
+    def _shared_child_host_body(self, lines=CHILD_HOST_WALK):
+        """A draft whose 3455, 3470 and 3471 citations share one prose line."""
+        prose = " ".join(
+            "`" + span + "` is cited."
+            for span in (
+                CHILD_HOST_DOC_SPAN,
+                EMPTY_JOURNAL_SPAN,
+                ADMIT_SYSTEM_SPAN,
+            )
+        )
+        return (
+            prose
+            + "\n"
+            + "".join("    " + line + "\n" for line in lines)
+            + "\n"
+        )
+
     def _hosted_source(self, count=COVER_NUMBER, lines=None):
         """A committed file with one correct line for every hosted quote."""
         rows = ["// filler"] * max(count, COVER_NUMBER)
@@ -7320,6 +7337,58 @@ class CitationCheckTests(unittest.TestCase):
                 selector(
                     self._hosted_body(groups=[group], **{group: lines[:index]})
                 ),
+                span,
+            )
+
+    def test_one_prose_line_citing_3455_3470_and_3471_walks_each_marker(self):
+        body = self._shared_child_host_body()
+        for span in (
+            CHILD_HOST_DOC_SPAN,
+            EMPTY_JOURNAL_SPAN,
+            ADMIT_SYSTEM_SPAN,
+        ):
+            self.assertEqual(
+                len(check._remainders(body, "`" + span + "`")),
+                len(CHILD_HOST_WALK),
+                span,
+            )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._hosted_source()})
+        self.assertEqual(got, [])
+        self.assertEqual(
+            reads,
+            [
+                CHILD_HOST_DOC_NUMBER,
+                EMPTY_JOURNAL_NUMBER,
+                ADMIT_SYSTEM_NUMBER,
+            ],
+        )
+        self.assertEqual(check.child_host_doc_quote(body), CHILD_HOST_WALK[0])
+        self.assertEqual(check.empty_journal_quote(body), CHILD_HOST_WALK[15])
+        self.assertEqual(check.admit_system_quote(body), CHILD_HOST_WALK[16])
+        cases = (
+            (0, CHILD_HOST_DOC_SPAN, CHILD_HOST_DOC_NUMBER),
+            (15, EMPTY_JOURNAL_SPAN, EMPTY_JOURNAL_NUMBER),
+            (16, ADMIT_SYSTEM_SPAN, ADMIT_SYSTEM_NUMBER),
+        )
+        for index, span, number in cases:
+            got, reads = self._pinned_reads(
+                self._shared_child_host_body(
+                    self._changed(CHILD_HOST_WALK, index)
+                ),
+                {OWNED_REL: self._hosted_source()},
+            )
+            self.assertEqual(got, ["refuse: quoted line does not match " + span])
+            self.assertEqual(
+                reads,
+                [
+                    other
+                    for other in (
+                        CHILD_HOST_DOC_NUMBER,
+                        EMPTY_JOURNAL_NUMBER,
+                        ADMIT_SYSTEM_NUMBER,
+                    )
+                    if other <= number
+                ],
                 span,
             )
 
@@ -7962,4 +8031,13 @@ class CitationCheckTests(unittest.TestCase):
             "`" + GRANT_PARENT_SPAN + "`",
             self.test_grant_false_line_does_not_stand_for_line_3482,
             "CAUGHT grant-false-as-parent",
+        )
+
+    def test_falsifier_shared_line_child_host_index_is_caught(self):
+        self._caught_walk_index(
+            "child_host_doc_quote",
+            1,
+            "`" + CHILD_HOST_DOC_SPAN + "`",
+            self.test_one_prose_line_citing_3455_3470_and_3471_walks_each_marker,
+            "CAUGHT shared-line-child-host-index",
         )
