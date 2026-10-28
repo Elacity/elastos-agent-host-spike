@@ -17,11 +17,13 @@ pub fn cargo_toml_path_depends_on_grant_binding(cargo_toml: &str) -> bool {
             || ((unquoted.contains("grant-binding={")
                 || unquoted.contains("grant-binding.git=")
                 || unquoted.contains("grant-binding.version=")
+                || unquoted.contains("grant-binding.registry=")
                 || unquoted.contains("grant-binding.workspace=")
                 || unquoted.contains(".grant-binding]")
                 || unquoted.contains("package=grant-binding"))
                 && (unquoted.contains("git=")
                     || unquoted.contains("version=")
+                    || unquoted.contains("registry=")
                     || unquoted.contains("workspace="))))
 }
 
@@ -493,6 +495,12 @@ fn model_table_or_dotted_dependency_is_a_link() {
     assert!(cargo_toml_path_depends_on_grant_binding(branch_first));
     let registry_first = "grant-binding = { registry = \"crates-io\", version = \"1.2.3\" }\n";
     assert!(cargo_toml_path_depends_on_grant_binding(registry_first));
+    let registry_only = "grant-binding = { registry = \"crates-io\" }\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(registry_only));
+    let registry_table = "[dependencies.grant-binding]\nregistry = \"crates-io\"\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(registry_table));
+    let dotted_registry = "grant-binding.registry = \"crates-io\"\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(dotted_registry));
     let workspace = "grant-binding = { workspace = true }\n";
     assert!(cargo_toml_path_depends_on_grant_binding(workspace));
     let table = "[dependencies.grant-binding]\nversion = \"1.2.3\"\n";

@@ -15,11 +15,13 @@ test: link::model_table_or_dotted_dependency_is_a_link
             || ((unquoted.contains("grant-binding={")
                 || unquoted.contains("grant-binding.git=")
                 || unquoted.contains("grant-binding.version=")
+                || unquoted.contains("grant-binding.registry=")
                 || unquoted.contains("grant-binding.workspace=")
                 || unquoted.contains(".grant-binding]")
                 || unquoted.contains("package=grant-binding"))
                 && (unquoted.contains("git=")
                     || unquoted.contains("version=")
+                    || unquoted.contains("registry=")
                     || unquoted.contains("workspace="))))
 --- new
     let _ = cargo_toml;
