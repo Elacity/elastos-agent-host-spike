@@ -47,6 +47,10 @@ rand = "0.8"
 serde_json = "1.0"
 wasm-capsule-audit = { path = "audit" }
 wasm-capsule-tools = { path = "tools" }
+# Task 064: the Bus tests write their component fixtures in WAT text, as the
+# audit's own tests do, at the audit's exact pin, so no new crate enters the
+# lockfile.
+wat = "=1.258.0"
 
 # The reproducible-build knobs the capsule is compiled with (Cargo honours
 # `[profile.*]` only in the workspace root): one codegen unit, LTO, a stripped
