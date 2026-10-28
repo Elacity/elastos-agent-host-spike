@@ -30,12 +30,18 @@ pub struct Receipt {
 impl Receipt {
     /// A head record with no parent.
     pub fn head(cid: &str) -> Self {
-        Receipt { cid: cid.to_string(), parent: None }
+        Receipt {
+            cid: cid.to_string(),
+            parent: None,
+        }
     }
 
     /// A record chained to `parent`.
     pub fn child(cid: &str, parent: &str) -> Self {
-        Receipt { cid: cid.to_string(), parent: Some(parent.to_string()) }
+        Receipt {
+            cid: cid.to_string(),
+            parent: Some(parent.to_string()),
+        }
     }
 }
 
@@ -49,7 +55,11 @@ pub struct ExportLimits {
 
 impl Default for ExportLimits {
     fn default() -> Self {
-        ExportLimits { max_records: 4096, max_record_bytes: 1024, max_total_bytes: 1_048_576 }
+        ExportLimits {
+            max_records: 4096,
+            max_record_bytes: 1024,
+            max_total_bytes: 1_048_576,
+        }
     }
 }
 
@@ -87,7 +97,12 @@ impl fmt::Display for ExportRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ExportRefusal::ChainBroken { index } => {
-                write!(f, "{}: record {} does not link to its predecessor", self.code(), index)
+                write!(
+                    f,
+                    "{}: record {} does not link to its predecessor",
+                    self.code(),
+                    index
+                )
             }
             ExportRefusal::UnexpectedParent { index } => {
                 write!(f, "{}: head record {} carries a parent", self.code(), index)
@@ -130,16 +145,24 @@ fn check_cid(cid: &str, index: usize) -> Result<(), ExportRefusal> {
 /// refuses even an empty chain.
 pub fn export(chain: &[Receipt], limits: ExportLimits) -> Result<Vec<u8>, ExportRefusal> {
     if limits.max_records == 0 {
-        return Err(ExportRefusal::LimitExceeded { limit: "max_records" });
+        return Err(ExportRefusal::LimitExceeded {
+            limit: "max_records",
+        });
     }
     if limits.max_record_bytes == 0 {
-        return Err(ExportRefusal::LimitExceeded { limit: "max_record_bytes" });
+        return Err(ExportRefusal::LimitExceeded {
+            limit: "max_record_bytes",
+        });
     }
     if limits.max_total_bytes == 0 {
-        return Err(ExportRefusal::LimitExceeded { limit: "max_total_bytes" });
+        return Err(ExportRefusal::LimitExceeded {
+            limit: "max_total_bytes",
+        });
     }
     if chain.len() > limits.max_records {
-        return Err(ExportRefusal::LimitExceeded { limit: "max_records" });
+        return Err(ExportRefusal::LimitExceeded {
+            limit: "max_records",
+        });
     }
 
     let mut out: Vec<u8> = Vec::new();
@@ -165,10 +188,14 @@ pub fn export(chain: &[Receipt], limits: ExportLimits) -> Result<Vec<u8>, Export
         let line = render(receipt);
         let line_bytes = line.len() + 1;
         if line.len() > limits.max_record_bytes {
-            return Err(ExportRefusal::LimitExceeded { limit: "max_record_bytes" });
+            return Err(ExportRefusal::LimitExceeded {
+                limit: "max_record_bytes",
+            });
         }
         if out.len() + line_bytes > limits.max_total_bytes {
-            return Err(ExportRefusal::LimitExceeded { limit: "max_total_bytes" });
+            return Err(ExportRefusal::LimitExceeded {
+                limit: "max_total_bytes",
+            });
         }
         out.extend_from_slice(line.as_bytes());
         out.push(b'\n');
@@ -186,7 +213,11 @@ mod tests {
     // parent's CID, in order, head parent rendered `-`.
     #[test]
     fn exports_cids_and_parents_in_order() {
-        let chain = vec![Receipt::head("a"), Receipt::child("b", "a"), Receipt::child("c", "b")];
+        let chain = vec![
+            Receipt::head("a"),
+            Receipt::child("b", "a"),
+            Receipt::child("c", "b"),
+        ];
         let bytes = export(&chain, ExportLimits::default()).expect("linked chain exports");
         let text = String::from_utf8(bytes).expect("utf8");
         assert_eq!(text, "a\t-\nb\ta\nc\tb\n");
@@ -203,7 +234,11 @@ mod tests {
     // naming the first bad index.
     #[test]
     fn broken_chain_refused_with_first_index() {
-        let chain = vec![Receipt::head("a"), Receipt::child("b", "a"), Receipt::child("c", "x")];
+        let chain = vec![
+            Receipt::head("a"),
+            Receipt::child("b", "a"),
+            Receipt::child("c", "x"),
+        ];
         let refusal = export(&chain, ExportLimits::default()).expect_err("broken chain refused");
         assert_eq!(refusal.code(), "chain_broken");
         match refusal {
@@ -236,7 +271,13 @@ mod tests {
         let r = export(&head_with_parent, ExportLimits::default()).expect_err("refused");
         assert_eq!(r.code(), "unexpected_parent");
 
-        let missing = vec![Receipt::head("a"), Receipt { cid: "b".to_string(), parent: None }];
+        let missing = vec![
+            Receipt::head("a"),
+            Receipt {
+                cid: "b".to_string(),
+                parent: None,
+            },
+        ];
         let r = export(&missing, ExportLimits::default()).expect_err("refused");
         assert_eq!(r.code(), "missing_parent");
     }
@@ -257,7 +298,11 @@ mod tests {
     // including the empty one.
     #[test]
     fn all_limits_zero_refuses() {
-        let zero = ExportLimits { max_records: 0, max_record_bytes: 0, max_total_bytes: 0 };
+        let zero = ExportLimits {
+            max_records: 0,
+            max_record_bytes: 0,
+            max_total_bytes: 0,
+        };
         let r = export(&[], zero).expect_err("zero limits refuse");
         assert_eq!(r.code(), "limit_exceeded");
     }
@@ -267,7 +312,11 @@ mod tests {
     // "abcd\t-") is over a cap of 3.
     #[test]
     fn record_over_cap_refused() {
-        let limits = ExportLimits { max_records: 10, max_record_bytes: 3, max_total_bytes: 100 };
+        let limits = ExportLimits {
+            max_records: 10,
+            max_record_bytes: 3,
+            max_total_bytes: 100,
+        };
         let chain = vec![Receipt::head("abcd")];
         let r = export(&chain, limits).expect_err("refused");
         assert_eq!(r.code(), "limit_exceeded");

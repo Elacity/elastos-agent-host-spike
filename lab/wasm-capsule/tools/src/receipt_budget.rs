@@ -103,7 +103,11 @@ impl ReceiptBudget {
     /// Add a non-checkpoint receipt. Returns the labels this push proposes for
     /// archival to stay within budget. Refuses when one receipt alone exceeds
     /// the budget.
-    pub fn push(&mut self, label: impl Into<String>, size: u64) -> Result<Vec<String>, BudgetRefusal> {
+    pub fn push(
+        &mut self,
+        label: impl Into<String>,
+        size: u64,
+    ) -> Result<Vec<String>, BudgetRefusal> {
         self.push_entry(label.into(), size, false)
     }
 
@@ -141,7 +145,11 @@ impl ReceiptBudget {
         if size > self.budget {
             return Err(BudgetRefusal::ReceiptExceedsBudget);
         }
-        self.receipts.push_back(ReceiptEntry { label, size, checkpoint });
+        self.receipts.push_back(ReceiptEntry {
+            label,
+            size,
+            checkpoint,
+        });
         self.used += size;
         let mut archived = Vec::new();
         while self.used > self.budget {
@@ -177,7 +185,10 @@ mod tests {
     fn zero_budget_is_refused() {
         let err = ReceiptBudget::new(0).unwrap_err();
         assert_eq!(err.code(), "bad_receipt_budget");
-        assert_eq!(err.to_string(), "bad_receipt_budget: receipt budget must be greater than zero");
+        assert_eq!(
+            err.to_string(),
+            "bad_receipt_budget: receipt budget must be greater than zero"
+        );
     }
 
     // P10: a positive budget is accepted and starts empty with no head.
@@ -212,7 +223,10 @@ mod tests {
         let proposed = b.push("r3", 10).unwrap();
         assert_eq!(proposed, vec!["r1".to_string()]);
         assert_eq!(b.used(), 30);
-        assert_eq!(b.labels(), vec!["r2".to_string(), "head".to_string(), "r3".to_string()]);
+        assert_eq!(
+            b.labels(),
+            vec!["r2".to_string(), "head".to_string(), "r3".to_string()]
+        );
     }
 
     // P18: the chain head is never proposed for archival even when oldest.
