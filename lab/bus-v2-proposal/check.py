@@ -266,6 +266,23 @@ RESIDENT_STOP_MARKER = "`" + RESIDENT_STOP_SPAN + "`"
 RESIDENT_EXPORT_SPAN = "elastos/wit/elastos-bus-v1.wit:87"
 RESIDENT_EXPORT_MARKER = "`" + RESIDENT_EXPORT_SPAN + "`"
 
+# The journal range holds the two budget comparisons. Its two endpoints share
+# one marker, and each endpoint's remainder is its own pinned line.
+JOURNAL_RANGE_SPAN = "capsules/model-provider/src/journal.rs:391-397"
+JOURNAL_RANGE_MARKER = "`" + JOURNAL_RANGE_SPAN + "`"
+
+# The model-service range holds the create comment. Its two endpoints share
+# one marker, and each endpoint's remainder is its own pinned line.
+GATEWAY_RANGE_SPAN = (
+    "elastos/crates/elastos-server/src/api/gateway_model_service.rs:1444-1446"
+)
+GATEWAY_RANGE_MARKER = "`" + GATEWAY_RANGE_SPAN + "`"
+
+# The guest range holds the zeroed step budget. Its two endpoints share one
+# marker, and each endpoint's remainder is its own pinned line.
+GUEST_RANGE_SPAN = "examples/agent-host/src/lib.rs:471-476"
+GUEST_RANGE_MARKER = "`" + GUEST_RANGE_SPAN + "`"
+
 # The two resident-A3 claims the draft never makes. Each has its own refusal.
 A3_MET_CLAIM = "A3 is met"
 A3_GRANT_CLAIM = "ComponentProvider grants resident A3 credit"
@@ -851,12 +868,84 @@ QUOTE_TARGETS = (
     (RESIDENT_RUN_SPAN, RESIDENT_RUN_MARKER, "resident_run_quote"),
     (RESIDENT_STOP_SPAN, RESIDENT_STOP_MARKER, "resident_stop_quote"),
     (RESIDENT_EXPORT_SPAN, RESIDENT_EXPORT_MARKER, "resident_export_quote"),
+    # The 56 aligned entries this task adds, in draft order. Each reads its own
+    # span through the shared window rule. A range's two endpoints share one
+    # marker and stand first endpoint then second endpoint.
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:814", "`elastos/crates/elastos-server/src/resource_bridge.rs:814`", None),
+    ("lab/capsule-identity/src/lib.rs:1252", "`lab/capsule-identity/src/lib.rs:1252`", None),
+    ("lab/capsule-identity/README.md:807", "`lab/capsule-identity/README.md:807`", None),
+    ("elastos/crates/elastos-compute/src/providers/component.rs:350", "`elastos/crates/elastos-compute/src/providers/component.rs:350`", None),
+    ("capsules/model-provider/src/adapters.rs:58", "`capsules/model-provider/src/adapters.rs:58`", None),
+    ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:1", "`elastos/crates/elastos-server/src/api/gateway_model_service.rs:1`", None),
+    ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:4", "`elastos/crates/elastos-server/src/api/gateway_model_service.rs:4`", None),
+    ("examples/agent-host/src/lib.rs:471", GUEST_RANGE_MARKER, None),
+    ("examples/agent-host/src/lib.rs:476", GUEST_RANGE_MARKER, None),
+    ("examples/agent-host/src/lib.rs:532", "`examples/agent-host/src/lib.rs:532`", None),
+    ("examples/agent-host/src/lib.rs:754", "`examples/agent-host/src/lib.rs:754`", None),
+    ("capsules/model-provider/src/journal.rs:391", JOURNAL_RANGE_MARKER, None),
+    ("capsules/model-provider/src/journal.rs:397", JOURNAL_RANGE_MARKER, None),
+    ("capsules/model-provider/src/journal.rs:921", "`capsules/model-provider/src/journal.rs:921`", None),
+    ("capsules/model-provider/src/state.rs:530", "`capsules/model-provider/src/state.rs:530`", None),
+    ("capsules/model-provider/src/state.rs:609", "`capsules/model-provider/src/state.rs:609`", None),
+    ("capsules/model-provider/src/contract.rs:134", "`capsules/model-provider/src/contract.rs:134`", None),
+    ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:355", "`elastos/crates/elastos-server/src/api/gateway_model_service.rs:355`", None),
+    ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:1444", GATEWAY_RANGE_MARKER, None),
+    ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:1446", GATEWAY_RANGE_MARKER, None),
+    ("examples/agent-host/asks.json:4", "`examples/agent-host/asks.json:4`", None),
+    ("examples/agent-host/asks.json:5", "`examples/agent-host/asks.json:5`", None),
+    ("examples/agent-host/asks.json:6", "`examples/agent-host/asks.json:6`", None),
+    ("elastos/crates/elastos-server/src/provider_resource.rs:422", "`elastos/crates/elastos-server/src/provider_resource.rs:422`", None),
+    ("examples/agent-host/asks.json:7", "`examples/agent-host/asks.json:7`", None),
+    ("examples/agent-host/asks.json:8", "`examples/agent-host/asks.json:8`", None),
+    ("examples/agent-host/asks.json:9", "`examples/agent-host/asks.json:9`", None),
+    ("elastos/crates/elastos-compute/src/exec_vm.rs:43", "`elastos/crates/elastos-compute/src/exec_vm.rs:43`", None),
+    ("elastos/crates/elastos-compute/src/exec_vm.rs:49", "`elastos/crates/elastos-compute/src/exec_vm.rs:49`", None),
+    ("elastos/crates/elastos-compute/src/exec_vm.rs:130", "`elastos/crates/elastos-compute/src/exec_vm.rs:130`", None),
+    ("elastos/crates/elastos-server/src/provider_resource.rs:174", "`elastos/crates/elastos-server/src/provider_resource.rs:174`", None),
+    ("elastos/crates/elastos-server/src/provider_resource.rs:176", "`elastos/crates/elastos-server/src/provider_resource.rs:176`", None),
+    ("elastos/crates/elastos-server/src/provider_resource.rs:163", "`elastos/crates/elastos-server/src/provider_resource.rs:163`", None),
+    ("elastos/crates/elastos-server/src/provider_resource.rs:164", "`elastos/crates/elastos-server/src/provider_resource.rs:164`", None),
+    ("elastos/crates/elastos-server/src/provider_resource.rs:165", "`elastos/crates/elastos-server/src/provider_resource.rs:165`", None),
+    ("examples/agent-host/asks.json:12", "`examples/agent-host/asks.json:12`", None),
+    ("elastos/crates/elastos-server/src/provider_resource.rs:379", "`elastos/crates/elastos-server/src/provider_resource.rs:379`", None),
+    ("elastos/crates/elastos-server/src/provider_resource.rs:382", "`elastos/crates/elastos-server/src/provider_resource.rs:382`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:696", "`elastos/crates/elastos-server/src/resource_bridge.rs:696`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:697", "`elastos/crates/elastos-server/src/resource_bridge.rs:697`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:698", "`elastos/crates/elastos-server/src/resource_bridge.rs:698`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:699", "`elastos/crates/elastos-server/src/resource_bridge.rs:699`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:564", "`elastos/crates/elastos-server/src/resource_bridge.rs:564`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:565", "`elastos/crates/elastos-server/src/resource_bridge.rs:565`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:576", "`elastos/crates/elastos-server/src/resource_bridge.rs:576`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:577", "`elastos/crates/elastos-server/src/resource_bridge.rs:577`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:597", "`elastos/crates/elastos-server/src/resource_bridge.rs:597`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:600", "`elastos/crates/elastos-server/src/resource_bridge.rs:600`", None),
+    ("lab/grant-binding/README.md:12", "`lab/grant-binding/README.md:12`", None),
+    ("docs/AGENT_ARCHITECTURE.md:19", "`docs/AGENT_ARCHITECTURE.md:19`", None),
+    ("docs/AGENT_ARCHITECTURE.md:21", "`docs/AGENT_ARCHITECTURE.md:21`", None),
+    ("docs/AGENT_ARCHITECTURE.md:24", "`docs/AGENT_ARCHITECTURE.md:24`", None),
+    ("docs/AGENT_ARCHITECTURE.md:332", "`docs/AGENT_ARCHITECTURE.md:332`", None),
+    ("lab/grant-binding/src/lib.rs:280", "`lab/grant-binding/src/lib.rs:280`", None),
+    ("lab/grant-binding/src/lib.rs:23", "`lab/grant-binding/src/lib.rs:23`", None),
+    ("lab/grant-binding/src/lib.rs:25", "`lab/grant-binding/src/lib.rs:25`", None),
 )
 
 
 def quoted_line_matches(quoted, source):
     """True only when the quotation equals the pinned source line."""
     return quoted == source
+
+
+def _target_quotation(text, target, root, sha):
+    """Return the quotation for TARGET.
+
+    A target with a named selector reads through that selector. A target with
+    no selector reads its own span at its own marker through ``_pinned_quote``,
+    which is the same window rule and the same equality decision.
+    """
+    span, marker, quoter = target
+    if quoter is None:
+        return _pinned_quote(text, span, marker, root, sha)
+    return globals()[quoter](text, root, sha)
 
 
 def _quote_refusal(root, text, sha, target):
@@ -874,7 +963,7 @@ def _quote_refusal(root, text, sha, target):
         return None
     rel, number = _span_target(span)
     source = pinned_line(root, sha, rel, number)
-    quoted = globals()[quoter](text, root, sha)
+    quoted = _target_quotation(text, target, root, sha)
     if quoted is None or source is None:
         return "refuse: quoted line is not in the pinned commit: " + span
     if not quoted_line_matches(quoted, source):

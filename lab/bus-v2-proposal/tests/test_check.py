@@ -1324,6 +1324,1123 @@ PROVIDER_WALKS = (
 )
 
 
+# The 59 entries the target list held before this task, in list order. The
+# 56 aligned entries are the whole difference, so an extra entry fails too.
+BASELINE_TARGETS = (
+    'examples/agent-host/src/lib.rs:2067',
+    'examples/agent-host/src/lib.rs:2421',
+    'examples/agent-host/src/lib.rs:2422',
+    'examples/agent-host/src/lib.rs:2720',
+    'examples/agent-host/src/lib.rs:2741',
+    'examples/agent-host/src/lib.rs:2749',
+    'examples/agent-host/src/lib.rs:2958',
+    'examples/agent-host/src/lib.rs:2981',
+    'examples/agent-host/src/lib.rs:3290',
+    'examples/agent-host/src/lib.rs:3308',
+    'examples/agent-host/src/lib.rs:3339',
+    'examples/agent-host/src/lib.rs:3360',
+    'examples/agent-host/src/lib.rs:3370',
+    'examples/agent-host/src/lib.rs:3382',
+    'examples/agent-host/src/lib.rs:3387',
+    'examples/agent-host/src/lib.rs:3403',
+    'examples/agent-host/src/lib.rs:3449',
+    'examples/agent-host/src/lib.rs:3455',
+    'examples/agent-host/src/lib.rs:3470',
+    'examples/agent-host/src/lib.rs:3471',
+    'examples/agent-host/src/lib.rs:3474',
+    'examples/agent-host/src/lib.rs:3482',
+    'examples/agent-host/src/lib.rs:3526',
+    'examples/agent-host/src/lib.rs:3549',
+    'examples/agent-host/src/lib.rs:3754',
+    'examples/agent-host/src/lib.rs:3755',
+    'examples/agent-host/src/lib.rs:3757',
+    'examples/agent-host/src/lib.rs:3767',
+    'examples/agent-host/src/lib.rs:3849',
+    'examples/agent-host/src/lib.rs:3850',
+    'examples/agent-host/src/lib.rs:3935',
+    'examples/agent-host/src/lib.rs:3936',
+    'examples/agent-host/src/lib.rs:3947',
+    'examples/agent-host/src/lib.rs:3961',
+    'examples/agent-host/src/lib.rs:3966',
+    'examples/agent-host/src/lib.rs:3967',
+    'examples/agent-host/src/lib.rs:4023',
+    'examples/agent-host/src/lib.rs:4032',
+    'examples/agent-host/src/lib.rs:4033',
+    'examples/agent-host/src/lib.rs:4061',
+    'examples/agent-host/src/lib.rs:8149',
+    'examples/agent-host/src/lib.rs:8162',
+    'examples/agent-host/src/lib.rs:8168',
+    'examples/agent-host/src/lib.rs:8187',
+    'examples/agent-host/src/lib.rs:8188',
+    'examples/agent-host/src/lib.rs:8189',
+    'examples/agent-host/src/lib.rs:8190',
+    'examples/agent-host/src/lib.rs:8191',
+    'examples/agent-host/src/lib.rs:8192',
+    'examples/agent-host/src/lib.rs:8193',
+    'examples/agent-host/src/lib.rs:8194',
+    'examples/agent-host/src/lib.rs:8488',
+    'elastos/crates/elastos-server/src/provider_resource.rs:123',
+    'elastos/crates/elastos-server/src/provider_resource.rs:189',
+    'elastos/crates/elastos-server/src/provider_resource.rs:190',
+    'elastos/crates/elastos-server/src/provider_resource.rs:192',
+    'elastos/crates/elastos-compute/src/providers/component.rs:218',
+    'elastos/crates/elastos-compute/src/providers/component.rs:232',
+    'elastos/wit/elastos-bus-v1.wit:87',
+)
+
+# The 37 blocks the 65 aligned citations indent, in draft order. Each entry
+# is its markers, the first pinned line of its block, and the block itself.
+# Several markers share one entry: a shared block is one block, not a copy.
+def _aligned_endpoints(span):
+    """Return the endpoint decisions SPAN makes: two for a range, else one."""
+    rel, _, number = span.rpartition(":")
+    if "-" in number:
+        start, end = number.split("-")
+        return [rel + ":" + start, rel + ":" + end]
+    return [span]
+
+
+# The 65 spans this task decides, one per marker, in the order it lists them.
+ALIGNED_SPANS_DECIDED = (
+    "capsules/model-provider/src/adapters.rs:58",
+    "capsules/model-provider/src/contract.rs:134",
+    "capsules/model-provider/src/journal.rs:391-397",
+    "capsules/model-provider/src/journal.rs:921",
+    "capsules/model-provider/src/state.rs:530",
+    "capsules/model-provider/src/state.rs:609",
+    "docs/AGENT_ARCHITECTURE.md:19",
+    "docs/AGENT_ARCHITECTURE.md:21",
+    "docs/AGENT_ARCHITECTURE.md:24",
+    "docs/AGENT_ARCHITECTURE.md:332",
+    "elastos/crates/elastos-compute/src/exec_vm.rs:43",
+    "elastos/crates/elastos-compute/src/exec_vm.rs:49",
+    "elastos/crates/elastos-compute/src/exec_vm.rs:130",
+    "elastos/crates/elastos-compute/src/providers/component.rs:350",
+    "elastos/crates/elastos-server/src/api/gateway_model_service.rs:1",
+    "elastos/crates/elastos-server/src/api/gateway_model_service.rs:4",
+    "elastos/crates/elastos-server/src/api/gateway_model_service.rs:355",
+    "elastos/crates/elastos-server/src/api/gateway_model_service.rs:1444-1446",
+    "elastos/crates/elastos-server/src/provider_resource.rs:163",
+    "elastos/crates/elastos-server/src/provider_resource.rs:164",
+    "elastos/crates/elastos-server/src/provider_resource.rs:165",
+    "elastos/crates/elastos-server/src/provider_resource.rs:174",
+    "elastos/crates/elastos-server/src/provider_resource.rs:176",
+    "elastos/crates/elastos-server/src/provider_resource.rs:379",
+    "elastos/crates/elastos-server/src/provider_resource.rs:382",
+    "elastos/crates/elastos-server/src/provider_resource.rs:422",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:564",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:565",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:576",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:577",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:597",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:600",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:696",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:697",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:698",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:699",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:814",
+    "examples/agent-host/asks.json:4",
+    "examples/agent-host/asks.json:5",
+    "examples/agent-host/asks.json:6",
+    "examples/agent-host/asks.json:7",
+    "examples/agent-host/asks.json:8",
+    "examples/agent-host/asks.json:9",
+    "examples/agent-host/asks.json:12",
+    "examples/agent-host/src/lib.rs:471-476",
+    "examples/agent-host/src/lib.rs:532",
+    "examples/agent-host/src/lib.rs:754",
+    "examples/agent-host/src/lib.rs:3339",
+    "examples/agent-host/src/lib.rs:3360",
+    "examples/agent-host/src/lib.rs:3370",
+    "examples/agent-host/src/lib.rs:3382",
+    "examples/agent-host/src/lib.rs:3387",
+    "examples/agent-host/src/lib.rs:3403",
+    "examples/agent-host/src/lib.rs:3449",
+    "examples/agent-host/src/lib.rs:3455",
+    "examples/agent-host/src/lib.rs:3470",
+    "examples/agent-host/src/lib.rs:3471",
+    "examples/agent-host/src/lib.rs:3474",
+    "examples/agent-host/src/lib.rs:3482",
+    "lab/capsule-identity/README.md:807",
+    "lab/capsule-identity/src/lib.rs:1252",
+    "lab/grant-binding/README.md:12",
+    "lab/grant-binding/src/lib.rs:23",
+    "lab/grant-binding/src/lib.rs:25",
+    "lab/grant-binding/src/lib.rs:280",
+)
+
+# The 68 endpoint decisions those spans make.
+ALIGNED_ENDPOINTS = tuple(
+    endpoint for span in ALIGNED_SPANS_DECIDED for endpoint in _aligned_endpoints(span)
+)
+ALIGNED_ENDPOINT_SET = frozenset(ALIGNED_ENDPOINTS)
+
+# The 12 endpoint decisions 130, 131, and 136 already made.
+ALIGNED_ALREADY_DECIDED = frozenset(
+    (
+        "examples/agent-host/src/lib.rs:3339",
+        "examples/agent-host/src/lib.rs:3360",
+        "examples/agent-host/src/lib.rs:3370",
+        "examples/agent-host/src/lib.rs:3382",
+        "examples/agent-host/src/lib.rs:3387",
+        "examples/agent-host/src/lib.rs:3403",
+        "examples/agent-host/src/lib.rs:3449",
+        "examples/agent-host/src/lib.rs:3455",
+        "examples/agent-host/src/lib.rs:3470",
+        "examples/agent-host/src/lib.rs:3471",
+        "examples/agent-host/src/lib.rs:3474",
+        "examples/agent-host/src/lib.rs:3482",
+    )
+)
+
+# The 56 endpoint decisions this task appends to the target list.
+ALIGNED_NEW_ENDPOINTS = tuple(
+    endpoint
+    for endpoint in ALIGNED_ENDPOINTS
+    if endpoint not in ALIGNED_ALREADY_DECIDED
+)
+
+# One marker per aligned span, with its one or two endpoints.
+ALIGNED_RANGE_SPAN = "examples/agent-host/src/lib.rs:471-476"
+
+ALIGNED_GROUPS = (
+    (
+        (
+            "elastos/crates/elastos-server/src/resource_bridge.rs:814",
+        ),
+        803,
+        (
+            'fn scope_current_user_alias(',
+            '    uri_or_resource: &str,',
+            '    principal_id: Option<&str>,',
+            ') -> Result<String, String> {',
+            '    let Some(rooted) = rooted_localhost_uri(uri_or_resource) else {',
+            '        return Ok(uri_or_resource.to_string());',
+            '    };',
+            '    if is_unscoped_current_user_alias(&rooted) {',
+            '        let Some(principal_id) = principal_id else {',
+            '            return Err(',
+            '                "localhost://Users/self requires a principal-scoped launch context".to_string(),',
+            '            );',
+            '        };',
+            '        let principal_root = crate::auth::principal_localhost_root(principal_id);',
+            '        if rooted == "localhost://Users/self" {',
+            '            return Ok(principal_root);',
+            '        }',
+            '        let rest = rooted',
+            '            .strip_prefix("localhost://Users/self/")',
+            '            .ok_or_else(|| format!("Invalid current-user alias: {uri_or_resource}"))?;',
+            '        return Ok(format!("{principal_root}/{rest}"));',
+            '    }',
+            '    if rooted.starts_with("localhost://Users/") {',
+            '        let Some(principal_id) = principal_id else {',
+            '            return Err("localhost://Users requires a principal-scoped launch context".to_string());',
+            '        };',
+            '        let principal_root = crate::auth::principal_localhost_root(principal_id);',
+            '        if rooted == principal_root || rooted.starts_with(&format!("{principal_root}/")) {',
+            '            return Ok(rooted);',
+            '        }',
+            '        return Err(',
+            '            "localhost://Users roots must use Users/self or the active principal root".to_string(),',
+            '        );',
+            '    }',
+            '    Ok(rooted)',
+            '}',
+        ),
+    ),
+    (
+        (
+            "lab/capsule-identity/src/lib.rs:1252",
+        ),
+        1252,
+        (
+            '/// `Ok(())` means all four passed. It is not a trust, admission or launch',
+            '/// value. A wrong key, a changed signature and a name moved onto other bytes',
+            '/// all fail step 4 with one reason.',
+        ),
+    ),
+    (
+        (
+            "lab/capsule-identity/README.md:807",
+        ),
+        807,
+        (
+            'The rule: a valid signature grants nothing by itself. A bundle whose test-key',
+            'signature verifies is still not admitted, and it gets no grant. This library',
+            'checks identity only, and it sits in no Runtime admission or launch path; the',
+            "lab's stand-in launcher, in test code, calls it",
+            '([below](#lab-stand-in-launcher-m1-check-b1)).',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-compute/src/providers/component.rs:350",
+        ),
+        347,
+        (
+            'impl elastos::bus::identity::Host for ComponentState {',
+            '    fn context(&mut self) -> elastos::bus::types::IdentityContext {',
+            '        elastos::bus::types::IdentityContext {',
+            '            principal: self.principal_id.clone(),',
+            '            capsule: self.capsule_id.clone(),',
+            '            session: self.capsule_id.clone(),',
+            '            device: None,',
+            '        }',
+            '    }',
+            '}',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:3339",
+        ),
+        3338,
+        (
+            '/// Record a hosted model proposal. The resource names the model. There is',
+            '/// no secret field. This does not call a provider.',
+            '#[cfg(any(test, target_arch = "wasm32"))]',
+            "fn propose_hosted(journal: &mut Journal, resource: &str) -> Result<u64, &'static str> {",
+            '    if !resource.starts_with("localhost://")',
+            '        || resource.chars().any(char::is_whitespace)',
+            '        || host_path(resource)',
+            '    {',
+            '        return Err("host path");',
+            '    }',
+            '    let id = propose_step(journal);',
+            '    let step = journal',
+            '        .steps',
+            '        .iter_mut()',
+            '        .find(|step| step.id == id)',
+            '        .expect("just pushed");',
+            '    step.kind = ProposalKind::Hosted;',
+            '    step.resource = resource.to_string();',
+            '    Ok(id)',
+            '}',
+        ),
+    ),
+    (
+        (
+            "capsules/model-provider/src/adapters.rs:58",
+        ),
+        45,
+        (
+            'fn effect_request(',
+            '    client: &reqwest::Client,',
+            '    method: reqwest::Method,',
+            '    direct_url: &str,',
+            '    runtime_socket: Option<&str>,',
+            '    offer_id: &str,',
+            '    run_id: &str,',
+            '    request_id: &str,',
+            "    effect: &'static str,",
+            ') -> reqwest::RequestBuilder {',
+            '    let url = if runtime_socket.is_some() {',
+            '        RUNTIME_HOSTED_EFFECT_URL',
+            '    } else {',
+            '        direct_url',
+            '    };',
+            '    let builder = client.request(method, url);',
+            '    if runtime_socket.is_some() {',
+            '        builder',
+            '            .header("x-elastos-offer-id", offer_id)',
+            '            .header("x-elastos-run-id", run_id)',
+            '            .header("x-elastos-request-id", request_id)',
+            '            .header("x-elastos-effect", effect)',
+            '    } else {',
+            '        builder',
+            '    }',
+            '}',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/api/gateway_model_service.rs:1",
+            "elastos/crates/elastos-server/src/api/gateway_model_service.rs:4",
+        ),
+        1,
+        (
+            '//! Remote model service: the destination side of a `remote_model` grant.',
+            '//!',
+            '//! A seed Runtime routes typed model operations over Carrier `provider_invoke`',
+            '//! with target `model`. This Runtime owns the decision. It verifies the grant',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:471-476",
+        ),
+        454,
+        (
+            'fn step_payload(step: &Step) -> Option<Vec<u8>> {',
+            '    let mut out = step.id.to_le_bytes().to_vec();',
+            '    out.push(state_tag(step.state));',
+            '    out.push(kind_tag(step.kind));',
+            '    put_str(&mut out, &step.resource)?;',
+            '    out.extend_from_slice(&step.effect_id.to_le_bytes());',
+            '    out.push(u8::from(step.has_result));',
+            '    put_str(&mut out, &step.old)?;',
+            '    put_str(&mut out, &step.new)?;',
+            '    out.extend_from_slice(&u32::try_from(step.argv.len()).ok()?.to_le_bytes());',
+            '    for arg in &step.argv {',
+            '        put_str(&mut out, arg)?;',
+            '    }',
+            '    put_opt(&mut out, step.parent_id);',
+            '    put_str(&mut out, &step.seat)?;',
+            '    put_opt(&mut out, step.seen_version);',
+            '    put_str(&mut out, &step.inbox)?;',
+            '    // Room for OMP idea 2, empty until it is built: depth, budget (flag,',
+            '    // requests, seconds), requests_used, stop.',
+            '    out.push(0);',
+            '    out.extend_from_slice(&[0; 1 + 4 + 8]);',
+            '    out.extend_from_slice(&0_u32.to_le_bytes());',
+            '    out.push(0);',
+            '    Some(out)',
+            '}',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:532",
+        ),
+        531,
+        (
+            '    // Room for OMP idea 2, empty until it is built: cancelled_from (flag and',
+            '    // step id), task_budget (flag, requests, seconds), depth.',
+            '    out.extend_from_slice(&[0; 1 + 8]);',
+            '    out.extend_from_slice(&[0; 1 + 4 + 8]);',
+            '    out.push(0);',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:754",
+        ),
+        749,
+        (
+            "    // OMP idea 2's fields must be empty until it is built.",
+            '    let depth = reader.byte().map_err(fail)?;',
+            '    let budget = reader.take(1 + 4 + 8).map_err(fail)?;',
+            '    let requests_used = reader.u32().map_err(fail)?;',
+            '    let stop = reader.byte().map_err(fail)?;',
+            '    if depth != 0 || budget.iter().any(|byte| *byte != 0) || requests_used != 0 || stop != 0 {',
+            '        return Err("record");',
+            '    }',
+        ),
+    ),
+    (
+        (
+            "capsules/model-provider/src/journal.rs:391-397",
+        ),
+        389,
+        (
+            '        } else {',
+            '            let usage = self.visit_census(&census, |_, _, _| Ok(()))?;',
+            '            if usage.entries >= MAX_NEW_JOURNAL_ENTRIES',
+            '                || usage',
+            '                    .charged_bytes',
+            '                    .checked_add(charge)',
+            '                    .is_none_or(|total| total > MAX_JOURNAL_GROWTH_BYTES)',
+            '            {',
+            '                // This check precedes the durable Prepared record and dispatch.',
+            '                return Err(journal_budget_fault());',
+            '            }',
+            '        }',
+            '        self.verify_census(&census)?;',
+            '        let expected = existing.map(|entry| &entry.metadata);',
+            '        atomic_write_owner_only(&path, &bytes, expected)',
+            '    }',
+            '    pub fn active_run_count(&self, offer_id: &str) -> Result<usize, ProviderFault> {',
+            '        let mut total = 0usize;',
+        ),
+    ),
+    (
+        (
+            "capsules/model-provider/src/journal.rs:921",
+        ),
+        906,
+        (
+            '                    .iter()',
+            '                    .find(|entry| entry.path == old.path)',
+            '                    .is_none_or(|entry| !same_snapshot(&old.metadata, &entry.metadata))',
+            '            })',
+            '        {',
+            '            return Err(ProviderFault::corrupt_journal(',
+            '                "model run journal census changed during scan",',
+            '            ));',
+            '        }',
+            '        Ok(())',
+            '    }',
+            '}',
+            'fn journal_budget_fault() -> ProviderFault {',
+            '    ProviderFault::policy_limit(',
+            '        "Model run history is full. Retained outcomes expire after their history window; then try again.",',
+            '        "model run journal admission or growth limit exceeded",',
+            '    )',
+            '}',
+        ),
+    ),
+    (
+        (
+            "capsules/model-provider/src/state.rs:530",
+        ),
+        516,
+        (
+            '        // A retained request owns its original result, including legacy IDs and',
+            '        // results whose offer has since changed or retired.',
+            '        if let Some(mut existing) = self.journal.load_run_if_present(&run_id)? {',
+            '            if request_fingerprint(&existing.runtime_binding, &existing.input_hash)? != fingerprint',
+            '            {',
+            '                return Err(ProviderFault::invalid_request(',
+            '                    "request_id conflicts with an existing model run",',
+            '                ));',
+            '            }',
+            '            self.project_archived_run(&mut existing)?;',
+            '            if !existing.status.is_terminal() {',
+            '                let current_offer = self.current_execution_offer_for_run(&existing)?;',
+            '                self.refresh_run_if_needed(current_offer.as_ref(), &mut existing)?;',
+            '            }',
+            '            return serialize_run_view(&existing);',
+            '        }',
+        ),
+    ),
+    (
+        (
+            "capsules/model-provider/src/state.rs:609",
+        ),
+        606,
+        (
+            '        self.journal.store_run(&run)?;',
+            '        let active_runs = self.journal.active_run_count(&offer.id)?;',
+            '        if active_runs > offer.policy.concurrency_limit as usize {',
+            '            transition_error(',
+            '                &offer,',
+            '                &mut run,',
+            '                RunError {',
+            '                    class: ErrorClass::RateLimited,',
+            '                    code: "model_busy".to_string(),',
+            '                    message: "Model is busy.".to_string(),',
+            '                },',
+            '            )?;',
+            '            self.journal.store_run(&run)?;',
+            '            return serialize_run_view(&run);',
+            '        }',
+            '        match self.adapters.dispatch(',
+            '            &offer.adapter,',
+            '            &offer,',
+            '            &request.runtime_binding,',
+            '            &request.input,',
+            '            run.deadline_ms,',
+            '        ) {',
+        ),
+    ),
+    (
+        (
+            "capsules/model-provider/src/contract.rs:134",
+        ),
+        131,
+        (
+            '    pub fn is_terminal(&self) -> bool {',
+            '        matches!(',
+            '            self,',
+            '            Self::Completed | Self::Failed | Self::Cancelled | Self::SettlementUnknown',
+            '        )',
+            '    }',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/api/gateway_model_service.rs:355",
+        ),
+        324,
+        (
+            '/// Hold one slot for a create, or recognise that the request already has a',
+            '/// record. The check and the hold happen under the same lock and land in the',
+            '/// same index write, so two creates cannot both take the last slot.',
+            'fn reserve_run_slot(',
+            '    data_dir: &Path,',
+            '    now: u64,',
+            '    key: &str,',
+            '    grant_id: &str,',
+            '    remote_principal_id: &str,',
+            '    capsule_id: &str,',
+            '    request_id: &str,',
+            ') -> anyhow::Result<RunSlot> {',
+            '    update_run_index(data_dir, now, |index| {',
+            '        if let Some((run_id, record)) = index.runs.iter().find(|(_, record)| {',
+            '            record.grant_id == grant_id',
+            '                && record.remote_principal_id == remote_principal_id',
+            '                && record_capsule_id(record) == capsule_id',
+            '                && record.request_id == request_id',
+            '        }) {',
+            '            return Ok(RunSlot::Existing {',
+            '                run_id: run_id.clone(),',
+            '                record: Box::new(record.clone()),',
+            '            });',
+            '        }',
+            '        if index.pending.contains_key(key) {',
+            '            anyhow::bail!("model run reservation is already held");',
+            '        }',
+            '        anyhow::ensure!(',
+            '            index.runs.len() + index.pending.len() < MODEL_RUN_INDEX_MAX,',
+            '            "model run index is full"',
+            '        );',
+            '        index.pending.insert(key.to_string(), now);',
+            '        Ok(RunSlot::Reserved)',
+            '    })',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/api/gateway_model_service.rs:1444-1446",
+        ),
+        1444,
+        (
+            '    // A create holds its record slot before any model work starts. A retry of',
+            '    // an already recorded request is answered from that record before another',
+            '    // create. A full index refuses here.',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/asks.json:4",
+            "examples/agent-host/asks.json:5",
+            "examples/agent-host/asks.json:6",
+        ),
+        4,
+        (
+            '    {"kind": "read", "resource": "<principal>/"},',
+            '    {"kind": "edit", "resource": "<principal>/"},',
+            '    {"kind": "restore", "resource": "<principal>/"},',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/provider_resource.rs:422",
+        ),
+        422,
+        (
+            '            "read", "write", "list", "delete", "stat", "mkdir", "exists", "resolve", "ping",',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/asks.json:7",
+            "examples/agent-host/asks.json:8",
+            "examples/agent-host/asks.json:9",
+        ),
+        7,
+        (
+            '    {"kind": "run", "resource": "<principal>/Projects/"},',
+            '    {"kind": "child", "resource": "<principal>/Projects/"},',
+            '    {"kind": "init", "resource": "<principal>/Projects/"},',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-compute/src/exec_vm.rs:43",
+            "elastos/crates/elastos-compute/src/exec_vm.rs:49",
+        ),
+        42,
+        (
+            '/// Refuse a missing grant, a cancel, a host path, a missing Linux rootfs,',
+            '/// or a host that has no adapter. A ready decision still does not boot.',
+            "pub fn decide_exec(request: &ExecRequest<'_>) -> ExecDecision {",
+            '    if request.cancelled {',
+            '        return ExecDecision::Refuse("cancelled");',
+            '    }',
+            '    if request.grant.is_none_or(|grant| grant.is_empty()) {',
+            '        return ExecDecision::Refuse("missing grant");',
+            '    }',
+            '    if !request.workspace.starts_with("localhost://")',
+            '        || request.workspace.chars().any(char::is_whitespace)',
+            '        || host_path(request.workspace)',
+            '    {',
+            '        return ExecDecision::Refuse("host path");',
+            '    }',
+            '    if request.argv.is_empty() || request.argv.iter().any(|arg| host_path(arg)) {',
+            '        return ExecDecision::Refuse("host path");',
+            '    }',
+            '    if request.rootfs.file_name().and_then(|name| name.to_str()) != Some("rootfs.ext4")',
+            '        || !request.rootfs.is_file()',
+            '    {',
+            '        return ExecDecision::Refuse("rootfs missing");',
+            '    }',
+            '    match request.host {',
+            '        ExecHost::Macos => ExecDecision::Admit {',
+            '            adapter: ExecAdapter::AppleVirtualization,',
+            '        },',
+            '        ExecHost::Linux => ExecDecision::Admit {',
+            '            adapter: ExecAdapter::Crosvm,',
+            '        },',
+            '        ExecHost::Other => ExecDecision::Refuse("unsupported host"),',
+            '    }',
+            '}',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-compute/src/exec_vm.rs:130",
+        ),
+        122,
+        (
+            '/// Files that may be placed in the machine for one project. Paths stay',
+            '/// relative. A host path, a `..` segment, or a workspace that is not',
+            '/// `localhost://Users/<root>/Projects/<name>` is refused. This does not copy',
+            '/// a directory from the host.',
+            "pub fn admit_project_files(workspace: &str, files: &[(&str, &str)]) -> Result<(), &'static str> {",
+            '    let Some(rest) = workspace.strip_prefix("localhost://Users/") else {',
+            '        return Err("host path");',
+            '    };',
+            '    let Some((root, name)) = rest.split_once("/Projects/") else {',
+            '        return Err("host path");',
+            '    };',
+            '    if root.is_empty()',
+            '        || name.is_empty()',
+            "        || root.contains('/')",
+            "        || name.contains('/')",
+            "        || root.contains('\\\\')",
+            "        || name.contains('\\\\')",
+            '        || host_path(workspace)',
+            '        || host_path(root)',
+            '        || host_path(name)',
+            '        || workspace.chars().any(char::is_whitespace)',
+            '        || files.is_empty()',
+            '    {',
+            '        return Err("host path");',
+            '    }',
+            '    for (path, text) in files {',
+            '        if path.is_empty()',
+            "            || path.starts_with('/')",
+            '            || host_path(path)',
+            '            || path.chars().any(char::is_whitespace)',
+            '            || path',
+            "                .split('/')",
+            '                .any(|part| part.is_empty() || part == "." || part == "..")',
+            '        {',
+            '            return Err("host path");',
+            '        }',
+            '        if host_path(text) {',
+            '            return Err("host path");',
+            '        }',
+            '    }',
+            '    Ok(())',
+            '}',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:3360",
+            "examples/agent-host/src/lib.rs:3370",
+            "examples/agent-host/src/lib.rs:3382",
+        ),
+        3359,
+        (
+            "/// A child is a separate step. Its resource must sit under the parent's",
+            "/// resource. It does not copy the parent's grant.",
+            '#[cfg(any(test, target_arch = "wasm32"))]',
+            'fn propose_child(',
+            '    journal: &mut Journal,',
+            '    parent_id: u64,',
+            '    resource: &str,',
+            ") -> Result<u64, &'static str> {",
+            '    let Some(parent) = journal.steps.iter().find(|step| step.id == parent_id) else {',
+            '        return Err("no parent");',
+            '    };',
+            '    if parent.resource.is_empty() || !narrower_resource(&parent.resource, resource) {',
+            '        return Err("not a subset");',
+            '    }',
+            '    let id = propose_step(journal);',
+            '    let step = journal',
+            '        .steps',
+            '        .iter_mut()',
+            '        .find(|step| step.id == id)',
+            '        .expect("just pushed");',
+            '    step.kind = ProposalKind::Child;',
+            '    step.resource = resource.to_string();',
+            '    step.parent_id = Some(parent_id);',
+            '    step.grant = None;',
+            '    Ok(id)',
+            '}',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:3449",
+        ),
+        3432,
+        (
+            "/// Give a child its own grant. The parent's grant string is refused, and the",
+            '/// child stays prepared. This does not start a process.',
+            '#[cfg(any(test, target_arch = "wasm32"))]',
+            'fn authorize_child(journal: &mut Journal, child_id: u64, grant: Option<&str>) -> bool {',
+            '    let Some(child) = journal.steps.iter().find(|step| step.id == child_id) else {',
+            '        return false;',
+            '    };',
+            '    if child.kind != ProposalKind::Child {',
+            '        return false;',
+            '    }',
+            '    let parent_grant = child.parent_id.and_then(|parent_id| {',
+            '        journal',
+            '            .steps',
+            '            .iter()',
+            '            .find(|step| step.id == parent_id)',
+            '            .and_then(|step| step.grant.clone())',
+            '    });',
+            '    if grant.is_none() || grant == Some("") || parent_grant.as_deref() == grant {',
+            '        return false;',
+            '    }',
+            '    authorize(journal, child_id, grant)',
+            '}',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:3455",
+            "examples/agent-host/src/lib.rs:3470",
+            "examples/agent-host/src/lib.rs:3471",
+        ),
+        3455,
+        (
+            '/// A child host is a second journal. It keeps the system head and does not',
+            "/// copy the parent's log or the parent's grant. This is not a second loaded",
+            '/// component, and it does not start a process.',
+            '#[cfg(any(test, target_arch = "wasm32"))]',
+            'fn open_child_host(',
+            '    parent: &Journal,',
+            '    parent_id: u64,',
+            '    resource: &str,',
+            ") -> Result<Journal, &'static str> {",
+            '    let Some(parent_step) = parent.steps.iter().find(|step| step.id == parent_id) else {',
+            '        return Err("no parent");',
+            '    };',
+            '    if parent_step.resource.is_empty() || !narrower_resource(&parent_step.resource, resource) {',
+            '        return Err("not a subset");',
+            '    }',
+            '    let mut child = empty_journal();',
+            '    admit_system(&mut child, SYSTEM_HEAD, true);',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:3474",
+        ),
+        3473,
+        (
+            '    if child.steps.iter().any(|step| step.grant.is_some()) {',
+            '        return Err("inherited");',
+            '    }',
+            '    Ok(child)',
+            '}',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:3482",
+        ),
+        3479,
+        (
+            "/// Give the child host its own grant. The parent's grant is refused.",
+            '#[cfg(any(test, target_arch = "wasm32"))]',
+            'fn grant_child_host(child: &mut Journal, parent_grant: Option<&str>, grant: Option<&str>) -> bool {',
+            '    if grant.is_none() || grant == Some("") || grant == parent_grant {',
+            '        return false;',
+            '    }',
+            '    let Some(id) = child',
+            '        .steps',
+            '        .iter()',
+            '        .find(|step| {',
+            '            step.kind == ProposalKind::Run',
+            '                && step.grant.is_none()',
+            '                && step.state == StepState::Prepared',
+            '        })',
+            '        .map(|step| step.id)',
+            '    else {',
+            '        return false;',
+            '    };',
+            '    authorize(child, id, grant)',
+            '}',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/src/lib.rs:3387",
+            "examples/agent-host/src/lib.rs:3403",
+        ),
+        3386,
+        (
+            '/// Record a project proposal. The resource is a `localhost://` project name.',
+            '/// A host path or a slash inside the root or the name creates no step.',
+            '#[cfg(any(test, target_arch = "wasm32"))]',
+            "fn propose_init(journal: &mut Journal, root: &str, name: &str) -> Result<u64, &'static str> {",
+            '    if root.is_empty()',
+            '        || name.is_empty()',
+            '        || root',
+            '            .chars()',
+            "            .any(|ch| ch.is_whitespace() || ch == '/' || ch == '\\\\')",
+            '        || name',
+            '            .chars()',
+            "            .any(|ch| ch.is_whitespace() || ch == '/' || ch == '\\\\')",
+            '        || host_path(root)',
+            '        || host_path(name)',
+            '    {',
+            '        return Err("host path");',
+            '    }',
+            '    let resource = format!("localhost://Users/{root}/Projects/{name}");',
+            '    let id = propose_step(journal);',
+            '    let step = journal',
+            '        .steps',
+            '        .iter_mut()',
+            '        .find(|step| step.id == id)',
+            '        .expect("just pushed");',
+            '    step.kind = ProposalKind::Init;',
+            '    step.resource = resource;',
+            '    Ok(id)',
+            '}',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/provider_resource.rs:174",
+            "elastos/crates/elastos-server/src/provider_resource.rs:176",
+        ),
+        173,
+        (
+            '        "peer" => match op {',
+            '            "init" | "connect" | "remember_peer" | "gossip_join" | "gossip_leave"',
+            '            | "gossip_send" | "get_ticket" | "get_node_id" | "list_peers" | "list_topics"',
+            '            | "list_topic_peers" | "gossip_join_peers" | "gossip_recv" => Some(Action::Message),',
+            '            _ => None,',
+            '        },',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/provider_resource.rs:163",
+            "elastos/crates/elastos-server/src/provider_resource.rs:164",
+            "elastos/crates/elastos-server/src/provider_resource.rs:165",
+        ),
+        163,
+        (
+            '            "offers_list" | "runs_get" | "runs_events" => Some(Action::Read),',
+            '            "runs_create" | "runs_cancel" => Some(Action::Execute),',
+            '            _ => None,',
+        ),
+    ),
+    (
+        (
+            "examples/agent-host/asks.json:12",
+        ),
+        12,
+        (
+            '    {"kind": "journal-append", "resource": "<principal>/.AppData/Agents/agent-host/"}',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/provider_resource.rs:379",
+            "elastos/crates/elastos-server/src/provider_resource.rs:382",
+        ),
+        372,
+        (
+            'pub(crate) fn agents_area_refusal(',
+            '    rooted: &str,',
+            '    operation: &str,',
+            ") -> Option<(&'static str, &'static str)> {",
+            '    if !in_agents_area(rooted) {',
+            '        return None;',
+            '    }',
+            '    if !matches!(operation, "read" | "write") {',
+            '        return Some((',
+            '            "operation_not_allowed",',
+            '            "only read and write are allowed under .AppData/Agents/",',
+            '        ));',
+            '    }',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/resource_bridge.rs:696",
+            "elastos/crates/elastos-server/src/resource_bridge.rs:697",
+            "elastos/crates/elastos-server/src/resource_bridge.rs:698",
+            "elastos/crates/elastos-server/src/resource_bridge.rs:699",
+        ),
+        684,
+        (
+            'fn write_precondition(request: &serde_json::Value) -> Result<Option<WritePrecondition>, String> {',
+            '    let create_only = match request.get("create_only") {',
+            '        None | Some(serde_json::Value::Null) => false,',
+            '        Some(serde_json::Value::Bool(value)) => *value,',
+            '        Some(_) => return Err("create_only must be a boolean".to_string()),',
+            '    };',
+            '    let if_revision = match request.get("if_revision") {',
+            '        None | Some(serde_json::Value::Null) => None,',
+            '        Some(serde_json::Value::String(value)) if !value.is_empty() => Some(value.clone()),',
+            '        Some(_) => return Err("if_revision must be a non-empty string".to_string()),',
+            '    };',
+            '    match (create_only, if_revision) {',
+            '        (true, Some(_)) => Err("create_only and if_revision cannot both be set".to_string()),',
+            '        (true, None) => Ok(Some(WritePrecondition::Absent)),',
+            '        (false, Some(revision)) => Ok(Some(WritePrecondition::Revision(revision))),',
+            '        (false, None) => Ok(None),',
+            '    }',
+            '}',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/resource_bridge.rs:564",
+            "elastos/crates/elastos-server/src/resource_bridge.rs:565",
+        ),
+        562,
+        (
+            '            if agent_journal && append {',
+            '                return Some(resource_error_response(',
+            '                    "append_not_allowed",',
+            '                    "append is read-then-write; Agent journals are written whole with a revision precondition",',
+            '                ));',
+            '            }',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/resource_bridge.rs:576",
+            "elastos/crates/elastos-server/src/resource_bridge.rs:577",
+        ),
+        574,
+        (
+            '            if agent_journal && precondition.is_none() {',
+            '                return Some(resource_error_response(',
+            '                    "revision_required",',
+            '                    "Agent journal writes need create_only or if_revision",',
+            '                ));',
+            '            }',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/resource_bridge.rs:597",
+        ),
+        597,
+        (
+            '                content.clone()',
+        ),
+    ),
+    (
+        (
+            "elastos/crates/elastos-server/src/resource_bridge.rs:600",
+        ),
+        600,
+        (
+            '                Some(precondition) => crate::auth::write_principal_root_object_if_revision(',
+        ),
+    ),
+    (
+        (
+            "lab/grant-binding/README.md:12",
+        ),
+        12,
+        (
+            "reference model, not the Runtime; counts toward no M1 check; the Runtime half is Anders's (#464, #463, #181)",
+        ),
+    ),
+    (
+        (
+            "docs/AGENT_ARCHITECTURE.md:19",
+        ),
+        19,
+        (
+            '- A human and an agent are both represented by Runtime principals.',
+        ),
+    ),
+    (
+        (
+            "docs/AGENT_ARCHITECTURE.md:21",
+        ),
+        21,
+        (
+            '  signed Profile document with a stable Profile DID, controlled from a',
+        ),
+    ),
+    (
+        (
+            "docs/AGENT_ARCHITECTURE.md:24",
+        ),
+        24,
+        (
+            '- Executable agent software is a capsule, separate from the agent principal',
+        ),
+    ),
+    (
+        (
+            "docs/AGENT_ARCHITECTURE.md:332",
+        ),
+        332,
+        (
+            "- Agent state is rooted under the agent principal's `UsersAI/...` space.",
+        ),
+    ),
+    (
+        (
+            "lab/grant-binding/src/lib.rs:280",
+        ),
+        266,
+        (
+            'fn resource_name(agent: &str, name: &str, owned_root: Option<&str>) -> Result<String, Refuse> {',
+            "    if name.contains('\\\\') || name.starts_with('/') {",
+            '        return Err(Refuse::HostPath);',
+            '    }',
+            "    let parts: Vec<&str> = name.split('/').collect();",
+            '    if parts',
+            '        .iter()',
+            '        .any(|part| part.is_empty() || *part == "." || *part == "..")',
+            '    {',
+            '        return Err(Refuse::HostPath);',
+            '    }',
+            '    if parts.first() == Some(&"Public") {',
+            '        return Err(Refuse::PublicRead);',
+            '    }',
+            '    if parts.len() < 3 || parts[0] != "UsersAI" || parts[1] != agent {',
+            '        return Err(Refuse::OutsidePrincipal);',
+            '    }',
+            '    if !parts.iter().skip(2).all(|part| {',
+            '        part.chars()',
+            "            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))",
+            '    }) {',
+            '        return Err(Refuse::SymlinkShaped);',
+            '    }',
+            '    if let Some(root) = owned_root {',
+            '        let inside = name',
+            '            .strip_prefix(root)',
+            "            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));",
+            '        if !inside {',
+            '            return Err(Refuse::OutsideRoot);',
+            '        }',
+            '    }',
+            '    Ok(name.to_owned())',
+            '}',
+        ),
+    ),
+    (
+        (
+            "lab/grant-binding/src/lib.rs:23",
+            "lab/grant-binding/src/lib.rs:25",
+        ),
+        23,
+        (
+            '/// An opaque grant handle. The guest holds only this.',
+            '#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]',
+            'pub struct Handle(u64);',
+        ),
+    ),
+)
+
+# The shared groups: one quoted block that several markers read.
+ALIGNED_SHARED = tuple(
+    (markers, start, lines)
+    for markers, start, lines in ALIGNED_GROUPS
+    if len(markers) > 1
+)
+
 class CitationCheckTests(unittest.TestCase):
     def _temp_root(self):
         tmp = tempfile.TemporaryDirectory()
@@ -8211,17 +9328,19 @@ class CitationCheckTests(unittest.TestCase):
             ],
         )
 
-    def test_unchecked_exec_vm_line_is_not_compared(self):
+    def test_exec_vm_line_43_mismatch_is_refused(self):
+        # Line 43 is the ready-decision doc line. A quotation that differs from
+        # it is refused after the hosted decisions, and line 49 is never read.
         body = self._hosted_body() + (
             "`" + EXEC_SPAN + "` says `A ready decision still does not boot.`\n"
             "\n"
-            "    // a different remainder no slice compares yet\n"
+            "    // a different remainder than line 43\n"
         )
         files = self._hosted_files()
         files[EXEC_REL] = ("// filler\n" * EXEC_NUMBER).encode("utf-8")
         got, reads = self._pinned_reads(body, files)
-        self.assertEqual(got, [])
-        self.assertEqual(reads, list(HOSTED_READ_ORDER))
+        self.assertEqual(got, ["refuse: quoted line does not match " + EXEC_SPAN])
+        self.assertEqual(reads, list(HOSTED_READ_ORDER) + [EXEC_NUMBER])
 
     def test_cover_mismatch_stops_the_provider_decision(self):
         got, reads = self._pinned_reads(
@@ -8700,4 +9819,322 @@ class CitationCheckTests(unittest.TestCase):
             self.test_resident_quote_refusal_short_circuits,
             "",
             "CAUGHT resident-short-circuit",
+        )
+
+    # The 65 aligned citations this task decides. Each marker indents one block,
+    # and several markers can share one block. A range makes two decisions.
+    def _aligned_place(self, endpoint):
+        """Return the group index and block offset that ENDPOINT reads."""
+        rel, _, number = endpoint.rpartition(":")
+        number = int(number)
+        for index, (markers, start, lines) in enumerate(ALIGNED_GROUPS):
+            if endpoint not in [e for m in markers for e in _aligned_endpoints(m)]:
+                continue
+            offset = number - start
+            self.assertTrue(0 <= offset < len(lines), endpoint)
+            return index, offset
+        raise AssertionError(endpoint)
+
+    def _aligned_first_endpoint(self, endpoint):
+        """Return the first marker's endpoint that reads ENDPOINT's pinned line.
+
+        The draft cites a shared group's markers on one prose line in
+        ``ALIGNED_SPANS_DECIDED`` order, so the first of them is the one the walk
+        reaches first. This reads no target list, so a dropped target is still
+        named by its own marker.
+        """
+        index, offset = self._aligned_place(endpoint)
+        markers, start, _ = ALIGNED_GROUPS[index]
+        rel = markers[0].rpartition(":")[0]
+        line = rel + ":" + str(start + offset)
+        same = [
+            other
+            for marker in markers
+            for other in _aligned_endpoints(marker)
+            if other == line
+        ]
+        self.assertTrue(same, endpoint)
+        return same[0]
+
+    def _aligned_body(self, changes=None, copies=None, groups=None):
+        """A draft that cites each aligned marker and indents its one block."""
+        changes = changes or {}
+        copies = copies or {}
+        parts = []
+        for index, (markers, _, lines) in enumerate(groups or ALIGNED_GROUPS):
+            prose = " ".join(self._cited(marker, copies.get(marker, 1)) for marker in markers)
+            block = [
+                changes.get((index, offset), text)
+                for offset, text in enumerate(lines)
+            ]
+            parts.append(prose + "\n")
+            parts.append("".join("    " + line + "\n" for line in block))
+            parts.append("\n")
+        return "".join(parts)
+
+    def _aligned_files(self, changes=None):
+        """A committed file set that lays each block at the line the pin gives it."""
+        changes = changes or {}
+        rows = {}
+        for index, (markers, start, lines) in enumerate(ALIGNED_GROUPS):
+            rel = markers[0].rpartition(":")[0]
+            store = rows.setdefault(rel, {})
+            for offset, text in enumerate(lines):
+                store[start + offset] = changes.get((index, offset), text)
+        return {
+            rel: (
+                "\n".join(store.get(number, "// filler") for number in range(1, max(store) + 1))
+                + "\n"
+            ).encode("utf-8")
+            for rel, store in rows.items()
+        }
+
+    def _aligned_root(self, files=None):
+        """A committed fixture whose draft can be rewritten without a new pin."""
+        root = self._temp_root()
+        self._write(root, "", files if files is not None else self._aligned_files())
+        return root, self._commit_all(root)
+
+    def _aligned_reads(self, root, sha, body):
+        """Return the problems and the numbers read, for BODY at the fixture pin."""
+        reads = []
+        original = check.pinned_line
+
+        def record(read_root, read_sha, rel, number):
+            reads.append(number)
+            return original(read_root, read_sha, rel, number)
+
+        check.pinned_line = record
+        try:
+            (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
+                "Pinned commit: " + sha + "\n" + body, encoding="utf-8"
+            )
+            got = check.problems(root)
+        finally:
+            check.pinned_line = original
+        return got, reads
+
+    def _aligned_order(self, body):
+        """The aligned decisions BODY cites, in target-list order."""
+        return [
+            target[0]
+            for target in check.QUOTE_TARGETS
+            if target[0] in ALIGNED_ENDPOINT_SET
+            and check._remainders(body, target[1])
+        ]
+
+    def test_aligned_span_set_is_the_65_this_task_decides(self):
+        # The 65 spans make 68 endpoint decisions, and 12 of those were already
+        # targets, so this task adds 56 entries. A missing span, an extra span
+        # and a duplicated span each fail here.
+        self.assertEqual(len(ALIGNED_SPANS_DECIDED), 65)
+        self.assertEqual(len(ALIGNED_ENDPOINTS), 68)
+        self.assertEqual(len(ALIGNED_ALREADY_DECIDED), 12)
+        self.assertEqual(len(ALIGNED_NEW_ENDPOINTS), 56)
+        self.assertEqual(len(check.QUOTE_TARGETS), 115)
+        self.assertEqual(set(ALIGNED_ALREADY_DECIDED) - ALIGNED_ENDPOINT_SET, set())
+
+    def test_live_draft_aligned_quotes_match_their_pinned_lines(self):
+        # Every one of the 65 markers stands once in the draft, its block is the
+        # pinned block, and the window rule reads the cited line from it.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        for span in ALIGNED_SPANS_DECIDED:
+            marker = "`" + span + "`"
+            self.assertEqual(text.count(marker), 1, span)
+            remainders = check._remainders(text, marker)
+            self.assertTrue(remainders, span)
+            rel, _, number = span.rpartition(":")
+            pinned = check._pinned_lines(root, sha, rel)
+            for endpoint in _aligned_endpoints(span):
+                line = int(endpoint.rpartition(":")[2])
+                self.assertEqual(
+                    check.quote_for(remainders, pinned, line),
+                    check.pinned_line(root, sha, rel, line),
+                    endpoint,
+                )
+        self.assertEqual(check.problems(root), [])
+
+    def test_every_aligned_span_is_a_target(self):
+        # The target list names each of the 68 endpoint decisions exactly once,
+        # so a dropped span, an extra span and a duplicated span all fail here
+        # before any file is read.
+        entries = [target[0] for target in check.QUOTE_TARGETS]
+        for endpoint in ALIGNED_ENDPOINTS:
+            self.assertEqual(entries.count(endpoint), 1, endpoint)
+        for endpoint in BASELINE_TARGETS:
+            self.assertEqual(entries.count(endpoint), 1, endpoint)
+        self.assertEqual(len(entries), len(BASELINE_TARGETS) + len(ALIGNED_NEW_ENDPOINTS))
+        # The spans this task adds, read back from the target list as spans, are
+        # exactly the 65 names above minus the 12 that already had entries. A
+        # missing span leaves its name out here, an extra span makes the entry
+        # count differ, and a duplicated span repeats a name or an entry.
+        needed = [
+            span
+            for span in ALIGNED_SPANS_DECIDED
+            if not set(_aligned_endpoints(span)) <= ALIGNED_ALREADY_DECIDED
+        ]
+        self.assertEqual(len(needed), 53)
+        self.assertEqual(len(ALIGNED_SPANS_DECIDED), len(set(ALIGNED_SPANS_DECIDED)))
+        added = [endpoint for endpoint in entries if endpoint not in BASELINE_TARGETS]
+        self.assertEqual(len(added), len(ALIGNED_NEW_ENDPOINTS))
+        added_spans = {
+            span
+            for endpoint in added
+            for span in ALIGNED_SPANS_DECIDED
+            if endpoint in _aligned_endpoints(span)
+        }
+        self.assertEqual(sorted(added_spans), sorted(needed))
+        # Each of the 68 endpoint decisions then refuses on a one-character
+        # change, and the walk stops at that refusal. A shared block refuses on
+        # the first of its markers in list order; a range refuses on the
+        # endpoint whose own remainder differs.
+        files = self._aligned_files()
+        root, sha = self._aligned_root(files)
+        body = self._aligned_body()
+        got, reads = self._aligned_reads(root, sha, body)
+        self.assertEqual(got, [])
+        order = self._aligned_order(body)
+        self.assertEqual(reads, [int(span.rpartition(":")[2]) for span in order])
+        for span in ALIGNED_ENDPOINTS:
+            index, offset = self._aligned_place(span)
+            changed = (index, offset)
+            block = list(ALIGNED_GROUPS[index][2])
+            block[offset] = block[offset] + "x"
+            refused = self._aligned_first_endpoint(span)
+            got, reads = self._aligned_reads(
+                root,
+                sha,
+                self._aligned_body(
+                    changes={changed: block[offset]},
+                    groups=ALIGNED_GROUPS,
+                ),
+            )
+            self.assertEqual(
+                got, ["refuse: quoted line does not match " + refused], span
+            )
+            stopped = order[: order.index(refused) + 1]
+            self.assertEqual(
+                reads, [int(other.rpartition(":")[2]) for other in stopped], span
+            )
+
+    def test_shared_block_is_read_once(self):
+        # A shared block is one block read by several markers, not one copy per
+        # marker. Each shared group's markers read the same block, the group's
+        # text stands once in the draft, and each marker stands once.
+        shared = [group for group in ALIGNED_GROUPS if len(group[0]) > 1]
+        self.assertEqual(len(shared), len(ALIGNED_SHARED))
+        body = self._aligned_body()
+        root, sha = self._aligned_root()
+        got, reads = self._aligned_reads(root, sha, body)
+        self.assertEqual(got, [])
+        for markers, _, lines in shared:
+            blocks = {
+                tuple(check._remainders(body, "`" + marker + "`"))
+                for marker in markers
+            }
+            self.assertEqual(blocks, {tuple(lines)}, markers)
+            block = "".join("    " + line + "\n" for line in lines)
+            self.assertEqual(body.count(block), 1, markers)
+            for marker in markers:
+                self.assertEqual(body.count("`" + marker + "`"), 1, marker)
+
+    def test_range_second_endpoint_is_decided(self):
+        # Only the second endpoint's remainder differs, so the range refuses on
+        # its second endpoint and not on its first.
+        span = ALIGNED_RANGE_SPAN
+        first, second = _aligned_endpoints(span)
+        index, offset = self._aligned_place(second)
+        block = list(ALIGNED_GROUPS[index][2])
+        block[offset] = block[offset] + "x"
+        got, reads = self._pinned_reads(
+            self._aligned_body(changes={(index, offset): block[offset]}),
+            self._aligned_files(),
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + second])
+        self.assertIn(int(first.rpartition(":")[2]), reads)
+        self.assertEqual(reads[-1], int(second.rpartition(":")[2]))
+
+    def test_aligned_draft_without_a_span_adds_no_refusal(self):
+        for span in ALIGNED_SPANS_DECIDED[:4]:
+            groups = [
+                group for group in ALIGNED_GROUPS if span not in group[0]
+            ]
+            self.assertEqual(len(groups), len(ALIGNED_GROUPS) - 1, span)
+            got, _ = self._pinned_reads(
+                self._aligned_body(groups=groups), self._aligned_files()
+            )
+            self.assertEqual(got, [], span)
+
+    def test_aligned_quote_refusal_waits_for_a_known_pin(self):
+        body = self._aligned_body()
+        self.assertEqual(
+            check.problems(self._raw_draft(body, self._aligned_files())),
+            ["refuse: draft has no pinned commit"],
+        )
+
+    def test_falsifier_exec_vm_43_target_dropped(self):
+        # The old test accepted an unchecked exec_vm line. Dropping the 43
+        # target now leaves that draft with no refusal, which this test names.
+        planted = tuple(
+            target for target in check.QUOTE_TARGETS if target[0] != EXEC_SPAN
+        )
+        self.assertEqual(len(planted), len(check.QUOTE_TARGETS) - 1)
+        self._caught(
+            "QUOTE_TARGETS",
+            planted,
+            self.test_exec_vm_line_43_mismatch_is_refused,
+            "",
+            "CAUGHT exec-vm-43-target",
+        )
+
+    def test_falsifier_aligned_target_dropped(self):
+        # The 65-span test names every one of the 68 endpoint decisions, so
+        # dropping any one entry fails it. The unplanted run proves the test
+        # passes for another reason than the plant.
+        self.test_every_aligned_span_is_a_target()
+        original = check.QUOTE_TARGETS
+        try:
+            for endpoint in ALIGNED_ENDPOINTS:
+                planted = tuple(
+                    target for target in original if target[0] != endpoint
+                )
+                self.assertEqual(len(planted), len(original) - 1, endpoint)
+                check.QUOTE_TARGETS = planted
+                with self.assertRaises(AssertionError):
+                    self.test_every_aligned_span_is_a_target()
+        finally:
+            check.QUOTE_TARGETS = original
+        print("CAUGHT aligned-target-dropped")
+
+    def test_falsifier_shared_block_copied(self):
+        # A reader that hands one marker a second copy of its block breaks the
+        # one-block rule the shared markers share.
+        shared = [group for group in ALIGNED_GROUPS if len(group[0]) > 1]
+        marker = "`" + shared[0][0][0] + "`"
+        original = check._remainders
+
+        def planted(text, name):
+            found = original(text, name)
+            if name == marker:
+                return list(found) + list(found)
+            return found
+
+        self._caught(
+            "_remainders",
+            planted,
+            self.test_shared_block_is_read_once,
+            "",
+            "CAUGHT shared-block-copied",
+        )
+
+    def test_falsifier_range_endpoint_dropped(self):
+        self._caught_dropped_target(
+            _aligned_endpoints(ALIGNED_RANGE_SPAN)[1],
+            self.test_range_second_endpoint_is_decided,
+            "CAUGHT range-endpoint-dropped",
         )
