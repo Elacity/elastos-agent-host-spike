@@ -22,6 +22,9 @@ DRAFT = Path("lab/bus-v2-proposal/CORE-CALLS-PROPOSAL.md")
 OWNED_SPAN = "examples/agent-host/src/lib.rs:3754"
 OWNED_MARKER = "`" + OWNED_SPAN + "`"
 
+# Its quotation is the second indented line after the owned span.
+NEXT_SPAN = "examples/agent-host/src/lib.rs:3755"
+
 # The draft indents a quotation by exactly four spaces.
 DRAFT_INDENT = "    "
 
@@ -144,26 +147,43 @@ def pinned_line(root, sha, rel, number):
     return lines[number - 1]
 
 
-def _owned_target():
-    """Return the path and line number of the owned span."""
-    rel, _, number = OWNED_SPAN.rpartition(":")
+def _span_target(span):
+    """Return the path and line number of SPAN."""
+    rel, _, number = span.rpartition(":")
     return rel, int(number)
 
 
-def owned_quote(text):
-    """Return the one quotation after the owned span, or None when absent."""
+def _owned_remainders(text):
+    """Return the indented remainders after the owned span, in order."""
     lines = text.splitlines()
     for index, line in enumerate(lines):
         if OWNED_MARKER not in line:
             continue
+        remainders = []
         for following in lines[index + 1:]:
             if not following:
                 continue
             if not following.startswith(DRAFT_INDENT):
-                return None
-            return following[len(DRAFT_INDENT):]
+                break
+            remainders.append(following[len(DRAFT_INDENT):])
+        return remainders
+    return []
+
+
+def owned_quote(text):
+    """Return the first quotation after the owned span, or None when absent."""
+    remainders = _owned_remainders(text)
+    if not remainders:
         return None
-    return None
+    return remainders[0]
+
+
+def next_owned_quote(text):
+    """Return the second quotation after the owned span, or None when absent."""
+    remainders = _owned_remainders(text)
+    if len(remainders) < 2:
+        return None
+    return remainders[1]
 
 
 def quoted_line_matches(quoted, source):
@@ -171,20 +191,37 @@ def quoted_line_matches(quoted, source):
     return quoted == source
 
 
-def _quote_refusal(root, text, sha):
-    """Return the one quote refusal, or None when the owned quote is absent."""
-    if text.count(OWNED_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + OWNED_SPAN
-    quoted = owned_quote(text)
+def _next_quote_refusal(root, text, sha):
+    """Return the 3755 refusal, or None when that quote is absent or matches."""
+    quoted = next_owned_quote(text)
     if quoted is None:
         return None
-    rel, number = _owned_target()
+    rel, number = _span_target(NEXT_SPAN)
     source = pinned_line(root, sha, rel, number)
     if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + OWNED_SPAN
+        return "refuse: quoted line is not in the pinned commit: " + NEXT_SPAN
     if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + OWNED_SPAN
+        return "refuse: quoted line does not match " + NEXT_SPAN
     return None
+
+
+def _quote_refusals(root, text, sha):
+    """Return the quote refusals, the owned line first."""
+    if text.count(OWNED_MARKER) > 1:
+        return ["refuse: quoted line is not one line: " + OWNED_SPAN]
+    quoted = owned_quote(text)
+    if quoted is None:
+        return []
+    rel, number = _span_target(OWNED_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return ["refuse: quoted line is not in the pinned commit: " + OWNED_SPAN]
+    if not quoted_line_matches(quoted, source):
+        return ["refuse: quoted line does not match " + OWNED_SPAN]
+    following = _next_quote_refusal(root, text, sha)
+    if following is None:
+        return []
+    return [following]
 
 
 def _past_end(number, rel, count):
@@ -246,9 +283,7 @@ def problems(root):
         if reason is not None:
             refusals.append(reason)
     if pin_reason is None and pinned:
-        quote = _quote_refusal(root, text, sha)
-        if quote is not None:
-            refusals.append(quote)
+        refusals.extend(_quote_refusals(root, text, sha))
     return refusals
 
 
