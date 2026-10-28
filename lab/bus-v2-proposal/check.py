@@ -269,9 +269,13 @@ B2_COLUMNS = (
     "Extension",
     "Evidence",
 )
-B2_SECTION = re.compile(r"## 6\.[ \t]")
+B2_SECTION = re.compile(r"6\.(?:[ \t]|$)")
+B2_HEADING = re.compile(r" {0,3}(#{1,6})(?:[ \t]+(.*)|$)")
+B2_SETEXT = re.compile(r" {0,3}(?:=+|-+)[ \t]*$")
 B2_RULE = re.compile(r":?-{3,}:?")
 B2_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+B2_HTML_CODE = re.compile(r" {0,3}<(pre|script|style|textarea)(?=[ \t>]|$)", re.I)
+B2_HTML_TAG = re.compile(r" {0,3}</?[A-Za-z][A-Za-z0-9-]*(?=[ \t/>]|$)")
 B2_REL = "examples/agent-host/asks.json"
 B2_SCHEMA = "elastos.agent-host.asks/v1"
 
@@ -986,15 +990,29 @@ def _b2_pair(prefix, pair):
     return "refuse: B2 " + prefix + ": " + pair[0] + " | " + pair[1]
 
 
-def _b2_section_bounds(lines):
+def _b2_section_bounds(lines, contexts):
     """Return the first and past-the-last line of section 6, or None when not one."""
-    heads = [index for index, line in enumerate(lines) if B2_SECTION.match(line)]
+    headings = []
+    for index, line in enumerate(lines):
+        if contexts[index] is not None:
+            continue
+        heading = B2_HEADING.match(line)
+        if heading is not None:
+            headings.append((index, index + 1, len(heading.group(1)), heading.group(2) or ""))
+        elif (
+            index > 0 and B2_SETEXT.fullmatch(line)
+            and contexts[index - 1] is None and lines[index - 1].strip()
+            and B2_HEADING.match(lines[index - 1]) is None
+        ):
+            level = 1 if line.lstrip().startswith("=") else 2
+            headings.append((index - 1, index + 1, level, lines[index - 1].strip()))
+    heads = [head for head in headings if head[2] == 2 and B2_SECTION.match(head[3])]
     if len(heads) != 1:
         return None
-    start = heads[0] + 1
-    for index in range(start, len(lines)):
-        if lines[index].startswith("## "):
-            return start, index
+    start = heads[0][1]
+    for first, _, level, _ in headings:
+        if first >= start and level <= 2:
+            return start, first
     return start, len(lines)
 
 
@@ -1009,7 +1027,7 @@ def _b2_cells(line):
 def _b2_code(cell):
     """Return CELL without one pair of surrounding backticks."""
     if len(cell) >= 2 and cell.startswith("`") and cell.endswith("`"):
-        return cell[1:-1].strip()
+        return cell[1:-1]
     return cell
 
 
@@ -1041,7 +1059,7 @@ def _b2_rows(block):
         if cells is None or len(cells) != len(B2_COLUMNS):
             return None, "refuse: B2 mapping row is not six cells: " + line.strip()
         for index, column in enumerate(B2_COLUMNS):
-            if not _b2_code(cells[index]):
+            if not _b2_code(cells[index]).strip():
                 if index < 2:
                     return None, "refuse: B2 mapping row has an empty " + column
                 pair = (_b2_code(cells[0]), _b2_code(cells[1]))
@@ -1051,49 +1069,74 @@ def _b2_rows(block):
     return pairs, None
 
 
-def _b2_fenced(lines):
-    """Return one flag per line that says whether a fence renders it as code.
+def _b2_contexts(lines):
+    """Track code and HTML blocks for the fixed B2 heading and table reader.
 
-    A fence opens on a run of at least three backticks or tildes and closes on a
-    run of the same character that is at least as long and carries no info
-    string, which is how CommonMark reads a code block.
+    The same context excludes literal headings and refuses literal tables.
+    Raw HTML code blocks end at their closing tag; other tags end at a blank
+    line. The two standalone B2 comments delimit the table, not an HTML block.
     """
-    fenced = []
+    contexts = []
     fence = None
+    html_end = None
     for line in lines:
+        if html_end is not None:
+            contexts.append("inside an HTML block")
+            if html_end.search(line):
+                html_end = None
+            continue
         match = B2_FENCE.match(line)
-        if fence is None:
-            if match is None:
-                fenced.append(False)
-                continue
+        if fence is not None:
+            contexts.append("inside a code fence")
+            if match is not None:
+                mark = match.group(1)
+                if (
+                    mark[0] == fence[0] and len(mark) >= len(fence)
+                    and not match.group(2).strip()
+                ):
+                    fence = None
+            continue
+        if line.strip() and line.expandtabs(4).startswith(DRAFT_INDENT):
+            contexts.append("indented as code")
+            continue
+        if match is not None and (
+            match.group(1)[0] != "`" or "`" not in match.group(2)
+        ):
             fence = match.group(1)
-            fenced.append(True)
+            contexts.append("inside a code fence")
             continue
-        fenced.append(True)
-        if match is None:
-            continue
-        mark = match.group(1)
-        if mark[0] == fence[0] and len(mark) >= len(fence) and not match.group(2).strip():
-            fence = None
-    return fenced
+        raw = B2_HTML_CODE.match(line)
+        if raw is not None:
+            html_end = re.compile(r"</" + raw.group(1) + r"\s*>", re.I)
+        elif line.lstrip().startswith("<!--") and line.strip() not in (B2_OPEN, B2_CLOSE):
+            html_end = re.compile(r"-->")
+        elif line.lstrip().startswith("<?"):
+            html_end = re.compile(r"\?>")
+        elif line.lstrip().startswith("<![CDATA["):
+            html_end = re.compile(r"\]\]>")
+        elif re.match(r" {0,3}<![A-Z]", line):
+            html_end = re.compile(r">")
+        elif B2_HTML_TAG.match(line):
+            html_end = re.compile(r"^\s*$")
+        contexts.append(None if html_end is None else "inside an HTML block")
+        if html_end is not None and html_end.search(line):
+            html_end = None
+    return contexts
 
 
-def _b2_code_refusal(lines, first, last):
-    """Return a refusal when LINES FIRST..LAST render as code, or None."""
-    fenced = _b2_fenced(lines)
+def _b2_code_refusal(contexts, first, last):
+    """Return a refusal when lines FIRST..LAST have a code or HTML context."""
     for index in range(first, last + 1):
-        if fenced[index]:
-            return "refuse: B2 mapping table is inside a code fence"
-        line = lines[index]
-        if line.startswith("\t") or line.startswith(DRAFT_INDENT):
-            return "refuse: B2 mapping table is indented as code"
+        if contexts[index] is not None:
+            return "refuse: B2 mapping table is " + contexts[index]
     return None
 
 
 def b2_mapping(text):
     """Return the (kind, resource) pairs of the one B2 table, or a reason."""
     lines = text.splitlines()
-    bounds = _b2_section_bounds(lines)
+    contexts = _b2_contexts(lines)
+    bounds = _b2_section_bounds(lines, contexts)
     if bounds is None:
         return None, "refuse: B2 section 6 is not one heading"
     start, end = bounds
@@ -1105,7 +1148,7 @@ def b2_mapping(text):
         return None, "refuse: B2 mapping table is not one table"
     if not (start <= opens[0] < end and start <= closes[0] < end):
         return None, "refuse: B2 mapping table is outside section 6"
-    reason = _b2_code_refusal(lines, opens[0], closes[0])
+    reason = _b2_code_refusal(contexts, opens[0], closes[0])
     if reason is not None:
         return None, reason
     return _b2_rows(lines[opens[0] + 1:closes[0]])

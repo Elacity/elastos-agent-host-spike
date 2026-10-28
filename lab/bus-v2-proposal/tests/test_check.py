@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from collections import Counter
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -8677,6 +8678,185 @@ class B2CoverageTests(CaughtMixin, unittest.TestCase):
         ]
         self.assertEqual(check.problems(root), expected, expected)
 
+    def _assert_memory_mapping(self, body, expected, pairs=B2_PAIRS):
+        """Exercise problems and the CLI with an in-memory draft and source blob."""
+        root = check.worktree_root()
+        sha = "a" * 40
+        source = json.dumps({
+            "schema": check.B2_SCHEMA,
+            "asks": [{"kind": kind, "resource": resource} for kind, resource in pairs],
+        }).encode("utf-8")
+        with (
+            patch.object(check, "load_draft", return_value="Pinned commit: " + sha + "\n" + body),
+            patch.object(check, "commit_exists", return_value=True),
+            patch.object(check, "_pinned_blob", return_value=source),
+        ):
+            self.assertEqual(check.problems(root), expected, expected)
+            code, out = self._main_at(root)
+            self.assertEqual(code, int(bool(expected)), expected)
+            self.assertEqual(out, "".join(reason + "\n" for reason in expected), expected)
+
+    def test_b2_code_delimited_pair_whitespace_is_refused(self):
+        # Preserve whitespace inside either pair field. Table-cell padding
+        # outside the backticks is separate from the declared spelling.
+        for column in (0, 1):
+            for space in (" ", "\t", "\u00a0"):
+                for leading in (False, True):
+                    changed = list(B2_PAIRS[0])
+                    value = changed[column]
+                    changed[column] = space + value if leading else value + space
+                    changed = tuple(changed)
+                    pairs = (changed,) + B2_PAIRS[1:]
+                    body = b2_body(b2_table(pairs))
+                    expected = [
+                        b2_reason("mapping misses", B2_PAIRS[0]),
+                        b2_reason("mapping has an extra", changed),
+                    ]
+                    self._assert_memory_mapping(body, expected)
+                    # The same bytes in the source and mapping still agree.
+                    self._assert_memory_mapping(body, [], pairs=pairs)
+
+    def test_b2_code_delimited_empty_cells_are_refused(self):
+        for column, name in enumerate(B2_MAP_COLUMNS):
+            for blank in ("", " ", "\t", "\u00a0"):
+                def row(pair):
+                    cells = b2_cells(pair)
+                    cells[column] = "`" + blank + "`"
+                    return cells
+
+                expected = "refuse: B2 mapping row has an empty " + name
+                if column >= 2:
+                    expected = b2_reason("mapping row has an empty " + name, B2_PAIRS[0])
+                self._assert_memory_mapping(b2_body(b2_table(B2_PAIRS, row=row)), [expected])
+
+    def test_b2_heading_context_is_refused(self):
+        heading = "## 6. B2 mapping\n"
+        table = b2_table(B2_PAIRS)
+        expected = ["refuse: B2 section 6 is not one heading"]
+        self._assert_memory_mapping(table, expected)
+        self._assert_memory_mapping(heading + heading + table, expected)
+        self._assert_memory_mapping(heading + table + "\n6. B2 mapping\n---\n", expected)
+        self._assert_memory_mapping("# 6. B2 mapping\n\n" + table, expected)
+        wrappers = (
+            ("```\n", "```\n"),
+            ("~~~markdown\n", "~~~\n"),
+            ("````\n```\n", "`````\n"),
+            ("<pre>\n", "</pre>\n"),
+            ('   <PRE class="example">\n', "</PRE>\n"),
+            ("<script>\n", "</script>\n"),
+            ("<style>\n", "</style>\n"),
+            ("<textarea>\n", "</textarea>\n"),
+            ("<div>\n", "</div>\n\n"),
+            ("<!--\n", "-->\n"),
+            ("<?example\n", "?>\n"),
+            ("<![CDATA[\n", "]]>\n"),
+            ("<!DECLARATION\n", ">\n"),
+        )
+        for opening, closing in wrappers:
+            literal = opening + heading + closing
+            self._assert_memory_mapping(literal + "\n" + table, expected)
+            # A literal heading is neither a second section 6 nor a boundary
+            # when a rendered section 6 already owns the table.
+            self._assert_memory_mapping(heading + "\n" + literal + "\n" + table, [])
+        for indent in ("    ", "\t", " \t", "  \t", "   \t"):
+            self._assert_memory_mapping(indent + heading + "\n" + table, expected)
+        for heading in (" ## 6. B2 mapping", "   ##\t6. B2 mapping", "##  6. B2 mapping ##"):
+            self._assert_memory_mapping(heading + "\n\n" + table, [])
+        self._assert_memory_mapping("6. B2 mapping\n---\n\n" + table, [])
+        self._assert_memory_mapping("## 6. B2 mapping\n---\n\n" + table, [])
+
+    def test_b2_section_boundaries_are_refused(self):
+        section = "## 6. B2 mapping\n\n"
+        table = b2_table(B2_PAIRS)
+        expected = ["refuse: B2 mapping table is outside section 6"]
+        for level in ("#", "##"):
+            for indent in ("", " ", "  ", "   "):
+                for suffix in ("", " Unrelated section", "\tUnrelated section", "  Unrelated section ##"):
+                    boundary = indent + level + suffix + "\n\n"
+                    self._assert_memory_mapping(section + boundary + table, expected)
+        for underline in ("=", "===", "-", "---", "   ===\t", "   --- "):
+            boundary = "Unrelated section\n" + underline + "\n\n"
+            self._assert_memory_mapping(section + boundary + table, expected)
+        for nested in ("### Details", "###### Details", "#Unrelated", "\\# Unrelated", "---"):
+            self._assert_memory_mapping(section + nested + "\n\n" + table, [])
+
+    def test_b2_html_table_is_refused(self):
+        section = "## 6. B2 mapping\n\n"
+        table = b2_table(B2_PAIRS)
+        expected = ["refuse: B2 mapping table is inside an HTML block"]
+        for tag in ("pre", "script", "style", "textarea", "div", "code"):
+            for opening in ("<" + tag + ">", '   <' + tag.upper() + ' class="example">'):
+                closing = "</" + tag.upper() + ">\n"
+                self._assert_memory_mapping(section + opening + "\n" + table + closing, expected)
+                # Markers outside the wrapper still own a literal table.
+                wrapped = table.replace(
+                    "<!-- b2-map -->\n", "<!-- b2-map -->\n" + opening + "\n"
+                ).replace("<!-- /b2-map -->", closing + "<!-- /b2-map -->")
+                self._assert_memory_mapping(section + wrapped, expected)
+            if tag in ("pre", "script", "style", "textarea"):
+                # Blank lines, fences and Markdown headings inside raw HTML
+                # leave that HTML context in force until its closing tag.
+                opening = "<" + tag + "\nclass='example'>\n\n```\n# Literal heading\n"
+                self._assert_memory_mapping(section + opening + table + closing, expected)
+            # Once the block ends, a following Markdown table is valid.
+            self._assert_memory_mapping(section + "<" + tag + ">\n" + closing + "\n" + table, [])
+        for opening, closing in (("<!--", "-->"), ("<?example", "?>"), ("<![CDATA[", "]]>"), ("<!DECLARATION", ">")):
+            self._assert_memory_mapping(section + opening + "\n" + table + closing + "\n", expected)
+
+    def test_b2_literal_table_context_is_refused(self):
+        section = "## 6. B2 mapping\n\n"
+        lines = b2_table(B2_PAIRS).splitlines()
+        for indent in ("    ", "\t", " \t", "  \t", "   \t"):
+            for index in range(len(lines)):
+                changed = lines[:]
+                changed[index] = indent + changed[index]
+                self._assert_memory_mapping(section + "\n".join(changed), [
+                    "refuse: B2 mapping table is indented as code",
+                ])
+        for fence in ("```", "~~~", "   ```markdown", "````\n```", "~~~~\n~~~"):
+            self._assert_memory_mapping(section + fence + "\n" + "\n".join(lines), [
+                "refuse: B2 mapping table is inside a code fence",
+            ])
+
+    def test_b2_marker_order_and_count_are_refused(self):
+        table = b2_table(B2_PAIRS)
+        for changed in (
+            table.replace("<!-- b2-map -->", ""),
+            table.replace("<!-- /b2-map -->", ""),
+            "<!-- /b2-map -->\n" + table.replace("<!-- /b2-map -->", ""),
+            table + "<!-- b2-map -->\n",
+            table + "<!-- /b2-map -->\n",
+        ):
+            self._assert_memory_mapping(b2_body(changed), [
+                "refuse: B2 mapping table is not one table",
+            ])
+
+    def test_falsifier_b2_pair_whitespace_is_caught(self):
+        original = check._b2_code
+        self._caught(
+            "_b2_code",
+            lambda cell: original(cell).strip(),
+            self.test_b2_code_delimited_pair_whitespace_is_refused,
+            "refuse: B2 mapping misses",
+            "CAUGHT b2-pair-whitespace",
+        )
+
+    def test_falsifier_b2_mapping_context_is_caught(self):
+        self._caught_all(
+            "b2_refusals",
+            lambda root, text, sha: [],
+            (
+                self.test_b2_heading_context_is_refused,
+                self.test_b2_section_boundaries_are_refused,
+                self.test_b2_html_table_is_refused,
+                self.test_b2_literal_table_context_is_refused,
+                self.test_b2_code_delimited_empty_cells_are_refused,
+                self.test_b2_marker_order_and_count_are_refused,
+            ),
+            "refuse: B2",
+            "CAUGHT b2-mapping-context",
+        )
+
     def test_b2_table_shape_is_refused(self):
         section = "## 6. B2 mapping\n\nText.\n\n"
         after = "\n## 7. Open questions\n\n"
@@ -8958,6 +9138,13 @@ class B2CoverageTests(CaughtMixin, unittest.TestCase):
         named_tests = (
             self.test_b2_missing_pair_is_refused,
             self.test_b2_duplicate_or_extra_pair_is_refused,
+            self.test_b2_code_delimited_pair_whitespace_is_refused,
+            self.test_b2_code_delimited_empty_cells_are_refused,
+            self.test_b2_heading_context_is_refused,
+            self.test_b2_section_boundaries_are_refused,
+            self.test_b2_html_table_is_refused,
+            self.test_b2_literal_table_context_is_refused,
+            self.test_b2_marker_order_and_count_are_refused,
             self.test_b2_table_shape_is_refused,
             self.test_b2_pinned_source_is_refused,
             self.test_b2_asks_use_the_pinned_commit,
