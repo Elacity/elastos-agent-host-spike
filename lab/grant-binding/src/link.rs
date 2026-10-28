@@ -2,15 +2,17 @@
 
 /// True when the decoded text is a path, git, registry, table, dotted, workspace, or workspace-member dependency on this crate.
 ///
+/// A source key counts only inside the dependency entry that names this crate.
+/// A `[package]` version, or a `path` key on another dependency, is not that entry.
 /// A manifest that only names the crate, including its own `version` field, is not a link.
 /// A workspace `exclude` list, and a key that only ends in `members`, are not links.
-/// Workspace keys can be quoted; array boundaries come from syntax outside strings.
 #[rustfmt::skip]
 pub fn cargo_toml_path_depends_on_grant_binding(cargo_toml: &str) -> bool {
     let manifest = cargo_toml;
     let cargo_toml = decode_toml_basic_strings(cargo_toml);
     let packed: String = cargo_toml.chars().filter(|ch| !ch.is_whitespace()).collect();
-    let unquoted = packed.replace(['"', '\''], "");
+    let tight: String = cargo_toml.chars().filter(|ch| *ch != ' ').collect();
+    let unquoted_tight = tight.replace(['"', '\''], "");
     let member = {
         // Keep raw token boundaries: a decoded quote or bracket is still string content.
         let bytes = manifest.as_bytes();
@@ -68,24 +70,105 @@ pub fn cargo_toml_path_depends_on_grant_binding(cargo_toml: &str) -> bool {
         }
         linked
     };
-    cargo_toml.contains("grant-binding")
-        && (cargo_toml.contains("path")
-            || packed.split("grant-binding").skip(1).any(|suffix| {
-                suffix.trim_start_matches(['"', '\'']).strip_prefix('=')
-                    .is_some_and(|value| value.starts_with(['"', '\'']))
-            })
-            || ((unquoted.contains("grant-binding={")
-                || unquoted.contains("grant-binding.git=")
-                || unquoted.contains("grant-binding.version=")
-                || unquoted.contains("grant-binding.registry=")
-                || unquoted.contains("grant-binding.workspace=")
-                || unquoted.contains(".grant-binding]")
-                || unquoted.contains("package=grant-binding"))
-                && (unquoted.contains("git=")
-                    || unquoted.contains("version=")
-                    || unquoted.contains("registry=")
-                    || unquoted.contains("workspace=")))
-            || member)
+    let inline_version = packed.split("grant-binding").skip(1).any(|suffix| {
+        suffix
+            .trim_start_matches(['"', '\''])
+            .strip_prefix('=')
+            .is_some_and(|value| value.starts_with(['"', '\'']))
+    });
+    let inline_table = unquoted_tight.split("grant-binding={").skip(1).any(|suffix| {
+        let inside = suffix.split('}').next().unwrap_or("");
+        inside.contains("git=")
+            || inside.contains("version=")
+            || inside.contains("registry=")
+            || inside.contains("path=")
+            || inside.contains("workspace=")
+    });
+    fn brace_depth(text: &str, index: usize) -> i32 {
+        text[..index].chars().fold(0, |depth, ch| match ch {
+            '{' => depth + 1,
+            '}' => depth - 1,
+            _ => depth,
+        })
+    }
+    fn has_source_at(section: &str, needle: &str, bare: bool) -> bool {
+        section.match_indices(needle).any(|(at, _)| {
+            let prior = &section[..at];
+            let edge = if bare {
+                prior.is_empty()
+                    || prior.ends_with(|ch: char| {
+                        !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-' && ch != '.'
+                    })
+            } else {
+                prior.is_empty()
+                    || prior.ends_with(|ch: char| {
+                        !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-'
+                    })
+            };
+            edge && brace_depth(section, at) == 0
+        })
+    }
+    fn has_any_source(section: &str, prefix: &str, bare: bool) -> bool {
+        ["git", "version", "registry", "path", "workspace"]
+            .iter()
+            .any(|key| has_source_at(section, &format!("{prefix}{key}="), bare))
+    }
+    let renamed = unquoted_tight.split('{').skip(1).any(|suffix| {
+        let inside = suffix.split('}').next().unwrap_or("");
+        inside.contains("package=grant-binding")
+            && (inside.contains("git=")
+                || inside.contains("version=")
+                || inside.contains("registry=")
+                || inside.contains("path=")
+                || inside.contains("workspace="))
+    }) || unquoted_tight.split(']').skip(1).any(|suffix| {
+        let section = suffix.split('[').next().unwrap_or("");
+        section.match_indices("package=grant-binding").any(|(index, _)| {
+            if brace_depth(section, index) != 0 {
+                return false;
+            }
+            let before = &section[..index];
+            let boundary = before.is_empty()
+                || before.ends_with(|ch: char| {
+                    !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-'
+                });
+            if !boundary {
+                return false;
+            }
+            if before.ends_with('.') {
+                let alias = before[..before.len() - 1]
+                    .rsplit(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
+                    .next()
+                    .unwrap_or("");
+                !alias.is_empty() && has_any_source(section, &format!("{alias}."), false)
+            } else {
+                has_any_source(section, "", true)
+            }
+        })
+    });
+    let named_table = unquoted_tight.split(".grant-binding]").skip(1).any(|suffix| {
+        let section = suffix.split('[').next().unwrap_or("");
+        section.contains("git=")
+            || section.contains("version=")
+            || section.contains("registry=")
+            || section.contains("path=")
+            || section.contains("workspace=")
+    });
+    let path_value = unquoted_tight.split("path=").skip(1).any(|suffix| {
+        let value = suffix.split([',', '}', ']', '\n']).next().unwrap_or("");
+        value.contains("grant-binding")
+    });
+    member
+        || inline_version
+        || inline_table
+        || renamed
+        || named_table
+        || path_value
+        || unquoted_tight.contains("grant-binding.git=")
+        || unquoted_tight.contains("grant-binding.version=")
+        || unquoted_tight.contains("grant-binding.registry=")
+        || unquoted_tight.contains("grant-binding.path=")
+        || unquoted_tight.contains("grant-binding.workspace=")
 }
 
 /// Decode escapes in TOML basic strings, so an escaped link stays visible.
@@ -653,6 +736,41 @@ fn model_workspace_member_is_a_link() {
         "[workspace]\ndefault-members = ['crates/other]']\nexclude = ['lab/grant-binding']\n",
         "[workspace]\nmembers = [\n# lab/grant-binding\n\"crates/other\",\n]\n",
         "[workspace]\nmembers = ['lab/grant-bind\\u0069ng']\n",
+    ] {
+        assert!(
+            !cargo_toml_path_depends_on_grant_binding(manifest),
+            "{manifest}"
+        );
+    }
+}
+
+#[test]
+fn model_source_key_outside_the_entry_is_not_a_link() {
+    for manifest in [
+        "grant-binding = { version = \"1.2.3\" }\n",
+        "grant-binding = { path = \"lab/gb\" }\n",
+        "[dependencies.grant-binding]\npath = \"lab/gb\"\n",
+        "gb = { package = \"grant-binding\", registry = \"crates-io\" }\n",
+        "[dependencies]\ngb.package = \"grant-binding\"\ngb.version = \"1.2.3\"\n",
+        "gb = { path = \"../grant-binding\" }\n",
+        "grant-binding = { registry = \"crates-io\" }\n",
+        "grant-binding.workspace = true\n",
+    ] {
+        assert!(
+            cargo_toml_path_depends_on_grant_binding(manifest),
+            "{manifest}"
+        );
+    }
+    for manifest in [
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies.grant-binding]\n",
+        "[package]\nname = \"grant-binding\"\nversion = \"0.1.0\"\n\n[dependencies.grant-binding]\n",
+        "serde = { path = \"vendor/serde\" }\nnote = \"grant-binding\"\n",
+        "serde = { path = \"vendor/serde\" }\ngb = { package = \"grant-binding\" }\n",
+        "name = \"grant-binding\"\nversion = \"0.1.0\"\n",
+        "[dependencies.grant-binding]\n",
+        "Grant-Binding = { version = \"1.2.3\" }\n",
+        "other = { git = \"https://example.com/grant-binding.git\" }\n",
+        "[dependencies]\ngb.package=\"grant-binding\"\nserde.version=\"1.0\"\n",
     ] {
         assert!(
             !cargo_toml_path_depends_on_grant_binding(manifest),
