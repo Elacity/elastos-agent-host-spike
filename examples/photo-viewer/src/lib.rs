@@ -20,7 +20,7 @@
 //! `elastos:bus@v1`. It has no files, sockets, clock or environment.
 
 mod album;
-
+pub mod slideshow;
 #[cfg(test)]
 mod tests;
 
@@ -242,3 +242,4 @@ impl capsule_kit_guest::wit::exports::elastos::bus::lifecycle::Guest for PhotoVi
 
 #[cfg(target_arch = "wasm32")]
 capsule_kit_guest::wit::export_lifecycle!(PhotoViewer with_types_in capsule_kit_guest::wit);
+pub mod favorites;

@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+pub mod sniff;
 
 const PROVIDER_ID: &str = "media-provider";
 const PROTOCOL_VERSION: &str = "elastos.media-provider/v1";
