@@ -76,7 +76,9 @@ After one instance has ended, `post_capability_grant` of the survivor's pending 
 
 A `resource_invoke` on `localhost://Users/` or `localhost://UsersAI/` calls `protected_read` or `protected_write`. Any other invoke still calls `authorise` and returns `data` null. The protected response has no token, no principal, and no resolved root. The stored text is returned as it was written. A PASS gives the Runtime no A15 credit. `session_id` still equals the instance id.
 
-A shell grant, deny, or revoke appends one event through `record_use` after the decision succeeds. A refusal appends nothing. `get_audit_types` answers `GET /api/audit/types` with the four type names. The lab event has no token and no reason key. A stop's revoke is not on this list. A PASS gives the Runtime no A15 credit and no A6 credit. `session_id` still equals the instance id.
+A shell grant, deny, or revoke appends one event through `record_use` after the decision succeeds. A refusal appends nothing. `get_audit_types` answers `GET /api/audit/types` with the four type names. The lab event has no token and no reason key. A stop's revoke uses that same list. A PASS gives the Runtime no A15 credit and no A6 credit. `session_id` still equals the instance id.
+
+`revoke_live` appends one `capability_revoke` through `record_use` for each `Live` grant it drops. A shell revoke still appends from its own route. A pending settlement appends nothing. A shell deny of a starting instance calls this same `revoke_live`, so those dropped grants are on this list, and that route still appends its own `capability_denied`. A PASS gives the Runtime no A15 credit and no A6 credit. `session_id` still equals the instance id.
 
 ## Callers
 

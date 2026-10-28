@@ -13691,3 +13691,174 @@ New:
 - `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 262.46 seconds, inside the 600-second bound. Targets: lib 79 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0.
 - Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_decisions_join_the_audit_list -- --exact`: exit 0, 1 passed, real 0.11 seconds.
 
+## 084
+
+084: `revoke_live` appends one `capability_revoke` through `record_use` for each `Live` grant it drops, sorted by `request_id`. A shell revoke still appends from its own route. A pending settlement appends nothing. `standin_stop_revoke_joins_the_audit_list` fails on each hand-run plant and passes when they are restored. A PASS gives the Runtime no A15 credit and no A6 credit. `session_id` still equals the instance id.
+
+### Quote from the contract (read only)
+
+`docs/AGENT_ARCHITECTURE.md`, Request flow, step 9: "Runtime dispatches an approved operation to the owning provider and records the result in the same audit path used for a human action."
+
+This task is that record for the grants `revoke_live` drops. It is not a new list and not a second revoke.
+
+### Plants
+
+Each plant was applied alone. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_stop_revoke_joins_the_audit_list -- --exact`. The planted crate compiled, and that test failed on its assertion. The file was restored before the next plant. Restored, that test passes. No `falsifiers.json` id. Panic lines are `src/../standin-runtime/mod.rs`.
+
+F-standin-stop-audit-skip: `revoke_live` sets `Revoked` and does not call `record_use`. Failed at `src/../standin-runtime/mod.rs:14500:9`: `the stop appends one event per live grant`, left `0`, right `2`. Real 1.62 seconds.
+
+Old:
+
+```text
+        for (request_id, _, _) in &dropped {
+            self.revoke_grant(request_id);
+        }
+        for (request_id, resource, action) in &dropped {
+            self.record_use(
+                "capability_revoke",
+                true,
+                request_id,
+                session_id,
+                resource,
+                action,
+            );
+        }
+```
+
+New:
+
+```text
+        for (request_id, _, _) in &dropped {
+            self.revoke_grant(request_id);
+        }
+```
+
+F-standin-stop-audit-as-use: the stop appends `capability_use`. Failed at `src/../standin-runtime/mod.rs:11214:9`: `the stop revoke of req-b`, left `type` `capability_use`, right `type` `capability_revoke`. Real 1.76 seconds.
+
+Old:
+
+```text
+        for (request_id, resource, action) in &dropped {
+            self.record_use(
+                "capability_revoke",
+```
+
+New:
+
+```text
+        for (request_id, resource, action) in &dropped {
+            self.record_use(
+                "capability_use",
+```
+
+F-standin-stop-audit-sibling: `revoke_live` appends one event for every session's `Live` grant. Failed at `src/../standin-runtime/mod.rs:14510:9`: `the stop appends one event per live grant`, left `3`, right `2`. Real 1.54 seconds.
+
+Old:
+
+```text
+.filter(|grant| grant.session_id == session_id && is_live(grant.life))
+```
+
+New:
+
+```text
+.filter(|grant| is_live(grant.life))
+```
+
+F-standin-stop-audit-pending: `settle_pending` also appends a `capability_revoke` for each pending request. Failed at `src/../standin-runtime/mod.rs:14518:9`: `the stop appends one event per live grant`, left `3`, right `2`. Real 1.82 seconds.
+
+Old:
+
+```text
+        for request_id in pending {
+            self.settle_record(&request_id, RequestStatus::Denied, cause, "runtime");
+        }
+```
+
+New:
+
+```text
+        for request_id in pending {
+            self.settle_record(&request_id, RequestStatus::Denied, cause, "runtime");
+            self.record_use(
+                "capability_revoke",
+                true,
+                &request_id,
+                session_id,
+                "",
+                "",
+            );
+        }
+```
+
+F-standin-stop-audit-not-live: `revoke_live` also appends an `Exhausted`, `Revoked` or `Expired` grant of that session. Failed at `src/../standin-runtime/mod.rs:14510:9`: `the stop appends one event per live grant`, left `5`, right `2`. Real 1.54 seconds.
+
+Old:
+
+```text
+.filter(|grant| grant.session_id == session_id && is_live(grant.life))
+```
+
+New:
+
+```text
+.filter(|grant| grant.session_id == session_id)
+```
+
+F-standin-stop-audit-request: `revoke_live` rewrites that session's request `resource` while it appends. Failed at `src/../standin-runtime/mod.rs:14600:9`: `the granted request record is unchanged`, left resource `changed`, right `localhost://Public/resident-instances/kept.txt`. Real 1.81 seconds.
+
+Old:
+
+```text
+        for (request_id, _, _) in &dropped {
+            self.revoke_grant(request_id);
+        }
+        for (request_id, resource, action) in &dropped {
+```
+
+New:
+
+```text
+        for (request_id, _, _) in &dropped {
+            self.revoke_grant(request_id);
+        }
+        for request in &mut self.requests {
+            if request.session_id == session_id {
+                request.resource = "changed".to_owned();
+            }
+        }
+        for (request_id, resource, action) in &dropped {
+```
+
+F-standin-stop-audit-rewrite: a refused second stop rewrites the stored events to `capability_use` and leaves the count at 2. Failed at `src/../standin-runtime/mod.rs:14636:9`: `a second stop leaves the audit list unchanged`, left both events `capability_use` with `total_in_memory` 2, right both events `capability_revoke` with `total_in_memory` 2. Real 1.54 seconds.
+
+Old:
+
+```text
+        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
+            return Err(not_live(phase));
+        }
+        let session_id = self.instances[index].id.clone();
+```
+
+New:
+
+```text
+        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
+            for event in &mut self.audit {
+                event.event_type = "capability_use";
+            }
+            return Err(not_live(phase));
+        }
+        let session_id = self.instances[index].id.clone();
+```
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.16 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 247.84 seconds, inside the 600-second bound. Targets: lib 80 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0.
+- Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_stop_revoke_joins_the_audit_list -- --exact`: exit 0, 1 passed, real 1.54 seconds.
+
+

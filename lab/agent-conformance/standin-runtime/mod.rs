@@ -55,8 +55,9 @@
 //! A refusal appends nothing. The lab event has no token, and the body has
 //! no epoch. A shell grant, deny or revoke appends one event through that
 //! same `record_use` after the decision succeeds. `get_audit_types` answers
-//! `GET /api/audit/types` with the four type names and reads no store. A
-//! stop's revoke stays unwritten.
+//! `GET /api/audit/types` with the four type names and reads no store.
+//! `revoke_live` appends one `capability_revoke` for each `Live` grant a stop
+//! or a failed start drops. A pending settlement appends nothing.
 
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -644,7 +645,10 @@ impl StandIn {
     /// settles its remaining pending requests through the session cleanup.
     /// Any other phase stays. Ok is `{"success": true}`. After that writer
     /// and that life change, `record_use` appends one `capability_denied`.
-    /// A refusal appends nothing.
+    /// When the instance is `starting`, `revoke_live` appends one
+    /// `capability_revoke` for each `Live` grant it drops before that
+    /// `capability_denied`. A pending settlement appends nothing. A refusal
+    /// appends nothing.
     pub fn post_capability_deny(
         &mut self,
         caller: Caller<'_>,
@@ -1078,9 +1082,11 @@ impl StandIn {
     /// This is the only append. `event_type` and `success` name the decision.
     /// `protected_write` and `protected_read` pass `capability_use` and `true`
     /// after the bytes are stored or found. A shell grant, deny or revoke
-    /// calls this once after that decision succeeds. A refusal returns before
-    /// this call. `at` is the test instant. The event has no token and no
-    /// reason.
+    /// calls this once after that decision succeeds. `revoke_live` calls this
+    /// once per `Live` grant it drops, with `capability_revoke` and `true`.
+    /// `settle_pending` and `expire_due` do not call this. A refusal returns
+    /// before this call. `at` is the test instant. The event has no token and
+    /// no reason.
     fn record_use(
         &mut self,
         event_type: &'static str,
@@ -1427,16 +1433,41 @@ impl StandIn {
         Ok(())
     }
 
-    /// Writes `Revoked` on `Live` grants of one session. Other lives stay.
+    /// Writes `Revoked` on `Live` grants of one session, then appends one
+    /// `capability_revoke` for each grant just dropped.
+    ///
+    /// The append order is `request_id`. An `Exhausted`, `Revoked` or
+    /// `Expired` grant adds none. A grant of another session adds none.
+    /// `revoke_grant` is the one `Revoked` assignment and does not append.
+    /// A shell deny of a `starting` instance uses this same append, and that
+    /// route still appends its own `capability_denied`. `settle_pending` and
+    /// `expire_due` do not append.
     fn revoke_live(&mut self, session_id: &str) {
-        let live = self
+        let mut dropped = self
             .grants
             .iter()
             .filter(|grant| grant.session_id == session_id && is_live(grant.life))
-            .map(|grant| grant.request_id.clone())
+            .map(|grant| {
+                (
+                    grant.request_id.clone(),
+                    grant.resource.clone(),
+                    grant.action.clone(),
+                )
+            })
             .collect::<Vec<_>>();
-        for request_id in live {
-            self.revoke_grant(&request_id);
+        dropped.sort_by(|left, right| left.0.cmp(&right.0));
+        for (request_id, _, _) in &dropped {
+            self.revoke_grant(request_id);
+        }
+        for (request_id, resource, action) in &dropped {
+            self.record_use(
+                "capability_revoke",
+                true,
+                request_id,
+                session_id,
+                resource,
+                action,
+            );
         }
     }
 
@@ -14304,6 +14335,662 @@ mod tests {
             "running",
             "",
             "the stand-in did the work: component-2 stays running",
+        );
+    }
+
+    #[test]
+    fn standin_stop_revoke_joins_the_audit_list() {
+        let mut standin = StandIn::new();
+        launch_two_running(&mut standin);
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 is running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 is running",
+        );
+        let empty = json!({"events": [], "total_in_memory": 0});
+        assert_eq!(
+            shell_audit(&standin, None, None),
+            empty,
+            "the stand-in did the work: the shell audit list starts empty"
+        );
+
+        let read_b = "localhost://Public/resident-instances/b.txt";
+        let write_a = "localhost://Public/resident-instances/a.txt";
+        let spent = "localhost://Public/resident-instances/spent.txt";
+        let sibling = "localhost://Public/resident-instances/sib.txt";
+        let already = "localhost://Public/resident-instances/old.txt";
+        let aged = "localhost://Public/resident-instances/age.txt";
+        let waiting = "localhost://Public/resident-instances/pend.txt";
+        let kept = "localhost://Public/resident-instances/kept.txt";
+        let sibling_wait = "localhost://Public/resident-instances/sib-pend.txt";
+        standin.seed_grant(
+            "req-b",
+            "component-1",
+            read_b,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-a",
+            "component-1",
+            write_a,
+            "write",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-spent",
+            "component-1",
+            spent,
+            "read",
+            "once",
+            1,
+            Life::Exhausted,
+            false,
+        );
+        standin.seed_grant(
+            "req-sib",
+            "component-2",
+            sibling,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-old",
+            "component-1",
+            already,
+            "read",
+            "session",
+            1,
+            Life::Revoked,
+            false,
+        );
+        standin.seed_grant(
+            "req-age",
+            "component-1",
+            aged,
+            "read",
+            "session",
+            1,
+            Life::Expired,
+            false,
+        );
+        standin
+            .seed_request("req-pend", "component-1", waiting, "read", "still waiting")
+            .expect("the stand-in did the work: it stores the pending request");
+        standin
+            .seed_request("req-kept", "component-1", kept, "read", "already asked")
+            .expect("the stand-in did the work: it stores the granted request");
+        standin.settle_record(
+            "req-kept",
+            RequestStatus::Granted,
+            "already granted",
+            "shell",
+        );
+        standin
+            .seed_request(
+                "req-pend-sib",
+                "component-2",
+                sibling_wait,
+                "read",
+                "sibling waiting",
+            )
+            .expect("the stand-in did the work: it stores the sibling pending request");
+        let stored = |entries: Vec<Value>, request_id: &str| {
+            entries
+                .into_iter()
+                .find(|entry| entry["request_id"] == request_id)
+                .unwrap_or_else(|| panic!("the stand-in did the work: {request_id} stays stored"))
+        };
+        let kept_before = stored(request_entries(&standin, "component-1"), "req-kept");
+        let pend_before = stored(request_entries(&standin, "component-1"), "req-pend");
+        let sibling_before = stored(request_entries(&standin, "component-2"), "req-pend-sib");
+        assert_eq!(
+            kept_before["status"], "granted",
+            "the stand-in did the work: the stored request is granted"
+        );
+
+        standin.set_instant(6);
+        assert_eq!(
+            shell_audit(&standin, None, None),
+            empty,
+            "the stand-in did the work: ageing the instant appends nothing"
+        );
+        assert_eq!(
+            request_status(&standin, "component-1", "req-pend"),
+            "pending",
+            "the stand-in did the work: the pending request stays pending before the stop"
+        );
+        let client = Caller::Client {
+            session_id: "component-1",
+        };
+        assert_eq!(
+            standin.delete_capsule(client, "component-1", &json!({"reason": "stop one"})),
+            Err((403, "This endpoint requires shell privileges".to_owned())),
+            "the stand-in did the work: a client stop is refused"
+        );
+        assert_eq!(
+            standin.delete_capsule(Caller::Shell, "component-1", &Value::Null),
+            Err((400, "stop body needs reason".to_owned())),
+            "the stand-in did the work: a stop without a reason is refused"
+        );
+        assert_eq!(
+            shell_audit(&standin, None, None),
+            empty,
+            "the stand-in did the work: a refused stop appends nothing"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-a"),
+            (Life::Live, false),
+            "the stand-in did the work: a refused stop leaves req-a live"
+        );
+
+        assert_eq!(
+            standin.delete_capsule(Caller::Shell, "component-1", &json!({"reason": "stop one"})),
+            Ok(Value::Null),
+            "the stand-in did the work: the stop answers null"
+        );
+        assert_eq!(
+            audit_total(&standin),
+            2,
+            "the stand-in did the work: the stop appends one event per live grant"
+        );
+        let stopped = shell_audit(&standin, None, None);
+        let events = stopped["events"]
+            .as_array()
+            .expect("the stand-in did the work: events is a list");
+        assert_decision(
+            &events[0],
+            "capability_revoke",
+            6,
+            "req-b",
+            "component-1",
+            read_b,
+            "read",
+            true,
+            "the stop revoke of req-b",
+        );
+        assert_decision(
+            &events[1],
+            "capability_revoke",
+            6,
+            "req-a",
+            "component-1",
+            write_a,
+            "write",
+            true,
+            "the stop revoke of req-a",
+        );
+        assert!(
+            !stopped.to_string().contains("token"),
+            "the stand-in did the work: the audit response has no token"
+        );
+        assert!(
+            !stopped.to_string().contains("current_epoch"),
+            "the stand-in did the work: the audit response has no current_epoch"
+        );
+        assert!(
+            !stopped.to_string().contains("reason"),
+            "the stand-in did the work: the audit response has no reason"
+        );
+        for request_id in [
+            "req-spent",
+            "req-sib",
+            "req-old",
+            "req-age",
+            "req-pend",
+            "req-kept",
+            "req-pend-sib",
+        ] {
+            assert_absent(events, request_id);
+        }
+        assert_eq!(
+            grant_record(&standin, "req-a"),
+            (Life::Revoked, false),
+            "the stand-in did the work: req-a is revoked"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-b"),
+            (Life::Revoked, false),
+            "the stand-in did the work: req-b is revoked"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-spent"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: req-spent stays exhausted"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-sib"),
+            (Life::Live, false),
+            "the stand-in did the work: req-sib stays live"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-old"),
+            (Life::Revoked, false),
+            "the stand-in did the work: req-old stays revoked"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-age"),
+            (Life::Expired, false),
+            "the stand-in did the work: req-age stays expired"
+        );
+        let kept_after = stored(request_entries(&standin, "component-1"), "req-kept");
+        assert_eq!(
+            kept_after, kept_before,
+            "the stand-in did the work: the granted request record is unchanged"
+        );
+        let mut pend_expected = pend_before.clone();
+        pend_expected["status"] = json!("denied");
+        pend_expected["decision_reason"] = json!("stopped: stop one");
+        pend_expected["settled_by"] = json!("runtime");
+        assert_eq!(
+            stored(request_entries(&standin, "component-1"), "req-pend"),
+            pend_expected,
+            "the stand-in did the work: the pending request is denied and its other fields stay"
+        );
+        assert_eq!(
+            stored(request_entries(&standin, "component-2"), "req-pend-sib"),
+            sibling_before,
+            "the stand-in did the work: the sibling pending request stays pending"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "stopped",
+            "stopped: stop one",
+            "the stand-in did the work: component-1 is stopped",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running",
+        );
+
+        assert_eq!(
+            standin.delete_capsule(Caller::Shell, "component-1", &json!({"reason": "stop one"})),
+            Err((400, "instance is not live: stopped".to_owned())),
+            "the stand-in did the work: a second stop of component-1 is refused"
+        );
+        assert_eq!(
+            shell_audit(&standin, None, None),
+            stopped,
+            "the stand-in did the work: a second stop leaves the audit list unchanged"
+        );
+        assert_eq!(
+            standin.delete_capsule(Caller::Shell, "component-9", &json!({"reason": "stop one"})),
+            Err((400, "unknown instance: component-9".to_owned())),
+            "the stand-in did the work: an unknown stop is refused"
+        );
+        assert_eq!(
+            shell_audit(&standin, None, None),
+            stopped,
+            "the stand-in did the work: an unknown stop leaves the audit list unchanged"
+        );
+        let sibling_client = Caller::Client {
+            session_id: "component-2",
+        };
+        assert_eq!(
+            standin.delete_capsule(
+                sibling_client,
+                "component-2",
+                &json!({"reason": "stop one"}),
+            ),
+            Err((403, "This endpoint requires shell privileges".to_owned())),
+            "the stand-in did the work: a client stop of component-2 is refused"
+        );
+        assert_eq!(
+            standin.delete_capsule(Caller::Shell, "component-2", &Value::Null),
+            Err((400, "stop body needs reason".to_owned())),
+            "the stand-in did the work: a stop of component-2 without a reason is refused"
+        );
+        assert_eq!(
+            standin.finish_start("component-1"),
+            Err((400, "instance is not live: stopped".to_owned())),
+            "the stand-in did the work: finish_start of a stopped instance is refused"
+        );
+        assert_eq!(
+            standin.finish_start("component-2"),
+            Err((400, "start already returned".to_owned())),
+            "the stand-in did the work: finish_start of a running instance is refused"
+        );
+        assert_eq!(
+            standin.finish_start("component-9"),
+            Err((400, "unknown instance: component-9".to_owned())),
+            "the stand-in did the work: finish_start of an unknown instance is refused"
+        );
+        assert_eq!(
+            shell_audit(&standin, None, None),
+            stopped,
+            "the stand-in did the work: a refused start leaves the audit list unchanged"
+        );
+        assert_eq!(
+            audit_total(&standin),
+            2,
+            "the stand-in did the work: a refused start appends nothing"
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running after the refusals",
+        );
+
+        standin
+            .admit_resident(
+                "/capsules/fail-after-submit",
+                "fail-after-submit",
+                Start::Error("start refused".to_owned()),
+            )
+            .expect("the stand-in did the work: it admits the failed start");
+        let launched = standin
+            .post_capsules(
+                Caller::Shell,
+                &json!({"path": "/capsules/fail-after-submit"}),
+            )
+            .expect("the stand-in did the work: it launches the failed start");
+        assert_eq!(
+            launched["id"], "component-3",
+            "the stand-in did the work: the failed start is component-3"
+        );
+        let fail_id = "component-3";
+        let fail_res = "localhost://Public/resident-instances/fail.txt";
+        let fail_wait = "localhost://Public/resident-instances/fail-pend.txt";
+        let fail_kept = "localhost://Public/resident-instances/fail-kept.txt";
+        standin.seed_grant(
+            "req-fail",
+            fail_id,
+            fail_res,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin
+            .seed_request("req-fail-pend", fail_id, fail_wait, "read", "still waiting")
+            .expect("the stand-in did the work: it stores the failed start's pending request");
+        standin
+            .seed_request("req-fail-kept", fail_id, fail_kept, "read", "already asked")
+            .expect("the stand-in did the work: it stores the failed start's granted request");
+        standin.settle_record(
+            "req-fail-kept",
+            RequestStatus::Granted,
+            "already granted",
+            "shell",
+        );
+        let fail_kept_before = stored(request_entries(&standin, fail_id), "req-fail-kept");
+        let fail_pend_before = stored(request_entries(&standin, fail_id), "req-fail-pend");
+        standin.set_instant(7);
+        assert_eq!(
+            shell_audit(&standin, None, None),
+            stopped,
+            "the stand-in did the work: seeding the failed start appends nothing"
+        );
+        assert_eq!(
+            standin.finish_start(fail_id),
+            Ok(()),
+            "the stand-in did the work: the failed start returns ok"
+        );
+        assert_eq!(
+            audit_total(&standin),
+            3,
+            "the stand-in did the work: the failed start appends one event"
+        );
+        let failed = shell_audit(&standin, None, None);
+        let failed_events = failed["events"]
+            .as_array()
+            .expect("the stand-in did the work: events is a list");
+        assert_decision(
+            &failed_events[0],
+            "capability_revoke",
+            7,
+            "req-fail",
+            fail_id,
+            fail_res,
+            "read",
+            true,
+            "the failed start revoke of req-fail",
+        );
+        assert_eq!(
+            &failed_events[1..],
+            stopped["events"]
+                .as_array()
+                .expect("the stand-in did the work: events is a list")
+                .as_slice(),
+            "the stand-in did the work: the failed start leaves the stop's events unchanged"
+        );
+        assert_absent(failed_events, "req-sib");
+        assert_absent(failed_events, "req-fail-pend");
+        assert_absent(failed_events, "req-fail-kept");
+        assert!(
+            !failed.to_string().contains("token"),
+            "the stand-in did the work: the failed start audit response has no token"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-fail"),
+            (Life::Revoked, false),
+            "the stand-in did the work: req-fail is revoked"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-sib"),
+            (Life::Live, false),
+            "the stand-in did the work: req-sib stays live after the failed start"
+        );
+        assert_eq!(
+            stored(request_entries(&standin, fail_id), "req-fail-kept"),
+            fail_kept_before,
+            "the stand-in did the work: the failed start leaves its granted request unchanged"
+        );
+        let mut fail_pend_expected = fail_pend_before.clone();
+        fail_pend_expected["status"] = json!("denied");
+        fail_pend_expected["decision_reason"] = json!("start refused");
+        fail_pend_expected["settled_by"] = json!("runtime");
+        assert_eq!(
+            stored(request_entries(&standin, fail_id), "req-fail-pend"),
+            fail_pend_expected,
+            "the stand-in did the work: the failed start denies its pending request and appends none"
+        );
+        assert_named_capsule(
+            &standin,
+            fail_id,
+            "fail-after-submit",
+            "failed",
+            "start refused",
+            "the failed start stores its cause",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running after the failed start",
+        );
+        assert_eq!(
+            standin.finish_start(fail_id),
+            Err((400, "start already returned".to_owned())),
+            "the stand-in did the work: a second start of the failed instance is refused"
+        );
+        assert_eq!(
+            shell_audit(&standin, None, None),
+            failed,
+            "the stand-in did the work: a second start of the failed instance leaves the audit list unchanged"
+        );
+
+        standin
+            .admit_resident("/capsules/deny-starting", "deny-starting", Start::Ok)
+            .expect("the stand-in did the work: it admits the starting deny");
+        let deny_launch = standin
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/deny-starting"}))
+            .expect("the stand-in did the work: it launches the starting deny");
+        assert_eq!(
+            deny_launch["id"], "component-4",
+            "the stand-in did the work: the starting deny is component-4"
+        );
+        let deny_id = "component-4";
+        let deny_live = "localhost://Public/resident-instances/deny-live.txt";
+        let deny_wait = "localhost://Public/resident-instances/deny-wait.txt";
+        let deny_extra = "localhost://Public/resident-instances/deny-extra.txt";
+        let deny_spent = "localhost://Public/resident-instances/deny-spent.txt";
+        standin.seed_grant(
+            "req-deny-live",
+            deny_id,
+            deny_live,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-deny-spent",
+            deny_id,
+            deny_spent,
+            "read",
+            "once",
+            1,
+            Life::Exhausted,
+            false,
+        );
+        standin
+            .seed_request("req-deny-wait", deny_id, deny_wait, "read", "still waiting")
+            .expect("the stand-in did the work: it stores the deny request");
+        standin
+            .seed_request(
+                "req-deny-extra",
+                deny_id,
+                deny_extra,
+                "read",
+                "also waiting",
+            )
+            .expect("the stand-in did the work: it stores the other deny request");
+        let deny_wait_before = stored(request_entries(&standin, deny_id), "req-deny-wait");
+        let deny_extra_before = stored(request_entries(&standin, deny_id), "req-deny-extra");
+        standin.set_instant(8);
+        assert_eq!(
+            shell_audit(&standin, None, None),
+            failed,
+            "the stand-in did the work: seeding the starting deny appends nothing"
+        );
+        let denied = standin
+            .post_capability_deny(
+                Caller::Shell,
+                &json!({"request_id": "req-deny-wait", "reason": "start denied"}),
+            )
+            .expect("the stand-in did the work: it denies the starting instance");
+        assert_eq!(
+            denied,
+            json!({"success": true}),
+            "the stand-in did the work: the starting deny answers success true"
+        );
+        assert_eq!(
+            audit_total(&standin),
+            5,
+            "the stand-in did the work: the starting deny appends the dropped grant and its own denial"
+        );
+        let denied_audit = shell_audit(&standin, None, None);
+        let denied_events = denied_audit["events"]
+            .as_array()
+            .expect("the stand-in did the work: events is a list");
+        assert_decision(
+            &denied_events[0],
+            "capability_denied",
+            8,
+            "req-deny-wait",
+            deny_id,
+            deny_wait,
+            "read",
+            false,
+            "the starting deny of req-deny-wait",
+        );
+        assert_decision(
+            &denied_events[1],
+            "capability_revoke",
+            8,
+            "req-deny-live",
+            deny_id,
+            deny_live,
+            "read",
+            true,
+            "the starting deny revoke of req-deny-live",
+        );
+        assert_eq!(
+            &denied_events[2..],
+            failed["events"]
+                .as_array()
+                .expect("the stand-in did the work: events is a list")
+                .as_slice(),
+            "the stand-in did the work: the starting deny leaves the earlier events unchanged"
+        );
+        for request_id in ["req-deny-spent", "req-deny-extra", "req-sib"] {
+            assert_absent(denied_events, request_id);
+        }
+        assert_eq!(
+            grant_record(&standin, "req-deny-live"),
+            (Life::Revoked, false),
+            "the stand-in did the work: req-deny-live is revoked"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-deny-spent"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: req-deny-spent stays exhausted"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-sib"),
+            (Life::Live, false),
+            "the stand-in did the work: req-sib stays live after the starting deny"
+        );
+        let mut deny_wait_expected = deny_wait_before.clone();
+        deny_wait_expected["status"] = json!("denied");
+        deny_wait_expected["decision_reason"] = json!("start denied");
+        deny_wait_expected["settled_by"] = json!("shell");
+        assert_eq!(
+            stored(request_entries(&standin, deny_id), "req-deny-wait"),
+            deny_wait_expected,
+            "the stand-in did the work: the named deny keeps the shell settlement"
+        );
+        let mut deny_extra_expected = deny_extra_before.clone();
+        deny_extra_expected["status"] = json!("denied");
+        deny_extra_expected["decision_reason"] = json!("start denied");
+        deny_extra_expected["settled_by"] = json!("runtime");
+        assert_eq!(
+            stored(request_entries(&standin, deny_id), "req-deny-extra"),
+            deny_extra_expected,
+            "the stand-in did the work: the other pending request is settled and adds no event"
+        );
+        assert_named_capsule(
+            &standin,
+            deny_id,
+            "deny-starting",
+            "failed",
+            "start denied",
+            "the starting deny stores its cause",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running after the starting deny",
         );
     }
 }
