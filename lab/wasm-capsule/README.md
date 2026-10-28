@@ -728,14 +728,14 @@ module run starts:
 **The receipt.** `render` gives `key: value` lines in the shape of wc-001's
 build receipt (`tools/build:82`), under its own schema line. Every value comes
 from the run. The real receipt from this Mac, from
-`real_receipt_names_both_installed_engines` on 27 Oct 2026, task 034 (the
+`real_receipt_names_both_installed_engines` on 28 Oct 2026, task 062 (the
 capsule `tools/build` makes, bundled, signed with a fresh test key, verified
 and run on Homebrew's `/opt/homebrew/bin/wasmtime` and `/opt/homebrew/bin/wasmer`;
 the test asserts `bundle: <bundle_identity of the run's bundle>`, which holds
 the same two files as `REFERENCE_LAB_CID`'s bundle):
 
 ```
-schema: wc-005.run-receipt/v3
+schema: wc-005.run-receipt/v4
 bundle: bafybeiebyzg55l4s6kb6daroty4prlkximwp6uvo32ovacfzdx7cahywqm
 function: digest
 argument: 1592590337
@@ -751,6 +751,8 @@ wasmtime_memory_cap: ENFORCED max-memory-size=67108864,max-memories=1,trap-on-gr
 wasmer_memory_cap: SKIPPED: no memory cap flag in wasmer run --help or wasmer --help (wc-010a)
 wasmtime_memory_maximum_bytes: 67108864
 wasmer_memory_maximum_bytes: 67108864
+wasmtime_process_max_rss_bytes: 14368768 (engine process RSS, not linear memory)
+wasmer_process_max_rss_bytes: 18710528 (engine process RSS, not linear memory)
 ```
 
 `bundle` is the verified `cid()`'s Display form, treated as opaque; it is the
@@ -803,9 +805,41 @@ gives `1048576`), and both lines can be tested against the manifest. The
 cap flag; wasmer's cap is the module's own maximum, which its maximum line
 records.
 
-The receipt records no peak memory: `/usr/bin/time -l` gives the engine
-process's resident memory, not the capsule's linear memory (wc-010a); which
-number belongs here waits for Flint.
+**The peak lines (task 062; schema v4).** After the v3 lines, `render` adds,
+per engine, `wasmtime` then `wasmer`, exactly:
+
+- `<engine>_process_max_rss_bytes: <n> (engine process RSS, not linear memory)`.
+
+What is measured: `n` is the maximum resident set size of that one engine's
+module-run process, in bytes. The runner's one poll loop asks with
+`wait4(pid, WNOHANG)` in place of `try_wait`; the call that reaps the engine
+returns its exit status and that process's own `rusage`, and `n` is its
+`ru_maxrss`, the same kernel counter `/usr/bin/time -l` prints as "maximum
+resident set size". On macOS it is in bytes (`man 2 getrusage`: "the maximum
+resident set size utilized (in bytes)"). The exit status is built from the
+same call, so each engine process is reaped exactly once and never waited for
+again. `getrusage(RUSAGE_CHILDREN)` is not used: it mixes every child the
+calling process has reaped. The `--version` queries record no peak. A run the
+runner stops (budget, cancel, failed wait) is refused, so it has no peak, and
+the refusal receipt has no peak line.
+
+What it is not: the capsule's linear memory. Linear-memory pages the guest
+never touched are not resident, so they are not counted, and the engine's own
+code, data and compiled module are. wc-010a's probes grew linear memory to
+64 MB and both engines stayed under 20 MB resident ("Peak memory for wc-010's
+receipt"); a guest that fills 48 MiB pushes both past 48 MiB
+(`process_peak_rss_follows_the_memory_the_engine_touched`). That is why every
+line carries its label, and why no line claims that RSS stays under the cap.
+
+Why there is no wrapper: running the engine under `/usr/bin/time` would add a
+process and change every engine argv that the census tests (040, 042), the
+recording shims (041, 049) and `argv_faults` read. `wait4` reads the same
+counter with the argv unchanged.
+
+No linear-memory peak is recorded, because nothing here measures one: no
+receipt line has a key that names linear memory. Flint's answer (INBOX,
+28 Oct 00:25) asked for exactly this label, and for a linear-memory peak only
+if it is actually measured, never cited.
 
 **Writing it.** `write_receipt` writes `render`'s text to a caller-given path
 with the shared `bundle::write_new_file` (`create_new`). An existing file, a
@@ -1141,7 +1175,9 @@ the capsule's linear memory:
 
 Both runs grew linear memory to 64 MB, yet each process's resident size is
 below that: untouched pages are not resident. So this number is no measure of
-the capsule's declared or used linear memory.
+the capsule's declared or used linear memory. Task 062 records this counter in
+the run receipt with exactly that label ("The peak lines", in "Run receipt
+(wc-005c)").
 
 ## Memory cap (wc-010b)
 
@@ -2500,7 +2536,7 @@ gives `67108864` on both (`real_receipt_names_both_installed_engines`).
 
 ## Falsifiers
 
-`falsifiers.json` holds 189 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 191 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
@@ -2508,21 +2544,21 @@ seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
 031, two task 032, one task 035, three task 036, five task 038, three task
 039, one task 040, one task 041, two task 043, one task 044, one task
 033, two task 034, one task 045, two task 046, one task 050, three task
-052 and one task 056.
+052, one task 056 and two task 062.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 125, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 127, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046, 050, 052 and 056: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
-+ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1 + 3 + 1), each run by the canonical runner with its summary
+029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046, 050, 052, 056 and 062: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
++ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1 + 3 + 1 + 2), each run by the canonical runner with its summary
 line quoted.
 Hand-proven, pending R1: 69, each counted once: the 64 entries of the sections
 marked so (wc-001, tasks 010 and 009, wc-004 and wc-008: 9 + 7 + 23 + 21 + 4),
-and five proofs with no `falsifiers.json` entry, outside the 189 (task 036's
+and five proofs with no `falsifiers.json` entry, outside the 191 (task 036's
 `/bin/bash` 3.2 guard in `tests/reproducible.rs`, task 042's killed-run
 stop and task 049's two environment record proofs in `tests/run.rs`, and task
 053's import-section refusal in `tests/common/wasm_shape.rs`; none of these
@@ -3400,3 +3436,25 @@ F-WC-README-OUTSIDE-COUNT to the new total, each the same bug as before. The
 canonical runner reports F-WC3-LANE-FILES-QUOTED, F-WC4-SCAN-SKIP-MISSING,
 F-WC4-SCAN-NAME-AFTER-READ, F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT
 CAUGHT (LOG.md, task 056). This task changes no other label.
+
+Task 062's two, runner-caught (the canonical runner's summary line is in
+LOG.md, task 062). The run receipt records each engine's measured peak, the
+module-run process's own `ru_maxrss` from `wait4`, labelled as engine process
+RSS, not linear memory ("The peak lines", in "Run receipt (wc-005c)"). Each
+anchor is found exactly once, and each named test fails at its assertion:
+
+- F-WC10H-PEAK-CITED — `start_engine` (`tools/src/run.rs`) records a cited
+  number, the declared cap `memory_cap_bytes(memory_mb)`, in place of the peak
+  its `wait4` measured (`process_peak_rss_follows_the_memory_the_engine_touched`:
+  the built capsule then reads 67108864 bytes, not under 48 MiB). It needs both
+  real engines; with either missing that test prints SKIPPED and passes, so the
+  runner reports it NOT RUN, never CAUGHT.
+- F-WC10H-PEAK-UNLABELLED — the receipt's peak line (`tools/src/receipt.rs`)
+  drops ` (engine process RSS, not linear memory)`
+  (`receipt_labels_each_engine_peak_as_process_rss_not_linear_memory`).
+
+Task 062 also re-anchors F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT to the
+new total, and F-WC10-CAP-REJECTED-RETRY (its planted uncapped retry fills the
+new `EngineRun::process_max_rss_bytes` with 0, since that retry is not reaped by
+`wait4`), each the same bug as before (LOG.md, task 062). This task changes no
+other label.

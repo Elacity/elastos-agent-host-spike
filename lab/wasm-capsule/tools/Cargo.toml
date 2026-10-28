@@ -22,8 +22,14 @@ publish = false
 # Runtime's `CapsuleManifest` (read-only), the one reader of `capsule.json`,
 # parsed with `serde_json` as that type is read everywhere else. Both are the
 # versions the lockfile already held through `capsule-identity`.
+#
+# Task 062: `libc`, for `wait4` in the runner's one poll loop, which reaps each
+# engine process once and returns that process's own `rusage` (its peak RSS).
+# Pinned exactly at the version the lockfile already held for other crates, so
+# no new package enters it.
 [dependencies]
 capsule-identity = { path = "../../capsule-identity" }
 elastos-common = { path = "../../../elastos/crates/elastos-common" }
+libc = "=0.2.189"
 serde_json = "1.0"
 wasm-capsule-audit = { path = "../audit" }
