@@ -15,6 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const ANCHOR: &str = "interfaces.push(import.name.name.to_owned());";
+pub const CORE_ANCHOR: &str = "                imports.push(DeclaredImport {\n                    module: import.module.to_owned(),\n                    name: import.name.to_owned(),\n                });";
 pub const SKIP_MARK: &str = "does not cover that plant";
 pub const LIVE_LIB_REL: &str = "lab/wasm-capsule/audit/src/lib.rs";
 pub const FUNC_FINDING_ID: &str = "cx-wasm-audit-001";
@@ -25,6 +26,10 @@ pub const TYPE_FINDING_ID: &str = "cx-wasm-audit-003";
 pub const TYPE_FINDING_FILE: &str = "cx-wasm-audit-003.md";
 pub const COMPONENT_FINDING_ID: &str = "cx-wasm-audit-004";
 pub const COMPONENT_FINDING_FILE: &str = "cx-wasm-audit-004.md";
+pub const GLOBAL_FINDING_ID: &str = "cx-wasm-audit-005";
+pub const GLOBAL_FINDING_FILE: &str = "cx-wasm-audit-005.md";
+pub const TABLE_FINDING_ID: &str = "cx-wasm-audit-006";
+pub const TABLE_FINDING_FILE: &str = "cx-wasm-audit-006.md";
 pub const MUST_REFUSE: &str = "must refuse";
 pub const COULD_NOT_COMPILE: &str = "could not compile";
 pub const LOCKFILE_ERROR: &str = "lockfile failed";
@@ -62,6 +67,7 @@ pub enum Step {
 }
 
 pub struct PlantedProbe {
+    pub anchor: &'static str,
     pub replacement: String,
     pub assert_shape: fn(&str, &str),
     pub test_file: &'static str,
@@ -80,14 +86,18 @@ impl Drop for TempCopy {
     }
 }
 
-pub fn plant_edit(source: &str, replacement: &str) -> Plant {
-    let count = source.matches(ANCHOR).count();
+pub fn plant_at(source: &str, anchor: &str, replacement: &str) -> Plant {
+    let count = source.matches(anchor).count();
     if count != 1 {
         return Plant::Skip(format!(
             "{LIVE_LIB_REL} holds {count} copies of the anchor, not one. This run {SKIP_MARK}."
         ));
     }
-    Plant::Source(source.replacen(ANCHOR, replacement, 1))
+    Plant::Source(source.replacen(anchor, replacement, 1))
+}
+
+pub fn plant_edit(source: &str, replacement: &str) -> Plant {
+    plant_at(source, ANCHOR, replacement)
 }
 
 pub fn type_skip_replacement(type_name: &str) -> String {
@@ -106,6 +116,24 @@ pub fn assert_type_skip_shape(original: &str, planted: &str, type_name: &str) {
     let push_at = planted.find(ANCHOR).expect("push");
     assert!(type_at < continue_at && continue_at < push_at);
     assert_eq!(planted.replacen(&replacement, ANCHOR, 1), original);
+}
+
+pub fn core_skip_replacement(type_name: &str) -> String {
+    format!(
+        "                if matches!(import.ty, wasmparser::TypeRef::{type_name}(_)) {{\n                    continue;\n                }}\n{CORE_ANCHOR}"
+    )
+}
+
+pub fn assert_core_skip_shape(original: &str, planted: &str, type_name: &str) {
+    let replacement = core_skip_replacement(type_name);
+    assert_eq!(original.matches(CORE_ANCHOR).count(), 1);
+    assert_eq!(planted.matches(CORE_ANCHOR).count(), 1);
+    let needle = format!("wasmparser::TypeRef::{type_name}(_)");
+    let type_at = planted.find(&needle).expect("type skip");
+    let continue_at = planted.find("continue").expect("continue");
+    let push_at = planted.find(CORE_ANCHOR).expect("push");
+    assert!(type_at < continue_at && continue_at < push_at);
+    assert_eq!(planted.replacen(&replacement, CORE_ANCHOR, 1), original);
 }
 
 pub fn report_plant(plant: &Plant) -> Report {
@@ -136,6 +164,17 @@ pub fn refusal_test_source(test_name: &str, fixture: &str) -> String {
 fn {test_name}() {{
     let wasm = wat::parse_str({fixture:?}).unwrap();
     wasm_capsule_audit::audit_component(&wasm, &[]).expect_err("must refuse");
+}}
+"#
+    )
+}
+
+pub fn core_refusal_test_source(test_name: &str, fixture: &str) -> String {
+    format!(
+        r#"#[test]
+fn {test_name}() {{
+    let wasm = wat::parse_str({fixture:?}).unwrap();
+    wasm_capsule_audit::audit(&wasm, &[]).expect_err("must refuse");
 }}
 "#
     )
@@ -182,7 +221,7 @@ fn execute_plant(
 fn plant_body(dir: &Path, before: &[u8], probe: &PlantedProbe) -> Result<(), String> {
     let source =
         std::str::from_utf8(before).map_err(|err| format!("audit source is not utf-8: {err}"))?;
-    match plant_edit(source, &probe.replacement) {
+    match plant_at(source, probe.anchor, &probe.replacement) {
         Plant::Skip(reason) => refuse_silent_pass(&Plant::Skip(reason)),
         Plant::Source(planted) => {
             (probe.assert_shape)(source, &planted);
@@ -700,9 +739,13 @@ pub fn assert_live_attribution(line: &str, finding_id: &str, commit: &str, diges
 }
 
 pub fn accept_detail(kind: &str, fixture: &str) -> String {
-    format!(
-        "accepted an undeclared component {kind} import\nfixture: {fixture}\ndeclarations: empty"
-    )
+    // Core module imports are globals and tables. Component kinds keep the
+    // component label; a blanket word would misidentify one of the two.
+    let world = match kind {
+        "global" | "table" => "core",
+        _ => "component",
+    };
+    format!("accepted an undeclared {world} {kind} import\nfixture: {fixture}\ndeclarations: empty")
 }
 
 pub fn record_outcome(
