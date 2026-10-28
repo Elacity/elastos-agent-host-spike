@@ -45,6 +45,10 @@ DENY_MARKER = "`" + DENY_SPAN + "`"
 MINT_SPAN = "examples/agent-host/src/lib.rs:3549"
 MINT_MARKER = "`" + MINT_SPAN + "`"
 
+# Its quotation is the second indented line after the journal span, source line 3757.
+JOURNAL_SPAN = "examples/agent-host/src/lib.rs:3757"
+JOURNAL_MARKER = "`" + JOURNAL_SPAN + "`"
+
 # The draft indents a quotation by exactly four spaces.
 DRAFT_INDENT = "    "
 
@@ -246,6 +250,14 @@ def mint_quote(text):
     return remainders[1]
 
 
+def journal_quote(text):
+    """Return the second quotation after the journal span, or None when absent."""
+    remainders = _remainders(text, JOURNAL_MARKER)
+    if len(remainders) < 2:
+        return None
+    return remainders[1]
+
+
 def quoted_line_matches(quoted, source):
     """True only when the quotation equals the pinned source line."""
     return quoted == source
@@ -345,8 +357,24 @@ def _mint_quote_refusal(root, text, sha):
     return None
 
 
+def _journal_quote_refusal(root, text, sha):
+    """Return the 3757 refusal, or None when that quote is absent or matches."""
+    if text.count(JOURNAL_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + JOURNAL_SPAN
+    quoted = journal_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(JOURNAL_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + JOURNAL_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + JOURNAL_SPAN
+    return None
+
+
 def _quote_refusals(root, text, sha):
-    """Return the quote refusals in source order: 3526, 3549, 3754, 3755, 8149, 8162, then 8168."""
+    """Return the quote refusals in source order: 3526, 3549, 3754, 3755, 3757, 8149, 8162, then 8168."""
     deny = _deny_quote_refusal(root, text, sha)
     if deny is not None:
         return [deny]
@@ -366,6 +394,9 @@ def _quote_refusals(root, text, sha):
         following = _next_quote_refusal(root, text, sha)
         if following is not None:
             return [following]
+    journal = _journal_quote_refusal(root, text, sha)
+    if journal is not None:
+        return [journal]
     asks = _asks_quote_refusal(root, text, sha)
     if asks is not None:
         return [asks]
