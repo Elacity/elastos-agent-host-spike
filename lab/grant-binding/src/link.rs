@@ -220,3 +220,12 @@ gb = { path = \"../grant-bind\\u0069ng\", package = \"grant-bind\\u0069ng\" }\n"
     assert!(!literal_run.contains("grant-binding"));
     assert!(cargo_toml_path_depends_on_grant_binding(literal_run));
 }
+
+#[test]
+fn model_multiline_basic_string_escape_is_a_link() {
+    let multiline = "gb = { path = \"\"\"../grant-bind\\u0069ng\"\"\", package = \"\"\"grant-bind\\u0069ng\"\"\" }\n";
+    assert!(!multiline.contains("grant-binding"));
+    assert!(multiline.contains("\\u0069"));
+    assert!(multiline.contains("\"\"\""));
+    assert!(cargo_toml_path_depends_on_grant_binding(multiline));
+}
