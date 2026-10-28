@@ -61,6 +61,36 @@ ASKS_SIXTH = "/// keeps no new production path."
 ASKS_CFG = "#[cfg(test)]"
 ASKS_CONST = 'const ASKS_JSON: &str = include_str!("../asks.json");'
 
+DENY_REL = OWNED_REL
+DENY_NUMBER = 3526
+DENY_SPAN = "examples/agent-host/src/lib.rs:3526"
+DENY_LINES = (
+    "/// A missing grant denies the step. A grant id is recorded and does not run it.",
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    "fn authorize(journal: &mut Journal, id: u64, grant: Option<&str>) -> bool {",
+    "    let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) else {",
+    "        return false;",
+    "    };",
+    "    if step.state != StepState::Prepared {",
+    "        return false;",
+    "    }",
+    "    match grant {",
+    '        None | Some("") => {',
+    "            step.state = StepState::Denied;",
+    "            step.grant = None;",
+    "            false",
+    "        }",
+    "        Some(grant_id) => {",
+    "            step.grant = Some(grant_id.to_string());",
+    "            true",
+    "        }",
+    "    }",
+    "}",
+)
+DENY_QUOTE = DENY_LINES[0]
+DENY_SECOND = DENY_LINES[1]
+DENY_LAST = DENY_LINES[-1]
+
 
 class CitationCheckTests(unittest.TestCase):
     def _temp_root(self):
@@ -233,6 +263,47 @@ class CitationCheckTests(unittest.TestCase):
         lines = [first, second, third, fourth, ASKS_FIFTH, ASKS_SIXTH, ASKS_CFG, last]
         body = "`" + ASKS_SPAN + "` states that the Runtime enforces each grant.\n\n"
         body += "".join("    " + line + "\n" for line in lines[:count])
+        return body + "\n"
+
+    def _deny_source(
+        self,
+        first=DENY_QUOTE,
+        owned=OWNED_QUOTE,
+        third=ASKS_THIRD,
+        marker_last=MARKER_CONST,
+        launching_last=LAUNCHING_CONST,
+    ):
+        """A committed file with line 3526, the owned lines, asks, marker and launching."""
+        rows = ["// filler"] * (DENY_NUMBER - 1) + [first]
+        rows += ["// filler"] * (OWNED_NUMBER - 1 - len(rows)) + [owned, NEXT_QUOTE]
+        rows += ["// filler"] * (ASKS_NUMBER - 3 - len(rows))
+        rows += [
+            ASKS_FIRST,
+            ASKS_SECOND,
+            third,
+            ASKS_FOURTH,
+            ASKS_FIFTH,
+            ASKS_SIXTH,
+            ASKS_CFG,
+            ASKS_CONST,
+        ]
+        rows += ["// filler"] * (MARKER_NUMBER - 4 - len(rows))
+        rows += [MARKER_HEAD, MARKER_TAIL, MARKER_CFG, marker_last]
+        rows += ["// filler"] * (LAUNCHING_NUMBER - len(rows) - 5)
+        rows += [
+            LAUNCHING_HEAD,
+            LAUNCHING_SECOND,
+            LAUNCHING_THIRD,
+            LAUNCHING_CFG,
+            launching_last,
+        ]
+        return ("\n".join(rows) + "\n").encode("utf-8")
+
+    def _deny_block(self, first=DENY_QUOTE, second=DENY_SECOND, last=DENY_LAST):
+        """A draft that cites the deny span and indents its 21 lines below it."""
+        lines = [first, second] + list(DENY_LINES[2:-1]) + [last]
+        body = "`" + DENY_SPAN + "` states that a missing grant denies the step.\n\n"
+        body += "".join("    " + line + "\n" for line in lines)
         return body + "\n"
 
     def _caught(self, global_name, planted, named_test, prefix, label):
@@ -918,6 +989,138 @@ class CitationCheckTests(unittest.TestCase):
             ["refuse: pinned commit is not a commit: " + "f" * 40],
         )
 
+    def test_live_draft_deny_quote_matches_its_pinned_line(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        self.assertEqual(check.deny_quote(text), DENY_QUOTE)
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        self.assertEqual(
+            check.pinned_line(root, sha, DENY_REL, DENY_NUMBER),
+            DENY_QUOTE,
+        )
+
+    def test_deny_quoted_line_mismatch_is_refused(self):
+        expected = "refuse: quoted line does not match " + DENY_SPAN
+        root = self._draft(
+            self._deny_block(first=DENY_QUOTE + "x"),
+            {DENY_REL: self._deny_source()},
+        )
+        self.assertEqual(check.problems(root), [expected])
+        (root / DENY_REL).write_bytes(
+            self._deny_source(first="// edited in the worktree")
+        )
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_deny_quoted_line_match_ignores_the_worktree_file(self):
+        root = self._draft(self._deny_block(), {DENY_REL: self._deny_source()})
+        self.assertEqual(check.problems(root), [])
+        (root / DENY_REL).write_bytes(
+            self._deny_source(first="// edited in the worktree")
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_deny_second_line_does_not_stand_for_line_3526(self):
+        root = self._draft(
+            self._deny_block(second=DENY_SECOND + "x"),
+            {DENY_REL: self._deny_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_deny_last_line_does_not_stand_for_line_3526(self):
+        root = self._draft(
+            self._deny_block(last=DENY_LAST + "x"),
+            {DENY_REL: self._deny_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_deny_span_without_an_indented_line_adds_no_refusal(self):
+        body = (
+            "`"
+            + DENY_SPAN
+            + "` states that a missing grant denies the step.\n"
+            "\n"
+            "The block follows.\n"
+        )
+        got, reads = self._pinned_reads(body, {DENY_REL: self._deny_source()})
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [])
+
+    def test_deny_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        expected = "refuse: quoted line is not in the pinned commit: " + DENY_SPAN
+        short = ("// filler\n" * 10).encode("utf-8")
+        root = self._draft(self._deny_block(), {DENY_REL: short})
+        (root / DENY_REL).write_bytes(self._deny_source())
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_two_deny_spans_are_refused(self):
+        expected = "refuse: quoted line is not one line: " + DENY_SPAN
+        body = self._deny_block() + "\nAgain `" + DENY_SPAN + "`.\n"
+        got, reads = self._pinned_reads(body, {DENY_REL: self._deny_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [])
+
+    def test_draft_without_the_deny_span_adds_no_deny_refusal(self):
+        root = self._draft(
+            self._quote_body(OWNED_QUOTE, NEXT_QUOTE),
+            {DENY_REL: self._deny_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_deny_line_mismatch_adds_no_owned_or_asks_refusal(self):
+        expected = "refuse: quoted line does not match " + DENY_SPAN
+        body = (
+            self._deny_block(first=DENY_QUOTE + "x")
+            + self._quote_body(OWNED_QUOTE + "y", NEXT_QUOTE)
+            + self._asks_block(third=ASKS_THIRD + "z")
+        )
+        got, reads = self._pinned_reads(body, {DENY_REL: self._deny_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [DENY_NUMBER])
+
+    def test_owned_line_mismatch_follows_the_deny_match(self):
+        expected = "refuse: quoted line does not match " + OWNED_SPAN
+        body = self._deny_block() + self._quote_body(OWNED_QUOTE + "x", NEXT_QUOTE)
+        got, reads = self._pinned_reads(body, {DENY_REL: self._deny_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [DENY_NUMBER, OWNED_NUMBER])
+
+    def test_draft_without_the_deny_span_still_refuses_an_owned_mismatch(self):
+        expected = "refuse: quoted line does not match " + OWNED_SPAN
+        root = self._draft(
+            self._quote_body(OWNED_QUOTE + "x", NEXT_QUOTE),
+            {DENY_REL: self._deny_source()},
+        )
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_draft_without_the_deny_span_still_refuses_an_asks_mismatch(self):
+        expected = "refuse: quoted line does not match " + ASKS_SPAN
+        root = self._draft(
+            self._asks_block(third=ASKS_THIRD + "x"),
+            {DENY_REL: self._deny_source()},
+        )
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_deny_quote_refusal_waits_for_a_known_pin(self):
+        body = self._deny_block(first=DENY_QUOTE + "x")
+        files = {DENY_REL: self._deny_source()}
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+        bad_pin = "Pinned commit: HEAD\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(bad_pin, files)),
+            ["refuse: pinned commit is not one 40-hex commit"],
+        )
+        unknown = "Pinned commit: " + "f" * 40 + "\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(unknown, files, commit=True)),
+            ["refuse: pinned commit is not a commit: " + "f" * 40],
+        )
+
     def test_falsifier_missing_path_is_caught(self):
         self._caught(
             "read_file",
@@ -1042,6 +1245,15 @@ class CitationCheckTests(unittest.TestCase):
             self.test_asks_quoted_line_mismatch_is_refused,
             "refuse: quoted line does not match",
             "CAUGHT asks-quoted-line",
+        )
+
+    def test_falsifier_deny_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_deny_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT deny-quoted-line",
         )
 
     def test_worktree_root_contains_checker(self):
