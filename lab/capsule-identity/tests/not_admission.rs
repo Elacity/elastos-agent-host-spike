@@ -104,11 +104,17 @@ fn valid_signature_grants_nothing_by_itself() {
 /// Every `pub fn` the library declares: identity checks only. `check_name`
 /// is listed twice: the free function and `CheckedBundle`'s checked form.
 /// `manifest_name` is task 036's: the checked manifest's `name`, identity
-/// data read from the one manifest check, not a decision. The next five are task 011's package record: its digest, its payload, its
+/// data read from the one manifest check, not a decision.
+/// `encode_listed_files` is task 047's: the one encoder, for a caller whose
+/// walk lists each file's path, size and SHA-256. `encode_chunked_files` is
+/// task 055's: the same encoder, for a caller whose walk kept each raw leaf's
+/// digest instead, so it names a file of any size without a second read. The next five are task 011's package record: its digest, its payload, its
 /// signer and its two verifiers. The last four are task 015's variant
-/// binding: its payload, its signer and its two verifiers. None admits,
-/// grants or launches.
-const IDENTITY_FUNCTIONS: [&str; 25] = [
+/// binding: its payload, its signer and its two verifiers. The last two are
+/// task 049's: the package record's one signer and one verifier over a lab
+/// CID, which the folder and checked record calls use. None admits, grants
+/// or launches.
+const IDENTITY_FUNCTIONS: [&str; 29] = [
     "lab_cid",
     "lab_cid_observed",
     "checked_bundle",
@@ -119,6 +125,8 @@ const IDENTITY_FUNCTIONS: [&str; 25] = [
     "manifest_name",
     "check_name",
     "encode_entries",
+    "encode_listed_files",
+    "encode_chunked_files",
     "entry_kind",
     "entry_path",
     "name_signature_message",
@@ -134,6 +142,8 @@ const IDENTITY_FUNCTIONS: [&str; 25] = [
     "sign_variant_binding",
     "verify_checked_variant_binding",
     "verify_variant_binding",
+    "sign_cid_record",
+    "verify_cid_record",
 ];
 
 /// How many times each name occurs in `names`.
