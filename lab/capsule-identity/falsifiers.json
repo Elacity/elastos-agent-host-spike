@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044 and 047). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047 and 048). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -2752,8 +2752,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "            cid: cid_bytes(RAW_CODEC, &file.sha256),\n",
-          "new": "            cid: cid_bytes(DAG_PB_CODEC, &file.sha256),\n"
+          "old": "    (cid_bytes(RAW_CODEC, sha256), size)\n",
+          "new": "    (cid_bytes(DAG_PB_CODEC, sha256), size)\n"
         }
       ],
       "tests": [
@@ -2778,18 +2778,18 @@
     },
     {
       "id": "F-CI18e",
-      "title": "the over-chunk refusal is removed: a larger file becomes one raw leaf",
+      "title": "the leaf-limit refusal is removed: a file of more than 174 leaves gets one file root (retargeted by task 048: the one-leaf refusal it once removed is no longer in the walk's path)",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "        if file.size > CHUNK_SIZE as u64 {\n            return Err(Refusal::FileOverChunkLimit {\n                path: file.path.clone(),\n                length: usize::try_from(file.size).unwrap_or(usize::MAX),\n            });\n        }\n",
+          "old": "    if content.len().div_ceil(CHUNK_SIZE) > MAX_FILE_LINKS {\n        return Err(Refusal::FileOverLeafLimit {\n            path: path.to_owned(),\n            length: content.len(),\n        });\n    }\n",
           "new": ""
         }
       ],
       "tests": [
-        "file_over_the_chunk_limit_is_refused"
+        "file_of_174_leaves_is_named_and_one_byte_more_is_refused"
       ]
     },
     {
@@ -2848,8 +2848,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "            cid: cid_bytes(RAW_CODEC, &file.sha256),\n",
-          "new": "            cid: if file.size <= 32 {\n                [&[CID_VERSION, RAW_CODEC, 0x00, file.size as u8][..], &file.sha256[..file.size as usize]].concat()\n            } else {\n                cid_bytes(RAW_CODEC, &file.sha256)\n            },\n"
+          "old": "    (cid_bytes(RAW_CODEC, sha256), size)\n",
+          "new": "    if size <= 32 {\n        ([&[CID_VERSION, RAW_CODEC, 0x00, size as u8][..], &sha256[..size as usize]].concat(), size)\n    } else {\n        (cid_bytes(RAW_CODEC, sha256), size)\n    }\n"
         }
       ],
       "tests": [
@@ -2929,8 +2929,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "            cid: cid_bytes(RAW_CODEC, &file.sha256),\n",
-          "new": "            cid: if file.size == 0 {\n                cid_bytes(DAG_PB_CODEC, &naming_hash(&[0x0a, 0x04, 0x08, 0x02, 0x18, 0x00]))\n            } else {\n                cid_bytes(RAW_CODEC, &file.sha256)\n            },\n"
+          "old": "    (cid_bytes(RAW_CODEC, sha256), size)\n",
+          "new": "    if size == 0 {\n        (cid_bytes(DAG_PB_CODEC, &naming_hash(&[0x0a, 0x04, 0x08, 0x02, 0x18, 0x00])), size)\n    } else {\n        (cid_bytes(RAW_CODEC, sha256), size)\n    }\n"
         }
       ],
       "tests": [
@@ -4408,7 +4408,7 @@
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
           "old": "    let (digest, _) = encode_directory(&root, \"\", &naming_hash)?;\n",
-          "new": "    let _ = encode_directory(&root, \"\", &naming_hash)?;\n    let mut sorted: Vec<&ListedFile> = files.iter().collect();\n    sorted.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));\n    let listed: Vec<String> = sorted\n        .iter()\n        .map(|file| {\n            let hex: String = file.sha256.iter().map(|byte| format!(\"{byte:02x}\")).collect();\n            format!(\"{{\\\"path\\\":{:?},\\\"sha256\\\":\\\"{hex}\\\",\\\"size\\\":{}}}\", file.path, file.size)\n        })\n        .collect();\n    let listing = format!(\"{{\\\"files\\\":[{}],\\\"schema\\\":\\\"elastos.capsule.closure/v1\\\"}}\", listed.join(\",\"));\n    let digest = naming_hash(listing.as_bytes());\n"
+          "new": "    let _ = encode_directory(&root, \"\", &naming_hash)?;\n    fn walk_listing(directory: &Directory, parent: &str, out: &mut Vec<(String, String, u64)>) {\n        for (name, child) in &directory.children {\n            let path = if parent.is_empty() { name.clone() } else { format!(\"{parent}/{name}\") };\n            match child {\n                Child::File { cid, tsize } => {\n                    let hex: String = cid[4..].iter().map(|byte| format!(\"{byte:02x}\")).collect();\n                    out.push((path, hex, *tsize));\n                }\n                Child::Directory(inner) => walk_listing(inner, &path, out),\n            }\n        }\n    }\n    let mut sorted = Vec::new();\n    walk_listing(&root, \"\", &mut sorted);\n    sorted.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));\n    let listed: Vec<String> = sorted\n        .iter()\n        .map(|(path, hex, size)| format!(\"{{\\\"path\\\":{path:?},\\\"sha256\\\":\\\"{hex}\\\",\\\"size\\\":{size}}}\"))\n        .collect();\n    let listing = format!(\"{{\\\"files\\\":[{}],\\\"schema\\\":\\\"elastos.capsule.closure/v1\\\"}}\", listed.join(\",\"));\n    let digest = naming_hash(listing.as_bytes());\n"
         }
       ],
       "tests": [
@@ -4424,8 +4424,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "            tsize: file.size,\n",
-          "new": "            tsize: 0,\n"
+          "old": "    (cid_bytes(RAW_CODEC, sha256), size)\n",
+          "new": "    (cid_bytes(RAW_CODEC, sha256), 0)\n"
         }
       ],
       "tests": [
@@ -4445,7 +4445,88 @@
         }
       ],
       "tests": [
-        "listed_file_over_the_chunk_limit_is_refused"
+        "listed_file_over_the_chunk_limit_is_refused",
+        "listed_file_over_one_leaf_names_the_bytes_call"
+      ]
+    },
+    {
+      "id": "F-CI48a",
+      "title": "a file root's links carry no name field: the empty name's 12 00 is left out",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        put_length_delimited(&mut pb_link, 2, link.name.as_bytes());\n",
+          "new": "        if !link.name.is_empty() {\n            put_length_delimited(&mut pb_link, 2, link.name.as_bytes());\n        }\n"
+        }
+      ],
+      "tests": [
+        "file_over_one_leaf_has_the_pinned_cid"
+      ]
+    },
+    {
+      "id": "F-CI48b",
+      "title": "the blocksizes are left out of a file root's UnixFS data",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    for leaf in leaves {\n        data.push(4 << 3);\n        put_varint(&mut data, leaf.tsize);\n    }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "file_over_one_leaf_has_the_pinned_cid"
+      ]
+    },
+    {
+      "id": "F-CI48c",
+      "title": "the filesize is left out of a file root's UnixFS data",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    data.push(3 << 3);\n    put_varint(&mut data, length);\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "file_over_one_leaf_has_the_pinned_cid"
+      ]
+    },
+    {
+      "id": "F-CI48d",
+      "title": "a link to a file root has the leaves' lengths as Tsize, without the root block's length",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    let tsize = block.len() as u64 + leaves.iter().map(|leaf| leaf.tsize).sum::<u64>();\n",
+          "new": "    let tsize = leaves.iter().map(|leaf| leaf.tsize).sum::<u64>();\n"
+        }
+      ],
+      "tests": [
+        "file_over_one_leaf_has_the_pinned_cid"
+      ]
+    },
+    {
+      "id": "F-CI48e",
+      "title": "the leaf limit 174 (max-file-links) becomes 175",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "const MAX_FILE_LINKS: usize = 174;\n",
+          "new": "const MAX_FILE_LINKS: usize = 175;\n"
+        }
+      ],
+      "tests": [
+        "file_of_174_leaves_is_named_and_one_byte_more_is_refused"
       ]
     }
   ]
