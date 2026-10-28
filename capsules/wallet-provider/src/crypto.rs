@@ -668,3 +668,131 @@ mod uf_crypto_wire_refusal_tests {
         );
     }
 }
+
+/// One test per refusal string the managed-signing path and the external
+/// handoff signature readers raise, each asserting the whole `Err` value. They
+/// pin answers the signer already gives: they add no rule and register no
+/// falsifier. They prove what the wallet provider agrees to sign and why it
+/// refuses the rest, not confinement: the Runtime decides whether the provider
+/// runs at all.
+///
+/// `managed Bitcoin accounts only support bitcoin_bip322_proof signing` (`:117`)
+/// is a different string from `Bitcoin accounts only support
+/// bitcoin_bip322_proof signing` at `approval.rs:192`, which
+/// `approval_refuses_non_bitcoin_intent_for_bitcoin_account` pins: that one
+/// refuses when the approval request is recorded, this one when the recorded
+/// request is signed.
+///
+/// `Browser wallet signature payload missing message` (`:453`) and `Browser
+/// typed-data payload missing canonical typed data` (`:461`) have sibling sites
+/// that task 128 pins: `crypto/evm/validation.rs:92` through
+/// `personal_sign_missing_message_is_refused`, and `crypto/evm/validation.rs:163`
+/// through `typed_data_missing_canonical_is_refused`. The `crypto/evm/browser.rs:33`
+/// copy sits behind that same validator and is reached by no test.
+///
+/// Three lines are recorded as unreachable instead of tested. `unsupported
+/// managed wallet proof type` (`:24`) is the `_` arm over `managed_proof_type`,
+/// which returns only `MANAGED_EVM_PROOF_TYPE` or `MANAGED_BTC_P2WPKH_PROOF_TYPE`
+/// (`validation.rs:242` to `:252`), as task 129 recorded. `invalid managed
+/// rights signature: {err}` (`:85`) canonicalises the signature `sign_evm_message`
+/// produced one line above at `:81`, whose output `canonicalize_evm_signature`
+/// accepts, so a rejection would need a fault in k256 itself. `Bitcoin BIP-322
+/// payload missing message` (`:469`) is reached only from
+/// `external_signature_message` callers that already refused a payload without
+/// `message`: `approval.rs:666` in `complete_connector_handoff` after
+/// `validate_bitcoin_challenge_for_signing` at `:659`, which refuses at
+/// `crypto/bitcoin.rs:482`, and `approval.rs:479` in `approve_connector_handoff`,
+/// which that handoff reaches at `crypto.rs:201` with no validator of its own.
+#[cfg(test)]
+mod uf_signing_path_refusal_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A managed request every earlier branch of the signing path accepts, so
+    /// each case reaches the guard it pins. The two fields a case changes are
+    /// `chain_namespace` for `:117` and `intent` plus `payload` for the two
+    /// readers; the rest is one valid value in the shape `request_approval`
+    /// stores (`approval.rs:262` to `:294`).
+    fn request() -> WalletApprovalRequest {
+        serde_json::from_value(json!({
+            "schema": "elastos.wallet.approval_request/v1",
+            "request_id": "req-signing-path",
+            "kind": "signature",
+            "status": "pending",
+            "principal_id": "person:local:alice",
+            "account_id": "wallet:eip155:20:0x1111111111111111111111111111111111111111",
+            "proof_binding_id": "proof:eip155:20:0x1111111111111111111111111111111111111111",
+            "chain_namespace": "eip155:20",
+            "address": "0x1111111111111111111111111111111111111111",
+            "intent": "browser_personal_sign",
+            "requested_by_actor": "browser",
+            "resource": "elastos://wallet/eip155:20/sign/browser_personal_sign",
+            "reason": "unit test signing path",
+            "payload": { "message": "hello" },
+            "payload_hash": "hash-signing-path",
+            "created_at": 0,
+            "expires_at": 1_000,
+        }))
+        .expect("the signing-path request fixture is a valid approval request")
+    }
+
+    /// Catches removal of the Bitcoin chain guard in `sign_managed_approval` at
+    /// `:115`, which raises `:117`. The request carries the Bitcoin mainnet
+    /// chain namespace and the `browser_account_access` intent, so every intent
+    /// branch above the guard misses and every branch below it would sign an
+    /// EVM attestation with the account's EVM key. `approve_and_sign_managed`
+    /// (`approval.rs:923`) is the production caller that reaches the guard.
+    ///
+    /// The `Ok` type carries no `Debug`, so the case maps it to `()` and
+    /// compares the whole result against the whole refusal.
+    #[test]
+    fn signing_path_refuses_bitcoin_chain_for_a_non_bitcoin_intent() {
+        let signing_key = SigningKey::from_slice(&[0x11; 32]).expect("the fixed test key is valid");
+        let mut request = request();
+        request.chain_namespace = BITCOIN_MAINNET_CHAIN_NAMESPACE.to_string();
+        request.intent = "browser_account_access".to_string();
+        assert_eq!(
+            sign_managed_approval(&signing_key, &request).map(|_| ()),
+            Err("managed Bitcoin accounts only support bitcoin_bip322_proof signing".to_string())
+        );
+    }
+
+    /// Catches removal of the `message` reader in `external_signature_message`
+    /// at `:451`, which raises `:453`. The payload carries no `message` and one
+    /// number under that key, because a non-string `message` is the case a
+    /// reader that stopped reading the value would still refuse. The route is
+    /// `complete_connector_handoff` at `approval.rs:771`, after the request was
+    /// handed to the page at `crypto.rs:201`.
+    #[test]
+    fn signing_path_refuses_personal_sign_without_a_message() {
+        let mut request = request();
+        request.intent = "browser_personal_sign".to_string();
+        for payload in [json!({}), json!({ "message": 0 })] {
+            request.payload = payload;
+            assert_eq!(
+                external_signature_message(&request).unwrap_err(),
+                "Browser wallet signature payload missing message"
+            );
+        }
+    }
+
+    /// Catches removal of the `typed_data_canonical` reader in
+    /// `external_signature_message` at `:459`, which raises `:461`. The payload
+    /// carries no canonical typed data and one number under that key, so a
+    /// reader that stopped reading the value still refuses. The route is
+    /// `approve_connector_handoff` at `approval.rs:479`, which reaches the
+    /// reader at `crypto.rs:201`; the completion path hashes typed data itself
+    /// at `approval.rs:764` and never calls this reader.
+    #[test]
+    fn signing_path_refuses_typed_data_without_canonical_data() {
+        let mut request = request();
+        request.intent = "browser_typed_data_sign".to_string();
+        for payload in [json!({}), json!({ "typed_data_canonical": 0 })] {
+            request.payload = payload;
+            assert_eq!(
+                external_signature_message(&request).unwrap_err(),
+                "Browser typed-data payload missing canonical typed data"
+            );
+        }
+    }
+}
