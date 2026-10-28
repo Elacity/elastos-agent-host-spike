@@ -1022,12 +1022,10 @@ fn operations_section_cites_existing_tests() {
                             "operation `{first}` needs right cell `{NO_DECLARED_RIGHT}`, not `{right}`"
                         ));
                     }
-                } else if STORAGE_OPERATIONS.contains(&first) {
-                    if right != "storage" {
-                        return Err(format!(
-                            "operation `{first}` needs right cell `storage`, not `{right}`"
-                        ));
-                    }
+                } else if STORAGE_OPERATIONS.contains(&first) && right != "storage" {
+                    return Err(format!(
+                        "operation `{first}` needs right cell `storage`, not `{right}`"
+                    ));
                 }
             } else if right == UNSHOWN_RIGHT {
                 return Err(format!(
@@ -1275,7 +1273,7 @@ fn operations_section_cites_existing_tests() {
                 ));
             };
             let wire_name = match attribute.take() {
-                Some(line) if line == "#[serde(default)]" => rust_name.trim().to_string(),
+                Some("#[serde(default)]") => rust_name.trim().to_string(),
                 Some(line) => {
                     let quoted_value = |prefix| {
                         line.strip_prefix(prefix)
