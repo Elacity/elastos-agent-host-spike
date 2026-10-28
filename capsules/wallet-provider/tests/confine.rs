@@ -6719,21 +6719,14 @@ fn operations_table_rows(document_name: &str, section: &str) -> (Vec<OperationsR
 
 /// `variant` in snake_case, by the rule the wire protocol uses
 /// (`#[serde(rename_all = "snake_case")]`): an underscore before an upper-case
-/// letter that follows a lower-case letter or a digit, then lower case.
+/// letter after the first character, then ASCII lower case.
 fn variant_snake_case(variant: &str) -> String {
     let mut name = String::with_capacity(variant.len());
     for (index, character) in variant.char_indices() {
-        if character.is_ascii_uppercase() {
-            let previous = variant[..index].chars().next_back();
-            if previous
-                .is_some_and(|previous| previous.is_ascii_lowercase() || previous.is_ascii_digit())
-            {
-                name.push('_');
-            }
-            name.push(character.to_ascii_lowercase());
-        } else {
-            name.push(character);
+        if index > 0 && character.is_uppercase() {
+            name.push('_');
         }
+        name.push(character.to_ascii_lowercase());
     }
     name
 }
@@ -6780,7 +6773,8 @@ fn dispatch_arm_variants(source: &str, signature: &str, arm_type: &str) -> Optio
 /// ordinary arms appear in the table in dispatch order. Where `fn handle`
 /// answers `wallet_contract`, every `WalletProviderOperationV2::<Variant>` arm
 /// of `fn dispatch_wallet_operation` is one `wallet_contract <kind>` row, and
-/// those rows follow the ordinary rows. A name reaches snake_case by
+/// those rows follow the ordinary rows in their own dispatch order. Each arm
+/// matches exactly one row. A name reaches snake_case by
 /// `variant_snake_case`. The contract enum is the only list of kinds, so a new
 /// kind fails here until its row exists.
 fn row_set_problems(
@@ -6823,9 +6817,12 @@ fn row_set_problems(
         }
     }
     let observed: Vec<&str> = rows.iter().map(|row| row.operation.as_str()).collect();
+    let mut unmatched_rows = observed.clone();
     let mut problems = Vec::new();
     for name in &expected {
-        if !observed.contains(&name.as_str()) {
+        if let Some(index) = unmatched_rows.iter().position(|row| *row == name) {
+            unmatched_rows.remove(index);
+        } else {
             problems.push(format!(
                 "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set: the arm {name} of \
                  {} has no row",
@@ -6833,8 +6830,14 @@ fn row_set_problems(
             ));
         }
     }
-    for name in &observed {
-        if !expected.iter().any(|expected| expected == name) {
+    for name in unmatched_rows {
+        if expected.iter().any(|expected| expected == name) {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row {name} has \
+                 more copies than matching arms in {}",
+                provider_path.display()
+            ));
+        } else {
             problems.push(format!(
                 "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row {name} has \
                  no arm in {}",
@@ -6842,47 +6845,36 @@ fn row_set_problems(
             ));
         }
     }
-    problems.extend(row_set_order_problems(
-        document_name,
-        &expected,
-        &observed,
-        provider_path,
-    ));
+    // Pair each occurrence before comparing order, so missing and surplus rows
+    // each get their own reason, without also reporting their shifted positions.
+    if problems.is_empty() {
+        problems.extend(row_set_order_problems(
+            document_name,
+            &expected,
+            &observed,
+            provider_path,
+        ));
+    }
     problems
 }
 
-/// Every problem with the order of one table's rows: the ordinary rows follow
-/// the dispatch order of their arms, and the `wallet_contract` kind rows come
-/// after the last ordinary row.
+/// Compare the full row sequence after `row_set_problems` pairs every
+/// occurrence: ordinary arms in dispatch order, then kinds in dispatch order.
 fn row_set_order_problems(
     document_name: &str,
     expected: &[String],
     observed: &[&str],
     provider_path: &Path,
 ) -> Vec<String> {
-    let is_kind = |name: &str| name.starts_with(&format!("{WALLET_CONTRACT_ARM} "));
-    let ordinary_wanted: Vec<&str> = expected
+    if expected
         .iter()
         .map(String::as_str)
-        .filter(|name| !is_kind(name) && observed.contains(name))
-        .collect();
-    let ordinary_found: Vec<&str> = observed
-        .iter()
-        .copied()
-        .filter(|name| expected.iter().any(|expected| expected == name) && !is_kind(name))
-        .collect();
-    let mut problems = Vec::new();
-    if let Some((wanted, found)) = ordinary_wanted
-        .iter()
-        .zip(ordinary_found.iter())
-        .find(|(wanted, found)| wanted != found)
+        .eq(observed.iter().copied())
     {
-        problems.push(format!(
-            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row {found} comes \
-             where {} answers {wanted}, and the table keeps the dispatch order",
-            provider_path.display()
-        ));
+        return Vec::new();
     }
+    let is_kind = |name: &str| name.starts_with(&format!("{WALLET_CONTRACT_ARM} "));
+    let mut problems = Vec::new();
     if let Some(first_kind) = observed.iter().position(|name| is_kind(name)) {
         if let Some(last_arm) = observed
             .iter()
@@ -6896,8 +6888,22 @@ fn row_set_order_problems(
                     observed[last_arm],
                     provider_path.display()
                 ));
+                return problems;
             }
         }
+    }
+    if let Some((index, _)) = observed
+        .iter()
+        .enumerate()
+        .find(|(index, found)| expected[*index] != **found)
+    {
+        problems.push(format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row {} comes \
+             where {} answers {}, and the table keeps the dispatch order",
+            observed[index],
+            provider_path.display(),
+            expected[index]
+        ));
     }
     problems
 }
@@ -8018,7 +8024,8 @@ fn every_operations_table_cites_existing_tests() {
 /// naming an undeclared id or `no named test shows this` passes; WP143 disables
 /// the both-sides rule, so a right row with one side and a `none:` row with a
 /// side pass; WP144 disables the Linux-status rule, so a cell naming another
-/// status passes. This real-tree test fails on each, at that document's row.
+/// status passes. `operations_table_row_check_refuses_each_bad_table` catches
+/// each mutation with a bad-table fixture; this test checks the real tables.
 #[test]
 fn every_operations_table_row_matches_its_provider_and_the_contract() {
     let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -8835,7 +8842,10 @@ const FIXTURE_OPERATIONS: [&str; 4] = [
 /// `fn dispatch_wallet_operation` answers `list_accounts`. The passing table
 /// returns no problem. Rule 1 refuses a `handle` arm with no row, a row with no
 /// arm, a kind arm with no row, ordinary rows in another order and a kind row
-/// before an ordinary row. Rule 2 refuses a Right cell that names an undeclared
+/// before an ordinary row. A two-kind fixture also refuses swapped kind rows,
+/// duplicate ordinary and kind rows, and equal-length rows with the wrong
+/// multiplicity. An acronym fixture requires serde's wire name. Rule 2 refuses
+/// a Right cell that names an undeclared
 /// id and one that says `no named test shows this`. Rule 3 refuses a right row
 /// missing `permitted:`, a right row missing `nearest outside refused:` and a
 /// `none:` row citing `permitted:`. Rule 4 refuses a Linux cell that is not
@@ -8859,6 +8869,9 @@ fn operations_table_row_check_refuses_each_bad_table() {
         ("VerifyBip322Proof", "verify_bip322_proof"),
         ("ImportManagedRecoverySet", "import_managed_recovery_set"),
         ("GetPersonaDid", "get_persona_did"),
+        ("GetDID", "get_d_i_d"),
+        ("DID", "d_i_d"),
+        ("VerifyBIP322Proof", "verify_b_i_p322_proof"),
     ] {
         assert_eq!(
             variant_snake_case(case),
@@ -8961,6 +8974,114 @@ fn operations_table_row_check_refuses_each_bad_table() {
         )],
         "a kind row before an ordinary row must be refused"
     );
+
+    // Rule 1: both contract kinds retain their dispatch order and multiplicity.
+    let two_kind_source = ROW_FIXTURE_PROVIDER.replace(
+        "        WalletProviderOperationV2::ListAccounts",
+        "        WalletProviderOperationV2::GetDID {} => self.get_did(),\n\
+                WalletProviderOperationV2::ListAccounts",
+    );
+    assert_ne!(two_kind_source, ROW_FIXTURE_PROVIDER);
+    fs::write(&provider_source, &two_kind_source).expect("two-kind fixture provider source");
+    let two_kind_operations = [
+        "init",
+        "status",
+        "shutdown",
+        "wallet_contract get_d_i_d",
+        "wallet_contract list_accounts",
+    ];
+    assert_eq!(
+        operations_table_row_problems(
+            "fixture-provider",
+            &fixture_row_document(&two_kind_operations),
+            provider.path()
+        ),
+        Vec::<String>::new(),
+        "two kinds in dispatch order, including serde's acronym name, must pass"
+    );
+
+    let mut swapped_kinds = two_kind_operations;
+    swapped_kinds.swap(3, 4);
+    assert_eq!(
+        operations_table_row_problems(
+            "fixture-provider",
+            &fixture_row_document(&swapped_kinds),
+            provider.path()
+        ),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row \
+             wallet_contract list_accounts comes where {} answers wallet_contract get_d_i_d, \
+             and the table keeps the dispatch order",
+            provider_source.display()
+        )],
+        "contract kinds out of dispatch order must be refused"
+    );
+
+    for (case, index) in [("the final kind row", 4), ("shutdown before the kinds", 2)] {
+        let mut duplicate = two_kind_operations.to_vec();
+        duplicate.insert(index + 1, duplicate[index]);
+        assert_eq!(
+            operations_table_row_problems(
+                "fixture-provider",
+                &fixture_row_document(&duplicate),
+                provider.path()
+            ),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row {} has \
+                 more copies than matching arms in {}",
+                duplicate[index],
+                provider_source.display()
+            )],
+            "a duplicate of {case} must be refused"
+        );
+    }
+
+    let mut replaced_kind = two_kind_operations;
+    replaced_kind[3] = replaced_kind[4];
+    assert_eq!(
+        operations_table_row_problems(
+            "fixture-provider",
+            &fixture_row_document(&replaced_kind),
+            provider.path()
+        ),
+        vec![
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the arm \
+                 wallet_contract get_d_i_d of {} has no row",
+                provider_source.display()
+            ),
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row \
+                 wallet_contract list_accounts has more copies than matching arms in {}",
+                provider_source.display()
+            ),
+        ],
+        "equal lengths with different multiplicities must be refused"
+    );
+
+    let mut wrong_acronym = two_kind_operations;
+    wrong_acronym[3] = "wallet_contract get_did";
+    assert_eq!(
+        operations_table_row_problems(
+            "fixture-provider",
+            &fixture_row_document(&wrong_acronym),
+            provider.path()
+        ),
+        vec![
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the arm \
+                 wallet_contract get_d_i_d of {} has no row",
+                provider_source.display()
+            ),
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row \
+                 wallet_contract get_did has no arm in {}",
+                provider_source.display()
+            ),
+        ],
+        "an acronym row must name the operation as serde does"
+    );
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
 
     // Rule 2: a Right cell with an undeclared id, and one naming no test.
     for (case, right) in [
