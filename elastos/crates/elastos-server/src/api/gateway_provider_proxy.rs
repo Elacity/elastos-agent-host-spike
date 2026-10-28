@@ -1765,6 +1765,9 @@ pub(super) async fn gateway_provider_proxy(
                 Ok(value) => value,
                 Err((status, message)) => return (status, message).into_response(),
             };
+        if op == "runs_create" && !hosted_run_allowed(&state.data_dir, &context, &request) {
+            return (StatusCode::FORBIDDEN, HOSTED_RUN_ADMIN_ONLY).into_response();
+        }
         // Approved remote model grants route new runs to the granting Runtime.
         // A grant lookup failure keeps the local path; it cannot widen
         // authority. Runs already routed remotely settle through their stored
@@ -3990,6 +3993,31 @@ pub(super) fn provider_proxy_runtime_metadata_field(request: &serde_json::Value)
                 || matches!(key.as_str(), "connect_ticket" | "carrier_route" | "carrier")
         })
         .map(String::as_str)
+}
+
+const HOSTED_RUN_ADMIN_ONLY: &str =
+    "Hosted AI on this Home is for admins. Local models are still available.";
+
+/// Hosted AI spends this Home's paid connection, so in 0.8.0 only an admin's
+/// run may use a hosted offer. Other offers are not affected.
+fn hosted_run_allowed(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+    request: &serde_json::Value,
+) -> bool {
+    let offer_id = request["offer_id"].as_str().unwrap_or_default();
+    if !crate::api::model_provider_config::is_hosted_offer_id(offer_id) {
+        return true;
+    }
+    context
+        .proof_binding_id
+        .as_deref()
+        .and_then(|proof| crate::auth::load_principal_for_proof_binding(data_dir, proof).ok())
+        .is_some_and(|principal| {
+            crate::auth::ensure_proof_binding_not_revoked(&principal).is_ok()
+                && principal.principal_id == context.principal_id
+                && crate::auth::is_admin(&principal)
+        })
 }
 
 pub(super) fn normalize_model_provider_request(

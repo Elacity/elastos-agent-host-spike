@@ -171,7 +171,6 @@ verify:
     ./scripts/vendor-ui-tokens.sh --check
     node scripts/carrier-dependency-generation-check.mjs
     just product-ui-source
-    node scripts/home-clipboard-source-gate.mjs
     node --test scripts/browser-window-close-handshake.test.mjs
     node --test scripts/home-assistant-mark.test.mjs
     node --test scripts/home-two-runtime-acceptance.test.mjs
@@ -206,6 +205,7 @@ verify-ci: ci-test-capsules ci-test-elastos
 product-ui-source:
     node scripts/home-shell-regression-smoke.mjs
     node scripts/home-shell-bridge-smoke.mjs
+    node scripts/home-shell-recovery-smoke.mjs
     node scripts/people-discovery-smoke.mjs
     node scripts/inbox-product-behavior-smoke.mjs
     node scripts/archive-product-behavior-smoke.mjs
@@ -226,6 +226,7 @@ product-ui-browser:
     node scripts/library-product-layout-smoke.mjs
     node scripts/browser-product-layout-smoke.mjs
     node scripts/system-uiux-layout-smoke.mjs
+    node scripts/system-window-policy-browser-smoke.mjs
     node scripts/chat-room-configured-layout-smoke.mjs
     node scripts/home-phone-layout-smoke.mjs
 

@@ -12,7 +12,6 @@ import {
   isTrashUri,
   isWebSpaceUri,
   parentUri,
-  publishedCid,
   viewerOptions,
 } from "./model.js";
 import { createLibraryRuntime } from "./api.js?v=library-20260711c";
@@ -145,7 +144,6 @@ import {
     let restoreObject = async () => {};
     let restoreSelectedObjects = async () => {};
     let setClipboard = () => {};
-    let shareObject = async () => {};
     let showStatusObject = async () => {};
     let trashObject = async () => {};
     let trashSelectedObjects = async () => {};
@@ -153,10 +151,12 @@ import {
     let unpublishSelectedObjects = async () => {};
     let uploadFiles = async () => {};
     const {
+      allVisible,
       clearSelection,
       isSelected,
       objectByUri,
       prepareDragSelection,
+      pruneSelectionToVisible,
       selectAllVisible,
       selectedObjects,
       selectOnly,
@@ -199,9 +199,11 @@ import {
     });
     const {
       hideMenu,
+      hideMenuIfTargetsHidden,
       menuAction,
       renderMenu,
     } = createLibraryMenu({
+      allVisible,
       contextMenu: elements.contextMenu,
       perf,
       showError,
@@ -210,13 +212,13 @@ import {
       bindDialogEvents,
       confirmDestructive,
       hideDialog,
+      hideDialogIfTargetsHidden,
       showObjectStatus,
       showProtectAndListDialog,
       showProperties,
-      showShareDialog,
-      showShareReceipt,
       showSharedAccessReceipt,
     } = createLibraryDialog({
+      allVisible,
       copyText: (...args) => copyText(...args),
       dialog: elements.dialog,
       hideMenu,
@@ -243,6 +245,7 @@ import {
       elements,
       isSelected,
       perf,
+      releaseHiddenTargets,
       selectedObjects,
       state,
       visibleObjects,
@@ -297,7 +300,6 @@ import {
       restoreObject,
       restoreSelectedObjects,
       setClipboard,
-      shareObject,
       showStatusObject,
       trashObject,
       trashSelectedObjects,
@@ -326,8 +328,6 @@ import {
       showObjectStatus,
       showProtectAndListDialog,
       showProperties,
-      showShareDialog,
-      showShareReceipt,
       showSharedAccessReceipt,
       startCreateObject,
       state,
@@ -958,6 +958,13 @@ import {
       return visibleObjectsForState(state);
     }
 
+    // A redraw that hides items drops them from the selection and closes menus or dialogs bound to them (#441).
+    function releaseHiddenTargets() {
+      pruneSelectionToVisible();
+      hideMenuIfTargetsHidden();
+      hideDialogIfTargetsHidden();
+    }
+
     function showMenuForObject(object, x, y) {
       if (!isSelected(object.uri)) {
         selectOnly(object.uri);
@@ -970,7 +977,7 @@ import {
       const actions = [];
       if (isBlockedObject(object)) {
         actions.push(menuAction("Properties", () => showProperties(object)));
-        renderMenu(actions, x, y);
+        renderMenu(actions, x, y, [object.uri]);
         return;
       }
       if (isDirectory(object)) {
@@ -1012,7 +1019,6 @@ import {
               actions.push(menuAction("Status", () => showStatusObject(object)));
               if (hasCapability(object, "repair")) actions.push(menuAction("Repair", () => repairObject(object)));
               if (object.shared) actions.push(menuAction("Check My Access", () => checkMyAccess(object)));
-              if (hasCapability(object, "share")) actions.push(menuAction("Share", () => shareObject(object)));
               if (hasCapability(object, "unpublish")) actions.push(menuAction("Unpublish", () => unpublishObject(object)));
           } else if (hasCapability(object, "publish")) {
             actions.push(menuAction("Publish", () => publishObject(object)));
@@ -1038,7 +1044,6 @@ import {
       }
       actions.push("-");
       const localContentCid = contentCid(object);
-      const publicCid = publishedCid(object);
       if (localContentCid) {
         actions.push(
           menuAction("Copy Content CID", () =>
@@ -1049,15 +1054,8 @@ import {
             )),
         );
       }
-      if (object.published && publicCid) {
-        actions.push(menuAction("Copy Published Link", () => copyText(
-          "elastos://" + publicCid,
-          "published link",
-          "resource.uri",
-        )));
-      }
       actions.push(menuAction("Properties", () => showProperties(object)));
-      renderMenu(actions, x, y);
+      renderMenu(actions, x, y, [object.uri]);
     }
 
     function isPolicyGatedArchive(object) {
@@ -1123,7 +1121,7 @@ import {
       if (active.some((object) => hasCapability(object, "trash"))) actions.push(menuAction("Delete", trashSelectedObjects));
       if (trash.length) actions.push(menuAction("Restore", restoreSelectedObjects));
       if (permanentlyDeletable) actions.push(menuAction("Delete Permanently", deleteSelectedObjects));
-      renderMenu(actions, x, y);
+      renderMenu(actions, x, y, objects.map((object) => object.uri));
     }
 
     function showBackgroundMenu(x, y) {

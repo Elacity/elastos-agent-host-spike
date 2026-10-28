@@ -215,8 +215,10 @@ pub(crate) use gateway_wallet::ensure_wallet_connector_configured;
 use gateway_wallet::*;
 pub(super) use gateway_wallet_adapter::RuntimeWalletAdapter;
 
-/// Maximum size for a single file fetched through the gateway (100 MB).
+/// Largest single file the gateway serves or Library accepts (100 MiB). Gateway
+/// reads ask the local store for at most this, below the transfer ceiling.
 const MAX_GATEWAY_FILE_SIZE: usize = 100 * 1024 * 1024;
+const _: () = assert!(MAX_GATEWAY_FILE_SIZE <= elastos_common::MAX_WHOLE_CONTENT_BYTES);
 const LIBRARY_UPLOAD_CHUNK_MAX_BYTES: usize = 768 * 1024;
 const BROWSER_FILE_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
 const BROWSER_INPUT_BODY_MAX_BYTES: usize = (BROWSER_FILE_UPLOAD_BYTES.div_ceil(3) * 4) + 64 * 1024;
@@ -1473,7 +1475,8 @@ fn gateway_provider_error_tuple(scheme: &str, err: anyhow::Error) -> (StatusCode
         StatusCode::SERVICE_UNAVAILABLE
     } else if text.contains("not found") {
         StatusCode::NOT_FOUND
-    } else if text.contains("invalid")
+    } else if err.is::<crate::library::LibraryArchiveTooLarge>()
+        || text.contains("invalid")
         || text.contains("empty")
         || text.contains("must not")
         || text.contains("missing")
