@@ -580,3 +580,220 @@ mod tests {
         assert!(wallet_dir.is_dir());
     }
 }
+
+/// Unit tests for the wallet store's own refusals, round trip and pruning.
+///
+/// They pin answers the store already gives; they add no rule and register no
+/// falsifier. They prove the store, not confinement: the Runtime decides whether
+/// the provider runs at all, and no test here speaks for that decision.
+///
+/// The `wallet store path has no parent directory` arm is deliberately deferred
+/// here rather than chased: the provider always hands the store an absolute path
+/// under its wallet directory, and a bare `/` reaches that arm without showing
+/// anything about a real store.
+#[cfg(test)]
+mod uf_tests {
+    use super::*;
+
+    fn sample_request(id: u64, principal: &str, now: u64) -> WalletApprovalRequest {
+        serde_json::from_value(serde_json::json!({
+            "schema": "elastos.wallet.approval_request/v1",
+            "request_id": format!("req-{id}"),
+            "wallet_request_sha256": format!("sha-{id}"),
+            "authority_binding": format!("binding-{id}"),
+            "kind": "signature",
+            "status": "pending",
+            "principal_id": principal,
+            "account_id": "wallet:eip155:20:req",
+            "proof_binding_id": "proof:eip155:20:req",
+            "chain_namespace": "eip155:20",
+            "address": "0x0000000000000000000000000000000000000000",
+            "intent": "browser_personal_sign",
+            "session_id": format!("session-{id}"),
+            "launch_id": format!("launch-{id}"),
+            "requested_by_actor": "browser",
+            "resource": "elastos://wallet/eip155:20/sign/browser_personal_sign",
+            "reason": "unit test request",
+            "payload": { "message": format!("message-{id}") },
+            "payload_hash": format!("hash-{id}"),
+            "created_at": now,
+            "expires_at": now + 1_000,
+        }))
+        .expect("the sample approval request must decode")
+    }
+
+    /// Falsifier: return the raw `serde_json` error text, so the reason stops
+    /// naming the parse failure.
+    #[test]
+    fn load_store_if_present_rejects_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet-state.json");
+        fs::write(&path, b"{ not valid json").unwrap();
+        let reason = "key must be a string at line 1 column 3";
+        assert_eq!(load_store_if_present(&path).unwrap_err(), reason);
+        assert_eq!(load_store(&path).unwrap_err(), reason);
+    }
+
+    /// Falsifier: stop writing `approval_requests`, or stop reading them back,
+    /// and the round trip loses the request.
+    ///
+    /// `wallet_store_is_atomic_private_and_size_bounded` reloads
+    /// `default_accounts`; this reloads the request record, where the `payload`
+    /// is an untyped `Value` and the status an enum, so a field dropped on the
+    /// way through JSON shows up here and not there.
+    #[test]
+    fn save_store_then_load_round_trips_approval_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet-state.json");
+        let mut store = WalletStore::default();
+        store
+            .approval_requests
+            .push(sample_request(1, "person:local:alice", 10));
+        save_store(&path, &store).unwrap();
+        let loaded = load_store(&path).unwrap();
+        assert_eq!(loaded.approval_requests.len(), 1);
+        let request = &loaded.approval_requests[0];
+        assert_eq!(request.request_id, "req-1");
+        assert_eq!(request.status, ApprovalStatus::Pending);
+        assert_eq!(
+            request.payload,
+            serde_json::json!({ "message": "message-1" }),
+            "the untyped payload must survive the round trip unchanged"
+        );
+        assert_eq!(request.requested_by_actor, "browser");
+    }
+
+    /// Falsifier: create the missing parent inside `save_store`; the refusal
+    /// never fires and the save succeeds.
+    #[test]
+    fn save_store_refuses_when_parent_directory_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing").join("wallet-state.json");
+        assert!(save_store(&path, &WalletStore::default())
+            .unwrap_err()
+            .starts_with("failed to inspect wallet store parent directory"));
+    }
+
+    /// Falsifier: accept `size >= max_bytes`, so the exact limit is refused.
+    #[test]
+    fn ensure_size_within_limit_boundaries() {
+        assert!(ensure_size_within_limit(
+            "wallet store",
+            MAX_WALLET_STORE_BYTES as u64,
+            MAX_WALLET_STORE_BYTES
+        )
+        .is_ok());
+        assert!(ensure_size_within_limit("wallet store", 0, MAX_WALLET_STORE_BYTES).is_ok());
+    }
+
+    /// Falsifier: accept any existing path in `ensure_directory`, so a regular
+    /// file passes as the wallet directory.
+    #[test]
+    fn ensure_directory_rejects_regular_file_and_accepts_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real-dir");
+        fs::create_dir(&real).unwrap();
+        assert!(ensure_directory(&real, "wallet storage directory").is_ok());
+        let file = dir.path().join("file");
+        fs::write(&file, b"x").unwrap();
+        assert_eq!(
+            ensure_directory(&file, "wallet storage directory").unwrap_err(),
+            "wallet storage directory must be a non-symlink directory"
+        );
+    }
+
+    /// Falsifier: let `create_wallet_dir_durable` fall through to
+    /// `create_dir_all` instead of refusing a regular file component.
+    #[test]
+    fn create_wallet_dir_durable_refuses_file_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("blocker");
+        fs::write(&file, b"x").unwrap();
+        assert_eq!(
+            create_wallet_dir_durable(&file).unwrap_err(),
+            format!(
+                "wallet storage directory component must be a non-symlink directory: {}",
+                file.display()
+            )
+        );
+    }
+
+    /// `prune_store` keeps the newest resolved history, then answers oldest
+    /// first: the final `reverse` at the end of the function is what puts the
+    /// kept list back in `created_at` order.
+    ///
+    /// Falsifier: drop the final `reverse`, and the answer becomes newest first;
+    /// drop the `sort_by_key`, and the answer keeps the input order.
+    #[test]
+    fn prune_store_sorts_oldest_first() {
+        let mut store = WalletStore::default();
+        store
+            .approval_requests
+            .push(sample_request(1, "person:local:alice", 1));
+        store
+            .approval_requests
+            .push(sample_request(2, "person:local:alice", 50));
+        store
+            .approval_requests
+            .push(sample_request(3, "person:local:alice", 20));
+        let order = prune_store(store, 0)
+            .approval_requests
+            .iter()
+            .map(|request| request.created_at)
+            .collect::<Vec<_>>();
+        assert_eq!(order, vec![1, 20, 50]);
+    }
+
+    /// Falsifier: stamp `resolved_at` on every call instead of only when the
+    /// request first elapses, and the second call moves the time.
+    #[test]
+    fn expire_approval_if_elapsed_sets_expired_once() {
+        let mut request = sample_request(1, "person:local:alice", 0);
+        request.expires_at = 5;
+        expire_approval_if_elapsed(&mut request, 10);
+        assert_eq!(request.status, ApprovalStatus::Expired);
+        assert_eq!(request.resolved_at, Some(10));
+        expire_approval_if_elapsed(&mut request, 20);
+        assert_eq!(request.resolved_at, Some(10));
+    }
+
+    /// Falsifier: treat every `Completed` request as active whatever its
+    /// signature or Chain outcome, or treat an elapsed pending request as
+    /// active; one of the three cases below flips.
+    #[test]
+    fn approval_authority_is_active_refuses_resolved_requests() {
+        let now = 1_000;
+
+        let mut expired_pending = sample_request(1, "person:local:alice", now);
+        expired_pending.expires_at = now;
+        assert!(!approval_authority_is_active(&expired_pending, now));
+
+        let mut recorded = sample_request(2, "person:local:alice", now);
+        recorded.status = ApprovalStatus::Completed;
+        recorded.intent = "transaction_intent".to_string();
+        recorded.signed_result = Some(serde_json::json!({ "signed_transaction": "0x0202" }));
+        recorded.validated_chain_outcome = Some(
+            serde_json::from_value(serde_json::json!({
+                "schema": "elastos.wallet.validated-chain-outcome/v1",
+                "approval_request_id": "req-2",
+                "account_id": "wallet:eip155:20:req",
+                "chain_namespace": "eip155:20",
+                "network": "esc-mainnet",
+                "binding": {
+                    "kind": "managed_signed",
+                    "signed_transaction_sha256": "sha256:0202",
+                },
+                "transaction_hash": "0x0202",
+                "chain_observation": { "schema": "elastos.chain.broadcast_receipt/v1" },
+                "confirmed_at": 1_000,
+            }))
+            .expect("the sample Chain outcome must decode"),
+        );
+        assert!(!approval_authority_is_active(&recorded, now));
+
+        let mut unsigned = sample_request(3, "person:local:alice", now);
+        unsigned.status = ApprovalStatus::Completed;
+        unsigned.intent = "transaction_intent".to_string();
+        assert!(!approval_authority_is_active(&unsigned, now));
+    }
+}
