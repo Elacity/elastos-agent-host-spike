@@ -1,0 +1,11 @@
+id: F-A7-timesettle
+file: src/ledger.rs
+test: ledger::model_known_settle_after_timeout_still_charges
+--- old
+        let charge = measured;
+--- new
+        if ledger.open.get(&reservation.id).is_some_and(|open| open.timed_out) {
+            return Err(SettleRefuse::AboveReservation);
+        }
+        let charge = measured;
+--- end
