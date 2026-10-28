@@ -481,18 +481,21 @@ fn confined_provider_serves_did_operations_under_its_root() {
 /// `get_did`, `resolve`, `sign_chat_message`, `verify`, `verify_did_recovery`,
 /// `get_nickname` and `shutdown` name no granted resource: after `init` and
 /// `set_nickname` the storage root holds `did/nickname.enc`, and each call
-/// leaves those names and those bytes unchanged, so no call writes under the
-/// root and none needs a read outside what the profile already grants.
+/// leaves those names and each file's bytes exactly as `init` and
+/// `set_nickname` left them. The case compares the names under `did/` and the
+/// bytes of `did/nickname.enc`, so a rewrite of that file to the same bytes
+/// would pass it; it counts no syscalls and changes no grant.
 ///
 /// Honesty limit: the profile grants `file-read*` on the literal
 /// `STORAGE_PARENT`, so the parent directory itself can be stat'ed. This case
 /// shows each call answers `ok`, or its settled refusal, under the kernel's
-/// enforcement, so the call needed no read outside those grants and wrote
-/// nothing. It does not count syscalls, and it changes no grant.
+/// enforcement.
 ///
-/// Falsifier: read `/etc/hosts`, outside every grant, in `get_did`'s ok arm and
-/// answer `storage_error` when that read is denied (DID31); `get_did` stops
-/// answering ok and this case fails on its first answer.
+/// Falsifiers: `DID31` reads `/etc/hosts`, outside every grant, in `get_did`'s
+/// ok arm, and `DID32` writes one file into the storage root in the
+/// `Request::Shutdown` arm of `fn handle`, so `get_did` fails on its first
+/// answer and `shutdown` fails on the final compare that follows it; the five
+/// calls between them have no plant of their own.
 #[test]
 fn no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
