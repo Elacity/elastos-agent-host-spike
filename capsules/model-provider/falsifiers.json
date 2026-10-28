@@ -2971,14 +2971,14 @@
     },
     {
       "id": "MP53",
-      "title": "the no-worker branch keeps the run running instead of settling it unknown, so a run left by a stopped provider never settles after a restart",
+      "title": "the one settlement-unknown result keeps the run running instead of settling it unknown, so a run left by a stopped provider never settles at a restart or a stop",
       "command": "provider",
       "expect": "caught",
       "edits": [
         {
           "file": "../../capsules/model-provider/src/adapters.rs",
-          "old": "    }\n    Ok(ReconcileResult::Terminal {\n        events: Vec::new(),\n        status: RunStatus::SettlementUnknown,\n        output: None,\n        error: Some(RunError {\n            class: ErrorClass::SettlementUnknown,\n            code: \"settlement_unknown\".to_string(),\n            message: \"model backend settlement is unknown\".to_string(),\n        }),\n        backend_report: None,\n    })\n}",
-          "new": "    }\n    Ok(ReconcileResult::StillRunning {\n        events: Vec::new(),\n        backend_state: serialize_local_text_backend_state(state.cancel_requested)?,\n        status: RunStatus::Running,\n    })\n}"
+          "old": "pub(crate) fn worker_settlement_unknown_result() -> ReconcileResult {\n    ReconcileResult::Terminal {\n        events: Vec::new(),\n        status: RunStatus::SettlementUnknown,\n        output: None,\n        error: Some(RunError {\n            class: ErrorClass::SettlementUnknown,\n            code: \"settlement_unknown\".to_string(),\n            message: \"model backend settlement is unknown\".to_string(),\n        }),\n        backend_report: None,\n    }\n}",
+          "new": "pub(crate) fn worker_settlement_unknown_result() -> ReconcileResult {\n    ReconcileResult::StillRunning {\n        events: Vec::new(),\n        backend_state: json!({\"schema\": LOCAL_TEXT_BACKEND_STATE_SCHEMA, \"cancel_requested\": false}),\n        status: RunStatus::Running,\n    }\n}"
         }
       ],
       "tests": [
@@ -2988,14 +2988,14 @@
     },
     {
       "id": "MP54",
-      "title": "the no-worker branch claims a confirmed cancel instead of an unknown settlement, so a restart reports cancellation for a run whose backend outcome is unknown",
+      "title": "the one settlement-unknown result claims a confirmed cancel instead of an unknown settlement, so a stop reports cancellation for a run whose backend outcome is unknown",
       "command": "provider",
       "expect": "caught",
       "edits": [
         {
           "file": "../../capsules/model-provider/src/adapters.rs",
-          "old": "    }\n    Ok(ReconcileResult::Terminal {\n        events: Vec::new(),\n        status: RunStatus::SettlementUnknown,\n        output: None,\n        error: Some(RunError {\n            class: ErrorClass::SettlementUnknown,\n            code: \"settlement_unknown\".to_string(),\n            message: \"model backend settlement is unknown\".to_string(),\n        }),\n        backend_report: None,\n    })\n}",
-          "new": "    }\n    Ok(ReconcileResult::Terminal {\n        events: Vec::new(),\n        status: RunStatus::Cancelled,\n        output: None,\n        error: Some(RunError {\n            class: ErrorClass::Cancelled,\n            code: \"cancelled\".to_string(),\n            message: \"model run was cancelled\".to_string(),\n        }),\n        backend_report: None,\n    })\n}"
+          "old": "pub(crate) fn worker_settlement_unknown_result() -> ReconcileResult {\n    ReconcileResult::Terminal {\n        events: Vec::new(),\n        status: RunStatus::SettlementUnknown,\n        output: None,\n        error: Some(RunError {\n            class: ErrorClass::SettlementUnknown,\n            code: \"settlement_unknown\".to_string(),\n            message: \"model backend settlement is unknown\".to_string(),\n        }),\n        backend_report: None,\n    }\n}",
+          "new": "pub(crate) fn worker_settlement_unknown_result() -> ReconcileResult {\n    ReconcileResult::Terminal {\n        events: Vec::new(),\n        status: RunStatus::Cancelled,\n        output: None,\n        error: Some(RunError {\n            class: ErrorClass::Cancelled,\n            code: \"cancelled\".to_string(),\n            message: \"model run was cancelled\".to_string(),\n        }),\n        backend_report: None,\n    }\n}"
         }
       ],
       "tests": [

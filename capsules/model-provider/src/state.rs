@@ -1,7 +1,7 @@
 use crate::adapters::{
     is_http_job_creating_backend_state, is_local_text_backend_state, local_text_cancel_requested,
-    pure_local_stop_result, AdapterExecutor, CancelResult, DispatchResult, ReconcileResult,
-    WorkerApplyGuard,
+    pure_local_stop_result, worker_settlement_unknown_result, AdapterExecutor, CancelResult,
+    DispatchResult, ReconcileResult, WorkerApplyGuard,
 };
 use crate::config::{
     journal_root, AdapterConfig, BridgeProviderConfig, ConfiguredOffer, ProviderInitExtra,
@@ -865,30 +865,14 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
         if !is_local {
             return Ok(());
         }
-        // The stop settlement is the same rule as a read after a restart: with
-        // no worker for the run, `reconcile_local_text` (`src/adapters.rs:1424`)
-        // returns the `settlement_unknown` terminal. A run with no current
-        // offer or no stored backend state keeps the unknown terminal here,
-        // because reconcile cannot read a backend it cannot name.
-        let offer = self.current_execution_offer_for_run(&run)?;
-        let settled = match offer.as_ref() {
-            Some(offer) => self.reconcile_run_with_offer(offer, &mut run)?,
-            None => false,
-        };
-        if !settled {
-            let stored_offer = run.offer.clone();
-            transition_terminal(
-                &stored_offer,
-                &mut run,
-                RunStatus::SettlementUnknown,
-                None,
-                Some(RunError {
-                    class: ErrorClass::SettlementUnknown,
-                    code: "settlement_unknown".to_string(),
-                    message: "model backend settlement is unknown".to_string(),
-                }),
-            )?;
-        }
+        // The stop settlement returns the same terminal a read after a restart
+        // returns with no worker for the run (`reconcile_local_text`,
+        // `src/adapters.rs:1424-1443`): the one `settlement_unknown` result from
+        // `worker_settlement_unknown_result` (`src/adapters.rs:2774`). The
+        // workers are gone by now, at `init` and at `shutdown`, so this settles
+        // the run without a second terminal rule.
+        let stored_offer = run.offer.clone();
+        apply_reconcile_result(&stored_offer, &mut run, worker_settlement_unknown_result())?;
         self.journal.store_run(&run)?;
         Ok(())
     }
@@ -972,17 +956,7 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
     ) -> Result<(), ProviderFault> {
         if run.status == RunStatus::Prepared && run.backend_state.is_none() {
             let stored_offer = run.offer.clone();
-            transition_terminal(
-                &stored_offer,
-                run,
-                RunStatus::SettlementUnknown,
-                None,
-                Some(RunError {
-                    class: ErrorClass::SettlementUnknown,
-                    code: "settlement_unknown".to_string(),
-                    message: "model backend settlement is unknown".to_string(),
-                }),
-            )?;
+            apply_reconcile_result(&stored_offer, run, worker_settlement_unknown_result())?;
             self.journal.store_run(run)?;
             return Ok(());
         }
@@ -1004,17 +978,7 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
         }
         let Some(offer) = offer else {
             let stored_offer = run.offer.clone();
-            transition_terminal(
-                &stored_offer,
-                run,
-                RunStatus::SettlementUnknown,
-                None,
-                Some(RunError {
-                    class: ErrorClass::SettlementUnknown,
-                    code: "settlement_unknown".to_string(),
-                    message: "model backend settlement is unknown".to_string(),
-                }),
-            )?;
+            apply_reconcile_result(&stored_offer, run, worker_settlement_unknown_result())?;
             self.journal.store_run(run)?;
             return Ok(());
         };
@@ -1033,12 +997,11 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
         Ok(())
     }
 
-    /// Applies the one reconcile rule to `run`, and says whether it did. A run
-    /// with no stored backend state has nothing to reconcile, so its caller
-    /// keeps its own settlement. `refresh_run_if_needed` and the stop
-    /// settlement share this path (P10), so a run left without a worker settles
-    /// through `reconcile_local_text` (`src/adapters.rs:1424`) after a restart
-    /// and after a clean shutdown.
+    /// Applies the adapter's one reconcile rule to `run`, and says whether it
+    /// did. A run with no stored backend state has nothing to reconcile, so the
+    /// caller keeps its own settlement. The reconcile rule's no-worker branch
+    /// returns `worker_settlement_unknown_result` (`src/adapters.rs:2774`), the
+    /// same terminal every stop settlement applies.
     fn reconcile_run_with_offer(
         &mut self,
         offer: &ConfiguredOffer,
@@ -6707,24 +6670,7 @@ mod tests {
     fn bounded_settlement_visitor_validates_all_records_before_mutation() {
         let root = temp_root("visitor-full-validation");
         let model = offer("local-text");
-        // The stop settlement takes the one reconcile rule
-        // (`src/state.rs:849-893`), so each surviving run answers with the
-        // unknown terminal the visitor test asserts.
-        let unknown = Ok(ReconcileResult::Terminal {
-            events: vec![],
-            status: RunStatus::SettlementUnknown,
-            output: None,
-            error: Some(RunError {
-                class: ErrorClass::SettlementUnknown,
-                code: "settlement_unknown".into(),
-                message: "Unknown".into(),
-            }),
-            backend_report: None,
-        });
-        let adapters = FakeAdapters {
-            reconcile_results: Arc::new(Mutex::new(vec![unknown.clone(), unknown])),
-            ..Default::default()
-        };
+        let adapters = FakeAdapters::default();
         let mut state = init_state(&root, vec![model.clone()], adapters.clone());
         let mut paths = Vec::new();
         for index in 0..2 {

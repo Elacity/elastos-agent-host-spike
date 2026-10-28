@@ -1439,17 +1439,7 @@ fn reconcile_local_text(
             },
         });
     }
-    Ok(ReconcileResult::Terminal {
-        events: Vec::new(),
-        status: RunStatus::SettlementUnknown,
-        output: None,
-        error: Some(RunError {
-            class: ErrorClass::SettlementUnknown,
-            code: "settlement_unknown".to_string(),
-            message: "model backend settlement is unknown".to_string(),
-        }),
-        backend_report: None,
-    })
+    Ok(worker_settlement_unknown_result())
 }
 
 fn reserve_local_text_cancel(
@@ -2777,7 +2767,11 @@ fn parse_backend_cost(
     Ok(Some(BackendCost { value, unit }))
 }
 
-fn worker_settlement_unknown_result() -> ReconcileResult {
+/// The one `settlement_unknown` terminal. `reconcile_local_text`'s no-worker
+/// branch and every stop settlement (`src/state.rs`) return this exact result,
+/// so a planted change here reaches all of them (P10). A worker that cannot
+/// name its backend outcome also returns it.
+pub(crate) fn worker_settlement_unknown_result() -> ReconcileResult {
     ReconcileResult::Terminal {
         events: Vec::new(),
         status: RunStatus::SettlementUnknown,

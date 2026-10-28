@@ -4914,26 +4914,25 @@ fn opt_in_real_deepseek_turn_through_the_runtime_socket_completes_with_text_and_
 }
 
 /// A hosted run left open when its provider process stops settles
-/// `settlement_unknown` after a restart, and the restarted provider does not
-/// send it again. The one rule is the no-worker branch of
-/// `reconcile_local_text` (`src/adapters.rs:1424-1453`): a restarted provider
-/// has no worker for the run (`has_local_text_worker`,
-/// `src/adapters.rs:683`), so reconciliation returns a `SettlementUnknown`
-/// terminal with code `settlement_unknown` and no output (`:1442-1451`), and
-/// `refresh_run_if_needed` (`src/state.rs:968`, which calls `reconcile` at
-/// `:1029`) stores it when the owner reads the run. A crash and a clean
-/// `shutdown` (`shutdown_workers`, `src/adapters.rs:745`) both reach this one
-/// rule because the stop settlement also aborts the workers first and then
-/// asks the same reconcile rule (`src/state.rs:849-893`). This is the design's
-/// "disconnect and reconnect without redispatch, restart with unknown
-/// settlement" (`docs/MODEL_PROVIDER.md:527`), "Reconnection cannot dispatch
-/// the model request again" (`:214`), the journal rule that tells apart "a
-/// request with unknown backend settlement that requires reconciliation"
-/// (`:271-276`), and "cancellation and unknown settlement are distinguishable"
-/// (`:547`). The `backend_report` the restarted provider records is the
-/// unknown triple the held cancel test asserts, because a hosted terminal with
-/// no backend report becomes `BackendReport::unknown()`
-/// (`src/state.rs:1380-1382`).
+/// `settlement_unknown` at that stop, and the restarted provider does not send
+/// it again. The one terminal is `worker_settlement_unknown_result`
+/// (`src/adapters.rs:2774`): `reconcile_local_text`'s no-worker branch also
+/// returns it (`src/adapters.rs:1424-1443`), and the stop settlement applies it
+/// through `settle_local_text_run_unknown` (`src/state.rs:849-881`). A kill is
+/// settled by the next `init` (`src/execution.rs:254`); a clean `shutdown`
+/// collects the active run ids, aborts every worker (`src/execution.rs:422-428`,
+/// `shutdown_workers` at `src/adapters.rs:745`), and applies the same terminal.
+/// The owner's read then finds the run already terminal and returns it at
+/// `refresh_run_if_needed`'s terminal check (`src/state.rs:952`, `:971`), so no
+/// worker starts and no effect is sent. This is the design's "disconnect and
+/// reconnect without redispatch, restart with unknown settlement"
+/// (`docs/MODEL_PROVIDER.md:527`), "Reconnection cannot dispatch the model
+/// request again" (`:214`), the journal rule that tells apart "a request with
+/// unknown backend settlement that requires reconciliation" (`:271-276`), and
+/// "cancellation and unknown settlement are distinguishable" (`:547`). The
+/// `backend_report` the settled run records is the unknown triple the held
+/// cancel test asserts, because a hosted terminal with no backend report
+/// becomes `BackendReport::unknown()` (`src/state.rs:1345`).
 ///
 /// The test holds the stand-in's answer, so the run is open when the first
 /// provider stops. This helper stops that provider through `stop`, starts a
@@ -5196,10 +5195,10 @@ fn hosted_run_open_when_the_provider_is_killed_settles_unknown_after_restart() {
 }
 
 /// A hosted run still open at a clean `shutdown` settles `settlement_unknown`
-/// after a restart and is not sent again. The shutdown collects the active run
-/// ids, aborts every worker (`src/execution.rs:422-424`), and settles through
-/// the same reconcile rule a restart read takes (`src/state.rs:849-893`). The
-/// rule, its citations and every assertion after the stop are on
+/// at the stop and is not sent again. The shutdown collects the active run
+/// ids, aborts every worker (`src/execution.rs:422-428`), and applies the one
+/// `settlement_unknown` terminal (`src/state.rs:849-881`). The rule, its
+/// citations and every assertion after the stop are on
 /// `assert_hosted_run_settles_unknown_after_restart`; this test creates the
 /// open run and checks the stand-in saw its one connection first. Off macOS
 /// the provider refuses every hosted run before any socket, so the test prints
