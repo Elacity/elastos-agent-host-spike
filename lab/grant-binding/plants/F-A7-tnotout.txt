@@ -4,5 +4,5 @@ test: ledger::model_timeout_twice_is_refused
 --- old
             None => return Err(TimeoutRefuse::NotOutstanding),
 --- new
-            None => return Ok(()),
+            None => return Ok(TimeoutRecord),
 --- end
