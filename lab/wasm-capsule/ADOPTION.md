@@ -69,14 +69,19 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   (task 020) `linked()` and `unused_grants()` (README.md, "Same output on two
   engines (wc-005b)").
   `wasm_capsule_tools::receipt` (wc-005c, task 016) renders that run as
-  `schema: wc-005.run-receipt/v3` lines (the lab CID, `digest`, `1592590337`,
+  `schema: wc-005.run-receipt/v4` lines (the lab CID, `digest`, `1592590337`,
   each engine's version, exit status and stdout; wc-010c, task 028: the two
   memory lines `memory_mb` and `memory_cap_bytes`, then per engine
   `<engine>_memory_cap`, ENFORCED with the cap argument read back from that
   engine's argv or SKIPPED with wc-010a's reason; task 034: then per engine
   `<engine>_memory_maximum_bytes`, the module memory maximum that engine's run
   was checked against by `run`'s one `memories` check, in bytes, or `none (the
-  module has no memory)`; no peak memory), and writes it only with
+  module has no memory)`; task 062: then per engine
+  `<engine>_process_max_rss_bytes: <n> (engine process RSS, not linear
+  memory)`, the peak RSS of that engine's module-run process, its own
+  `ru_maxrss` from the `wait4` that reaped it, the counter `/usr/bin/time -l`
+  prints, in bytes on macOS; no linear-memory peak, since none is measured),
+  and writes it only with
   `bundle::write_new_file`. The versions are observed, not configured: each is
   the first line the engine printed for `--version` before the module ran, and
   none is part of the lab CID (README.md, "Run receipt (wc-005c)").
