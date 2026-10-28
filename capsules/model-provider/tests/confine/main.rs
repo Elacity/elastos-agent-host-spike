@@ -890,7 +890,8 @@ fn wait_for_terminal(
 /// `fn parse_request`, a second signature, a missing `match op`, more than one
 /// `match op {`, an arm on the `match op {` line, an arm that is not a plain
 /// quoted string followed by `=>` and not `other =>`, an arm line with more
-/// than one `=>`, an arm line that opens or closes a nested block, a missing
+/// than one `=>`, an arm line with a block-comment delimiter, an arm line
+/// that opens or closes a nested block, a missing
 /// closing quote, a second `other =>`, and a missing `other =>` each refuse
 /// with their own `parse_request` reason.
 /// `operation_rows_match_parse_request` requires the same names in the same
@@ -1063,6 +1064,8 @@ fn operations_section_cites_existing_tests() {
     /// line has one arm: a plain quoted string followed by `=>`, or the one
     /// `other =>`. An arm line that contains `{` or `}` refuses, so a nested
     /// match, a nested block, or a shorter close cannot hide an outer arm.
+    /// An arm line that contains `/*` or `*/` also refuses, so commented arms
+    /// and closing delimiters cannot hide a real arm.
     /// Other patterns require an
     /// explicit refusal. The compare reads the
     /// match as text: it shows the Operation cells equal these arms, not that
@@ -1118,6 +1121,11 @@ fn operations_section_cites_existing_tests() {
             }
             if arm.is_empty() || arm.starts_with("//") {
                 continue;
+            }
+            if arm.contains("/*") || arm.contains("*/") {
+                return Err(format!(
+                    "parse_request: arm line `{arm}` contains a block-comment delimiter"
+                ));
             }
             if arm.contains('{') || arm.contains('}') {
                 return Err(format!(
@@ -1415,6 +1423,22 @@ fn operations_section_cites_existing_tests() {
         operation_rows_match_parse_request(init_then_unsupported, short_source),
         Ok(())
     );
+    for original in [
+        "\"init\" => Operation::Init,",
+        "other => Operation::Unsupported(other.to_string()),",
+    ] {
+        for delimiter in ["/*", "*/"] {
+            let arm = format!("{original} {delimiter}");
+            let planted = short_source.replace(original, &arm);
+            assert_eq!(
+                operation_rows_match_parse_request(init_then_unsupported, &planted),
+                Err(format!(
+                    "parse_request: arm line `{arm}` contains a block-comment delimiter"
+                )),
+                "{planted}"
+            );
+        }
+    }
     for pattern in [
         "\"init\" | \"ping\"",
         "\"init\" if enabled",
@@ -1624,6 +1648,26 @@ fn operations_section_cites_existing_tests() {
     });
     operation_rows_match_parse_request(section, &contract)
         .expect("the operations table names the parse_request arms in order");
+    // A commented catch-all and close must not end the scan before the real
+    // ping arm. The unchanged nine-row table matched this plant before the
+    // block-comment refusal.
+    let commented_arm = "\"runs_cancel\" => ProviderOperation::RunsCancel, /*";
+    let hidden_ping = contract.replace(
+        "\"runs_cancel\" => ProviderOperation::RunsCancel,",
+        &format!(
+            "{commented_arm}\n        other => ignored,\n    }};\n    */\n        \"ping\" => ProviderOperation::Status,"
+        ),
+    );
+    assert_ne!(
+        hidden_ping, contract,
+        "the hidden-ping plant must be applied"
+    );
+    assert_eq!(
+        operation_rows_match_parse_request(section, &hidden_ping),
+        Err(format!(
+            "parse_request: arm line `{commented_arm}` contains a block-comment delimiter"
+        ))
+    );
 }
 
 /// The Id cells in `section` are the same set as `ids`.
