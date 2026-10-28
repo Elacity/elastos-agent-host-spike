@@ -61,6 +61,21 @@ WRITE_MARKER = "`" + WRITE_SPAN + "`"
 READ_SPAN = "examples/agent-host/src/lib.rs:3850"
 READ_MARKER = "`" + READ_SPAN + "`"
 
+# Its quotation is the doc line, remainder 0 after the write-body span, source
+# line 3961.
+BODY_DOC_SPAN = "examples/agent-host/src/lib.rs:3961"
+BODY_DOC_MARKER = "`" + BODY_DOC_SPAN + "`"
+
+# Its quotation is the missing-revision arm, remainder 5 after the write-body
+# span, source line 3966.
+CREATE_ONLY_SPAN = "examples/agent-host/src/lib.rs:3966"
+CREATE_ONLY_MARKER = "`" + CREATE_ONLY_SPAN + "`"
+
+# Its quotation is the present-revision arm, remainder 6 after the write-body
+# span, source line 3967.
+PRESENT_REVISION_SPAN = "examples/agent-host/src/lib.rs:3967"
+PRESENT_REVISION_MARKER = "`" + PRESENT_REVISION_SPAN + "`"
+
 # Its quotation is the Read arm, remainder 8 after the kind span, source line 8187.
 KIND_READ_SPAN = "examples/agent-host/src/lib.rs:8187"
 KIND_READ_MARKER = "`" + KIND_READ_SPAN + "`"
@@ -105,6 +120,16 @@ REVISION_MARKER = "`" + REVISION_SPAN + "`"
 # Its quotation is remainder 15 after the request span, source line 2749.
 OP_SPAN = "examples/agent-host/src/lib.rs:2749"
 OP_MARKER = "`" + OP_SPAN + "`"
+
+# Its quotation is the no-process remainder, remainder 1 after the run span,
+# source line 2958.
+NO_PROCESS_SPAN = "examples/agent-host/src/lib.rs:2958"
+NO_PROCESS_MARKER = "`" + NO_PROCESS_SPAN + "`"
+
+# Its quotation is the seat line, remainder 24 after the run span, source line
+# 2981.
+SEAT_SPAN = "examples/agent-host/src/lib.rs:2981"
+SEAT_MARKER = "`" + SEAT_SPAN + "`"
 
 # Its quotation is remainder 4 after the restore span, source line 3308.
 NO_WRITE_SPAN = "examples/agent-host/src/lib.rs:3308"
@@ -377,6 +402,30 @@ def read_quote(text):
     return remainders[17]
 
 
+def body_doc_quote(text):
+    """Return remainder 0 after the write-body span, or None when it is absent."""
+    remainders = _remainders(text, BODY_DOC_MARKER)
+    if not remainders:
+        return None
+    return remainders[0]
+
+
+def create_only_quote(text):
+    """Return remainder 5 after the write-body span, or None when it is absent."""
+    remainders = _remainders(text, CREATE_ONLY_MARKER)
+    if len(remainders) <= 5:
+        return None
+    return remainders[5]
+
+
+def present_revision_quote(text):
+    """Return remainder 6 after the write-body span, or None when it is absent."""
+    remainders = _remainders(text, PRESENT_REVISION_MARKER)
+    if len(remainders) <= 6:
+        return None
+    return remainders[6]
+
+
 def kind_read_quote(text):
     """Return the ninth quotation after the read span, or None when absent."""
     remainders = _remainders(text, KIND_READ_MARKER)
@@ -463,6 +512,22 @@ def op_quote(text):
     if len(remainders) <= 15:
         return None
     return remainders[15]
+
+
+def no_process_quote(text):
+    """Return remainder 1 after the run span, or None when it is absent."""
+    remainders = _remainders(text, NO_PROCESS_MARKER)
+    if len(remainders) <= 1:
+        return None
+    return remainders[1]
+
+
+def seat_quote(text):
+    """Return remainder 24 after the run span, or None when it is absent."""
+    remainders = _remainders(text, SEAT_MARKER)
+    if len(remainders) <= 24:
+        return None
+    return remainders[24]
 
 
 def no_write_quote(text):
@@ -706,6 +771,38 @@ def _op_quote_refusal(root, text, sha):
     return None
 
 
+def _no_process_quote_refusal(root, text, sha):
+    """Return the 2958 refusal, or None when that quote is absent or matches."""
+    if text.count(NO_PROCESS_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + NO_PROCESS_SPAN
+    quoted = no_process_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(NO_PROCESS_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + NO_PROCESS_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + NO_PROCESS_SPAN
+    return None
+
+
+def _seat_quote_refusal(root, text, sha):
+    """Return the 2981 refusal, or None when that quote is absent or matches."""
+    if text.count(SEAT_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + SEAT_SPAN
+    quoted = seat_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(SEAT_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + SEAT_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + SEAT_SPAN
+    return None
+
+
 def _is_write_quote_refusal(root, text, sha):
     """Return the 3290 refusal, or None when that quote is absent or matches."""
     if text.count(IS_WRITE_MARKER) > 1:
@@ -831,6 +928,54 @@ def _read_quote_refusal(root, text, sha):
         return "refuse: quoted line is not in the pinned commit: " + READ_SPAN
     if not quoted_line_matches(quoted, source):
         return "refuse: quoted line does not match " + READ_SPAN
+    return None
+
+
+def _body_doc_quote_refusal(root, text, sha):
+    """Return the 3961 refusal, or None when that quote is absent or matches."""
+    if text.count(BODY_DOC_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + BODY_DOC_SPAN
+    quoted = body_doc_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(BODY_DOC_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + BODY_DOC_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + BODY_DOC_SPAN
+    return None
+
+
+def _create_only_quote_refusal(root, text, sha):
+    """Return the 3966 refusal, or None when that quote is absent or matches."""
+    if text.count(CREATE_ONLY_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + CREATE_ONLY_SPAN
+    quoted = create_only_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(CREATE_ONLY_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + CREATE_ONLY_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + CREATE_ONLY_SPAN
+    return None
+
+
+def _present_revision_quote_refusal(root, text, sha):
+    """Return the 3967 refusal, or None when that quote is absent or matches."""
+    if text.count(PRESENT_REVISION_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + PRESENT_REVISION_SPAN
+    quoted = present_revision_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(PRESENT_REVISION_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + PRESENT_REVISION_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + PRESENT_REVISION_SPAN
     return None
 
 
@@ -1043,7 +1188,7 @@ def _default_action_quote_refusal(root, text, sha):
 
 
 def _quote_refusals(root, text, sha):
-    """Return the quote refusals in source order: 2067, 2421, 2422, 2720, 2741, 2749, 3290, 3308, 3526, 3549, 3754, 3755, 3757, 3767, 3849, 3850, 8149, 8162, 8168, 8187, 8188, 8189, 8190, 8191, 8192, 8193, 8194, 8488, then 123, 189, 190, 192."""
+    """Return the quote refusals in source order: 2067, 2421, 2422, 2720, 2741, 2749, 2958, 2981, 3290, 3308, 3526, 3549, 3754, 3755, 3757, 3767, 3849, 3850, 3961, 3966, 3967, 8149, 8162, 8168, 8187, 8188, 8189, 8190, 8191, 8192, 8193, 8194, 8488, then 123, 189, 190, 192."""
     observe = _observe_quote_refusal(root, text, sha)
     if observe is not None:
         return [observe]
@@ -1062,6 +1207,12 @@ def _quote_refusals(root, text, sha):
     op = _op_quote_refusal(root, text, sha)
     if op is not None:
         return [op]
+    no_process = _no_process_quote_refusal(root, text, sha)
+    if no_process is not None:
+        return [no_process]
+    seat = _seat_quote_refusal(root, text, sha)
+    if seat is not None:
+        return [seat]
     is_write = _is_write_quote_refusal(root, text, sha)
     if is_write is not None:
         return [is_write]
@@ -1099,6 +1250,15 @@ def _quote_refusals(root, text, sha):
     read = _read_quote_refusal(root, text, sha)
     if read is not None:
         return [read]
+    body_doc = _body_doc_quote_refusal(root, text, sha)
+    if body_doc is not None:
+        return [body_doc]
+    create_only = _create_only_quote_refusal(root, text, sha)
+    if create_only is not None:
+        return [create_only]
+    present_revision = _present_revision_quote_refusal(root, text, sha)
+    if present_revision is not None:
+        return [present_revision]
     asks = _asks_quote_refusal(root, text, sha)
     if asks is not None:
         return [asks]
