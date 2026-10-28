@@ -43,8 +43,9 @@ use tempfile::TempDir;
 /// HAMT shard (task 062), the multibyte-name shard (task 063), the
 /// combining-mark shard (task 064), the fifteen-byte-name shard (task 065),
 /// the sixteen-byte-name shard (task 066), the nine-byte-name shard
-/// (task 067) and the one-byte-name shard (task 068): 27.
-const PINNED_BUNDLES: usize = 27;
+/// (task 067) and the one-byte-name shard (task 068), and the three-shared-
+/// digest-byte shard (task 069): 28.
+const PINNED_BUNDLES: usize = 28;
 
 /// How many committed fixtures have a pin: all but wc001-core.
 const PINNED_FIXTURES: usize = 7;
@@ -236,6 +237,11 @@ fn pinned_bundles() -> Vec<Pinned> {
         what: "one-byte name over the HAMT threshold".to_owned(),
         pin: ONE_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID,
         entries: one_byte_name_over_the_hamt_threshold_bundle(),
+    });
+    bundles.push(Pinned {
+        what: "three shared digest bytes over the HAMT threshold".to_owned(),
+        pin: THREE_SHARED_DIGEST_BYTES_OVER_HAMT_THRESHOLD_LAB_CID,
+        entries: directory_with_three_shared_digest_bytes_bundle(),
     });
     bundles
 }

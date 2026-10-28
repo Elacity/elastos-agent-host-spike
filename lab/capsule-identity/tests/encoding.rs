@@ -351,6 +351,51 @@ fn directory_with_a_one_link_hamt_shard_has_the_pinned_cid() {
 }
 
 #[test]
+fn three_shared_digest_bytes_over_the_hamt_threshold_is_a_shard() {
+    // Task 069: two 200-byte names replace the first two fillers of the
+    // 262145-estimate bundle. Their digest bytes 0, 1 and 2 are equal
+    // (`10 0F 9C`) and byte 3 differs (`DD` and `28`), and no other name has
+    // their first digest byte, so byte 2's bucket holds both names and still
+    // gets a child shard from byte 3. The links estimate stays 262145, so the
+    // directory is a HAMT shard. The pin was recomputed by README's Python
+    // rule and printed by Kubo v0.40.1 with the provider's HAMT config.
+    let entries = directory_with_three_shared_digest_bytes_bundle();
+    let pair = shared_three_byte_names();
+    for name in &pair {
+        let found: Vec<&BundleEntry> = entries.iter().filter(|entry| entry.path == *name).collect();
+        assert_eq!(found.len(), 1, "one name of the pair is in the bundle");
+        assert_eq!(found[0].path.len(), 200, "a pair name's bytes");
+    }
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    let (_bundle, walked, encoded) = walk_and_encode(&entries);
+    assert_eq!(
+        (walked.as_str(), encoded.as_str()),
+        (
+            THREE_SHARED_DIGEST_BYTES_OVER_HAMT_THRESHOLD_LAB_CID,
+            THREE_SHARED_DIGEST_BYTES_OVER_HAMT_THRESHOLD_LAB_CID
+        ),
+        "(lab_cid, encode_entries) against the pin"
+    );
+    assert!(walked.starts_with("bafybei"), "{walked}");
+    assert_ne!(
+        walked, DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID,
+        "three shared digest bytes got the plain shard's name"
+    );
+    assert_ne!(
+        walked, DIRECTORY_WITH_A_ONE_LINK_HAMT_SHARD_LAB_CID,
+        "three shared digest bytes got the one-link shard's name"
+    );
+    assert_ne!(
+        walked, ONE_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID,
+        "three shared digest bytes got the 1-byte name's name"
+    );
+}
+
+#[test]
 fn file_root_inside_a_hamt_has_the_pinned_cid() {
     // Task 062: one 200-byte filler of the 262145-estimate bundle holds a
     // file of 262145 bytes, a file root over two raw leaves. A HAMT leaf

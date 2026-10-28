@@ -2569,4 +2569,77 @@ mod tests {
         assert_ne!(shard.links[0].cid, vec![0x01, 0xaa]);
         assert_ne!(shard.links[0].cid, vec![0x01, 0xbb]);
     }
+
+    #[test]
+    fn two_names_sharing_three_digest_bytes_get_the_next_shard() {
+        // Task 069: two 200-byte names whose digest bytes 0, 1 and 2 are
+        // equal (`10 0F 9C`) and whose byte 3 differs (`DD` and `28`). At
+        // depth 2 both names fall in one bucket, so that bucket is still one
+        // link named only byte 2's two uppercase hex digits, pointing at the
+        // child shard from byte 3: sharing three digest bytes keeps the next
+        // shard level.
+        let names = [
+            format!("c3-{:0>197}", 24_530),
+            format!("c3-{:0>197}", 47_365),
+        ];
+        for name in &names {
+            assert_eq!(name.len(), 200, "a bundle name fits in a folder");
+        }
+        let digests: Vec<[u8; HAMT_DIGEST_BYTES]> = names
+            .iter()
+            .map(|name| hamt_digest(name.as_bytes()))
+            .collect();
+        assert_eq!(
+            digests[0],
+            [0x10, 0x0F, 0x9C, 0xDD, 0x9B, 0xA1, 0xD9, 0x36],
+            "the first name's digest"
+        );
+        assert_eq!(
+            digests[1],
+            [0x10, 0x0F, 0x9C, 0x28, 0x1F, 0xB2, 0xF3, 0x59],
+            "the second name's digest"
+        );
+        assert_eq!(
+            digests[0][..3],
+            digests[1][..3],
+            "the two names share digest bytes 0, 1 and 2"
+        );
+        assert_eq!(digests[0][..3], [0x10, 0x0F, 0x9C], "the shared prefix");
+        assert_ne!(
+            digests[0][3], digests[1][3],
+            "the two names differ at digest byte 3"
+        );
+        let links = [
+            Link {
+                name: Cow::Owned(names[0].clone()),
+                cid: vec![0x01, 0xaa],
+                tsize: 1,
+            },
+            Link {
+                name: Cow::Owned(names[1].clone()),
+                cid: vec![0x01, 0xbb],
+                tsize: 2,
+            },
+        ];
+        let shard = hamt_shard(&links, &[0, 1], &digests, 2, "", &naming_hash)
+            .expect("two names sharing three bytes are a shard");
+        let bucket = digests[0][2];
+        assert_eq!(shard.links.len(), 1, "one bucket is one link");
+        assert_eq!(
+            shard.links[0].name,
+            format!("{bucket:02X}"),
+            "a bucket of two children is named only its third digest byte"
+        );
+        assert_eq!(
+            shard.links[0].name, "9C",
+            "byte 2's two uppercase hex digits"
+        );
+        assert!(
+            !shard.links[0].name.contains(names[0].as_str())
+                && !shard.links[0].name.contains(names[1].as_str()),
+            "a shard link name holds no child's leaf name"
+        );
+        assert_ne!(shard.links[0].cid, vec![0x01, 0xaa]);
+        assert_ne!(shard.links[0].cid, vec![0x01, 0xbb]);
+    }
 }

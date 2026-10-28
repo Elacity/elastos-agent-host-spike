@@ -151,7 +151,12 @@ To recompute a lab CID by hand:
    one child is one link named the bucket's two
    uppercase hex digits and the child's name; a bucket of two or more is one
    link named only those two digits, pointing at a child shard built from the
-   next digest byte, even when that child shard holds one link. A shard of
+   next digest byte, even when that child shard holds one link. Two names
+   that share three digest bytes still get a child shard from the third
+   byte: byte 2's bucket holds both names and the child shard from byte 3
+   names their leaves (task 069,
+   `directory_with_three_shared_digest_bytes_bundle`, the pair
+   `c3-` and 197 digits for 24530 and 47365 sharing `10 0F 9C`). A shard of
    one link is allowed when its children share this byte; only a bucket of
    one child is a leaf. A ninth byte is refused
    with `Refusal::HamtTooDeep`. Links go out in bucket order. The shard's
@@ -178,6 +183,11 @@ To recompute a lab CID by hand:
    bundle's `nine_byte_name_over_the_hamt_threshold_is_a_shard` names it with
    F-CI67a, and the 1-byte bundle's
    `one_byte_name_over_the_hamt_threshold_is_a_shard` names it with F-CI68a.
+   The three-shared-byte bundle's
+   `three_shared_digest_bytes_over_the_hamt_threshold_is_a_shard` names it
+   with F-CI69a, and
+   `two_names_sharing_three_digest_bytes_get_the_next_shard` calls the same
+   builder at byte 2 (task 069).
 7. A directory's CID is `01 70 12 20` and the SHA-256 of its block (the dag-pb
    codec `0x70`). The Tsize of a link to a directory is the length of its
    block plus the Tsizes of its own links. Every varint inside a CID here is
@@ -395,6 +405,7 @@ rules and not from the Rust code, in
 | A name whose length is a positive multiple of 16 has an empty tail, so its last 16-byte block is mixed once: `photo-block.jpeg` is 16 bytes (task 066) | `sixteen_byte_name_mixes_its_last_block_once`, `sixteen_byte_name_over_the_hamt_threshold_is_a_shard` | F-CI66a (the tail takes the last 16 bytes again) |
 | A 9-byte name leaves a 9-byte tail, so tail index 8, the first byte of the hash's second word, is mixed: `photo.jpg` is 9 bytes and the measured name is 242 bytes (task 067) | `nine_byte_name_mixes_the_second_words_first_byte`, `nine_byte_name_over_the_hamt_threshold_is_a_shard` | F-CI67a (a tail must be longer than 9 bytes to mix its second word) |
 | A 1-byte name leaves a 1-byte tail, so its only byte is mixed into the hash's first word: `a` is 1 byte and the measured name is 250 bytes (task 068) | `one_byte_name_mixes_its_only_tail_byte`, `one_byte_name_over_the_hamt_threshold_is_a_shard` | F-CI68a (a tail must be longer than 1 byte to mix its first word) |
+| A bucket of two or more children gets a child shard at any digest byte, so two names that share three digest bytes (`10 0F 9C`) still keep the next shard level: byte 3 gives their leaves (task 069) | `three_shared_digest_bytes_over_the_hamt_threshold_is_a_shard`, `two_names_sharing_three_digest_bytes_get_the_next_shard` | F-CI69a (a bucket at byte 2 becomes a leaf) |
 | A HAMT bitmap sets bucket `i` in byte `31 - i / 8` at `1 << (i % 8)` and drops leading zero bytes; a collision bucket gets a child shard (task 056) | `hamt_data_trims_leading_zero_bitmap_bytes`, `two_names_in_one_bucket_get_a_child_shard` | F-CI56f (bitmap byte order), F-CI56g (no trimming) |
 | The largest basic root block task 053 named (262144 bytes) is still named, and one name byte more is named too; no block-length refusal remains (task 053, extended by task 056) | `directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused` | — |
 | No inline: no identity multihash | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18i (inline at most 32 bytes) |
@@ -564,6 +575,21 @@ first and `encode_entries` agrees; the hand-run Kubo printed it too. Its named
 tests are `one_byte_name_mixes_its_only_tail_byte` and
 `one_byte_name_over_the_hamt_threshold_is_a_shard`; F-CI68a plants a tail
 requirement of more than 1 byte, so a 1-byte name misses its only tail byte.
+Task 069 adds one more pin, built in a temp dir and in memory and never
+committed: that same 262145-estimate bundle with its first two 200-byte
+fillers replaced by `c3-` and 197 zero-padded digits for 24530 and 47365.
+Each name is 200 bytes, so the byte estimate stays 262145 and the directory
+is a HAMT shard. Both names' murmur3 digests start `10 0F 9C` and differ at
+byte 3 (`DD` and `28`), and no other name has their first digest byte, so
+byte 2's bucket holds both names and still gets a child shard from byte 3.
+It is `bafybeigu7u5n3b2mlwwhktsq3qzgt54c7lii5y5kboe4ykmpzjryofvw24`
+(`THREE_SHARED_DIGEST_BYTES_OVER_HAMT_THRESHOLD_LAB_CID`) and its entries are
+`directory_with_three_shared_digest_bytes_bundle`, built from the pair
+`shared_three_byte_names`. README's Python block gave it first and
+`encode_entries` agrees; the hand-run Kubo printed it too. Its named tests
+are `three_shared_digest_bytes_over_the_hamt_threshold_is_a_shard` and
+`two_names_sharing_three_digest_bytes_get_the_next_shard`; F-CI69a plants a
+leaf test that also takes a bucket of two or more children at byte 2.
 
 ### The cross-implementation check
 
@@ -588,9 +614,9 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    (`python3 -I could not run: <error>`), a non-zero exit (even after it
    printed a valid CID), no output, or more than one line is refused with its
    own reason, and the test asserts each of these reasons.
-5. For each of the 27 pins, the Python answer, the pin constant and the
+5. For each of the 28 pins, the Python answer, the pin constant and the
    printed `encode_entries` result for the same files must be equal, and the
-   test asserts that it checked exactly 27 bundles in all. The 27 are the seven
+   test asserts that it checked exactly 28 bundles in all. The 28 are the seven
    pinned fixtures (`content-sample`, `web-app`, `agent-host`, `provider`,
    `model`, `provider-variant-a`, `provider-variant-b`), the recipe, the
    chunk-limit, empty-file and long-name bundles above, which are built as
@@ -603,7 +629,8 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    root inside a HAMT shard (task 062), the multibyte-name shard (task 063),
    the combining-mark shard (task 064), the fifteen-byte-name shard (task
    065), the sixteen-byte-name shard (task 066), the nine-byte-name shard
-   (task 067) and the one-byte-name shard (task 068), also built in memory.
+   (task 067) and the one-byte-name shard (task 068), and the
+   three-shared-digest-byte shard (task 069), also built in memory.
    `wc001-core` has no pin, because its `capsule.wasm` is
    built on each machine, so it is not checked here.
 
@@ -611,7 +638,7 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
 | --- | --- | --- |
 | README's rule agrees with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19a (the block's `0x55` becomes `0x70` before it runs) |
 | Rust agrees with README's rule, not only with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19b (the encoder's `RAW_CODEC` becomes `0x56`) |
-| A missing block is no pass: exactly 27 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
+| A missing block is no pass: exactly 28 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
 | An interpreter that cannot start fails the test | `readme_python_recomputes_every_lab_cid_pin` | F-CI19d (a program that does not exist) |
 | A non-zero exit is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19e (exit status not checked) |
 | No output is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19f (empty answer taken) |
@@ -627,7 +654,7 @@ script's `KUBO_ADD_FLAGS`, `scripts/ci-model-package.mjs:211`, written once as
 `KUBO_ADD_FLAGS` in the test file) in a fresh temp repo made by
 `init --empty-repo`, with the provider's two HAMT config values set. No daemon
 runs and nothing is written outside the temp folders.
-`kubo_hash_only_import_prints_every_lab_cid_pin` writes each of the 27 pinned
+`kubo_hash_only_import_prints_every_lab_cid_pin` writes each of the 28 pinned
 bundles above into a temp folder (since task 051 with the two-level file
 bundle, since task 053 with the directory-at-limit bundle, since task 056
 with the HAMT bundles, since task 061 with the one-link shard, since task
@@ -635,7 +662,8 @@ with the HAMT bundles, since task 061 with the one-link shard, since task
 multibyte-name shard, since task 064 with the combining-mark shard, since
 task 065 with the fifteen-byte-name shard, since task 066 with the
 sixteen-byte-name shard and since task 067 with the nine-byte-name shard,
-and since task 068 with the one-byte-name shard), and
+since task 068 with the one-byte-name shard, and since task 069 with the
+three-shared-digest-byte shard), and
 Kubo's root,
 the pin and `encode_entries` must be one value. On 2026-10-28 it passed at
 task 053 too (`test result: ok. 1 passed`), and with the HAMT threshold set to
@@ -2234,7 +2262,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 313 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 314 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -2295,7 +2323,7 @@ is retargeted by it), and task 064's F-CI64a (see
 [the encoding](#the-encoding)) and F-CI64b and F-CI64c (both: see
 [the cross-implementation check](#the-cross-implementation-check); F-CI62b
 is retargeted by it too), and task 065's F-CI65a, task 066's F-CI66a,
-task 067's F-CI67a and task 068's F-CI68a (all: see
+task 067's F-CI67a, task 068's F-CI68a and task 069's F-CI69a (all: see
 [the encoding](#the-encoding)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
