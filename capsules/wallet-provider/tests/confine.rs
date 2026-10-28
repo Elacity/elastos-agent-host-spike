@@ -808,11 +808,15 @@ impl ConfinedProvider {
         (result, lifecycle_id)
     }
 
-    fn shutdown(&mut self) {
+    /// Sends `shutdown`, checks that it answers `ok` and that the child exited
+    /// with status 0, and returns the answer so a caller can hold it to its
+    /// exact shape.
+    fn shutdown(&mut self) -> Value {
         let response = self.send(&json!({ "op": "shutdown" }));
         assert_eq!(response["status"], "ok", "shutdown must answer: {response}");
         let exit = self.wait_for_exit();
         assert!(exit.code() == Some(0), "confined provider {exit}");
+        response
     }
 }
 
@@ -1131,15 +1135,23 @@ fn confined_provider_serves_wallet_operations_under_its_root() {
 ///
 /// Honesty limit: the profile grants `file-read*` on the literal
 /// `STORAGE_PARENT`, so the parent directory itself can be stat'ed. This case
-/// shows each call answers `ok` under the kernel's enforcement and that the
-/// wallet directory's names and each file's bytes are unchanged after every
-/// call. It claims no syscall count and changes no grant.
+/// compares the wallet directory's final entry names and each file's bytes
+/// against the setup snapshot, so it shows each call answers `ok` under the
+/// kernel's enforcement and that no call changed, added or removed a name
+/// under the wallet directory. It counts no syscalls and changes no grant.
 ///
 /// Falsifiers: read `/etc/hosts`, outside every grant, in `status`'s ok arm and
 /// answer `storage_error` when that read is denied (WP139), so `status` stops
-/// answering ok and this case fails on its first answer; and append one byte
-/// to `wallet-key.hex` in `status`'s ok arm while every answer stays ok
-/// (WP140), so only the wallet directory comparison catches it.
+/// answering ok and this case fails on its first answer; append one byte to
+/// `wallet-key.hex` in `status`'s ok arm while every answer stays ok (WP140),
+/// so only the wallet directory comparison catches it, at `status`; and write
+/// one file into the wallet directory in `shutdown`'s arm before it answers
+/// (WP145), so the final comparison after `shutdown` finds a name the setup
+/// did not leave. WP139 and WP140 both plant in `status`, the first call, and
+/// WP145 plants in `shutdown`, the last, so the three registered plants for
+/// this case reach its first and its last call only; a regression in
+/// `list_accounts`, `default_account` or `list_approvals` alone would fail
+/// this case with no plant of its own.
 #[test]
 fn no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged() {
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
@@ -1205,37 +1217,51 @@ fn no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged() {
         "the setup must leave exactly the key and the store under the wallet directory"
     );
 
+    // The one comparison every call below makes: the wallet directory's entry
+    // names and each file's bytes, against the setup snapshot. A changed,
+    // added or removed name, or changed bytes, is an `Err` that names the call
+    // and the path. It counts no syscalls.
+    fn unchanged(root: &Path, call: &str, setup: &[(String, Vec<u8>)]) -> Result<(), String> {
+        let dir = wallet_dir(root);
+        let mut after = Vec::new();
+        let entries = fs::read_dir(&dir)
+            .map_err(|err| format!("{call} could not list {}: {err}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|err| {
+                format!("{call} could not read an entry of {}: {err}", dir.display())
+            })?;
+            let path = entry.path();
+            let bytes = fs::read(&path)
+                .map_err(|err| format!("{call} could not read {}: {err}", path.display()))?;
+            after.push((entry.file_name().to_string_lossy().into_owned(), bytes));
+        }
+        after.sort();
+        if after == setup {
+            return Ok(());
+        }
+        let changed = after
+            .iter()
+            .find(|(name, bytes)| {
+                setup
+                    .iter()
+                    .find(|(known, _)| known == name)
+                    .is_none_or(|(_, known_bytes)| known_bytes != bytes)
+            })
+            .or_else(|| {
+                setup
+                    .iter()
+                    .find(|(name, _)| !after.iter().any(|(now, _)| now == name))
+            })
+            .map(|(name, _)| name.as_str());
+        Err(match changed {
+            Some(name) => format!("{call} changed {}", dir.join(name).display()),
+            None => format!("{call} changed the entry set under {}", dir.display()),
+        })
+    }
+
     let status = provider.send(&json!({ "op": "status" }));
-    let mut after = fs::read_dir(wallet_dir(&root))
-        .expect("wallet directory after status")
-        .map(|entry| {
-            let entry = entry.expect("wallet directory entry after status");
-            (
-                entry.file_name().to_string_lossy().into_owned(),
-                fs::read(entry.path()).expect("wallet file bytes after status"),
-            )
-        })
-        .collect::<Vec<(String, Vec<u8>)>>();
-    after.sort();
-    let changed = after
-        .iter()
-        .find(|(name, bytes)| {
-            setup
-                .iter()
-                .find(|(known, _)| known == name)
-                .is_none_or(|(_, known_bytes)| known_bytes != bytes)
-        })
-        .or_else(|| {
-            setup
-                .iter()
-                .find(|(name, _)| !after.iter().any(|(now, _)| now == name))
-        })
-        .map(|(name, _)| name.clone());
-    assert!(
-        after == setup,
-        "status changed the wallet directory at {changed:?}; the watched paths are \
-         {WALLET_KEY_FILE} and wallet-state.json"
-    );
+    let watched = unchanged(&root, "status", &setup);
+    assert!(watched.is_ok(), "{}", watched.unwrap_err());
     assert_eq!(status["status"], "ok", "status must answer: {status}");
     assert_eq!(
         status["data"]["storage_configured"], true,
@@ -1245,36 +1271,8 @@ fn no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged() {
     let data = ok_data(provider.wallet(WalletProviderOperationV2::ListAccounts {
         include_revoked: false,
     }));
-    let mut after = fs::read_dir(wallet_dir(&root))
-        .expect("wallet directory after list_accounts")
-        .map(|entry| {
-            let entry = entry.expect("wallet directory entry after list_accounts");
-            (
-                entry.file_name().to_string_lossy().into_owned(),
-                fs::read(entry.path()).expect("wallet file bytes after list_accounts"),
-            )
-        })
-        .collect::<Vec<(String, Vec<u8>)>>();
-    after.sort();
-    let changed = after
-        .iter()
-        .find(|(name, bytes)| {
-            setup
-                .iter()
-                .find(|(known, _)| known == name)
-                .is_none_or(|(_, known_bytes)| known_bytes != bytes)
-        })
-        .or_else(|| {
-            setup
-                .iter()
-                .find(|(name, _)| !after.iter().any(|(now, _)| now == name))
-        })
-        .map(|(name, _)| name.clone());
-    assert!(
-        after == setup,
-        "list_accounts changed the wallet directory at {changed:?}; the watched paths are \
-         {WALLET_KEY_FILE} and wallet-state.json"
-    );
+    let watched = unchanged(&root, "list_accounts", &setup);
+    assert!(watched.is_ok(), "{}", watched.unwrap_err());
     assert!(
         data["accounts"].as_array().is_some_and(|accounts| accounts
             .iter()
@@ -1286,36 +1284,8 @@ fn no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged() {
         chain_namespace: "eip155:20".to_string(),
         intent: "publish_envelope".to_string(),
     }));
-    let mut after = fs::read_dir(wallet_dir(&root))
-        .expect("wallet directory after default_account")
-        .map(|entry| {
-            let entry = entry.expect("wallet directory entry after default_account");
-            (
-                entry.file_name().to_string_lossy().into_owned(),
-                fs::read(entry.path()).expect("wallet file bytes after default_account"),
-            )
-        })
-        .collect::<Vec<(String, Vec<u8>)>>();
-    after.sort();
-    let changed = after
-        .iter()
-        .find(|(name, bytes)| {
-            setup
-                .iter()
-                .find(|(known, _)| known == name)
-                .is_none_or(|(_, known_bytes)| known_bytes != bytes)
-        })
-        .or_else(|| {
-            setup
-                .iter()
-                .find(|(name, _)| !after.iter().any(|(now, _)| now == name))
-        })
-        .map(|(name, _)| name.clone());
-    assert!(
-        after == setup,
-        "default_account changed the wallet directory at {changed:?}; the watched paths are \
-         {WALLET_KEY_FILE} and wallet-state.json"
-    );
+    let watched = unchanged(&root, "default_account", &setup);
+    assert!(watched.is_ok(), "{}", watched.unwrap_err());
     assert_eq!(
         data["default_account"]["account_id"].as_str(),
         Some(account_id.as_str()),
@@ -1325,75 +1295,34 @@ fn no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged() {
     let data = ok_data(provider.wallet(WalletProviderOperationV2::ListApprovals {
         include_resolved: false,
     }));
-    let mut after = fs::read_dir(wallet_dir(&root))
-        .expect("wallet directory after list_approvals")
-        .map(|entry| {
-            let entry = entry.expect("wallet directory entry after list_approvals");
-            (
-                entry.file_name().to_string_lossy().into_owned(),
-                fs::read(entry.path()).expect("wallet file bytes after list_approvals"),
-            )
-        })
-        .collect::<Vec<(String, Vec<u8>)>>();
-    after.sort();
-    let changed = after
-        .iter()
-        .find(|(name, bytes)| {
-            setup
-                .iter()
-                .find(|(known, _)| known == name)
-                .is_none_or(|(_, known_bytes)| known_bytes != bytes)
-        })
-        .or_else(|| {
-            setup
-                .iter()
-                .find(|(name, _)| !after.iter().any(|(now, _)| now == name))
-        })
-        .map(|(name, _)| name.clone());
-    assert!(
-        after == setup,
-        "list_approvals changed the wallet directory at {changed:?}; the watched paths are \
-         {WALLET_KEY_FILE} and wallet-state.json"
+    let watched = unchanged(&root, "list_approvals", &setup);
+    assert!(watched.is_ok(), "{}", watched.unwrap_err());
+    let approvals = data["approval_requests"]
+        .as_array()
+        .unwrap_or_else(|| panic!("list_approvals must answer an approval_requests array: {data}"));
+    assert_eq!(
+        approvals.len(),
+        1,
+        "list_approvals must answer exactly the one pending request the setup made: {data}"
     );
-    assert!(
-        data["approval_requests"]
-            .as_array()
-            .is_some_and(|requests| requests
-                .iter()
-                .any(|request| request["request_id"] == request_id.as_str())),
-        "list_approvals must answer the pending request: {data}"
+    assert_eq!(
+        approvals[0]["request_id"].as_str(),
+        Some(request_id.as_str()),
+        "list_approvals must answer the request the setup made: {data}"
+    );
+    assert_eq!(
+        approvals[0]["status"].as_str(),
+        Some("pending"),
+        "list_approvals must answer the request as still pending: {data}"
     );
 
-    provider.shutdown();
-    let mut after = fs::read_dir(wallet_dir(&root))
-        .expect("wallet directory after shutdown")
-        .map(|entry| {
-            let entry = entry.expect("wallet directory entry after shutdown");
-            (
-                entry.file_name().to_string_lossy().into_owned(),
-                fs::read(entry.path()).expect("wallet file bytes after shutdown"),
-            )
-        })
-        .collect::<Vec<(String, Vec<u8>)>>();
-    after.sort();
-    let changed = after
-        .iter()
-        .find(|(name, bytes)| {
-            setup
-                .iter()
-                .find(|(known, _)| known == name)
-                .is_none_or(|(_, known_bytes)| known_bytes != bytes)
-        })
-        .or_else(|| {
-            setup
-                .iter()
-                .find(|(name, _)| !after.iter().any(|(now, _)| now == name))
-        })
-        .map(|(name, _)| name.clone());
-    assert!(
-        after == setup,
-        "shutdown changed the wallet directory at {changed:?}; the watched paths are \
-         {WALLET_KEY_FILE} and wallet-state.json"
+    let shutdown = provider.shutdown();
+    let watched = unchanged(&root, "shutdown", &setup);
+    assert!(watched.is_ok(), "{}", watched.unwrap_err());
+    assert_eq!(
+        shutdown,
+        json!({ "status": "ok" }),
+        "shutdown must answer status only, with no data field"
     );
 }
 
