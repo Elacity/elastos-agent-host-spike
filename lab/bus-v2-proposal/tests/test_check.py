@@ -49,6 +49,18 @@ LAUNCHING_THIRD = "/// declaration covers that person and no other `Users/<name>
 LAUNCHING_CFG = "#[cfg(test)]"
 LAUNCHING_CONST = 'const LAUNCHING_PRINCIPAL: &str = "Users/self";'
 
+ASKS_REL = OWNED_REL
+ASKS_NUMBER = 8149
+ASKS_SPAN = "examples/agent-host/src/lib.rs:8149"
+ASKS_FIRST = "/// The declared per-step asks, compiled in from `asks.json` in this lane. The"
+ASKS_SECOND = "/// file is an auditable declaration, not the policy check: the Runtime"
+ASKS_THIRD = "/// enforces each grant (P4, P18). It is a lane-local stand-in for the Runtime"
+ASKS_FOURTH = "/// manifest and retires into that one place when the Runtime defines per-step"
+ASKS_FIFTH = "/// asks (P10). It is read by this module's tests only, so the shipped guest"
+ASKS_SIXTH = "/// keeps no new production path."
+ASKS_CFG = "#[cfg(test)]"
+ASKS_CONST = 'const ASKS_JSON: &str = include_str!("../asks.json");'
+
 
 class CitationCheckTests(unittest.TestCase):
     def _temp_root(self):
@@ -175,6 +187,53 @@ class CitationCheckTests(unittest.TestCase):
             "    " + last + "\n"
             "\n"
         )
+
+    def _asks_source(
+        self,
+        first=ASKS_FIRST,
+        third=ASKS_THIRD,
+        marker_last=MARKER_CONST,
+        launching_last=LAUNCHING_CONST,
+    ):
+        """A committed file with the owned lines, asks, marker and launching blocks."""
+        rows = ["// filler"] * (OWNED_NUMBER - 1) + [OWNED_QUOTE, NEXT_QUOTE]
+        rows += ["// filler"] * (ASKS_NUMBER - 3 - len(rows))
+        rows += [
+            first,
+            ASKS_SECOND,
+            third,
+            ASKS_FOURTH,
+            ASKS_FIFTH,
+            ASKS_SIXTH,
+            ASKS_CFG,
+            ASKS_CONST,
+        ]
+        rows += ["// filler"] * (MARKER_NUMBER - 4 - len(rows))
+        rows += [MARKER_HEAD, MARKER_TAIL, MARKER_CFG, marker_last]
+        rows += ["// filler"] * (LAUNCHING_NUMBER - len(rows) - 5)
+        rows += [
+            LAUNCHING_HEAD,
+            LAUNCHING_SECOND,
+            LAUNCHING_THIRD,
+            LAUNCHING_CFG,
+            launching_last,
+        ]
+        return ("\n".join(rows) + "\n").encode("utf-8")
+
+    def _asks_block(
+        self,
+        first=ASKS_FIRST,
+        second=ASKS_SECOND,
+        third=ASKS_THIRD,
+        fourth=ASKS_FOURTH,
+        last=ASKS_CONST,
+        count=8,
+    ):
+        """A draft that cites the asks span and indents its quotation below it."""
+        lines = [first, second, third, fourth, ASKS_FIFTH, ASKS_SIXTH, ASKS_CFG, last]
+        body = "`" + ASKS_SPAN + "` states that the Runtime enforces each grant.\n\n"
+        body += "".join("    " + line + "\n" for line in lines[:count])
+        return body + "\n"
 
     def _caught(self, global_name, planted, named_test, prefix, label):
         named_test()
@@ -699,6 +758,166 @@ class CitationCheckTests(unittest.TestCase):
             LAUNCHING_CONST,
         )
 
+    def test_live_draft_asks_quote_matches_its_pinned_line(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        self.assertEqual(check.asks_quote(text), ASKS_THIRD)
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        self.assertEqual(
+            check.pinned_line(root, sha, ASKS_REL, ASKS_NUMBER),
+            ASKS_THIRD,
+        )
+
+    def test_asks_quoted_line_mismatch_is_refused(self):
+        expected = "refuse: quoted line does not match " + ASKS_SPAN
+        root = self._draft(
+            self._asks_block(third=ASKS_THIRD + "x"),
+            {ASKS_REL: self._asks_source()},
+        )
+        self.assertEqual(check.problems(root), [expected])
+        (root / ASKS_REL).write_bytes(
+            self._asks_source(third="// edited in the worktree")
+        )
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_asks_quoted_line_match_ignores_the_worktree_file(self):
+        root = self._draft(self._asks_block(), {ASKS_REL: self._asks_source()})
+        self.assertEqual(check.problems(root), [])
+        (root / ASKS_REL).write_bytes(
+            self._asks_source(third="// edited in the worktree")
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_asks_first_line_does_not_stand_for_line_8149(self):
+        root = self._draft(
+            self._asks_block(first=ASKS_FIRST + "x"),
+            {ASKS_REL: self._asks_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_asks_second_line_does_not_stand_for_line_8149(self):
+        root = self._draft(
+            self._asks_block(second=ASKS_SECOND + "x"),
+            {ASKS_REL: self._asks_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_asks_fourth_line_does_not_stand_for_line_8149(self):
+        root = self._draft(
+            self._asks_block(fourth=ASKS_FOURTH + "x"),
+            {ASKS_REL: self._asks_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_asks_last_line_does_not_stand_for_line_8149(self):
+        root = self._draft(
+            self._asks_block(last=ASKS_CONST + "x"),
+            {ASKS_REL: self._asks_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_two_asks_lines_are_not_read(self):
+        got, reads = self._pinned_reads(
+            self._asks_block(count=2), {ASKS_REL: self._asks_source()}
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [])
+
+    def test_asks_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        expected = "refuse: quoted line is not in the pinned commit: " + ASKS_SPAN
+        short = ("// filler\n" * 10).encode("utf-8")
+        root = self._draft(self._asks_block(), {ASKS_REL: short})
+        (root / ASKS_REL).write_bytes(self._asks_source())
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_two_asks_spans_are_refused(self):
+        expected = "refuse: quoted line is not one line: " + ASKS_SPAN
+        body = self._asks_block() + "\nAgain `" + ASKS_SPAN + "`.\n"
+        got, reads = self._pinned_reads(body, {ASKS_REL: self._asks_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [])
+
+    def test_draft_without_the_asks_span_adds_no_asks_refusal(self):
+        root = self._draft(
+            self._marker_body(MARKER_CONST),
+            {ASKS_REL: self._asks_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_owned_line_mismatch_adds_no_asks_refusal(self):
+        expected = "refuse: quoted line does not match " + OWNED_SPAN
+        body = self._quote_body(OWNED_QUOTE + "x", NEXT_QUOTE) + self._asks_block(
+            third=ASKS_THIRD + "y"
+        )
+        got, reads = self._pinned_reads(body, {ASKS_REL: self._asks_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [OWNED_NUMBER])
+
+    def test_next_line_mismatch_adds_no_asks_refusal(self):
+        expected = "refuse: quoted line does not match " + NEXT_SPAN
+        body = self._quote_body(OWNED_QUOTE, NEXT_QUOTE + "x") + self._asks_block(
+            third=ASKS_THIRD + "y"
+        )
+        got, reads = self._pinned_reads(body, {ASKS_REL: self._asks_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [OWNED_NUMBER, NEXT_NUMBER])
+
+    def test_asks_line_mismatch_adds_no_marker_or_launching_refusal(self):
+        expected = "refuse: quoted line does not match " + ASKS_SPAN
+        body = (
+            self._quote_body(OWNED_QUOTE, NEXT_QUOTE)
+            + self._asks_block(third=ASKS_THIRD + "x")
+            + self._marker_body(MARKER_CONST + "y")
+            + self._launching_body(LAUNCHING_CONST + "z")
+        )
+        got, reads = self._pinned_reads(body, {ASKS_REL: self._asks_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [OWNED_NUMBER, NEXT_NUMBER, ASKS_NUMBER])
+
+    def test_marker_line_mismatch_follows_the_asks_match(self):
+        expected = "refuse: quoted line does not match " + MARKER_SPAN
+        body = self._asks_block() + self._marker_body(MARKER_CONST + "x")
+        got, reads = self._pinned_reads(body, {ASKS_REL: self._asks_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [ASKS_NUMBER, MARKER_NUMBER])
+
+    def test_draft_without_the_asks_span_still_refuses_a_marker_mismatch(self):
+        expected = "refuse: quoted line does not match " + MARKER_SPAN
+        root = self._draft(
+            self._marker_body(MARKER_CONST + "x"),
+            {ASKS_REL: self._asks_source()},
+        )
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_draft_without_the_asks_span_still_refuses_a_launching_mismatch(self):
+        expected = "refuse: quoted line does not match " + LAUNCHING_SPAN
+        root = self._draft(
+            self._launching_body(LAUNCHING_CONST + "x"),
+            {ASKS_REL: self._asks_source()},
+        )
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_asks_quote_refusal_waits_for_a_known_pin(self):
+        body = self._asks_block(third=ASKS_THIRD + "x")
+        files = {ASKS_REL: self._asks_source()}
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+        bad_pin = "Pinned commit: HEAD\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(bad_pin, files)),
+            ["refuse: pinned commit is not one 40-hex commit"],
+        )
+        unknown = "Pinned commit: " + "f" * 40 + "\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(unknown, files, commit=True)),
+            ["refuse: pinned commit is not a commit: " + "f" * 40],
+        )
+
     def test_falsifier_missing_path_is_caught(self):
         self._caught(
             "read_file",
@@ -814,6 +1033,15 @@ class CitationCheckTests(unittest.TestCase):
             self.test_launching_quoted_line_mismatch_is_refused,
             "refuse: quoted line does not match",
             "CAUGHT launching-quoted-line",
+        )
+
+    def test_falsifier_asks_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_asks_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT asks-quoted-line",
         )
 
     def test_worktree_root_contains_checker(self):
