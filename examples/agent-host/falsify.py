@@ -53,6 +53,7 @@ import pathlib
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -3142,7 +3143,8 @@ def new_mission_commands_list_and_refuse_missing_manifests():
     points those rows at scratch paths under SELF_TEST_DIR, so the refusal
     still holds after the real lab crates exist. A selected command whose
     scratch manifest is present still runs when another mission command's
-    manifest is absent. The production rows keep lab/<name>/Cargo.toml."""
+    manifest is absent. Inspection errors also refuse with their exact reason
+    before work starts. The production rows keep lab/<name>/Cargo.toml."""
     ok = True
     mission = (
         ("two-capsule-run", "TCR"),
@@ -3216,6 +3218,56 @@ def new_mission_commands_list_and_refuse_missing_manifests():
                        and f"{command}: manifest does not exist" in reason)
             print(f"self-test: {command} missing manifest -> exit {code}: {reason.strip()}")
             if not refused:
+                ok = False
+            if reason != f"{manifest}: {command}: manifest does not exist\n":
+                ok = False
+            if calls["baseline"] != 0 or calls["mutation"] != 0:
+                ok = False
+            real_stat = pathlib.Path.stat
+            for error in (PermissionError("permission denied"), OSError("I/O failure")):
+                def failed_manifest_stat(path, *args, **kwargs):
+                    if path == manifest:
+                        raise error
+                    return real_stat(path, *args, **kwargs)
+
+                reset_calls()
+                with mock.patch.object(pathlib.Path, "stat", failed_manifest_stat):
+                    code, out, reason = invoke(["--from", str(data), entry_id])
+                expected = (f"{manifest}: {command}: manifest cannot be inspected: "
+                            f"{error}\n")
+                print(f"self-test: {command} {type(error).__name__} -> "
+                      f"exit {code}: {reason.strip()}")
+                if code != CASE_USAGE or reason != expected or out:
+                    ok = False
+                if calls["baseline"] != 0 or calls["mutation"] != 0:
+                    ok = False
+            # A directory and a path below a regular file are both unavailable
+            # manifests, with the same exact refusal as a missing file.
+            manifest.parent.mkdir(parents=True)
+            manifest.mkdir()
+            for kind in ("directory", "non-directory parent"):
+                if kind == "non-directory parent":
+                    manifest.rmdir()
+                    manifest.parent.rmdir()
+                    manifest.parent.write_text("parent file\n", encoding="utf-8")
+                reset_calls()
+                code, out, reason = invoke(["--from", str(data), entry_id])
+                print(f"self-test: {command} {kind} -> exit {code}: {reason.strip()}")
+                if (code != CASE_USAGE or out
+                        or reason != f"{manifest}: {command}: manifest does not exist\n"):
+                    ok = False
+                if calls["baseline"] != 0 or calls["mutation"] != 0:
+                    ok = False
+            manifest.parent.unlink()
+        for selection, expected in (
+            (["UNKNOWN"], "no falsifier matches UNKNOWN\n"),
+            (["--self-test-case", "unknown mission case"],
+             "no self-test case named unknown mission case\n"),
+        ):
+            reset_calls()
+            code, out, reason = invoke(["--from", str(data)] + selection)
+            print(f"self-test: mission selection -> exit {code}: {out.strip()}")
+            if code != CASE_USAGE or out != expected or reason:
                 ok = False
             if calls["baseline"] != 0 or calls["mutation"] != 0:
                 ok = False
@@ -3676,7 +3728,7 @@ def refuse_missing_selected_manifest(chosen):
     List mode and the self-test modes return before this runs, and a command
     that was not selected is not checked. spec() stays an argv constructor.
     The refusal is load_refuse: status 2, and the reason names the command,
-    the manifest path and that the manifest does not exist.
+    the manifest path and either its absence or the inspection error.
     """
     seen = []
     for entry in chosen:
@@ -3685,7 +3737,13 @@ def refuse_missing_selected_manifest(chosen):
             continue
         seen.append(command)
         manifest, _cargo_args = PROVIDER_CRATES[command]
-        if not manifest.is_file():
+        try:
+            is_file = stat.S_ISREG(manifest.stat().st_mode)
+        except (FileNotFoundError, NotADirectoryError):
+            is_file = False
+        except OSError as error:
+            load_refuse(manifest, f"{command}: manifest cannot be inspected: {error}")
+        if not is_file:
             load_refuse(manifest, f"{command}: manifest does not exist")
 
 
