@@ -38,6 +38,9 @@
 //! `post_capsules` copies that principal onto the new instance.
 //! `protected_write` and `protected_read` resolve `Users/self` and
 //! `UsersAI/self` from it, then call `authorise`. One map holds the bytes.
+//! A `.` segment or an empty segment collapses through
+//! `normalize_public_resource` onto that one object. A `..` segment is
+//! refused before that collapse and spends nothing.
 //!
 //! `bind_verified_component` stores the component hash the launch verified.
 //! `post_capsules` copies that hash onto the new instance. `component_hash`
@@ -1209,6 +1212,10 @@ impl StandIn {
 
     /// The one resolver for `Users/self` and `UsersAI/self`.
     ///
+    /// Unknown-instance and not-live errors come first. A raw `..` segment
+    /// is `protected path rejects ..` before any collapse. Any other uri
+    /// collapses through `normalize_public_resource`, then the principal,
+    /// `Users/self`, `UsersAI/self` and digest-root rules run on that text.
     /// The root is the first 24 characters of `identity::sha256` of the
     /// instance principal. The principal text is not part of the root.
     fn resolve_protected_uri(&self, instance_id: &str, uri: &str) -> Result<String, (u16, String)> {
@@ -1228,6 +1235,7 @@ impl StandIn {
         if uri.split('/').any(|segment| segment == "..") {
             return Err((400, "protected path rejects ..".to_owned()));
         }
+        let collapsed = normalize_public_resource(uri);
         let Some(principal) = instance
             .principal
             .as_deref()
@@ -1239,25 +1247,25 @@ impl StandIn {
             ));
         };
         let digest = &crate::identity::sha256(principal.as_bytes())[..24];
-        if let Some(suffix) = uri.strip_prefix("localhost://Users/self") {
+        if let Some(suffix) = collapsed.strip_prefix("localhost://Users/self") {
             if suffix.is_empty() || suffix.starts_with('/') {
                 return Ok(format!("localhost://Users/{digest}{suffix}"));
             }
         }
-        if let Some(suffix) = uri.strip_prefix("localhost://UsersAI/self") {
+        if let Some(suffix) = collapsed.strip_prefix("localhost://UsersAI/self") {
             if suffix.is_empty() || suffix.starts_with('/') {
                 return Ok(format!("localhost://UsersAI/{digest}{suffix}"));
             }
         }
         let users_root = format!("localhost://Users/{digest}");
         let users_child = format!("{users_root}/");
-        if uri == users_root || uri.starts_with(&users_child) {
-            return Ok(uri.to_owned());
+        if collapsed == users_root || collapsed.starts_with(&users_child) {
+            return Ok(collapsed);
         }
-        if uri.starts_with("localhost://UsersAI/") {
+        if collapsed.starts_with("localhost://UsersAI/") {
             return Err((400, "UsersAI roots must use UsersAI/self".to_owned()));
         }
-        if uri.starts_with("localhost://Users/") {
+        if collapsed.starts_with("localhost://Users/") {
             return Err((
                 400,
                 "localhost://Users roots must use Users/self or the active principal root"
@@ -15899,6 +15907,142 @@ mod tests {
             "running",
             "",
             "the stand-in did the work: component-2 stays running after the starting deny",
+        );
+    }
+
+    #[test]
+    fn standin_protected_path_collapses_a_dot_segment() {
+        let mut standin = StandIn::new();
+        standin
+            .admit_resident("/capsules/journal-a", "journal-a", Start::Ok)
+            .expect("the stand-in did the work: it admits journal-a");
+        standin
+            .bind_verified_principal("/capsules/journal-a", "agent-ada")
+            .expect("the stand-in did the work: it binds agent-ada");
+        let launched = standin
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/journal-a"}))
+            .expect("the stand-in did the work: it launches journal-a");
+        assert_eq!(
+            launched["id"], "component-1",
+            "the stand-in did the work: the launch id is component-1"
+        );
+        standin
+            .finish_start("component-1")
+            .expect("the stand-in did the work: it finishes the start");
+        assert_named_capsule(
+            &standin,
+            "component-1",
+            "journal-a",
+            "running",
+            "",
+            "component-1 is running",
+        );
+        let digest_a = &crate::identity::sha256(b"agent-ada")[..24];
+        let journal = format!("localhost://UsersAI/{digest_a}/journal");
+        let note = format!("localhost://Users/{digest_a}/note");
+        standin.seed_grant(
+            "req-w",
+            "component-1",
+            "localhost://UsersAI/self/journal",
+            "write",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-r",
+            "component-1",
+            "localhost://UsersAI/self/journal",
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-dot",
+            "component-1",
+            "localhost://UsersAI/self/foo/../journal",
+            "write",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-users",
+            "component-1",
+            "localhost://Users/self/note",
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-w",
+                "localhost://UsersAI/self/./journal",
+                b"journal-v1",
+            ),
+            Ok(journal),
+            "the stand-in did the work: a dot segment stores the collapsed journal"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-w"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: the once write grant is spent"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-r", "localhost://UsersAI/self//journal"),
+            Ok(b"journal-v1".to_vec()),
+            "the stand-in did the work: an empty segment reads that one journal"
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-dot",
+                "localhost://UsersAI/self/foo/../journal",
+                b"other",
+            ),
+            Err((400, "protected path rejects ..".to_owned())),
+            "the stand-in did the work: .. is refused"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-dot"),
+            (Life::Live, false),
+            "the stand-in did the work: the .. write spends nothing"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-r", "localhost://UsersAI/self/journal"),
+            Ok(b"journal-v1".to_vec()),
+            "the stand-in did the work: the journal object stays journal-v1"
+        );
+        let stored_note = standin.protected_write(
+            "component-1",
+            "req-users",
+            "localhost://Users/self/./note",
+            b"note-v1",
+        );
+        assert_eq!(
+            stored_note.as_deref(),
+            Ok(note.as_str()),
+            "the stand-in did the work: a Users/self dot segment stores the collapsed note"
+        );
+        let stored_note = stored_note.expect("the stand-in did the work: the note write is Ok");
+        assert!(
+            !stored_note.contains("agent-ada"),
+            "the stand-in did the work: the principal text stays out of the root: {stored_note}"
+        );
+        assert_named_capsule(
+            &standin,
+            "component-1",
+            "journal-a",
+            "running",
+            "",
+            "component-1 stays running",
         );
     }
 }

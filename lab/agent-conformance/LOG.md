@@ -14872,3 +14872,58 @@ After every restore, `standin-runtime/mod.rs` matched SHA-256 `90d3a627037e63cd4
 - Rerun `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, real 253.57 seconds, inside the 600-second bound. The same targets passed until provider_launch. `standin_provider_launch_refuses_invalid_init_responses` passed. `standin_provider_launch_refuses_the_next_request_after_a_transport_failure` failed at `tests/provider_launch.rs:715:10` with `process leftover; processes:1 paths:["stdout-112"]`. That test is outside the named rerun list. The rerun failed, so this task stops. No source change followed either failure.
 - Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_invoke_covers_one_operation -- --exact`: exit 0, 1 passed, real 0.07 seconds.
 - `Cargo.toml` and `Cargo.lock` are unchanged. `authorise` stays `(caller, request_id)`.
+
+## 093
+
+093: a `.` segment or an empty segment in a protected `Users/self` or `UsersAI/self` uri collapses through the one `normalize_public_resource`, so that journal is one object. A raw `..` segment stays `protected path rejects ..` and spends nothing. A PASS gives the Runtime no A15 credit.
+
+### Quotes (read only)
+
+State ownership, `docs/AGENT_ARCHITECTURE.md`:
+
+> Agent state is rooted under the agent principal's `UsersAI/...` space.
+
+`ResourceId::normalize` in `elastos/crates/elastos-runtime/src/capability/token.rs`: after `://`, empty segments and `.` segments are dropped and `..` is kept.
+
+### Plants
+
+`req-dot` is seeded with `localhost://UsersAI/self/foo/../journal`, the same text as the write, so removing the raw check can return `Ok` and spend that `once` grant. Each plant was applied alone. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_protected_path_collapses_a_dot_segment -- --exact`. The planted crate compiled, and that test failed on its assertion. The file was restored before the next plant. Restored, the test passes. No `falsifiers.json` id. Panic lines are `src/../standin-runtime/mod.rs`.
+
+F-standin-protected-dot-alias: `resolve_protected_uri` skips `normalize_public_resource`, so the dotted write is `403` `wrong resource`. The canonical grant blocks that write. Failed at `src/../standin-runtime/mod.rs:15983:9`: `the stand-in did the work: a dot segment stores the collapsed journal`, left `Err((403, "wrong resource: expected localhost://UsersAI/self/journal, got localhost://UsersAI/self/./journal"))`, right `Ok("localhost://UsersAI/763281cf1e57227a6b99d89d/journal")`. Real 1.80 seconds.
+
+Old:
+
+```text
+        let collapsed = normalize_public_resource(uri);
+```
+
+New:
+
+```text
+        let collapsed = uri.to_owned();
+```
+
+F-standin-protected-dotdot-drop: the raw `..` check is removed, so `localhost://UsersAI/self/foo/../journal` returns `Ok`. That `Ok` is the path that spends the `once` grant before it returns, so `req-dot` is `Exhausted`. The test stops on the write assertion, before the `Live` check. Failed at `src/../standin-runtime/mod.rs:16000:9`: `the stand-in did the work: .. is refused`, left `Ok("localhost://UsersAI/763281cf1e57227a6b99d89d/foo/../journal")`, right `Err((400, "protected path rejects .."))`. Real 1.72 seconds.
+
+Old:
+
+```text
+        if uri.split('/').any(|segment| segment == "..") {
+            return Err((400, "protected path rejects ..".to_owned()));
+        }
+```
+
+New: those three lines removed.
+
+After every restore, `standin-runtime/mod.rs` matched SHA-256 `d7befdbfb17e9e778545948183399cdeb1092bac86a33ba21380bab5f4e2ed59`.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. `CARGO_TARGET_DIR` and `CARGO_BUILD_TARGET_DIR` were `lab/agent-conformance/target`. `CARGO_BUILD_BUILD_DIR` was `lab/agent-conformance/target/host-build`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.16 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 283.91 seconds, inside the 600-second bound. lib 88 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; provider_launch 22 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0. No leftover, so no rerun.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.18 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_protected_path_collapses_a_dot_segment -- --exact`: exit 0, 1 passed, real 0.11 seconds.
+- `Cargo.toml` and `Cargo.lock` are unchanged. `authorise` stays `(caller, request_id)`. `normalize_public_resource` and `slash_pieces` stay. The new caller of `normalize_public_resource` is `resolve_protected_uri`.
+
+- 093: collapsed a dotted or empty protected `Users/self` or `UsersAI/self` uri through `normalize_public_resource`, and kept the raw `..` refusal in front of that collapse.

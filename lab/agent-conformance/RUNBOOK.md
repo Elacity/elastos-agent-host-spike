@@ -769,3 +769,5 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 `standin_storage_refuses_a_raw_dot_home` is this stand-in, and a PASS there gives the Runtime no A9 credit.
 
 `standin_hostcall_invoke_covers_one_operation` is this stand-in, and a PASS there gives the Runtime no A6 credit.
+
+`standin_protected_path_collapses_a_dot_segment` is this stand-in, and a PASS there gives the Runtime no A15 credit.
