@@ -5,11 +5,13 @@ The tests call ``check.problems``. They do not compile a citation expression.
 
 import contextlib
 import io
+import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -22,6 +24,67 @@ IDENTITY = {
     "GIT_COMMITTER_NAME": "citation-check",
     "GIT_COMMITTER_EMAIL": "citation-check@example.com",
 }
+
+DRAFT_REL = "lab/bus-v2-proposal/CORE-CALLS-PROPOSAL.md"
+
+# The smallest asks file the shared fixture pins: two asks, one resource each.
+FIXTURE_ASKS = (
+    ("read", "<principal>/"),
+    ("journal-append", "<principal>/.AppData/Agents/agent-host/"),
+)
+
+
+def asks_json(pairs, schema="elastos.agent-host.asks/v1"):
+    """Return an asks file holding PAIRS, with SCHEMA as its schema line."""
+    rows = ",\n".join(
+        '    {"kind": "%s", "resource": "%s"}' % (kind, resource)
+        for kind, resource in pairs
+    )
+    return (
+        '{\n  "schema": "%s",\n  "asks": [\n%s\n  ]\n}\n' % (schema, rows)
+    ).encode("utf-8")
+
+
+B2_MAP_COLUMNS = (
+    "Kind",
+    "Resource",
+    "Operation and action",
+    "Constraint",
+    "Extension",
+    "Evidence",
+)
+
+B2_MAP_DEFAULT = (
+    "The guest records the step.",
+    "The resource sits under the principal root.",
+    "extension required: no typed operation names this ask.",
+    "The paragraphs below in this section.",
+)
+
+
+def b2_table(pairs, row=None, header=B2_MAP_COLUMNS, open_mark="<!-- b2-map -->",
+             close_mark="<!-- /b2-map -->"):
+    """Return the one mapping table for PAIRS, bounded by the two markers."""
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join(["---"] * len(header)) + " |",
+    ]
+    for pair in pairs:
+        cells = (
+            row(pair)
+            if row is not None
+            else ["`%s`" % pair[0], "`%s`" % pair[1]] + list(B2_MAP_DEFAULT)
+        )
+        lines.append("| " + " | ".join(cells) + " |")
+    return open_mark + "\n" + "\n".join(lines) + "\n" + close_mark + "\n"
+
+
+def b2_body(table, heading="## 6. B2 mapping\n\n"):
+    """Return a draft body whose only B2 table is TABLE under HEADING."""
+    return heading + table + "\n"
+
+
+FIXTURE_TABLE = b2_body(b2_table(FIXTURE_ASKS))
 
 OWNED_REL = "examples/agent-host/src/lib.rs"
 OWNED_NUMBER = 3754
@@ -1283,7 +1346,38 @@ PROVIDER_WALKS = (
 )
 
 
-class CitationCheckTests(unittest.TestCase):
+class CaughtMixin:
+    """The planted-bug helper both suites share."""
+
+    def _caught(self, global_name, planted, named_test, prefix, label):
+        named_test()
+        original = getattr(check, global_name)
+        try:
+            setattr(check, global_name, planted)
+            with self.assertRaises(AssertionError) as caught:
+                named_test()
+            self.assertIn(prefix, str(caught.exception))
+        finally:
+            setattr(check, global_name, original)
+        print(label)
+
+    def _caught_all(self, global_name, planted, named_tests, prefix, label):
+        """One plant, every named test. Each named test must fail under it."""
+        for named_test in named_tests:
+            named_test()
+        original = getattr(check, global_name)
+        try:
+            setattr(check, global_name, planted)
+            for named_test in named_tests:
+                with self.assertRaises(AssertionError) as caught:
+                    named_test()
+                self.assertIn(prefix, str(caught.exception))
+        finally:
+            setattr(check, global_name, original)
+        print(label)
+
+
+class CitationCheckTests(CaughtMixin, unittest.TestCase):
     def _temp_root(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -1292,9 +1386,7 @@ class CitationCheckTests(unittest.TestCase):
         return root
 
     def _write(self, root, body, files):
-        (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
-            body, encoding="utf-8"
-        )
+        (root / DRAFT_REL).write_text(body, encoding="utf-8")
         for rel, data in files.items():
             path = root / rel
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1328,12 +1420,23 @@ class CitationCheckTests(unittest.TestCase):
         self._git(root, "commit", "-q", "-m", "fixture")
         return self._git_output(root, "rev-parse", "HEAD")
 
-    def _draft(self, body, files=None):
-        """A temp root whose draft pins the repository's committed HEAD."""
+    def _draft(self, body, files=None, b2=None):
+        """A temp root whose draft pins the repository's committed HEAD.
+
+        Unless ``b2`` is a pair list, the fixture commits the small asks file and
+        the complete mapping table for it, so a citation-only test never trips
+        the coverage rule. ``b2`` gives the test its own ask set and table.
+        ``files`` can still replace either source file.
+        """
         root = self._temp_root()
-        self._write(root, body, files or {})
+        pairs = FIXTURE_ASKS if b2 is None else b2
+        merged = {check.B2_REL: asks_json(pairs)}
+        if b2 is None:
+            body = body + "\n" + FIXTURE_TABLE
+        merged.update(files or {})
+        self._write(root, body, merged)
         sha = self._commit_all(root)
-        (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
+        (root / DRAFT_REL).write_text(
             "Pinned commit: " + sha + "\n" + body, encoding="utf-8"
         )
         return root
@@ -2059,18 +2162,6 @@ class CitationCheckTests(unittest.TestCase):
                 parts.append("".join("    " + line + "\n" for line in lines))
             parts.append("\n")
         return "".join(parts)
-
-    def _caught(self, global_name, planted, named_test, prefix, label):
-        named_test()
-        original = getattr(check, global_name)
-        try:
-            setattr(check, global_name, planted)
-            with self.assertRaises(AssertionError) as caught:
-                named_test()
-            self.assertIn(prefix, str(caught.exception))
-        finally:
-            setattr(check, global_name, original)
-        print(label)
 
     def _pinned_reads(self, body, files, restore=None):
         """Return the problems and the numbers read from the pinned commit."""
@@ -8386,4 +8477,424 @@ class CitationCheckTests(unittest.TestCase):
             "`" + CHILD_HOST_DOC_SPAN + "`",
             self.test_one_prose_line_citing_3455_3470_and_3471_walks_each_marker,
             "CAUGHT shared-line-child-host-index",
+        )
+
+
+# The asks the B2 tests pin. It is the fixture's source, not a checker constant:
+# the live test below reads the real set from the pinned source.
+B2_PAIRS = (
+    ("read", "<principal>/"),
+    ("edit", "<principal>/"),
+    ("restore", "<principal>/"),
+    ("run", "<principal>/Projects/"),
+    ("child", "<principal>/Projects/"),
+    ("init", "<principal>/Projects/"),
+    ("hosted", "Models/"),
+    ("hosted", "<principal>/.AppData/Models/"),
+    ("journal-append", "<principal>/.AppData/Agents/agent-host/"),
+)
+
+
+def b2_reason(prefix, pair):
+    """The reason this checker gives for PAIR under PREFIX."""
+    return "refuse: B2 " + prefix + ": " + pair[0] + " | " + pair[1]
+
+
+def b2_cells(pair, blank=None):
+    """One mapping row for PAIR, with the cell at BLANK left empty."""
+    cells = ["`%s`" % pair[0], "`%s`" % pair[1]] + list(B2_MAP_DEFAULT)
+    if blank is not None:
+        cells[blank] = ""
+    return cells
+
+
+class B2CoverageTests(CaughtMixin, unittest.TestCase):
+    """The one B2 coverage table against the asks at the draft pin."""
+
+    def _temp_root(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / "lab" / "bus-v2-proposal").mkdir(parents=True)
+        return root
+
+    def _git(self, root, *args):
+        env = dict(os.environ)
+        env.update(IDENTITY)
+        subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=True,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def _git_output(self, root, *args):
+        env = dict(os.environ)
+        env.update(IDENTITY)
+        return subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=True,
+            env=env,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def _commit_all(self, root, message="fixture"):
+        self._git(root, "init", "-q")
+        self._git(root, "add", "-A")
+        self._git(root, "commit", "-q", "-m", message)
+        return self._git_output(root, "rev-parse", "HEAD")
+
+    def _pin(self, root, body):
+        head = self._git_output(root, "rev-parse", "HEAD")
+        (root / DRAFT_REL).write_text(
+            "Pinned commit: " + head + "\n" + body, encoding="utf-8"
+        )
+
+    def _b2_draft(self, body, asks=None, files=None):
+        """A temp root pinned to HEAD with BODY, and ASKS when it is not None.
+
+        The asks bytes are committed before the pin, so the pin holds exactly the
+        source a test means it to hold. ``files`` adds other committed files.
+        """
+        root = self._temp_root()
+        merged = dict(files or {})
+        if asks is not None:
+            merged.setdefault(check.B2_REL, asks)
+        (root / DRAFT_REL).write_text(body, encoding="utf-8")
+        for rel, data in merged.items():
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        self._commit_all(root)
+        self._pin(root, body)
+        return root
+
+    def _main_at(self, root):
+        original = check.worktree_root
+        buf = io.StringIO()
+        try:
+            check.worktree_root = lambda: root
+            with contextlib.redirect_stdout(buf):
+                code = check.main()
+        finally:
+            check.worktree_root = original
+        return code, buf.getvalue()
+
+    def _pinned_pairs(self):
+        """The ask pairs at this worktree's draft pin, or the fixture set.
+
+        The test takes its expected set from the pinned source, so no test
+        carries the live row count as a rule.
+        """
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        sha = None if text is None else check.pin_sha(text)
+        if sha is None:
+            return B2_PAIRS
+        asks, reason = check.source_asks(root, sha)
+        if reason is not None:
+            self.fail(reason)
+        return tuple(check.b2_pairs(asks))
+
+    def test_b2_complete_mapping_passes(self):
+        pairs = self._pinned_pairs()
+        root = self._b2_draft(b2_body(b2_table(pairs)), asks=asks_json(pairs))
+        self.assertEqual(check.problems(root), [])
+        permuted = tuple(reversed(pairs))
+        root = self._b2_draft(b2_body(b2_table(permuted)), asks=asks_json(pairs))
+        self.assertEqual(check.problems(root), [])
+
+    def test_live_draft_mapping_covers_its_pinned_asks(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        asks, reason = check.source_asks(root, sha)
+        self.assertIsNone(reason, reason)
+        pairs, reason = check.b2_mapping(text)
+        self.assertIsNone(reason, reason)
+        self.assertEqual(Counter(pairs), Counter(check.b2_pairs(asks)))
+        hosted = [pair for pair in pairs if pair[0] == "hosted"]
+        self.assertEqual(len(hosted), len(set(hosted)))
+
+    def test_b2_missing_pair_is_refused(self):
+        pairs = self._pinned_pairs()
+        for index, pair in enumerate(pairs):
+            rows = list(pairs)
+            del rows[index]
+            root = self._b2_draft(b2_body(b2_table(rows)), asks=asks_json(pairs))
+            expected = b2_reason("mapping misses", pair)
+            self.assertEqual(check.problems(root), [expected], expected)
+            code, out = self._main_at(root)
+            self.assertEqual(code, 1, expected)
+            self.assertEqual(out, expected + "\n", expected)
+
+    def test_b2_duplicate_or_extra_pair_is_refused(self):
+        pairs = self._pinned_pairs()
+        self.assertGreater(len(pairs), 3)
+        # A duplicate row that replaces a different row hides its omission from
+        # any comparison that only counts the row set.
+        rows = list(pairs)
+        rows[3] = rows[0]
+        root = self._b2_draft(b2_body(b2_table(rows)), asks=asks_json(pairs))
+        expected = [
+            b2_reason("mapping row repeats", pairs[0]),
+            b2_reason("mapping misses", pairs[3]),
+        ]
+        self.assertEqual(check.problems(root), expected, expected)
+        # A duplicate row beside the complete set adds no new pair, so only a
+        # count of the rows finds it.
+        rows = list(pairs) + [pairs[0]]
+        root = self._b2_draft(b2_body(b2_table(rows)), asks=asks_json(pairs))
+        expected = [b2_reason("mapping row repeats", pairs[0])]
+        self.assertEqual(check.problems(root), expected, expected)
+        # An extra row that names no source ask.
+        extra = (pairs[0][0], pairs[0][1] + "Other/")
+        root = self._b2_draft(
+            b2_body(b2_table(pairs + (extra,))), asks=asks_json(pairs)
+        )
+        expected = b2_reason("mapping has an extra", extra)
+        self.assertEqual(check.problems(root), [expected], expected)
+        # One changed resource spelling.
+        changed = (pairs[3][0], pairs[3][1].lower())
+        self.assertNotEqual(changed, pairs[3])
+        root = self._b2_draft(
+            b2_body(b2_table(pairs[:3] + (changed,) + pairs[4:])),
+            asks=asks_json(pairs),
+        )
+        expected = [
+            b2_reason("mapping misses", pairs[3]),
+            b2_reason("mapping has an extra", changed),
+        ]
+        self.assertEqual(check.problems(root), expected, expected)
+
+    def test_b2_table_shape_is_refused(self):
+        section = "## 6. B2 mapping\n\nText.\n\n"
+        after = "\n## 7. Open questions\n\n"
+        wrong_columns = ("Kind", "Resource", "Operation", "Constraint", "Extension", "Evidence")
+        cases = (
+            (
+                section,
+                "refuse: B2 mapping table is absent",
+            ),
+            (
+                section + b2_table(B2_PAIRS) + b2_table(B2_PAIRS),
+                "refuse: B2 mapping table is not one table",
+            ),
+            (
+                section + after + b2_table(B2_PAIRS),
+                "refuse: B2 mapping table is outside section 6",
+            ),
+            (
+                section + b2_table(B2_PAIRS, header=wrong_columns),
+                "refuse: B2 mapping table columns are not "
+                + ", ".join(B2_MAP_COLUMNS),
+            ),
+            (
+                section
+                + b2_table(
+                    B2_PAIRS,
+                    row=lambda pair: b2_cells(pair)[:1] + b2_cells(pair)[2:],
+                ),
+                "refuse: B2 mapping row is not six cells: | `read` | "
+                + B2_MAP_DEFAULT[0]
+                + " | "
+                + B2_MAP_DEFAULT[1]
+                + " | "
+                + B2_MAP_DEFAULT[2]
+                + " | "
+                + B2_MAP_DEFAULT[3]
+                + " |",
+            ),
+        )
+        for body, expected in cases:
+            root = self._b2_draft(body, asks=asks_json(B2_PAIRS))
+            self.assertEqual(check.problems(root), [expected], expected)
+            code, out = self._main_at(root)
+            self.assertEqual(code, 1, expected)
+            self.assertEqual(out, expected + "\n", expected)
+        for index, column in enumerate(B2_MAP_COLUMNS):
+            if index < 2:
+                expected = "refuse: B2 mapping row has an empty " + column
+            else:
+                expected = b2_reason("mapping row has an empty " + column, B2_PAIRS[0])
+            body = section + b2_table(
+                B2_PAIRS, row=lambda pair, i=index: b2_cells(pair, blank=i)
+            )
+            root = self._b2_draft(body, asks=asks_json(B2_PAIRS))
+            self.assertEqual(check.problems(root), [expected], expected)
+
+    def test_b2_pinned_source_is_refused(self):
+        body = b2_body(b2_table(B2_PAIRS))
+        cases = (
+            (None, "refuse: B2 source is absent: " + check.B2_REL),
+            (b"\xff\xfe\n", "refuse: B2 source is not utf-8 text: " + check.B2_REL),
+            (b"{\n", "refuse: B2 source is not JSON: " + check.B2_REL),
+            (
+                asks_json(B2_PAIRS, schema="elastos.agent-host.asks/v2"),
+                "refuse: B2 source schema is not "
+                + check.B2_SCHEMA
+                + ": "
+                + check.B2_REL,
+            ),
+            (
+                b'{"schema": "elastos.agent-host.asks/v1", "asks": "read"}\n',
+                "refuse: B2 source has no ask list: " + check.B2_REL,
+            ),
+            (
+                b'{"schema": "elastos.agent-host.asks/v1", "asks": ["read"]}\n',
+                "refuse: B2 source ask is not a mapping: " + check.B2_REL,
+            ),
+            (
+                b'{"schema": "elastos.agent-host.asks/v1", "asks": [{"kind": 7}]}\n',
+                "refuse: B2 source ask has no kind: " + check.B2_REL,
+            ),
+            (
+                asks_json((("read", ""),)),
+                "refuse: B2 source ask has no resource: " + check.B2_REL,
+            ),
+            (
+                asks_json(B2_PAIRS + (B2_PAIRS[0],)),
+                b2_reason("source asks repeat", B2_PAIRS[0]),
+            ),
+        )
+        for asks, expected in cases:
+            root = self._b2_draft(body, asks=asks)
+            self.assertEqual(check.problems(root), [expected], expected)
+            code, out = self._main_at(root)
+            self.assertEqual(code, 1, expected)
+            self.assertEqual(out, expected + "\n", expected)
+
+    def test_b2_invalid_pin_skips_source_read(self):
+        body = b2_body(b2_table(B2_PAIRS))
+        asks = asks_json(B2_PAIRS)
+        reads = []
+        original = check._pinned_blob
+
+        def record(root, sha, rel):
+            reads.append(rel)
+            return original(root, sha, rel)
+
+        cases = (
+            (body, "refuse: draft has no pinned commit"),
+            (
+                "Pinned commit: HEAD\n" + body,
+                "refuse: pinned commit is not one 40-hex commit",
+            ),
+            (
+                "Pinned commit: " + "f" * 40 + "\n" + body,
+                "refuse: pinned commit is not a commit: " + "f" * 40,
+            ),
+        )
+        try:
+            check._pinned_blob = record
+            for pinned, expected in cases:
+                reads.clear()
+                root = self._b2_draft(body, asks=asks)
+                (root / DRAFT_REL).write_text(pinned, encoding="utf-8")
+                self.assertEqual(check.problems(root), [expected], expected)
+                self.assertEqual(reads, [], expected)
+        finally:
+            check._pinned_blob = original
+
+    def test_b2_asks_use_the_pinned_commit(self):
+        body = b2_body(b2_table(B2_PAIRS))
+        # A dirty working-tree asks file cannot change a valid pinned mapping.
+        root = self._b2_draft(body, asks=asks_json(B2_PAIRS))
+        (root / check.B2_REL).write_bytes(asks_json((("read", "Other/"),)))
+        self.assertEqual(check.problems(root), [])
+        # A working-tree repair cannot make an invalid pinned source pass.
+        root = self._b2_draft(
+            body, asks=asks_json(B2_PAIRS, schema="elastos.agent-host.asks/v2")
+        )
+        expected = (
+            "refuse: B2 source schema is not "
+            + check.B2_SCHEMA
+            + ": "
+            + check.B2_REL
+        )
+        (root / check.B2_REL).write_bytes(asks_json(B2_PAIRS))
+        self.assertEqual(check.problems(root), [expected], expected)
+        # A second commit with a changed ask pair changes the expected mapping.
+        root = self._b2_draft(body, asks=asks_json(B2_PAIRS))
+        self.assertEqual(check.problems(root), [])
+        moved = (B2_PAIRS[0][0], "<principal>/Moved/")
+        (root / check.B2_REL).write_bytes(asks_json((moved,) + B2_PAIRS[1:]))
+        self._commit_all(root, "second asks")
+        self._pin(root, body)
+        expected = [
+            b2_reason("mapping misses", moved),
+            b2_reason("mapping has an extra", B2_PAIRS[0]),
+        ]
+        self.assertEqual(check.problems(root), expected, expected)
+
+    def test_falsifier_b2_coverage_is_caught(self):
+        named_tests = (
+            self.test_b2_missing_pair_is_refused,
+            self.test_b2_duplicate_or_extra_pair_is_refused,
+            self.test_b2_table_shape_is_refused,
+            self.test_b2_pinned_source_is_refused,
+            self.test_b2_asks_use_the_pinned_commit,
+        )
+        self._caught_all(
+            "b2_refusals",
+            lambda root, text, sha: [],
+            named_tests,
+            "refuse: B2",
+            "CAUGHT b2-coverage",
+        )
+
+    def test_falsifier_b2_set_only_comparison_is_caught(self):
+        """A comparison of the pair sets alone cannot see a repeated row."""
+
+        def sets_only(root, text, sha):
+            asks, reason = check.source_asks(root, sha)
+            if reason is not None:
+                return [reason]
+            pairs, reason = check.b2_mapping(text)
+            if reason is not None:
+                return [reason]
+            expected = set(check.b2_pairs(asks))
+            found = set(pairs)
+            refusals = [
+                check._b2_pair("mapping misses", pair)
+                for pair in sorted(expected - found)
+            ]
+            refusals.extend(
+                check._b2_pair("mapping has an extra", pair)
+                for pair in sorted(found - expected)
+            )
+            return refusals
+
+        self._caught(
+            "b2_refusals",
+            sets_only,
+            self.test_b2_duplicate_or_extra_pair_is_refused,
+            "mapping row repeats",
+            "CAUGHT b2-set-only-comparison",
+        )
+
+    def test_falsifier_b2_pinned_source_is_caught(self):
+        def working_tree(root, sha):
+            data = check.read_file(root, check.B2_REL)
+            if data is None:
+                return None, "refuse: B2 source is absent: " + check.B2_REL
+            try:
+                parsed = json.loads(check.decode_text(data))
+            except UnicodeDecodeError:
+                return None, "refuse: B2 source is not utf-8 text: " + check.B2_REL
+            except ValueError:
+                return None, "refuse: B2 source is not JSON: " + check.B2_REL
+            return check._source_asks_checked(parsed)
+
+        self._caught(
+            "source_asks",
+            working_tree,
+            self.test_b2_asks_use_the_pinned_commit,
+            "refuse: B2",
+            "CAUGHT b2-pinned-source",
         )

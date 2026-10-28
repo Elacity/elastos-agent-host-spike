@@ -3,8 +3,10 @@
 One parser. ``problems`` is the only function that decides a citation.
 """
 
+import json
 import re
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 # One line: the prefix, a space, and forty lowercase hex digits.
@@ -256,6 +258,22 @@ DEFAULT_ACTION_MARKER = "`" + DEFAULT_ACTION_SPAN + "`"
 # The draft indents a quotation by exactly four spaces.
 DRAFT_INDENT = "    "
 
+# The one coverage table: its markers, its columns, and the source it covers.
+B2_OPEN = "<!-- b2-map -->"
+B2_CLOSE = "<!-- /b2-map -->"
+B2_COLUMNS = (
+    "Kind",
+    "Resource",
+    "Operation and action",
+    "Constraint",
+    "Extension",
+    "Evidence",
+)
+B2_SECTION = re.compile(r"## 6\.[ \t]")
+B2_RULE = re.compile(r":?-{3,}:?")
+B2_REL = "examples/agent-host/asks.json"
+B2_SCHEMA = "elastos.agent-host.asks/v1"
+
 
 def read_file(root, rel):
     """Return file bytes, or None when ``rel`` is not a file under ``root``."""
@@ -351,8 +369,8 @@ def _spans(text):
         cursor = closed + 1
 
 
-def _pinned_lines(root, sha, rel):
-    """Return every line of REL at commit SHA, or None when it is absent."""
+def _pinned_blob(root, sha, rel):
+    """Return the bytes of REL at commit SHA, or None when it is absent."""
     if sha is None:
         return None
     try:
@@ -365,9 +383,24 @@ def _pinned_lines(root, sha, rel):
         return None
     if result.returncode != 0:
         return None
+    return result.stdout
+
+
+def _pinned_text(root, sha, rel):
+    """Return the text of REL at commit SHA, or None when it is absent or not UTF-8."""
+    data = _pinned_blob(root, sha, rel)
+    if data is None:
+        return None
     try:
-        text = decode_text(result.stdout)
+        return decode_text(data)
     except UnicodeDecodeError:
+        return None
+
+
+def _pinned_lines(root, sha, rel):
+    """Return every line of REL at commit SHA, or None when it is absent."""
+    text = _pinned_text(root, sha, rel)
+    if text is None:
         return None
     return text.splitlines()
 
@@ -860,6 +893,171 @@ def _past_end(number, rel, count):
     return "refuse: line %s is past the end of %s (%s lines)" % (number, rel, count)
 
 
+def _is_one_line(value):
+    """True when VALUE is a nonempty string with no line break in it."""
+    if not isinstance(value, str):
+        return False
+    return bool(value.strip()) and "\n" not in value and "\r" not in value
+
+
+def b2_pairs(asks):
+    """Return the exact (kind, resource) pairs of ASKS, one entry per row."""
+    return [(ask["kind"], ask["resource"]) for ask in asks]
+
+
+def source_asks(root, sha):
+    """Return the asks at commit SHA, or a ``refuse: B2 source ...`` reason.
+
+    The answer is ``(asks, None)`` on success and ``(None, reason)`` on any
+    failure, so a caller never reads a partly valid source.
+    """
+    data = _pinned_blob(root, sha, B2_REL)
+    if data is None:
+        return None, "refuse: B2 source is absent: " + B2_REL
+    try:
+        text = decode_text(data)
+    except UnicodeDecodeError:
+        return None, "refuse: B2 source is not utf-8 text: " + B2_REL
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return None, "refuse: B2 source is not JSON: " + B2_REL
+    return _source_asks_checked(parsed)
+
+
+def _source_asks_checked(parsed):
+    """Return the checked asks of PARSED, or a source refusal."""
+    if not isinstance(parsed, dict) or parsed.get("schema") != B2_SCHEMA:
+        return None, "refuse: B2 source schema is not " + B2_SCHEMA + ": " + B2_REL
+    rows = parsed.get("asks")
+    if not isinstance(rows, list):
+        return None, "refuse: B2 source has no ask list: " + B2_REL
+    asks = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return None, "refuse: B2 source ask is not a mapping: " + B2_REL
+        kind = row.get("kind")
+        resource = row.get("resource")
+        for name, value in (("kind", kind), ("resource", resource)):
+            if not _is_one_line(value):
+                return None, "refuse: B2 source ask has no " + name + ": " + B2_REL
+        asks.append({"kind": kind, "resource": resource})
+    counts = Counter(b2_pairs(asks))
+    for pair, count in counts.items():
+        if count > 1:
+            return None, _b2_pair("source asks repeat", pair)
+    return asks, None
+
+
+def _b2_pair(prefix, pair):
+    """One B2 reason that names a (kind, resource) pair."""
+    return "refuse: B2 " + prefix + ": " + pair[0] + " | " + pair[1]
+
+
+def _b2_section_bounds(lines):
+    """Return the first and past-the-last line of section 6, or None when not one."""
+    heads = [index for index, line in enumerate(lines) if B2_SECTION.match(line)]
+    if len(heads) != 1:
+        return None
+    start = heads[0] + 1
+    for index in range(start, len(lines)):
+        if lines[index].startswith("## "):
+            return start, index
+    return start, len(lines)
+
+
+def _b2_cells(line):
+    """Return the stripped cells of one table ROW, or None when it is not a row."""
+    text = line.strip()
+    if len(text) < 2 or not text.startswith("|") or not text.endswith("|"):
+        return None
+    return [cell.strip() for cell in text[1:-1].split("|")]
+
+
+def _b2_code(cell):
+    """Return CELL without one pair of surrounding backticks."""
+    if len(cell) >= 2 and cell.startswith("`") and cell.endswith("`"):
+        return cell[1:-1].strip()
+    return cell
+
+
+def _b2_rows(block):
+    """Return the (kind, resource) pairs of the table lines in BLOCK, or a reason."""
+    rows = [line for line in block if line.strip()]
+    if len(rows) < 2:
+        return None, "refuse: B2 mapping table has no header and separator row"
+    header = _b2_cells(rows[0])
+    if header != list(B2_COLUMNS):
+        return None, "refuse: B2 mapping table columns are not " + ", ".join(B2_COLUMNS)
+    rule = _b2_cells(rows[1])
+    if (
+        rule is None
+        or len(rule) != len(B2_COLUMNS)
+        or not all(B2_RULE.fullmatch(cell) for cell in rule)
+    ):
+        return None, "refuse: B2 mapping table has no separator row"
+    pairs = []
+    for line in rows[2:]:
+        cells = _b2_cells(line)
+        if cells is None or len(cells) != len(B2_COLUMNS):
+            return None, "refuse: B2 mapping row is not six cells: " + line.strip()
+        for index, column in enumerate(B2_COLUMNS):
+            if not _b2_code(cells[index]):
+                if index < 2:
+                    return None, "refuse: B2 mapping row has an empty " + column
+                pair = (_b2_code(cells[0]), _b2_code(cells[1]))
+                return None, _b2_pair("mapping row has an empty " + column, pair)
+        pair = (_b2_code(cells[0]), _b2_code(cells[1]))
+        pairs.append(pair)
+    return pairs, None
+
+
+def b2_mapping(text):
+    """Return the (kind, resource) pairs of the one B2 table, or a reason."""
+    lines = text.splitlines()
+    bounds = _b2_section_bounds(lines)
+    if bounds is None:
+        return None, "refuse: B2 section 6 is not one heading"
+    start, end = bounds
+    opens = [index for index, line in enumerate(lines) if line.strip() == B2_OPEN]
+    closes = [index for index, line in enumerate(lines) if line.strip() == B2_CLOSE]
+    if not opens and not closes:
+        return None, "refuse: B2 mapping table is absent"
+    if len(opens) != 1 or len(closes) != 1 or closes[0] < opens[0]:
+        return None, "refuse: B2 mapping table is not one table"
+    if not (start <= opens[0] < end and start <= closes[0] < end):
+        return None, "refuse: B2 mapping table is outside section 6"
+    return _b2_rows(lines[opens[0] + 1:closes[0]])
+
+
+def b2_refusals(root, text, sha):
+    """Return the B2 refusals for TEXT at commit SHA, source read first."""
+    asks, reason = source_asks(root, sha)
+    if reason is not None:
+        return [reason]
+    pairs, reason = b2_mapping(text)
+    if reason is not None:
+        return [reason]
+    expected = Counter(b2_pairs(asks))
+    found = Counter(pairs)
+    refusals = [
+        _b2_pair("mapping row repeats", pair)
+        for pair, count in found.items()
+        if pair in expected and count > expected[pair]
+    ]
+    refusals.extend(
+        _b2_pair("mapping misses", pair)
+        for pair, count in expected.items()
+        if found[pair] < count
+    )
+    refusals.extend(
+        _b2_pair("mapping has an extra", pair)
+        for pair in found
+        if pair not in expected
+    )
+    return refusals
+
+
 def _refusal(root, match):
     rel = match.group("path")
     data = read_file(root, rel)
@@ -916,6 +1114,7 @@ def problems(root):
             refusals.append(reason)
     if pin_reason is None and pinned:
         refusals.extend(_quote_refusals(root, text, sha))
+        refusals.extend(b2_refusals(root, text, sha))
     return refusals
 
 
