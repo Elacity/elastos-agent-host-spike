@@ -4,19 +4,31 @@ test: link::model_case_different_manifest_is_not_a_link
 test: link::model_git_or_registry_dependency_is_a_link
 --- old
     let packed: String = cargo_toml.chars().filter(|ch| !ch.is_whitespace()).collect();
-    (cargo_toml.contains("grant-binding") && cargo_toml.contains("path"))
-        || packed.contains("grant-binding={git")
-        || packed.contains("grant-binding={version")
-        || packed.contains("grant-binding=\"")
-        || (packed.contains("package=\"grant-binding\"")
-            && (packed.contains("git") || packed.contains("version")))
+    let unquoted = packed.replace(['"', '\''], "");
+    cargo_toml.contains("grant-binding")
+        && (cargo_toml.contains("path")
+            || packed.split("grant-binding").skip(1).any(|suffix| {
+                suffix.trim_start_matches(['"', '\'']).strip_prefix('=')
+                    .is_some_and(|value| value.starts_with(['"', '\'']))
+            })
+            || ((unquoted.contains("grant-binding={")
+                || unquoted.contains("grant-binding.")
+                || unquoted.contains(".grant-binding]")
+                || unquoted.contains("package=grant-binding"))
+                && (unquoted.contains("git=") || unquoted.contains("version="))))
 --- new
     let folded = cargo_toml.to_ascii_lowercase();
     let packed: String = folded.chars().filter(|ch| !ch.is_whitespace()).collect();
-    (folded.contains("grant-binding") && folded.contains("path"))
-        || packed.contains("grant-binding={git")
-        || packed.contains("grant-binding={version")
-        || packed.contains("grant-binding=\"")
-        || (packed.contains("package=\"grant-binding\"")
-            && (packed.contains("git") || packed.contains("version")))
+    let unquoted = packed.replace(['"', '\''], "");
+    folded.contains("grant-binding")
+        && (folded.contains("path")
+            || packed.split("grant-binding").skip(1).any(|suffix| {
+                suffix.trim_start_matches(['"', '\'']).strip_prefix('=')
+                    .is_some_and(|value| value.starts_with(['"', '\'']))
+            })
+            || ((unquoted.contains("grant-binding={")
+                || unquoted.contains("grant-binding.")
+                || unquoted.contains(".grant-binding]")
+                || unquoted.contains("package=grant-binding"))
+                && (unquoted.contains("git=") || unquoted.contains("version="))))
 --- end
