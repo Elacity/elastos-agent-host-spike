@@ -773,6 +773,20 @@ fn model_public_prefix_is_not_a_public_read() {
 }
 
 #[test]
+fn model_case_different_public_segment_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let refusal = verifier
+        .bind_grant(instance, "public/notes", rights())
+        .expect_err("case-different Public segment");
+    assert_eq!(refusal, Refuse::OutsidePrincipal);
+    assert_eq!(
+        refusal.to_string(),
+        "owned root is outside the agent principal"
+    );
+}
+
+#[test]
 fn model_extended_usersai_segment_is_refused() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
