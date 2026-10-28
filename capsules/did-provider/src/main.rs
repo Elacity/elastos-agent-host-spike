@@ -1769,27 +1769,42 @@ mod tests {
         }
     }
 
+    /// Pins the principal-root mismatch refusal with another principal and a
+    /// suffix of the requested principal. Removing the comparison lets both
+    /// reach signature validation; replacing equality with `starts_with` lets
+    /// the suffix through. Either change loses the exact refusal below.
     #[test]
     fn test_verify_did_recovery_rejects_noncanonical_root_binding() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let did = encode_signing_key_did(&signing_key);
         let provider = DidProvider::new();
 
-        let err = match provider.verify_did_recovery(
-            &did,
-            "person:local:abc123",
-            "localhost://Users/person:local:other",
-            "protector:did:abc123",
-            "pdek:abc123",
-            "nonce:abc123",
-            now_ts(),
-            now_ts() + 300,
-            "00",
-        ) {
-            Response::Error { message, .. } => message,
-            other => panic!("Expected noncanonical root to fail closed, got {:?}", other),
-        };
-        assert!(err.contains("must match"));
+        for (case, root) in [
+            ("another principal", "localhost://Users/person:local:other"),
+            (
+                "principal plus a suffix",
+                "localhost://Users/person:local:abc123x",
+            ),
+        ] {
+            let err = match provider.verify_did_recovery(
+                &did,
+                "person:local:abc123",
+                root,
+                "protector:did:abc123",
+                "pdek:abc123",
+                "nonce:abc123",
+                now_ts(),
+                now_ts() + 300,
+                "00",
+            ) {
+                Response::Error { message, .. } => message,
+                other => panic!("Expected noncanonical root to fail closed, got {:?}", other),
+            };
+            assert_eq!(
+                err, "localhost_root must match the DID recovery principal",
+                "case {case}: root {root:?}"
+            );
+        }
     }
 
     #[test]
@@ -1832,6 +1847,9 @@ mod tests {
         }
     }
 
+    /// Pins the request validator's subject refusal. Removing its codec call
+    /// reaches the later DID decode, whose error lacks the recovery prefix,
+    /// so the exact assertion fails.
     #[test]
     fn test_verify_did_recovery_rejects_did_elastos_until_resolver_exists() {
         let provider = DidProvider::new();
@@ -1849,7 +1867,10 @@ mod tests {
             Response::Error { message, .. } => message,
             other => panic!("Expected did:elastos to fail closed, got {:?}", other),
         };
-        assert!(err.contains("did:key"));
+        assert_eq!(
+            err,
+            "invalid DID recovery subject: DID must be one canonical Ed25519 did:key"
+        );
     }
 
     #[test]
@@ -1886,25 +1907,27 @@ mod tests {
         ));
     }
 
+    /// Pins the expired refusal for a signed past proof and at `expires_at == now`.
+    /// Both intervals stay ordered and within the maximum TTL. Removing the
+    /// expired guard accepts them; changing `<=` to `<` accepts the boundary.
     #[test]
     fn test_verify_did_recovery_rejects_expired_proof() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let did = encode_signing_key_did(&signing_key);
-        let issued_at = now_ts().saturating_sub(600);
+        let now = now_ts();
+        let issued_at = now.saturating_sub(600);
         let expires_at = issued_at + 300;
-        let signature = did_recovery_test_signature(
-            &signing_key,
-            DidRecoveryPayload {
-                did: &did,
-                principal_id: "person:local:abc123",
-                localhost_root: "localhost://Users/person:local:abc123",
-                protector_id: "protector:did:abc123",
-                data_key_id: "pdek:abc123",
-                nonce: "nonce:abc123",
-                issued_at,
-                expires_at,
-            },
-        );
+        let recovery = DidRecoveryPayload {
+            did: &did,
+            principal_id: "person:local:abc123",
+            localhost_root: "localhost://Users/person:local:abc123",
+            protector_id: "protector:did:abc123",
+            data_key_id: "pdek:abc123",
+            nonce: "nonce:abc123",
+            issued_at,
+            expires_at,
+        };
+        let signature = did_recovery_test_signature(&signing_key, recovery);
         let provider = DidProvider::new();
         let err = match provider.verify_did_recovery(
             &did,
@@ -1920,7 +1943,26 @@ mod tests {
             Response::Error { message, .. } => message,
             other => panic!("Expected expired proof to fail closed, got {:?}", other),
         };
-        assert!(err.contains("expired"));
+        for (case, result) in [
+            ("signed past proof", Err(err)),
+            (
+                "expiry equals now",
+                validate_did_recovery_request(
+                    &DidRecoveryPayload {
+                        issued_at: now - 60,
+                        expires_at: now,
+                        ..recovery
+                    },
+                    now,
+                ),
+            ),
+        ] {
+            assert_eq!(
+                result,
+                Err("DID recovery proof expired".to_string()),
+                "{case}"
+            );
+        }
     }
 
     #[test]
@@ -2201,8 +2243,9 @@ mod tests {
     }
 }
 
-/// The refusal strings of the DID recovery request validator, the
-/// localhost-root check and the storage cipher, one test per string.
+/// The remaining refusal strings of the DID recovery request validator, the
+/// localhost-root check and the storage cipher, one test per string. The
+/// existing `tests` module owns subject, expired-proof and root-mismatch refusals.
 ///
 /// These tests pin behaviour the production lines already have: they add no
 /// rule and change no answer. Each asserts the whole `Err` value, so a dropped
@@ -2279,21 +2322,6 @@ mod uf_did_refusal_tests {
         );
     }
 
-    /// Pins `invalid DID recovery subject: {e}` (:619), with the text
-    /// `decode_did_key` returns for a subject that is not a canonical
-    /// Ed25519 `did:key`.
-    ///
-    /// Falsifier: drop the `decode_did_key` call at :619; this request then
-    /// answers `Ok` and the `unwrap_err` panics.
-    #[test]
-    fn did_recovery_refuses_a_subject_that_is_not_a_canonical_did_key() {
-        let payload = valid_request("did:elastos:alice");
-        assert_eq!(
-            refuse(&payload),
-            "invalid DID recovery subject: DID must be one canonical Ed25519 did:key"
-        );
-    }
-
     /// Pins `data_key_id must start with pdek:` (:625). The subject, the
     /// principal, the root, the protector and the id itself all pass their
     /// earlier checks first, so only the prefix rule fires.
@@ -2323,21 +2351,6 @@ mod uf_did_refusal_tests {
             refuse(&payload),
             "DID recovery proof issued_at is in the future"
         );
-    }
-
-    /// Pins `DID recovery proof expired` (:632) at its boundary, where
-    /// `expires_at` equals now. The ends stay ordered and within the maximum
-    /// TTL, so the expiry rule at :634 to :635 would accept this request.
-    ///
-    /// Falsifier: remove the expired check at :632; this request then answers
-    /// `Ok`.
-    #[test]
-    fn did_recovery_refuses_an_expired_proof() {
-        let did = subject_did();
-        let mut payload = valid_request(&did);
-        payload.issued_at = NOW - 60;
-        payload.expires_at = NOW;
-        assert_eq!(refuse(&payload), "DID recovery proof expired");
     }
 
     /// Pins `DID recovery proof expiry is invalid` (:637), which one string
@@ -2375,9 +2388,10 @@ mod uf_did_refusal_tests {
     /// reserved, fits 256 characters and equals `principal_id`, so only the
     /// missing prefix refuses it.
     ///
-    /// Falsifier, per case: weaken the guard that case names (accept an
-    /// unprefixed root at :647, or remove the matching term of the :649 to :656
-    /// condition); that request then reaches the principal match and answers
+    /// Falsifier, prefix case: accept the bare principal as an unprefixed root
+    /// at :647; the request then answers `Ok`, so the assertion fails.
+    /// Falsifier, segment cases: remove the matching term of the :649 to :656
+    /// condition; that request then reaches the principal match and answers
     /// `localhost_root must match the DID recovery principal`, so the assertion
     /// fails. Removing the call at :621 makes every case answer `Ok`.
     #[test]
@@ -2401,35 +2415,6 @@ mod uf_did_refusal_tests {
             assert_eq!(
                 refuse(&payload),
                 "localhost_root must be a principal-owned localhost user root",
-                "case {case}: root {root:?}"
-            );
-        }
-    }
-
-    /// Pins `localhost_root must match the DID recovery principal` (:661). The
-    /// root is well formed in both cases and only its segment differs from
-    /// `principal_id`: one names another principal, and one extends the
-    /// principal with a suffix, so a prefix test cannot replace the exact
-    /// match.
-    ///
-    /// Falsifier, per case: remove the match check at :660, or weaken it to a
-    /// `starts_with` test; that request then answers `Ok`, so the assertion
-    /// fails.
-    #[test]
-    fn did_recovery_refuses_a_root_for_another_principal() {
-        let did = subject_did();
-        for (case, root) in [
-            ("another principal", "localhost://Users/person:local:other"),
-            (
-                "principal plus a suffix",
-                "localhost://Users/person:local:abc123x",
-            ),
-        ] {
-            let mut payload = valid_request(&did);
-            payload.localhost_root = root;
-            assert_eq!(
-                refuse(&payload),
-                "localhost_root must match the DID recovery principal",
                 "case {case}: root {root:?}"
             );
         }
