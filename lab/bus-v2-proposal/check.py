@@ -6,6 +6,7 @@ One parser. ``problems`` is the only function that decides a citation.
 import bisect
 import collections
 import functools
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -354,8 +355,13 @@ def _spans(text):
         cursor = closed + 1
 
 
-def pinned_line(root, sha, rel, number):
-    """Return line NUMBER of REL at commit SHA, or None when it is absent."""
+def pinned_bytes(root, sha, rel):
+    """Return the bytes of REL at commit SHA, or None when it is absent.
+
+    This is the one pinned read. Every check that needs the source at the
+    draft's pin reads it here, so a quotation, a line and an asks file come
+    from one commit.
+    """
     if sha is None:
         return None
     try:
@@ -368,8 +374,16 @@ def pinned_line(root, sha, rel, number):
         return None
     if result.returncode != 0:
         return None
+    return result.stdout
+
+
+def pinned_line(root, sha, rel, number):
+    """Return line NUMBER of REL at commit SHA, or None when it is absent."""
+    data = pinned_bytes(root, sha, rel)
+    if data is None:
+        return None
     try:
-        text = decode_text(result.stdout)
+        text = decode_text(data)
     except UnicodeDecodeError:
         return None
     lines = text.splitlines()
@@ -411,18 +425,11 @@ def _pinned_lines(root, sha, rel):
     """
     if sha is None:
         return ()
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(root), "show", sha + ":" + rel],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError:
-        return ()
-    if result.returncode != 0:
+    data = pinned_bytes(root, sha, rel)
+    if data is None:
         return ()
     try:
-        text = decode_text(result.stdout)
+        text = decode_text(data)
     except UnicodeDecodeError:
         return ()
     return tuple(
@@ -1014,6 +1021,180 @@ def _past_end(number, rel, count):
     return "refuse: line %s is past the end of %s (%s lines)" % (number, rel, count)
 
 
+# The one asks source the B2 table is compared with, at the draft pin.
+ASKS_SOURCE = "examples/agent-host/asks.json"
+ASKS_SCHEMA = "elastos.agent-host.asks/v1"
+
+# The one mapping table. One pair per row, inside one section 6.
+B2_OPEN = "<!-- b2-map -->"
+B2_CLOSE = "<!-- /b2-map -->"
+B2_COLUMNS = (
+    "Kind",
+    "Resource",
+    "Operation and action",
+    "Constraint",
+    "Extension",
+    "Evidence",
+)
+B2_HEADING = re.compile(r"^## 6\.")
+
+
+def pinned_asks(root, sha):
+    """Return the asks bytes at commit SHA, or None when the file is absent."""
+    return pinned_bytes(root, sha, ASKS_SOURCE)
+
+
+def _b2_sections(lines):
+    """Return the (start, end) body of every section 6 heading."""
+    headings = [number for number, line in enumerate(lines) if line.startswith("## ")]
+    found = []
+    for index, number in enumerate(headings):
+        if B2_HEADING.match(lines[number]) is None:
+            continue
+        end = headings[index + 1] if index + 1 < len(headings) else len(lines)
+        found.append((number + 1, end))
+    return found
+
+
+def _cells(line):
+    """Return the cells of one table row, or () when the line is not a row."""
+    text = line.strip()
+    if not text.startswith("|") or not text.endswith("|") or len(text) < 2:
+        return ()
+    return tuple(cell.strip() for cell in text[1:-1].split("|"))
+
+
+def _rule_cell(cell):
+    return re.fullmatch(r":?-{3,}:?", cell) is not None
+
+
+def _unquote(cell):
+    """Return CELL without one pair of surrounding backticks."""
+    if len(cell) > 1 and cell.startswith("`") and cell.endswith("`"):
+        return cell[1:-1]
+    return cell
+
+
+def _b2_rows(body):
+    """Return (shape_reason, rows) for the non-empty lines between the markers."""
+    if not body:
+        return "refuse: B2 mapping table is absent", None
+    if _cells(body[0]) != B2_COLUMNS:
+        return "refuse: B2 mapping columns are not " + ", ".join(B2_COLUMNS), None
+    if len(body) < 2 or not all(_rule_cell(cell) for cell in _cells(body[1])):
+        return "refuse: B2 mapping table has no rule row", None
+    rows = []
+    for number, line in enumerate(body[2:], start=1):
+        cells = _cells(line)
+        if len(cells) != len(B2_COLUMNS):
+            return "refuse: B2 mapping row is not six cells: " + line.strip(), None
+        for column, cell in zip(B2_COLUMNS, cells):
+            if not cell:
+                return (
+                    "refuse: B2 mapping cell is empty: row %d %s" % (number, column),
+                    None,
+                )
+        rows.append((_unquote(cells[0]), _unquote(cells[1])) + cells[2:])
+    if not rows:
+        return "refuse: B2 mapping table has no rows", None
+    return None, rows
+
+
+def _b2_table(text):
+    """Return (shape_reason, rows) for the one marker-bounded table of TEXT."""
+    lines = text.splitlines()
+    opened = [number for number, line in enumerate(lines) if line.strip() == B2_OPEN]
+    closed = [number for number, line in enumerate(lines) if line.strip() == B2_CLOSE]
+    if not opened and not closed:
+        return "refuse: B2 mapping table is absent", None
+    if len(opened) != 1 or len(closed) != 1 or closed[0] <= opened[0]:
+        return "refuse: B2 mapping table is not one table", None
+    sections = _b2_sections(lines)
+    if not sections:
+        return "refuse: B2 mapping table is not in section 6", None
+    if len(sections) > 1:
+        return "refuse: B2 draft has more than one section 6", None
+    start, end = sections[0]
+    if not (start <= opened[0] < end and start <= closed[0] < end):
+        return "refuse: B2 mapping table is not in section 6", None
+    body = [line for line in lines[opened[0] + 1:closed[0]] if line.strip()]
+    return _b2_rows(body)
+
+
+def _b2_source(data):
+    """Return (reason, pairs) for the asks bytes DATA at the pinned commit."""
+    if data is None:
+        return "refuse: B2 asks source is missing: " + ASKS_SOURCE, None
+    try:
+        text = decode_text(data)
+    except UnicodeDecodeError:
+        return "refuse: B2 asks source is not utf-8 text: " + ASKS_SOURCE, None
+    try:
+        document = json.loads(text)
+    except ValueError:
+        return "refuse: B2 asks source is not JSON: " + ASKS_SOURCE, None
+    row_reason = "refuse: B2 asks source row is not one kind and resource: " + ASKS_SOURCE
+    if not isinstance(document, dict) or document.get("schema") != ASKS_SCHEMA:
+        return (
+            "refuse: B2 asks source schema is not " + ASKS_SCHEMA + ": " + ASKS_SOURCE,
+            None,
+        )
+    asks = document.get("asks")
+    if not isinstance(asks, list):
+        return row_reason, None
+    pairs = collections.Counter()
+    for row in asks:
+        if not isinstance(row, dict):
+            return row_reason, None
+        kind = row.get("kind")
+        resource = row.get("resource")
+        if not isinstance(kind, str) or not kind:
+            return row_reason, None
+        if not isinstance(resource, str) or not resource:
+            return row_reason, None
+        pairs[(kind, resource)] += 1
+    for kind, resource in sorted(pairs):
+        if pairs[(kind, resource)] > 1:
+            return (
+                "refuse: B2 asks source repeats a pair: " + kind + " " + resource,
+                None,
+            )
+    return None, pairs
+
+
+def _b2_coverage(declared, mapped):
+    """Return one reason per pair the mapping table does not cover once."""
+    reasons = []
+    for pair in sorted(set(declared) | set(mapped)):
+        kind, resource = pair
+        have = mapped.get(pair, 0)
+        want = declared.get(pair, 0)
+        if have == want:
+            continue
+        if have > want and have > 1:
+            reasons.append("refuse: B2 mapping repeats a pair: " + kind + " " + resource)
+        elif have > want:
+            reasons.append("refuse: B2 mapping has extra pair: " + kind + " " + resource)
+        else:
+            reasons.append("refuse: B2 mapping is missing pair: " + kind + " " + resource)
+    return reasons
+
+
+def _b2_refusals(root, text, sha):
+    """Return the B2 reasons: source, then table shape, then coverage.
+
+    The asks are read from the draft's own commit, so a repaired working tree
+    does not change what the table must cover.
+    """
+    source_reason, declared = _b2_source(pinned_asks(root, sha))
+    if source_reason is not None:
+        return [source_reason]
+    shape_reason, rows = _b2_table(text)
+    if shape_reason is not None:
+        return [shape_reason]
+    return _b2_coverage(declared, collections.Counter((row[0], row[1]) for row in rows))
+
+
 def _refusal(root, match):
     rel = match.group("path")
     data = read_file(root, rel)
@@ -1070,6 +1251,7 @@ def problems(root):
             refusals.append(reason)
     if pin_reason is None and pinned:
         refusals.extend(_quote_refusals(root, text, sha))
+        refusals.extend(_b2_refusals(root, text, sha))
     return refusals
 
 
