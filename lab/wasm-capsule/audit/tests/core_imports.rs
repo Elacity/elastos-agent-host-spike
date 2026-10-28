@@ -486,6 +486,9 @@ fn type_level_wasi_or_env_import_is_refused() {
         r#"(component (type $t (component (import "env" (instance)))))"#,
         r#"(component
             (type $t (component (import "elastos:bus/runtime@2.0.0" (instance)))))"#,
+        // A name that starts with a listed string, not only with `elastos:bus`.
+        r#"(component
+            (type $t (component (import "elastos:bus/types@1.0.0-rc.1" (instance)))))"#,
         // The same name hidden one nested `Type(...)` declaration down, beside
         // an allowed top-level type import, so an empty list cannot decide.
         r#"(component
