@@ -279,12 +279,15 @@ def load(path=DATA):
 # - capsules/model-provider/falsifiers.json: the model provider's
 #   src/local_memory.rs, src/journal.rs, src/contract.rs, src/state.rs,
 #   tests/process.rs, src/local_llama.rs and src/adapters.rs.
-#   tests/process.rs is named here because the model list's MP30-MP36 and
-#   MP38 edit it: MP30, MP31 and MP34 change the relay request, MP33 sends it
-#   a second time, MP32 changes the record of a closed provider socket, MP35
-#   drops the no-live-grant refusal in the granting stand-in, MP36 answers from
-#   a canned stream instead of relaying, and MP38 drops the shared stand-in's
-#   authorise call so a grant for another session reaches the model. The model
+#   tests/process.rs is named here because the model list's MP30-MP36, MP38
+#   and MP39 edit it: MP30, MP31 and MP34 change the relay request, MP33 sends
+#   it a second time, MP32 changes the record of a closed provider socket, MP35
+#   ignores the shared stand-in's authorise result so a run with no grant
+#   reaches the model, MP36 answers from a canned stream instead of relaying,
+#   MP38 passes the session the shell view lists instead of the served session
+#   so another session's grant reaches the model, and MP39 passes the first
+#   live entry's request id instead of the effect's so a run whose own request
+#   id has no grant is admitted. The model
 #   list's `selftest` entries
 #   edit falsify.py, which recovery
 #   finds under examples/agent-host.
@@ -293,8 +296,11 @@ def load(path=DATA):
 # - capsules/did-provider/falsifiers.json: did's src/main.rs, did's
 #   confine.sb and did's tests/confine.rs.
 # - capsules/wallet-provider/falsifiers.json: wallet's src/main.rs, wallet's
-#   confine.sb, wallet's tests/confine.rs and src/tests/falsifiers.rs, and
-#   did's src/main.rs, did's confine.sb and did's tests/confine.rs.
+#   confine.sb, wallet's tests/confine.rs, src/tests/falsifiers.rs and
+#   tests/common/profile_generator.rs, and did's src/main.rs, did's
+#   confine.sb and did's tests/confine.rs. The profile generator file is
+#   named ahead of the move: wallet's WP93 to WP103 and WP105 to WP108 edit
+#   it once confine moves the lab profile generator there.
 # - lab/capsule-identity/falsifiers.json: capsule-identity's .gitignore,
 #   README.md, src/lib.rs, tests/common/mod.rs and
 #   fixtures/wc001-core/capsule.json.
@@ -336,6 +342,7 @@ PROVIDER_TARGETS = (
     "capsules/did-provider/confine.sb",
     "capsules/did-provider/tests/confine.rs",
     "capsules/wallet-provider/src/main.rs",
+    "capsules/wallet-provider/tests/common/profile_generator.rs",
     "capsules/wallet-provider/confine.sb",
     "capsules/wallet-provider/tests/confine.rs",
     "capsules/wallet-provider/src/tests/falsifiers.rs",
@@ -2110,7 +2117,8 @@ def a_killed_provider_edit_is_recovered():
     through main(), and repeat the edit. This lane's model-provider targets,
     the model provider's confinement test harness and process test file, the
     confine lane's five did/wallet targets plus its did confinement test
-    harness and wallet's falsifier honesty test, capsule-identity's
+    harness, wallet's falsifier honesty test and wallet's profile generator
+    file, capsule-identity's
     .gitignore, README.md, src/lib.rs, tests/common/mod.rs and
     fixtures/wc001-core/capsule.json, and
     the wasm lab's .gitignore, README.md, LOG.md, capsule/capsule.json,
@@ -2145,6 +2153,7 @@ def a_killed_provider_edit_is_recovered():
                  "../../capsules/wallet-provider/src/main.rs",
                  "../../capsules/wallet-provider/confine.sb",
                  "../../capsules/wallet-provider/tests/confine.rs",
+                 "../../capsules/wallet-provider/tests/common/profile_generator.rs",
                  "../../capsules/wallet-provider/src/tests/falsifiers.rs",
                  "../../lab/capsule-identity/src/lib.rs",
                  "../../lab/capsule-identity/tests/common/mod.rs",

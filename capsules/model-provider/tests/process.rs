@@ -840,10 +840,9 @@ enum HostedEffectAnswer {
     Relay {
         backend_url: String,
     },
-    /// Checks the shared stand-in's shell live-grant view for the effect's
-    /// request id, then asks the shared stand-in's `authorise` whether that
-    /// grant is for `served_session`, before it relays: no live entry, or a
-    /// grant `authorise` refuses, answers with the Runtime's refusal
+    /// Asks the shared stand-in's one admission decision, `authorise`, whether
+    /// the effect's request id holds a live grant for `served_session`, before
+    /// it relays: a refusal answers with the Runtime's refusal
     /// (`RUNTIME_HOSTED_REFUSAL`) and reaches no backend.
     Granted {
         grants: Arc<Mutex<StandIn>>,
@@ -904,18 +903,6 @@ fn shell_live_grant_view(grants: &Mutex<StandIn>) -> Value {
         .expect("the shared stand-in answers the shell live-grant view")
 }
 
-/// True when that view lists one entry whose `request_id` equals `request_id`.
-/// The shared stand-in keeps only `Live` grants
-/// (`lab/agent-conformance/standin-runtime/mod.rs:128-139`), so an exhausted,
-/// revoked or expired grant never admits an effect.
-fn shell_view_lists_live_grant(grants: &Mutex<StandIn>, request_id: &str) -> bool {
-    shell_live_grant_view(grants)["capabilities"]
-        .as_array()
-        .expect("the shared stand-in shell view lists capabilities")
-        .iter()
-        .any(|entry| entry["request_id"] == request_id)
-}
-
 /// Stand-in for the Runtime-owned hosted effect socket that `init` names in
 /// `runtime_hosted_socket`. It stays in this file because
 /// `tests/confine/main.rs` is cc-model-confine's file in another test binary,
@@ -925,10 +912,9 @@ fn shell_view_lists_live_grant(grants: &Mutex<StandIn>, request_id: &str) -> boo
 /// Runtime refuses before dispatch, or, when asked at `bind_streaming`, with
 /// the Runtime's accepted head and the backend stream. `hold_answer` keeps that
 /// answer back, so the run stays open for as long as the test needs it. A
-/// stand-in bound with `bind_granting` answers only an effect whose request id
-/// holds a live entry in the shared stand-in's shell view for the session that
-/// stand-in serves, and records the named reason for every refusal in this
-/// stand-in.
+/// stand-in bound with `bind_granting` answers only an effect that the shared
+/// stand-in's `authorise` admits for the session that stand-in serves, and
+/// records `authorise`'s named reason for every refusal in this stand-in.
 struct HostedEffectStandIn {
     path: PathBuf,
     listener: Arc<UnixListener>,
@@ -979,8 +965,8 @@ impl HostedEffectStandIn {
     }
 
     /// Binds the stand-in that relays a hosted effect to the real backend at
-    /// `backend_url` only when `grants` lists a live entry for the effect's
-    /// request id that is for `served_session`, and answers with the Runtime's
+    /// `backend_url` only when the shared stand-in's `authorise` admits the
+    /// effect's request id for `served_session`, and answers with the Runtime's
     /// refusal otherwise. `served_session` is this stand-in's rule for the
     /// hosted run it serves, not a claim about how the Runtime finds an
     /// effect's session: the effect carries no session id
@@ -1217,30 +1203,21 @@ fn serve_hosted_effect(
             served_session,
             backend_url,
         } => {
-            // The check's first decision: an effect with no live entry for its
-            // request id is refused.
-            if !shell_view_lists_live_grant(&grants, &request_id) {
-                // The refusal reaches the run as `hosted_effect_refused` with
-                // class `access_refused` (`src/adapters.rs:2799-2829`), and no
-                // backend sees the effect.
-                refusals
-                    .lock()
-                    .unwrap()
-                    .push(format!("no live grant for request {request_id}"));
-                let _ = (&stream).write_all(RUNTIME_HOSTED_REFUSAL);
-                return;
-            }
-            // The same check's session tie is the shared stand-in's one
-            // admission rule, `StandIn::authorise`
-            // (`lab/agent-conformance/standin-runtime/mod.rs:146-161`): the
-            // grant must be for the session this stand-in serves, or it refuses
-            // with its own reason, which names both sessions (`:504-510`).
+            // The one admission decision is the shared stand-in's `authorise`
+            // (`lab/agent-conformance/standin-runtime/mod.rs:146-161`). It
+            // refuses an unknown request id, a grant that is not live and a
+            // grant for another session, each with its own named reason. It is
+            // a lab seam, not a route
+            // (`lab/agent-conformance/standin-runtime/README.md:27`).
             if let Err((_, reason)) = grants.lock().unwrap().authorise(
                 Caller::Client {
                     session_id: &served_session,
                 },
                 &request_id,
             ) {
+                // The refusal reaches the run as `hosted_effect_refused` with
+                // class `access_refused` (`src/adapters.rs:2799-2829`), and no
+                // backend sees the effect.
                 refusals.lock().unwrap().push(reason);
                 let _ = (&stream).write_all(RUNTIME_HOSTED_REFUSAL);
                 return;
@@ -1458,6 +1435,8 @@ struct LocalRelayBackend {
     listener: Arc<TcpListener>,
     sender: mpsc::Sender<RecordedRequest>,
     requests: Receiver<RecordedRequest>,
+    /// The connections the accept loop has returned so far.
+    accepted: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     accept: Option<thread::JoinHandle<()>>,
 }
@@ -1471,15 +1450,20 @@ impl LocalRelayBackend {
             .expect("a stoppable local relay backend");
         let listener = Arc::new(listener);
         let (sender, requests) = mpsc::channel();
+        let accepted = Arc::new(AtomicUsize::new(0));
         let stop = Arc::new(AtomicBool::new(false));
         let accept = {
             let listener = Arc::clone(&listener);
+            let accepted = Arc::clone(&accepted);
             let stopping = Arc::clone(&stop);
             let sender = sender.clone();
             thread::spawn(move || {
                 while !stopping.load(Ordering::Relaxed) {
                     match listener.accept() {
-                        Ok((stream, _)) => serve_local_relay_request(stream, &sender),
+                        Ok((stream, _)) => {
+                            accepted.fetch_add(1, Ordering::Relaxed);
+                            serve_local_relay_request(stream, &sender);
+                        }
                         Err(_) => thread::sleep(Duration::from_millis(5)),
                     }
                 }
@@ -1490,6 +1474,7 @@ impl LocalRelayBackend {
             listener,
             sender,
             requests,
+            accepted,
             stop,
             accept: Some(accept),
         }
@@ -1497,6 +1482,15 @@ impl LocalRelayBackend {
 
     fn url(&self) -> &str {
         &self.url
+    }
+
+    /// The connections the backend has accepted so far. It reads a counter and
+    /// does not stop the backend, so a run that reached no backend can be told
+    /// from one that did. `observe()` cannot check for zero requests: it waits
+    /// `FIXTURE_EVENT_TIMEOUT` for a first one and fails when none comes, so a
+    /// zero-request check reads this counter instead.
+    fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::Relaxed)
     }
 
     /// Every request the backend read, waiting `FIXTURE_EVENT_TIMEOUT` for the
@@ -2975,17 +2969,19 @@ fn hosted_relay_forwards_the_provider_body_unchanged_and_no_key() {
     provider.shutdown();
 }
 
-/// A hosted model turn is reached only through a live grant in the shared
-/// stand-in's RA-1 shell view. `HostedEffectStandIn::ra1_view` reads that view
-/// through the shared stand-in's own `get_capability_list` call
+/// A hosted model turn is reached only through a live grant that the shared
+/// stand-in's one admission decision, `authorise`, admits for the session the
+/// run's binding names. `HostedEffectStandIn::ra1_view` reads the shared
+/// stand-in's live-grant view through its own `get_capability_list` call
 /// (`lab/agent-conformance/standin-runtime/mod.rs:128-139`), and a granting
-/// stand-in answers only an effect whose request id matches a live entry, so no
-/// route runs over a socket here (`MP35`). Run A carries a non-empty
-/// `grant_id` but has no seeded grant, so the stand-in refuses it with the
-/// Runtime's `403` and `X-Elastos-Hosted-Access: refused` before any backend
-/// call, and the run settles `failed` with `hosted_effect_refused` and class
-/// `access_refused`. One `Live` grant for run B's request id is then listed
-/// with every entry field, and run B completes with `ready` and reported
+/// stand-in answers only an effect that `authorise` admits, so no route runs
+/// over a socket here (`MP35`). Run A carries a non-empty `grant_id` but has no
+/// seeded grant, so `authorise` refuses it with `unknown grant: <request id>`;
+/// the stand-in answers with the Runtime's `403` and
+/// `X-Elastos-Hosted-Access: refused` before any backend call, and the run
+/// settles `failed` with `hosted_effect_refused` and class `access_refused`.
+/// One `Live` grant for run B's request id is then listed with every entry
+/// field, and run B completes with `ready` and reported
 /// usage. The loopback backend counts exactly one request, so only B reached
 /// the model (`MP36`). The shared stand-in has no seam that spends a grant
 /// (`lab/agent-conformance/standin-runtime/README.md`), so this lane models no
@@ -3072,7 +3068,7 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
     );
     assert_eq!(
         stand_in.refusal_reasons(),
-        vec![format!("no live grant for request {request_a}")],
+        vec![format!("unknown grant: {request_a}")],
         "the stand-in must record why it refused run A"
     );
 
@@ -3383,6 +3379,137 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
     assert_eq!(
         backend_requests[0].request_line, "POST /v1/chat/completions HTTP/1.1",
         "the one request must be run D's model turn"
+    );
+
+    provider.shutdown();
+}
+
+/// A hosted model turn is reached only through a grant for its own request id.
+/// 060's test shows the refusal with no grant and the control whose live entry
+/// matches; 059's test shows another session's grant refused. This one seeds
+/// one `Live` grant for `HOSTED_FIXTURE_SESSION_ID` under a different request
+/// id, so the run's own request id holds no grant and the shared stand-in's
+/// `authorise` refuses it with `unknown grant: <its request id>`. The granting
+/// stand-in answers the Runtime's `403` before any backend call, the run
+/// settles `failed` with `hosted_effect_refused` and class `access_refused`,
+/// and the loopback backend accepts no connection (`MP39`).
+///
+/// This is stand-in lab evidence for M1's A4 only: the stand-ins are not the
+/// Runtime, the loopback backend is not a hosted connection, and it books no M1
+/// check and no grade point. The Runtime's own grant check stays with Anders.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn an_ra1_grant_for_another_request_does_not_reach_the_model() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider RA-1 grant for another request: off macOS the \
+             provider refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let backend = LocalRelayBackend::bind();
+    let grants = Arc::new(Mutex::new(StandIn::new()));
+    let root = test_support::temp_root_path("model-provider-process", "ra1-other-request");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind_granting(
+        "ra1-other-request",
+        backend.url(),
+        Arc::clone(&grants),
+        HOSTED_FIXTURE_SESSION_ID,
+    );
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    // The shell seeds one `Live` grant for the session the stand-in serves, but
+    // for another request id than the run's. The values are this test's
+    // fixture, and the shared stand-in decides liveness.
+    let other_request = test_support::fixture_model_request_id("request:ra1-other-request");
+    let resource = "model:fixture/text";
+    let action = "text.generate";
+    let duration = "once";
+    let granted_at: u64 = 1_790_000_000;
+    grants.lock().unwrap().seed_grant(
+        &other_request,
+        HOSTED_FIXTURE_SESSION_ID,
+        resource,
+        action,
+        duration,
+        granted_at,
+        Life::Live,
+        false,
+    );
+    let expected_entry = json!({
+        "request_id": other_request,
+        "session_id": HOSTED_FIXTURE_SESSION_ID,
+        "resource": resource,
+        "action": action,
+        "duration": duration,
+        "granted_at": granted_at,
+    });
+    assert_eq!(
+        stand_in.ra1_view(),
+        json!({
+            "scope": SHELL_LIVE_GRANT_SCOPE,
+            "capabilities": [expected_entry],
+        }),
+        "the shared stand-in shell view must list the one live grant for another request id with every field"
+    );
+
+    // The run's own request id has no grant, so `authorise` refuses it with its
+    // own reason before any backend call.
+    let prompt = "a turn whose own request id has no grant";
+    let request = test_support::fixture_model_request_id("request:ra1-no-own-grant");
+    let settled = run_hosted_text_turn(
+        &mut provider,
+        &request,
+        "grant:ra1-no-own-grant",
+        prompt,
+        FIXTURE_EVENT_TIMEOUT,
+    );
+    assert_eq!(
+        settled["data"]["status"],
+        "failed",
+        "a turn whose own request id has no grant must fail: {}",
+        run_status_and_error_code(&settled)
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["error"]["code"],
+        "hosted_effect_refused",
+        "the refusal must carry the Runtime's error code: {}",
+        run_status_and_error_code(&settled)
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["error"]["class"],
+        "access_refused",
+        "the refusal must carry the access class: {}",
+        run_status_and_error_code(&settled)
+    );
+    assert_eq!(
+        stand_in.refusal_reasons(),
+        vec![format!("unknown grant: {request}")],
+        "the stand-in must record the shared stand-in's reason for the run's own request id"
+    );
+
+    // The refused run reached no backend: the loopback backend accepted no
+    // connection.
+    assert_eq!(
+        backend.accepted(),
+        0,
+        "the run whose own request id has no grant must send the model nothing"
     );
 
     provider.shutdown();
