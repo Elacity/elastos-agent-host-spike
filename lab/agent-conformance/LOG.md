@@ -10477,3 +10477,147 @@ After the last restore, the two named tests pass and `git diff --stat` shows onl
 The eight principle answers above still hold. Row 3 gains no second path or rule: the refusals stay in the one method and the revoke stays on the one writer and the one `Revoked` assignment. Row 5 covers the null body, the empty reason, the malformed client body and the two-fault precedence. Row 7 now names fourteen caught plants, six on the drops test and eight on the refusal test.
 
 070 round 2: extended both revoke-all tests to preserved denied and expired records, an expired grant, a live grant with `session_ended: true`, all preserved grant fields, malformed client bodies, a null body, an empty reason and the two-fault refusal precedence; the route gained only its precedence doc sentence, and fourteen hand-run plants each failed the named test.
+
+### 070 repair — failure owns session cleanup
+
+The failure transitions in `post_capability_deny` and `finish_start` now use
+`revoke_live` and `settle_pending`. The shared cleanup revokes the failed
+session's live grants and settles its remaining pending requests with the
+failure cause. The shell keeps ownership of the explicit deny record; runtime
+owns the other settlements. The sibling session keeps its records and grants.
+`post_capability_grant`, `authorise`, the request writer and the grant writers
+keep their existing rules.
+
+`standin_failure_ends_session_authority` submits requests through the public
+request method before start returns. It covers shell denial with `Start::Ok`,
+`Start::Error` and `Start::Trap`. Each case proves that session and once grants
+return `grant is not live: Revoked`, a grant of the third request returns
+`request is not pending: request-3`, and the sibling still has authority.
+Before the repair, this test failed at `mod.rs:3509` because the first grant
+still returned `Ok(())` (exit 101, 2.91 seconds). The existing shell-deny test
+now checks the runtime settlement of `req-extra`, its exact repeat-deny
+refusal, and preservation of the failure cause on a later seeded request.
+
+The revoke-all test uses one metadata assertion for all six grants: `req-1`,
+`req-2`, `req-orphan`, `req-3`, `req-old` and `req-ended`. It runs after each
+revoke-all call and compares `request_id`, `session_id`, `resource`, `action`,
+`duration` and `granted_at`. The existing life and `session_ended` assertions
+also run after each call.
+
+#### Repair plants
+
+All five plants compiled and failed on their test assertions. Each plant was
+restored byte for byte before the next. The commands used
+`CARGO_BUILD_BUILD_DIR=$PWD/lab/agent-conformance/target/host-build`,
+`CARGO_TARGET_DIR=$PWD/lab/agent-conformance/target`, `CARGO_INCREMENTAL=0`
+and `RUST_TEST_THREADS=2`. The test command was
+`cargo test --offline --locked --manifest-path lab/agent-conformance/Cargo.toml --lib TEST -- --exact`.
+The first two plants below use
+`standin_runtime::tests::standin_shell_revoke_all_drops_every_live_grant`.
+The other three use
+`standin_runtime::tests::standin_failure_ends_session_authority`.
+
+F-standin-revoke-all-overwrite-expired-grant specifically overwrites the
+`Expired` grant. This is separate from the earlier overwrite-records plant,
+which exercises request status. Exit 101 in 8.03 seconds at the planted
+`mod.rs:6904`: `the stand-in did the work: the revoke-all leaves the expired req-old grant`;
+actual `(Revoked, false)`, expected `(Expired, false)`. Restored, the exact
+test passed in 1.76 seconds.
+
+Old bytes:
+
+```text
+        for request_id in live {
+            self.revoke_grant(&request_id);
+        }
+        Ok(json!({ "success": true, "reason": reason }))
+```
+
+New bytes:
+
+```text
+        for request_id in live {
+            self.revoke_grant(&request_id);
+        }
+        for grant in &mut self.grants {
+            if grant.life == Life::Expired {
+                grant.life = Life::Revoked;
+            }
+        }
+        Ok(json!({ "success": true, "reason": reason }))
+```
+
+F-second-revoke-change-orphan-metadata changes `req-orphan` only on the second
+call. Exit 101 in 1.54 seconds at the planted `mod.rs:6983`:
+`the stand-in did the work: the revoke-all keeps every field of req-orphan`;
+actual resource `""`, expected `"res"`.
+
+Old bytes:
+
+```text
+        let granted = self
+```
+
+New bytes:
+
+```text
+        if self.grants.iter().all(|grant| !is_live(grant.life)) {
+            if let Some(grant) = self.grants.iter_mut().find(|grant| grant.request_id == "req-orphan") {
+                grant.resource.clear();
+            }
+        }
+        let granted = self
+```
+
+F-deny-keep-grants removes the following complete line, including its newline,
+from `post_capability_deny` (new bytes are empty). Exit 101 in 2.06 seconds at
+the planted `mod.rs:3533`: `shell denied start revokes the session and once grants`;
+actual `Ok(())`, expected `Err((400, "grant is not live: Revoked"))`.
+
+```text
+                self.revoke_live(&session_id);
+```
+
+F-deny-keep-pending removes the following complete line, including its newline,
+from `post_capability_deny` (new bytes are empty). Exit 101 in 1.39 seconds at
+the planted `mod.rs:3544`: `failure settles the third request before a later grant`;
+actual success, expected `Err((400, "request is not pending: request-3"))`.
+
+```text
+                self.settle_pending(&session_id, reason);
+```
+
+F-failed-start-keep-grants removes revocation from `finish_start`. Exit 101
+in 1.34 seconds at the planted `mod.rs:3533`:
+`start refused revokes the session and once grants`; actual `Ok(())`, expected
+`Err((400, "grant is not live: Revoked"))`.
+
+Old bytes:
+
+```text
+        let cause = instance.cause.clone();
+        self.revoke_live(&session_id);
+```
+
+New bytes:
+
+```text
+        let cause = instance.cause.clone();
+```
+
+#### Restored repair checks
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`:
+  exit 0 in 0.16 seconds.
+- With the environment above,
+  `cargo test --offline --locked --manifest-path lab/agent-conformance/Cargo.toml --lib --test standin_contract`:
+  exit 0 in 6.89 seconds; 67 stand-in tests, two contract tests and three probe
+  unit tests passed. These checks use the stand-in without an operator or a
+  probe artifact build.
+- Restored `standin-runtime/mod.rs` SHA-256:
+  `f402f7f2ab88963bf0abdae6e3fe9532695061e221f960e29158971c07688ae2`.
+  Only that source file and this log changed in this repair. Cargo manifests,
+  lockfile, falsifier registry and the other lane sources keep their bytes.
+- The supervisor owns the full gate and fresh review. This repair used the
+  bounded checks above; the full suite includes Git identity checks, and this
+  turn's instructions prohibit running Git.
