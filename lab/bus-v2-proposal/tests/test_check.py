@@ -883,6 +883,47 @@ PROVIDER_CASES = (
 # The groups one provider body cites, in the order it emits them.
 PROVIDER_GROUPS = ("scheme", "read_action", "write_action", "default_action")
 
+# The three resident-A3 citations: the activation removal, the stop contract
+# error, and the one lifecycle export. Each stands on its own prose line.
+RESIDENT_REL = "elastos/crates/elastos-compute/src/providers/component.rs"
+RESIDENT_RUN_NUMBER = 218
+RESIDENT_RUN_SPAN = RESIDENT_REL + ":218"
+RESIDENT_RUN_QUOTE = "        self.instances.write().await.remove(&handle.id);"
+
+RESIDENT_STOP_NUMBER = 232
+RESIDENT_STOP_SPAN = RESIDENT_REL + ":232"
+RESIDENT_STOP_QUOTE = (
+    '                "component/v1 is a bounded activation contract and has no resident stop operation"'
+)
+
+RESIDENT_EXPORT_REL = "elastos/wit/elastos-bus-v1.wit"
+RESIDENT_EXPORT_NUMBER = 87
+RESIDENT_EXPORT_SPAN = RESIDENT_EXPORT_REL + ":87"
+RESIDENT_EXPORT_QUOTE = "  run: func() -> result<_, bus-error>;"
+
+RESIDENT_CASES = (
+    ("run", RESIDENT_RUN_SPAN, RESIDENT_RUN_QUOTE),
+    ("stop", RESIDENT_STOP_SPAN, RESIDENT_STOP_QUOTE),
+    ("export", RESIDENT_EXPORT_SPAN, RESIDENT_EXPORT_QUOTE),
+)
+
+# The groups one resident body cites, in the order it emits them.
+RESIDENT_GROUPS = ("run", "stop", "export")
+
+# The order in which the resident decisions read their pinned lines.
+RESIDENT_DECISION_ORDER = (
+    RESIDENT_RUN_NUMBER,
+    RESIDENT_STOP_NUMBER,
+    RESIDENT_EXPORT_NUMBER,
+)
+
+# A paragraph that keeps the resident decision but states no forbidden claim.
+RESIDENT_OPEN = "A3 stays open.\n"
+
+# The two claims the resident paragraph never makes, one refusal each.
+A3_MET_REFUSAL = "refuse: draft says A3 is met"
+A3_GRANT_REFUSAL = "refuse: draft says ComponentProvider grants resident A3 credit"
+
 # The order in which the provider decisions read their pinned lines.
 PROVIDER_DECISION_ORDER = (
     SCHEME_NUMBER,
@@ -1822,6 +1863,61 @@ class CitationCheckTests(unittest.TestCase):
         """A committed provider file with every walk laid at its pinned offset."""
         rows = self._walk_rows(PROVIDER_WALKS, PROVIDER_WALK_END, lines)
         return ("\n".join(rows[:count]) + "\n").encode("utf-8")
+
+    def _resident_source(self, count=RESIDENT_STOP_NUMBER, lines=None):
+        """A committed ComponentProvider file with lines 218 and 232 laid in.
+
+        LINES overrides one pinned line number, so a case can plant a single
+        differing character in the pinned commit instead of in the draft.
+        """
+        overrides = dict(lines or {})
+        rows = ["// filler"] * count
+        for number, text in (
+            (RESIDENT_RUN_NUMBER, RESIDENT_RUN_QUOTE),
+            (RESIDENT_STOP_NUMBER, RESIDENT_STOP_QUOTE),
+        ):
+            if number <= count:
+                rows[number - 1] = overrides.get(number, text)
+        return ("\n".join(rows) + "\n").encode("utf-8")
+
+    def _wit_source(self, lines=None):
+        """A committed Bus v1 WIT file with line 87 laid in."""
+        overrides = dict(lines or {})
+        rows = ["// filler"] * RESIDENT_EXPORT_NUMBER
+        rows[RESIDENT_EXPORT_NUMBER - 1] = overrides.get(
+            RESIDENT_EXPORT_NUMBER, RESIDENT_EXPORT_QUOTE
+        )
+        return ("\n".join(rows) + "\n").encode("utf-8")
+
+    def _resident_files(self, resident=None, wit=None):
+        """The two pinned files the resident block cites."""
+        return {
+            RESIDENT_REL: self._resident_source(lines=resident),
+            RESIDENT_EXPORT_REL: self._wit_source(lines=wit),
+        }
+
+    def _resident_body(
+        self,
+        run=RESIDENT_RUN_QUOTE,
+        stop=RESIDENT_STOP_QUOTE,
+        export=RESIDENT_EXPORT_QUOTE,
+        groups=None,
+    ):
+        """A draft that cites the three resident spans and quotes each one."""
+        chosen = RESIDENT_GROUPS if groups is None else tuple(groups)
+        blocks = (
+            ("run", RESIDENT_RUN_SPAN, run),
+            ("stop", RESIDENT_STOP_SPAN, stop),
+            ("export", RESIDENT_EXPORT_SPAN, export),
+        )
+        parts = []
+        for name, span, quote in blocks:
+            if name not in chosen:
+                continue
+            parts.append("`" + span + "` is cited.\n")
+            parts.append("    " + quote + "\n")
+        parts.append(RESIDENT_OPEN)
+        return "".join(parts)
 
     def _changed(self, lines, index):
         """Return LINES with the one line at INDEX altered by one character."""
@@ -8386,4 +8482,222 @@ class CitationCheckTests(unittest.TestCase):
             "`" + CHILD_HOST_DOC_SPAN + "`",
             self.test_one_prose_line_citing_3455_3470_and_3471_walks_each_marker,
             "CAUGHT shared-line-child-host-index",
+        )
+
+    def test_live_draft_resident_quotes_match_their_pinned_lines(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        numbers = {
+            "run": RESIDENT_RUN_NUMBER,
+            "stop": RESIDENT_STOP_NUMBER,
+            "export": RESIDENT_EXPORT_NUMBER,
+        }
+        for name, span, quote in RESIDENT_CASES:
+            selector = getattr(check, "resident_" + name + "_quote")
+            self.assertEqual(selector(text), quote, span)
+            rel = RESIDENT_EXPORT_REL if name == "export" else RESIDENT_REL
+            self.assertEqual(check.pinned_line(root, sha, rel, numbers[name]), quote, span)
+        self.assertEqual(check.problems(root), [])
+
+    def test_resident_run_line_mismatch_is_refused(self):
+        # Line 218 is the first resident decision. Its refusal is the only
+        # reason, and the later pinned lines are never read.
+        got, reads = self._pinned_reads(
+            self._resident_body(run=RESIDENT_RUN_QUOTE + "x"),
+            self._resident_files(),
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + RESIDENT_RUN_SPAN]
+        )
+        self.assertEqual(reads, [RESIDENT_RUN_NUMBER])
+
+    def test_resident_stop_line_mismatch_is_refused(self):
+        # A zero-scoring window still stands for line 232: the window that holds
+        # that line is compared, and the one differing character is refused.
+        got, reads = self._pinned_reads(
+            self._resident_body(stop=RESIDENT_STOP_QUOTE + "x"),
+            self._resident_files(),
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + RESIDENT_STOP_SPAN]
+        )
+        self.assertEqual(reads, [RESIDENT_RUN_NUMBER, RESIDENT_STOP_NUMBER])
+
+    def test_resident_export_line_mismatch_is_refused(self):
+        got, reads = self._pinned_reads(
+            self._resident_body(export=RESIDENT_EXPORT_QUOTE + "x"),
+            self._resident_files(),
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + RESIDENT_EXPORT_SPAN]
+        )
+        self.assertEqual(reads, list(RESIDENT_DECISION_ORDER))
+
+    def test_resident_single_character_difference_in_the_pin_is_refused(self):
+        # The same one-character difference planted in the pinned commit, not in
+        # the draft, is refused for each of the three cited lines.
+        cases = (
+            (RESIDENT_RUN_SPAN, {RESIDENT_RUN_NUMBER: RESIDENT_RUN_QUOTE + "x"}, None),
+            (RESIDENT_STOP_SPAN, {RESIDENT_STOP_NUMBER: RESIDENT_STOP_QUOTE + "x"}, None),
+            (RESIDENT_EXPORT_SPAN, None, {RESIDENT_EXPORT_NUMBER: RESIDENT_EXPORT_QUOTE + "x"}),
+        )
+        for span, resident, wit in cases:
+            root = self._draft(self._resident_body(), self._resident_files(resident, wit))
+            self.assertEqual(
+                check.problems(root), ["refuse: quoted line does not match " + span]
+            )
+
+    def test_resident_quote_refusal_short_circuits(self):
+        # The run refusal stands first, so the stop and export decisions never
+        # read their pinned lines. A walker that keeps walking reads all three.
+        got, reads = self._pinned_reads(
+            self._resident_body(run=RESIDENT_RUN_QUOTE + "x"),
+            self._resident_files(),
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + RESIDENT_RUN_SPAN]
+        )
+        self.assertEqual(reads, [RESIDENT_RUN_NUMBER])
+
+    def test_resident_draft_without_a_span_adds_no_refusal(self):
+        # The draft's other citations are unchanged, so dropping one resident
+        # span leaves no refusal for it.
+        for name, span, _ in RESIDENT_CASES:
+            groups = [group for group in RESIDENT_GROUPS if group != name]
+            body = self._resident_body(groups=groups)
+            self.assertNotIn("`" + span + "`", body)
+            self.assertEqual(check.problems(self._draft(body, self._resident_files())), [])
+
+    def test_resident_a3_stays_open(self):
+        # The paragraph keeps A3 open. Each claim that would close it has its
+        # own refusal, and neither claim is accepted in the other's place.
+        self.assertEqual(
+            check.problems(self._draft(self._resident_body(), self._resident_files())),
+            [],
+        )
+        claims = (
+            (check.A3_MET_CLAIM, A3_MET_REFUSAL),
+            (check.A3_GRANT_CLAIM, A3_GRANT_REFUSAL),
+        )
+        for claim, refusal in claims:
+            body = self._resident_body() + claim + "\n"
+            self.assertEqual(
+                check.problems(self._draft(body, self._resident_files())), [refusal]
+            )
+        both = self._resident_body() + check.A3_MET_CLAIM + "\n" + check.A3_GRANT_CLAIM + "\n"
+        self.assertEqual(
+            check.problems(self._draft(both, self._resident_files())),
+            [A3_MET_REFUSAL, A3_GRANT_REFUSAL],
+        )
+
+    def test_resident_a3_claim_waits_for_a_known_pin(self):
+        body = self._resident_body() + check.A3_MET_CLAIM + "\n"
+        files = self._resident_files()
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+
+    def _caught_dropped_target(self, span, named_test, label):
+        planted = tuple(
+            target for target in check.QUOTE_TARGETS if target[0] != span
+        )
+        self.assertEqual(len(planted), len(check.QUOTE_TARGETS) - 1, span)
+        self._caught(
+            "QUOTE_TARGETS",
+            planted,
+            named_test,
+            "refuse: quoted line does not match",
+            label,
+        )
+
+    def test_falsifier_resident_stop_line_is_caught(self):
+        # A window picker that returns None for a zero score is the rule this
+        # slice removes. The zero-scoring line 232 window is refused under that
+        # plant before the comparison runs.
+        def planted(remainders, pinned_lines, number):
+            nonempty = [
+                (line, text) for line, text in enumerate(pinned_lines, 1) if text
+            ]
+            width = len(remainders)
+            if not width or width > len(nonempty):
+                return None
+            best = None
+            best_score = None
+            for start in range(len(nonempty) - width + 1):
+                window = nonempty[start:start + width]
+                if not any(line == number for line, _ in window):
+                    continue
+                score = sum(
+                    1
+                    for offset, (_, text) in enumerate(window)
+                    if remainders[offset] == text
+                )
+                if best_score is None or score > best_score:
+                    best = start
+                    best_score = score
+            if not best_score:
+                return None
+            return sum(1 for line, _ in nonempty[best:best + width] if line < number)
+
+        self._caught(
+            "_quote_window",
+            planted,
+            self.test_resident_stop_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT resident-stop",
+        )
+
+    def test_falsifier_resident_a3_open_is_caught(self):
+        # A draft that drops both claim checks accepts a closed A3.
+        self._caught(
+            "a3_claim_refusals",
+            lambda text: [],
+            self.test_resident_a3_stays_open,
+            A3_MET_REFUSAL,
+            "CAUGHT resident-a3-open",
+        )
+
+    def test_falsifier_resident_run_target_is_caught(self):
+        self._caught_dropped_target(
+            RESIDENT_RUN_SPAN,
+            self.test_resident_run_line_mismatch_is_refused,
+            "CAUGHT resident-run-target",
+        )
+
+    def test_falsifier_resident_stop_target_is_caught(self):
+        self._caught_dropped_target(
+            RESIDENT_STOP_SPAN,
+            self.test_resident_stop_line_mismatch_is_refused,
+            "CAUGHT resident-stop-target",
+        )
+
+    def test_falsifier_resident_export_target_is_caught(self):
+        self._caught_dropped_target(
+            RESIDENT_EXPORT_SPAN,
+            self.test_resident_export_line_mismatch_is_refused,
+            "CAUGHT resident-export-target",
+        )
+
+    def test_falsifier_resident_short_circuit_is_caught(self):
+        # A walker that keeps walking after a refusal reads the later pinned
+        # lines, and the short-circuit test sees reads past the run line.
+        def planted(root, text, sha):
+            found = []
+            for target in check.QUOTE_TARGETS:
+                reason = check._quote_refusal(root, text, sha, target)
+                if reason is not None:
+                    found.append(reason)
+            return found[:1]
+
+        self._caught(
+            "_quote_refusals",
+            planted,
+            self.test_resident_quote_refusal_short_circuits,
+            "",
+            "CAUGHT resident-short-circuit",
         )

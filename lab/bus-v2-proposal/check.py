@@ -253,6 +253,23 @@ WRITE_ACTION_MARKER = "`" + WRITE_ACTION_SPAN + "`"
 DEFAULT_ACTION_SPAN = "elastos/crates/elastos-server/src/provider_resource.rs:192"
 DEFAULT_ACTION_MARKER = "`" + DEFAULT_ACTION_SPAN + "`"
 
+# Its quotation is the removal at the end of the activation, source line 218.
+RESIDENT_REL = "elastos/crates/elastos-compute/src/providers/component.rs"
+RESIDENT_RUN_SPAN = RESIDENT_REL + ":218"
+RESIDENT_RUN_MARKER = "`" + RESIDENT_RUN_SPAN + "`"
+
+# Its quotation is the contract error in the stop body, source line 232.
+RESIDENT_STOP_SPAN = RESIDENT_REL + ":232"
+RESIDENT_STOP_MARKER = "`" + RESIDENT_STOP_SPAN + "`"
+
+# Its quotation is the one export the capsule kernel provides, source line 87.
+RESIDENT_EXPORT_SPAN = "elastos/wit/elastos-bus-v1.wit:87"
+RESIDENT_EXPORT_MARKER = "`" + RESIDENT_EXPORT_SPAN + "`"
+
+# The two resident-A3 claims the draft never makes. Each has its own refusal.
+A3_MET_CLAIM = "A3 is met"
+A3_GRANT_CLAIM = "ComponentProvider grants resident A3 credit"
+
 # The draft indents a quotation by exactly four spaces.
 DRAFT_INDENT = "    "
 
@@ -756,6 +773,21 @@ def default_action_quote(text, root=None, sha=None, pinned=None):
     return _pinned_quote(text, DEFAULT_ACTION_SPAN, DEFAULT_ACTION_MARKER, root, sha, pinned)
 
 
+def resident_run_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the activation removal, or None."""
+    return _pinned_quote(text, RESIDENT_RUN_SPAN, RESIDENT_RUN_MARKER, root, sha, pinned)
+
+
+def resident_stop_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the stop contract error, or None."""
+    return _pinned_quote(text, RESIDENT_STOP_SPAN, RESIDENT_STOP_MARKER, root, sha, pinned)
+
+
+def resident_export_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the lifecycle export, or None."""
+    return _pinned_quote(text, RESIDENT_EXPORT_SPAN, RESIDENT_EXPORT_MARKER, root, sha, pinned)
+
+
 # The only target list: one entry per line decision, in source order. A range's
 # two endpoints share one marker. The quoter name is looked up at call time so a
 # test can plant a neighbouring remainder through the production path.
@@ -816,6 +848,9 @@ QUOTE_TARGETS = (
     (READ_ACTION_SPAN, READ_ACTION_MARKER, "read_action_quote"),
     (WRITE_ACTION_SPAN, WRITE_ACTION_MARKER, "write_action_quote"),
     (DEFAULT_ACTION_SPAN, DEFAULT_ACTION_MARKER, "default_action_quote"),
+    (RESIDENT_RUN_SPAN, RESIDENT_RUN_MARKER, "resident_run_quote"),
+    (RESIDENT_STOP_SPAN, RESIDENT_STOP_MARKER, "resident_stop_quote"),
+    (RESIDENT_EXPORT_SPAN, RESIDENT_EXPORT_MARKER, "resident_export_quote"),
 )
 
 
@@ -854,6 +889,16 @@ def _quote_refusals(root, text, sha):
         if reason is not None:
             return [reason]
     return []
+
+
+def a3_claim_refusals(text):
+    """Return one refusal per claim that closes resident A3, each its own line."""
+    refusals = []
+    if A3_MET_CLAIM in text:
+        refusals.append("refuse: draft says " + A3_MET_CLAIM)
+    if A3_GRANT_CLAIM in text:
+        refusals.append("refuse: draft says " + A3_GRANT_CLAIM)
+    return refusals
 
 
 def _past_end(number, rel, count):
@@ -916,6 +961,7 @@ def problems(root):
             refusals.append(reason)
     if pin_reason is None and pinned:
         refusals.extend(_quote_refusals(root, text, sha))
+        refusals.extend(a3_claim_refusals(text))
     return refusals
 
 

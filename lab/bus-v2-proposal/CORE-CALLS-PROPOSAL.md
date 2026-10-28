@@ -371,6 +371,14 @@ For the session, the pending request's session id is the bridge capsule id. The 
 
             session: self.capsule_id.clone(),
 
+This citation is design input for resident A3. The `start` body sets the activation running, starts the host call, and removes the activation when the run finishes, whether that run succeeded, failed, or panicked. `elastos/crates/elastos-compute/src/providers/component.rs:218` is that removal.
+            self.instances.write().await.remove(&handle.id);
+`elastos/crates/elastos-compute/src/providers/component.rs:232` is the contract error that `elastos/crates/elastos-compute/src/providers/component.rs::stop` returns for a running activation. That body reads the stored status and returns that error when the activation is running. It does not stop that activation, so a running activation keeps running until its run finishes.
+                    "component/v1 is a bounded activation contract and has no resident stop operation"
+`elastos/wit/elastos-bus-v1.wit:87` is the one export the capsule kernel provides. The capsule exports `lifecycle.run`, and that export returns one result.
+      run: func() -> result<_, bus-error>;
+Resident A3 credit depends on the RA-6 path. `lab/agent-conformance/standin-runtime/mod.rs::delete_capsule` is that path's stop: it stops one resident instance and revokes that instance's live grants. The stand-in is the lab path, and the lab path is not the Runtime. A3 stays open.
+
 `elastos/crates/elastos-server/src/api/handlers/capability.rs:182` is the refusal in `request_status`. The body loads the pending request by id. When `request.session_id` differs from the caller session id, the body returns Forbidden and the text Cannot access another session's request. Otherwise the body returns that request's status.
 
     // Verify the request belongs to this session
