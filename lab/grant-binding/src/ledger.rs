@@ -1947,3 +1947,48 @@ fn model_second_agent_hold_past_the_shared_u64_total_is_refused() {
     assert_eq!(after.open.len(), 1);
     assert_eq!(after.charged, 0);
 }
+
+#[test]
+fn model_same_identity_shares_one_ceiling() {
+    let mut verifier = Verifier::new();
+    let asked = verifier.register_instance("agent-1", "session-a");
+    let other = verifier.register_instance("agent-1", "session-b");
+    assert_ne!(other, asked);
+    let asked_handle = verifier
+        .bind_grant(asked, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other_handle = verifier
+        .bind_grant(other, "UsersAI/agent-1/other", rights())
+        .expect("bind");
+    assert_ne!(other_handle, asked_handle);
+    let asked_call = verifier.open_call(asked);
+    let other_call = verifier.open_call(other);
+    let asked_request = guest(asked_handle);
+    let other_request = guest(other_handle);
+    verifier
+        .admit_ask(
+            &asked_call,
+            &asked_request,
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("one ask for the identity");
+    verifier
+        .reserve(&other_call, &other_request, 6)
+        .expect("other session holds inside the shared ceiling");
+    let refusal = verifier
+        .reserve(&asked_call, &asked_request, 6)
+        .expect_err("the other session's hold fills this identity");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 10,
+            held: 6,
+            asked: 6,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 6);
+}
