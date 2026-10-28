@@ -229,3 +229,11 @@ fn model_multiline_basic_string_escape_is_a_link() {
     assert!(multiline.contains("\"\"\""));
     assert!(cargo_toml_path_depends_on_grant_binding(multiline));
 }
+
+#[test]
+fn model_unknown_hex_escape_is_not_a_link() {
+    let hex = "gb = { path = \"../grant-bind\\x69ng\", package = \"grant-bind\\x69ng\" }\n";
+    assert!(!hex.contains("grant-binding"));
+    assert!(hex.contains("\\x69"));
+    assert!(!cargo_toml_path_depends_on_grant_binding(hex));
+}
