@@ -63,6 +63,26 @@ pub const EMPTY_FILE_LAB_CID: &str = "bafybeic2y3c3met6txd62reatxwqjnodhfejchfml
 pub const LONG_UTF8_NAME_LAB_CID: &str =
     "bafybeih6g5cy7asndjexb7bazovwryqyj4faxvababcjrbe4jxayhzvgmy";
 
+/// content-sample with `sample.example` as 262145 zero bytes, one over the
+/// chunk limit: a balanced file root over two raw leaves, 262144 and 1
+/// bytes. Built in a temp dir and never committed.
+pub const TWO_LEAF_FILE_LAB_CID: &str =
+    "bafybeidbd7gfhommypeks66twpnbbb3lwovdqe6iwtmdxptgcq5jqbaaby";
+/// content-sample with one more file, `core/big.bin`, holding
+/// [`big_bin_bytes`]: a file root over three raw leaves (262144, 262144 and
+/// 75712 bytes) one directory down, so its Tsize reaches the root through
+/// `core/`. Built in a temp dir and never committed.
+pub const THREE_LEAF_NESTED_LAB_CID: &str =
+    "bafybeidpgwbsi22cbsmthqupvn37xphujhs6fnzyuy64uc6nsauc6bftqe";
+/// The path of the three-leaf file.
+pub const BIG_BIN: &str = "core/big.bin";
+
+/// The 600000 bytes of [`BIG_BIN`]: byte `i` is `i % 251`, so no two leaves
+/// hold the same bytes.
+pub fn big_bin_bytes() -> Vec<u8> {
+    (0..600_000u32).map(|i| (i % 251) as u8).collect()
+}
+
 /// The photo lane's PH6 stand-in photo set, a consumer copy and not a
 /// fixture: its five files, copied byte for byte from
 /// `examples/photo-viewer/host-test/fixtures/stand-in-photo-set/` at
