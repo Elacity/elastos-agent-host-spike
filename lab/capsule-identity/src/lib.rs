@@ -104,12 +104,17 @@
 //! names the signer and binds the printed lab CID. Its bytes are
 //! [`PackageRecord::package_record_payload`], compact JSON with the keys
 //! `cid`, `schema` ([`PACKAGE_RECORD_SCHEMA`]) and `signer_did`, and no name
-//! field. [`sign_package_record`] signs [`domain_separated_digest`] of
-//! [`PACKAGE_RECORD_DOMAIN`] and that payload; it writes nothing.
-//! [`verify_checked_package_record`] checks, in order, the signer's
-//! `did:key`, the explicit accepted list, the record's CID against the
-//! checked bundle's, then the Ed25519 signature. [`verify_package_record`]
-//! is [`checked_bundle`] and then that check. Both signatures share one
+//! field. The record binds a lab CID however it was computed: a folder walk,
+//! a checked bundle, entries or a closure listing. [`sign_cid_record`] signs
+//! [`domain_separated_digest`] of [`PACKAGE_RECORD_DOMAIN`] and the payload
+//! for one [`LabCid`]; it writes nothing. [`verify_cid_record`] checks, in
+//! order, the signer's `did:key`, the explicit accepted list, the record's
+//! CID against that lab CID, then the Ed25519 signature.
+//! [`sign_package_record`] is [`lab_cid`] and then [`sign_cid_record`];
+//! [`verify_checked_package_record`] is [`verify_cid_record`] over the
+//! checked bundle's CID; [`verify_package_record`] is [`checked_bundle`] and
+//! then the checked call. So a record is built, signed and checked in one
+//! place each. Both signatures share one
 //! digest, one DID encoder and decoder, one accepted-list check and one
 //! Ed25519 verification. `Ok(())` grants nothing.
 //!
@@ -1514,15 +1519,19 @@ fn package_record_message(record: &PackageRecord) -> [u8; 32] {
     domain_separated_digest(PACKAGE_RECORD_DOMAIN, &record.package_record_payload())
 }
 
-/// Sign a package record for `bundle` with `key`.
+/// Sign a package record for the lab CID `cid` with `key`.
 ///
-/// The CID is [`lab_cid`]'s printed form; a bundle [`lab_cid`] refuses gets no
-/// record, and the refusal is [`lab_cid`]'s own. `signer_did` is
+/// This is the one place a record is built and signed. The record's CID is
+/// `cid`'s printed form, and `signer_did` is
 /// `elastos_identity::encode_signing_key_did` of `key`. The signature is
 /// Ed25519 over [`domain_separated_digest`] of [`PACKAGE_RECORD_DOMAIN`] and
-/// the record's payload. It writes no file and changes no bundle byte.
-pub fn sign_package_record(key: &SigningKey, bundle: &Path) -> Result<PackageRecord, Refusal> {
-    let cid = lab_cid(bundle)?.to_string();
+/// the record's payload. It writes no file and reads none.
+///
+/// It signs a name, not bytes: `cid` must come from [`encode_listed_files`],
+/// [`encode_entries`], [`lab_cid`] or [`checked_bundle`], so it names the
+/// bytes that call read or was given. It grants nothing.
+pub fn sign_cid_record(key: &SigningKey, cid: LabCid) -> PackageRecord {
+    let cid = cid.to_string();
     let signer_did = signer_did_of(key);
     let mut record = PackageRecord {
         cid,
@@ -1530,32 +1539,45 @@ pub fn sign_package_record(key: &SigningKey, bundle: &Path) -> Result<PackageRec
         signature: [0; 64],
     };
     record.signature = key.sign(&package_record_message(&record)).to_bytes();
-    Ok(record)
+    record
 }
 
-/// Check `record` against the bytes `checked` holds.
+/// Sign a package record for `bundle` with `key`.
 ///
-/// The checks run in this order, and the first refusal is the answer:
+/// This is [`lab_cid`] and then [`sign_cid_record`]; it builds and signs
+/// nothing itself. A bundle [`lab_cid`] refuses gets no record, and the
+/// refusal is [`lab_cid`]'s own. It writes no file and changes no bundle byte.
+pub fn sign_package_record(key: &SigningKey, bundle: &Path) -> Result<PackageRecord, Refusal> {
+    let cid = lab_cid(bundle)?;
+    Ok(sign_cid_record(key, cid))
+}
+
+/// Check `record` against the lab CID `cid`.
+///
+/// This is the one place a record is checked. The checks run in this order,
+/// and the first refusal is the answer:
 ///
 /// 1. `elastos_identity::decode_did_key` on `record.signer_did`, with the name
 ///    signature's reason.
 /// 2. `record.signer_did` is an exact member of `accepted`, with the name
 ///    signature's reason. An empty list refuses every signer.
-/// 3. `record.cid` is `checked.cid()`'s printed form. Otherwise it is refused
-///    naming both. This reads nothing from disk.
+/// 3. `record.cid` is `cid`'s printed form. Otherwise it is refused naming
+///    both. This reads nothing from disk.
 /// 4. Ed25519 verification of `record.signature` over the record's digest,
 ///    with the key from step 1 and the name signature's reason.
 ///
-/// `Ok(())` means all four passed. It is not a trust, admission or launch
-/// value, and it grants nothing.
-pub fn verify_checked_package_record(
-    checked: &CheckedBundle,
+/// It checks a signature over a name, not bytes: `cid` must come from
+/// [`encode_listed_files`], [`encode_entries`], [`lab_cid`] or
+/// [`checked_bundle`]. `Ok(())` means all four passed. It is not a trust,
+/// admission or launch value, and it grants nothing.
+pub fn verify_cid_record(
+    cid: LabCid,
     record: &PackageRecord,
     accepted: &[String],
 ) -> Result<(), Refusal> {
     let key = decode_signer(&record.signer_did)?;
     require_accepted(&record.signer_did, accepted)?;
-    require_record_cid(checked, record)?;
+    require_record_cid(cid, record)?;
     let message = package_record_message(record);
     verify_ed25519(
         &key,
@@ -1565,6 +1587,18 @@ pub fn verify_checked_package_record(
         &record.cid,
     )?;
     Ok(())
+}
+
+/// Check `record` against the bytes `checked` holds.
+///
+/// This is [`verify_cid_record`] over `checked.cid()`, so it holds no check
+/// of its own and reads nothing from disk. `Ok(())` grants nothing.
+pub fn verify_checked_package_record(
+    checked: &CheckedBundle,
+    record: &PackageRecord,
+    accepted: &[String],
+) -> Result<(), Refusal> {
+    verify_cid_record(checked.cid(), record, accepted)
 }
 
 /// Check `record` against the bundle at `bundle`.
@@ -1581,12 +1615,12 @@ pub fn verify_package_record(
     verify_checked_package_record(&held, record, accepted)
 }
 
-/// Check (c) of a package record: it binds the checked bundle's printed CID.
-fn require_record_cid(checked: &CheckedBundle, record: &PackageRecord) -> Result<(), Refusal> {
-    if record.cid != checked.cid().to_string() {
+/// Check (c) of a package record: it binds `cid`'s printed form.
+fn require_record_cid(cid: LabCid, record: &PackageRecord) -> Result<(), Refusal> {
+    if record.cid != cid.to_string() {
         return Err(Refusal::RecordNamesAnotherCid {
             record: record.cid.clone(),
-            bundle: checked.cid(),
+            bundle: cid,
         });
     }
     Ok(())
