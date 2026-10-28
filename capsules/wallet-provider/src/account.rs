@@ -720,3 +720,437 @@ impl WalletProvider {
 fn is_eip155_namespace(value: &str) -> bool {
     value.starts_with("eip155:")
 }
+
+/// Unit tests for the refusals of the account, recovery-key and default-account
+/// calls in this file.
+///
+/// They pin answers the provider already gives; they add no rule and register no
+/// falsifier. They prove what the wallet provider answers, not confinement: the
+/// Runtime decides whether the provider runs at all, and no test here speaks for
+/// that decision.
+///
+/// Three strings across five sites are not reachable from a call, so none has a
+/// test. `managed recovery key import returned no account` and `managed recovery
+/// key export returned no key` sit in `Response::Ok { data: None }` arms of
+/// calls that always answer `data: Some(..)`. `wallet-provider managed wallet
+/// storage is not initialized` is guarded by `self.storage_key.is_none()`, and
+/// `ensure_initialized` already refuses with `wallet-provider is not
+/// initialized` when either field is `None`, while `init` sets both together.
+#[cfg(test)]
+mod uf_account_refusal_tests {
+    use super::*;
+    use elastos_wallet_contract::MANAGED_RECOVERY_SET_SCHEMA;
+
+    const PRINCIPAL: &str = "person:local:alice";
+    const EVM_CHAIN: &str = "eip155:20";
+    const ADDRESS: &str = "0x1111111111111111111111111111111111111111";
+    const OTHER_ADDRESS: &str = "0x2222222222222222222222222222222222222222";
+    /// An account id of ordinary characters that was never linked, so the opaque
+    /// id checks pass and only the record lookup can answer.
+    const UNLINKED_ACCOUNT_ID: &str = "wallet:eip155:20:0x9999999999999999999999999999999999999999";
+
+    /// An initialised provider on its own temporary root, built the way
+    /// `init` itself is called. The directory outlives the provider in every
+    /// test that uses it.
+    fn initialized_provider() -> (tempfile::TempDir, WalletProvider) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
+        (dir, provider)
+    }
+
+    /// Links an external account on `eip155:20` and answers its account id.
+    fn link_external_account(provider: &mut WalletProvider) -> String {
+        let response = provider.link_account(LinkAccountInput {
+            principal_id: PRINCIPAL.to_string(),
+            proof_binding_id: format!("proof:eip155:20:{ADDRESS}"),
+            chain_namespace: EVM_CHAIN.to_string(),
+            address: ADDRESS.to_string(),
+            proof_type: "siwe".to_string(),
+            connector_id: Some("walletconnect".to_string()),
+            label: None,
+        });
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "link must succeed, got {response:?}"
+        );
+        account_id(EVM_CHAIN, ADDRESS)
+    }
+
+    fn create_managed_account(provider: &mut WalletProvider, create_new: bool) -> Response {
+        provider.create_managed_account(CreateManagedAccountInput {
+            principal_id: PRINCIPAL.to_string(),
+            chain_namespace: EVM_CHAIN.to_string(),
+            label: None,
+            create_new,
+        })
+    }
+
+    /// The deterministic signing key every recovery-key case starts from.
+    fn recovery_signing_key() -> SigningKey {
+        SigningKey::from_slice(&[7_u8; 32]).expect("deterministic recovery key")
+    }
+
+    /// A recovery key the importer accepts, so one case changes one field and
+    /// meets every check ahead of the one it names.
+    fn recovery_key_value() -> Value {
+        let signing_key = recovery_signing_key();
+        let address = managed_address_for_signing_key(&signing_key, EVM_CHAIN)
+            .expect("eip155:20 is a managed chain");
+        json!({
+            "schema": "elastos.wallet.recovery-key/v1",
+            "account_id": account_id(EVM_CHAIN, &address),
+            "chain_namespace": EVM_CHAIN,
+            "address": address,
+            "secret_type": "secp256k1_private_key_hex",
+            "private_key_hex": hex::encode(signing_key.to_bytes()),
+        })
+    }
+
+    fn import_recovery_key(provider: &mut WalletProvider, recovery_key: Value) -> Response {
+        provider.import_managed_recovery_key(ImportManagedRecoveryKeyInput {
+            principal_id: PRINCIPAL.to_string(),
+            recovery_key,
+            label: None,
+        })
+    }
+
+    fn error(code: &str, message: &str) -> Response {
+        Response::Error {
+            code: code.to_string(),
+            message: message.to_string(),
+        }
+    }
+
+    /// Catches removal of the active-account guard in `rename_account` (:500),
+    /// `export_managed_recovery_key` (:529) and `set_default_account` (:610):
+    /// without any of them the call reaches a record that was never linked.
+    ///
+    /// One string is raised from three sites, so this test drives all three.
+    #[test]
+    fn account_refuses_missing_active_account() {
+        let (_dir, mut provider) = initialized_provider();
+
+        assert_eq!(
+            provider.rename_account(PRINCIPAL, UNLINKED_ACCOUNT_ID, "Spending"),
+            error("not_found", "active linked account not found")
+        );
+        assert_eq!(
+            provider.export_managed_recovery_key(PRINCIPAL, UNLINKED_ACCOUNT_ID),
+            error("not_found", "active linked account not found")
+        );
+        assert_eq!(
+            provider.set_default_account(SetDefaultAccountInput {
+                principal_id: PRINCIPAL.to_string(),
+                chain_namespace: EVM_CHAIN.to_string(),
+                intent: "browser_personal_sign".to_string(),
+                account_id: UNLINKED_ACCOUNT_ID.to_string(),
+            }),
+            error("not_found", "active linked account not found")
+        );
+    }
+
+    /// Catches removal of the record lookup in `revoke_account` (:455): without
+    /// it a revocation of an account that was never linked answers as if the
+    /// account had been revoked.
+    #[test]
+    fn account_refuses_missing_linked_account() {
+        let (_dir, mut provider) = initialized_provider();
+        assert_eq!(
+            provider.revoke_account(PRINCIPAL, UNLINKED_ACCOUNT_ID),
+            error("not_found", "linked account not found")
+        );
+    }
+
+    /// Catches removal of the empty-label guard in `rename_account` (:490):
+    /// without it a blank label clears the account's name.
+    #[test]
+    fn account_refuses_empty_label() {
+        let (_dir, mut provider) = initialized_provider();
+        assert_eq!(
+            provider.rename_account(PRINCIPAL, UNLINKED_ACCOUNT_ID, "   "),
+            error("invalid_request", "label is required")
+        );
+    }
+
+    /// Catches removal of the managed-account guard in
+    /// `export_managed_recovery_key` (:533): without it the provider exports a
+    /// recovery key answer for an account whose key an external connector holds.
+    #[test]
+    fn account_refuses_export_of_external_account() {
+        let (_dir, mut provider) = initialized_provider();
+        let linked_account_id = link_external_account(&mut provider);
+        assert_eq!(
+            provider.export_managed_recovery_key(PRINCIPAL, &linked_account_id),
+            error(
+                "external_wallet_required",
+                "recovery key is available only for passkey-managed accounts"
+            )
+        );
+    }
+
+    /// Catches removal of the chain-match guard in `set_default_account` (:614):
+    /// without it an `eip155:1` default points at an `eip155:20` account.
+    #[test]
+    fn account_refuses_default_chain_mismatch() {
+        let (_dir, mut provider) = initialized_provider();
+        let linked_account_id = link_external_account(&mut provider);
+        assert_eq!(
+            provider.set_default_account(SetDefaultAccountInput {
+                principal_id: PRINCIPAL.to_string(),
+                chain_namespace: "eip155:1".to_string(),
+                intent: "browser_personal_sign".to_string(),
+                account_id: linked_account_id,
+            }),
+            error(
+                "invalid_request",
+                "default wallet chain must match the linked account"
+            )
+        );
+    }
+
+    /// Catches removal of the missing-record guard in `default_account` (:665):
+    /// without it an unset default answers as an account.
+    #[test]
+    fn account_refuses_default_account_not_set() {
+        let (_dir, provider) = initialized_provider();
+        assert_eq!(
+            provider.default_account(PRINCIPAL, EVM_CHAIN, "browser_personal_sign"),
+            error("not_found", "default linked account not set")
+        );
+    }
+
+    /// Catches removal of the active-account guard in `default_account` (:667):
+    /// without it a default record whose account is gone answers as an account.
+    ///
+    /// This case needs provider state, not a plain input: the store fields are
+    /// declared in the crate root, so the test pushes one `DefaultWalletAccount`
+    /// for an account id that was never linked. That is provider state, not a
+    /// copy of a check.
+    ///
+    /// The record is on a non-EVM namespace because `default_account_record`
+    /// runs the active-account filter inside its `eip155` lookup, which would
+    /// answer `default linked account not set` instead.
+    #[test]
+    fn account_refuses_default_account_not_active() {
+        let (_dir, mut provider) = initialized_provider();
+        provider.store.default_accounts.push(DefaultWalletAccount {
+            schema: "elastos.wallet.default_account/v1".to_string(),
+            principal_id: PRINCIPAL.to_string(),
+            chain_namespace: BITCOIN_MAINNET_CHAIN_NAMESPACE.to_string(),
+            intent: "bitcoin_bip322_proof".to_string(),
+            account_id: account_id(BITCOIN_MAINNET_CHAIN_NAMESPACE, "bc1q-never-linked"),
+            set_at: 1,
+        });
+        assert_eq!(
+            provider.default_account(
+                PRINCIPAL,
+                BITCOIN_MAINNET_CHAIN_NAMESPACE,
+                "bitcoin_bip322_proof"
+            ),
+            error("not_found", "default linked account is not active")
+        );
+    }
+
+    /// Catches removal of the ambiguous-key guard in `create_managed_account`
+    /// (:126): without it a reuse request silently picks one of two distinct
+    /// active keys in the same scope, so the account it answers was chosen by
+    /// iteration order.
+    ///
+    /// This case needs the account state, not a plain input: two managed
+    /// `eip155:20` accounts are created with `create_new: true`, so both keys
+    /// stay active in one scope.
+    #[test]
+    fn account_refuses_ambiguous_managed_key_reuse() {
+        let (_dir, mut provider) = initialized_provider();
+        assert!(matches!(
+            create_managed_account(&mut provider, true),
+            Response::Ok { .. }
+        ));
+        assert!(matches!(
+            create_managed_account(&mut provider, true),
+            Response::Ok { .. }
+        ));
+        assert_eq!(
+            create_managed_account(&mut provider, false),
+            error(
+                "managed_key_ambiguous",
+                "multiple distinct active managed wallet keys are eligible for reuse; create_new is required"
+            )
+        );
+    }
+
+    /// Catches removal of the schema check in `import_managed_recovery_key`
+    /// (:212): without it a recovery key of another schema is imported.
+    #[test]
+    fn account_refuses_recovery_key_schema() {
+        let (_dir, mut provider) = initialized_provider();
+        let mut recovery_key = recovery_key_value();
+        recovery_key["schema"] = json!("elastos.wallet.recovery-key/v2");
+        assert_eq!(
+            import_recovery_key(&mut provider, recovery_key),
+            error("invalid_request", "expected elastos.wallet.recovery-key/v1")
+        );
+    }
+
+    /// Catches removal of the `account_id` presence check (:218): without it a
+    /// recovery key with no account id reaches the match against its chain and
+    /// address.
+    #[test]
+    fn account_refuses_recovery_key_missing_account_id() {
+        let (_dir, mut provider) = initialized_provider();
+        let mut recovery_key = recovery_key_value();
+        recovery_key.as_object_mut().unwrap().remove("account_id");
+        assert_eq!(
+            import_recovery_key(&mut provider, recovery_key),
+            error("invalid_request", "recovery key missing account_id")
+        );
+    }
+
+    /// Catches removal of the `chain_namespace` presence check (:221): without
+    /// it a recovery key with no chain reaches the address checks.
+    #[test]
+    fn account_refuses_recovery_key_missing_chain_namespace() {
+        let (_dir, mut provider) = initialized_provider();
+        let mut recovery_key = recovery_key_value();
+        recovery_key
+            .as_object_mut()
+            .unwrap()
+            .remove("chain_namespace");
+        assert_eq!(
+            import_recovery_key(&mut provider, recovery_key),
+            error("invalid_request", "recovery key missing chain_namespace")
+        );
+    }
+
+    /// Catches removal of the `address` presence check (:226): without it a
+    /// recovery key with no address reaches the account-id match.
+    #[test]
+    fn account_refuses_recovery_key_missing_address() {
+        let (_dir, mut provider) = initialized_provider();
+        let mut recovery_key = recovery_key_value();
+        recovery_key.as_object_mut().unwrap().remove("address");
+        assert_eq!(
+            import_recovery_key(&mut provider, recovery_key),
+            error("invalid_request", "recovery key missing address")
+        );
+    }
+
+    /// Catches removal of the `secret_type` check (:234): without it a key of a
+    /// kind the provider cannot decrypt is imported as a secp256k1 key.
+    #[test]
+    fn account_refuses_recovery_key_secret_type() {
+        let (_dir, mut provider) = initialized_provider();
+        let mut recovery_key = recovery_key_value();
+        recovery_key["secret_type"] = json!("bip39_seed_phrase");
+        assert_eq!(
+            import_recovery_key(&mut provider, recovery_key),
+            error("invalid_request", "unsupported wallet recovery key type")
+        );
+    }
+
+    /// Catches removal of the account-id match (:251): without it a key is
+    /// imported under an id that names another chain and address.
+    #[test]
+    fn account_refuses_recovery_key_account_id_mismatch() {
+        let (_dir, mut provider) = initialized_provider();
+        let mut recovery_key = recovery_key_value();
+        recovery_key["account_id"] = json!(account_id(EVM_CHAIN, OTHER_ADDRESS));
+        assert_eq!(
+            import_recovery_key(&mut provider, recovery_key),
+            error(
+                "invalid_request",
+                "recovery key account_id does not match chain and address"
+            )
+        );
+    }
+
+    /// Catches removal of the private-key presence check (:257): without it a
+    /// recovery key with no private key reaches the length check.
+    #[test]
+    fn account_refuses_recovery_key_missing_private_key_hex() {
+        let (_dir, mut provider) = initialized_provider();
+        let mut recovery_key = recovery_key_value();
+        recovery_key
+            .as_object_mut()
+            .unwrap()
+            .remove("private_key_hex");
+        assert_eq!(
+            import_recovery_key(&mut provider, recovery_key),
+            error("invalid_request", "recovery key missing private_key_hex")
+        );
+    }
+
+    /// Catches removal of the 32-byte length check (:261): without it a short
+    /// private key reaches the curve parser instead of the length answer.
+    #[test]
+    fn account_refuses_recovery_key_private_key_length() {
+        let (_dir, mut provider) = initialized_provider();
+        let mut recovery_key = recovery_key_value();
+        recovery_key["private_key_hex"] = json!(hex::encode([1_u8; 31]));
+        assert_eq!(
+            import_recovery_key(&mut provider, recovery_key),
+            error("invalid_request", "private_key_hex must be 32 bytes")
+        );
+    }
+
+    /// Catches removal of the curve check (:265): without it a 32-byte value
+    /// that is not a secp256k1 scalar reaches the address derivation.
+    #[test]
+    fn account_refuses_recovery_key_invalid_private_key() {
+        let (_dir, mut provider) = initialized_provider();
+        let mut recovery_key = recovery_key_value();
+        recovery_key["private_key_hex"] = json!(hex::encode([0_u8; 32]));
+        assert_eq!(
+            import_recovery_key(&mut provider, recovery_key),
+            error("invalid_request", "invalid secp256k1 private key")
+        );
+    }
+
+    /// Catches removal of the address-match check (:272): without it a private
+    /// key is imported for an address a different key controls.
+    #[test]
+    fn account_refuses_recovery_key_private_key_address_mismatch() {
+        let (_dir, mut provider) = initialized_provider();
+        let mut recovery_key = recovery_key_value();
+        recovery_key["private_key_hex"] = json!(hex::encode([9_u8; 32]));
+        assert_eq!(
+            import_recovery_key(&mut provider, recovery_key),
+            error(
+                "invalid_request",
+                "private key does not match recovery key address"
+            )
+        );
+    }
+
+    /// Catches removal of the entry match in `import_managed_recovery_set`
+    /// (:370): without it a set entry is imported under an account id that
+    /// differs from the id inside its own recovery key.
+    ///
+    /// The set's own `validate` passes first, so the entry's key is a non-empty
+    /// JSON object of the recovery-key schema and only the entry match can
+    /// answer.
+    #[test]
+    fn account_refuses_recovery_set_account_id_mismatch() {
+        let (_dir, mut provider) = initialized_provider();
+        let recovery_set = ManagedRecoverySetV1 {
+            schema: MANAGED_RECOVERY_SET_SCHEMA.to_string(),
+            keys: vec![ManagedRecoveryKeyEntryV1 {
+                account_id: account_id(EVM_CHAIN, OTHER_ADDRESS),
+                recovery_key: recovery_key_value(),
+                label: None,
+            }],
+        };
+        assert_eq!(
+            provider.import_managed_recovery_set(PRINCIPAL, &recovery_set),
+            error(
+                "invalid_request",
+                "managed recovery set account_id does not match its opaque recovery key"
+            )
+        );
+    }
+}
