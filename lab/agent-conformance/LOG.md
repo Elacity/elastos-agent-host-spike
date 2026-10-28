@@ -9981,3 +9981,214 @@ New:
 | 8. Identity, admission and allowance stay separate? | Yes | The shell check at `:559`, the record-status check at `:567` and the one grant-life write at `:576` are separate decisions; `revoke_grant` matches one id and one `Live` life at `:770-776`, and neither the instance phase nor another grant changes. |
 
 A passing row gives the real Runtime no A6 credit for this revoke.
+
+## 070 — A6: shell revoke-all drops every live grant
+
+070: `post_capability_revoke_all` answers `POST /api/capability/revoke-all` on the same `StandIn`. It calls `require_shell` before it reads the body. It calls the one writer with `denied`, the shell reason and `shell` on every `Granted` record, then calls the one `Revoked` function for every `Live` grant. It does not call `revoke_live`, `delete_capability`, `settle_pending`, `post_capability_deny`, `post_capability_grant` or `authorise`. Every instance keeps its phase and cause, and a pending record and an `Exhausted` grant stay. The Ok value's only keys are `success` and `reason`, with no epoch. `standin_shell_revoke_all_drops_every_live_grant` and `standin_shell_revoke_all_refuses_without_shell` prove the route. `standin-runtime/README.md` states the route and its refusals, and `RUNBOOK.md` gains the matching row. A passing row gives the real Runtime no A6 credit.
+
+### Quotes from the contract (read only)
+
+`docs/AGENT_ARCHITECTURE.md:318-320`, "Delegation and mandates":
+
+```text
+- **Allow once** authorizes one exact operation.
+- **Allow for this session** authorizes a bounded operation set until the
+  session ends or the grant is revoked.
+```
+
+This task takes the revoke half of the second sentence for every live grant at once: a session grant stops authorising while every instance keeps running. The one-grant revoke stays 069, and a standing mandate stays out.
+
+### Quotes from the Runtime (read only, not imported)
+
+`elastos/crates/elastos-server/src/api/server.rs:263-268` puts the route on the shell router:
+
+```text
+        .route("/api/capability/:id", delete(handlers::revoke_capability))
+        .route(
+            "/api/capability/revoke-all",
+            post(handlers::revoke_all_capabilities),
+        )
+```
+
+`elastos/crates/elastos-server/src/api/handlers/capability.rs:513-534` shows the body's only key, its default and the Ok keys:
+
+```text
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevokeAllInput {
+    /// Reason for revoking all capabilities
+    #[serde(default = "default_revoke_reason")]
+    pub reason: String,
+}
+
+fn default_revoke_reason() -> String {
+    "Revoked all by user".to_string()
+}
+
+#[derive(Debug, Serialize)]
+pub struct RevokeAllOutput {
+    pub success: bool,
+    pub new_epoch: u64,
+    pub reason: String,
+}
+```
+
+`capability.rs:536-553` shows the handler and the epoch advance:
+
+```text
+/// POST /api/capability/revoke-all
+///
+/// Revoke all capabilities by advancing the epoch (shell only).
+/// All tokens with epoch < new_epoch will be rejected.
+pub async fn revoke_all_capabilities(
+    State(state): State<CapabilityState>,
+    Extension(_session): Extension<Session>, // Shell check done by middleware
+    Json(input): Json<RevokeAllInput>,
+) -> Json<RevokeAllOutput> {
+    let new_epoch = state.capability_manager.revoke_all(&input.reason);
+
+    // Mark all granted requests as revoked
+    state.pending_store.revoke_all_granted().await;
+
+    Json(RevokeAllOutput {
+        success: true,
+        new_epoch,
+        reason: input.reason,
+    })
+}
+```
+
+`elastos/crates/elastos-server/src/api/middleware.rs:90-95` answers a client with status 403 and the reason `This endpoint requires shell privileges`. `elastos/crates/elastos-runtime/src/capability/pending.rs:544-566` sets every granted record to denied with the reason `Epoch advanced - all capabilities revoked`:
+
+```text
+    /// Mark all granted requests as revoked
+    ///
+    /// Called when epoch is advanced to revoke all capabilities
+    pub async fn revoke_all_granted(&self) {
+        let mut requests = self.requests.write().await;
+        let now = SecureTimestamp::now();
+
+        for (request_id, request) in requests.iter_mut() {
+            if request.is_granted() {
+                request.status = RequestStatus::Denied {
+                    reason: "Epoch advanced - all capabilities revoked".to_string(),
+                };
+```
+
+The stand-in copies the shell check, the body's one key, the default reason and the granted-record settlement. It does not copy the epoch, the token, `new_epoch` or the store's epoch reason.
+
+### Code
+
+- `post_capability_revoke_all` at `standin-runtime/mod.rs:590` is the only new public method. Its doc comment starts `POST /api/capability/revoke-all.` at `:583`. `require_shell(caller)?` at `:597` runs before the body is read at `:598`. `Value::Null` uses `Revoked all by user` at `:599`; an object reads its only key `reason` at `:600-615`; a body that is not an object and not null is 400 `revoke body needs an object` at `:617`; another key is 400 `revoke body rejects ` plus that key at `:605`; a non-string reason is 400 `revoke reason must be a string` at `:612-614`. Every refusal returns before a store write.
+- On success the route collects the `Granted` request ids at `:620-624` and calls the one writer with `Denied`, the shell reason and `shell` for each at `:625-627`; it then collects the `Live` grant ids at `:629-633` and calls `revoke_grant` for each at `:634-636`. The Ok value at `:637` has only `success` and `reason`. It does not call `revoke_live`, `delete_capability`, `settle_pending`, `authorise`, `post_capability_grant` or `post_capability_deny`, and it adds no epoch counter.
+- The one writer at `:843`, the one `Revoked` assignment at `:834`, `revoke_live` at `:814`, `delete_capability` at `:554`, `post_capability_grant` at `:470`, `post_capability_deny` at `:430`, `settle_pending` at `:865`, `stop_one` at `:794`, `seed_grant` at `:227`, `authorise` at `:659`, `require_shell` at `:1036`, `grant_not_live` at `:1135`, `post_capability_request`, `get_capability_request`, `watch_ended`, `expire_due` and `seed_request` keep their bodies. No new private function, no new field and no new reason string for the default beyond the one in the new method.
+
+### Tests
+
+Two tests in the module's `#[cfg(test)]`, passing with no operator and no probe build. They reuse `pending_request`, `granted_request`, `denied_request`, `grant_record`, `seed_shared_request`, `admit_shared`, `shared_body`, `launch_finished`, `assert_capsule`, `assert_delete`, `request_entries`, `request_ids` and `assert_live_request_ids_empty`. Assertion text says the stand-in did the work.
+
+- `standin_shell_revoke_all_drops_every_live_grant` at `standin-runtime/mod.rs:6512` admits `/capsules/read-shared` as `read-shared` with `Start::Ok`, launches twice, finishes both starts, and reads `component-1` and `component-2` `running`. It seeds `req-1` and `req-3` on `component-1` and `req-2` and `req-p` on `component-2`, resource `localhost://Public/resident-instances/shared.txt`, action `read`, reason `read shared`, then `set_instant(4)`. Three shell grants are Ok `{"success":true}`: `req-1` `session` `grant shared read`, `req-3` `once` `grant once`, `req-2` `session` `grant sibling`. `seed_grant` stores `req-orphan` on `component-2` (`res`, `read`, `session`, `granted_at` 4, `Live`, `session_ended` false). `authorise` for the `component-1` client and `req-3` is `Ok(())` and `grant_record` is `(Life::Exhausted, false)`. The shell live-grant `request_id` set is exactly `req-1`, `req-2` and `req-orphan`. A shell revoke-all of `{"reason":"stop every grant"}` is Ok `{"success":true,"reason":"stop every grant"}`. Both `component-1` records are denied with decision reason `stop every grant` and `settled_by` `shell`; `req-2` is denied the same way; `req-p` stays `pending_request("req-p", "component-2")`; the `component-2` record list has no `req-orphan`. `grant_record` is `(Life::Revoked, false)` for `req-1`, `req-2` and `req-orphan`, and `(Life::Exhausted, false)` for `req-3`. The shell live set is empty. `authorise` for `req-1` and `req-2` is 400 `grant is not live: Revoked`, and for `req-3` 400 `grant is not live: Exhausted`. Both instances stay `running` with cause `""`. A second revoke-all with the same body is the same Ok value and leaves those records, lives and the empty live set as they were.
+- `standin_shell_revoke_all_refuses_without_shell` at `:6792` starts from the two running instances with `req-1` `Live` on `component-1` and `req-2` `Live` on `component-2`, both granted as in the first test. A client revoke-all of `{}` is 403 `This endpoint requires shell privileges`; a shell string body is 400 `revoke body needs an object`; `{"reason":"stop every grant","token":"req-1"}` is 400 `revoke body rejects token`; `{"reason":1}` is 400 `revoke reason must be a string`. After each refusal both grants stay `(Life::Live, false)` and both records stay granted. A shell `{}` is Ok `{"success":true,"reason":"Revoked all by user"}`, both records are denied with that reason and `settled_by` `shell`, both grants are `(Life::Revoked, false)`, the live set is empty, and both instances stay `running` with cause `""`.
+
+### Hand-run falsifiers
+
+No `falsifiers.json` id and no new id. Each plant ran alone and was restored before the next. The command was `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_revoke_all_drops_every_live_grant -- --exact`. Each planted crate compiled (`Finished` `test` profile), and each planted run exited with that test failed on its assertion. After the last restore, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows the candidate only, with no plant; the file's SHA-256 is `5041b3a6294c63abb1fd74bd939f55fa69668ae976825d6b1a4b8528eac07d88`.
+
+F-standin-revoke-all-stub: the start of `post_capability_revoke_all` returns Ok of `{"success": true, "reason": "stop every grant"}` before the caller is read. Planted run failed at `standin-runtime/mod.rs:6648:9` (`:6648` restored): `assertion left == right failed: the stand-in did the work: the revoke-all denies both component-1 records`, with the left records `granted` and the right records `denied`.
+
+Old:
+
+```text
+    ) -> Result<Value, (u16, String)> {
+        const DEFAULT_REASON: &str = "Revoked all by user";
+
+        require_shell(caller)?;
+        let reason = match body {
+```
+
+New:
+
+```text
+    ) -> Result<Value, (u16, String)> {
+        return Ok(json!({ "success": true, "reason": "stop every grant" }));
+        const DEFAULT_REASON: &str = "Revoked all by user";
+
+        require_shell(caller)?;
+        let reason = match body {
+```
+
+F-standin-revoke-all-keep: the route writes the denied records and does not call the `Revoked` function. Planted run failed at `standin-runtime/mod.rs:6669:9` (`:6679` restored): `assertion left == right failed: the stand-in did the work: the revoke-all drops the req-1 live grant`, `left: (Live, false)`, `right: (Revoked, false)`.
+
+Old:
+
+```text
+        let live = self
+            .grants
+            .iter()
+            .filter(|grant| is_live(grant.life))
+            .map(|grant| grant.request_id.clone())
+            .collect::<Vec<_>>();
+        for request_id in live {
+            self.revoke_grant(&request_id);
+        }
+        Ok(json!({ "success": true, "reason": reason }))
+```
+
+New:
+
+```text
+        Ok(json!({ "success": true, "reason": reason }))
+```
+
+F-standin-revoke-all-one-session: the route calls `revoke_live` for `component-1` and does not revoke `component-2`. Planted run failed at `standin-runtime/mod.rs:6675:9` (`:6684` restored): `assertion left == right failed: the stand-in did the work: the revoke-all drops the req-2 live grant`, `left: (Live, false)`, `right: (Revoked, false)`.
+
+Old:
+
+```text
+        let live = self
+            .grants
+            .iter()
+            .filter(|grant| is_live(grant.life))
+            .map(|grant| grant.request_id.clone())
+            .collect::<Vec<_>>();
+        for request_id in live {
+            self.revoke_grant(&request_id);
+        }
+        Ok(json!({ "success": true, "reason": reason }))
+```
+
+New:
+
+```text
+        self.revoke_live("component-1");
+        Ok(json!({ "success": true, "reason": reason }))
+```
+
+### Docs
+
+`standin-runtime/README.md:61` adds one paragraph immediately before `## Callers` at `:63`: `post_capability_revoke_all` answers `POST /api/capability/revoke-all`; a shell revoke sets every granted record to `denied` through the one writer with the shell reason and `settled_by` `shell`, and the one `Revoked` assignment then drops every live grant; the body's only key is a string `reason` and a missing reason is `Revoked all by user`; the instances stay, a pending record stays pending, and an exhausted grant stays `Exhausted`; the Ok body's only keys are `success` and `reason`, with no epoch; a stop still revokes one session through `revoke_live` and one grant still revokes through `delete_capability`; a PASS gives the Runtime no A6 credit for this revoke. The RA-1, RI-1 to RI-4 and settlement paragraphs keep their bytes, and so do the watch, survivor, expiry, once-grant, request-route, later-read, pending-cap and one-grant-revoke paragraphs.
+
+`RUNBOOK.md:745` adds one paragraph after the last stand-in paragraph: `standin_shell_revoke_all_drops_every_live_grant` is this stand-in, and a PASS there gives the Runtime no A6 credit for a shell revoke of every grant. Every other RUNBOOK paragraph keeps its bytes.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged, and the protected diff is empty: `git diff` for `src/harness.rs`, `src/census.rs`, `tests/effects.rs`, `tests/common/grants.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. The only changed files are `standin-runtime/mod.rs` (+493 lines), `standin-runtime/README.md` (+2) and `RUNBOOK.md` (+2), plus this `LOG.md`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.14 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: real 252.23 seconds (user 54.04, sys 23.80), inside the 600-second bound. Observed targets: report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0 in both crates. Cargo reached the last doc-tests target and printed no `error: test failed` line, so every earlier target passed, including the agent-conformance lib target. A separate `-p agent-conformance --lib` run showed 66 passed and 0 failed, which is the previous 64 plus the two new tests. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.14 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_revoke_all_drops_every_live_grant -- --exact` passed 1 and failed 0 (65 filtered), real 0.06 seconds.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The route works on stored `request_id` values at `standin-runtime/mod.rs:620-636` and adds no code or content identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | The route removes authority: it drops every live grant at `:629-636` and mints none; no capsule, import or Home change, and the shell still holds no grant. |
+| 3. A second path or a second copy of one rule? | No | `post_capability_revoke_all` is the one route for `POST /api/capability/revoke-all`; it reuses the one writer at `:843` and the one `Revoked` assignment at `:834`, and it does not call `revoke_live` or `delete_capability`. No second writer, no second `Revoked` assignment and no second default reason. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`; `elastos/` is untouched and its route, middleware and store are quoted only. |
+| 5. Refusals deny by default with a clear reason? | Yes | A client is 403 `This endpoint requires shell privileges` at `:597` before the body is read; a non-object body is 400 `revoke body needs an object` at `:617`; another key is 400 `revoke body rejects <key>` at `:605`; a non-string reason is 400 `revoke reason must be a string` at `:612-614`; each writes nothing. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | No capsule code, world or import changes; the stand-in keeps the Runtime's one revocation decision, and the capsule keeps its own logic. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_shell_revoke_all_drops_every_live_grant` at `:6512` and `standin_shell_revoke_all_refuses_without_shell` at `:6792`; the stub, keep and one-session plants each fail the named test on its assertion, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | The shell check at `:597`, the record-status filter at `:620-624` and the grant-life filter at `:629-633` are separate decisions; the route changes no instance phase, and an `Exhausted` grant stays `Exhausted`. |
+
+A passing row gives the real Runtime no A6 credit for this revoke.
