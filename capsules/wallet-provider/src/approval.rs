@@ -1272,3 +1272,823 @@ fn validate_chain_observation_binding(outcome: &ValidatedChainOutcomeV1) -> Resu
     }
     Ok(())
 }
+
+/// One unit test per refusal the approval state machine raises with a literal
+/// message, each asserting the whole `Response::Error` value. They pin answers
+/// the provider already gives: they add no rule, change no production line and
+/// register no falsifier. They prove what the wallet provider answers an
+/// approval call, not confinement: the Runtime decides whether the provider
+/// runs.
+///
+/// Two strings this file raises are left out because an existing test already
+/// scores the same rule by its code, so a second test would test one rule
+/// twice: `Wallet approval identity was reused with substituted semantics or
+/// authority` (`:35`, `:57`, `approval_identity_conflict`), held by
+/// `request_approval_uses_the_runtime_request_identity_and_replays_exactly`
+/// (`src/tests/v2_contract.rs:69`) and
+/// `protected_content_rights_replays_exact_result_and_rejects_substitutions`
+/// (`src/tests/approvals/protected_content.rs:583`); and `managed signing is
+/// implemented only for Browser account access, personal_sign, typed data,
+/// transaction, and Bitcoin BIP-322 intents` (`:184`, `:869`), held by
+/// `managed_accounts_reject_unimplemented_intents_before_recording_authority`
+/// (`src/tests/approvals/managed.rs:590`) and
+/// `persisted_unsupported_managed_intent_cannot_reach_signing`
+/// (`src/tests/approvals/managed.rs:628`).
+#[cfg(test)]
+mod uf_approval_refusal_tests {
+    use super::*;
+    use elastos_wallet_contract::{PublicNetwork, VerifiedWalletInvocationContext};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const PRINCIPAL: &str = "person:local:alice";
+    const SESSION: &str = "session:alice";
+    const EVM_CHAIN: &str = "eip155:20";
+    const BITCOIN_CHAIN: &str = BITCOIN_MAINNET_CHAIN_NAMESPACE;
+    /// A mainnet P2WPKH address, so this account is a Bitcoin account that
+    /// signs with the `bip322_simple` proof type.
+    const BITCOIN_ADDRESS: &str = "bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l";
+    const EXTERNAL_ADDRESS: &str = "0x1111111111111111111111111111111111111111";
+    const OTHER_ADDRESS: &str = "0x3333333333333333333333333333333333333333";
+    const CONNECTOR: &str = "wallet-metamask";
+    const OTHER_CONNECTOR: &str = "wallet-unisat";
+    const OTHER_SESSION: &str = "session:other";
+    /// An ordinary opaque id that names no stored approval.
+    const MISSING_REQUEST_ID: &str = "wallet-request:ffffffffffffffffffffffffffffffff";
+    const PAYLOAD_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    const REASON: &str = "Review the exact request";
+
+    static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+
+    fn request_id() -> String {
+        format!(
+            "wallet-request:{:032x}",
+            NEXT_REQUEST.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    fn init_provider() -> (tempfile::TempDir, WalletProvider) {
+        let dir = tempfile::tempdir().expect("test storage root");
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
+        (dir, provider)
+    }
+
+    fn error(code: &str, message: &str) -> Response {
+        Response::Error {
+            code: code.to_string(),
+            message: message.to_string(),
+        }
+    }
+
+    fn managed_account(provider: &mut WalletProvider) -> (String, String) {
+        match provider.create_managed_account(CreateManagedAccountInput {
+            principal_id: PRINCIPAL.to_string(),
+            chain_namespace: EVM_CHAIN.to_string(),
+            label: None,
+            create_new: false,
+        }) {
+            Response::Ok { data: Some(data) } => (
+                data["account"]["account_id"]
+                    .as_str()
+                    .expect("managed account id")
+                    .to_string(),
+                data["account"]["address"]
+                    .as_str()
+                    .expect("managed account address")
+                    .to_string(),
+            ),
+            other => panic!("expected a managed account, got {other:?}"),
+        }
+    }
+
+    /// Links an external EVM account under the test connector, so an approval
+    /// on it needs a typed connector handoff rather than managed signing.
+    fn linked_external_account(provider: &mut WalletProvider) -> (String, String) {
+        let response = provider.link_account(LinkAccountInput {
+            principal_id: PRINCIPAL.to_string(),
+            proof_binding_id: format!("proof:{EVM_CHAIN}:{EXTERNAL_ADDRESS}"),
+            chain_namespace: EVM_CHAIN.to_string(),
+            address: EXTERNAL_ADDRESS.to_string(),
+            proof_type: "siwe".to_string(),
+            connector_id: Some(CONNECTOR.to_string()),
+            label: None,
+        });
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "link must succeed, got {response:?}"
+        );
+        (
+            account_id(EVM_CHAIN, EXTERNAL_ADDRESS),
+            EXTERNAL_ADDRESS.to_string(),
+        )
+    }
+
+    fn personal_sign_payload(account_id: &str, address: &str) -> Value {
+        json!({
+            "schema": "elastos.browser.wallet-signature-request/v1",
+            "method": "personal_sign",
+            "params": [REASON, address],
+            "message": REASON,
+            "address": address,
+            "account_id": account_id,
+            "chain_namespace": EVM_CHAIN,
+            "page_url": "https://dapp.example/sign",
+            "origin": "https://dapp.example",
+            "requires_wallet_approval": true
+        })
+    }
+
+    fn transaction_payload(from: &str) -> Value {
+        json!({
+            "schema": "elastos.chain.unsigned_transaction_intent/v1",
+            "transaction_type": "eip155_legacy",
+            "from": from,
+            "to": "0x2222222222222222222222222222222222222222",
+            "value": "0x0",
+            "data": "0x",
+            "chain_id": 20,
+            "nonce": "0x7",
+            "gas_price": "0x3b9aca00",
+            "gas_limit": "0x5208",
+            "requires_wallet_approval": true,
+            "wallet_intent": "transaction_intent"
+        })
+    }
+
+    fn signature_request(
+        request_id: &str,
+        account_id: &str,
+        chain_namespace: &str,
+        intent: &str,
+        payload: Value,
+    ) -> SignatureRequestInput {
+        SignatureRequestInput {
+            request_id: request_id.to_string(),
+            wallet_request_sha256: "wallet-request-sha256:test".to_string(),
+            authority_binding: format!("0x{}", "11".repeat(32)),
+            principal_id: PRINCIPAL.to_string(),
+            session_id: SESSION.to_string(),
+            launch_id: "launch:browser".to_string(),
+            proof_binding_id: None,
+            account_id: account_id.to_string(),
+            chain_namespace: chain_namespace.to_string(),
+            intent: intent.to_string(),
+            requested_by_actor: "browser".to_string(),
+            resource: "elastos://wallet/eip155:20/sign/browser_personal_sign".to_string(),
+            reason: REASON.to_string(),
+            payload,
+            expires_at: now_ts().saturating_add(APPROVAL_REQUEST_TTL_SECS),
+        }
+    }
+
+    /// Records one approval through the provider's own call and answers its id.
+    fn stored_approval(provider: &mut WalletProvider, account_id: &str, address: &str) -> String {
+        let request_id = request_id();
+        let response = provider.request_approval(signature_request(
+            &request_id,
+            account_id,
+            EVM_CHAIN,
+            "browser_personal_sign",
+            personal_sign_payload(account_id, address),
+        ));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "the approval must be recorded, got {response:?}"
+        );
+        request_id
+    }
+
+    fn index_of(provider: &WalletProvider, request_id: &str) -> usize {
+        provider
+            .store
+            .approval_requests
+            .iter()
+            .position(|request| request.request_id == request_id)
+            .unwrap_or_else(|| panic!("approval {request_id} must be stored"))
+    }
+
+    fn stored_payload_hash(provider: &WalletProvider, request_id: &str) -> String {
+        provider.store.approval_requests[index_of(provider, request_id)]
+            .payload_hash
+            .clone()
+    }
+
+    fn approve_handoff(provider: &mut WalletProvider, request_id: &str) {
+        let response = provider
+            .approve_connector_handoff(PRINCIPAL, SESSION, CONNECTOR, request_id, "Approve");
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "the connector handoff must be approved, got {response:?}"
+        );
+    }
+
+    fn completion<'a>(
+        request_id: &'a str,
+        payload_hash: &'a str,
+        signer: &'a str,
+    ) -> ConnectorHandoffCompletion<'a> {
+        ConnectorHandoffCompletion {
+            principal_id: PRINCIPAL,
+            session_id: SESSION,
+            request_id,
+            connector_id: CONNECTOR,
+            payload_hash,
+            signature: Some("0x1234abcd"),
+            signature_type: Some("personal_sign"),
+            public_key: None,
+            signer,
+            transaction_hash: None,
+        }
+    }
+
+    /// One string, raised by the protected-content replay arm (`:69`) when the
+    /// stored `signed_result` does not parse as
+    /// `ProtectedContentRightsSignatureResultV1`. It is driven through
+    /// `idempotent_transaction_effect_replay` (`:17`), because repeating
+    /// `request_approval` appends a second record and never reaches the replay.
+    ///
+    /// The record is the provider's own: `request_approval` wrote it, and only
+    /// its identity fields name the later rights request, so the replay's
+    /// identity checks pass and the stored-result reader is the guard under
+    /// test.
+    ///
+    /// Catches removal of that reader: without it a stored result of any shape
+    /// is replayed to the caller as the signed rights result.
+    #[test]
+    fn approval_refuses_invalid_stored_rights_result() {
+        let (_dir, mut provider) = init_provider();
+        let (account_id, address) = managed_account(&mut provider);
+        let context = VerifiedWalletInvocationContext::new(
+            PRINCIPAL,
+            SESSION,
+            None,
+            "grant:test",
+            "library",
+            "launch:library",
+        )
+        .expect("test Wallet authority must be valid");
+        let now = now_ts();
+        let request = WalletProviderRequestV2::new(
+            &context,
+            request_id(),
+            now,
+            now.saturating_add(120),
+            WalletProviderOperationV2::RequestProtectedContentRightsSignature {
+                account_id: account_id.clone(),
+                canonical_rights_request_hex: "00".to_string(),
+                reason: REASON.to_string(),
+            },
+        )
+        .expect("test rights request must build");
+        let recorded = provider.request_approval(SignatureRequestInput {
+            request_id: request.request_id.clone(),
+            wallet_request_sha256: request.request_sha256.clone(),
+            authority_binding: wallet_authority_binding(&request.authority),
+            principal_id: request.authority.principal_id.clone(),
+            session_id: request.authority.session_id.clone(),
+            launch_id: request.authority.launch_id.clone(),
+            proof_binding_id: request.authority.proof_binding_id.clone(),
+            account_id: account_id.clone(),
+            chain_namespace: EVM_CHAIN.to_string(),
+            intent: "browser_personal_sign".to_string(),
+            requested_by_actor: "library".to_string(),
+            resource: "elastos://wallet/protected-content/rights/sign".to_string(),
+            reason: REASON.to_string(),
+            payload: personal_sign_payload(&account_id, &address),
+            expires_at: now.saturating_add(APPROVAL_REQUEST_TTL_SECS),
+        });
+        assert!(
+            matches!(recorded, Response::Ok { .. }),
+            "the approval must be recorded, got {recorded:?}"
+        );
+        provider.store.approval_requests[0].signed_result =
+            Some(json!({ "schema": "elastos.wallet.unrelated/v1" }));
+
+        assert_eq!(
+            provider.idempotent_transaction_effect_replay(&request),
+            Some(error(
+                "signing_error",
+                "stored protected-content rights result is invalid"
+            ))
+        );
+    }
+
+    /// Catches removal of the Bitcoin intent guard (`:192`): without it a
+    /// Bitcoin account records an approval for an intent it cannot sign.
+    #[test]
+    fn approval_refuses_non_bitcoin_intent_for_bitcoin_account() {
+        let (_dir, mut provider) = init_provider();
+        let response = provider.link_account(LinkAccountInput {
+            principal_id: PRINCIPAL.to_string(),
+            proof_binding_id: format!("proof:{BITCOIN_CHAIN}:{BITCOIN_ADDRESS}"),
+            chain_namespace: BITCOIN_CHAIN.to_string(),
+            address: BITCOIN_ADDRESS.to_string(),
+            proof_type: "bip322_simple".to_string(),
+            connector_id: Some(OTHER_CONNECTOR.to_string()),
+            label: None,
+        });
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "link must succeed, got {response:?}"
+        );
+        let account_id = account_id(BITCOIN_CHAIN, BITCOIN_ADDRESS);
+        assert_eq!(
+            provider.request_approval(signature_request(
+                &request_id(),
+                &account_id,
+                BITCOIN_CHAIN,
+                "browser_personal_sign",
+                json!({ "message": REASON }),
+            )),
+            error(
+                "invalid_request",
+                "Bitcoin accounts only support bitcoin_bip322_proof signing"
+            )
+        );
+    }
+
+    /// Catches removal of the Bitcoin account guard (`:238`): without it a
+    /// Bitcoin proof approval is recorded against an EVM account, whose key
+    /// cannot produce the proof.
+    #[test]
+    fn approval_refuses_bitcoin_proof_without_a_bitcoin_account() {
+        let (_dir, mut provider) = init_provider();
+        let (account_id, _) = managed_account(&mut provider);
+        assert_eq!(
+            provider.request_approval(signature_request(
+                &request_id(),
+                &account_id,
+                EVM_CHAIN,
+                "bitcoin_bip322_proof",
+                json!({ "message": REASON }),
+            )),
+            error(
+                "invalid_request",
+                "Bitcoin proof signing requires a supported Bitcoin account"
+            )
+        );
+    }
+
+    /// One string, raised at six reachable sites: `attach_validated_chain_outcome`
+    /// (`:321`), `reject_approval` (`:398`), `approve_connector_handoff`
+    /// (`:456`), `approve_and_sign_managed` (`:520`),
+    /// `complete_connector_handoff` (`:578`) and `sign_managed_approval`
+    /// (`:849`). This test drives all six, so no site is left to a caller.
+    ///
+    /// The seventh site, `:940`, is a second lookup inside
+    /// `sign_managed_approval` after it found the same record at `:842`.
+    /// Nothing between those two reads changes the store, and `prune_store`
+    /// retains a record whose status is `Approved` and whose `expires_at` is
+    /// ahead (`src/storage.rs:233`), so no call can reach it. It is recorded
+    /// here rather than forced.
+    ///
+    /// Catches removal of any of the six lookups: without one, a call answers a
+    /// request id that was never recorded as if it had been.
+    #[test]
+    fn approval_refuses_missing_request() {
+        let (_dir, mut provider) = init_provider();
+        let expected = error("not_found", "wallet approval request not found");
+        let authority = WalletAuthorityV2 {
+            principal_id: PRINCIPAL.to_string(),
+            session_id: SESSION.to_string(),
+            proof_binding_id: None,
+            grant_id: "grant:test".to_string(),
+            actor: CONNECTOR.to_string(),
+            launch_id: "launch:browser".to_string(),
+            capability: "wallet:transaction:project-chain-outcome".to_string(),
+            intent: "wallet.transaction.chain-outcome.attach".to_string(),
+        };
+        let outcome = ValidatedChainOutcomeV1 {
+            schema: "elastos.wallet.validated-chain-outcome/v1".to_string(),
+            approval_request_id: MISSING_REQUEST_ID.to_string(),
+            account_id: account_id(EVM_CHAIN, EXTERNAL_ADDRESS),
+            chain_namespace: EVM_CHAIN.to_string(),
+            network: PublicNetwork::new("esc-local").expect("test network"),
+            binding: ValidatedChainOutcomeBindingV1::ManagedSigned {
+                signed_transaction_sha256: format!("0x{}", "22".repeat(32)),
+            },
+            transaction_hash: format!("0x{}", "33".repeat(32)),
+            chain_observation: json!({}),
+            confirmed_at: now_ts(),
+        };
+
+        assert_eq!(
+            provider.attach_validated_chain_outcome(&authority, &outcome),
+            expected
+        );
+        assert_eq!(
+            provider.reject_approval(PRINCIPAL, SESSION, "library", MISSING_REQUEST_ID, "No"),
+            expected
+        );
+        assert_eq!(
+            provider.approve_connector_handoff(
+                PRINCIPAL,
+                SESSION,
+                CONNECTOR,
+                MISSING_REQUEST_ID,
+                "Approve"
+            ),
+            expected
+        );
+        assert_eq!(
+            provider.approve_and_sign_managed(PRINCIPAL, SESSION, MISSING_REQUEST_ID, "Approve"),
+            expected
+        );
+        assert_eq!(
+            provider.complete_connector_handoff(completion(
+                MISSING_REQUEST_ID,
+                PAYLOAD_HASH,
+                OTHER_ADDRESS
+            )),
+            expected
+        );
+        assert_eq!(
+            provider.sign_managed_approval(PRINCIPAL, MISSING_REQUEST_ID),
+            expected
+        );
+    }
+
+    /// One string, raised at three sites: `reject_approval` (`:403`),
+    /// `approve_connector_handoff` (`:461`) and `complete_connector_handoff`
+    /// (`:595`). This test drives all three with an approval the provider
+    /// recorded in this session and a call from another session.
+    ///
+    /// Catches removal of any of the three session checks: without one, a
+    /// Runtime session settles an approval another session recorded.
+    #[test]
+    fn approval_refuses_request_from_another_runtime_session() {
+        let (_dir, mut provider) = init_provider();
+        let (account_id, address) = linked_external_account(&mut provider);
+        let expected = error(
+            "invalid_request",
+            "wallet approval request belongs to a different Runtime session",
+        );
+
+        let rejected = stored_approval(&mut provider, &account_id, &address);
+        assert_eq!(
+            provider.reject_approval(PRINCIPAL, OTHER_SESSION, "library", &rejected, "No"),
+            expected
+        );
+
+        let approved = stored_approval(&mut provider, &account_id, &address);
+        assert_eq!(
+            provider.approve_connector_handoff(
+                PRINCIPAL,
+                OTHER_SESSION,
+                CONNECTOR,
+                &approved,
+                "Approve"
+            ),
+            expected
+        );
+
+        let completed = stored_approval(&mut provider, &account_id, &address);
+        approve_handoff(&mut provider, &completed);
+        let payload_hash = stored_payload_hash(&provider, &completed);
+        let mut handoff = completion(&completed, &payload_hash, &address);
+        handoff.session_id = OTHER_SESSION;
+        assert_eq!(provider.complete_connector_handoff(handoff), expected);
+    }
+
+    /// One string, raised at two sites: `reject_approval` (`:409`) and
+    /// `complete_connector_handoff` (`:601`). This test drives both with an
+    /// approval the provider bound to one connector and a call from another.
+    ///
+    /// Catches removal of either connector check: without one, a second wallet
+    /// connector settles an approval the first connector requested.
+    #[test]
+    fn approval_refuses_request_from_another_connector() {
+        let (_dir, mut provider) = init_provider();
+        let (account_id, address) = linked_external_account(&mut provider);
+        let expected = error(
+            "invalid_request",
+            "wallet approval request belongs to a different connector",
+        );
+
+        let rejected = stored_approval(&mut provider, &account_id, &address);
+        assert_eq!(
+            provider.reject_approval(PRINCIPAL, SESSION, OTHER_CONNECTOR, &rejected, "No"),
+            expected
+        );
+
+        let completed = stored_approval(&mut provider, &account_id, &address);
+        approve_handoff(&mut provider, &completed);
+        let payload_hash = stored_payload_hash(&provider, &completed);
+        let mut handoff = completion(&completed, &payload_hash, &address);
+        handoff.connector_id = OTHER_CONNECTOR;
+        assert_eq!(provider.complete_connector_handoff(handoff), expected);
+    }
+
+    /// Catches removal of the managed session check (`:532`): without it a
+    /// second Runtime session approves and signs a managed wallet approval the
+    /// first session requested.
+    #[test]
+    fn approval_refuses_managed_request_from_another_runtime_session() {
+        let (_dir, mut provider) = init_provider();
+        let (account_id, address) = managed_account(&mut provider);
+        let request_id = stored_approval(&mut provider, &account_id, &address);
+        assert_eq!(
+            provider.approve_and_sign_managed(PRINCIPAL, OTHER_SESSION, &request_id, "Approve"),
+            error(
+                "invalid_request",
+                "managed Wallet approval belongs to a different Runtime session"
+            )
+        );
+    }
+
+    /// Catches removal of the connector handoff guard (`:536`): without it the
+    /// managed approve-and-sign path signs for a connector account, so the
+    /// connector never supplies the signature that account requires.
+    #[test]
+    fn approval_refuses_managed_signing_for_connector_request() {
+        let (_dir, mut provider) = init_provider();
+        let (account_id, address) = linked_external_account(&mut provider);
+        let request_id = stored_approval(&mut provider, &account_id, &address);
+        assert_eq!(
+            provider.approve_and_sign_managed(PRINCIPAL, SESSION, &request_id, "Approve"),
+            error(
+                "external_wallet_required",
+                "connector approvals require a typed connector handoff"
+            )
+        );
+    }
+
+    /// `:610`, the `invalid_request` site. The `invalid_signature` sites at
+    /// `:725` and `:794` raise the same text under a different code and are
+    /// held by `src/tests/approvals/external.rs:462`, so they are not repeated
+    /// here.
+    ///
+    /// Catches removal of the signer check: without it a connector completes an
+    /// approval with a signature from an address the review never named.
+    #[test]
+    fn approval_refuses_connector_completion_with_another_signer() {
+        let (_dir, mut provider) = init_provider();
+        let (account_id, address) = linked_external_account(&mut provider);
+        let request_id = stored_approval(&mut provider, &account_id, &address);
+        approve_handoff(&mut provider, &request_id);
+        let payload_hash = stored_payload_hash(&provider, &request_id);
+        assert_eq!(
+            provider.complete_connector_handoff(completion(
+                &request_id,
+                &payload_hash,
+                OTHER_ADDRESS
+            )),
+            error("invalid_request", "wallet signature signer mismatch")
+        );
+    }
+
+    /// Catches removal of the transaction signature exclusion (`:615`): without
+    /// it a connector reports a signature for a transaction approval, so the
+    /// settlement reads a signature the chain never produced.
+    #[test]
+    fn approval_refuses_transaction_completion_with_signature() {
+        let (_dir, mut provider) = init_provider();
+        let (account_id, address) = linked_external_account(&mut provider);
+        let request_id = request_id();
+        let recorded = provider.request_approval(signature_request(
+            &request_id,
+            &account_id,
+            EVM_CHAIN,
+            "transaction_intent",
+            transaction_payload(&address),
+        ));
+        assert!(
+            matches!(recorded, Response::Ok { .. }),
+            "the approval must be recorded, got {recorded:?}"
+        );
+        approve_handoff(&mut provider, &request_id);
+        let payload_hash = stored_payload_hash(&provider, &request_id);
+        assert_eq!(
+            provider.complete_connector_handoff(completion(&request_id, &payload_hash, &address)),
+            error(
+                "invalid_request",
+                "external transaction completion must not include signature"
+            )
+        );
+    }
+
+    /// Catches removal of the transaction hash guard (`:621`): without it a
+    /// transaction approval completes with no transaction, so the record names
+    /// a broadcast that no hash identifies.
+    #[test]
+    fn approval_refuses_transaction_completion_without_hash() {
+        let (_dir, mut provider) = init_provider();
+        let (account_id, address) = linked_external_account(&mut provider);
+        let request_id = request_id();
+        let recorded = provider.request_approval(signature_request(
+            &request_id,
+            &account_id,
+            EVM_CHAIN,
+            "transaction_intent",
+            transaction_payload(&address),
+        ));
+        assert!(
+            matches!(recorded, Response::Ok { .. }),
+            "the approval must be recorded, got {recorded:?}"
+        );
+        approve_handoff(&mut provider, &request_id);
+        let payload_hash = stored_payload_hash(&provider, &request_id);
+        let mut handoff = completion(&request_id, &payload_hash, &address);
+        handoff.signature = None;
+        handoff.signature_type = None;
+        assert_eq!(
+            provider.complete_connector_handoff(handoff),
+            error(
+                "invalid_request",
+                "external transaction completion requires transaction_hash"
+            )
+        );
+    }
+
+    /// One string, raised at two sites: the Bitcoin proof branch (`:641`) and
+    /// the signature branch every other intent takes (`:757`). This test drives
+    /// both. The Bitcoin case reaches its branch by moving the recorded intent
+    /// after approval, because a Bitcoin approval at request time needs a stored
+    /// challenge this test does not own.
+    ///
+    /// Catches removal of either signature guard: without one a connector
+    /// completes an approval that names a signature while carrying none.
+    #[test]
+    fn approval_refuses_signature_completion_without_signature() {
+        let (_dir, mut provider) = init_provider();
+        let (account_id, address) = linked_external_account(&mut provider);
+        let expected = error(
+            "invalid_request",
+            "external signature completion requires signature",
+        );
+
+        let bitcoin = stored_approval(&mut provider, &account_id, &address);
+        approve_handoff(&mut provider, &bitcoin);
+        let bitcoin_index = index_of(&provider, &bitcoin);
+        provider.store.approval_requests[bitcoin_index].intent = "bitcoin_bip322_proof".to_string();
+        let bitcoin_hash = stored_payload_hash(&provider, &bitcoin);
+        let mut handoff = completion(&bitcoin, &bitcoin_hash, &address);
+        handoff.signature = None;
+        handoff.signature_type = None;
+        assert_eq!(provider.complete_connector_handoff(handoff), expected);
+
+        let generic = request_id();
+        let recorded = provider.request_approval(signature_request(
+            &generic,
+            &account_id,
+            EVM_CHAIN,
+            "auth_challenge",
+            json!({ "challenge": REASON }),
+        ));
+        assert!(
+            matches!(recorded, Response::Ok { .. }),
+            "the approval must be recorded, got {recorded:?}"
+        );
+        approve_handoff(&mut provider, &generic);
+        let generic_hash = stored_payload_hash(&provider, &generic);
+        let mut handoff = completion(&generic, &generic_hash, &address);
+        handoff.signature = None;
+        handoff.signature_type = None;
+        assert_eq!(provider.complete_connector_handoff(handoff), expected);
+    }
+
+    /// Catches removal of the rights signature guard (`:686`): without it a
+    /// protected-content rights approval completes with no signature, so the
+    /// content is released against a record that proves nothing.
+    ///
+    /// The recorded intent is moved after approval, because a rights approval
+    /// at request time needs a canonical rights request this test does not own.
+    #[test]
+    fn approval_refuses_rights_completion_without_signature() {
+        let (_dir, mut provider) = init_provider();
+        let (account_id, address) = linked_external_account(&mut provider);
+        let request_id = stored_approval(&mut provider, &account_id, &address);
+        approve_handoff(&mut provider, &request_id);
+        let index = index_of(&provider, &request_id);
+        provider.store.approval_requests[index].intent =
+            PROTECTED_CONTENT_RIGHTS_SIGNATURE_INTENT.to_string();
+        let payload_hash = stored_payload_hash(&provider, &request_id);
+        let mut handoff = completion(&request_id, &payload_hash, &address);
+        handoff.signature = None;
+        handoff.signature_type = None;
+        assert_eq!(
+            provider.complete_connector_handoff(handoff),
+            error(
+                "invalid_request",
+                "external protected-content rights completion requires signature"
+            )
+        );
+    }
+
+    /// Catches removal of the personal_sign requirement (`:695`): without it a
+    /// rights approval completes with another signature type, so the bytes the
+    /// signer signed are not the canonical rights request.
+    ///
+    /// The recorded intent is moved after approval, as in
+    /// `approval_refuses_rights_completion_without_signature`.
+    #[test]
+    fn approval_refuses_rights_completion_with_another_signature_type() {
+        let (_dir, mut provider) = init_provider();
+        let (account_id, address) = linked_external_account(&mut provider);
+        let request_id = stored_approval(&mut provider, &account_id, &address);
+        approve_handoff(&mut provider, &request_id);
+        let index = index_of(&provider, &request_id);
+        provider.store.approval_requests[index].intent =
+            PROTECTED_CONTENT_RIGHTS_SIGNATURE_INTENT.to_string();
+        let payload_hash = stored_payload_hash(&provider, &request_id);
+        let mut handoff = completion(&request_id, &payload_hash, &address);
+        handoff.signature_type = Some("eth_sign");
+        assert_eq!(
+            provider.complete_connector_handoff(handoff),
+            error(
+                "invalid_request",
+                "protected-content rights completion requires personal_sign"
+            )
+        );
+    }
+
+    /// Catches removal of the approved-state guard (`:854`): without it managed
+    /// signing runs on a pending approval, so the key signs a request the user
+    /// never reviewed.
+    #[test]
+    fn approval_refuses_managed_signing_before_approval() {
+        let (_dir, mut provider) = init_provider();
+        let (account_id, address) = managed_account(&mut provider);
+        let request_id = stored_approval(&mut provider, &account_id, &address);
+        assert_eq!(
+            provider.sign_managed_approval(PRINCIPAL, &request_id),
+            error(
+                "invalid_request",
+                "wallet approval request must be approved before managed signing"
+            )
+        );
+    }
+
+    /// Catches removal of the reviewed-payload check (`:860`): without it the
+    /// key signs whatever the record holds now, not the payload the approval
+    /// hash covers.
+    #[test]
+    fn approval_refuses_managed_signing_after_payload_change() {
+        let (_dir, mut provider) = init_provider();
+        let (account_id, address) = managed_account(&mut provider);
+        let request_id = stored_approval(&mut provider, &account_id, &address);
+        let index = index_of(&provider, &request_id);
+        provider.store.approval_requests[index].status = ApprovalStatus::Approved;
+        provider.store.approval_requests[index].approved_at = Some(now_ts());
+        provider.store.approval_requests[index].payload = json!({ "message": "substituted" });
+        assert_eq!(
+            provider.sign_managed_approval(PRINCIPAL, &request_id),
+            error(
+                "signing_error",
+                "wallet approval payload no longer matches the reviewed payload hash"
+            )
+        );
+    }
+
+    /// Catches removal of the managed proof type guard (`:879`): without it the
+    /// managed path signs for an account that requires an external wallet, so
+    /// the external signer never supplies the signature.
+    #[test]
+    fn approval_refuses_managed_signing_for_external_account() {
+        let (_dir, mut provider) = init_provider();
+        let (account_id, address) = managed_account(&mut provider);
+        let request_id = stored_approval(&mut provider, &account_id, &address);
+        let index = index_of(&provider, &request_id);
+        provider.store.approval_requests[index].status = ApprovalStatus::Approved;
+        provider.store.approval_requests[index].approved_at = Some(now_ts());
+        let account_index = provider
+            .store
+            .accounts
+            .iter()
+            .position(|account| account.account_id == account_id)
+            .expect("the account must be stored");
+        provider.store.accounts[account_index].proof_type = "siwe".to_string();
+        assert_eq!(
+            provider.sign_managed_approval(PRINCIPAL, &request_id),
+            error(
+                "external_wallet_required",
+                "approved request requires an external wallet signature handoff"
+            )
+        );
+    }
+
+    /// Catches removal of the managed authority comparison (`:885`): without it
+    /// the key signs for the account record while the approval names another
+    /// address, so the signature settles under authority the review never saw.
+    #[test]
+    fn approval_refuses_managed_signing_after_authority_change() {
+        let (_dir, mut provider) = init_provider();
+        let (account_id, address) = managed_account(&mut provider);
+        let request_id = stored_approval(&mut provider, &account_id, &address);
+        let index = index_of(&provider, &request_id);
+        provider.store.approval_requests[index].status = ApprovalStatus::Approved;
+        provider.store.approval_requests[index].approved_at = Some(now_ts());
+        provider.store.approval_requests[index].address = OTHER_ADDRESS.to_string();
+        assert_eq!(
+            provider.sign_managed_approval(PRINCIPAL, &request_id),
+            error(
+                "signing_error",
+                "wallet approval authority no longer matches its managed account"
+            )
+        );
+    }
+}
