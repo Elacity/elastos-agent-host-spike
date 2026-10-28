@@ -70,6 +70,8 @@ After one instance has ended, `post_capability_grant` of the survivor's pending 
 
 `bind_verified_component` stores the component hash the launch verified. The launch body still rejects `component_hash`. `post_capsules` copies the hash onto the new instance. `component_hash` reads it. The list JSON does not carry it. A name is not a hash. A later bind does not change an instance already created. A PASS gives the Runtime no A3 credit. two-capsule-run owns the bytes. `session_id` still equals the instance id.
 
+`StandIn::get_capability_pending` answers `GET /api/capability/pending`. A client is refused. The list is the pending records of every session, sorted by `session_id` then `request_id`. `expires_at` is `requested_at` plus `REQUEST_TIMEOUT_SECS`. The list does not grant and does not settle. `get_capability_requests` stays the per-session record. A PASS gives the Runtime no A15 credit. `session_id` still equals the instance id.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.

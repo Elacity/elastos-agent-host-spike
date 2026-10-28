@@ -12456,3 +12456,177 @@ New:
 - Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.30 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_instance_stores_the_verified_component_hash -- --exact` exit 0, 1 passed and 0 failed, real 0.17 seconds.
 
 Principles: the instance hash is the value `post_capsules` copies at `standin-runtime/mod.rs:1064`, checked by `crate::report::hex` at `:970` against `src/report.rs:350`. `bind_verified_component` at `:966` stores that hash on the admitted path at `:982` and does not mint an id. `component_hash` at `:990` reads the instance field. Empty, malformed, unknown-path and already-bound refusals are `:968`, `:971`, `:977` and `:980`. An unknown instance is `:996`. A missing hash is `:1001`. `admit_resident` at `:915` stays the admit. A PASS gives the Runtime no A3 credit. two-capsule-run owns the bytes.
+
+## 078 — Shell lists every pending request
+
+078: `get_capability_pending` answers `GET /api/capability/pending` from the one request store. A client is refused before that store is read. The list is every session's pending records, sorted by `session_id` then `request_id`. `expires_at` comes from `request_expires_at`, which is `requested_at` plus `REQUEST_TIMEOUT_SECS`. The list does not grant and does not settle. `standin_shell_lists_every_pending_request` fails on each hand-run plant and passes when they are restored. A PASS gives the Runtime no A15 credit. `session_id` still equals the instance id.
+
+The spec check seeds same-session ids in reverse order (`req-c` before `req-a`), denies `req-d` and asserts its omission, gives each request its own resource, action and reason, and seeds `req-sat` at `u64::MAX - 10` so expiry must saturate. The sorted shell order of the first three is still `req-a`, `req-c`, `req-b`.
+
+### Quotes from the contract (read only)
+
+`docs/AGENT_ARCHITECTURE.md`, Request flow, step 8:
+
+```text
+8. If additional consent is required, Runtime records a pending request and
+   Home or Inbox presents it. The UI does not mint the grant itself.
+```
+
+This task is that list. It is not the grant and it does not store a decision.
+
+`elastos/crates/elastos-server/src/api/handlers/capability.rs`, `ListPendingOutput` and `PendingRequestOutput`. The body's only key is `requests`. Each entry's keys are `request_id`, `session_id`, `resource`, `action`, `reason`, `requested_at` and `expires_at`. The route is `GET /api/capability/pending` in `elastos/crates/elastos-server/src/api/server.rs`. The shell check is the middleware, and the reason is `This endpoint requires shell privileges`.
+
+The one timeout is `REQUEST_TIMEOUT_SECS` on this stand-in, value 300. `elastos/crates/elastos-runtime/src/capability/pending.rs` names the same 300 as `DEFAULT_REQUEST_TIMEOUT_SECS`. This task does not copy that store and does not add a second timeout number.
+
+### Plants
+
+Each plant was applied alone. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_lists_every_pending_request -- --exact`. The planted crate compiled, and that test failed on its assertion. The file was restored before the next plant. Restored, that test passes. No `falsifiers.json` id. Panic lines are `src/../standin-runtime/mod.rs`.
+
+F-standin-pending-stub: the start of `get_capability_pending` returns `Ok` of `{"requests":[]}` before the caller check. Failed at `src/../standin-runtime/mod.rs:10526:9`: `a client is refused before the store is read`, left `Ok` of `{"requests":[]}`, right `Err((403, "This endpoint requires shell privileges"))`.
+
+Old:
+
+```text
+    pub fn get_capability_pending(&self, caller: Caller<'_>) -> Result<Value, (u16, String)> {
+        require_shell(caller)?;
+```
+
+New:
+
+```text
+    pub fn get_capability_pending(&self, caller: Caller<'_>) -> Result<Value, (u16, String)> {
+        return Ok(json!({ "requests": [] }));
+        require_shell(caller)?;
+```
+
+F-standin-pending-all: the filter keeps every status, so a granted id is listed. Failed at `src/../standin-runtime/mod.rs:10631:9`: `a granted request leaves the shell pending list`, left `["req-a", "req-c", "req-b"]`, right `["req-a", "req-b"]`.
+
+Old:
+
+```text
+            .filter(|request| request.status == RequestStatus::Pending)
+```
+
+New:
+
+```text
+            .filter(|_request| true)
+```
+
+F-standin-pending-order: the list keeps store order, so `req-b` comes before `req-a`. Failed at `src/../standin-runtime/mod.rs:10563:9`: `the shell pending list is req-a, req-c, req-b`, left `["req-b", "req-c", "req-a"]`, right `["req-a", "req-c", "req-b"]`.
+
+Old:
+
+```text
+        listed.sort_by(|left, right| {
+            left.session_id
+                .cmp(&right.session_id)
+                .then(left.request_id.cmp(&right.request_id))
+        });
+        let requests = listed.into_iter().map(pending_entry).collect::<Vec<_>>();
+```
+
+New:
+
+```text
+        let requests = listed.into_iter().map(pending_entry).collect::<Vec<_>>();
+```
+
+F-standin-pending-clock: `expires_at` is `requested_at`, with no addition of `REQUEST_TIMEOUT_SECS`. Failed at `src/../standin-runtime/mod.rs:10472:9`: `req-a expires at requested_at plus REQUEST_TIMEOUT_SECS`, left `Some(0)`, right `Some(300)`.
+
+Old:
+
+```text
+fn request_expires_at(requested_at: u64) -> u64 {
+    requested_at.saturating_add(REQUEST_TIMEOUT_SECS)
+}
+```
+
+New:
+
+```text
+fn request_expires_at(requested_at: u64) -> u64 {
+    requested_at
+}
+```
+
+F-standin-pending-session-only: the list sorts only by `session_id`, so `req-c` stays before `req-a`. Failed at `src/../standin-runtime/mod.rs:10564:9`: `the shell pending list is req-a, req-c, req-b`, left `["req-c", "req-a", "req-b"]`, right `["req-a", "req-c", "req-b"]`.
+
+Old:
+
+```text
+        listed.sort_by(|left, right| {
+            left.session_id
+                .cmp(&right.session_id)
+                .then(left.request_id.cmp(&right.request_id))
+        });
+```
+
+New:
+
+```text
+        listed.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+```
+
+F-standin-pending-denied: the filter includes `Denied`, so `req-d` is listed. Failed at `src/../standin-runtime/mod.rs:10654:9`: `a denied request leaves the shell pending list`, left `["req-a", "req-d", "req-b"]`, right `["req-a", "req-b"]`.
+
+Old:
+
+```text
+            .filter(|request| request.status == RequestStatus::Pending)
+```
+
+New:
+
+```text
+            .filter(|request| request.status != RequestStatus::Granted)
+```
+
+F-standin-pending-fields: `pending_entry` substitutes action, reason and resource for one another. Failed at `src/../standin-runtime/mod.rs:10455:9`: `req-a keeps its resource`, left `String("read")`, right `"localhost://Public/resident-instances/a.txt"`.
+
+Old:
+
+```text
+        "resource": request.resource,
+        "action": request.action,
+        "reason": request.reason,
+```
+
+New:
+
+```text
+        "resource": request.action,
+        "action": request.reason,
+        "reason": request.resource,
+```
+
+F-standin-pending-wrap: `expires_at` uses `wrapping_add` in place of `saturating_add`. Failed at `src/../standin-runtime/mod.rs:10472:9`: `req-sat expires at requested_at plus REQUEST_TIMEOUT_SECS`, left `Some(289)`, right `Some(18446744073709551615)`.
+
+Old:
+
+```text
+    requested_at.saturating_add(REQUEST_TIMEOUT_SECS)
+```
+
+New:
+
+```text
+    requested_at.wrapping_add(REQUEST_TIMEOUT_SECS)
+```
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged. The forbidden `git diff` is empty. After the plants were restored, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` has no plant.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.47 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 306.23 seconds, inside the 600-second bound. Targets in order: lib 73 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.47 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_lists_every_pending_request -- --exact` exit 0, 1 passed and 0 failed, real 11.88 seconds.
+
+Principles: `get_capability_pending` at `standin-runtime/mod.rs:372` reads the same `requests` store. `require_shell` at `:373` refuses a client with `This endpoint requires shell privileges` (`:1397`) before that read. `request_expires_at` at `:1367` is the one addition of `REQUEST_TIMEOUT_SECS`, using `saturating_add`. `pending_entry` at `:1371` copies `request_id`, `session_id`, `resource`, `action`, `reason` and `requested_at` from the request. The method is `&self`, so it does not grant, settle or call `expire_due`. `get_capability_requests` stays the per-session record. A PASS gives the Runtime no A15 credit. `session_id` still equals the instance id.
+
+### Supervisor gate and one rerun
+
+The supervisor gate, `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`, exited 101. The only failure was `cleanup_census_refuses_each_leftover`. Its census line was `process leftover; processes:1 paths:["stdout-25"]`. That name is outside the named rerun list. The path matches `stdout-<digits>`. It does not include `host-process.lock` or `config.toml`. Census, the operator and the stand-in were left unchanged.
+
+- Rerun: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.17 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` exit 0, real 278.67 seconds, inside the 600-second bound. Targets in order: lib 73 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0.
+- Proof after that rerun: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_lists_every_pending_request -- --exact` exit 0, 1 passed and 0 failed, real 0.10 seconds.

@@ -40,6 +40,12 @@
 //! `post_capsules` copies that hash onto the new instance. `component_hash`
 //! reads it. The launch body still rejects `component_hash`. A later bind
 //! does not change an instance already created.
+//!
+//! `get_capability_pending` answers `GET /api/capability/pending` from that
+//! same request store. A client is refused before the store is read. The list
+//! is every session's pending records, sorted by `session_id` then
+//! `request_id`. `expires_at` is `requested_at` plus `REQUEST_TIMEOUT_SECS`.
+//! The list does not grant and does not settle.
 
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -352,6 +358,30 @@ impl StandIn {
             .collect();
         listed.sort_by(|left, right| left.request_id.cmp(&right.request_id));
         let requests = listed.into_iter().map(request_entry).collect::<Vec<_>>();
+        Ok(json!({ "requests": requests }))
+    }
+
+    /// `GET /api/capability/pending`.
+    ///
+    /// The shell receives every session's still-pending requests from the one
+    /// request store. A client is status 403 with `This endpoint requires
+    /// shell privileges`, and that check runs before the store is read. The
+    /// body's only key is `requests`. A record whose status is not pending is
+    /// omitted. Entries are sorted by `session_id`, then `request_id`. This
+    /// method does not grant, does not settle and does not call `expire_due`.
+    pub fn get_capability_pending(&self, caller: Caller<'_>) -> Result<Value, (u16, String)> {
+        require_shell(caller)?;
+        let mut listed: Vec<&Request> = self
+            .requests
+            .iter()
+            .filter(|request| request.status == RequestStatus::Pending)
+            .collect();
+        listed.sort_by(|left, right| {
+            left.session_id
+                .cmp(&right.session_id)
+                .then(left.request_id.cmp(&right.request_id))
+        });
+        let requests = listed.into_iter().map(pending_entry).collect::<Vec<_>>();
         Ok(json!({ "requests": requests }))
     }
 
@@ -1330,6 +1360,23 @@ fn request_entry(request: &Request) -> Value {
         "status": request_status_text(request.status),
         "decision_reason": request.decision_reason,
         "settled_by": request.settled_by,
+    })
+}
+
+/// One expiry. `expires_at` is the stored instant plus `REQUEST_TIMEOUT_SECS`.
+fn request_expires_at(requested_at: u64) -> u64 {
+    requested_at.saturating_add(REQUEST_TIMEOUT_SECS)
+}
+
+fn pending_entry(request: &Request) -> Value {
+    json!({
+        "request_id": request.request_id,
+        "session_id": request.session_id,
+        "resource": request.resource,
+        "action": request.action,
+        "reason": request.reason,
+        "requested_at": request.requested_at,
+        "expires_at": request_expires_at(request.requested_at),
     })
 }
 
@@ -10351,6 +10398,354 @@ mod tests {
         assert_eq!(
             starting["cause"], "",
             "the stand-in did the work: component-3 has an empty cause"
+        );
+    }
+
+    fn shell_pending(standin: &StandIn) -> Value {
+        standin
+            .get_capability_pending(Caller::Shell)
+            .expect("the stand-in did the work: the shell reads the pending list")
+    }
+
+    fn pending_ids(body: &Value) -> Vec<String> {
+        body["requests"]
+            .as_array()
+            .expect("the stand-in did the work: the shell pending list is requests")
+            .iter()
+            .map(|entry| {
+                entry["request_id"]
+                    .as_str()
+                    .expect("the stand-in did the work: a pending entry names request_id")
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    fn assert_pending_entry(
+        entry: &Value,
+        request_id: &str,
+        session_id: &str,
+        resource: &str,
+        action: &str,
+        reason: &str,
+        requested_at: u64,
+        expires_at: u64,
+    ) {
+        assert_keys(
+            entry,
+            &[
+                "action",
+                "expires_at",
+                "reason",
+                "request_id",
+                "requested_at",
+                "resource",
+                "session_id",
+            ],
+            "the stand-in did the work: a pending entry's keys are request_id, session_id, resource, action, reason, requested_at and expires_at",
+        );
+        assert_eq!(
+            entry["request_id"], request_id,
+            "the stand-in did the work: the pending entry names {request_id}"
+        );
+        assert_eq!(
+            entry["session_id"], session_id,
+            "the stand-in did the work: {request_id} belongs to {session_id}"
+        );
+        assert_eq!(
+            entry["resource"], resource,
+            "the stand-in did the work: {request_id} keeps its resource"
+        );
+        assert_eq!(
+            entry["action"], action,
+            "the stand-in did the work: {request_id} keeps its action"
+        );
+        assert_eq!(
+            entry["reason"], reason,
+            "the stand-in did the work: {request_id} keeps its reason"
+        );
+        assert_eq!(
+            entry["requested_at"].as_u64(),
+            Some(requested_at),
+            "the stand-in did the work: {request_id} keeps the instant seed_request stored"
+        );
+        assert_eq!(
+            entry["expires_at"].as_u64(),
+            Some(expires_at),
+            "the stand-in did the work: {request_id} expires at requested_at plus REQUEST_TIMEOUT_SECS"
+        );
+    }
+
+    fn record_status(standin: &StandIn, session_id: &str, request_id: &str) -> String {
+        let records = standin
+            .get_capability_requests(Caller::Shell, Some(session_id))
+            .expect("the stand-in did the work: the per-session record still needs a session");
+        records["requests"]
+            .as_array()
+            .expect("the stand-in did the work: the per-session record is requests")
+            .iter()
+            .find(|entry| entry["request_id"] == request_id)
+            .unwrap_or_else(|| {
+                panic!("the stand-in did the work: the per-session record holds {request_id}")
+            })["status"]
+            .as_str()
+            .expect("the stand-in did the work: the per-session record names status")
+            .to_owned()
+    }
+
+    #[test]
+    fn standin_shell_lists_every_pending_request() {
+        let mut standin = StandIn::new();
+        launch_two_running(&mut standin);
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 is running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 is running",
+        );
+        let empty = shell_pending(&standin);
+        assert_keys(
+            &empty,
+            &["requests"],
+            "the stand-in did the work: the shell pending list's only key is requests",
+        );
+        assert_eq!(
+            empty,
+            json!({ "requests": [] }),
+            "the stand-in did the work: the shell pending list starts empty"
+        );
+        assert_eq!(
+            standin.get_capability_pending(Caller::Client {
+                session_id: "component-1",
+            }),
+            Err((403, "This endpoint requires shell privileges".to_owned(),)),
+            "the stand-in did the work: a client is refused before the store is read"
+        );
+        assert_eq!(
+            standin.get_capability_requests(Caller::Shell, None),
+            Err((400, "requests need a session".to_owned())),
+            "the stand-in did the work: the per-session record still needs a session"
+        );
+
+        let resource_a = "localhost://Public/resident-instances/a.txt";
+        let resource_c = "localhost://Public/resident-instances/c.txt";
+        let resource_b = "localhost://Public/resident-instances/b.txt";
+        let resource_d = "localhost://Public/resident-instances/d.txt";
+        let resource_late = "localhost://Public/resident-instances/late.txt";
+        let resource_sat = "localhost://Public/resident-instances/sat.txt";
+        // req-c is stored before req-a so a sort by session_id alone is not request_id order.
+        standin
+            .seed_request("req-b", "component-2", resource_b, "execute", "execute b")
+            .expect("the stand-in did the work: it stores req-b");
+        standin
+            .seed_request("req-c", "component-1", resource_c, "write", "write c")
+            .expect("the stand-in did the work: it stores req-c");
+        standin
+            .seed_request("req-a", "component-1", resource_a, "read", "read a")
+            .expect("the stand-in did the work: it stores req-a");
+        assert_eq!(
+            standin.get_capability_pending(Caller::Client {
+                session_id: "component-1",
+            }),
+            Err((403, "This endpoint requires shell privileges".to_owned(),)),
+            "the stand-in did the work: a client is refused while requests are pending"
+        );
+
+        let listed = shell_pending(&standin);
+        assert_keys(
+            &listed,
+            &["requests"],
+            "the stand-in did the work: the shell pending list's only key is requests",
+        );
+        assert_eq!(
+            pending_ids(&listed),
+            vec!["req-a".to_owned(), "req-c".to_owned(), "req-b".to_owned()],
+            "the stand-in did the work: the shell pending list is req-a, req-c, req-b"
+        );
+        let requests = listed["requests"]
+            .as_array()
+            .expect("the stand-in did the work: the shell pending list is requests");
+        assert_pending_entry(
+            &requests[0],
+            "req-a",
+            "component-1",
+            resource_a,
+            "read",
+            "read a",
+            0,
+            300,
+        );
+        assert_pending_entry(
+            &requests[1],
+            "req-c",
+            "component-1",
+            resource_c,
+            "write",
+            "write c",
+            0,
+            300,
+        );
+        assert_pending_entry(
+            &requests[2],
+            "req-b",
+            "component-2",
+            resource_b,
+            "execute",
+            "execute b",
+            0,
+            300,
+        );
+        assert_eq!(
+            record_status(&standin, "component-1", "req-a"),
+            "pending",
+            "the stand-in did the work: the shell pending list leaves req-a pending"
+        );
+        assert_eq!(
+            record_status(&standin, "component-1", "req-c"),
+            "pending",
+            "the stand-in did the work: the shell pending list leaves req-c pending"
+        );
+        assert_eq!(
+            record_status(&standin, "component-2", "req-b"),
+            "pending",
+            "the stand-in did the work: the shell pending list leaves req-b pending"
+        );
+
+        let granted = standin.post_capability_grant(
+            Caller::Shell,
+            &json!({ "request_id": "req-c", "duration": "once" }),
+        );
+        assert!(
+            granted.is_ok(),
+            "the stand-in did the work: the shell grant of req-c is Ok: {granted:?}"
+        );
+        let after_grant = shell_pending(&standin);
+        assert_eq!(
+            pending_ids(&after_grant),
+            vec!["req-a".to_owned(), "req-b".to_owned()],
+            "the stand-in did the work: a granted request leaves the shell pending list"
+        );
+        assert_eq!(
+            record_status(&standin, "component-1", "req-c"),
+            "granted",
+            "the stand-in did the work: the per-session record keeps req-c granted"
+        );
+
+        standin
+            .seed_request("req-d", "component-1", resource_d, "delete", "delete d")
+            .expect("the stand-in did the work: it stores req-d");
+        let denied = standin.post_capability_deny(
+            Caller::Shell,
+            &json!({ "request_id": "req-d", "reason": "deny d" }),
+        );
+        assert!(
+            denied.is_ok(),
+            "the stand-in did the work: the shell deny of req-d is Ok: {denied:?}"
+        );
+        let after_deny = shell_pending(&standin);
+        assert_eq!(
+            pending_ids(&after_deny),
+            vec!["req-a".to_owned(), "req-b".to_owned()],
+            "the stand-in did the work: a denied request leaves the shell pending list"
+        );
+        assert_eq!(
+            record_status(&standin, "component-1", "req-d"),
+            "denied",
+            "the stand-in did the work: the per-session record keeps req-d denied"
+        );
+
+        standin.set_instant(299);
+        let at_299 = shell_pending(&standin);
+        assert_eq!(
+            pending_ids(&at_299),
+            vec!["req-a".to_owned(), "req-b".to_owned()],
+            "the stand-in did the work: instant 299 leaves req-a then req-b"
+        );
+        assert_eq!(
+            at_299["requests"][0]["expires_at"].as_u64(),
+            Some(300),
+            "the stand-in did the work: req-a's expiry stays 300 at instant 299"
+        );
+        standin.set_instant(300);
+        assert_eq!(
+            shell_pending(&standin),
+            json!({ "requests": [] }),
+            "the stand-in did the work: instant 300 leaves the shell pending list empty"
+        );
+        assert_eq!(
+            record_status(&standin, "component-1", "req-a"),
+            "expired",
+            "the stand-in did the work: the per-session record keeps req-a expired"
+        );
+
+        standin
+            .seed_request(
+                "req-late",
+                "component-2",
+                resource_late,
+                "message",
+                "message late",
+            )
+            .expect("the stand-in did the work: it stores req-late");
+        let late = shell_pending(&standin);
+        assert_eq!(
+            pending_ids(&late),
+            vec!["req-late".to_owned()],
+            "the stand-in did the work: req-a and req-b stay absent after req-late"
+        );
+        assert_pending_entry(
+            &late["requests"][0],
+            "req-late",
+            "component-2",
+            resource_late,
+            "message",
+            "message late",
+            300,
+            600,
+        );
+
+        let near = u64::MAX - 10;
+        standin.set_instant(near);
+        standin
+            .seed_request("req-sat", "component-1", resource_sat, "admin", "admin sat")
+            .expect("the stand-in did the work: it stores req-sat");
+        let saturated = shell_pending(&standin);
+        assert_eq!(
+            pending_ids(&saturated),
+            vec!["req-sat".to_owned()],
+            "the stand-in did the work: the shell pending list is the request seeded near u64::MAX"
+        );
+        assert_pending_entry(
+            &saturated["requests"][0],
+            "req-sat",
+            "component-1",
+            resource_sat,
+            "admin",
+            "admin sat",
+            near,
+            u64::MAX,
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 stays running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running",
         );
     }
 }
