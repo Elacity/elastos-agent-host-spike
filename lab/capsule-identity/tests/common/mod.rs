@@ -156,6 +156,12 @@ pub const DIRECTORY_WITH_A_ONE_LINK_HAMT_SHARD_LAB_CID: &str =
 /// and in memory and never committed.
 pub const FILE_ROOT_INSIDE_A_HAMT_LAB_CID: &str =
     "bafybeifpzyxcurfmvho4qwltsy5wtgyiwt7qvviwzcj5oqzgejmqyajdqa";
+/// Task 063: the 262145-estimate flat bundle with its first 200-byte filler
+/// replaced by a 200-byte name of 68 Unicode scalars (66 `名` and `aa`), so
+/// the byte estimate stays 262145 and a Unicode scalar count (262013) stays
+/// basic. Built in a temp dir and in memory and never committed.
+pub const MULTIBYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeif7njjvh2l3tb7qp643e4p2q4qry77ukedkjhy2qrumxcr5wvawau";
 
 /// The empty files that bring content-sample's root block to 262144 bytes
 /// and `longer` more: 1064 named by 200 digits and one by 235 + `longer`
@@ -230,6 +236,50 @@ pub fn directory_at_hamt_threshold_bundle(longer: usize) -> Vec<BundleEntry> {
         .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
         .sum();
     assert_eq!(measured, target, "the helper measured {measured} bytes");
+    entries
+}
+
+/// Task 063: [`directory_at_hamt_threshold_bundle`]`(1)` with its first
+/// 200-byte filler (a name of digits only) replaced by 66 `名` (U+540D) and
+/// `aa`: 200 UTF-8 bytes in 68 Unicode scalars, with empty content. The name
+/// keeps its 200 bytes, so the byte estimate stays 262145 and the directory
+/// is a HAMT shard; a Unicode scalar count would be 262013 and stay a basic
+/// directory. The measured name longer than 200 bytes is left as it is. The
+/// name has no NFD decomposition, so a folder walk reads the bytes the helper
+/// wrote. Built in a temp dir and in memory and never committed.
+pub fn multibyte_name_over_the_hamt_threshold_bundle() -> Vec<BundleEntry> {
+    let multibyte = format!("{}aa", "\u{540d}".repeat(66));
+    assert_eq!(
+        (multibyte.len(), multibyte.chars().count()),
+        (200, 68),
+        "the multibyte name's bytes and scalars"
+    );
+    let mut replaced = 0;
+    let entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(1)
+        .into_iter()
+        .map(|entry| {
+            if replaced == 0 && entry.path.len() == 200 {
+                replaced += 1;
+                BundleEntry {
+                    path: multibyte.clone(),
+                    content: entry.content,
+                }
+            } else {
+                entry
+            }
+        })
+        .collect();
+    assert_eq!(replaced, 1, "one 200-byte filler is replaced");
+    let bytes: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(bytes, HAMT_LINKS_LIMIT + 1, "the byte estimate");
+    let scalars: usize = entries
+        .iter()
+        .map(|entry| entry.path.chars().count() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(scalars, 262_013, "the scalar estimate");
     entries
 }
 

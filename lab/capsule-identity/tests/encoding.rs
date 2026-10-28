@@ -383,6 +383,57 @@ fn file_root_inside_a_hamt_has_the_pinned_cid() {
 }
 
 #[test]
+fn multibyte_name_over_the_hamt_threshold_is_a_shard() {
+    // Task 063: one 200-byte filler of the 262145-estimate bundle is replaced
+    // by a 200-byte name of 66 名 (U+540D) and `aa`, which is 68 Unicode
+    // scalars. The byte estimate keeps the directory a HAMT shard; a scalar
+    // count would be 262013 and stay a basic directory. The pin was
+    // recomputed by README's Python rule and printed by Kubo v0.40.1 with the
+    // provider's HAMT config.
+    let entries = multibyte_name_over_the_hamt_threshold_bundle();
+    let bytes: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    let scalars: usize = entries
+        .iter()
+        .map(|entry| entry.path.chars().count() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(bytes, HAMT_LINKS_LIMIT + 1, "the byte estimate");
+    assert_eq!(scalars, 262_013, "the scalar estimate");
+    assert!(
+        scalars <= HAMT_LINKS_LIMIT,
+        "the scalar estimate {scalars} does not stay a basic directory"
+    );
+    let multibyte: Vec<&BundleEntry> = entries
+        .iter()
+        .filter(|entry| !entry.path.is_ascii())
+        .collect();
+    assert_eq!(multibyte.len(), 1, "one multibyte name");
+    assert_eq!(multibyte[0].path.len(), 200, "the replaced path's bytes");
+    assert_eq!(
+        multibyte[0].path.chars().count(),
+        68,
+        "the replaced path's scalars"
+    );
+    assert_eq!(multibyte[0].path, format!("{}aa", "\u{540d}".repeat(66)));
+    let (_bundle, walked, encoded) = walk_and_encode(&entries);
+    assert_eq!(
+        (walked.as_str(), encoded.as_str()),
+        (
+            MULTIBYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID,
+            MULTIBYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID
+        ),
+        "(lab_cid, encode_entries) against the pin"
+    );
+    assert!(walked.starts_with("bafybei"), "{walked}");
+    assert_ne!(
+        walked, DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID,
+        "a multibyte name got the ASCII shard's name"
+    );
+}
+
+#[test]
 fn child_directory_over_the_hamt_threshold_is_a_shard() {
     // The 262145-estimate flat bundle sits under `photos/`, and
     // content-sample's own two files stay at the root, so `photos/capsule.json`

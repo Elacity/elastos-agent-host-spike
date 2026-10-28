@@ -113,12 +113,20 @@ To recompute a lab CID by hand:
    it got the same CID from Kubo with the provider's HAMT config, unsharded
    (`directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused`).
    The exact-threshold bundle is a larger basic block, and it is named
-   (`directory_at_the_hamt_threshold_stays_basic`).
+   (`directory_at_the_hamt_threshold_stays_basic`). The estimate counts a
+   name's UTF-8 bytes, and a Unicode scalar count is a different number: the
+   multibyte-name bundle has a 200-byte name of 68 scalars, so its estimate
+   is 262145 bytes and it is a shard, while a scalar count of 262013 would
+   stay a basic directory
+   (`multibyte_name_over_the_hamt_threshold_is_a_shard`, F-CI63a).
 6. A directory whose sum is greater than 262144 is a **HAMT shard** (task
    056): fanout 256, bucket hash murmur3 `New64` (the first 64 bits of
-   x64-128 with seed 0), one digest byte per level. Hash each child's name,
-   not its path. A bucket holds the children whose digest byte at this level
-   is equal. A bucket of one child is one link named the bucket's two
+   x64-128 with seed 0), one digest byte per level. Hash each child's name's
+   UTF-8 bytes, not its path and not its Unicode scalars: a scalar hash moves
+   the multibyte name's bucket
+   (`multibyte_name_over_the_hamt_threshold_is_a_shard`, F-CI63b). A bucket
+   holds the children whose digest byte at this level is equal. A bucket of
+   one child is one link named the bucket's two
    uppercase hex digits and the child's name; a bucket of two or more is one
    link named only those two digits, pointing at a child shard built from the
    next digest byte, even when that child shard holds one link. A shard of
@@ -137,10 +145,11 @@ To recompute a lab CID by hand:
    `directory_at_the_hamt_threshold_stays_basic`,
    `directory_over_the_hamt_threshold_is_a_shard`,
    `child_directory_over_the_hamt_threshold_is_a_shard`,
-   `directory_with_a_one_link_hamt_shard_has_the_pinned_cid` and
-   `file_root_inside_a_hamt_has_the_pinned_cid` name this shape,
+   `directory_with_a_one_link_hamt_shard_has_the_pinned_cid`,
+   `file_root_inside_a_hamt_has_the_pinned_cid` and
+   `multibyte_name_over_the_hamt_threshold_is_a_shard` name this shape,
    with falsifiers F-CI56a to F-CI56l, F-CI18h, F-CI53a, F-CI53b,
-   F-CI61a and F-CI62a.
+   F-CI61a, F-CI62a and F-CI63b.
 7. A directory's CID is `01 70 12 20` and the SHA-256 of its block (the dag-pb
    codec `0x70`). The Tsize of a link to a directory is the length of its
    block plus the Tsizes of its own links. Every varint inside a CID here is
@@ -351,6 +360,8 @@ rules and not from the Rust code, in
 | A HAMT leaf link names its bucket in two uppercase hex digits and then the child's name; a bucket of two or more children is one link named only the prefix (task 056) | `directory_over_the_hamt_threshold_is_a_shard`, `child_directory_over_the_hamt_threshold_is_a_shard` | F-CI56b (a leaf has the prefix only), F-CI56c (a one-entry bucket is a child shard) |
 | A child shard of one link stays a shard link when its names share the next digest byte; a bucket of two or more children is never a leaf (task 061) | `directory_with_a_one_link_hamt_shard_has_the_pinned_cid`, `two_names_in_one_bucket_get_a_child_shard` | F-CI61a (a child shard of one link becomes a leaf) |
 | A HAMT leaf stores its child node's Tsize, so a file over one leaf in a shard contributes its file-root Tsize and not its byte length (task 062) | `file_root_inside_a_hamt_has_the_pinned_cid` | F-CI62a (a leaf's Tsize is capped at 262144) |
+| A directory's links estimate counts each name's UTF-8 byte length, so a 200-byte name of 68 scalars shards on bytes (262145) and would stay basic on scalars (262013) (task 063) | `multibyte_name_over_the_hamt_threshold_is_a_shard` | F-CI63a (the estimate counts scalars) |
+| A HAMT bucket hash takes the name's UTF-8 bytes, so the same multibyte name gets its byte bucket and not its scalar one (task 063) | `multibyte_name_over_the_hamt_threshold_is_a_shard` | F-CI63b (the hash takes scalars as bytes) |
 | A HAMT bitmap sets bucket `i` in byte `31 - i / 8` at `1 << (i % 8)` and drops leading zero bytes; a collision bucket gets a child shard (task 056) | `hamt_data_trims_leading_zero_bitmap_bytes`, `two_names_in_one_bucket_get_a_child_shard` | F-CI56f (bitmap byte order), F-CI56g (no trimming) |
 | The largest basic root block task 053 named (262144 bytes) is still named, and one name byte more is named too; no block-length refusal remains (task 053, extended by task 056) | `directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused` | — |
 | No inline: no identity multihash | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18i (inline at most 32 bytes) |
@@ -439,6 +450,16 @@ the file root's Tsize (262249), not the file's 262145 bytes. It is
 `file_root_inside_a_hamt_bundle`. README's Python block gave it first and
 `encode_entries` and `encode_chunked_files` agree; the hand-run Kubo printed
 it too.
+Task 063 adds one more pin, built in a temp dir and in memory and never
+committed: that same 262145-estimate bundle with its first 200-byte filler
+replaced by 66 `名` (U+540D) and `aa`, 200 UTF-8 bytes in 68 Unicode scalars,
+with empty content. The measured name longer than 200 bytes stays as it is.
+The byte estimate stays 262145, so the directory is a HAMT shard; a Unicode
+scalar count would be 262013 and stay a basic directory. It is
+`bafybeif7njjvh2l3tb7qp643e4p2q4qry77ukedkjhy2qrumxcr5wvawau`
+(`MULTIBYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID`) and its entries are
+`multibyte_name_over_the_hamt_threshold_bundle`. README's Python block gave it
+first and `encode_entries` agrees; the hand-run Kubo printed it too.
 
 ### The cross-implementation check
 
@@ -463,9 +484,9 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    (`python3 -I could not run: <error>`), a non-zero exit (even after it
    printed a valid CID), no output, or more than one line is refused with its
    own reason, and the test asserts each of these reasons.
-5. For each of the 21 pins, the Python answer, the pin constant and the
+5. For each of the 22 pins, the Python answer, the pin constant and the
    printed `encode_entries` result for the same files must be equal, and the
-   test asserts that it checked exactly 21 bundles. The 21 are the seven
+   test asserts that it checked exactly 22 bundles. The 22 are the seven
    pinned fixtures (`content-sample`, `web-app`, `agent-host`, `provider`,
    `model`, `provider-variant-a`, `provider-variant-b`), the recipe, the
    chunk-limit, empty-file and long-name bundles above, which are built as
@@ -474,8 +495,9 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    and three-leaf file bundles (task 048), the two-level file bundle (task
    051) and the directory-at-limit bundle (task 053), the directory at and
    over the HAMT threshold, the directory with a one-link HAMT shard (task
-   061), the child directory over the HAMT threshold (task 056) and the file
-   root inside a HAMT shard (task 062), also built in memory.
+   061), the child directory over the HAMT threshold (task 056), the file
+   root inside a HAMT shard (task 062) and the multibyte-name shard (task
+   063), also built in memory.
    `wc001-core` has no pin, because its `capsule.wasm` is
    built on each machine, so it is not checked here.
 
@@ -483,7 +505,7 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
 | --- | --- | --- |
 | README's rule agrees with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19a (the block's `0x55` becomes `0x70` before it runs) |
 | Rust agrees with README's rule, not only with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19b (the encoder's `RAW_CODEC` becomes `0x56`) |
-| A missing block is no pass: exactly 21 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
+| A missing block is no pass: exactly 22 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
 | An interpreter that cannot start fails the test | `readme_python_recomputes_every_lab_cid_pin` | F-CI19d (a program that does not exist) |
 | A non-zero exit is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19e (exit status not checked) |
 | No output is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19f (empty answer taken) |
@@ -499,11 +521,12 @@ script's `KUBO_ADD_FLAGS`, `scripts/ci-model-package.mjs:211`, written once as
 `KUBO_ADD_FLAGS` in the test file) in a fresh temp repo made by
 `init --empty-repo`, with the provider's two HAMT config values set. No daemon
 runs and nothing is written outside the temp folders.
-`kubo_hash_only_import_prints_every_lab_cid_pin` writes each of the 21 pinned
+`kubo_hash_only_import_prints_every_lab_cid_pin` writes each of the 22 pinned
 bundles above into a temp folder (since task 051 with the two-level file
 bundle, since task 053 with the directory-at-limit bundle, since task 056
-with the HAMT bundles, since task 061 with the one-link shard and since task
-062 with the file root inside a shard), and Kubo's root,
+with the HAMT bundles, since task 061 with the one-link shard, since task
+062 with the file root inside a shard and since task 063 with the
+multibyte-name shard), and Kubo's root,
 the pin and `encode_entries` must be one value. On 2026-10-28 it passed at
 task 053 too (`test result: ok. 1 passed`), and with the HAMT threshold set to
 `1KiB` by hand it failed on the directory-at-limit row alone, so the HAMT
@@ -2101,7 +2124,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 304 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 306 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -2156,7 +2179,9 @@ F-CI53b are retargeted by it), and task 054's F-CI54a to F-CI54e (see
 [the encoding](#the-encoding)), and task 061's F-CI61a (see
 [the encoding](#the-encoding); F-CI56j is retargeted by it), and task 062's
 F-CI62a (see [the encoding](#the-encoding)) and F-CI62b (see
-[the cross-implementation check](#the-cross-implementation-check)).
+[the cross-implementation check](#the-cross-implementation-check)), and task
+063's F-CI63a and F-CI63b (both: see [the encoding](#the-encoding); F-CI62b
+is retargeted by it).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
