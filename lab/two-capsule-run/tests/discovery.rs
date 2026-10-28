@@ -137,47 +137,50 @@ fn hex_tokens(line: &str, len: usize) -> Vec<&str> {
 /// `BridgeHostcall` shape: `(&str, &str, Option<&str>) -> Result<String, String>`.
 fn bridge_entry(source: &str) -> String {
     let code = code_without_strings_and_comments(source);
-    let Some(block) = impl_block(&code, "StandIn") else {
-        return "none".to_string();
-    };
     let mut entries: Vec<String> = Vec::new();
     let mut search = 0;
-    while let Some(offset) = block[search..].find("pub fn ") {
+    while let Some(offset) = code[search..].find("impl StandIn") {
         let start = search + offset;
-        let before = block[..start].chars().next_back();
-        if before.is_some_and(|character| character.is_alphanumeric() || character == '_') {
-            search = start + "pub fn ".len();
+        let after = &code[start + "impl StandIn".len()..];
+        if after
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_alphanumeric() || character == '_')
+        {
+            search = start + "impl StandIn".len();
             continue;
         }
-        let Some(brace) = block[start..].find('{') else {
+        let Some(brace) = after.find('{') else {
             break;
         };
-        if let Some(name) = bridge_shaped(&block[start..start + brace]) {
-            entries.push(name);
+        let open = start + "impl StandIn".len() + brace;
+        let Some(close) = matching_brace(&code, open) else {
+            break;
+        };
+        let block = &code[open + 1..close];
+        let mut method = 0;
+        while let Some(offset) = block[method..].find("pub fn ") {
+            let start = method + offset;
+            let before = block[..start].chars().next_back();
+            if before.is_some_and(|character| character.is_alphanumeric() || character == '_') {
+                method = start + "pub fn ".len();
+                continue;
+            }
+            let Some(brace) = block[start..].find('{') else {
+                break;
+            };
+            if let Some(name) = bridge_shaped(&block[start..start + brace]) {
+                entries.push(name);
+            }
+            method = start + brace + 1;
         }
-        search = start + brace + 1;
+        search = close + 1;
     }
     match entries.len() {
         0 => "none".to_string(),
         1 => entries.remove(0),
         _ => format!("ambiguous ({})", entries.join(", ")),
     }
-}
-
-fn impl_block<'a>(code: &'a str, name: &str) -> Option<&'a str> {
-    let needle = format!("impl {name}");
-    let start = code.find(&needle)?;
-    let after = &code[start + needle.len()..];
-    if after
-        .chars()
-        .next()
-        .is_some_and(|character| character.is_alphanumeric() || character == '_')
-    {
-        return None;
-    }
-    let open = start + needle.len() + after.find('{')?;
-    let close = matching_brace(code, open)?;
-    Some(&code[open + 1..close])
 }
 
 fn matching_brace(text: &str, open: usize) -> Option<usize> {
@@ -223,9 +226,19 @@ fn bridge_shaped(signature: &str) -> Option<String> {
     (returned == "Result<String,String>").then(|| name.to_string())
 }
 
+/// Comments are prose, so code checks ignore them. String literals stay when
+/// a caller reads a declared value.
+fn code_without_comments(source: &str) -> String {
+    strip_source(source, false)
+}
+
 /// Removes string contents and comments while keeping their delimiters and
 /// line breaks. Discovery then reads code tokens, not prose that mentions them.
 fn code_without_strings_and_comments(source: &str) -> String {
+    strip_source(source, true)
+}
+
+fn strip_source(source: &str, strip_strings: bool) -> String {
     let characters = source.chars().collect::<Vec<_>>();
     let mut out = String::with_capacity(source.len());
     let mut index = 0;
@@ -260,22 +273,30 @@ fn code_without_strings_and_comments(source: &str) -> String {
         if string {
             if escape {
                 escape = false;
-                out.push(' ');
+                out.push(if strip_strings { ' ' } else { character });
             } else if character == '\\' {
                 escape = true;
-                out.push(' ');
+                out.push(if strip_strings { ' ' } else { character });
             } else if character == '"' {
                 string = false;
                 out.push('"');
             } else {
-                out.push(if character == '\n' { '\n' } else { ' ' });
+                out.push(if strip_strings {
+                    if character == '\n' {
+                        '\n'
+                    } else {
+                        ' '
+                    }
+                } else {
+                    character
+                });
             }
             index += 1;
             continue;
         }
         if character == '\'' {
             // A char literal (for example b'"') is not a lifetime and must not
-            // start a string. Copy its delimiters and blank its contents.
+            // start a string.
             let mut end = index + 1;
             if characters.get(end) == Some(&'\\') {
                 end += 1;
@@ -283,11 +304,17 @@ fn code_without_strings_and_comments(source: &str) -> String {
             if end < characters.len() {
                 end += 1;
                 if characters.get(end) == Some(&'\'') {
-                    out.push('\'');
-                    for _ in index + 1..end {
-                        out.push(' ');
+                    if strip_strings {
+                        out.push('\'');
+                        for _ in index + 1..end {
+                            out.push(' ');
+                        }
+                        out.push('\'');
+                    } else {
+                        for value in &characters[index..=end] {
+                            out.push(*value);
+                        }
                     }
-                    out.push('\'');
                     index = end + 1;
                     continue;
                 }
@@ -373,8 +400,13 @@ fn normalize_type(text: &str) -> String {
 }
 
 fn declared_world(source: &str) -> Option<String> {
-    let start = source.find("world:")? + "world:".len();
-    let rest = &source[start..];
+    let code = code_without_comments(source);
+    let macro_start = code.find("wit_bindgen::generate!")?;
+    let open = macro_start + code[macro_start..].find('{')?;
+    let close = matching_brace(&code, open)?;
+    let body = &code[open + 1..close];
+    let start = body.find("world:")? + "world:".len();
+    let rest = &body[start..];
     let quote = rest.find('"')?;
     let rest = &rest[quote + 1..];
     let end = rest.find('"')?;
@@ -447,41 +479,122 @@ fn falsify_command(source: &str) -> String {
 
 fn component_build_step(source: &str) -> String {
     const BUILDER: &str = "scripts/build-component-capsule.sh";
-    // A command word can follow a prefix such as env, nice or exec, an
-    // operator such as &&, or a line continuation. A comment, assignment or
-    // echo argument is not a call.
+    // Resolve the command word through wrappers and interpreters. An argument
+    // that merely names the script is not an invocation.
     let source = shell_without_comments(source).replace("\\\n", " ");
     for segment in source.split([';', '&', '|', '\n']) {
         let words = segment.split_whitespace().collect::<Vec<_>>();
-        let mut start = 0;
-        while start < words.len() {
-            let word = words[start].trim_matches(['"', '\'']);
-            if word.contains('=') {
-                start += 1;
-            } else {
+        let mut index = 0;
+        while index < words.len() && is_assignment(words[index]) {
+            index += 1;
+        }
+        while index < words.len() {
+            let command = shell_basename(words[index]);
+            let mut advanced = true;
+            match command {
+                "env" => {
+                    index += 1;
+                    while index < words.len() {
+                        let word = trim_shell_word(words[index]);
+                        if word.starts_with('-') || is_assignment(word) {
+                            index += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                "nice" => {
+                    index += 1;
+                    while index < words.len() {
+                        let word = trim_shell_word(words[index]);
+                        if word.starts_with('-') {
+                            let takes_value = word == "-n";
+                            index += 1;
+                            if takes_value && index < words.len() {
+                                index += 1;
+                            }
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                "sudo" => {
+                    index += 1;
+                    while index < words.len() {
+                        let word = trim_shell_word(words[index]);
+                        if word.starts_with('-') {
+                            let takes_value = matches!(
+                                word,
+                                "-u" | "-g" | "-p" | "-C" | "-h" | "-r" | "-t" | "-U"
+                            );
+                            index += 1;
+                            if takes_value && index < words.len() {
+                                index += 1;
+                            }
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                "exec" | "command" | "time" | "nohup" => {
+                    index += 1;
+                    while index < words.len() && trim_shell_word(words[index]).starts_with('-') {
+                        index += 1;
+                    }
+                }
+                "bash" | "sh" | "zsh" | "dash" | "ksh" => {
+                    index += 1;
+                    while index < words.len() {
+                        let word = trim_shell_word(words[index]);
+                        if word == "-c" {
+                            index = words.len();
+                            break;
+                        }
+                        if word.starts_with('-') {
+                            index += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                _ => advanced = false,
+            }
+            if !advanced {
                 break;
             }
         }
-        let Some(first) = words.get(start) else {
+        let Some(command) = words.get(index) else {
             continue;
         };
-        let first = first.trim_matches(['"', '\'']);
-        if matches!(first, "echo" | "printf" | "test" | "[") {
-            continue;
-        }
-        for word in words {
-            let word = word.trim_matches(['"', '\'']);
-            let relative = word
-                .strip_prefix("${REPO_ROOT}/")
-                .or_else(|| word.strip_prefix("$REPO_ROOT/"))
-                .or_else(|| word.strip_prefix("./"))
-                .unwrap_or(word);
-            if relative == BUILDER {
-                return BUILDER.to_string();
-            }
+        if is_builder_path(command) {
+            return BUILDER.to_string();
         }
     }
     "absent".to_string()
+}
+
+fn trim_shell_word(word: &str) -> &str {
+    word.trim_matches(['"', '\''])
+}
+
+fn shell_basename(word: &str) -> &str {
+    let word = trim_shell_word(word);
+    word.rsplit('/').next().unwrap_or(word)
+}
+
+fn is_assignment(word: &str) -> bool {
+    trim_shell_word(word).contains('=')
+}
+
+fn is_builder_path(word: &str) -> bool {
+    const BUILDER: &str = "scripts/build-component-capsule.sh";
+    let word = trim_shell_word(word);
+    let relative = word
+        .strip_prefix("${REPO_ROOT}/")
+        .or_else(|| word.strip_prefix("$REPO_ROOT/"))
+        .or_else(|| word.strip_prefix("./"))
+        .unwrap_or(word);
+    relative == BUILDER
 }
 
 /// Removes shell comments while keeping quoted text, so a commented call and
@@ -914,9 +1027,15 @@ fn component_build_requires_an_invocation() {
         format!("exec {CALL}\n"),
         format!("bash \\\n    {CALL}\n"),
         format!("env {CALL}\n"),
+        format!("env VAR=1 {CALL}\n"),
         format!("nice -n 5 {CALL}\n"),
         format!("true && {CALL}\n"),
         format!("VAR=1 {CALL}\n"),
+        format!("sudo -u user {CALL}\n"),
+        format!("/usr/bin/env {CALL}\n"),
+        format!("command {CALL}\n"),
+        format!("nohup {CALL}\n"),
+        format!("sh {CALL}\n"),
     ] {
         assert_eq!(
             component_build_step(&source),
@@ -928,12 +1047,37 @@ fn component_build_requires_an_invocation() {
         format!("# {CALL}\n"),
         format!("    # {CALL}\n"),
         format!("echo {CALL}\n"),
+        format!("printf '%s\\n' {CALL}\n"),
+        format!("cat {CALL}\n"),
+        format!("cp {CALL} somewhere\n"),
+        format!("grep -n . {CALL}\n"),
+        format!("head -1 {CALL}\n"),
+        format!("test -f {CALL}\n"),
+        format!("bash -c {CALL}\n"),
         "BUILDER=\"${REPO_ROOT}/scripts/build-component-capsule.sh\"\n".to_string(),
         "# Handoff: scripts/build-component-capsule.sh will componentize it.\n".to_string(),
         "\"${REPO_ROOT}/scripts/build-component-capsule.sh.bak\"\n".to_string(),
     ] {
         assert_eq!(component_build_step(&source), "absent", "{source}");
     }
+}
+
+#[test]
+#[should_panic(
+    expected = "field agent_host_build: record says \"scripts/build-component-capsule.sh\", tree says \"absent\"\nthe record is stale; this task does not start activations."
+)]
+fn printing_the_component_build_stales_the_record() {
+    let repo = repo_root();
+    let source = "#!/usr/bin/env bash\nset -euo pipefail\ncat \"${REPO_ROOT}/scripts/build-component-capsule.sh\"\n";
+    let tree = observe_sources(&repo, |path| {
+        if path == AGENT_HOST_BUILD {
+            Ok(source.to_string())
+        } else {
+            read(&repo, path)
+        }
+    })
+    .expect("observe the printing build fixture");
+    assert_record_matches(&repo, &read_record(&repo), &tree);
 }
 
 #[test]
@@ -1063,7 +1207,12 @@ fn unrelated_runner_manifest_keeps_the_record_current() {
 )]
 fn ambiguous_component_digest_stales_the_record() {
     let repo = repo_root();
-    let log = format!("component {} {}\n", "a".repeat(64), "b".repeat(64));
+    let log = format!(
+        "{}\ncomponent {} {}\n",
+        read(&repo, LOG_PATH).expect("LOG.md"),
+        "a".repeat(64),
+        "b".repeat(64)
+    );
     let tree = observe_sources(&repo, |path| {
         if path == LOG_PATH {
             Ok(log.clone())
@@ -1195,6 +1344,121 @@ fn markers_ignore_strings_and_comments() {
     assert_eq!(marker(source, EXPORT_MARKER), EXPORT_MARKER);
     let source = "// export!(AgentHost);\nconst TEXT: &str = \"export!(AgentHost)\";\n";
     assert_eq!(marker(source, EXPORT_MARKER), "absent");
+}
+
+#[test]
+fn bridge_entry_scans_every_standin_impl() {
+    let source = "impl StandInExtra {\n    pub fn bridge(&self, line: &str, id: &str, principal: Option<&str>) -> Result<String, String> { Ok(line.to_owned()) }\n}\nimpl StandIn {\n    pub fn bridge(&self, line: &str, id: &str, principal: Option<&str>) -> Result<String, String> { Ok(line.to_owned()) }\n}\n";
+    assert_eq!(bridge_entry(source), "bridge");
+}
+
+#[test]
+#[should_panic(
+    expected = "field bridge_entry: record says \"none\", tree says \"bridge\"\nthe record is stale; this task does not start activations."
+)]
+fn bridge_in_a_later_impl_stales_the_record() {
+    let repo = repo_root();
+    let source = format!(
+        "{}\nimpl StandIn {{ pub fn bridge(&self, line: &str, id: &str, principal: Option<&str>) -> Result<String, String> {{ Ok(line.to_owned()) }} }}\n",
+        read(&repo, BRIDGE_PATH).expect("stand-in source")
+    );
+    let tree = observe_sources(&repo, |path| {
+        if path == BRIDGE_PATH {
+            Ok(source.clone())
+        } else {
+            read(&repo, path)
+        }
+    })
+    .expect("observe the later impl fixture");
+    assert_record_matches(&repo, &read_record(&repo), &tree);
+}
+
+#[test]
+fn commented_world_decoy_is_ignored() {
+    let repo = repo_root();
+    let source = format!(
+        "// world: \"decoy\"\n{}",
+        read(&repo, AGENT_HOST_SRC).expect("agent host source")
+    );
+    let tree = observe_sources(&repo, |path| {
+        if path == AGENT_HOST_SRC {
+            Ok(source.clone())
+        } else {
+            read(&repo, path)
+        }
+    })
+    .expect("observe the commented world fixture");
+    assert_eq!(tree.agent_host_world, "product-capsule-v1");
+    assert_record_matches(&repo, &read_record(&repo), &tree);
+}
+
+#[test]
+#[should_panic(
+    expected = "field agent_host_world: record says \"product-capsule-v1\", tree says \"decoy\"\nthe record is stale; this task does not start activations."
+)]
+fn changed_world_stales_the_record() {
+    let repo = repo_root();
+    let source = read(&repo, AGENT_HOST_SRC)
+        .expect("agent host source")
+        .replace("world: \"product-capsule-v1\"", "world: \"decoy\"");
+    let tree = observe_sources(&repo, |path| {
+        if path == AGENT_HOST_SRC {
+            Ok(source.clone())
+        } else {
+            read(&repo, path)
+        }
+    })
+    .expect("observe the changed world fixture");
+    assert_record_matches(&repo, &read_record(&repo), &tree);
+}
+
+#[test]
+fn record_mutations_fail_the_shared_assertion() {
+    let repo = repo_root();
+    let tree = observe(&repo).expect("observe the tree");
+    let record = read_record(&repo);
+    let mutations = [
+        ("bridge_entry", "planted-not-a-function"),
+        (
+            "component_sha256",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        ),
+        ("component_artifact", "lab/two-capsule-run/README.md"),
+        ("agent_host_component", "planted-not-a-component"),
+        ("agent_host_world", "planted-world"),
+        ("agent_host_entrypoint", "planted.component.wasm"),
+        ("agent_host_build", "planted-build.sh"),
+        (
+            "agent_host_lifecycle_entry",
+            "impl exports::elastos::bus::lifecycle::Guest for Planted",
+        ),
+        ("agent_host_run", "fn run() -> Result<(), planted::Error>"),
+        ("agent_host_export", "export!(Planted)"),
+        (
+            "core_module_lab_cid",
+            "lab-cid:sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        ),
+        ("falsify_command", "planted-command"),
+    ];
+    for (field, value) in mutations {
+        let planted = with_field(&record, field, value);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_record_matches(&repo, &planted, &tree)
+        }));
+        let payload = outcome
+            .err()
+            .unwrap_or_else(|| panic!("mutation {field} did not fail discovery"));
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|text| text.to_string()))
+            .unwrap_or_default();
+        assert!(
+            message.contains(&format!("field {field}")),
+            "mutation {field}: {message}"
+        );
+        println!("mutation {field}={value}: {message}");
+    }
 }
 
 #[test]
