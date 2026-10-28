@@ -879,11 +879,16 @@ fn wait_for_terminal(
 ///
 /// `operation_row_names` reads the Operation cells in order. The cut for
 /// `parse_request_operation_names` runs from the `fn parse_request(` line to
-/// the next function, and its `match op` arms are the quoted strings in
-/// source order; the one `other =>` arm is the `unsupported` row. A missing
-/// `fn parse_request`, a missing `match op`, an arm that is neither a quoted
-/// string nor `other =>`, a second `other =>`, and a missing `other =>` each
-/// refuse with their own `parse_request` reason.
+/// the next function. It requires exactly one `match op {` in the cut, so a
+/// commented copy refuses as a second match. The arms are the lines after
+/// that brace, and the brace must end its line: a line that carries text
+/// after it refuses. Each arm line holds one plain quoted string followed by
+/// `=>`, or the one `other =>`; that arm is the `unsupported` row. A missing
+/// `fn parse_request`, a missing `match op`, more than one `match op {`, an
+/// arm on the `match op {` line, an arm that is not a plain quoted string
+/// followed by `=>` and not `other =>`, an arm line with more than one `=>`,
+/// a missing closing quote, a second `other =>`, and a missing `other =>`
+/// each refuse with their own `parse_request` reason.
 /// `operation_rows_match_parse_request` requires the same names in the same
 /// order on the real section and on in-memory strings: an extra arm, a
 /// missing arm, a swap, an extra trailing row and a missing trailing row each
@@ -1074,12 +1079,23 @@ fn operations_section_cites_existing_tests() {
             offset += line.len() + 1;
         }
         let cut = &source[start..start + cut_len];
-        let Some(match_at) = cut.find("match op {") else {
+        let mut matches = cut.match_indices("match op {");
+        let Some((match_at, _)) = matches.next() else {
             return Err("parse_request: the cut has no `match op`".to_string());
         };
+        if matches.next().is_some() {
+            return Err("parse_request: the cut has more than one `match op`".to_string());
+        }
+        let after_brace = &cut[match_at + "match op {".len()..];
+        let opening = after_brace.lines().next().unwrap_or("").trim();
+        if !opening.is_empty() {
+            return Err(format!(
+                "parse_request: the `match op {{` line carries `{opening}` after the brace"
+            ));
+        }
         let mut names = Vec::new();
         let mut other_arms = 0;
-        for line in cut[match_at..].lines().skip(1) {
+        for line in after_brace.lines().skip(1) {
             let arm = line.trim();
             if arm.starts_with('}') {
                 break;
@@ -1413,63 +1429,95 @@ fn operations_section_cites_existing_tests() {
     let unsupported_then_init = "| Operation | Inputs | Outputs | Right | Effect | rule | Linux |\n| --- | --- | --- | --- | --- | --- | --- |\n| unsupported | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n| init | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n";
     let swapped = operation_rows_match_parse_request(unsupported_then_init, short_source)
         .expect_err("a swapped row order must fail");
-    assert!(
-        swapped.contains("init") && swapped.contains("unsupported"),
-        "{swapped}"
+    assert_eq!(
+        swapped,
+        "operation row `unsupported` has no partner: the parse_request arm there is `init`"
     );
     let init_then_status = "| Operation | Inputs | Outputs | Right | Effect | rule | Linux |\n| --- | --- | --- | --- | --- | --- | --- |\n| init | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n| status | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n";
     let missing_arm = operation_rows_match_parse_request(init_then_status, short_source)
         .expect_err("a row with no arm must fail");
-    assert!(missing_arm.contains("unsupported"), "{missing_arm}");
+    assert_eq!(
+        missing_arm,
+        "operation row `status` has no partner: the parse_request arm there is `unsupported`"
+    );
     let extra_arm_source = "pub fn parse_request(line: &str) -> Result<Envelope, Fault> {\n    let value = parse(line)?;\n    let operation = match op {\n        \"init\" => Operation::Init,\n        \"ping\" => Operation::Ping,\n        other => Operation::Unsupported(other.to_string()),\n    };\n    Ok(Envelope { operation, value })\n}\n";
     let extra_arm = operation_rows_match_parse_request(init_then_unsupported, extra_arm_source)
         .expect_err("an arm with no row must fail");
-    assert!(extra_arm.contains("ping"), "{extra_arm}");
+    assert_eq!(
+        extra_arm,
+        "operation row `unsupported` has no partner: the parse_request arm there is `ping`"
+    );
     let extra_trailing_row = "| Operation | Inputs | Outputs | Right | Effect | rule | Linux |\n| --- | --- | --- | --- | --- | --- | --- |\n| init | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n| unsupported | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n| status | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n";
     let extra_row = operation_rows_match_parse_request(extra_trailing_row, short_source)
         .expect_err("a trailing row with no arm must fail");
-    assert!(extra_row.contains("status"), "{extra_row}");
+    assert_eq!(extra_row, "operation row `status` has no parse_request arm");
     let missing_trailing_row = "| Operation | Inputs | Outputs | Right | Effect | rule | Linux |\n| --- | --- | --- | --- | --- | --- | --- |\n| init | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n";
     let missing_row = operation_rows_match_parse_request(missing_trailing_row, short_source)
         .expect_err("a trailing arm with no row must fail");
-    assert!(missing_row.contains("unsupported"), "{missing_row}");
+    assert_eq!(
+        missing_row,
+        "parse_request arm `unsupported` has no operation row"
+    );
     let no_signature =
         operation_rows_match_parse_request(init_then_unsupported, "fn other_reader() {}\n")
             .expect_err("a source with no parse_request must fail");
-    assert!(
-        no_signature.contains("parse_request") && no_signature.contains("no `fn parse_request`"),
-        "{no_signature}"
+    assert_eq!(
+        no_signature,
+        "parse_request: the source has no `fn parse_request`"
     );
     let no_match_op = "fn parse_request(line: &str) {\n    let value = parse(line);\n}\n";
     let no_match = operation_rows_match_parse_request(init_then_unsupported, no_match_op)
         .expect_err("a cut with no match op must fail");
-    assert!(
-        no_match.contains("parse_request") && no_match.contains("no `match op`"),
-        "{no_match}"
+    assert_eq!(no_match, "parse_request: the cut has no `match op`");
+    let commented_match_source = "fn parse_request(line: &str) -> Result<Envelope, Fault> {\n    let value = parse(line)?;\n    /*\n    let operation = match op {\n        \"init\" => Operation::Init,\n        other => Operation::Unsupported(other.to_string()),\n    };\n    */\n    let operation = match op {\n        \"init\" => Operation::Init,\n        \"ping\" => ProviderOperation::Status,\n        other => Operation::Unsupported(other.to_string()),\n    };\n    Ok(Envelope { operation, value })\n}\n";
+    let commented_match =
+        operation_rows_match_parse_request(init_then_unsupported, commented_match_source)
+            .expect_err("a commented copy of the match must refuse");
+    assert_eq!(
+        commented_match,
+        "parse_request: the cut has more than one `match op`"
+    );
+    let opening_line_arm_source = "fn parse_request(line: &str) -> Result<Envelope, Fault> {\n    let value = parse(line)?;\n    let operation = match op { \"ping\" => ProviderOperation::Status,\n        \"init\" => Operation::Init,\n        other => Operation::Unsupported(other.to_string()),\n    };\n    Ok(Envelope { operation, value })\n}\n";
+    let opening_line_arm =
+        operation_rows_match_parse_request(init_then_unsupported, opening_line_arm_source)
+            .expect_err("an arm on the match op line must refuse");
+    assert_eq!(
+        opening_line_arm,
+        "parse_request: the `match op {` line carries `\"ping\" => ProviderOperation::Status,` after the brace"
     );
     let unquoted_arm = "fn parse_request(line: &str) {\n    match op {\n        \"init\" => Operation::Init,\n        _ => Operation::Unsupported(op.to_string()),\n    };\n}\n";
     let unquoted = operation_rows_match_parse_request(init_then_unsupported, unquoted_arm)
         .expect_err("an unquoted arm must fail");
-    assert!(
-        unquoted.contains("parse_request") && unquoted.contains("not a quoted string"),
-        "{unquoted}"
+    assert_eq!(
+        unquoted,
+        "parse_request: arm `_ => Operation::Unsupported(op.to_string()),` is not a quoted string and not `other =>`"
+    );
+    let unclosed_arm = "fn parse_request(line: &str) {\n    match op {\n        \"init => Operation::Init,\n        other => Operation::Unsupported(op.to_string()),\n    };\n}\n";
+    let unclosed = operation_rows_match_parse_request(init_then_unsupported, unclosed_arm)
+        .expect_err("an arm with no closing quote must fail");
+    assert_eq!(
+        unclosed,
+        "parse_request: arm `\"init => Operation::Init,` has no closing quote"
     );
     let two_other_arms = "fn parse_request(line: &str) {\n    match op {\n        \"init\" => Operation::Init,\n        other => Operation::Unsupported(other.to_string()),\n        other => Operation::Unsupported(other.to_string()),\n    };\n}\n";
     let duplicate_other = operation_rows_match_parse_request(init_then_unsupported, two_other_arms)
         .expect_err("a second other arm must fail");
-    assert!(
-        duplicate_other.contains("parse_request") && duplicate_other.contains("second `other =>`"),
-        "{duplicate_other}"
+    assert_eq!(
+        duplicate_other,
+        "parse_request: the `match op` has a second `other =>` arm"
     );
     assert_ne!(no_signature, no_match);
-    assert_ne!(no_match, unquoted);
-    assert_ne!(unquoted, duplicate_other);
+    assert_ne!(no_match, commented_match);
+    assert_ne!(commented_match, opening_line_arm);
+    assert_ne!(opening_line_arm, unquoted);
+    assert_ne!(unquoted, unclosed);
+    assert_ne!(unclosed, duplicate_other);
     let no_other_arm = "fn parse_request(line: &str) {\n    match op {\n        \"init\" => Operation::Init,\n    };\n}\n";
     let missing_other = operation_rows_match_parse_request(missing_trailing_row, no_other_arm)
         .expect_err("a match op with no other arm must fail");
-    assert!(
-        missing_other.contains("parse_request") && missing_other.contains("no `other =>`"),
-        "{missing_other}"
+    assert_eq!(
+        missing_other,
+        "parse_request: the `match op` has no `other =>` arm"
     );
     assert_ne!(duplicate_other, missing_other);
 
