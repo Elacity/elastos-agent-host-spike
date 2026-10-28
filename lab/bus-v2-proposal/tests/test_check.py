@@ -27,6 +27,9 @@ OWNED_REL = "examples/agent-host/src/lib.rs"
 OWNED_NUMBER = 3754
 OWNED_SPAN = "examples/agent-host/src/lib.rs:3754"
 OWNED_QUOTE = "/// The one place a task journal lives. The guest names only `Users/self`."
+NEXT_NUMBER = 3755
+NEXT_SPAN = "examples/agent-host/src/lib.rs:3755"
+NEXT_QUOTE = "/// The Runtime scopes that to the launching person."
 
 
 class CitationCheckTests(unittest.TestCase):
@@ -96,19 +99,23 @@ class CitationCheckTests(unittest.TestCase):
         got = check.problems(self._draft(body, files))
         assert got == [expected], expected
 
-    def _source(self, quote):
-        """A committed file whose line 3754 is QUOTE."""
-        rows = ["// filler"] * (OWNED_NUMBER - 1) + [quote, "// tail"]
+    def _source(self, quote, following=NEXT_QUOTE):
+        """A committed file whose line 3754 is QUOTE and line 3755 is FOLLOWING."""
+        rows = ["// filler"] * (OWNED_NUMBER - 1) + [quote]
+        if following is not None:
+            rows.append(following)
         return ("\n".join(rows) + "\n").encode("utf-8")
 
-    def _quote_body(self, quote):
+    def _quote_body(self, quote, following=None):
         """A draft that cites the owned span and indents QUOTE below it."""
-        return (
+        body = (
             "`" + OWNED_SPAN + "` states that the guest names only `Users/self`.\n"
             "\n"
             "    " + quote + "\n"
-            "\n"
         )
+        if following is not None:
+            body += "    " + following + "\n"
+        return body + "\n"
 
     def _caught(self, global_name, planted, named_test, prefix, label):
         named_test()
@@ -121,6 +128,22 @@ class CitationCheckTests(unittest.TestCase):
         finally:
             setattr(check, global_name, original)
         print(label)
+
+    def _pinned_reads(self, body, files):
+        """Return the problems and the numbers read from the pinned commit."""
+        reads = []
+        original = check.pinned_line
+
+        def record(root, sha, rel, number):
+            reads.append(number)
+            return original(root, sha, rel, number)
+
+        try:
+            check.pinned_line = record
+            got = check.problems(self._draft(body, files))
+        finally:
+            check.pinned_line = original
+        return got, reads
 
     def test_absent_draft_is_refused(self):
         tmp = tempfile.TemporaryDirectory()
@@ -245,6 +268,88 @@ class CitationCheckTests(unittest.TestCase):
         (root / OWNED_REL).write_bytes(self._source(OWNED_QUOTE))
         self.assertEqual(check.problems(root), [expected])
 
+    def test_next_quoted_line_match_ignores_the_worktree_file(self):
+        root = self._draft(
+            self._quote_body(OWNED_QUOTE, NEXT_QUOTE),
+            {OWNED_REL: self._source(OWNED_QUOTE)},
+        )
+        self.assertEqual(check.problems(root), [])
+        (root / OWNED_REL).write_bytes(
+            self._source(OWNED_QUOTE, "// edited in the worktree")
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_next_quoted_line_mismatch_is_refused(self):
+        expected = "refuse: quoted line does not match " + NEXT_SPAN
+        root = self._draft(
+            self._quote_body(OWNED_QUOTE, NEXT_QUOTE + "x"),
+            {OWNED_REL: self._source(OWNED_QUOTE)},
+        )
+        self.assertEqual(check.problems(root), [expected])
+        (root / OWNED_REL).write_bytes(
+            self._source(OWNED_QUOTE, "// edited in the worktree")
+        )
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_next_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        expected = "refuse: quoted line is not in the pinned commit: " + NEXT_SPAN
+        root = self._draft(
+            self._quote_body(OWNED_QUOTE, NEXT_QUOTE),
+            {OWNED_REL: self._source(OWNED_QUOTE, following=None)},
+        )
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_short_pinned_file_refuses_the_owned_line_only(self):
+        expected = "refuse: quoted line is not in the pinned commit: " + OWNED_SPAN
+        short = ("// filler\n" * 10).encode("utf-8")
+        root = self._draft(
+            self._quote_body(OWNED_QUOTE, NEXT_QUOTE), {OWNED_REL: short}
+        )
+        (root / OWNED_REL).write_bytes(self._source(OWNED_QUOTE))
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_owned_line_mismatch_adds_no_next_refusal(self):
+        expected = "refuse: quoted line does not match " + OWNED_SPAN
+        root = self._draft(
+            self._quote_body(OWNED_QUOTE + "x", NEXT_QUOTE + "y"),
+            {OWNED_REL: self._source(OWNED_QUOTE)},
+        )
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_owned_line_refusal_skips_the_next_line_read(self):
+        got, reads = self._pinned_reads(
+            self._quote_body(OWNED_QUOTE + "x", NEXT_QUOTE),
+            {OWNED_REL: self._source(OWNED_QUOTE)},
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + OWNED_SPAN])
+        self.assertEqual(reads, [OWNED_NUMBER])
+
+    def test_absent_next_quote_skips_the_next_line_read(self):
+        got, reads = self._pinned_reads(
+            self._quote_body(OWNED_QUOTE),
+            {OWNED_REL: self._source(OWNED_QUOTE)},
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [OWNED_NUMBER])
+
+    def test_next_quote_refusal_waits_for_a_known_pin(self):
+        body = self._quote_body(OWNED_QUOTE, NEXT_QUOTE + "x")
+        files = {OWNED_REL: self._source(OWNED_QUOTE)}
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+        bad_pin = "Pinned commit: HEAD\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(bad_pin, files)),
+            ["refuse: pinned commit is not one 40-hex commit"],
+        )
+        unknown = "Pinned commit: " + "f" * 40 + "\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(unknown, files, commit=True)),
+            ["refuse: pinned commit is not a commit: " + "f" * 40],
+        )
+
     def test_two_quoted_spans_are_refused(self):
         expected = "refuse: quoted line is not one line: " + OWNED_SPAN
         body = (
@@ -303,11 +408,16 @@ class CitationCheckTests(unittest.TestCase):
         if text is None:
             self.skipTest("no draft in this worktree")
         self.assertEqual(check.owned_quote(text), OWNED_QUOTE)
+        self.assertEqual(check.next_owned_quote(text), NEXT_QUOTE)
         sha = check.pin_sha(text)
         self.assertIsNotNone(sha)
         self.assertEqual(
             check.pinned_line(root, sha, OWNED_REL, OWNED_NUMBER),
             OWNED_QUOTE,
+        )
+        self.assertEqual(
+            check.pinned_line(root, sha, OWNED_REL, NEXT_NUMBER),
+            NEXT_QUOTE,
         )
 
     def test_falsifier_missing_path_is_caught(self):
@@ -398,6 +508,15 @@ class CitationCheckTests(unittest.TestCase):
             self.test_quoted_line_mismatch_is_refused,
             "refuse: quoted line does not match",
             "CAUGHT quoted-line",
+        )
+
+    def test_falsifier_next_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_next_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT next-quoted-line",
         )
 
     def test_worktree_root_contains_checker(self):
