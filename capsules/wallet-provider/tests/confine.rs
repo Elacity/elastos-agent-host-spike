@@ -6642,6 +6642,465 @@ fn operations_table_citation_problems(
     problems
 }
 
+/// The one Right cell value a row uses when its operation needs no declared
+/// right.
+const NO_DECLARED_RIGHT: &str = "none: needs no declared right";
+
+/// The one Linux cell value every operations row uses in this lab.
+const LINUX_STATUS: &str = "designed, not enforced";
+
+/// The two sides a row whose Right is a declared right cites in its macOS cell.
+const PERMITTED_SIDE: &str = "permitted:";
+const OUTSIDE_SIDE: &str = "nearest outside refused:";
+
+/// The one dispatch arm whose name expands to one row per contract kind.
+const WALLET_CONTRACT_ARM: &str = "wallet_contract";
+
+/// The one `handle` arm type both providers match on.
+const REQUEST_ARM: &str = "Request::";
+
+/// The one contract operation type wallet's dispatch expands.
+const WALLET_OPERATION_ARM: &str = "WalletProviderOperationV2::";
+
+/// One operations table row, reduced to the cells the row check reads.
+struct OperationsRow {
+    operation: String,
+    right: String,
+    macos: String,
+    linux: String,
+}
+
+/// The one first cell of an operations table's header line.
+const OPERATION_HEADER: &str = "Operation";
+
+/// Every header cell, in the order used to read body cells.
+const TABLE_HEADER: [&str; 7] = [
+    OPERATION_HEADER,
+    "Inputs",
+    "Outputs",
+    "Right",
+    "Effect",
+    "macOS rule and test",
+    "Linux",
+];
+
+/// The one cell count every line of an operations table holds.
+const TABLE_CELLS: usize = TABLE_HEADER.len();
+
+/// Whether `line` can start a Markdown table. Outer bars are optional.
+fn is_table_line(line: &str) -> bool {
+    line.contains('|')
+}
+
+/// The trimmed cells of one Markdown table line, without its outer bars.
+fn table_cells(line: &str) -> Vec<&str> {
+    let mut cells: Vec<&str> = line.trim().split('|').collect();
+    if cells.first() == Some(&"") {
+        cells.remove(0);
+    }
+    if cells.last() == Some(&"") {
+        cells.pop();
+    }
+    cells.into_iter().map(str::trim).collect()
+}
+
+/// Whether `cells` are the table's separator line: `TABLE_CELLS` dashes-only
+/// cells, with at least one cell that is not empty.
+fn is_separator_cells(cells: &[&str]) -> bool {
+    cells.len() == TABLE_CELLS
+        && cells
+            .iter()
+            .all(|cell| cell.chars().all(|character| character == '-'))
+        && cells.iter().any(|cell| !cell.is_empty())
+}
+
+/// Every data row of one operations table section, in table order, and every
+/// row that cannot be read.
+///
+/// The first line containing `|` is the complete `TABLE_HEADER`, and the next
+/// nonempty line is the separator. Every later nonempty line is read as a row,
+/// including a repeated header, an indented row and a row with either or both
+/// outer bars omitted. Short rows are refused even when they hold no bar.
+/// Every line holds the table's `TABLE_CELLS` cells. A section with no table
+/// line, a first line that is not the header, a second line that would be a row
+/// and a header with no second line are refusals that name the document and the
+/// line; so is a row with any other cell count.
+fn operations_table_rows(
+    document_name: &str,
+    section: &str,
+) -> Result<(Vec<OperationsRow>, Vec<String>), Vec<String>> {
+    let mut lines = section
+        .lines()
+        .skip_while(|line| !is_table_line(line))
+        .filter(|line| !line.trim().is_empty());
+    let Some(header) = lines.next() else {
+        return Err(vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} holds no table line"
+        )]);
+    };
+    let header_cells = table_cells(header);
+    if header_cells != TABLE_HEADER {
+        return Err(vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} table line 1 is not the header \
+             {OPERATION_HEADER} over {TABLE_CELLS} cells: {}",
+            header.trim()
+        )]);
+    }
+    let Some(separator) = lines.next() else {
+        return Err(vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} table line 1 is the header and \
+             the table holds no separator line"
+        )]);
+    };
+    if !is_separator_cells(&table_cells(separator)) {
+        return Err(vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} table line 2 is not the \
+             separator of {TABLE_CELLS} dash cells: {}",
+            separator.trim()
+        )]);
+    }
+    let mut rows = Vec::new();
+    let mut problems = Vec::new();
+    for line in lines {
+        let cells = table_cells(line);
+        if cells.len() != TABLE_CELLS {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds {} cells, \
+                 and every row holds {TABLE_CELLS}",
+                cells.first().copied().unwrap_or_default(),
+                cells.len()
+            ));
+            continue;
+        }
+        rows.push(OperationsRow {
+            operation: cells[0].to_string(),
+            right: cells[3].to_string(),
+            macos: cells[5].to_string(),
+            linux: cells[6].to_string(),
+        });
+    }
+    Ok((rows, problems))
+}
+
+/// `variant` in snake_case, by the rule the wire protocol uses
+/// (`#[serde(rename_all = "snake_case")]`): an underscore before an upper-case
+/// letter after the first character, then ASCII lower case.
+fn variant_snake_case(variant: &str) -> String {
+    let mut name = String::with_capacity(variant.len());
+    for (index, character) in variant.char_indices() {
+        if index > 0 && character.is_uppercase() {
+            name.push('_');
+        }
+        name.push(character.to_ascii_lowercase());
+    }
+    name
+}
+
+/// Every `arm_type` variant the body of `signature` in `source` names, in body
+/// order, or `None` when `source` holds no such signature line.
+///
+/// The body starts after the signature line and ends at the next line that
+/// starts with `    fn `, or at the end of the file.
+fn dispatch_arm_variants(source: &str, signature: &str, arm_type: &str) -> Option<Vec<String>> {
+    let mut body = false;
+    let mut variants = Vec::new();
+    for line in source.lines() {
+        if !body {
+            if line.trim_start().starts_with(signature) {
+                body = true;
+            }
+            continue;
+        }
+        if line.starts_with("    fn ") {
+            break;
+        }
+        let mut rest = line;
+        while let Some(at) = rest.find(arm_type) {
+            let tail = &rest[at + arm_type.len()..];
+            let variant: String = tail
+                .chars()
+                .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+                .collect();
+            if !variant.is_empty() {
+                variants.push(variant);
+            }
+            rest = tail;
+        }
+    }
+    body.then_some(variants)
+}
+
+/// Every problem with one table's row set, each naming the document and the row
+/// or the arm that has no partner.
+///
+/// The row set must equal the operations `provider_source` answers. Every
+/// `Request::<Variant>` arm of `fn handle` is one name, and the names of the
+/// ordinary arms appear in the table in dispatch order. Where `fn handle`
+/// answers `wallet_contract`, every `WalletProviderOperationV2::<Variant>` arm
+/// of `fn dispatch_wallet_operation` is one `wallet_contract <kind>` row, and
+/// those rows follow the ordinary rows in their own dispatch order. Each arm
+/// matches exactly one row. A name reaches snake_case by
+/// `variant_snake_case`. The contract enum is the only list of kinds, so a new
+/// kind fails here until its row exists.
+fn row_set_problems(
+    document_name: &str,
+    rows: &[OperationsRow],
+    provider_source: &str,
+    provider_path: &Path,
+) -> Vec<String> {
+    let Some(arms) = dispatch_arm_variants(provider_source, "fn handle(", REQUEST_ARM) else {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set cannot be checked \
+             because {} holds no fn handle",
+            provider_path.display()
+        )];
+    };
+    let arm_names: Vec<String> = arms.iter().map(|arm| variant_snake_case(arm)).collect();
+    let answers_contract = arm_names.iter().any(|name| name == WALLET_CONTRACT_ARM);
+    let mut expected: Vec<String> = arm_names
+        .into_iter()
+        .filter(|name| name != WALLET_CONTRACT_ARM)
+        .collect();
+    if answers_contract {
+        let Some(kinds) = dispatch_arm_variants(
+            provider_source,
+            "fn dispatch_wallet_operation(",
+            WALLET_OPERATION_ARM,
+        ) else {
+            return vec![format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set cannot be checked \
+                 because {} answers {WALLET_CONTRACT_ARM} and holds no \
+                 fn dispatch_wallet_operation",
+                provider_path.display()
+            )];
+        };
+        for kind in &kinds {
+            expected.push(format!(
+                "{WALLET_CONTRACT_ARM} {}",
+                variant_snake_case(kind)
+            ));
+        }
+    }
+    let observed: Vec<&str> = rows.iter().map(|row| row.operation.as_str()).collect();
+    let mut unmatched_rows = observed.clone();
+    let mut problems = Vec::new();
+    for name in &expected {
+        if let Some(index) = unmatched_rows.iter().position(|row| *row == name) {
+            unmatched_rows.remove(index);
+        } else {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set: the arm {name} of \
+                 {} has no row",
+                provider_path.display()
+            ));
+        }
+    }
+    for name in unmatched_rows {
+        if expected.iter().any(|expected| expected == name) {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row {name} has \
+                 more copies than matching arms in {}",
+                provider_path.display()
+            ));
+        } else {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row {name} has \
+                 no arm in {}",
+                provider_path.display()
+            ));
+        }
+    }
+    // Pair each occurrence before comparing order, so missing and surplus rows
+    // each get their own reason, without also reporting their shifted positions.
+    if problems.is_empty() {
+        problems.extend(row_set_order_problems(
+            document_name,
+            &expected,
+            &observed,
+            provider_path,
+        ));
+    }
+    problems
+}
+
+/// Compare the full row sequence after `row_set_problems` pairs every
+/// occurrence: ordinary arms in dispatch order, then kinds in dispatch order.
+fn row_set_order_problems(
+    document_name: &str,
+    expected: &[String],
+    observed: &[&str],
+    provider_path: &Path,
+) -> Vec<String> {
+    if expected
+        .iter()
+        .map(String::as_str)
+        .eq(observed.iter().copied())
+    {
+        return Vec::new();
+    }
+    let is_kind = |name: &str| name.starts_with(&format!("{WALLET_CONTRACT_ARM} "));
+    let mut problems = Vec::new();
+    if let Some(first_kind) = observed.iter().position(|name| is_kind(name)) {
+        if let Some(last_arm) = observed
+            .iter()
+            .rposition(|name| expected.iter().any(|expected| expected == name) && !is_kind(name))
+        {
+            if last_arm > first_kind {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row {} \
+                     comes after the {WALLET_CONTRACT_ARM} rows, and the contract rows follow the \
+                     ordinary arms of {}",
+                    observed[last_arm],
+                    provider_path.display()
+                ));
+                return problems;
+            }
+        }
+    }
+    if let Some((index, _)) = observed
+        .iter()
+        .enumerate()
+        .find(|(index, found)| expected[*index] != **found)
+    {
+        problems.push(format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row {} comes \
+             where {} answers {}, and the table keeps the dispatch order",
+            observed[index],
+            provider_path.display(),
+            expected[index]
+        ));
+    }
+    problems
+}
+
+/// Whether `right` is exactly `NO_DECLARED_RIGHT` or one backtick span holding
+/// an id `CONTRACT_RIGHTS` or `PLATFORM_BASELINE_IDS` declares.
+fn declared_right_cell(right: &str) -> bool {
+    if right == NO_DECLARED_RIGHT {
+        return true;
+    }
+    right
+        .strip_prefix('`')
+        .and_then(|inner| inner.strip_suffix('`'))
+        .is_some_and(|id| CONTRACT_RIGHTS.contains(&id) || PLATFORM_BASELINE_IDS.contains(&id))
+}
+
+/// Every problem with one row's Right value, naming the document, the row and
+/// the value.
+fn right_vocabulary_problems(document_name: &str, row: &OperationsRow) -> Vec<String> {
+    if declared_right_cell(&row.right) {
+        return Vec::new();
+    }
+    vec![format!(
+        "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the Right cell {}, which \
+         is neither {NO_DECLARED_RIGHT} nor one declared contract id",
+        row.operation, row.right
+    )]
+}
+
+/// Every problem with the two sides one row cites, naming the document, the row
+/// and the missing or extra side.
+///
+/// A row whose Right is a declared right cites `PERMITTED_SIDE` and
+/// `OUTSIDE_SIDE` in its macOS cell. A `none:` row cites neither. A row whose
+/// Right is neither value is left to `right_vocabulary_problems`.
+fn right_side_problems(document_name: &str, row: &OperationsRow) -> Vec<String> {
+    if !declared_right_cell(&row.right) {
+        return Vec::new();
+    }
+    let mut problems = Vec::new();
+    for (side, cited) in [
+        (PERMITTED_SIDE, row.macos.contains(PERMITTED_SIDE)),
+        (OUTSIDE_SIDE, row.macos.contains(OUTSIDE_SIDE)),
+    ] {
+        if row.right == NO_DECLARED_RIGHT {
+            if cited {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} is \
+                     {NO_DECLARED_RIGHT} and cites {side}",
+                    row.operation
+                ));
+            }
+        } else if !cited {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the Right {} \
+                 and does not cite {side}",
+                row.operation, row.right
+            ));
+        }
+    }
+    problems
+}
+
+/// Every problem with one row's Linux cell, naming the document, the row and
+/// the value.
+fn linux_status_problems(document_name: &str, row: &OperationsRow) -> Vec<String> {
+    if row.linux == LINUX_STATUS {
+        return Vec::new();
+    }
+    vec![format!(
+        "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the Linux cell {}, and \
+         every Linux cell is {LINUX_STATUS}",
+        row.operation, row.linux
+    )]
+}
+
+/// Every problem with one operations table's rows, each naming the document,
+/// the row (or the arm) and the value.
+///
+/// The section under `OPERATIONS_HEADING` must hold a table whose first line is
+/// complete `TABLE_HEADER` and whose second is the dash separator. Every later
+/// nonempty line is a row, including repeated headers and rows with leading
+/// whitespace or omitted outer bars. Then the section must hold four things. Its row set,
+/// in table order, must equal the operations `<provider_dir>/src/main.rs`
+/// answers through `fn handle`, with a `wallet_contract` arm expanded to one
+/// `wallet_contract <kind>` row per `fn dispatch_wallet_operation` arm. Each
+/// Right cell must be exactly `NO_DECLARED_RIGHT` or one backtick span holding
+/// an id `CONTRACT_RIGHTS` or `PLATFORM_BASELINE_IDS` declares. A row whose
+/// Right is a declared right must cite `permitted:` and `nearest outside
+/// refused:` in its macOS cell, and a `none:` row must cite neither. Every
+/// Linux cell must be `LINUX_STATUS`.
+///
+/// Honesty limits: rule 1 reads the dispatch arms as text, so it shows the row
+/// set matches the arms, not that every arm is reachable; and it says nothing
+/// about the Outputs keys, which stay held in BACKLOG item 21.
+fn operations_table_row_problems(
+    document_name: &str,
+    document: &str,
+    provider_dir: &Path,
+) -> Vec<String> {
+    let section = match section_under_one_heading(document_name, document, OPERATIONS_HEADING) {
+        Ok(section) => section,
+        Err(problems) => return problems,
+    };
+    let (rows, mut problems) = match operations_table_rows(document_name, &section) {
+        Ok(read) => read,
+        Err(problems) => return problems,
+    };
+    let provider_path = provider_dir.join("src").join("main.rs");
+    match fs::read_to_string(&provider_path) {
+        Ok(source) => {
+            problems.extend(row_set_problems(
+                document_name,
+                &rows,
+                &source,
+                &provider_path,
+            ));
+        }
+        Err(err) => problems.push(format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set cannot be checked \
+             because {} is not readable: {err}",
+            provider_path.display()
+        )),
+    }
+    for row in &rows {
+        problems.extend(right_vocabulary_problems(document_name, row));
+        problems.extend(right_side_problems(document_name, row));
+        problems.extend(linux_status_problems(document_name, row));
+    }
+    problems
+}
+
 /// The top-level allow forms of `profile`, in profile order. This is the one
 /// selector, used by the removal check and the declared-rights check (P10).
 fn allow_forms(profile: &str) -> Vec<String> {
@@ -7617,6 +8076,45 @@ fn every_operations_table_cites_existing_tests() {
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
+/// Every row of an operations table matches its provider and the contract.
+///
+/// The check reads `capsules/<name>/CONFINEMENT.md` for each name in
+/// `OPERATIONS_TABLES`, cuts the section under `OPERATIONS_HEADING`, and
+/// requires four things of every row: the row set, in table order, equals the
+/// operations `capsules/<name>/src/main.rs` answers through `fn handle`, with a
+/// `wallet_contract` arm expanded to one row per `fn dispatch_wallet_operation`
+/// arm; the Right cell is exactly `none: needs no declared right` or one
+/// declared id in a backtick span; a row whose Right is a declared right cites
+/// both `permitted:` and `nearest outside refused:`, and a `none:` row cites
+/// neither; and every Linux cell is exactly `designed, not enforced`. Each
+/// fault is one line naming the document, the row (or the arm) and the value.
+/// The check reads files and starts no process, so it runs on every platform.
+///
+/// Falsifier: WP141 disables the row-set rule, so a table that omits a row or
+/// adds one passes; WP142 disables the Right-vocabulary rule, so a Right cell
+/// naming an undeclared id or `no named test shows this` passes; WP143 disables
+/// the both-sides rule, so a right row with one side and a `none:` row with a
+/// side pass; WP144 disables the Linux-status rule, so a cell naming another
+/// status passes. `operations_table_row_check_refuses_each_bad_table` catches
+/// each mutation with a bad-table fixture; this test checks the real tables.
+#[test]
+fn every_operations_table_row_matches_its_provider_and_the_contract() {
+    let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("capsules/wallet-provider must sit under capsules/");
+    let mut problems = Vec::new();
+    for name in OPERATIONS_TABLES {
+        let document =
+            read_confinement_document(capsules, name).unwrap_or_else(|err| panic!("{err}"));
+        problems.extend(operations_table_row_problems(
+            name,
+            &document,
+            &capsules.join(name),
+        ));
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
 /// The removal check reports an allow form that no entry removes, and only a
 /// complete removal counts.
 ///
@@ -8332,6 +8830,624 @@ fn operations_table_check_rejects_paths_outside_provider() {
                 escaped.display(),
                 root.display()
             )]
+        );
+    }
+}
+
+/// The operations-table fixtures' provider source: `fn handle` answers
+/// `init`, `status`, `wallet_contract` and `shutdown`, and `fn
+/// dispatch_wallet_operation` answers the one `list_accounts` kind.
+const ROW_FIXTURE_PROVIDER: &str = "\
+fn handle(&mut self, request: Request) -> Response {
+    match request {
+        Request::Init { config } => self.init(config),
+        Request::Status => self.status(),
+        Request::WalletContract { request } => self.handle_wallet_contract(request),
+        Request::Shutdown => Response::empty_ok(),
+    }
+}
+
+fn dispatch_wallet_operation(&mut self, request: &WalletProviderRequestV2) -> Response {
+    match &request.operation {
+        WalletProviderOperationV2::ListAccounts { include_revoked } => self.accounts(*include_revoked),
+    }
+}
+";
+
+/// One fixture operations row. The Inputs, Outputs and Effect cells are unread
+/// by the row check, so every row carries the same filler there.
+fn fixture_row(operation: &str, right: &str, macos: &str, linux: &str) -> String {
+    format!(
+        "| {operation} | `op` | ok: `status` | {right} | answers in memory | {macos} | {linux} |\n"
+    )
+}
+
+/// One fixture operations row whose rows are in the fixture dispatch order and
+/// whose Right, macOS and Linux cells follow all four rules.
+fn passing_fixture_row(operation: &str) -> String {
+    if operation == "init" {
+        fixture_row(
+            operation,
+            "`storage`",
+            "permitted: `tests/confine.rs::present_case` shows the write. \
+             nearest outside refused: `tests/confine.rs::present_case` shows the refusal.",
+            LINUX_STATUS,
+        )
+    } else {
+        fixture_row(
+            operation,
+            NO_DECLARED_RIGHT,
+            "`tests/confine.rs::present_case` shows the answer.",
+            LINUX_STATUS,
+        )
+    }
+}
+
+/// The operations table that passes the row check: a header, a separator and one
+/// row for each operation of `operations`, in the order given.
+fn fixture_row_document(operations: &[&str]) -> String {
+    let mut document = format!(
+        "{OPERATIONS_HEADING}\n\n| Operation | Inputs | Outputs | Right | Effect | macOS rule and \
+         test | Linux |\n| --- | --- | --- | --- | --- | --- | --- |\n"
+    );
+    for operation in operations {
+        document.push_str(&passing_fixture_row(operation));
+    }
+    document
+}
+
+/// The four operations the fixture dispatch answers, in table order: the
+/// ordinary arms of `fn handle` in dispatch order, then the one contract kind.
+const FIXTURE_OPERATIONS: [&str; 4] = [
+    "init",
+    "status",
+    "shutdown",
+    "wallet_contract list_accounts",
+];
+
+/// The row check refuses each bad table, one case per rule and sub-rule, and
+/// names the rule.
+///
+/// A temporary provider folder holds `src/main.rs` with the fixture dispatch:
+/// `fn handle` answers `init`, `status`, `wallet_contract` and `shutdown`, and
+/// `fn dispatch_wallet_operation` answers `list_accounts`. The passing table
+/// returns no problem. Rule 1 refuses a `handle` arm with no row, a row with no
+/// arm, a kind arm with no row, ordinary rows in another order and a kind row
+/// before an ordinary row. A two-kind fixture also refuses swapped kind rows,
+/// duplicate ordinary and kind rows, and equal-length rows with the wrong
+/// multiplicity. An acronym fixture requires serde's wire name. The table's
+/// complete header and separator are checked before reading positional cells.
+/// An appended row that repeats the header words, sits under leading whitespace
+/// or omits either outer bar reaches every rule. Short rows, including a row
+/// with no bars, are refused. Changed or swapped header labels are refused, and a
+/// section with no table line, a first line that is not the header, a header
+/// with no separator, a second line that would be a row and a separator with
+/// another cell count are each refused as one problem. Rule 2 refuses a Right
+/// cell that names an undeclared
+/// id and one that says `no named test shows this`. Rule 3 refuses a right row
+/// missing `permitted:`, a right row missing `nearest outside refused:` and a
+/// `none:` row citing `permitted:`. Rule 4 refuses a Linux cell that is not
+/// `designed, not enforced`, naming every row. The four `snake_case` names the
+/// contract already uses pin the helper. A missing or doubled heading stays with
+/// `section_under_one_heading`, which already refuses it once. The fixtures are
+/// a temporary directory; no process starts.
+///
+/// Falsifiers: WP141 disables the row-set rule, WP142 the Right-vocabulary
+/// rule, WP143 the both-sides rule and WP144 the Linux-status rule; this test
+/// fails on that rule's cases, because the bad table is then accepted.
+#[test]
+fn operations_table_row_check_refuses_each_bad_table() {
+    let provider = tempfile::tempdir().expect("temporary provider folder");
+    fs::create_dir_all(provider.path().join("src")).expect("fixture src folder");
+    let provider_source = provider.path().join("src/main.rs");
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source");
+
+    for (case, variant) in [
+        ("VerifyDidRecovery", "verify_did_recovery"),
+        ("VerifyBip322Proof", "verify_bip322_proof"),
+        ("ImportManagedRecoverySet", "import_managed_recovery_set"),
+        ("GetPersonaDid", "get_persona_did"),
+        ("GetDID", "get_d_i_d"),
+        ("DID", "d_i_d"),
+        ("VerifyBIP322Proof", "verify_b_i_p322_proof"),
+    ] {
+        assert_eq!(
+            variant_snake_case(case),
+            variant,
+            "{case} must reach its wire name"
+        );
+    }
+
+    let passing = fixture_row_document(&FIXTURE_OPERATIONS);
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &passing, provider.path()),
+        Vec::<String>::new(),
+        "a table that follows all four rules must pass"
+    );
+
+    // Rule 1: an arm with no row, and a kind arm with no row.
+    for (case, arm, anchor, arm_name) in [
+        (
+            "an arm with no row",
+            "        Request::Ping => self.ping(),\n",
+            "        Request::Shutdown",
+            "ping",
+        ),
+        (
+            "a kind arm with no row",
+            "        WalletProviderOperationV2::DefaultAccount {} => self.default_account(),\n",
+            "        WalletProviderOperationV2::ListAccounts",
+            "wallet_contract default_account",
+        ),
+    ] {
+        let source = ROW_FIXTURE_PROVIDER.replace(anchor, &format!("{arm}{anchor}"));
+        assert_ne!(
+            source, ROW_FIXTURE_PROVIDER,
+            "{case} must change the source"
+        );
+        fs::write(&provider_source, &source).expect("fixture provider source rewrite");
+        let problems = operations_table_row_problems("fixture-provider", &passing, provider.path());
+        assert_eq!(
+            problems.len(),
+            1,
+            "{case} must be one problem: {problems:?}"
+        );
+        assert!(
+            problems[0].contains("row set")
+                && problems[0].contains("has no row")
+                && problems[0].contains(arm_name),
+            "{case} must name the rule and the arm as {arm_name}: {}",
+            problems[0]
+        );
+    }
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    // Rule 1: a row with no arm.
+    let mut extra = fixture_row_document(&FIXTURE_OPERATIONS);
+    extra.push_str(&passing_fixture_row("ping"));
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &extra, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row ping has no \
+             arm in {}",
+            provider_source.display()
+        )],
+        "a row with no arm must be refused"
+    );
+
+    // A row that repeats the header words or sits under leading whitespace is
+    // still a body row, so no appended row hides from the four rules.
+    let clean = fixture_row_document(&FIXTURE_OPERATIONS);
+    for (case, row, row_name) in [
+        (
+            "a row that repeats the header words",
+            "| Operation | op | ok | `undeclared` | effect | permitted: | enforced |\n",
+            "Operation",
+        ),
+        (
+            "an indented row",
+            "   | ping | op | ok | `undeclared` | effect | permitted: | enforced |\n",
+            "ping",
+        ),
+    ] {
+        let document = format!("{clean}{row}");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![
+                format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row \
+                     {row_name} has no arm in {}",
+                    provider_source.display()
+                ),
+                format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {row_name} holds \
+                     the Right cell `undeclared`, which is neither {NO_DECLARED_RIGHT} nor one \
+                     declared contract id"
+                ),
+                format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {row_name} names \
+                     the Linux cell enforced, and every Linux cell is {LINUX_STATUS}"
+                ),
+            ],
+            "{case} must reach rules 1, 2 and 4"
+        );
+    }
+
+    // Markdown permits either outer bar to be omitted. Each form must expose
+    // the same extra operation, undeclared Right and invalid Linux claim.
+    for row in [
+        "phantom | op | ok | undeclared | effect | permitted: | enforced |\n",
+        "| phantom | op | ok | undeclared | effect | permitted: | enforced\n",
+        "phantom | op | ok | undeclared | effect | permitted: | enforced\n",
+    ] {
+        let document = format!("{clean}{row}");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![
+                format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row \
+                     phantom has no arm in {}",
+                    provider_source.display()
+                ),
+                format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row phantom holds \
+                     the Right cell undeclared, which is neither {NO_DECLARED_RIGHT} nor one \
+                     declared contract id"
+                ),
+                format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row phantom names \
+                     the Linux cell enforced, and every Linux cell is {LINUX_STATUS}"
+                ),
+            ],
+            "a row with optional outer bars must reach rules 1, 2 and 4: {row}"
+        );
+    }
+    assert_eq!(
+        operations_table_row_problems(
+            "fixture-provider",
+            &format!("{clean}phantom\n"),
+            provider.path()
+        ),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row phantom holds 1 cells, \
+             and every row holds {TABLE_CELLS}"
+        )],
+        "a short row with no bars must be refused instead of skipped"
+    );
+
+    // Valid headers, separators and rows also accept either optional outer bar.
+    for (omit_leading, omit_trailing) in [(true, false), (false, true), (true, true)] {
+        let document = clean
+            .lines()
+            .map(|line| {
+                let line = if omit_leading {
+                    line.strip_prefix('|').unwrap_or(line)
+                } else {
+                    line
+                };
+                if omit_trailing {
+                    line.strip_suffix('|').unwrap_or(line)
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            Vec::<String>::new(),
+            "optional outer bars must preserve a valid table"
+        );
+    }
+
+    // The table's shape is read by position, so a section that hides its rows
+    // or its header is refused instead of read as an empty table.
+    for (case, document, reason) in [
+        (
+            "a section with no table",
+            format!("{OPERATIONS_HEADING}\n\nno table here\n"),
+            format!("{OPERATIONS_HEADING} holds no table line"),
+        ),
+        (
+            "a first line that is not the header",
+            format!("{OPERATIONS_HEADING}\n\n{}", passing_fixture_row("init")),
+            format!(
+                "{OPERATIONS_HEADING} table line 1 is not the header {OPERATION_HEADER} over \
+                 {TABLE_CELLS} cells: {}",
+                passing_fixture_row("init").trim()
+            ),
+        ),
+        (
+            "a header with no separator",
+            format!(
+                "{OPERATIONS_HEADING}\n\n| Operation | Inputs | Outputs | Right | Effect | macOS \
+                 rule and test | Linux |\n"
+            ),
+            format!(
+                "{OPERATIONS_HEADING} table line 1 is the header and the table holds no \
+                 separator line"
+            ),
+        ),
+        (
+            "swapped Right and Linux header labels",
+            clean.replacen(
+                "| Right | Effect | macOS rule and test | Linux |",
+                "| Linux | Effect | macOS rule and test | Right |",
+                1,
+            ),
+            format!(
+                "{OPERATIONS_HEADING} table line 1 is not the header {OPERATION_HEADER} over \
+                 {TABLE_CELLS} cells: | Operation | Inputs | Outputs | Linux | Effect | macOS \
+                 rule and test | Right |"
+            ),
+        ),
+        (
+            "a second line that would be a row",
+            fixture_row_document(&FIXTURE_OPERATIONS).replacen(
+                "| --- | --- | --- | --- | --- | --- | --- |\n",
+                &passing_fixture_row("init"),
+                1,
+            ),
+            format!(
+                "{OPERATIONS_HEADING} table line 2 is not the separator of {TABLE_CELLS} dash \
+                 cells: {}",
+                passing_fixture_row("init").trim()
+            ),
+        ),
+        (
+            "a separator with another cell count",
+            fixture_row_document(&FIXTURE_OPERATIONS).replacen(
+                "| --- | --- | --- | --- | --- | --- | --- |\n",
+                "| --- | --- |\n",
+                1,
+            ),
+            format!(
+                "{OPERATIONS_HEADING} table line 2 is not the separator of {TABLE_CELLS} dash \
+                 cells: | --- | --- |"
+            ),
+        ),
+    ] {
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!("fixture-provider CONFINEMENT.md: {reason}")],
+            "{case} must be refused as one problem"
+        );
+    }
+
+    // Every label owns its column's meaning, including the unchecked body cells.
+    for label in [
+        "Operation",
+        "Inputs",
+        "Outputs",
+        "Right",
+        "Effect",
+        "macOS rule and test",
+        "Linux",
+    ] {
+        let document = clean.replacen(&format!("| {label} |"), "| changed |", 1);
+        assert_ne!(document, clean, "the {label} header must change");
+        let header = document.lines().nth(2).expect("fixture header line");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} table line 1 is not the \
+                 header {OPERATION_HEADER} over {TABLE_CELLS} cells: {header}"
+            )],
+            "the complete header must be checked before reading the {label} column"
+        );
+    }
+
+    let short_row = format!("{clean}| init | op | ok |\n");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &short_row, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds 3 cells, and \
+             every row holds {TABLE_CELLS}"
+        )],
+        "a row with another cell count must be refused"
+    );
+
+    // Rule 1: rows in another order, and a kind row before an ordinary row.
+    assert_eq!(
+        operations_table_row_problems(
+            "fixture-provider",
+            &fixture_row_document(&[
+                "status",
+                "init",
+                "shutdown",
+                "wallet_contract list_accounts",
+            ]),
+            provider.path()
+        ),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row status comes \
+             where {} answers init, and the table keeps the dispatch order",
+            provider_source.display()
+        )],
+        "ordinary rows out of dispatch order must be refused"
+    );
+    assert_eq!(
+        operations_table_row_problems(
+            "fixture-provider",
+            &fixture_row_document(&[
+                "wallet_contract list_accounts",
+                "init",
+                "status",
+                "shutdown",
+            ]),
+            provider.path()
+        ),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row shutdown comes \
+             after the wallet_contract rows, and the contract rows follow the ordinary arms of {}",
+            provider_source.display()
+        )],
+        "a kind row before an ordinary row must be refused"
+    );
+
+    // Rule 1: both contract kinds retain their dispatch order and multiplicity.
+    let two_kind_source = ROW_FIXTURE_PROVIDER.replace(
+        "        WalletProviderOperationV2::ListAccounts",
+        "        WalletProviderOperationV2::GetDID {} => self.get_did(),\n\
+                WalletProviderOperationV2::ListAccounts",
+    );
+    assert_ne!(two_kind_source, ROW_FIXTURE_PROVIDER);
+    fs::write(&provider_source, &two_kind_source).expect("two-kind fixture provider source");
+    let two_kind_operations = [
+        "init",
+        "status",
+        "shutdown",
+        "wallet_contract get_d_i_d",
+        "wallet_contract list_accounts",
+    ];
+    assert_eq!(
+        operations_table_row_problems(
+            "fixture-provider",
+            &fixture_row_document(&two_kind_operations),
+            provider.path()
+        ),
+        Vec::<String>::new(),
+        "two kinds in dispatch order, including serde's acronym name, must pass"
+    );
+
+    let mut swapped_kinds = two_kind_operations;
+    swapped_kinds.swap(3, 4);
+    assert_eq!(
+        operations_table_row_problems(
+            "fixture-provider",
+            &fixture_row_document(&swapped_kinds),
+            provider.path()
+        ),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row \
+             wallet_contract list_accounts comes where {} answers wallet_contract get_d_i_d, \
+             and the table keeps the dispatch order",
+            provider_source.display()
+        )],
+        "contract kinds out of dispatch order must be refused"
+    );
+
+    for (case, index) in [("the final kind row", 4), ("shutdown before the kinds", 2)] {
+        let mut duplicate = two_kind_operations.to_vec();
+        duplicate.insert(index + 1, duplicate[index]);
+        assert_eq!(
+            operations_table_row_problems(
+                "fixture-provider",
+                &fixture_row_document(&duplicate),
+                provider.path()
+            ),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row {} has \
+                 more copies than matching arms in {}",
+                duplicate[index],
+                provider_source.display()
+            )],
+            "a duplicate of {case} must be refused"
+        );
+    }
+
+    let mut replaced_kind = two_kind_operations;
+    replaced_kind[3] = replaced_kind[4];
+    assert_eq!(
+        operations_table_row_problems(
+            "fixture-provider",
+            &fixture_row_document(&replaced_kind),
+            provider.path()
+        ),
+        vec![
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the arm \
+                 wallet_contract get_d_i_d of {} has no row",
+                provider_source.display()
+            ),
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row \
+                 wallet_contract list_accounts has more copies than matching arms in {}",
+                provider_source.display()
+            ),
+        ],
+        "equal lengths with different multiplicities must be refused"
+    );
+
+    let mut wrong_acronym = two_kind_operations;
+    wrong_acronym[3] = "wallet_contract get_did";
+    assert_eq!(
+        operations_table_row_problems(
+            "fixture-provider",
+            &fixture_row_document(&wrong_acronym),
+            provider.path()
+        ),
+        vec![
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the arm \
+                 wallet_contract get_d_i_d of {} has no row",
+                provider_source.display()
+            ),
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row \
+                 wallet_contract get_did has no arm in {}",
+                provider_source.display()
+            ),
+        ],
+        "an acronym row must name the operation as serde does"
+    );
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    // Rule 2: a Right cell with an undeclared id, and one naming no test.
+    for (case, right) in [
+        ("an undeclared id", "`bound-net`"),
+        ("no named test shows this", "no named test shows this"),
+    ] {
+        let document = passing.replacen("| `storage` |", &format!("| {right} |"), 1);
+        assert_ne!(document, passing, "the fixture must hold the storage row");
+        let problems =
+            operations_table_row_problems("fixture-provider", &document, provider.path());
+        assert_eq!(
+            problems,
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds the Right \
+                 cell {right}, which is neither {NO_DECLARED_RIGHT} nor one declared contract id"
+            )],
+            "a Right cell of {case} must be refused, and rule 3 must stay quiet"
+        );
+    }
+
+    // Rule 3: one side missing from a right row, and a side on a none: row.
+    for (case, document, reason) in [
+        (
+            "a right row missing permitted:",
+            passing.replacen("permitted: ", "", 1),
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init names the Right \
+                 `storage` and does not cite {PERMITTED_SIDE}"
+            ),
+        ),
+        (
+            "a right row missing its outside side",
+            passing.replacen("nearest outside refused: ", "", 1),
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init names the Right \
+                 `storage` and does not cite {OUTSIDE_SIDE}"
+            ),
+        ),
+        (
+            "a none: row citing a side",
+            passing.replacen(
+                "| `tests/confine.rs::present_case` shows the answer. |",
+                "| permitted: `tests/confine.rs::present_case` shows the answer. |",
+                1,
+            ),
+            format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status is \
+                 {NO_DECLARED_RIGHT} and cites {PERMITTED_SIDE}"
+            ),
+        ),
+    ] {
+        assert_ne!(document, passing, "{case} must change the fixture");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![reason],
+            "{case} must be refused as one problem"
+        );
+    }
+
+    // Rule 4: a Linux cell that is not `designed, not enforced`, one per row.
+    let enforced = passing.replace(LINUX_STATUS, "enforced by Landlock");
+    assert_ne!(enforced, passing, "the fixture must name its Linux cells");
+    let problems = operations_table_row_problems("fixture-provider", &enforced, provider.path());
+    assert_eq!(
+        problems.len(),
+        FIXTURE_OPERATIONS.len(),
+        "every row must be refused once: {problems:?}"
+    );
+    for (problem, operation) in problems.iter().zip(FIXTURE_OPERATIONS.iter()) {
+        assert_eq!(
+            problem,
+            &format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {operation} names the \
+                 Linux cell enforced by Landlock, and every Linux cell is {LINUX_STATUS}"
+            ),
+            "the refusal must name the rule, the row and the value"
         );
     }
 }
