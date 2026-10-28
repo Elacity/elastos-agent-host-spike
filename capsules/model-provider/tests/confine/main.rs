@@ -1385,6 +1385,74 @@ fn operations_section_cites_existing_tests() {
         }
         Err("an unterminated string is in the region".to_string())
     }
+    /// The index after one code literal at `index`: an ordinary string, a
+    /// character literal, a byte string, or a raw string. Any other byte
+    /// returns `index` unchanged, and `string_end` is the ordinary-string end.
+    ///
+    /// A raw string and a character literal are skipped whole, so a `json!`
+    /// inside either is not a literal. A raw string starts with `r`, `br` or
+    /// `cr`, then zero or more `#`, then `"`, and closes at `"` followed by
+    /// that same number of `#`. `return`, `break` and `result` are not raw
+    /// strings. In a character literal `\'` and `\\` are one character and
+    /// the closer is `'`. An unterminated raw string and an unterminated
+    /// character name different reasons.
+    fn skip_code_literal(source: &str, index: usize) -> Result<usize, String> {
+        let bytes = source.as_bytes();
+        let Some(&first) = bytes.get(index) else {
+            return Ok(index);
+        };
+        if first == b'"' {
+            return string_end(source, index + 1);
+        }
+        if first == b'b' && bytes.get(index + 1) == Some(&b'"') {
+            return string_end(source, index + 2);
+        }
+        let character_at = if first == b'\'' {
+            Some(index + 1)
+        } else if first == b'b' && bytes.get(index + 1) == Some(&b'\'') {
+            Some(index + 2)
+        } else {
+            None
+        };
+        if let Some(mut cursor) = character_at {
+            while cursor < bytes.len() {
+                match bytes[cursor] {
+                    b'\\' => cursor += 2,
+                    b'\'' => return Ok(cursor + 1),
+                    _ => cursor += 1,
+                }
+            }
+            return Err("an unterminated character is in the region".to_string());
+        }
+        let hashes_at = if first == b'r' {
+            index + 1
+        } else if (first == b'b' || first == b'c') && bytes.get(index + 1) == Some(&b'r') {
+            index + 2
+        } else {
+            return Ok(index);
+        };
+        let mut cursor = hashes_at;
+        while bytes.get(cursor) == Some(&b'#') {
+            cursor += 1;
+        }
+        let hashes = cursor - hashes_at;
+        if bytes.get(cursor) != Some(&b'"') {
+            return Ok(index);
+        }
+        cursor += 1;
+        while cursor < bytes.len() {
+            let closes = bytes[cursor] == b'"'
+                && cursor + 1 + hashes <= bytes.len()
+                && bytes[cursor + 1..cursor + 1 + hashes]
+                    .iter()
+                    .all(|byte| *byte == b'#');
+            if closes {
+                return Ok(cursor + 1 + hashes);
+            }
+            cursor += 1;
+        }
+        Err("an unterminated raw string is in the region".to_string())
+    }
     // The first index at or after `index` that is neither whitespace nor a
     // comment.
     fn skip_space_and_comments(source: &str, mut index: usize) -> Result<usize, String> {
@@ -1414,11 +1482,15 @@ fn operations_section_cites_existing_tests() {
         let mut depth = 0usize;
         let mut index = skip_space_and_comments(source, start)?;
         loop {
+            let literal_end = skip_code_literal(source, index)?;
+            if literal_end != index {
+                index = literal_end;
+                continue;
+            }
             match bytes.get(index) {
                 None => return Err("a json! value has no end".to_string()),
                 Some(b',') if depth == 0 => return Ok(index + 1),
                 Some(b'}') if depth == 0 => return Ok(index),
-                Some(b'"') => index = string_end(source, index + 1)?,
                 Some(b'/') if index + 1 < bytes.len() && bytes[index + 1] == b'/' => {
                     index = line_comment_end(bytes, index + 2);
                 }
@@ -1481,8 +1553,9 @@ fn operations_section_cites_existing_tests() {
         let mut literal: Option<Vec<String>> = None;
         let mut index = 0;
         while index < bytes.len() {
-            if bytes[index] == b'"' {
-                index = string_end(source, index + 1)?;
+            let literal_end = skip_code_literal(source, index)?;
+            if literal_end != index {
+                index = literal_end;
                 continue;
             }
             if bytes[index] == b'/' && index + 1 < bytes.len() {
@@ -1526,8 +1599,9 @@ fn operations_section_cites_existing_tests() {
         let bytes = source.as_bytes();
         let mut index = start + signature.len();
         while index < bytes.len() && bytes[index] != b'{' {
-            if bytes[index] == b'"' {
-                index = string_end(source, index + 1)?;
+            let literal_end = skip_code_literal(source, index)?;
+            if literal_end != index {
+                index = literal_end;
                 continue;
             }
             if bytes[index] == b'/' && index + 1 < bytes.len() {
@@ -1547,8 +1621,12 @@ fn operations_section_cites_existing_tests() {
         }
         let mut depth = 0usize;
         while index < bytes.len() {
+            let literal_end = skip_code_literal(source, index)?;
+            if literal_end != index {
+                index = literal_end;
+                continue;
+            }
             match bytes[index] {
-                b'"' => index = string_end(source, index + 1)?,
                 b'/' if index + 1 < bytes.len() && bytes[index + 1] == b'/' => {
                     index = line_comment_end(bytes, index + 2);
                 }
@@ -1588,8 +1666,12 @@ fn operations_section_cites_existing_tests() {
         let mut depth = 0usize;
         let mut index = start + START.len();
         while index < bytes.len() {
+            let literal_end = skip_code_literal(source, index)?;
+            if literal_end != index {
+                index = literal_end;
+                continue;
+            }
             match bytes[index] {
-                b'"' => index = string_end(source, index + 1)?,
                 b'/' if index + 1 < bytes.len() && bytes[index + 1] == b'/' => {
                     index = line_comment_end(bytes, index + 2);
                 }
@@ -2477,6 +2559,102 @@ fn operations_section_cites_existing_tests() {
     let nested_keys = json_literal_keys(nested_arm).expect("the nested arm has one json! literal");
     assert_eq!(nested_keys, vec!["shutdown".to_string()]);
     assert!(!nested_keys.contains(&"inner".to_string()));
+
+    // A raw string or a character literal in the body does not end it. On the
+    // 094 head `string_end` ends every string at its first `"`, so `r#""}"#`
+    // and `br#""}"#` close `ok_response` before the later `json!`, and the
+    // brace count closes it at the `}` inside `'}'`. Each plant then returns
+    // `Ok` with the first keys.
+    for body in [
+        r##"fn ok_response() { json!({"status":"ok","data":1}); let _ = r#""}"#; json!({"status":"ok","result":1}); }"##,
+        r##"fn ok_response() { json!({"status":"ok","data":1}); let _ = br#""}"#; json!({"status":"ok","result":1}); }"##,
+        r#"fn ok_response() { json!({"status":"ok","data":1}); let _ = '}'; json!({"status":"ok","result":1}); }"#,
+    ] {
+        let region =
+            function_region(body, "fn ok_response(").expect("the plant body is one region");
+        let failure = json_literal_keys(region)
+            .expect_err("a json! after a raw string or a character literal is a second literal");
+        assert!(
+            failure.contains("second") && failure.contains("json"),
+            "{body}: {failure}"
+        );
+    }
+
+    // A `json!` inside a raw string is not a literal, and a raw string in a
+    // value keeps the `"kept"` key that follows it. On the 094 head the value
+    // reader ends at the `}` inside `r#""}"#` and then reports an unterminated
+    // string.
+    assert_eq!(
+        json_literal_keys(r##"json!({ "shutdown": r#""}"#, "kept": true })"##),
+        Ok(vec!["shutdown".to_string(), "kept".to_string()])
+    );
+    assert_eq!(
+        json_literal_keys(
+            r##"json!({ "shutdown": true }); let _ = r#"json!({ "extra": true })"#;"##
+        ),
+        Ok(vec!["shutdown".to_string()])
+    );
+
+    // The Shutdown arm cutter skips the character literal `','`, so the comma
+    // inside it does not end the arm before the later `json!`. On the 094 head
+    // the cutter stops at that comma and returns one literal.
+    let comma_arm = r#"ProviderOperation::Shutdown => Ok(ok_response(serde_json::json!({ "shutdown": true }))) + ',' + Ok(ok_response(serde_json::json!({ "renamed": true }))),"#;
+    let region = shutdown_arm_region(comma_arm).expect("the plant arm is one region");
+    let failure =
+        json_literal_keys(region).expect_err("the second json! after the arm character is refused");
+    assert!(
+        failure.contains("second") && failure.contains("json"),
+        "{failure}"
+    );
+
+    // The signature loop skips a literal before the body's `{`, so a brace
+    // inside an attribute string does not open the region. A reader without
+    // the skip stops at that brace and reports an unterminated string.
+    let string_before_body = r#"fn ok_response() #[doc = "a { brace"] { json!({"x": 1}) }"#;
+    let region = function_region(string_before_body, "fn ok_response(")
+        .expect("the body opens after the attribute string");
+    assert_eq!(
+        json_literal_keys(region),
+        Ok(vec!["x".to_string()]),
+        "{string_before_body}"
+    );
+
+    // One literal advances past its closer for each prefix and hash count, and
+    // each escape in a character literal is one character. A reader that ends
+    // a raw string at its first `"` or treats `'` as an ordinary byte fails
+    // these.
+    for (literal, end) in [
+        ("\"text\"", 6),
+        ("b\"text\"", 7),
+        ("r\"text\"", 7),
+        ("br\"text\"", 8),
+        ("cr\"text\"", 8),
+        ("r#\"text\"#", 9),
+        ("r##\"text\"##", 11),
+        ("r#\"a \"q\" b\"#", 12),
+        ("'}'", 3),
+        ("'\\''", 4),
+        ("'\\\\'", 4),
+        ("b'}'", 4),
+    ] {
+        assert_eq!(skip_code_literal(literal, 0), Ok(end), "{literal}");
+    }
+    // `return`, `break` and `result` are not raw strings, and any other byte
+    // returns `index` unchanged.
+    for unchanged in ["return", "break", "result", "x", "{"] {
+        assert_eq!(skip_code_literal(unchanged, 0), Ok(0), "{unchanged}");
+    }
+    // An unterminated raw string and an unterminated character have different
+    // reasons. A reader that returns `index` for `'` or `r#"` instead of
+    // scanning accepts the `json!` inside each of these.
+    assert_eq!(
+        json_literal_keys("let _ = 'json!({ \"x\": 1 })"),
+        Err("an unterminated character is in the region".to_string())
+    );
+    assert_eq!(
+        json_literal_keys(r##"let _ = r#"json!({ "x": 1 })"##),
+        Err("an unterminated raw string is in the region".to_string())
+    );
 
     // The reader accepts whitespace and comments before the `(` and before
     // the `{`. The substring reader `json!({` misses both forms.
