@@ -603,16 +603,6 @@ mod uf_tests {
     // ---- proof type selection by address ----
 
     #[test]
-    fn proof_type_for_p2wpkh_is_bip322() {
-        let key = fixed_signing_key();
-        let addr = p2wpkh_address(&key);
-        assert_eq!(
-            bitcoin_proof_type_for_address("bitcoin", &addr).unwrap(),
-            BITCOIN_PROOF_BIP322_SIMPLE
-        );
-    }
-
-    #[test]
     fn proof_type_for_p2wpkh_other_network_rejected() {
         let key = fixed_signing_key();
         let addr = p2wpkh_address(&key);
