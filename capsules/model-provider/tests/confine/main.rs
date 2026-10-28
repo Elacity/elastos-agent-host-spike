@@ -972,8 +972,22 @@ fn operations_section_cites_existing_tests() {
             .unwrap_or(doc.len());
         &doc[start..line_end]
     }
-    // Right is the fourth non-empty cell. Linux is the seventh. Header and
-    // separator rows are not data rows, so their cells are not claims.
+    fn operation_rows(section: &str) -> impl Iterator<Item = Vec<&str>> {
+        section
+            .lines()
+            .filter(|line| line.starts_with("| "))
+            .filter_map(|line| {
+                let cells: Vec<&str> = line
+                    .split('|')
+                    .map(str::trim)
+                    .filter(|cell| !cell.is_empty())
+                    .collect();
+                let first = cells.first().copied()?;
+                (first != "Operation" && first != "---").then_some(cells)
+            })
+    }
+    // Right is the fourth non-empty cell. Linux is the seventh. Both table
+    // checks use operation_rows to select and split the data rows.
     fn operations_table_cells_stay_lab_claims(
         section: &str,
         right_ids: &[&str],
@@ -992,21 +1006,8 @@ fn operations_section_cites_existing_tests() {
             "runs_events",
             "runs_cancel",
         ];
-        for line in section.lines() {
-            if !line.starts_with("| ") {
-                continue;
-            }
-            let cells: Vec<&str> = line
-                .split('|')
-                .map(str::trim)
-                .filter(|cell| !cell.is_empty())
-                .collect();
-            let Some(first) = cells.first().copied() else {
-                continue;
-            };
-            if first == "Operation" || first == "---" {
-                continue;
-            }
+        for cells in operation_rows(section) {
+            let first = cells[0];
             let right = cells.get(RIGHT_PLACE - 1).copied().unwrap_or("");
             if match_operation {
                 if NO_RIGHT_OPERATIONS.contains(&first) {
@@ -1040,25 +1041,15 @@ fn operations_section_cites_existing_tests() {
         Ok(())
     }
     fn operation_row_names(section: &str) -> Vec<&str> {
-        section
-            .lines()
-            .filter(|line| line.starts_with("| "))
-            .filter_map(|line| {
-                let mut cells = line
-                    .split('|')
-                    .map(str::trim)
-                    .filter(|cell| !cell.is_empty());
-                let first = cells.next()?;
-                (first != "Operation" && first != "---").then_some(first)
-            })
-            .collect()
+        operation_rows(section).map(|cells| cells[0]).collect()
     }
     /// The `match op` arms in source order, with `other =>` read as
     /// `unsupported`.
     ///
     /// The cut runs from the `fn parse_request(` line to the next function.
     /// The arms are the lines between `match op {` and its closing `};`. Each
-    /// arm is a quoted string or the one `other =>`. The compare reads the
+    /// line has one arm: a plain quoted string followed by `=>`, or the one
+    /// `other =>`. Other patterns require an explicit refusal. The compare reads the
     /// match as text: it shows the Operation cells equal these arms, not that
     /// every arm is reachable, and it does not read `src/execution.rs`.
     fn parse_request_operation_names(source: &str) -> Result<Vec<String>, String> {
@@ -1096,6 +1087,11 @@ fn operations_section_cites_existing_tests() {
             if arm.is_empty() || arm.starts_with("//") {
                 continue;
             }
+            if arm.matches("=>").count() > 1 {
+                return Err(format!(
+                    "parse_request: arm line `{arm}` has more than one `=>`"
+                ));
+            }
             if arm.starts_with("other =>") {
                 other_arms += 1;
                 if other_arms > 1 {
@@ -1114,6 +1110,11 @@ fn operations_section_cites_existing_tests() {
             let Some(end) = rest.find('"') else {
                 return Err(format!("parse_request: arm `{arm}` has no closing quote"));
             };
+            if rest[..end].contains('\\') || !rest[end + 1..].trim_start().starts_with("=>") {
+                return Err(format!(
+                    "parse_request: arm `{arm}` must use one plain quoted string followed by `=>`"
+                ));
+            }
             names.push(rest[..end].to_string());
         }
         if other_arms == 0 {
@@ -1192,6 +1193,82 @@ fn operations_section_cites_existing_tests() {
     require_cited_tests("`generated_`", source_without_the_function);
 
     let approved_ids = ["storage", "bound-executable"];
+    // A rejected Right or Linux cell exposes which rows the claims consumer
+    // selects. Its selection must equal the names consumer's selection.
+    for (row, expected_name) in [
+        ("prose", None),
+        ("|   | \t |", None),
+        (
+            " | hidden | in | out | RIGHT | effect | rule | LINUX |",
+            None,
+        ),
+        ("|hidden | in | out | RIGHT | effect | rule | LINUX |", None),
+        (
+            "| Operation | in | out | RIGHT | effect | rule | LINUX |",
+            None,
+        ),
+        (
+            "|   | Operation | in | out | RIGHT | effect | rule | LINUX |",
+            None,
+        ),
+        ("| --- | in | out | RIGHT | effect | rule | LINUX |", None),
+        (
+            "|   | --- | in | out | RIGHT | effect | rule | LINUX |",
+            None,
+        ),
+        (
+            "| init | in | out | RIGHT | effect | rule | LINUX |",
+            Some("init"),
+        ),
+        (
+            "|  | \tinit\t | in || out | RIGHT | effect | rule | LINUX |",
+            Some("init"),
+        ),
+        (
+            "| unsupported | in | out | RIGHT | effect | rule | LINUX |",
+            Some("unsupported"),
+        ),
+    ] {
+        let valid = row
+            .replace("RIGHT", "storage")
+            .replace("LINUX", "designed, not enforced");
+        let names = operation_row_names(&valid);
+        assert_eq!(
+            names,
+            expected_name.into_iter().collect::<Vec<_>>(),
+            "{row}"
+        );
+        assert_eq!(
+            operations_table_cells_stay_lab_claims(&valid, &approved_ids, false),
+            Ok(()),
+            "{row}"
+        );
+        for (from, to, reason) in [
+            (
+                "storage",
+                "network",
+                "right cell `network` is not an approved right id",
+            ),
+            (
+                "designed, not enforced",
+                "enforced",
+                "Linux cell `enforced` is not designed, not enforced",
+            ),
+        ] {
+            let planted = valid.replace(from, to);
+            assert_eq!(operation_row_names(&planted), names, "{planted}");
+            let expected = if names.is_empty() {
+                Ok(())
+            } else {
+                Err(reason.to_string())
+            };
+            assert_eq!(
+                operations_table_cells_stay_lab_claims(&planted, &approved_ids, false),
+                expected,
+                "{planted}"
+            );
+        }
+    }
     let network_row = "| init | in | out | network | effect | rule | designed, not enforced |";
     let network_panic = caught_lab_claim_panic(network_row, &approved_ids, false);
     assert!(
@@ -1301,6 +1378,38 @@ fn operations_section_cites_existing_tests() {
         operation_rows_match_parse_request(init_then_unsupported, short_source),
         Ok(())
     );
+    for pattern in [
+        "\"init\" | \"ping\"",
+        "\"init\" if enabled",
+        "\"init\"..=\"ping\"",
+        "\"in\\x69t\"",
+    ] {
+        let planted = short_source.replace("\"init\" =>", &format!("{pattern} =>"));
+        assert_eq!(
+            operation_rows_match_parse_request(init_then_unsupported, &planted),
+            Err(format!(
+                "parse_request: arm `{pattern} => Operation::Init,` must use one plain quoted string followed by `=>`"
+            )),
+            "{pattern}"
+        );
+    }
+    for arm in [
+        "\"init\" => Operation::Init, \"ping\" => Operation::Ping,",
+        "other => Operation::Unsupported(other.to_string()), \"ping\" => Operation::Ping,",
+    ] {
+        let original = if arm.starts_with('"') {
+            "\"init\" => Operation::Init,"
+        } else {
+            "other => Operation::Unsupported(other.to_string()),"
+        };
+        let planted = short_source.replace(original, arm);
+        assert_eq!(
+            operation_rows_match_parse_request(init_then_unsupported, &planted),
+            Err(format!(
+                "parse_request: arm line `{arm}` has more than one `=>`"
+            ))
+        );
+    }
     let unsupported_then_init = "| Operation | Inputs | Outputs | Right | Effect | rule | Linux |\n| --- | --- | --- | --- | --- | --- | --- |\n| unsupported | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n| init | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n";
     let swapped = operation_rows_match_parse_request(unsupported_then_init, short_source)
         .expect_err("a swapped row order must fail");
