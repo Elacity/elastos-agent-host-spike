@@ -42,10 +42,8 @@ directories. This crate runs no Kubo; the gate runs none either.
 So the lab CID follows the Kubo v0.40.1 profile, computed by the lab. One
 offline Kubo v0.40.1 hash-only cross-check with the Runtime's profile flags
 was run by hand on this Mac (task 050) and printed every committed pin, and
-[Claim scope](#claim-scope) states that gate. The pins added since then are
-checked by hand separately: task 056's run matched its threshold pin and
-printed other names for its two shard bundles, whose bitmap Kubo writes with
-its bytes in reverse order and trimmed to its highest bucket (LOG.md ci-56).
+[Claim scope](#claim-scope) states that gate. Task 056's run printed its three
+directory-threshold pins too (LOG.md ci-56).
 The tests pin both sides of that profile's directory threshold, with files at
 any tree depth: a file of one raw leaf, a file of 2 to 174 raw leaves under
 one balanced file root (task 048), since task 051 a larger file under Kubo's
@@ -119,16 +117,18 @@ To recompute a lab CID by hand:
    child shard built the same way from the next digest byte. Never emit a
    shard of one link. Links go out in bucket order through the same link
    writer. After them, field 1 holds the UnixFS data `08 05` (type 5,
-   HAMT shard), `12 20` and a 32-byte bitmap (bit `i` in byte `i / 8` at mask
-   `1 << (i % 8)`, zero bytes included), `28 22` (bucket hash murmur3) and
-   `30 80 02` (fanout 256); no filesize, blocksizes, mode or mtime. Each
+   HAMT shard), `12` and the bitmap in Kubo's trimmed form: `len = highest
+   bucket / 8 + 1` bytes, bit `b` in byte `len - 1 - b / 8` at mask
+   `1 << (b % 8)`, so the leading zero bytes are omitted; then `28 22`
+   (bucket hash murmur3) and `30 80 02` (fanout 256); no filesize,
+   blocksizes, mode or mtime. Each
    shard's CID is `01 70 12 20` and the SHA-256 of its block, and its Tsize is
    that block's length plus its children's Tsizes. A child directory is judged
    on its own estimate, so a file set under `photos/` can shard while the root
    stays basic. The tests `directory_at_the_hamt_threshold_stays_basic`,
    `directory_over_the_hamt_threshold_is_a_shard` and
    `child_directory_over_the_hamt_threshold_is_a_shard` show both sides, and
-   the falsifiers F-CI56a to F-CI56e plant a bug in each rule.
+   the falsifiers F-CI56a to F-CI56f plant a bug in each rule.
 6. A directory's (or shard's) CID is `01 70 12 20` and the SHA-256 of its
    block (the dag-pb codec `0x70`). The Tsize of a link to a directory is the
    length of its block plus the Tsizes of its own links. Every varint inside a
@@ -243,7 +243,7 @@ def hamt(children, level):  # {name: (CID bytes, Tsize)}; returns (CID bytes, Ts
     bitmap = bytearray(32)
     total = 0
     for bucket in sorted(buckets):
-        bitmap[bucket // 8] |= 1 << bucket % 8
+        bitmap[31 - bucket // 8] |= 1 << bucket % 8
         names = buckets[bucket]
         if len(names) == 1:
             child_cid, tsize = children[names[0]]
@@ -254,7 +254,8 @@ def hamt(children, level):  # {name: (CID bytes, Tsize)}; returns (CID bytes, Ts
         link = field(1, child_cid) + field(2, name.encode("utf-8"))
         links += field(2, link + b"\x18" + varint(tsize))
         total += tsize
-    unixfs = b"\x08\x05" + field(2, bytes(bitmap)) + b"\x28\x22" + b"\x30\x80\x02"
+    length = max(buckets) // 8 + 1
+    unixfs = b"\x08\x05" + field(2, bytes(bitmap[32 - length:])) + b"\x28\x22" + b"\x30\x80\x02"
     block = links + field(1, unixfs)
     return cid(0x70, block), len(block) + total
 
@@ -327,7 +328,7 @@ rules and not from the Rust code, in
 | Links sorted by name bytes | `lab_cid_matches_the_pinned_value_for_each_fixture`, `lab_cid_does_not_depend_on_listing_order` | F-CI18f (reverse), F-CI1a (no sort) |
 | Directory type 1 | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18g (5) |
 | A directory whose links estimate is at most 262144 bytes is one basic block, including when the block is longer (task 056) | `directory_at_the_hamt_threshold_stays_basic`, `directory_block_of_262144_bytes_is_named_and_one_byte_more_is_named_too` | F-CI53a (`>=` on the estimate) |
-| A greater links estimate is a fanout-256 HAMT: each level takes the next digest byte of murmur3 x64-128 seed 0 big-endian, uppercase hex buckets, one child named with its bucket, two or more under a child shard, a 32-byte bitmap, type 5, hash `0x22` and fanout 256 (task 056) | `directory_over_the_hamt_threshold_is_a_shard` | F-CI56a (the digest bytes reversed), F-CI56b (a leaf named by its hex only), F-CI56c (a one-entry bucket gets a child shard), F-CI56d (the estimate adds the child's Tsize, not 36), F-CI53b (the threshold becomes 262145), F-CI18h (the encoder never shards) |
+| A greater links estimate is a fanout-256 HAMT: each level takes the next digest byte of murmur3 x64-128 seed 0 big-endian, uppercase hex buckets, one child named with its bucket, two or more under a child shard, Kubo's trimmed bitmap, type 5, hash `0x22` and fanout 256 (task 056) | `directory_over_the_hamt_threshold_is_a_shard` | F-CI56a (the digest bytes reversed), F-CI56b (a leaf named by its hex only), F-CI56c (a one-entry bucket gets a child shard), F-CI56d (the estimate adds the child's Tsize, not 36), F-CI56f (the bitmap at byte `bucket/8` over 32 bytes), F-CI53b (the threshold becomes 262145), F-CI18h (the encoder never shards) |
 | A child directory is judged on its own links estimate, so it can shard while the root stays basic (task 056) | `child_directory_over_the_hamt_threshold_is_a_shard` | F-CI56e (only the root shards) |
 | No inline: no identity multihash | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18i (inline at most 32 bytes) |
 | The printed form, `b` and lowercase base32 | `lab_cid_prints_with_the_lab_label`, `the_library_names_a_bundle_one_way`, `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18j (old prefix), F-CI18k (uppercase), F-CI1d (no `b`) |
@@ -385,22 +386,15 @@ is exactly 262144 bytes is
 `bafybeihzudjdlu6pa3nwwqogsdj36t5z6auopjm6trdn73ar5hngnmg6iy`
 (`DIRECTORY_AT_HAMT_THRESHOLD_LAB_CID`, one basic directory though its block
 is larger than 262144 bytes); one estimate byte more, 262145, is
-`bafybeig46c3zyqlblqrtjqtgvgbzzbxwkohfzx3lj5pmqabzgdaxk3mpcu`
+`bafybeib3fzlyiq6xqlzitmq7oz5h6uvzcbd55nvwvyriih6loujluz76ny`
 (`DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID`, a fanout-256 HAMT); and the same
 262145-estimate file set under `photos/`, with content-sample's two files at
 the root, is
-`bafybeiffm2y3dpu7wxqumjhiufjoqcsmdg4eu7u5affy4icen4e7fumoqe`
+`bafybeidk6kyk4ohqytvobx5x3f2d3jwdyypauk23czp5tvpecfgq7pg3ye`
 (`CHILD_DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID`: the child shards and the root
 stays basic). README's Python block, extended from the rule in step 5, gave
-each of them before any Rust code named it. The hand-run Kubo matched the
-first pin only: it prints
-`bafybeib3fzlyiq6xqlzitmq7oz5h6uvzcbd55nvwvyriih6loujluz76ny` and
-`bafybeidk6kyk4ohqytvobx5x3f2d3jwdyypauk23czp5tvpecfgq7pg3ye` for the two
-shard bundles, because it writes the bitmap's bytes in reverse order and trims
-them to the highest bucket (task 056, LOG.md ci-56). The Python block shares that byte order, so it
-agrees with the lab and not with Kubo on those two names. The two shard pins
-stay the lab's own until the rule is settled; no threshold, bitmap, flag or
-pin was changed to match.
+each of them before any Rust code named it, and the hand-run Kubo printed all
+three (task 056, LOG.md ci-56).
 
 ### The cross-implementation check
 
@@ -467,9 +461,9 @@ the pin and `encode_entries` must be one value. On 2026-10-28 it passed at
 task 053 too (`test result: ok. 1 passed`), and with the HAMT threshold set to
 `1KiB` by hand it failed on the directory-at-limit row alone, so the HAMT
 config reaches Kubo and that row would catch a shard (LOG.md). Task 056 ran it
-again with the three new rows: the row whose estimate is exactly 262144 bytes
-matched, and the two shard rows differed (Kubo's names are in LOG.md ci-56).
-The `1KiB` hand-break stopped at that result.
+again with the three new rows and it passed (`test result: ok. 1 passed`);
+with the threshold set to `1KiB` by hand the directory-at-limit and
+at-threshold rows differed (LOG.md ci-56).
 `kubo_profile_reproduces_the_admitted_model_package_cid`
 is the control that the flags are the Runtime's: Kubo must print
 `bafybeiew3vuq32fvuz2kmps7lmgl4rxpvwsvklxykx4covogbrkhgy5qky`, the package CID
@@ -540,9 +534,8 @@ is two implementations on one Mac (Python 3.9.6 here). Kubo, the outside IPFS
 tool, ran only by hand: one offline Kubo v0.40.1 hash-only cross-check with
 the Runtime's profile flags was run by hand on this Mac (task 050) and printed
 every pin committed then, and again at task 051 with the new pin (the "Kubo
-cross-check" paragraph above). Task 056's run matched its threshold pin and
-differed on its two shard pins, whose bitmap Kubo writes byte-reversed and
-trimmed to the highest bucket.
+cross-check" paragraph above). Task 056's run printed its three
+directory-threshold pins too (LOG.md ci-56).
 
 ## Fixtures and their pinned lab CIDs
 
@@ -1941,17 +1934,15 @@ root over 2 to 174 raw leaves, and since task 051 Kubo's balanced file tree at
 any depth, pinned at two levels). The file tree's bytes are the lab's reading
 of the profile; the hand-run Kubo printed every file-tree pin too, and the lab
 encoder gives the model package CID the Runtime admitted on this Mac (task
-051). The two shard pins of task 056 name bundles whose bitmap bytes Kubo
-writes byte-reversed and trimmed, so they stay the lab's own (LOG.md ci-56).
+051). The hand-run Kubo printed all 19 pins, including the three threshold
+rows of task 056 (LOG.md ci-56).
 
 The claim is "Kubo v0.40.1 profile, computed by the lab", and nothing more.
 One offline Kubo v0.40.1 hash-only cross-check with the Runtime's profile
 flags was run by hand on this Mac (task 050) and printed every committed pin,
 and the claim words stay "Kubo v0.40.1 profile, computed by the lab" until
-Rong or Flint changes them. The pins added since then are checked by hand
-separately: task 056's run matched its threshold pin and printed other names
-for its two shard bundles, whose bitmap Kubo writes byte-reversed and trimmed
-(LOG.md ci-56). A hand run on one Mac is not a gate, so the lab
+Rong or Flint changes them. Task 056's three threshold pins also match the
+hand-run Kubo (LOG.md ci-56). A hand run on one Mac is not a gate, so the lab
 CID is still not called equal to the Runtime's CID or to Kubo's output in
 general. The Runtime's CID names a release archive, not the bundle's
 files (see [Why a lab CID](#why-a-lab-cid-and-not-the-runtimes-cid)). The test
@@ -2069,7 +2060,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 289 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 290 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -2119,7 +2110,7 @@ F-CI49a to F-CI49c (see
 051's F-CI51a to F-CI51c, and task 053's F-CI53a and F-CI53b (both: see
 [the encoding](#the-encoding)), and task 055's F-CI55a to F-CI55c (see
 [naming a closure listing](#naming-a-closure-listing)), and task 056's
-F-CI56a to F-CI56e (see [the encoding](#the-encoding)).
+F-CI56a to F-CI56f (see [the encoding](#the-encoding)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -2299,7 +2290,10 @@ shard test fail); F-CI56b names a leaf link with its uppercase hex bucket
 only; F-CI56c gives a one-entry bucket a child shard, so a shard of one link
 is emitted; F-CI56d adds a child's Tsize where the links estimate adds 36, so
 the 262145-estimate set stays basic; F-CI56e shards only when the directory
-path is empty, so the child over the estimate stays basic. F-CI18h, keeping
+path is empty, so the child over the estimate stays basic; and F-CI56f sets
+a bucket's bit at byte `bucket/8` over 32 bytes, the rule this task first
+wrote, so the bitmap and the shard's name differ from Kubo's (bit `b` at byte
+`31 - bucket/8`, trimmed to the highest bucket). F-CI18h, keeping
 its id and retargeted by task 056, removes the shard path (the encoder never
 shards); F-CI53a changes the estimate comparison to `>=`; F-CI53b makes the
 threshold constant `262_145`. F-CI18h, F-CI53a and F-CI56e share the

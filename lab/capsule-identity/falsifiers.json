@@ -4786,6 +4786,22 @@
       "tests": [
         "child_directory_over_the_hamt_threshold_is_a_shard"
       ]
+    },
+    {
+      "id": "F-CI56f",
+      "title": "the bitmap is not Kubo's: bit b in byte b/8, so the shard block and its name differ",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        bitmap[HAMT_FANOUT / 8 - 1 - bucket / 8] |= 1 << (bucket % 8);\n",
+          "new": "        bitmap[bucket / 8] |= 1 << (bucket % 8);\n"
+        }
+      ],
+      "tests": [
+        "directory_over_the_hamt_threshold_is_a_shard"
+      ]
     }
   ]
 }

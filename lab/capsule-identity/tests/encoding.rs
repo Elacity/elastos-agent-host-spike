@@ -261,10 +261,9 @@ fn directory_at_the_hamt_threshold_stays_basic() {
 fn directory_over_the_hamt_threshold_is_a_shard() {
     // One more estimate byte, 262145, is a fanout-256 HAMT: each child's
     // name hashes with murmur3 x64-128 (seed 0, big-endian) and levels take
-    // digest bytes 0, 1, 2. Its pin was computed from the rule above. Kubo
-    // v0.40.1 writes the bitmap's bytes in reverse order and trims them to
-    // the highest bucket, so it prints a different name for this bundle (task
-    // 056, LOG.md ci-56). The files are made here and never committed.
+    // digest bytes 0, 1, 2. Its pin was computed from the rule above and
+    // printed by Kubo v0.40.1 (task 056, LOG.md ci-56). The files are made
+    // here and never committed.
     let entries = directory_at_estimate_files(262_145);
     let estimate: usize = entries.iter().map(|entry| entry.path.len() + 36).sum();
     assert_eq!(estimate, 262_145, "the test's own links estimate");
@@ -299,10 +298,9 @@ fn child_directory_over_the_hamt_threshold_is_a_shard() {
     // so the child is judged on its own estimate and shards, while
     // content-sample's two files stay at the root. The root's direct
     // children are `capsule.json`, `sample.example` and `photos` only, an
-    // estimate of 140. Its pin was computed from the rule above; Kubo v0.40.1
-    // writes the bitmap's bytes in reverse order and trims them to the highest
-    // bucket, so it prints a different name for this bundle (task 056, LOG.md
-    // ci-56). The files are made here and never committed.
+    // estimate of 140. Its pin was computed from the rule above and printed
+    // by Kubo v0.40.1 (task 056, LOG.md ci-56). The files are made here and
+    // never committed.
     let entries = child_directory_over_hamt_threshold_entries();
     let child: usize = entries
         .iter()

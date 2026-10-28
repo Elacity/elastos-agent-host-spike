@@ -155,14 +155,14 @@ pub const DIRECTORY_AT_HAMT_THRESHOLD_LAB_CID: &str =
 /// The same flat bundle one estimate byte more, 262145: a fanout-256 HAMT.
 /// Built in memory and never committed.
 pub const DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID: &str =
-    "bafybeig46c3zyqlblqrtjqtgvgbzzbxwkohfzx3lj5pmqabzgdaxk3mpcu";
+    "bafybeib3fzlyiq6xqlzitmq7oz5h6uvzcbd55nvwvyriih6loujluz76ny";
 
 /// The 262145-estimate file set of [`directory_at_estimate_files`] under
 /// `photos/`, with content-sample's own two files at the root: the child is
 /// judged on its own estimate and shards, while the root's three names stay
 /// far under the threshold. Built in memory and never committed.
 pub const CHILD_DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID: &str =
-    "bafybeiffm2y3dpu7wxqumjhiufjoqcsmdg4eu7u5affy4icen4e7fumoqe";
+    "bafybeidk6kyk4ohqytvobx5x3f2d3jwdyypauk23czp5tvpecfgq7pg3ye";
 
 /// The flat bundle whose root links estimate is exactly `estimate` bytes:
 /// content-sample's entries, 1114 empty files named by 199 digits and one

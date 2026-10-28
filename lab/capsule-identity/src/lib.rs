@@ -21,11 +21,8 @@
 //! Kubo v0.40.1 profile, computed by the lab: one offline Kubo v0.40.1
 //! hash-only cross-check with the Runtime's profile flags was run by hand on
 //! this Mac (task 050) and printed every committed pin, and the claim stays
-//! these words until Rong or Flint changes them. The pins added since then are
-//! checked by hand separately: task 056's run matched its threshold pin and
-//! printed other names for its two shard bundles, whose bitmap Kubo writes
-//! byte-reversed and trimmed to the highest bucket (LOG.md ci-56). This crate
-//! runs no Kubo
+//! these words until Rong or Flint changes them. Task 056's run printed its
+//! three directory-threshold pins too (LOG.md ci-56). This crate runs no Kubo
 //! and pins both sides of that profile's directory threshold, with files at
 //! any tree depth:
 //!
@@ -61,20 +58,18 @@
 //!    name; a bucket of two or more is one link named by the hex alone,
 //!    pointing at a child shard built the same way from the next digest
 //!    byte. Links go out in bucket order; the shard's UnixFS data is its
-//!    type `08 05`, the 32-byte bitmap of its buckets, the hash type `28 22`
-//!    and the fanout `30 80 02`. A digest with no ninth byte is refused with
-//!    [`Refusal::HamtTooDeep`]. A child directory is judged on its own
+//!    type `08 05`, the trimmed bitmap of its buckets (`len = highest bucket
+//!    / 8 + 1` bytes, bit `b` in byte `len - 1 - b / 8` at mask
+//!    `1 << (b % 8)`), the hash type `28 22` and the fanout `30 80 02`. A
+//!    digest with no ninth byte is refused with [`Refusal::HamtTooDeep`]. A child directory is judged on its own
 //!    estimate, so a file set under `photos/` can shard while the root stays
 //!    basic. A directory's CID is `01 70 12 20` and the SHA-256 of its node's
 //!    block. The Tsize of a link to a directory is that node's block length
 //!    plus the Tsizes of its links. The three tests
 //!    `directory_at_the_hamt_threshold_stays_basic`,
 //!    `directory_over_the_hamt_threshold_is_a_shard` and
-//!    `child_directory_over_the_hamt_threshold_is_a_shard` show both sides.
-//!    Only the first of their pins matches the hand-run Kubo: Kubo v0.40.1
-//!    writes the bitmap's bytes in reverse order and trims them to the
-//!    highest bucket, so the two shard bundles get other names (task 056,
-//!    LOG.md ci-56).
+//!    `child_directory_over_the_hamt_threshold_is_a_shard` show both sides,
+//!    and the hand-run Kubo printed all three pins (task 056, LOG.md ci-56).
 //! 3. The root is the directory of the bundle's entries. Its CID prints as
 //!    `b` and the RFC 4648 base32 of its 36 bytes, lowercase, no padding.
 //!
@@ -279,7 +274,8 @@ pub const VARIANT_RECIPE_ENTRY: &str = "provider-variant.recipe";
 
 // The profile: Kubo v0.40.1's import flags as
 // `capsules/ipfs-provider/src/directory_hash.rs` `ADD_OPTIONS` sends them, for
-// files at any tree depth and no HAMT shard, computed by the lab (no
+// files at any tree depth and directories on both sides of the 256KiB
+// links-estimate threshold (task 056, 2026-10-28), computed by the lab (no
 // Kubo runs here). Each
 // one changes the CID or the refusal, and each has a falsifier. There is no
 // inline setting: no CID here uses the identity multihash, whatever the size of the block.
@@ -1444,7 +1440,9 @@ fn links_estimate(links: &[Link<'_>]) -> usize {
 /// name; a bucket of two or more is one link named `XX` alone, pointing at a
 /// child shard built the same way from the next digest byte. Links go out in
 /// bucket order, which is also name order. A level with no digest byte left
-/// is [`Refusal::HamtTooDeep`]. `sha256` is the one naming hash.
+/// is [`Refusal::HamtTooDeep`]. `sha256` is the one naming hash. The shard's
+/// bitmap is Kubo's trimmed form: bit `b` sits in byte `len - 1 - b / 8` at
+/// mask `1 << (b % 8)`, where `len` is `highest bucket / 8 + 1`.
 fn hamt_shard(
     children: &[&Link<'_>],
     level: usize,
@@ -1460,12 +1458,14 @@ fn hamt_shard(
         buckets[usize::from(bucket)].push(child);
     }
     let mut bitmap = [0u8; HAMT_FANOUT / 8];
+    let mut highest = 0usize;
     let mut named: Vec<(String, Vec<u8>, u64)> = Vec::new();
     for (bucket, members) in buckets.iter().enumerate() {
         if members.is_empty() {
             continue;
         }
-        bitmap[bucket / 8] |= 1 << (bucket % 8);
+        highest = highest.max(bucket);
+        bitmap[HAMT_FANOUT / 8 - 1 - bucket / 8] |= 1 << (bucket % 8);
         let prefix = format!("{bucket:02X}");
         let (name, cid, tsize) = match members.as_slice() {
             [only] => (
@@ -1488,15 +1488,17 @@ fn hamt_shard(
             tsize: *tsize,
         })
         .collect();
-    let block = hamt_shard_block(&links, &bitmap);
+    let bitmap = &bitmap[HAMT_FANOUT / 8 - (highest / 8 + 1)..];
+    let block = hamt_shard_block(&links, bitmap);
     let tsize = block.len() as u64 + links.iter().map(|link| link.tsize).sum::<u64>();
     Ok((sha256(&block), tsize))
 }
 
 /// A HAMT shard's dag-pb block: its links (`put_links`, in bucket order),
 /// then the UnixFS data as field 1: its type `08 05`, the bitmap of its
-/// buckets as 32 bytes (`12 20`, bit `i` in byte `i / 8` at mask
-/// `1 << (i % 8)`, zero bytes included), the bucket hash type `28 22`
+/// buckets as `highest bucket / 8 + 1` bytes (bit `b` in byte
+/// `len - 1 - b / 8` at mask `1 << (b % 8)`, the leading zero bytes omitted),
+/// the bucket hash type `28 22`
 /// (murmur3 x64-64) and the fanout `30 80 02` (256). No filesize,
 /// blocksizes, mode or mtime.
 fn hamt_shard_block(links: &[Link<'_>], bitmap: &[u8]) -> Vec<u8> {

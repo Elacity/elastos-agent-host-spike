@@ -702,7 +702,9 @@ B2 (Anders, 26 Oct)", added by task 026, whose citations are at that revision's 
 - The profile: `lab/capsule-identity/README.md:33` `profile is Kubo v0.40.1's import flags as`
 - Tests: `lab/capsule-identity/tests/fixtures.rs:42` `fn lab_cid_matches_the_pinned_value_for_each_fixture() {`,
   `lab/capsule-identity/tests/encoding.rs:149` `fn file_over_the_chunk_limit_is_refused() {`,
-  `lab/capsule-identity/tests/encoding.rs:168` `fn directory_over_the_hamt_threshold_is_refused() {`
+  `lab/capsule-identity/tests/encoding.rs:261` `fn directory_over_the_hamt_threshold_is_a_shard() {`
+  (task 056, on 2026-10-28: this replaces `directory_over_the_hamt_threshold_is_refused`, which task 056
+  removed; the directory past the links estimate is named, not refused)
   and `lab/capsule-identity/tests/cross_implementation.rs:127` `fn readme_python_recomputes_every_lab_cid_pin() {`
 - Archive hashes stay delivery checks: the lab names the bundle's files, not the Runtime's archive,
   `lab/capsule-identity/README.md:1200` `a delivery check of those archive bytes, not this CID.`
@@ -718,9 +720,7 @@ B2 (Anders, 26 Oct)", added by task 026, whose citations are at that revision's 
   Both sides of the profile's directory threshold are pinned, with files at any tree depth:
   `lab/capsule-identity/README.md:46` `The tests pin both sides of that profile's directory threshold, with files at`
   (corrected by task 053, on 2026-10-28; until then it said single-block. Task 056 changed the line to pin both
-  sides of the threshold; its hand-run Kubo matched the basic threshold pin and printed other names for the two
-  shard bundles, whose bitmap Kubo writes byte-reversed and trimmed to the highest bucket, so those two pins
-  stay the lab's own, LOG.md ci-56.)
+  sides of the threshold; its hand-run Kubo printed all three threshold pins, LOG.md ci-56.)
   The pins are reproduced on one Mac only, so no construction rule is frozen.
   Added by task 053, on 2026-10-28: the hand-run Kubo, with the provider's two HAMT config values, also printed
   `bafybeifv7ypq27zanvn46j4q5jnm5akr55flfzne3zszdbbolt2dtgevc4` (`DIRECTORY_AT_LIMIT_LAB_CID`), the pin of a bundle
@@ -957,16 +957,16 @@ at most 262144 bytes is one basic directory even when its block is larger, and a
 fanout-256 HAMT (task 056)
 (`lab/capsule-identity/src/lib.rs:308` `const DIRECTORY_SIZE_LIMIT: usize = 262_144;`)
 (corrected by task 056, on 2026-10-28; until then it quoted `DIRECTORY_BLOCK_LIMIT` and said a directory block over
-262144 bytes was refused. The hand-run Kubo matched the basic threshold pin and printed other names for the two
-shard bundles, whose bitmap Kubo writes byte-reversed and trimmed to the highest bucket, so those two pins stay
-the lab's own, LOG.md ci-56).
+262144 bytes was refused. The hand-run Kubo printed the pins of all three threshold rows; with the threshold set
+to `1KiB` by hand, the row whose estimate is exactly 262144 bytes differed, LOG.md ci-56).
 Added by task 048, on 2026-10-28: since task 048, a file of 2 to 174 raw leaves (262145 to 45613056 bytes) is named
 by its balanced file root (`fn file_root(` and `const MAX_FILE_LINKS: usize = 174;` in
 `lab/capsule-identity/src/lib.rs`), and only a larger file or a directory block over 262144 bytes is refused; the
 listing call `encode_listed_files` still refuses a listed file over 262144 bytes.
 Added by task 051, on 2026-10-28: since task 051 a file of any size is named by Kubo's balanced layout (trickle
-off, `max-file-links` 174 at every level, any depth; `FileOverLeafLimit` is gone), so only a directory block over
-262144 bytes is refused, and the Runtime-admitted SmolLM2 model package (`weights.gguf`, 144811072 bytes, 553
+off, `max-file-links` 174 at every level, any depth; `FileOverLeafLimit` is gone), so no file is refused for its
+size; at that task a directory block over 262144 bytes was still refused, and task 056, on 2026-10-28, names it
+as a fanout-256 HAMT shard instead (LOG.md ci-56), and the Runtime-admitted SmolLM2 model package (`weights.gguf`, 144811072 bytes, 553
 leaves) gets its admitted CID `bafybeiew3vuq32fvuz2kmps7lmgl4rxpvwsvklxykx4covogbrkhgy5qky` from the lab encoder
 (hand run, task 051: `kubo_profile_reproduces_the_admitted_model_package_cid`, `#[ignore]`, not in the gate).
 At `c641bcff2` the value was a framed SHA-256 stream printed `lab-cid:sha256:`
