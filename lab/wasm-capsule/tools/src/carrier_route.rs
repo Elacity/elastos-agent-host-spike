@@ -46,9 +46,7 @@ pub struct Need {
 /// True when `d` can serve `need`: size fits within `max_object_bytes` and, if
 /// a put is needed, the carrier supports put.
 pub fn fits(d: &Descriptor, need: Need) -> bool {
-    d.supports_get
-        && need.size <= d.max_object_bytes
-        && (!need.put || d.supports_put)
+    d.supports_get && need.size <= d.max_object_bytes && (!need.put || d.supports_put)
 }
 
 /// Choose the first permitted descriptor, in list order, that fits `need`.
@@ -285,8 +283,8 @@ mod tests {
     #[test]
     fn size_is_respected() {
         let descs = vec![desc("alpha", false, 5), desc("beta", false, 500)];
-        let decision = decide_route(&CapsuleRequest::bare(cid(), 100, false), &descs)
-            .expect("beta fits");
+        let decision =
+            decide_route(&CapsuleRequest::bare(cid(), 100, false), &descs).expect("beta fits");
         assert_eq!(decision.chosen.name, "beta");
     }
 
@@ -318,6 +316,9 @@ mod tests {
         let decision = decide_route(&CapsuleRequest::bare(cid(), 10, false), &descs)
             .expect("bare request is permitted");
         assert_eq!(decision.chosen.name, "zeta");
-        assert_eq!(decision.order, vec!["zeta".to_string(), "alpha".to_string()]);
+        assert_eq!(
+            decision.order,
+            vec!["zeta".to_string(), "alpha".to_string()]
+        );
     }
 }
