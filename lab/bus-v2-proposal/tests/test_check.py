@@ -436,6 +436,89 @@ EDIT_DECISION_ORDER = (
     DENY_NUMBER,
 )
 
+RUN_REL = OWNED_REL
+NO_PROCESS_NUMBER = 2958
+NO_PROCESS_SPAN = "examples/agent-host/src/lib.rs:2958"
+SEAT_NUMBER = 2981
+SEAT_SPAN = "examples/agent-host/src/lib.rs:2981"
+RUN_LINES = (
+    "/// Record a run proposal. The resource is a `localhost://` project. Arguments",
+    "/// stay data. A host path creates no step. This does not start a process.",
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    "fn propose_run(",
+    "    journal: &mut Journal,",
+    "    resource: &str,",
+    "    argv: &[String],",
+    ") -> Result<u64, &'static str> {",
+    '    if !resource.starts_with("localhost://")',
+    "        || resource.chars().any(char::is_whitespace)",
+    "        || host_path(resource)",
+    "        || argv.iter().any(|arg| host_path(arg))",
+    "    {",
+    '        return Err("host path");',
+    "    }",
+    "    let id = propose_step(journal);",
+    "    let step = journal",
+    "        .steps",
+    "        .iter_mut()",
+    "        .find(|step| step.id == id)",
+    '        .expect("just pushed");',
+    "    step.kind = ProposalKind::Run;",
+    "    step.resource = resource.to_string();",
+    "    step.argv = argv.to_vec();",
+    '    step.seat = "microvm".to_string();',
+    "    Ok(id)",
+    "}",
+)
+NO_PROCESS_QUOTE = RUN_LINES[1]
+SEAT_QUOTE = RUN_LINES[24]
+
+BODY_DOC_NUMBER = 3961
+BODY_DOC_SPAN = "examples/agent-host/src/lib.rs:3961"
+CREATE_ONLY_NUMBER = 3966
+CREATE_ONLY_SPAN = "examples/agent-host/src/lib.rs:3966"
+PRESENT_REVISION_NUMBER = 3967
+PRESENT_REVISION_SPAN = "examples/agent-host/src/lib.rs:3967"
+WRITE_BODY_LINES = (
+    "/// The write body the Runtime bridge reads: the whole encoding as `content`,",
+    "/// and `create_only` for the first version or `if_revision` after that.",
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    "fn journal_write_body(bytes: &[u8], revision: Option<&str>) -> Vec<u8> {",
+    "    let body = match revision {",
+    '        None => serde_json::json!({ "content": bytes, "create_only": true }),',
+    '        Some(revision) => serde_json::json!({ "content": bytes, "if_revision": revision }),',
+    "    };",
+    "    body.to_string().into_bytes()",
+    "}",
+)
+BODY_DOC_QUOTE = WRITE_BODY_LINES[0]
+CREATE_ONLY_QUOTE = WRITE_BODY_LINES[5]
+PRESENT_REVISION_QUOTE = WRITE_BODY_LINES[6]
+
+# The five run and write-body quotes, their pinned lines, walk and index.
+RUN_BODY_CASES = (
+    ("no_process", NO_PROCESS_NUMBER, NO_PROCESS_SPAN, RUN_LINES, 1),
+    ("seat", SEAT_NUMBER, SEAT_SPAN, RUN_LINES, 24),
+    ("body_doc", BODY_DOC_NUMBER, BODY_DOC_SPAN, WRITE_BODY_LINES, 0),
+    ("create_only", CREATE_ONLY_NUMBER, CREATE_ONLY_SPAN, WRITE_BODY_LINES, 5),
+    (
+        "present_revision",
+        PRESENT_REVISION_NUMBER,
+        PRESENT_REVISION_SPAN,
+        WRITE_BODY_LINES,
+        6,
+    ),
+)
+
+# The run and write-body decisions read their pinned lines in this order.
+RUN_BODY_DECISION_ORDER = (
+    NO_PROCESS_NUMBER,
+    SEAT_NUMBER,
+    BODY_DOC_NUMBER,
+    CREATE_ONLY_NUMBER,
+    PRESENT_REVISION_NUMBER,
+)
+
 # The five file-ask quotes, their pinned lines, their walk and their index.
 FILE_ASK_CASES = (
     ("observe", OBSERVE_NUMBER, OBSERVE_SPAN, OBSERVE_LINES, 4),
@@ -507,6 +590,11 @@ FILE_ASK_LINES = {
     GRANT_NUMBER: GRANT_QUOTE,
     WRITE_NUMBER: WRITE_QUOTE,
     READ_NUMBER: READ_QUOTE,
+    NO_PROCESS_NUMBER: NO_PROCESS_QUOTE,
+    SEAT_NUMBER: SEAT_QUOTE,
+    BODY_DOC_NUMBER: BODY_DOC_QUOTE,
+    CREATE_ONLY_NUMBER: CREATE_ONLY_QUOTE,
+    PRESENT_REVISION_NUMBER: PRESENT_REVISION_QUOTE,
     ASKS_NUMBER: ASKS_THIRD,
     MARKER_NUMBER: MARKER_CONST,
     LAUNCHING_NUMBER: LAUNCHING_CONST,
@@ -1207,9 +1295,15 @@ class CitationCheckTests(unittest.TestCase):
         groups=None,
         copies=None,
         indented=True,
+        ask=ASK_LINES,
+        run=RUN_LINES,
+        write_body=WRITE_BODY_LINES,
+        span_copies=None,
+        omit=(),
     ):
         """A draft that cites the file-ask spans and indents their walks."""
         copies = copies or {}
+        span_copies = span_copies or {}
         chosen = FILE_ASK_GROUPS if groups is None else tuple(groups)
         blocks = (
             ("observe", [OBSERVE_SPAN], list(observe)),
@@ -1221,7 +1315,13 @@ class CitationCheckTests(unittest.TestCase):
             ("owned", [OWNED_SPAN, NEXT_SPAN], [OWNED_QUOTE, NEXT_QUOTE]),
             ("journal", [JOURNAL_SPAN], [JOURNAL_CFG, JOURNAL_CONST]),
             ("grant", [GRANT_SPAN], list(GRANT_LINES)),
-            ("ask", [WRITE_SPAN, READ_SPAN], list(ASK_LINES)),
+            ("run", [NO_PROCESS_SPAN, SEAT_SPAN], list(run)),
+            ("ask", [WRITE_SPAN, READ_SPAN], list(ask)),
+            (
+                "write_body",
+                [BODY_DOC_SPAN, CREATE_ONLY_SPAN, PRESENT_REVISION_SPAN],
+                list(write_body),
+            ),
             (
                 "asks",
                 [ASKS_SPAN],
@@ -1264,8 +1364,12 @@ class CitationCheckTests(unittest.TestCase):
             if name not in chosen:
                 continue
             prose = " ".join(
-                self._cited(span, copies.get(name, 1)) for span in spans
+                self._cited(span, span_copies.get(span, copies.get(name, 1)))
+                for span in spans
+                if span not in omit
             )
+            if not prose:
+                continue
             parts.append(prose + "\n")
             if indented:
                 parts.append("".join("    " + line + "\n" for line in lines))
@@ -5378,4 +5482,523 @@ class CitationCheckTests(unittest.TestCase):
             "`" + DEFAULT_ACTION_SPAN + "`",
             self.test_default_action_delete_line_does_not_stand_for_line_192,
             "CAUGHT default-action-delete-line",
+        )
+
+    def _run_body_case(self, name):
+        for case in RUN_BODY_CASES:
+            if case[0] == name:
+                return case
+        raise AssertionError(name)
+
+    def _run_body_group(self, name):
+        return "run" if name in ("no_process", "seat") else "write_body"
+
+    def _run_body_span(self, number):
+        for name, case_number, span, lines, index in RUN_BODY_CASES:
+            if case_number == number:
+                return span
+        raise AssertionError(number)
+
+    def _present_run_body_decisions(self, body):
+        """Return the run and write-body decisions whose span the draft cites."""
+        return [
+            number
+            for number in RUN_BODY_DECISION_ORDER
+            if "`" + self._run_body_span(number) + "`" in body
+        ]
+
+    def test_live_draft_run_body_quotes_match_their_pinned_lines(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        for name, number, span, lines, index in RUN_BODY_CASES:
+            selector = getattr(check, name + "_quote")
+            self.assertEqual(selector(text), lines[index], span)
+            self.assertEqual(
+                len(check._remainders(text, "`" + span + "`")), len(lines), span
+            )
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        for name, number, span, lines, index in RUN_BODY_CASES:
+            self.assertEqual(
+                check.pinned_line(root, sha, RUN_REL, number), lines[index], span
+            )
+        self.assertEqual(check.problems(root), [])
+
+    def test_run_body_fixture_keeps_every_decision_on_its_pinned_line(self):
+        body = self._file_ask_body(groups=["run", "write_body"])
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._file_ask_source()}
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, list(RUN_BODY_DECISION_ORDER))
+
+    def test_run_body_selectors_are_absent_below_their_index(self):
+        for name, number, span, lines, index in RUN_BODY_CASES:
+            selector = getattr(check, name + "_quote")
+            group = self._run_body_group(name)
+            self.assertIsNone(
+                selector(self._file_ask_body(groups=[group], indented=False)), span
+            )
+            self.assertIsNone(selector("No run or write-body span here.\n"), span)
+            self.assertIsNone(
+                selector(
+                    self._file_ask_body(groups=[group], **{group: lines[:index]})
+                ),
+                span,
+            )
+
+    def _assert_run_body_quote_mismatch(self, name):
+        _, number, span, lines, index = self._run_body_case(name)
+        group = self._run_body_group(name)
+        expected = "refuse: quoted line does not match " + span
+        body = self._file_ask_body(
+            groups=[group], **{group: self._changed(lines, index)}
+        )
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._file_ask_source()}
+        )
+        self.assertEqual(got, [expected])
+        present = self._present_run_body_decisions(body)
+        self.assertEqual(reads, present[: present.index(number) + 1])
+        root = self._draft(body, {OWNED_REL: self._file_ask_source()})
+        (root / OWNED_REL).write_bytes(
+            self._file_ask_source(
+                lines={**FILE_ASK_LINES, number: "// edited in the worktree"}
+            )
+        )
+        self.assertEqual(check.problems(root), [expected])
+        root = self._draft(
+            self._file_ask_body(groups=[group]),
+            {OWNED_REL: self._file_ask_source()},
+        )
+        (root / OWNED_REL).write_bytes(
+            self._file_ask_source(
+                lines={**FILE_ASK_LINES, number: "// edited in the worktree"}
+            )
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_no_process_quoted_line_mismatch_is_refused(self):
+        self._assert_run_body_quote_mismatch("no_process")
+
+    def test_seat_quoted_line_mismatch_is_refused(self):
+        self._assert_run_body_quote_mismatch("seat")
+
+    def test_body_doc_quoted_line_mismatch_is_refused(self):
+        self._assert_run_body_quote_mismatch("body_doc")
+
+    def test_create_only_quoted_line_mismatch_is_refused(self):
+        self._assert_run_body_quote_mismatch("create_only")
+
+    def test_present_revision_quoted_line_mismatch_is_refused(self):
+        self._assert_run_body_quote_mismatch("present_revision")
+
+    def _assert_run_body_line_not_cited(self, name, index):
+        _, number, span, lines, _ = self._run_body_case(name)
+        group = self._run_body_group(name)
+        body = self._file_ask_body(
+            groups=[group], **{group: self._changed(lines, index)}
+        )
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._file_ask_source()}
+        )
+        self.assertEqual(got, [], span)
+        self.assertEqual(reads, self._present_run_body_decisions(body), span)
+
+    def test_run_record_line_does_not_stand_for_line_2958(self):
+        self._assert_run_body_line_not_cited("no_process", 0)
+
+    def test_run_walk_other_lines_do_not_stand_for_the_run_lines(self):
+        for index in (2, 25, 26):
+            self._assert_run_body_line_not_cited("no_process", index)
+
+    def test_seat_kind_line_does_not_stand_for_line_2981(self):
+        self._assert_run_body_line_not_cited("seat", 21)
+
+    def test_seat_walk_other_lines_do_not_stand_for_line_2981(self):
+        for index in (0, 2, 25, 26):
+            self._assert_run_body_line_not_cited("seat", index)
+
+    def test_body_follow_line_does_not_stand_for_line_3961(self):
+        self._assert_run_body_line_not_cited("body_doc", 1)
+
+    def test_write_body_walk_other_lines_do_not_stand_for_line_3961(self):
+        for index in (2, 4, 7, 9):
+            self._assert_run_body_line_not_cited("body_doc", index)
+
+    def test_present_revision_line_does_not_stand_for_line_3966(self):
+        lines = {
+            **FILE_ASK_LINES,
+            CREATE_ONLY_NUMBER: PRESENT_REVISION_QUOTE,
+            PRESENT_REVISION_NUMBER: PRESENT_REVISION_QUOTE,
+        }
+        body = self._file_ask_body(groups=["write_body"])
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._file_ask_source(lines=lines)}
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + CREATE_ONLY_SPAN]
+        )
+        self.assertEqual(reads, [BODY_DOC_NUMBER, CREATE_ONLY_NUMBER])
+
+    def test_create_only_line_does_not_stand_for_line_3967(self):
+        lines = {
+            **FILE_ASK_LINES,
+            CREATE_ONLY_NUMBER: CREATE_ONLY_QUOTE,
+            PRESENT_REVISION_NUMBER: CREATE_ONLY_QUOTE,
+        }
+        body = self._file_ask_body(groups=["write_body"])
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._file_ask_source(lines=lines)}
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + PRESENT_REVISION_SPAN]
+        )
+        self.assertEqual(
+            reads, [BODY_DOC_NUMBER, CREATE_ONLY_NUMBER, PRESENT_REVISION_NUMBER]
+        )
+
+    def test_run_body_spans_without_an_indented_line_add_no_refusal(self):
+        got, reads = self._pinned_reads(
+            self._file_ask_body(groups=["run", "write_body"], indented=False),
+            {OWNED_REL: self._file_ask_source()},
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [])
+
+    def test_run_body_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        for name, number, span, lines, index in RUN_BODY_CASES:
+            expected = "refuse: quoted line is not in the pinned commit: " + span
+            body = self._file_ask_body(groups=[self._run_body_group(name)])
+            got, reads = self._pinned_reads(
+                body,
+                {OWNED_REL: self._file_ask_source(count=number - 1)},
+                {OWNED_REL: self._file_ask_source()},
+            )
+            self.assertEqual(got, [expected], span)
+            present = self._present_run_body_decisions(body)
+            self.assertEqual(reads, present[: present.index(number) + 1], span)
+
+    def test_two_run_body_spans_are_refused(self):
+        cases = (
+            ("run", {NO_PROCESS_SPAN: 2}, NO_PROCESS_SPAN, []),
+            ("run", {SEAT_SPAN: 2}, SEAT_SPAN, [NO_PROCESS_NUMBER]),
+            ("write_body", {BODY_DOC_SPAN: 2}, BODY_DOC_SPAN, []),
+            (
+                "write_body",
+                {CREATE_ONLY_SPAN: 2},
+                CREATE_ONLY_SPAN,
+                [BODY_DOC_NUMBER],
+            ),
+            (
+                "write_body",
+                {PRESENT_REVISION_SPAN: 2},
+                PRESENT_REVISION_SPAN,
+                [BODY_DOC_NUMBER, CREATE_ONLY_NUMBER],
+            ),
+        )
+        for group, span_copies, span, present in cases:
+            body = self._file_ask_body(groups=[group], span_copies=span_copies)
+            got, reads = self._pinned_reads(
+                body, {OWNED_REL: self._file_ask_source()}
+            )
+            self.assertEqual(
+                got, ["refuse: quoted line is not one line: " + span], span
+            )
+            self.assertEqual(reads, present, span)
+
+    def test_draft_without_a_run_body_span_adds_no_refusal(self):
+        for name, number, span, lines, index in RUN_BODY_CASES:
+            body = self._file_ask_body(
+                groups=["run", "write_body"], omit=(span,)
+            )
+            got, reads = self._pinned_reads(
+                body, {OWNED_REL: self._file_ask_source()}
+            )
+            self.assertEqual(got, [], span)
+            self.assertEqual(
+                reads,
+                [other for other in RUN_BODY_DECISION_ORDER if other != number],
+                span,
+            )
+
+    def test_op_mismatch_does_not_read_the_run_lines(self):
+        body = self._edit_walk_body(
+            groups=["op"], op=self._changed(REQUEST_LINES, 15)
+        ) + self._file_ask_body(
+            groups=["run"], run=self._changed(RUN_LINES, 1)
+        )
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._file_ask_source()}
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + OP_SPAN])
+        self.assertEqual(reads, [OP_NUMBER])
+
+    def test_draft_without_the_op_span_still_refuses_the_no_process_line(self):
+        body = self._file_ask_body(
+            groups=["run"], run=self._changed(RUN_LINES, 1)
+        )
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._file_ask_source()}
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + NO_PROCESS_SPAN]
+        )
+        self.assertEqual(reads, [NO_PROCESS_NUMBER])
+
+    def test_seat_mismatch_stops_the_later_decisions(self):
+        body = (
+            self._file_ask_body(
+                groups=["run"], run=self._changed(RUN_LINES, 24)
+            )
+            + self._edit_walk_body(
+                groups=["is_write"], is_write=self._changed(IS_WRITE_LINES, 2)
+            )
+            + self._file_ask_body(
+                groups=["write_body"],
+                write_body=self._changed(WRITE_BODY_LINES, 0),
+            )
+        )
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._file_ask_source()}
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + SEAT_SPAN])
+        self.assertEqual(reads, [NO_PROCESS_NUMBER, SEAT_NUMBER])
+
+    def test_is_write_mismatch_does_not_read_the_write_body_lines(self):
+        body = self._edit_walk_body(
+            groups=["is_write"], is_write=self._changed(IS_WRITE_LINES, 2)
+        ) + self._file_ask_body(
+            groups=["write_body"],
+            write_body=self._changed(WRITE_BODY_LINES, 0),
+        )
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._file_ask_source()}
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + IS_WRITE_SPAN]
+        )
+        self.assertEqual(reads, [IS_WRITE_NUMBER])
+
+    def test_read_mismatch_does_not_read_the_write_body_lines(self):
+        body = (
+            self._file_ask_body(groups=["run"])
+            + self._file_ask_body(
+                groups=["ask"], ask=self._changed(ASK_LINES, 17)
+            )
+            + self._file_ask_body(
+                groups=["write_body"],
+                write_body=self._changed(WRITE_BODY_LINES, 0),
+            )
+        )
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._file_ask_source()}
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + READ_SPAN])
+        self.assertEqual(
+            reads,
+            [NO_PROCESS_NUMBER, SEAT_NUMBER, WRITE_NUMBER, READ_NUMBER],
+        )
+
+    def test_body_doc_mismatch_stops_the_later_decisions(self):
+        body = self._file_ask_body(
+            groups=["write_body"],
+            write_body=self._changed(WRITE_BODY_LINES, 0),
+        )
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._file_ask_source()}
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + BODY_DOC_SPAN]
+        )
+        self.assertEqual(reads, [BODY_DOC_NUMBER])
+
+    def test_create_only_mismatch_stops_the_present_revision_decision(self):
+        body = self._file_ask_body(
+            groups=["write_body"],
+            write_body=self._changed(WRITE_BODY_LINES, 5),
+        )
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._file_ask_source()}
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + CREATE_ONLY_SPAN]
+        )
+        self.assertEqual(reads, [BODY_DOC_NUMBER, CREATE_ONLY_NUMBER])
+
+    def test_present_revision_mismatch_stops_the_asks_decision(self):
+        body = (
+            self._file_ask_body(groups=["run"])
+            + self._file_ask_body(
+                groups=["write_body"],
+                write_body=self._changed(WRITE_BODY_LINES, 6),
+            )
+            + self._file_ask_body(
+                groups=["asks"], ask_third=ASKS_THIRD + "x"
+            )
+        )
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._file_ask_source()}
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + PRESENT_REVISION_SPAN]
+        )
+        self.assertEqual(reads, list(RUN_BODY_DECISION_ORDER[:5]))
+
+    def test_asks_mismatch_follows_the_run_body_matches(self):
+        body = self._file_ask_body(
+            groups=["run", "write_body", "asks"], ask_third=ASKS_THIRD + "x"
+        )
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._file_ask_source()}
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + ASKS_SPAN])
+        self.assertEqual(
+            reads, list(RUN_BODY_DECISION_ORDER) + [ASKS_NUMBER]
+        )
+
+    def test_cover_mismatch_follows_the_run_body_matches(self):
+        body = self._file_ask_body(
+            groups=["run", "write_body", "cover"],
+            cover=self._changed(COVER_LINES, 5),
+        )
+        got, reads = self._pinned_reads(
+            body,
+            {
+                OWNED_REL: self._file_ask_source(),
+                PROVIDER_REL: self._provider_source(),
+            },
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + COVER_SPAN])
+        self.assertEqual(reads, list(RUN_BODY_DECISION_ORDER) + [COVER_NUMBER])
+
+    def test_run_body_quote_refusal_waits_for_a_known_pin(self):
+        body = self._file_ask_body(
+            groups=["run"], run=self._changed(RUN_LINES, 1)
+        )
+        files = {OWNED_REL: self._file_ask_source()}
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+        self.assertEqual(
+            check.problems(
+                self._raw_draft("Pinned commit: HEAD\n" + body, files)
+            ),
+            ["refuse: pinned commit is not one 40-hex commit"],
+        )
+        self.assertEqual(
+            check.problems(
+                self._raw_draft(
+                    "Pinned commit: " + "f" * 40 + "\n" + body, files, commit=True
+                )
+            ),
+            ["refuse: pinned commit is not a commit: " + "f" * 40],
+        )
+
+    def _caught_run_body_index(self, global_name, index, span, named_test, label):
+        def planted(text):
+            remainders = check._remainders(text, "`" + span + "`")
+            if len(remainders) <= index:
+                return None
+            return remainders[index]
+
+        self._caught(
+            global_name,
+            planted,
+            named_test,
+            "refuse: quoted line does not match",
+            label,
+        )
+
+    def test_falsifier_no_process_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_no_process_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT no-process-quoted-line",
+        )
+
+    def test_falsifier_run_record_line_is_caught(self):
+        self._caught_run_body_index(
+            "no_process_quote",
+            0,
+            NO_PROCESS_SPAN,
+            self.test_run_record_line_does_not_stand_for_line_2958,
+            "CAUGHT run-record-line",
+        )
+
+    def test_falsifier_seat_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_seat_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT seat-quoted-line",
+        )
+
+    def test_falsifier_seat_kind_line_is_caught(self):
+        self._caught_run_body_index(
+            "seat_quote",
+            21,
+            SEAT_SPAN,
+            self.test_seat_kind_line_does_not_stand_for_line_2981,
+            "CAUGHT seat-kind-line",
+        )
+
+    def test_falsifier_body_doc_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_body_doc_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT body-doc-quoted-line",
+        )
+
+    def test_falsifier_body_follow_line_is_caught(self):
+        self._caught_run_body_index(
+            "body_doc_quote",
+            1,
+            BODY_DOC_SPAN,
+            self.test_body_follow_line_does_not_stand_for_line_3961,
+            "CAUGHT body-follow-line",
+        )
+
+    def test_falsifier_create_only_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_create_only_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT create-only-quoted-line",
+        )
+
+    def test_falsifier_present_revision_as_missing_is_caught(self):
+        self._caught_run_body_index(
+            "create_only_quote",
+            6,
+            CREATE_ONLY_SPAN,
+            self.test_present_revision_line_does_not_stand_for_line_3966,
+            "CAUGHT present-revision-as-missing",
+        )
+
+    def test_falsifier_present_revision_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_present_revision_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT present-revision-quoted-line",
+        )
+
+    def test_falsifier_create_only_as_present_is_caught(self):
+        self._caught_run_body_index(
+            "present_revision_quote",
+            5,
+            PRESENT_REVISION_SPAN,
+            self.test_create_only_line_does_not_stand_for_line_3967,
+            "CAUGHT create-only-as-present",
         )
