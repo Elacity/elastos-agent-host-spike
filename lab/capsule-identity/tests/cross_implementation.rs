@@ -18,7 +18,7 @@
 //! `.DS_Store`, a `.well-known/a.txt` and an empty folder `e`, and prints
 //! `KUBO_WEB_APP_WITH_F_HOLDING_EMPTY_G` (Kubo's value, not a pin) for a
 //! folder `f` holding only an empty `g`; `lab_cid` refuses all four, with
-//! `HiddenName` or `EmptyFolder`. It passes on this Mac (LOG.md, ci-54).
+//! `HiddenName` or `EmptyFolder`. It passes on this Mac (LOG.md, ci-57).
 mod common;
 
 use std::ffi::OsString;

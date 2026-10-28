@@ -397,6 +397,11 @@ fn directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused() {
     // the walk and the encoder name it, and the name differs from the pin.
     // This value is not pinned.
     let (bundle, entries) = at_limit(1);
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert!(estimate <= HAMT_LINKS_LIMIT, "{estimate}");
     let walked = name(&bundle);
     let encoded = encode_entries(&entries)
         .unwrap_or_else(|refusal| panic!("{refusal}"))

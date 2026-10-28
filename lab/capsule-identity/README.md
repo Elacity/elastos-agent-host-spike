@@ -90,7 +90,12 @@ To recompute a lab CID by hand:
    file's node. No file is refused for its length.
 4. Each path part but the last is a **directory**: `browser/app.js` is a
    directory `browser` with a link named `app.js`. The root is the directory
-   of the bundle's entries. No empty directory is ever made.
+   of the bundle's entries. A folder that holds no file, at any depth, is
+   refused: Kubo's import with `--empty-dirs=false` leaves out an empty
+   folder but keeps a folder that holds only empty folders, so the lab
+   refuses rather than print a name Kubo may not give. A name that starts
+   with `.` is refused too: Kubo without `--hidden` leaves that name out,
+   and the lab names every byte or refuses.
 5. A directory's **block** is dag-pb. Sort its children by name bytes. For each
    child, write protobuf field 2 (tag `0x12`, then the length as a varint)
    holding a link: field 1 (`0x0a`, length) the child's CID bytes, field 2
@@ -291,9 +296,13 @@ and `encode_entries` makes each file's node from its bytes with `file_node`
 any depth, task 051) and hands the nodes to
 `encode_tree`, the one tree builder. `encode_listed_files` (task 047; see
 [naming a closure listing](#naming-a-closure-listing)) makes one raw leaf per
-listed file and hands them to the same `encode_tree` (task 048). Every leaf is
-made by `raw_leaf`, every node of a file tree by `file_root_block`, and
-directory blocks and file-tree nodes write their links with one `put_links`. They are the only code that names a bundle; tests call them
+listed file and hands them to the same `encode_tree` (task 048).
+`encode_chunked_files` (task 055; see
+[naming a closure listing](#naming-a-closure-listing)) builds each file tree
+from the caller's chunk digests and hands the nodes to the same `encode_tree`.
+Every leaf is made by `raw_leaf`, every node of a file tree by
+`file_root_block`, and directory blocks and file-tree nodes write their links
+with one `put_links`. They are the only code that names a bundle; tests call them
 and copy none. `naming_hash` holds the one naming hash, and leaves, file roots
 and directory blocks share it. The encoder also
 refuses what the walk can never give but a caller of the encoder could: a path
@@ -338,6 +347,8 @@ rules and not from the Rust code, in
 | A name and a file's length are written with their lengths | `path_and_content_boundaries_cannot_collide` | F-CI1b, F-CI1p (name), F-CI1q (Tsize) |
 | A file and a directory at one path are refused | `encoder_refuses_file_directory_conflict` | F-CI18p, F-CI18q (one silently replaces the other) |
 | An empty, `.` or `..` path part is refused | `encoder_refuses_a_path_with_an_empty_or_dot_part` | F-CI18s |
+| A name that starts with `.` is refused, with its reason | `a_hidden_name_is_refused_with_its_reason` | F-CI54a (the one hidden check removed), F-CI54b (only the last part is checked), F-CI54c (any dot is refused) |
+| A folder that holds no file, at any depth, is refused, with its reason | `a_folder_with_no_file_is_refused_with_its_reason` | F-CI54d (the empty-folder check removed), F-CI54e (the file-count compare removed) |
 | Two entries with one path are refused | `encoder_refuses_a_duplicate_path` | F-CI1r |
 
 The three pins these tests add are in `tests/common/mod.rs`, and the Python
@@ -2050,7 +2061,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 296 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 301 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -2101,7 +2112,8 @@ F-CI49a to F-CI49c (see
 [the encoding](#the-encoding)), and task 055's F-CI55a to F-CI55c (see
 [naming a closure listing](#naming-a-closure-listing)), and task 056's
 F-CI56a to F-CI56l (see [the encoding](#the-encoding); F-CI18h, F-CI53a and
-F-CI53b are retargeted by it).
+F-CI53b are retargeted by it), and task 054's F-CI54a to F-CI54e (see
+[the encoding](#the-encoding)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -2275,6 +2287,11 @@ F-CI48b removes the `for blocksize in blocksizes` loop of `file_root_block`,
 and F-CI48d drops `block.len()` from the node's Tsize line in `file_root`;
 their titles say so. Every other older edit's text is the same and still
 found exactly once.
+Task 054's entries all edit `src/lib.rs`: F-CI54a deletes the hidden-name
+check, F-CI54b checks only the last path part, F-CI54c refuses any part that
+contains a dot, F-CI54d deletes the empty-folder check, and F-CI54e drops its
+file-count compare. Each anchor is a line task 054 added, found exactly once.
+Task 054 changed no older edit's text.
 
 ### The inventory check
 
