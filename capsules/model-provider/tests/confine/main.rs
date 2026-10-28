@@ -1420,6 +1420,8 @@ fn operations_section_cites_existing_tests() {
     /// not descend into a value, so a nested object's keys stay inside that
     /// value. It skips a string whole, so a `{` inside one is no brace. A
     /// call such as `ok_response(` is not a second literal.
+    /// Regions with `//` or `/*` are refused, including those markers inside
+    /// strings. This check applies before the literal count and body scan.
     ///
     /// Honesty limit: this reads literal text, not a serialized answer. A key
     /// a helper adds at run time is not read. Nested values (`offers`,
@@ -1429,6 +1431,12 @@ fn operations_section_cites_existing_tests() {
     /// `data`.
     fn json_literal_keys(region: &str) -> Result<Vec<String>, String> {
         const OPENER: &str = "json!({";
+        if region.contains("//") {
+            return Err("json: line-comment marker `//` is unsupported in the region".to_string());
+        }
+        if region.contains("/*") {
+            return Err("json: block-comment marker `/*` is unsupported in the region".to_string());
+        }
         let openings = region.matches(OPENER).count();
         if openings == 0 {
             return Err("json: the region has no `json!({` literal".to_string());
@@ -1617,12 +1625,12 @@ fn operations_section_cites_existing_tests() {
             )?;
             let names = cell_backtick_names(ok_side);
             if operation == "unsupported" {
-                if names.is_empty() {
+                if ok_side.trim().is_empty() {
                     continue;
                 }
                 return Err(format!(
                     "operation `unsupported` has an ok side: {}",
-                    names.join(", ")
+                    ok_side.trim()
                 ));
             }
             if names.len() < 2 {
@@ -1632,6 +1640,11 @@ fn operations_section_cites_existing_tests() {
             }
             compare_output_keys(operation, "ok", &names[..2], &ok_keys)?;
             if ok_side.contains("from") {
+                if names.len() < 3 {
+                    return Err(format!(
+                        "operation `{operation}` Outputs ok side has `from` without a struct name"
+                    ));
+                }
                 let struct_name = names[names.len() - 1];
                 let Some(struct_fields) = struct_field_names(contract_source, struct_name)? else {
                     return Err(format!(
@@ -2219,6 +2232,10 @@ pub fn error_response(code: &str, message: &str) -> Value {
     // not have, each fail with the operation and that name.
     let short_status = status_struct.replace("    pub offers_ready: usize,\n", "");
     let failure = outputs_failure(&init_row, &answer_contract(&short_status), "", "");
+    assert_eq!(
+        failure,
+        "operation `init` ok `data` name `offers_ready` has no partner in the answer"
+    );
     assert!(
         failure.contains("init") && failure.contains("offers_ready"),
         "{failure}"
@@ -2228,6 +2245,10 @@ pub fn error_response(code: &str, message: &str) -> Value {
         "    pub offers_ready: usize,\n    pub extra: bool,\n",
     );
     let failure = outputs_failure(&init_row, &answer_contract(&long_status), "", "");
+    assert_eq!(
+        failure,
+        "operation `init` ok `data` key `extra` has no partner in the cell"
+    );
     assert!(
         failure.contains("init") && failure.contains("extra"),
         "{failure}"
@@ -2254,11 +2275,19 @@ pub fn error_response(code: &str, message: &str) -> Value {
         "error: `status`, `code`.",
     );
     let failure = outputs_failure(&outputs_row("init", &missing_message), &answers, "", "");
+    assert_eq!(
+        failure,
+        "operation `init` error key `message` has no partner in the cell"
+    );
     assert!(failure.contains("message"), "{failure}");
 
     // A changed wrapper key and a reordered pair each fail.
     let renamed_ok = answers.replace("\"data\": data,", "\"result\": data,");
     let failure = outputs_failure(&init_row, &renamed_ok, "", "");
+    assert_eq!(
+        failure,
+        "operation `init` ok name `data` has no partner; the key there is `result`"
+    );
     assert!(
         failure.contains("init") && failure.contains("result"),
         "{failure}"
@@ -2269,6 +2298,10 @@ pub fn error_response(code: &str, message: &str) -> Value {
     );
     assert_ne!(reordered_ok, answers, "the reorder must change the writer");
     let failure = outputs_failure(&init_row, &reordered_ok, "", "");
+    assert_eq!(
+        failure,
+        "operation `init` ok name `status` has no partner; the key there is `data`"
+    );
     assert!(
         failure.contains("init") && failure.contains("status") && failure.contains("data"),
         "{failure}"
@@ -2304,6 +2337,10 @@ pub fn error_response(code: &str, message: &str) -> Value {
         offers_state,
         "",
     );
+    assert_eq!(
+        failure,
+        "operation `offers_list` ok `data` key `offer_revisions` has no partner in the cell"
+    );
     assert!(
         failure.contains("offers_list") && failure.contains("offer_revisions"),
         "{failure}"
@@ -2324,6 +2361,45 @@ pub fn error_response(code: &str, message: &str) -> Value {
         ),
         Ok(())
     );
+
+    // Commented keys and comment braces cannot make a stale Outputs cell pass.
+    // Both comment forms go through the same reader used by every answer.
+    for (commented_key, shutdown_value, reason) in [
+        (
+            "// \"offer_revisions\": offer_revisions,",
+            "\"shutdown\": true, // }\n                \"extra\": true",
+            "json: line-comment marker `//` is unsupported in the region",
+        ),
+        (
+            "/* \"offer_revisions\": offer_revisions, */",
+            "\"shutdown\": true, /* } */\n                \"extra\": true",
+            "json: block-comment marker `/*` is unsupported in the region",
+        ),
+    ] {
+        let commented_offers =
+            offers_state.replace("\"offer_revisions\": offer_revisions,", commented_key);
+        assert_ne!(commented_offers, offers_state);
+        assert_eq!(
+            outputs_failure(
+                &outputs_row("offers_list", offers_full),
+                &answers,
+                &commented_offers,
+                ""
+            ),
+            reason
+        );
+        let commented_shutdown = shutdown_arm.replace("\"shutdown\": true", shutdown_value);
+        assert_ne!(commented_shutdown, shutdown_arm);
+        assert_eq!(
+            outputs_failure(
+                &outputs_row("shutdown", shutdown_outputs),
+                &answers,
+                "",
+                &commented_shutdown
+            ),
+            reason
+        );
+    }
 
     // The `unsupported` row has only the error side. Any other row without
     // `from` fails.
@@ -2346,6 +2422,33 @@ pub fn error_response(code: &str, message: &str) -> Value {
         "",
     );
     assert!(failure.contains("unsupported"), "{failure}");
+    assert_eq!(
+        failure,
+        "operation `unsupported` has an ok side: ok: `status`, `data`."
+    );
+    for ok_side in ["ok: success.", "ok:", "success."] {
+        assert_eq!(
+            outputs_failure(
+                &outputs_row(
+                    "unsupported",
+                    &format!("{ok_side} error: `status`, `code`, `message`.")
+                ),
+                &answers,
+                "",
+                ""
+            ),
+            format!("operation `unsupported` has an ok side: {ok_side}")
+        );
+    }
+    assert_eq!(
+        operations_outputs_match_the_answers(
+            &outputs_row("unsupported", " \t error: `status`, `code`, `message`."),
+            &answers,
+            "",
+            ""
+        ),
+        Ok(())
+    );
     let failure = outputs_failure(
         &outputs_row(
             "runs_get",
@@ -2356,14 +2459,53 @@ pub fn error_response(code: &str, message: &str) -> Value {
         "",
     );
     assert!(failure.contains("runs_get"), "{failure}");
+    assert_eq!(
+        failure,
+        "operation `runs_get` Outputs ok side names no `from` struct and no answer `json!`"
+    );
+
+    // Every cell-layout refusal reports its own exact reason, including a
+    // `from` side that lacks the final struct-name span.
+    for (cell, reason) in [
+        (
+            "ok: `status`, `data`.",
+            "operation `init` Outputs cell has no `error:` side",
+        ),
+        (
+            "error: `status`, `code`, `message`.",
+            "operation `init` Outputs ok side has fewer than two names",
+        ),
+        (
+            "ok: `status`. error: `status`, `code`, `message`.",
+            "operation `init` Outputs ok side has fewer than two names",
+        ),
+        (
+            "ok: `status`, `data` from. error: `status`, `code`, `message`.",
+            "operation `init` Outputs ok side has `from` without a struct name",
+        ),
+        (
+            "ok: `status`, `data` from `MissingResponse`. error: `status`, `code`, `message`.",
+            "operation `init` names struct `MissingResponse`, which `src/contract.rs` does not declare",
+        ),
+    ] {
+        assert_eq!(
+            outputs_failure(&outputs_row("init", cell), &answers, "", ""),
+            reason
+        );
+    }
 
     // The one json reader refuses zero and two literals with separate
     // reasons, and it keeps a nested key inside its value.
     let no_literal = json_literal_keys("fn answer() {}")
         .expect_err("a region with no `json!({` must be refused");
+    assert_eq!(no_literal, "json: the region has no `json!({` literal");
     assert!(no_literal.contains("json"), "{no_literal}");
     let two_literals = json_literal_keys("json!({}) json!({})")
         .expect_err("a region with two `json!({` must be refused");
+    assert_eq!(
+        two_literals,
+        "json: the region has 2 `json!({` literals, not one"
+    );
     assert!(two_literals.contains("json"), "{two_literals}");
     assert_ne!(
         no_literal, two_literals,
@@ -2373,6 +2515,43 @@ pub fn error_response(code: &str, message: &str) -> Value {
         json_literal_keys("json!({ \"outer\": { \"inner\": true }, \"next\": 1 })"),
         Ok(vec!["outer".to_string(), "next".to_string()])
     );
+    for (region, reason) in [
+        (
+            "json!({ \"unfinished",
+            "json: a string in the literal never closes",
+        ),
+        ("json!({ \"key\": true", "json: the literal never closes"),
+    ] {
+        assert_eq!(json_literal_keys(region), Err(reason.to_string()));
+    }
+    // The refusal covers the whole region: before, within and after the
+    // literal, between a key and its colon, and within nested values. The
+    // conservative marker rule also refuses markers inside quoted strings.
+    for (marker, reason) in [
+        (
+            "//",
+            "json: line-comment marker `//` is unsupported in the region",
+        ),
+        (
+            "/*",
+            "json: block-comment marker `/*` is unsupported in the region",
+        ),
+    ] {
+        for region in [
+            format!("{marker} json!({{\"key\": true}}) */"),
+            format!("{marker} comment */\njson!({{\"key\": true}})"),
+            format!("json!({{\"key\": true}}) {marker} comment */"),
+            format!("json!({{\"key\" {marker} comment */\n: true}})"),
+            format!("json!({{\"outer\": {{{marker} }} */\n\"inner\": true}}}})"),
+            format!("json!({{\"key\": \"{marker}\"}})"),
+        ] {
+            assert_eq!(
+                json_literal_keys(&region),
+                Err(reason.to_string()),
+                "{region}"
+            );
+        }
+    }
 
     // An unreadable answer source is an error that names its path.
     let missing_answer = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/no_such_answer_source.rs");
