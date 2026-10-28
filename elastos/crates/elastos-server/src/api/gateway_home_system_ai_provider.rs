@@ -10,14 +10,42 @@ use std::sync::OnceLock;
 
 use super::*;
 
-fn hosted_setup_gate() -> &'static tokio::sync::Mutex<()> {
-    static GATE: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    GATE.get_or_init(|| tokio::sync::Mutex::new(()))
+pub(super) fn hosted_setup_gate(
+    data_dir: &std::path::Path,
+) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    static GATES: OnceLock<crate::api::model_provider_config::HostedHomeGates> = OnceLock::new();
+    crate::api::model_provider_config::hosted_home_gate(&GATES, data_dir)
 }
 
-async fn discard_staged_setup(data_dir: &std::path::Path, id: &str) -> anyhow::Result<()> {
-    let _guard = hosted_setup_gate().lock().await;
-    crate::api::model_provider_config::discard_staged_hosted_key(data_dir, id)
+async fn discard_staged_setup(
+    data_dir: &std::path::Path,
+    id: &str,
+    authorize: impl Fn() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let _guard = hosted_setup_gate(data_dir).lock_owned().await;
+    #[cfg(unix)]
+    let _transition = crate::api::model_provider_egress_decision::transition_gate(data_dir)
+        .lock_owned()
+        .await;
+    authorize()?;
+    crate::api::model_provider_config::require_staged_hosted_key(data_dir, id)?;
+    #[cfg(unix)]
+    let _ended = crate::api::model_provider_egress_decision::end_offer(data_dir, id)?;
+    #[cfg(unix)]
+    let _end = if _ended > 0 {
+        Some(crate::api::hosted_egress_admission::begin_hosted_end(data_dir, id).await)
+    } else {
+        None
+    };
+    authorize()?;
+    crate::api::model_provider_config::discard_staged_hosted_key(data_dir, id)?;
+    #[cfg(unix)]
+    let _cleanup_end = if _end.is_none() {
+        Some(crate::api::hosted_egress_admission::begin_hosted_end(data_dir, id).await)
+    } else {
+        None
+    };
+    Ok(())
 }
 
 const HOSTED_EXTERNAL_HTTPS_PAUSED: &str =
@@ -49,7 +77,7 @@ fn hosted_transport_error(err: anyhow::Error) -> anyhow::Error {
         "hosted egress requires an Inbox decision" => HOSTED_CONNECTION_PENDING,
         "hosted connection request was denied" => HOSTED_CONNECTION_DENIED,
         "hosted egress request was denied or ended" => HOSTED_ACCESS_CLOSED,
-        "owner ended hosted HTTPS" => HOSTED_CONNECTION_ENDED,
+        "hosted access ended during send" | "hosted access is ending" => HOSTED_CONNECTION_ENDED,
         "hosted validation destination unavailable"
         | "hosted validation redirect denied"
         | "hosted destination unavailable" => HOSTED_CONNECTION_ROUTE_BLOCKED,
@@ -144,6 +172,7 @@ struct AiProviderValidateResponse {
 #[cfg(test)]
 thread_local! {
     static OPENROUTER_MODELS_DOUBLE: RefCell<Option<OpenRouterModelsDouble>> = const { RefCell::new(None) };
+    static OPENROUTER_KEY_DOUBLE: RefCell<Option<(reqwest::StatusCode, Vec<u8>)>> = const { RefCell::new(None) };
     static VENICE_AUTH_DOUBLE: RefCell<Option<VeniceAuthDouble>> = const { RefCell::new(None) };
     static VENICE_MODELS_DOUBLE: RefCell<Option<Vec<DiscoveredModel>>> = const { RefCell::new(None) };
 }
@@ -153,6 +182,8 @@ thread_local! {
 pub(crate) enum OpenRouterModelsDouble {
     InvalidKey,
     Models(Vec<String>),
+    #[cfg(unix)]
+    AwaitEnd,
 }
 
 #[cfg(test)]
@@ -166,6 +197,13 @@ pub(crate) enum VeniceAuthDouble {
 #[cfg(test)]
 pub(crate) fn install_openrouter_models_double(double: OpenRouterModelsDouble) {
     OPENROUTER_MODELS_DOUBLE.with(|slot| *slot.borrow_mut() = Some(double));
+}
+
+/// Answer the OpenRouter key endpoint with this upstream status and body.
+/// Without it the key endpoint accepts the key.
+#[cfg(test)]
+pub(crate) fn install_openrouter_key_response(status: reqwest::StatusCode, body: &[u8]) {
+    OPENROUTER_KEY_DOUBLE.with(|slot| *slot.borrow_mut() = Some((status, body.to_vec())));
 }
 
 #[cfg(test)]
@@ -191,6 +229,7 @@ pub(crate) fn install_venice_validate_double(
 #[cfg(test)]
 pub(crate) fn clear_hosted_ai_validate_doubles() {
     OPENROUTER_MODELS_DOUBLE.with(|slot| *slot.borrow_mut() = None);
+    OPENROUTER_KEY_DOUBLE.with(|slot| *slot.borrow_mut() = None);
     VENICE_AUTH_DOUBLE.with(|slot| *slot.borrow_mut() = None);
     VENICE_MODELS_DOUBLE.with(|slot| *slot.borrow_mut() = None);
 }
@@ -205,7 +244,7 @@ fn require_system_admin(
     };
     let principal = crate::auth::load_principal_for_proof_binding(data_dir, proof_binding_id)?;
     crate::auth::ensure_proof_binding_not_revoked(&principal)?;
-    if !crate::auth::is_admin(&principal) {
+    if !crate::auth::is_admin(&principal) || principal.proof_binding.passkey.is_none() {
         return Err(anyhow::anyhow!("admin passkey required"));
     }
     Ok(context)
@@ -250,12 +289,58 @@ fn normalize_model(provider: crate::api::HostedAiProvider, value: &str) -> anyho
     Ok(trimmed.to_string())
 }
 
+/// The model list is public, so only the key endpoint, which requires the key,
+/// can tell whether OpenRouter accepts it.
+#[cfg(any(test, target_os = "macos"))]
+fn openrouter_key_response(status: reqwest::StatusCode, bytes: &[u8]) -> anyhow::Result<()> {
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(invalid_key(crate::api::HostedAiProvider::OpenRouter));
+    }
+    let unavailable = || anyhow::anyhow!("OpenRouter validation unavailable");
+    if !status.is_success() {
+        return Err(unavailable());
+    }
+    let payload: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| unavailable())?;
+    payload
+        .get("data")
+        .filter(|data| data.is_object())
+        .map(|_| ())
+        .ok_or_else(unavailable)
+}
+
+/// Only the provider's auth rejection means the key is invalid; any other
+/// unusable answer is an unavailable provider, not a verdict on the key.
+#[cfg(any(test, target_os = "macos"))]
+fn openrouter_models_response(
+    status: reqwest::StatusCode,
+    bytes: &[u8],
+) -> anyhow::Result<Vec<DiscoveredModel>> {
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(invalid_key(crate::api::HostedAiProvider::OpenRouter));
+    }
+    if !status.is_success() {
+        return Err(anyhow::anyhow!("OpenRouter validation unavailable"));
+    }
+    parse_openrouter_models_body(bytes)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn venice_access_response(status: reqwest::StatusCode, bytes: &[u8]) -> anyhow::Result<bool> {
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(invalid_key(crate::api::HostedAiProvider::Venice));
+    }
+    if !status.is_success() {
+        return Err(anyhow::anyhow!("Venice validation unavailable"));
+    }
+    parse_venice_rate_limits_body(bytes)
+}
+
 #[cfg(any(test, target_os = "macos"))]
 fn parse_openrouter_models_body(bytes: &[u8]) -> anyhow::Result<Vec<DiscoveredModel>> {
-    let payload: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|_| ai_provider_request_error("invalid OpenRouter key"))?;
+    let unavailable = || anyhow::anyhow!("OpenRouter validation unavailable");
+    let payload: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| unavailable())?;
     let Some(data) = payload.get("data").and_then(serde_json::Value::as_array) else {
-        return Err(ai_provider_request_error("invalid OpenRouter key"));
+        return Err(unavailable());
     };
     let mut models = Vec::new();
     for entry in data {
@@ -303,20 +388,20 @@ fn parse_openrouter_models_body(bytes: &[u8]) -> anyhow::Result<Vec<DiscoveredMo
 #[cfg(any(test, target_os = "macos"))]
 fn parse_venice_rate_limits_body(bytes: &[u8]) -> anyhow::Result<bool> {
     let payload: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|_| ai_provider_request_error("invalid Venice key"))?;
-    Ok(payload
+        .map_err(|_| anyhow::anyhow!("Venice validation unavailable"))?;
+    payload
         .get("data")
         .and_then(|data| data.get("accessPermitted"))
         .and_then(serde_json::Value::as_bool)
-        == Some(true))
+        .ok_or_else(|| anyhow::anyhow!("Venice validation unavailable"))
 }
 
 #[cfg(any(test, target_os = "macos"))]
 fn parse_venice_models_body(bytes: &[u8]) -> anyhow::Result<Vec<DiscoveredModel>> {
-    let payload: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|_| ai_provider_request_error("invalid Venice key"))?;
+    let unavailable = || anyhow::anyhow!("Venice validation unavailable");
+    let payload: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| unavailable())?;
     let Some(data) = payload.get("data").and_then(serde_json::Value::as_array) else {
-        return Err(ai_provider_request_error("invalid Venice key"));
+        return Err(unavailable());
     };
     let mut models = Vec::new();
     for entry in data {
@@ -343,6 +428,40 @@ fn parse_venice_models_body(bytes: &[u8]) -> anyhow::Result<Vec<DiscoveredModel>
     Ok(models)
 }
 
+async fn check_openrouter_key(
+    data_dir: &std::path::Path,
+    api_key: &str,
+    owner_proof_binding_id: &str,
+    connection_id: &str,
+) -> anyhow::Result<()> {
+    #[cfg(test)]
+    {
+        let _ = (data_dir, api_key, owner_proof_binding_id, connection_id);
+        match OPENROUTER_KEY_DOUBLE.with(|slot| slot.borrow().clone()) {
+            Some((status, body)) => openrouter_key_response(status, &body),
+            None => Ok(()),
+        }
+    }
+    #[cfg(all(not(test), target_os = "macos"))]
+    {
+        let (status, bytes) = crate::api::model_provider_egress::fetch_validation_for_connection(
+            data_dir,
+            crate::api::model_provider_egress::ValidationEndpoint::OpenRouterKey,
+            api_key,
+            owner_proof_binding_id,
+            connection_id,
+        )
+        .await
+        .map_err(hosted_transport_error)?;
+        openrouter_key_response(status, &bytes)
+    }
+    #[cfg(all(not(test), not(target_os = "macos")))]
+    {
+        let _ = (data_dir, api_key, owner_proof_binding_id, connection_id);
+        Err(ai_provider_request_error(HOSTED_EXTERNAL_HTTPS_PAUSED))
+    }
+}
+
 async fn fetch_openrouter_models(
     data_dir: &std::path::Path,
     api_key: &str,
@@ -355,7 +474,8 @@ async fn fetch_openrouter_models(
     {
         let _ = (data_dir, connection_id);
         let _ = api_key;
-        OPENROUTER_MODELS_DOUBLE.with(|slot| match slot.borrow().as_ref() {
+        let double = OPENROUTER_MODELS_DOUBLE.with(|slot| slot.borrow().clone());
+        match double {
             Some(OpenRouterModelsDouble::InvalidKey) => {
                 Err(ai_provider_request_error("invalid OpenRouter key"))
             }
@@ -367,8 +487,20 @@ async fn fetch_openrouter_models(
                     privacy: None,
                 })
                 .collect()),
+            #[cfg(unix)]
+            Some(OpenRouterModelsDouble::AwaitEnd) => {
+                let gate =
+                    crate::api::hosted_egress_admission::admission_gate(data_dir, connection_id);
+                let _admission = gate.lock.read().await;
+                let mut ended = gate.changed.subscribe();
+                ended.borrow_and_update();
+                ended.changed().await?;
+                Err(hosted_transport_error(anyhow::anyhow!(
+                    "hosted access ended during send"
+                )))
+            }
             None => Err(anyhow::anyhow!("OpenRouter validation transport unset")),
-        })
+        }
     }
     #[cfg(all(not(test), target_os = "macos"))]
     {
@@ -381,13 +513,7 @@ async fn fetch_openrouter_models(
         )
         .await
         .map_err(hosted_transport_error)?;
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(ai_provider_request_error("invalid OpenRouter key"));
-        }
-        if !status.is_success() {
-            return Err(anyhow::anyhow!("OpenRouter validation unavailable"));
-        }
-        parse_openrouter_models_body(&bytes)
+        openrouter_models_response(status, &bytes)
     }
     #[cfg(all(not(test), not(target_os = "macos")))]
     {
@@ -428,13 +554,7 @@ async fn fetch_venice_access(
         )
         .await
         .map_err(hosted_transport_error)?;
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(ai_provider_request_error("invalid Venice key"));
-        }
-        if !status.is_success() {
-            return Err(anyhow::anyhow!("Venice validation unavailable"));
-        }
-        parse_venice_rate_limits_body(&bytes)
+        venice_access_response(status, &bytes)
     }
     #[cfg(all(not(test), not(target_os = "macos")))]
     {
@@ -493,6 +613,7 @@ async fn validate_hosted_key(
     let api_key = normalize_secret(provider, api_key)?;
     match provider {
         crate::api::HostedAiProvider::OpenRouter => {
+            check_openrouter_key(data_dir, &api_key, owner_proof_binding_id, connection_id).await?;
             fetch_openrouter_models(data_dir, &api_key, owner_proof_binding_id, connection_id).await
         }
         crate::api::HostedAiProvider::Venice => {
@@ -535,6 +656,13 @@ pub(super) async fn system_approval_lens_revoke(
         return system_error_response(err);
     }
     #[cfg(unix)]
+    let _transition = crate::api::model_provider_egress_decision::transition_gate(&state.data_dir)
+        .lock_owned()
+        .await;
+    if let Err(err) = require_system_admin(&state.data_dir, &headers) {
+        return system_error_response(err);
+    }
+    #[cfg(unix)]
     let ended_https =
         match crate::api::model_provider_egress_decision::end_offer(&state.data_dir, &req.id) {
             Ok(count) => count,
@@ -542,25 +670,23 @@ pub(super) async fn system_approval_lens_revoke(
         };
     #[cfg(not(unix))]
     let ended_https = 0;
-    #[cfg(target_os = "macos")]
-    let ended_operator = match crate::api::model_provider_egress::end_operator_hosted_access(
-        &state.data_dir,
-        &req.id,
-    ) {
-        Ok(ended) => ended,
-        Err(err) => return system_error_response(err),
-    };
-    #[cfg(not(target_os = "macos"))]
-    let ended_operator = false;
     let jev_active = crate::jev_approval_lens::approved_connection(&state.data_dir, &req.id);
-    if jev_active {
-        if let Err(err) =
-            crate::jev_approval_lens::end_connection_approval(&state.data_dir, &req.id)
-        {
-            return system_error_response(err);
-        }
+    let ended_jev = if jev_active {
+        crate::jev_approval_lens::end_connection_approval(&state.data_dir, &req.id)
+    } else {
+        Ok(())
+    };
+    // Commit the owner's authority change before cancelling admitted sends.
+    #[cfg(unix)]
+    let _end = if ended_https > 0 {
+        Some(crate::api::hosted_egress_admission::begin_hosted_end(&state.data_dir, &req.id).await)
+    } else {
+        None
+    };
+    if let Err(err) = ended_jev {
+        return system_error_response(err);
     }
-    if ended_https == 0 && !ended_operator && !jev_active {
+    if ended_https == 0 && !jev_active {
         return system_error_response(anyhow::anyhow!("hosted connection has no active approval"));
     }
     Json(serde_json::json!({ "offer_id": req.id, "approval": "ended" })).into_response()
@@ -576,31 +702,27 @@ pub(super) async fn system_ai_provider_get(
     match crate::api::ai_provider_status(&state.data_dir) {
         Ok(status) => {
             let mut result = serde_json::to_value(status).expect("serializable provider status");
-            #[cfg(target_os = "macos")]
-            let operator_enabled =
-                crate::api::model_provider_egress::operator_hosted_access_enabled(&state.data_dir);
-            #[cfg(not(target_os = "macos"))]
-            let operator_enabled = false;
-            result["hosted_external_https"] = serde_json::json!(if operator_enabled {
-                "operator_ready"
-            } else if cfg!(target_os = "macos") {
+            result["hosted_external_https"] = serde_json::json!(if cfg!(target_os = "macos") {
                 "consent_required"
             } else {
                 "paused"
             });
-            result["hosted_external_https_reason"] = serde_json::json!(if operator_enabled {
-                "Owner-authorized hosted HTTPS is active for configured providers."
-            } else if cfg!(target_os = "macos") {
-                "Approve each hosted connection in Inbox before its key check or model request."
-            } else {
-                HOSTED_EXTERNAL_HTTPS_PAUSED
-            });
+            result["hosted_external_https_reason"] =
+                serde_json::json!(if cfg!(target_os = "macos") {
+                    "Approve each hosted connection in Inbox before its key check or model request."
+                } else {
+                    HOSTED_EXTERNAL_HTTPS_PAUSED
+                });
             if let Some(connections) = result
                 .get_mut("connections")
                 .and_then(serde_json::Value::as_array_mut)
             {
                 for connection in connections {
-                    connection["egress_state"] = serde_json::json!("paused");
+                    connection["egress_state"] = serde_json::json!(if cfg!(target_os = "macos") {
+                        "consent_required"
+                    } else {
+                        "paused"
+                    });
                     let Some(id) = connection
                         .get("id")
                         .and_then(serde_json::Value::as_str)
@@ -608,13 +730,6 @@ pub(super) async fn system_ai_provider_get(
                     else {
                         continue;
                     };
-                    #[cfg(target_os = "macos")]
-                    if crate::api::model_provider_egress::operator_hosted_offer_ready(
-                        &state.data_dir,
-                        &id,
-                    ) {
-                        connection["egress_state"] = serde_json::json!("operator_ready");
-                    }
                     #[cfg(target_os = "macos")]
                     match crate::api::model_provider_egress::saved_connection_state(
                         &state.data_dir,
@@ -712,7 +827,10 @@ pub(super) async fn system_ai_provider_validate(
         .id
         .clone()
         .unwrap_or_else(|| format!("model:hosted-{:032x}", rand::random::<u128>()));
-    let _setup = hosted_setup_gate().lock().await;
+    let _setup = hosted_setup_gate(&state.data_dir).lock_owned().await;
+    if let Err(err) = require_system_admin(&state.data_dir, &headers) {
+        return system_error_response(err);
+    }
     let api_key = match crate::api::model_provider_config::hosted_key_for_save(
         &state.data_dir,
         provider,
@@ -772,7 +890,10 @@ pub(super) async fn system_ai_provider_save(
         .id
         .clone()
         .unwrap_or_else(|| format!("model:hosted-{:032x}", rand::random::<u128>()));
-    let _setup = hosted_setup_gate().lock().await;
+    let _setup = hosted_setup_gate(&state.data_dir).lock_owned().await;
+    if let Err(err) = require_system_admin(&state.data_dir, &headers) {
+        return system_error_response(err);
+    }
     let api_key = match if req.api_key.trim().is_empty() {
         crate::api::model_provider_config::hosted_key_for_save(
             &state.data_dir,
@@ -817,6 +938,9 @@ pub(super) async fn system_ai_provider_save(
     let _model_share_guard = super::gateway_model_service::model_share_gate()
         .write()
         .await;
+    if let Err(err) = require_system_admin(&state.data_dir, &headers) {
+        return system_error_response(err);
+    }
     match crate::api::save_hosted_offer(
         &state.data_dir,
         state.provider_registry.as_deref(),
@@ -867,6 +991,14 @@ pub(super) async fn system_ai_provider_delete(
     if let Err(err) = require_system_admin(&state.data_dir, &headers) {
         return system_error_response(err);
     }
+    let _setup = hosted_setup_gate(&state.data_dir).lock_owned().await;
+    #[cfg(unix)]
+    let _transition = crate::api::model_provider_egress_decision::transition_gate(&state.data_dir)
+        .lock_owned()
+        .await;
+    if let Err(err) = require_system_admin(&state.data_dir, &headers) {
+        return system_error_response(err);
+    }
     let offer_id = match resolve_hosted_instance_id(
         &state.data_dir,
         req.id.as_deref(),
@@ -876,15 +1008,43 @@ pub(super) async fn system_ai_provider_delete(
         Err(err) => return system_error_response(err),
     };
     #[cfg(unix)]
-    if let Err(err) =
-        crate::api::model_provider_egress_decision::end_offer(&state.data_dir, &offer_id)
-    {
-        return system_error_response(err);
-    }
+    let _ended =
+        match crate::api::model_provider_egress_decision::end_offer(&state.data_dir, &offer_id) {
+            Ok(ended) => ended,
+            Err(err) => return system_error_response(err),
+        };
+    #[cfg(unix)]
+    let _end = if _ended > 0 {
+        Some(
+            crate::api::hosted_egress_admission::begin_hosted_end(&state.data_dir, &offer_id).await,
+        )
+    } else {
+        None
+    };
     let _model_share_guard = super::gateway_model_service::model_share_gate()
         .write()
         .await;
-    match crate::api::remove_hosted_offer(
+    if let Err(err) = require_system_admin(&state.data_dir, &headers) {
+        return system_error_response(err);
+    }
+    if let Err(err) = crate::api::model_provider_config::remove_hosted_offer_configuration(
+        &state.data_dir,
+        &offer_id,
+    ) {
+        return system_error_response(err);
+    }
+    #[cfg(unix)]
+    let _removal_end = if _end.is_none() {
+        Some(
+            crate::api::hosted_egress_admission::begin_hosted_end(&state.data_dir, &offer_id).await,
+        )
+    } else {
+        None
+    };
+    if let Err(err) = require_system_admin(&state.data_dir, &headers) {
+        return system_error_response(err);
+    }
+    match crate::api::model_provider_config::finish_hosted_offer_removal(
         &state.data_dir,
         state.provider_registry.as_deref(),
         &offer_id,
@@ -907,7 +1067,11 @@ pub(super) async fn system_ai_provider_discard_staged(
     let Some(id) = req.id.as_deref() else {
         return system_error_response(anyhow::anyhow!("staged hosted connection id required"));
     };
-    match discard_staged_setup(&state.data_dir, id).await {
+    match discard_staged_setup(&state.data_dir, id, || {
+        require_system_admin(&state.data_dir, &headers).map(|_| ())
+    })
+    .await
+    {
         Ok(()) => Json(serde_json::json!({"discarded": true})).into_response(),
         Err(err) => system_error_response(err),
     }
@@ -932,6 +1096,9 @@ pub(super) async fn system_ai_provider_share(
     let _model_share_guard = super::gateway_model_service::model_share_gate()
         .write()
         .await;
+    if let Err(err) = require_system_admin(&state.data_dir, &headers) {
+        return system_error_response(err);
+    }
     match crate::api::set_hosted_offer_share(
         &state.data_dir,
         &offer_id,
@@ -966,7 +1133,11 @@ mod parse_tests {
             super::HOSTED_ACCESS_CLOSED
         );
         assert_eq!(
-            mapped("owner ended hosted HTTPS"),
+            mapped("hosted access ended during send"),
+            super::HOSTED_CONNECTION_ENDED
+        );
+        assert_eq!(
+            mapped("hosted access is ending"),
             super::HOSTED_CONNECTION_ENDED
         );
         assert_eq!(
@@ -1001,7 +1172,7 @@ mod parse_tests {
 
         let dir = tempfile::tempdir().unwrap();
         let id = "model:hosted-0123456789abcdef0123456789abcdef";
-        let guard = super::hosted_setup_gate().lock().await;
+        let guard = super::hosted_setup_gate(dir.path()).lock_owned().await;
         crate::api::model_provider_config::stage_hosted_key(
             dir.path(),
             crate::api::HostedAiProvider::OpenRouter,
@@ -1009,7 +1180,7 @@ mod parse_tests {
             "fixture-key",
         )
         .unwrap();
-        let mut discard = Box::pin(super::discard_staged_setup(dir.path(), id));
+        let mut discard = Box::pin(super::discard_staged_setup(dir.path(), id, || Ok(())));
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(20), &mut discard)
                 .await
@@ -1104,6 +1275,70 @@ mod parse_tests {
             !super::parse_venice_rate_limits_body(br#"{"data":{"accessPermitted":false}}"#)
                 .unwrap()
         );
+    }
+
+    fn request_message(err: &anyhow::Error) -> String {
+        super::ai_provider_request_message(err)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| err.to_string())
+    }
+
+    #[test]
+    fn openrouter_key_check_rejects_key_only_on_auth_status() {
+        use reqwest::StatusCode;
+        for status in [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN] {
+            let err = super::openrouter_models_response(status, b"").unwrap_err();
+            assert_eq!(request_message(&err), "invalid OpenRouter key");
+        }
+        for body in [&b"not json"[..], br#"{"error":"busy"}"#, br#"{"data":{}}"#] {
+            let err = super::openrouter_models_response(StatusCode::OK, body).unwrap_err();
+            assert_eq!(request_message(&err), "OpenRouter validation unavailable");
+        }
+    }
+
+    #[test]
+    fn openrouter_key_endpoint_maps_auth_and_body() {
+        use reqwest::StatusCode;
+        super::openrouter_key_response(
+            StatusCode::OK,
+            br#"{"data":{"label":"sk-or-v1-fix...ure"}}"#,
+        )
+        .unwrap();
+        for status in [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN] {
+            let err = super::openrouter_key_response(status, br#"{"data":{}}"#).unwrap_err();
+            assert_eq!(request_message(&err), "invalid OpenRouter key");
+        }
+        for (status, body) in [
+            (StatusCode::OK, &b"not json"[..]),
+            (StatusCode::OK, br#"{"error":"busy"}"#),
+            (StatusCode::OK, br#"{"data":[]}"#),
+            (StatusCode::OK, br#"{"data":null}"#),
+            (StatusCode::TOO_MANY_REQUESTS, br#"{"data":{}}"#),
+            (StatusCode::INTERNAL_SERVER_ERROR, b""),
+        ] {
+            let err = super::openrouter_key_response(status, body).unwrap_err();
+            assert_eq!(request_message(&err), "OpenRouter validation unavailable");
+        }
+    }
+
+    #[test]
+    fn venice_key_check_rejects_key_only_on_auth_status_or_denied_access() {
+        use reqwest::StatusCode;
+        let err = super::venice_access_response(StatusCode::UNAUTHORIZED, b"").unwrap_err();
+        assert_eq!(request_message(&err), "invalid Venice key");
+        assert!(!super::venice_access_response(
+            StatusCode::OK,
+            br#"{"data":{"accessPermitted":false}}"#
+        )
+        .unwrap());
+        for body in [&b"not json"[..], br#"{"error":"busy"}"#, br#"{"data":{}}"#] {
+            let err = super::venice_access_response(StatusCode::OK, body).unwrap_err();
+            assert_eq!(request_message(&err), "Venice validation unavailable");
+        }
+        for body in [&b"not json"[..], br#"{"data":{}}"#] {
+            let err = super::parse_venice_models_body(body).unwrap_err();
+            assert_eq!(request_message(&err), "Venice validation unavailable");
+        }
     }
 
     #[test]
