@@ -45,6 +45,15 @@
   `git diff --quiet` finds the same as at `c641bcff2`. Every other Runtime citation stays at `c641bcff2`, and no
   issue was read. Corrected by task 043, on 2026-10-27: the bullet said `c6e2d58d5` was `git rev-parse HEAD` before
   the first commit; the parent is `9bd839491` (Cursor's FOLLOWUP on 040).
+- **Revision (task 059, 2026-10-28):** the signed-bundle journey runs against the shared stand-in. Its lab base is
+  the lane tip after 070 (PR #973, head `956930946`); it reads
+  `lab/agent-conformance/standin-runtime/mod.rs` and that folder's README, and no file under `elastos/`. The shared
+  `StandIn` owns instances, session ids, lifecycle and grants; this lane keeps the fixture store, the CID check and
+  four seams (`commit_launch`, `live_grants`, `grant_request_id`, `apply_stop`), and `tests/stand_in.rs` imports
+  the shared module once. The `cid` body stays a lab fixture entry point, composed to the shared `path` body after
+  the checks. `Start::Ok` is a test-supplied outcome, so it proves no publisher verification and no execution.
+  Commands actually run are in "The stand-in migration (28 Oct, task 059)" below. No Runtime file was read again,
+  every Runtime citation stays at `c641bcff2`, and no issue was read.
 
 Each cited file under `elastos/` or `scripts/`, checked with
 `git diff --stat 3beb816438fd567145a8d725e22465bd83277cf0 c641bcff21d9ceaad769b1ed89529d541ffd8766 -- <file>`:
@@ -926,6 +935,40 @@ in "B1 and B2 (Anders, 26 Oct)" above. A later push to #309 may add the ask, so 
 the ask is routed. Not shown: the Runtime did nothing here; it ran nothing, no Runtime file changed, and it still
 launches by `path`. The stand-in's `cid` request field stays a lab field, with no field of the Runtime's launch
 request for it to land on. This paragraph only reads two commits with `git`; no issue was read again.
+
+28 Oct, task 059: the signed-bundle journey now runs against the shared stand-in
+(`lab/agent-conformance/standin-runtime/mod.rs`, and that folder's README; README "Lab stand-in launcher (M1
+check B1)"). That value owns instances, session ids, lifecycle and grants. The lane's `StandInRuntime` in
+`tests/common/mod.rs` keeps the store, the package records, the accepted DIDs and the signed asks snapshots, and
+its four seams delegate: `commit_launch` runs checks (a)-(g) and calls the shared `post_capsules` with
+`{"path": <the stored folder>}`, `live_grants` calls the shared
+`get_capability_list(Caller::Shell, Some("all_sessions_live"))`, `grant_request_id(n)` gives the shared
+`seed_grant` its `grant-{n}` request id, and `apply_stop` calls the shared `delete_capsule`.
+`tests/stand_in.rs` imports the shared module once with `#[path]` and passes those closures; no other test binary
+compiles it. The `cid` request field stays a lab fixture entry point: it is not the shared route, whose only field
+is `path`, and no shared launch-by-CID route exists. Registration through `admit_resident` supplies `Start::Ok`, a
+test outcome that neither verifies a publisher nor executes the bundle; `finish_start` applies it and moves the
+instance to `running`. The shared response is used unchanged: launch answers `starting`, `session_id` equals `id`,
+and the list entry's `cause` is the shared representation. Two verified launches of the same signed CID each check
+the bundle again, use the same registered fixture path, and create two shared instances. The new test
+`standin_shared_stop_updates_the_same_instances_and_grants` launches two verified fixtures, completes both starts,
+seeds one live grant for each through the shared seam, stops one through `apply_stop`, and reads the same shared
+object: the stopped instance is listed as `stopped` with its reason, its grant is gone, and the sibling stays
+`running` with its grant.
+
+Commands actually run, from the repository root, all exit 0:
+`RUST_TEST_THREADS=2 cargo test --offline --locked --manifest-path lab/capsule-identity/Cargo.toml --test stand_in`
+printed `42 passed; 0 failed` (the 11 lane tests and the 31 tests the shared module brings with it);
+`RUST_TEST_THREADS=2 cargo test --offline --locked --manifest-path lab/capsule-identity/Cargo.toml --test claims
+the_lab_encoder_is_a_test_oracle` printed `1 passed; 0 failed; 3 filtered out`; the full
+`RUST_TEST_THREADS=2 cargo test --offline --locked --manifest-path lab/capsule-identity/Cargo.toml` passed;
+`cargo fmt --manifest-path lab/capsule-identity/Cargo.toml -- --check` printed nothing; and
+`python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json F-CI32 F-CI33 F-CI35
+F-CI36 F-CI37 F-CI44 F-CI59` printed `baseline: 13 named tests pass without an edit, 0 do not` and
+`summary: 23 CAUGHT of 23`. F-CI59a, F-CI59b and F-CI59c are CAUGHT; every retained entry is CAUGHT. F-CI33a is
+retired with its disposition: the shared `StandIn` owns the rule that a launch adds no grant, so this lane has no
+seam where that old bug could be planted; the named test stays. Not shown: the Runtime did nothing here; it ran
+nothing, launched nothing and granted nothing.
 
 ### Questions with no answer
 

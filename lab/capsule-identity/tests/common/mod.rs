@@ -2307,86 +2307,52 @@ pub fn published(folder: &Path) -> (String, PathBuf) {
     (named(folder).to_string(), folder.to_path_buf())
 }
 
-/// Lab stand-in for the Runtime's launch route, not the Runtime. It lives in
-/// test code and runs nothing: a launched instance is a record.
+/// The lane's fixture store and CID entry point over the shared stand-in.
 ///
-/// [`StandInRuntime::new`] builds it. Each other public method is named for a
-/// route of draft PR #309 at `513988ebd`, or is a lab test seam, not a route:
-/// - [`StandInRuntime::post_capsules`]: RA-6's `POST /api/capsules` (RI-2);
-/// - [`StandInRuntime::get_capsules`]: RA-6's `GET /api/capsules` (RI-3);
-/// - [`StandInRuntime::get_capability_list_all_sessions_live`]: RA-1's
-///   `GET /api/capability/list?scope=all_sessions_live`, the grant view;
-/// - [`StandInRuntime::seed_grant`]: Lab test seam, not a route;
-/// - [`StandInRuntime::asks_of`]: Lab test seam, not a route;
-/// - [`StandInRuntime::set_after_walk`]: Lab test seam, not a route.
+/// `StandIn` in `lab/agent-conformance/standin-runtime/mod.rs` owns
+/// instances, session ids, lifecycle and grants. This value lives in test
+/// code and runs nothing: it holds the store (printed lab CID -> bundle
+/// folder, filled at publish time by [`published`]), the publishers' package
+/// records, an explicit list of accepted publisher DIDs and the signed asks
+/// snapshots. It keeps no instance list, no grant list, no status string and
+/// no session counter (P10).
 ///
-/// The route methods take and return JSON bodies. It holds a store (printed
-/// lab CID -> bundle folder, filled at publish time by [`published`]), the
-/// publishers' package records and an explicit list of accepted publisher
-/// DIDs. A launch ends in one of two states: "launched", with one new
-/// instance, or "refused", status 400 with the reason and no instance. The
-/// one request field, `cid`, is a lab field, not in #309: today's route takes
-/// `path`.
+/// [`StandInRuntime::new`] builds it. Each other public method is a lab test
+/// seam, not a route:
+/// - [`StandInRuntime::commit_launch`]: the one CID fixture launch;
+/// - [`StandInRuntime::live_grants`]: the one shared grant view;
+/// - [`grant_request_id`]: the request id for one seeded grant;
+/// - [`StandInRuntime::apply_stop`]: the one shared stop;
+/// - [`StandInRuntime::asks_of`]: the signed asks of one launch;
+/// - [`StandInRuntime::set_after_walk`]: the after-walk hook.
 ///
-/// The grant view lists every held grant of every session. A launch adds no
-/// grant: a valid publisher signature alone yields none. No shell approval is
-/// modelled; a grant exists only through the test seam
-/// [`StandInRuntime::seed_grant`].
+/// The shared launch body's only field is `path`; this lane's launch body's
+/// only field is `cid`. [`StandInRuntime::commit_launch`] runs the CID checks
+/// and then calls the given closure with `{"path": <the stored folder>}`, so
+/// the composition from a verified CID to the shared route stays in this
+/// fixture entry point. It answers whatever the shared launch answers,
+/// unchanged.
 ///
-/// A launched instance is handed its asks only as the `asks.json` bytes of
-/// the checked bundle it was launched from, read through the test seam
+/// A launch is handed its asks only as the `asks.json` bytes of the checked
+/// bundle, kept under the shared `session_id` it answers, through
 /// [`StandInRuntime::asks_of`]: a change on disk after launch does not reach
-/// it. The bytes are never parsed, and #309 has no asks field. A change on
-/// disk between the walk and the launch does not reach it either, shown
-/// through the test seam [`StandInRuntime::set_after_walk`].
+/// it. The bytes are never parsed, and the shared routes have no asks field.
+/// A change on disk between the walk and the launch does not reach it either,
+/// shown through [`StandInRuntime::set_after_walk`].
 pub struct StandInRuntime {
     store: BTreeMap<String, PathBuf>,
     records: Vec<PackageRecord>,
     accepted: Vec<String>,
-    instances: Vec<Instance>,
-    grants: Vec<Grant>,
+    /// The `asks.json` bytes of the checked bundle, keyed by the shared
+    /// session id of the launch that created the instance. It holds no
+    /// status, grant or independent session id.
+    asks: BTreeMap<String, Option<Vec<u8>>>,
     after_walk: Option<fn(&Path)>,
 }
 
-/// One launched instance: a record, never a running program.
-struct Instance {
-    id: String,
-    name: String,
-    session_id: String,
-    /// The content of the `asks.json` entry of the checked bundle it was
-    /// launched from, or `None` when that bundle has none. Set once, at
-    /// launch.
-    asks: Option<Vec<u8>>,
-}
-
-/// One grant held for a session: a record, never a token.
-struct Grant {
-    request_id: String,
-    session_id: String,
-    resource: String,
-    action: String,
-    duration: String,
-    granted_at: u64,
-}
-
-impl Grant {
-    /// The grant view's entry: today's `CapabilityOutput` keys
-    /// (`capability.rs:411-418`) and #309 RA-1's `session_id`.
-    fn entry(&self) -> Value {
-        json!({
-            "request_id": self.request_id,
-            "resource": self.resource,
-            "action": self.action,
-            "duration": self.duration,
-            "granted_at": self.granted_at,
-            "session_id": self.session_id,
-        })
-    }
-}
-
 impl StandInRuntime {
-    /// A stand-in with these store entries, package records and accepted
-    /// publisher DIDs, and no instance.
+    /// A store with these entries, package records and accepted publisher
+    /// DIDs, and no signed asks snapshot.
     pub fn new(
         store: impl IntoIterator<Item = (String, PathBuf)>,
         records: Vec<PackageRecord>,
@@ -2396,80 +2362,55 @@ impl StandInRuntime {
             store: store.into_iter().collect(),
             records,
             accepted,
-            instances: Vec::new(),
-            grants: Vec::new(),
+            asks: BTreeMap::new(),
             after_walk: None,
         }
     }
 
-    /// `POST /api/capsules`: launch the bundle the body names by its lab CID.
-    /// The checks of [`StandInRuntime::checked_launch`] run first; the first
-    /// refusal is the answer, with status 400, and nothing is launched. Then
-    /// one instance is added and the answer is `{"id", "name", "status":
-    /// "launched", "session_id"}`.
-    pub fn post_capsules(&mut self, body: &Value) -> Result<Value, (u16, String)> {
-        let (name, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;
-        Ok(self.launch(name, asks))
+    /// Lab test seam, not a route: run the checks of
+    /// [`StandInRuntime::checked_launch`], then call `launch` with the shared
+    /// launch body `{"path": <the stored folder>}`. The answer is the
+    /// closure's, unchanged, and the checked asks are kept under its
+    /// `session_id`. A refusal is status 400 with the check's own reason, and
+    /// the closure is not called, so the shared instance and grant lists do
+    /// not change.
+    pub fn commit_launch(
+        &mut self,
+        body: &Value,
+        mut launch: impl FnMut(&Value) -> Result<Value, (u16, String)>,
+    ) -> Result<Value, (u16, String)> {
+        let (path, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;
+        let answer = launch(&json!({ "path": path }))?;
+        let session = answer["session_id"]
+            .as_str()
+            .expect("the shared launch answers a session_id")
+            .to_owned();
+        self.asks.insert(session, asks);
+        Ok(answer)
     }
 
-    /// `GET /api/capsules`: `{"capsules": [...]}`, one entry per launched
-    /// instance, with its `id`, `name`, `status`, `session_id` and `cause`
-    /// (`null` while it runs; no instance here ever ends).
-    pub fn get_capsules(&self) -> Value {
-        let capsules: Vec<Value> = self
-            .instances
-            .iter()
-            .map(|instance| {
-                json!({
-                    "id": instance.id,
-                    "name": instance.name,
-                    "status": "launched",
-                    "session_id": instance.session_id,
-                    "cause": null,
-                })
-            })
-            .collect();
-        json!({ "capsules": capsules })
+    /// Lab test seam, not a route: the one shared grant view. Answers the
+    /// closure's value unchanged; this lane keeps no grant entry, filter or
+    /// scope marker.
+    pub fn live_grants(&self, grants: impl FnOnce() -> Value) -> Value {
+        grants()
     }
 
-    /// `GET /api/capability/list?scope=all_sessions_live`: #309 RA-1's shell
-    /// view of every session's live grants, `{"scope": "all_sessions_live",
-    /// "capabilities": [...]}`, one entry per held grant with `request_id`,
-    /// `resource`, `action`, `duration`, `granted_at` and `session_id`. Only
-    /// [`StandInRuntime::seed_grant`] adds a grant; nothing here expires or is
-    /// revoked, so every held grant is listed.
-    pub fn get_capability_list_all_sessions_live(&self) -> Value {
-        let capabilities: Vec<Value> = self.grants.iter().map(Grant::entry).collect();
-        json!({ "scope": "all_sessions_live", "capabilities": capabilities })
+    /// Lab test seam, not a route: the one shared stop. Answers the closure's
+    /// result unchanged; this lane keeps no instance or grant list to update.
+    pub fn apply_stop(
+        &self,
+        stop: impl FnOnce() -> Result<Value, (u16, String)>,
+    ) -> Result<Value, (u16, String)> {
+        stop()
     }
 
-    /// Lab test seam, not a route: hold one grant of `action` on `resource`
-    /// for `duration` in the session `session_id`, with the next request id
-    /// and `granted_at` from a counter, not a clock. #309 and this lab model
-    /// no shell approval, so this is the only way a grant exists here; a test
-    /// uses it to show that the grant view lists what is held.
-    pub fn seed_grant(&mut self, session_id: &str, resource: &str, action: &str, duration: &str) {
-        let number = self.grants.len() + 1;
-        self.grants.push(Grant {
-            request_id: format!("grant-{number}"),
-            session_id: session_id.to_owned(),
-            resource: resource.to_owned(),
-            action: action.to_owned(),
-            duration: duration.to_owned(),
-            granted_at: number as u64,
-        });
-    }
-
-    /// Lab test seam, not a route: the asks the instance of `session_id` was
-    /// handed at launch, the `asks.json` bytes of the checked, signed bundle
-    /// it was launched from. `None` when that bundle has no `asks.json`, or
-    /// when no instance has that session. #309 has no asks field on any
-    /// route, and nothing here parses the bytes.
+    /// Lab test seam, not a route: the asks the shared instance of
+    /// `session_id` was handed at launch. `None` when that bundle has no
+    /// `asks.json`, or when no launch has that session. The shared routes
+    /// have no asks field, and nothing here parses the bytes.
     pub fn asks_of(&self, session_id: &str) -> Option<Vec<u8>> {
-        self.instances
-            .iter()
-            .find(|instance| instance.session_id == session_id)
-            .and_then(|instance| instance.asks.clone())
+        self.asks.get(session_id).cloned().flatten()
     }
 
     /// Lab test seam, not a route: every later launch calls `hook` once, on
@@ -2486,11 +2427,11 @@ impl StandInRuntime {
     /// store, (d) the one walk, (e) the one name compare against the stored
     /// bytes, (f) a package record for that CID, (g) the one record check.
     /// (a), (b) and (c) come before the CID check. The answer is the stored
-    /// manifest's `name`, from [`CheckedBundle::manifest_name`], and the
-    /// bundle's `asks.json` bytes, both from the one checked bundle that
-    /// passed every check. The hook of [`StandInRuntime::set_after_walk`], if
-    /// set, runs on the stored folder right after (d); no check after (d)
-    /// and no part of the answer reads the folder.
+    /// folder as the shared `path` text, and the bundle's `asks.json` bytes,
+    /// both from the one checked bundle that passed every check. The hook of
+    /// [`StandInRuntime::set_after_walk`], if set, runs on the stored folder
+    /// right after (d); no check after (d) and no part of the answer reads the
+    /// folder again.
     fn checked_launch(&self, body: &Value) -> Result<(String, Option<Vec<u8>>), String> {
         let cid = self.launch_cid(body)?;
         cid.parse::<LabCid>().map_err(said)?;
@@ -2504,7 +2445,7 @@ impl StandInRuntime {
         }
         checked.check_name(&cid).map_err(said)?;
         self.check_records(&checked, &cid)?;
-        Ok((checked.manifest_name().to_owned(), signed_asks(&checked)))
+        Ok((folder.to_string_lossy().into_owned(), signed_asks(&checked)))
     }
 
     /// Checks (f) and (g): every package record that binds `cid`, in store
@@ -2547,27 +2488,13 @@ impl StandInRuntime {
             .ok_or_else(|| format!("the launch body's cid is {cid}, not a string"))?;
         Ok(cid.to_owned())
     }
+}
 
-    /// Add one instance named `name` and handed `asks`, with the next id and
-    /// session id from a counter, and answer for it. The answer holds no asks
-    /// key.
-    fn launch(&mut self, name: String, asks: Option<Vec<u8>>) -> Value {
-        let number = self.instances.len() + 1;
-        let instance = Instance {
-            id: format!("instance-{number}"),
-            name,
-            session_id: format!("session-{number}"),
-            asks,
-        };
-        let answer = json!({
-            "id": instance.id,
-            "name": instance.name,
-            "status": "launched",
-            "session_id": instance.session_id,
-        });
-        self.instances.push(instance);
-        answer
-    }
+/// Lab test seam, not a route: the `request_id` the lane seeds for its
+/// `number`th grant. The shared `seed_grant` stores it; this lane mints no
+/// grant.
+pub fn grant_request_id(number: usize) -> String {
+    format!("grant-{number}")
 }
 
 /// A library refusal as the stand-in answers it: its own text, unchanged.

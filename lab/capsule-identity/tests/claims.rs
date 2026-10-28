@@ -86,6 +86,26 @@ fn the_claim_wording_check_names_each_gap() {
     );
 }
 
+/// The lane says what each encoder is for, once: the provider's encoder names
+/// deployed content, and the lab encoder is a test oracle only. README holds
+/// both sentences in "What it is, and what it is not", and neither is
+/// paraphrased.
+#[test]
+fn the_lab_encoder_is_a_test_oracle() {
+    let readme = std::fs::read_to_string(lane_dir().join("README.md"))
+        .unwrap_or_else(|error| panic!("README.md: {error}"));
+    for sentence in [
+        "The provider's encoder names deployed content.",
+        "The lab encoder is a test oracle only.",
+    ] {
+        assert_eq!(
+            readme.matches(sentence).count(),
+            1,
+            "README.md says {sentence:?} once"
+        );
+    }
+}
+
 /// The scan reads a claim however it is written: in any case, over a line
 /// break, over two comment, blockquote, nested blockquote or block-comment
 /// lines, with a typographic apostrophe, with emphasis (`*` or `_`) or code
