@@ -14940,3 +14940,46 @@ Two temporary changes were checked separately with `cargo test --locked --manife
 - Read change: old bytes `Some((&collapsed, "read")),`, new bytes `Some((uri, "read")),`. Exit 101 in 2.14 seconds at `src/../standin-runtime/mod.rs:15997:17`, `the stand-in did the work: localhost:///UsersAI/self/journal keeps the protected read comparison`.
 
 Restored source SHA-256: `ea9174c862a9c21752b4f524e6795af931473c1899c0b875eff1d3b8b6c1204a`. With the same lane-local Cargo settings listed above, `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exited 0 in 0.22 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::` exited 0 in 1.82 seconds: 89 passed, including the original dot-segment test and the new regression. The supervisor owns the full gate rerun and fresh review for this repair.
+
+### Hostcall classification
+
+`protected_invoke` is the one classification. It collapses through `normalize_public_resource`, then the first segment is `Users` or `UsersAI`. `bridge_envelope` and `authorise_presented` both call that function. A `.` segment or an empty segment is the same protected operation. A `/*` grant on that object is `wrong resource` and spends nothing. The hostcall stores bytes only for an exact grant of that one object.
+
+### Plants
+
+Each plant was applied alone and restored before the next. No `falsifiers.json` id. The planted crate compiled. Restored source SHA-256 is `55cb3ed8fde2c95d3e28e09a849137dd9faa5fbb4bd835afde84996f8b96fb14`.
+
+F-standin-protected-invoke-raw: `protected_invoke` skips `normalize_public_resource` and checks the raw prefix, so `localhost:///UsersAI/self/journal` takes the public invoke. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_protected_uri_spellings_share_authorization -- --exact`. Exit 101, real 1.62 seconds. Failed at `src/../standin-runtime/mod.rs:9333:9`: `the stand-in did the work: localhost:///UsersAI/self/journal hostcall write matches the protected refusal`, left `{"id":41,"response":{"data":null,"type":"ok"}}`, right the `error` `wrong resource: expected localhost://UsersAI/self/*, got localhost://UsersAI/self/journal`.
+
+Old:
+
+```text
+    let collapsed = normalize_public_resource(uri);
+    let Some(rest) = collapsed.strip_prefix("localhost://") else {
+        return false;
+    };
+    matches!(rest.split('/').next(), Some("Users" | "UsersAI"))
+```
+
+New:
+
+```text
+    uri.starts_with("localhost://Users/") || uri.starts_with("localhost://UsersAI/")
+```
+
+The two resolver plants were re-run on this tree. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_protected_path_collapses_a_dot_segment -- --exact`. Old and new bytes are the ones recorded above.
+
+F-standin-protected-dot-alias: exit 101, real 1.59 seconds. Failed at `src/../standin-runtime/mod.rs:16277:9` with the same left `403` `wrong resource` and right `Ok` digest journal.
+
+F-standin-protected-dotdot-drop: exit 101, real 1.69 seconds. Failed at `src/../standin-runtime/mod.rs:16294:9` with the same left `Ok` path that still contains `../` and right `protected path rejects ..`.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. `CARGO_TARGET_DIR` and `CARGO_BUILD_TARGET_DIR` were `lab/agent-conformance/target`. `CARGO_BUILD_BUILD_DIR` was `lab/agent-conformance/target/host-build`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.16 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 279.57 seconds, inside the 600-second bound. lib 89 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; provider_launch 22 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0. No leftover, so no rerun.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.17 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_protected_path_collapses_a_dot_segment -- --exact`: exit 0, 1 passed, real 0.11 seconds.
+- `Cargo.toml` and `Cargo.lock` are unchanged. `authorise` stays `(caller, request_id)`. `normalize_public_resource` and `slash_pieces` stay. `protected_invoke`, `resolve_protected_uri` and `public_resource_covers` call that one collapse.
+
+- 093: the hostcall classifies a collapsed `Users` or `UsersAI` uri through the one `protected_invoke`, so a dotted or empty spelling is that same protected operation.

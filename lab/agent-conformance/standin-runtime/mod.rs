@@ -28,9 +28,11 @@
 //!
 //! `bridge_envelope` is the one hostcall. A capability line calls
 //! `post_capability_request` for the given capsule id. A `resource_invoke`
-//! on `localhost://Users/` or `localhost://UsersAI/` calls `protected_read`
-//! or `protected_write` for that capsule id. Any other invoke presents its
-//! uri and operation to `authorise_presented` and returns `data` null.
+//! whose collapsed uri names `Users` or `UsersAI` calls `protected_read`
+//! or `protected_write` for that capsule id. `protected_invoke` is that
+//! classification and it uses `normalize_public_resource`. Any other invoke
+//! presents its uri and operation to `authorise_presented` and returns
+//! `data` null.
 //! `authorise` stays two arguments. The principal argument does not choose
 //! the caller.
 //!
@@ -495,11 +497,11 @@ impl StandIn {
     ///
     /// The one hostcall. A `request_capability` line calls
     /// `post_capability_request` for `capsule_id`. A `resource_invoke` whose
-    /// uri starts with `localhost://Users/` or `localhost://UsersAI/` calls
-    /// `protected_read` or `protected_write` for `capsule_id`. Any other
-    /// invoke reads `operation` and presents that uri and operation to
-    /// `authorise_presented`. A missing or non-string `operation` is
-    /// `invoke operation must be a string` and does not call
+    /// collapsed uri names `Users` or `UsersAI` calls `protected_read` or
+    /// `protected_write` for `capsule_id`. `protected_invoke` is that one
+    /// classification. Any other invoke reads `operation` and presents that
+    /// uri and operation to `authorise_presented`. A missing or non-string
+    /// `operation` is `invoke operation must be a string` and does not call
     /// `authorise_presented`. `authorise` stays two arguments. `principal`
     /// does not choose the caller. This method reads no clock and no disk.
     pub fn bridge_envelope(
@@ -1001,13 +1003,12 @@ impl StandIn {
     /// One authorise check. `presented` is the uri and the operation.
     ///
     /// Unknown, not-live and wrong-caller refusals come first. A different
-    /// action is `wrong action`. A `localhost://Users/` or `localhost://UsersAI/`
-    /// uri keeps the `resolve_protected_uri` compare. Protected operations
-    /// present the resolver's collapsed uri. Any other uri uses
-    /// `public_resource_covers` and does not resolve a principal. A mismatch
-    /// is `wrong resource`. Either spends nothing. A missing presentation is
-    /// the grant's own caller check. A `once` grant stores `Exhausted` only
-    /// after that check.
+    /// action is `wrong action`. `protected_invoke` classifies the collapsed
+    /// uri, and that uri keeps the `resolve_protected_uri` compare. Any other
+    /// uri uses `public_resource_covers` and does not resolve a principal. A
+    /// mismatch is `wrong resource`. Either spends nothing. A missing
+    /// presentation is the grant's own caller check. A `once` grant stores
+    /// `Exhausted` only after that check.
     fn authorise_presented(
         &mut self,
         caller: Caller<'_>,
@@ -2170,10 +2171,18 @@ fn invoke_uri(request: &Value) -> &str {
     request.get("uri").and_then(Value::as_str).unwrap_or("")
 }
 
-/// A protected invoke. Any other uri presents its operation to
+/// The one protected classification, on the collapsed uri.
+///
+/// `normalize_public_resource` drops empty pieces and `.` pieces. The first
+/// segment is then `Users` or `UsersAI`. A `.` segment or an empty segment is
+/// the same protected operation. Any other uri presents its operation to
 /// `authorise_presented`.
 fn protected_invoke(uri: &str) -> bool {
-    uri.starts_with("localhost://Users/") || uri.starts_with("localhost://UsersAI/")
+    let collapsed = normalize_public_resource(uri);
+    let Some(rest) = collapsed.strip_prefix("localhost://") else {
+        return false;
+    };
+    matches!(rest.split('/').next(), Some("Users" | "UsersAI"))
 }
 
 /// One public resource compare.
@@ -2199,8 +2208,9 @@ fn public_resource_covers(stored: &str, presented: &str) -> bool {
 
 /// The text after `://`, with empty pieces and `.` pieces dropped.
 ///
-/// `..` stays. Text with no `://` stays as given. This is the one collapse
-/// `public_resource_covers` uses.
+/// `..` stays. Text with no `://` stays as given. This is the one collapse.
+/// `protected_invoke`, `resolve_protected_uri` and `public_resource_covers`
+/// use it.
 fn normalize_public_resource(resource: &str) -> String {
     let Some(scheme_at) = resource.find("://") else {
         return resource.to_owned();
@@ -15979,7 +15989,79 @@ mod tests {
             .enumerate()
             {
                 let reason = format!("wrong resource: expected {wildcard}, got {canonical}");
+                let host_reason = StandIn::redact_protected_reason(&reason);
                 let audit_len = standin.audit.len();
+                let invoke = |id: u64, operation: &str, body: &str, token: &str| {
+                    format!(
+                        r#"{{"id":{id},"request":{{"type":"resource_invoke","uri":"{uri}","operation":"{operation}","body":{body},"token":"{token}"}}}}"#
+                    )
+                };
+                let (write_raw, write_host) = host_pair(
+                    &mut standin,
+                    &invoke(41, "write", r#""other""#, "req-wild-write"),
+                    "component-1",
+                    None,
+                )
+                .expect("the stand-in did the work: the hostcall write is one response");
+                assert_host_error(
+                    &write_host,
+                    41,
+                    &host_reason,
+                    &format!("{uri} hostcall write matches the protected refusal"),
+                );
+                assert_no_protected_leak(
+                    &write_raw,
+                    digest,
+                    "agent-ada",
+                    &format!("{uri} hostcall write"),
+                );
+                assert_eq!(
+                    grant_record(&standin, "req-wild-write"),
+                    (Life::Live, false),
+                    "the stand-in did the work: the hostcall refusal preserves the once write grant"
+                );
+                assert_eq!(
+                    standin.protected_objects, kept,
+                    "the stand-in did the work: the hostcall refusal stores nothing"
+                );
+                assert_eq!(
+                    standin.audit.len(),
+                    audit_len,
+                    "the stand-in did the work: the hostcall write refusal preserves the audit list"
+                );
+                let (read_raw, read_host) = host_pair(
+                    &mut standin,
+                    &invoke(42, "read", "{}", "req-wild-read"),
+                    "component-1",
+                    None,
+                )
+                .expect("the stand-in did the work: the hostcall read is one response");
+                assert_host_error(
+                    &read_host,
+                    42,
+                    &host_reason,
+                    &format!("{uri} hostcall read matches the protected refusal"),
+                );
+                assert_no_protected_leak(
+                    &read_raw,
+                    digest,
+                    "agent-ada",
+                    &format!("{uri} hostcall read"),
+                );
+                assert_eq!(
+                    grant_record(&standin, "req-wild-read"),
+                    (Life::Live, false),
+                    "the stand-in did the work: the hostcall refusal preserves the once read grant"
+                );
+                assert_eq!(
+                    standin.protected_objects, kept,
+                    "the stand-in did the work: the hostcall read refusal stores nothing"
+                );
+                assert_eq!(
+                    standin.audit.len(),
+                    audit_len,
+                    "the stand-in did the work: the hostcall read refusal preserves the audit list"
+                );
                 assert_eq!(
                     standin.protected_write("component-1", "req-wild-write", &uri, b"other"),
                     Err((403, reason.clone())),
@@ -16042,6 +16124,73 @@ mod tests {
                 assert_eq!(
                     standin.protected_objects, kept,
                     "the stand-in did the work: equivalent spellings keep one object"
+                );
+                let host_request = format!("req-host-write-{index}");
+                standin.seed_grant(
+                    &host_request,
+                    "component-1",
+                    &canonical,
+                    "write",
+                    "once",
+                    1,
+                    Life::Live,
+                    false,
+                );
+                let (stored_raw, stored_host) = host_pair(
+                    &mut standin,
+                    &invoke(43, "write", r#""journal-v1""#, &host_request),
+                    "component-1",
+                    None,
+                )
+                .expect("the stand-in did the work: the hostcall exact write is one response");
+                assert_host_ok(
+                    &stored_host,
+                    43,
+                    json!({ "stored": true }),
+                    &format!("{uri} hostcall write stores the one object"),
+                );
+                assert_no_protected_leak(
+                    &stored_raw,
+                    digest,
+                    "agent-ada",
+                    &format!("{uri} hostcall exact write"),
+                );
+                assert_eq!(
+                    grant_record(&standin, &host_request),
+                    (Life::Exhausted, false),
+                    "the stand-in did the work: the hostcall once write grant is spent"
+                );
+                assert_eq!(
+                    standin.protected_objects, kept,
+                    "the stand-in did the work: the hostcall write keeps one object"
+                );
+                let (same_raw, same_host) = host_pair(
+                    &mut standin,
+                    &invoke(44, "read", "{}", "req-read"),
+                    "component-1",
+                    None,
+                )
+                .expect("the stand-in did the work: the hostcall exact read is one response");
+                assert_host_ok(
+                    &same_host,
+                    44,
+                    json!("journal-v1"),
+                    &format!("{uri} hostcall read returns the one object"),
+                );
+                assert_no_protected_leak(
+                    &same_raw,
+                    digest,
+                    "agent-ada",
+                    &format!("{uri} hostcall exact read"),
+                );
+                assert_eq!(
+                    grant_record(&standin, "req-read"),
+                    (Life::Live, false),
+                    "the stand-in did the work: the session read grant stays live"
+                );
+                assert_eq!(
+                    standin.protected_objects, kept,
+                    "the stand-in did the work: the hostcall read keeps one object"
                 );
             }
             assert_named_capsule(
