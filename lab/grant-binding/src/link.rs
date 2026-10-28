@@ -152,8 +152,9 @@ fn metadata_dependency_names(dir: &Path, cargo_toml: &str) -> Result<Vec<String>
 /// One `cargo metadata --offline --no-deps` parse.
 ///
 /// An unsuccessful Cargo exit returns an empty list. Launch and decode failures
-/// stop the check with their own reasons. The list is dependency names, plus
-/// member names when this directory is the workspace root.
+/// stop the check with their own reasons. The list is the checked package's
+/// dependency names, plus member package names when this directory is the
+/// workspace root. A member's dependency is not a name of the root.
 fn metadata_names(manifest: &Path) -> Vec<String> {
     let manifest = fs::canonicalize(manifest).unwrap_or_else(|_| {
         panic!(
@@ -238,12 +239,13 @@ fn read_metadata(json: &str) -> MetadataSeen {
     seen
 }
 
-/// Dependency names of the checked package or workspace, plus member names
-/// when this directory is the workspace root.
+/// Dependency names of the checked package, plus member package names when
+/// this directory is the workspace root.
 ///
-/// A member manifest collects its own dependencies. A workspace root also
-/// collects its members' dependencies and names, leaving its own package name
-/// out. Each package path is resolved once before either collection rule.
+/// A member manifest collects its own dependencies and not sibling names.
+/// A workspace root collects member package names and not member dependencies,
+/// and it leaves its own package name out. Each package path is resolved once
+/// before either collection rule.
 fn names_for_manifest(seen: &MetadataSeen, manifest: &Path) -> Result<Vec<String>, MetadataRefuse> {
     let own = fs::canonicalize(manifest).map_err(|_| MetadataRefuse::ResolveManifest)?;
     // The canonical manifest already gives us a resolved directory, including
@@ -261,7 +263,7 @@ fn names_for_manifest(seen: &MetadataSeen, manifest: &Path) -> Result<Vec<String
         let path = fs::canonicalize(&package.manifest_path)
             .map_err(|_| MetadataRefuse::ResolvePackageManifest)?;
         let is_member = seen.member_ids.iter().any(|id| id == &package.id);
-        if path == own || (is_workspace_root && is_member) {
+        if path == own {
             names.extend(package.dependencies.iter().cloned());
         }
         if is_workspace_root && is_member && path != own {
@@ -1282,16 +1284,21 @@ fn stage_registry_workspace(dir: &Path) -> PathBuf {
 }
 
 #[test]
-fn model_virtual_workspace_keeps_member_dependency_names() {
+fn model_virtual_workspace_root_does_not_take_member_dependencies() {
     with_manifest_dir(&std::env::temp_dir(), |dir| {
         let manifest = stage_registry_workspace(dir);
-        assert!(manifest_depends_on_grant_binding(&manifest));
-        assert!(manifest_depends_on_grant_binding(
-            &dir.join("app/Cargo.toml")
-        ));
-        assert!(!manifest_depends_on_grant_binding(
-            &dir.join("other/Cargo.toml")
-        ));
+        assert!(
+            !manifest_depends_on_grant_binding(&manifest),
+            "workspace root"
+        );
+        assert!(
+            manifest_depends_on_grant_binding(&dir.join("app/Cargo.toml")),
+            "member dependency"
+        );
+        assert!(
+            !manifest_depends_on_grant_binding(&dir.join("other/Cargo.toml")),
+            "sibling"
+        );
         Ok(())
     })
     .unwrap();
@@ -1325,7 +1332,7 @@ fn model_metadata_path_failures_have_exact_reasons() {
         let mut seen = read_metadata(&String::from_utf8(output.stdout).unwrap());
         let mut names = names_for_manifest(&seen, &manifest).unwrap();
         names.sort();
-        assert_eq!(names, ["app", "grant-binding", "other"]);
+        assert_eq!(names, ["app", "other"]);
 
         let workspace_root = seen.workspace_root.take();
         assert_eq!(
@@ -1375,7 +1382,7 @@ fn model_metadata_path_failures_have_exact_reasons() {
             }
             fs::write(&package.manifest_path, text).unwrap();
         }
-        assert_eq!(names_for_manifest(&seen, &manifest).unwrap().len(), 3);
+        assert_eq!(names_for_manifest(&seen, &manifest).unwrap().len(), 2);
         Ok(())
     })
     .unwrap();
