@@ -2710,6 +2710,71 @@
       "tests": [
         "a_hosted_run_held_past_its_time_limit_fails_as_a_timeout"
       ]
+    },
+    {
+      "id": "MP59",
+      "title": "the conflicting Reported arm keeps the first report, so a later different fact stays reported",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "Self::Reported(_) => *self = Self::Invalid,",
+          "new": "Self::Reported(_) => {},"
+        }
+      ],
+      "tests": [
+        "hosted_backend_facts_conflicts_stay_unknown_after_restart"
+      ]
+    },
+    {
+      "id": "MP60",
+      "title": "the Invalid arm accepts a later value, so an invalid fact becomes reported again",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "Self::Invalid => {}",
+          "new": "Self::Invalid => *self = Self::Reported(value),"
+        }
+      ],
+      "tests": [
+        "hosted_backend_facts_conflicts_stay_unknown_after_restart",
+        "hosted_backend_facts_malformed_values_stay_unknown_after_restart"
+      ]
+    },
+    {
+      "id": "MP61",
+      "title": "a malformed fact keeps the previous report, so the fact stays reported",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "Err(()) => *self = Self::Invalid,",
+          "new": "Err(()) => {}"
+        }
+      ],
+      "tests": [
+        "hosted_backend_facts_malformed_values_stay_unknown_after_restart"
+      ]
+    },
+    {
+      "id": "MP62",
+      "title": "an equal fact is marked invalid, so a repeated report becomes unknown",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "Self::Reported(current) if current == &value => {}",
+          "new": "Self::Reported(current) if current == &value => *self = Self::Invalid,"
+        }
+      ],
+      "tests": [
+        "hosted_backend_facts_repeated_values_stay_reported_after_restart"
+      ]
     }
   ]
 }
