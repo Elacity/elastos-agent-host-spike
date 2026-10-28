@@ -271,6 +271,7 @@ B2_COLUMNS = (
 )
 B2_SECTION = re.compile(r"## 6\.[ \t]")
 B2_RULE = re.compile(r":?-{3,}:?")
+B2_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 B2_REL = "examples/agent-host/asks.json"
 B2_SCHEMA = "elastos.agent-host.asks/v1"
 
@@ -919,6 +920,11 @@ def _b2_unique_object(pairs):
     return result
 
 
+def _b2_reject_constant(name):
+    """Refuse a numeric constant that the JSON grammar does not name."""
+    raise ValueError(name)
+
+
 def source_asks(root, sha):
     """Return the asks at commit SHA, or a ``refuse: B2 source ...`` reason.
 
@@ -933,7 +939,11 @@ def source_asks(root, sha):
     except UnicodeDecodeError:
         return None, "refuse: B2 source is not utf-8 text: " + B2_REL
     try:
-        parsed = json.loads(text, object_pairs_hook=_b2_unique_object)
+        parsed = json.loads(
+            text,
+            object_pairs_hook=_b2_unique_object,
+            parse_constant=_b2_reject_constant,
+        )
     except _B2DuplicateKey as error:
         return None, (
             "refuse: B2 source repeats object key: "
@@ -1041,6 +1051,45 @@ def _b2_rows(block):
     return pairs, None
 
 
+def _b2_fenced(lines):
+    """Return one flag per line that says whether a fence renders it as code.
+
+    A fence opens on a run of at least three backticks or tildes and closes on a
+    run of the same character that is at least as long and carries no info
+    string, which is how CommonMark reads a code block.
+    """
+    fenced = []
+    fence = None
+    for line in lines:
+        match = B2_FENCE.match(line)
+        if fence is None:
+            if match is None:
+                fenced.append(False)
+                continue
+            fence = match.group(1)
+            fenced.append(True)
+            continue
+        fenced.append(True)
+        if match is None:
+            continue
+        mark = match.group(1)
+        if mark[0] == fence[0] and len(mark) >= len(fence) and not match.group(2).strip():
+            fence = None
+    return fenced
+
+
+def _b2_code_refusal(lines, first, last):
+    """Return a refusal when LINES FIRST..LAST render as code, or None."""
+    fenced = _b2_fenced(lines)
+    for index in range(first, last + 1):
+        if fenced[index]:
+            return "refuse: B2 mapping table is inside a code fence"
+        line = lines[index]
+        if line.startswith("\t") or line.startswith(DRAFT_INDENT):
+            return "refuse: B2 mapping table is indented as code"
+    return None
+
+
 def b2_mapping(text):
     """Return the (kind, resource) pairs of the one B2 table, or a reason."""
     lines = text.splitlines()
@@ -1056,6 +1105,9 @@ def b2_mapping(text):
         return None, "refuse: B2 mapping table is not one table"
     if not (start <= opens[0] < end and start <= closes[0] < end):
         return None, "refuse: B2 mapping table is outside section 6"
+    reason = _b2_code_refusal(lines, opens[0], closes[0])
+    if reason is not None:
+        return None, reason
     return _b2_rows(lines[opens[0] + 1:closes[0]])
 
 

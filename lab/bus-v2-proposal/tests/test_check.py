@@ -34,14 +34,19 @@ FIXTURE_ASKS = (
 )
 
 
-def asks_json(pairs, schema="elastos.agent-host.asks/v1"):
-    """Return an asks file holding PAIRS, with SCHEMA as its schema line."""
+def asks_json(pairs, schema="elastos.agent-host.asks/v1", extra=""):
+    """Return an asks file holding PAIRS, with SCHEMA as its schema line.
+
+    ``extra`` adds one member after the schema line, so a test can hold bytes
+    that the JSON grammar does not name beside a complete ask list.
+    """
     rows = ",\n".join(
         '    {"kind": "%s", "resource": "%s"}' % (kind, resource)
         for kind, resource in pairs
     )
     return (
-        '{\n  "schema": "%s",\n  "asks": [\n%s\n  ]\n}\n' % (schema, rows)
+        '{\n  "schema": "%s"%s,\n  "asks": [\n%s\n  ]\n}\n'
+        % (schema, extra, rows)
     ).encode("utf-8")
 
 
@@ -8690,6 +8695,38 @@ class B2CoverageTests(CaughtMixin, unittest.TestCase):
                 section + after + b2_table(B2_PAIRS),
                 "refuse: B2 mapping table is outside section 6",
             ),
+            # A fence or an indent renders the same table as code, not as a
+            # table, so the rendered draft would show no mapping at all.
+            (
+                section + "```\n" + b2_table(B2_PAIRS) + "```\n",
+                "refuse: B2 mapping table is inside a code fence",
+            ),
+            (
+                section + "```markdown\n" + b2_table(B2_PAIRS) + "```\n",
+                "refuse: B2 mapping table is inside a code fence",
+            ),
+            (
+                section + "~~~\n" + b2_table(B2_PAIRS) + "~~~\n",
+                "refuse: B2 mapping table is inside a code fence",
+            ),
+            (
+                section
+                + "\n".join(
+                    "    " + line
+                    for line in b2_table(B2_PAIRS).rstrip("\n").splitlines()
+                )
+                + "\n",
+                "refuse: B2 mapping table is indented as code",
+            ),
+            (
+                section
+                + "\n".join(
+                    "\t" + line
+                    for line in b2_table(B2_PAIRS).rstrip("\n").splitlines()
+                )
+                + "\n",
+                "refuse: B2 mapping table is indented as code",
+            ),
             (
                 section + b2_table(B2_PAIRS, header=wrong_columns),
                 "refuse: B2 mapping table columns are not "
@@ -8809,6 +8846,13 @@ class B2CoverageTests(CaughtMixin, unittest.TestCase):
                 "refuse: B2 source JSON nesting is too deep: " + check.B2_REL,
             ),
         )
+        # The JSON grammar names no numeric constant, so a decoder that accepts
+        # one would admit a document the source cannot hold.
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            cases += ((
+                asks_json(B2_PAIRS, extra=',\n  "invalid": ' + constant),
+                "refuse: B2 source is not JSON: " + check.B2_REL,
+            ),)
         # The decoder sees decoded keys: escaped spellings and duplicates
         # anywhere in an object must retain the same refusal.
         for spelling in ("literal", "escaped"):
