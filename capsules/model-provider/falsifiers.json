@@ -2419,6 +2419,22 @@
       ]
     },
     {
+      "id": "PV127",
+      "title": "startup recovery skips wallet's profile generator file",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"capsules/wallet-provider/src/main.rs\",\n    \"capsules/wallet-provider/tests/common/profile_generator.rs\",",
+          "new": "    \"capsules/wallet-provider/src/main.rs\","
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
       "id": "MP24",
       "title": "a Runtime-forwarded answer is read as a failure",
       "command": "provider",
@@ -2677,6 +2693,311 @@
       ],
       "tests": [
         "a_hosted_tool_call_or_reasoning_never_reaches_the_caller"
+      ]
+    },
+    {
+      "id": "MP57",
+      "title": "remaining_run_timeout adds 60 s to the remaining time, so the hosted client no longer stops at the run limit",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "    Ok(Duration::from_millis(remaining_ms))",
+          "new": "    Ok(Duration::from_millis(remaining_ms.saturating_add(60_000)))"
+        }
+      ],
+      "tests": [
+        "a_hosted_run_held_past_its_time_limit_fails_as_a_timeout"
+      ]
+    },
+    {
+      "id": "MP58",
+      "title": "transition_timeout records class BackendFailed and code backend_failed, so a time limit is recorded as a backend error",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "        Some(RunError {\n            class: ErrorClass::BackendTimeout,\n            code: \"backend_timeout\".to_string(),\n            message: \"model backend timed out\".to_string(),\n        }),",
+          "new": "        Some(RunError {\n            class: ErrorClass::BackendFailed,\n            code: \"backend_failed\".to_string(),\n            message: \"model backend timed out\".to_string(),\n        }),"
+        }
+      ],
+      "tests": [
+        "a_hosted_run_held_past_its_time_limit_fails_as_a_timeout"
+      ]
+    },
+    {
+      "id": "MP59",
+      "title": "the conflicting Reported arm keeps the first report, so a later different fact stays reported",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "Self::Reported(_) => *self = Self::Invalid,",
+          "new": "Self::Reported(_) => {},"
+        }
+      ],
+      "tests": [
+        "hosted_backend_facts_conflicts_stay_unknown_after_restart"
+      ]
+    },
+    {
+      "id": "MP60",
+      "title": "the Invalid arm accepts a later value, so an invalid fact becomes reported again",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "Self::Invalid => {}",
+          "new": "Self::Invalid => *self = Self::Reported(value),"
+        }
+      ],
+      "tests": [
+        "hosted_backend_facts_conflicts_stay_unknown_after_restart",
+        "hosted_backend_facts_malformed_values_stay_unknown_after_restart"
+      ]
+    },
+    {
+      "id": "MP61",
+      "title": "a malformed fact keeps the previous report, so the fact stays reported",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "Err(()) => *self = Self::Invalid,",
+          "new": "Err(()) => {}"
+        }
+      ],
+      "tests": [
+        "hosted_backend_facts_malformed_values_stay_unknown_after_restart"
+      ]
+    },
+    {
+      "id": "MP62",
+      "title": "an equal fact is marked invalid, so a repeated report becomes unknown",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "Self::Reported(current) if current == &value => {}",
+          "new": "Self::Reported(current) if current == &value => *self = Self::Invalid,"
+        }
+      ],
+      "tests": [
+        "hosted_backend_facts_repeated_values_stay_reported_after_restart"
+      ]
+    },
+    {
+      "id": "MP63",
+      "title": "request_fingerprint hashes session_id, so a rotated session conflicts with the retained run",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/journal.rs",
+          "old": "        \"capsule_id\": binding.capsule_id,\n        \"request_id\": binding.request_id,",
+          "new": "        \"capsule_id\": binding.capsule_id,\n        \"session_id\": binding.session_id,\n        \"request_id\": binding.request_id,"
+        }
+      ],
+      "tests": [
+        "hosted_request_identity_survives_rotation_and_refuses_conflicts"
+      ]
+    },
+    {
+      "id": "MP64",
+      "title": "request_fingerprint hashes grant_id, so a rotated grant conflicts with the retained run",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/journal.rs",
+          "old": "        \"operation\": binding.operation,\n        \"input_hash\": input_hash,",
+          "new": "        \"operation\": binding.operation,\n        \"grant_id\": binding.grant_id,\n        \"input_hash\": input_hash,"
+        }
+      ],
+      "tests": [
+        "hosted_request_identity_survives_rotation_and_refuses_conflicts"
+      ]
+    },
+    {
+      "id": "MP65",
+      "title": "the retained-run fingerprint comparison is skipped, so a changed request fact returns the stored run",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "            if request_fingerprint(&existing.runtime_binding, &existing.input_hash)? != fingerprint",
+          "new": "            if false && request_fingerprint(&existing.runtime_binding, &existing.input_hash)? != fingerprint"
+        }
+      ],
+      "tests": [
+        "hosted_request_identity_survives_rotation_and_refuses_conflicts"
+      ]
+    },
+    {
+      "id": "MP66",
+      "title": "granted_model_turn returns a completed ready result before bind_granting asks the stand-in, so the effect id is not the contract run id",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/tests/process.rs",
+          "old": "    let backend = LocalRelayBackend::bind();\n    let stand_in =\n        HostedEffectStandIn::bind_granting(&label, backend.url(), Arc::clone(&grants), session_id);",
+          "new": "    return GrantedModelTurn {\n        answer: Some(\"ready\".to_string()),\n        effect_id: \"ready\".to_string(),\n        journal: Some(json!({\"output\": {\"text\": \"ready\"}})),\n        binding: granted_model_turn_binding(session_id, prompt),\n        hosted_run_id: None,\n        backend_requests: Vec::new(),\n        refusal_reasons: Vec::new(),\n        settled: json!({\"data\": {\"status\": \"completed\"}}),\n        relay: None,\n        connections: 0,\n        hosted_requests: Vec::new(),\n    };\n    let backend = LocalRelayBackend::bind();\n    let stand_in =\n        HostedEffectStandIn::bind_granting(&label, backend.url(), Arc::clone(&grants), session_id);"
+        }
+      ],
+      "tests": [
+        "granted_model_turn_returns_the_answer_effect_and_audit"
+      ]
+    },
+    {
+      "id": "MP67",
+      "title": "the request binding hardcodes session:test, so a granted non-default session is recorded as the fixture session",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/tests/process.rs",
+          "old": "            \"principal_id\": \"person:local:test\",\n            \"session_id\": session_id,\n            \"capsule_id\": \"assistant\",",
+          "new": "            \"principal_id\": \"person:local:test\",\n            \"session_id\": HOSTED_FIXTURE_SESSION_ID,\n            \"capsule_id\": \"assistant\","
+        }
+      ],
+      "tests": [
+        "granted_model_turn_returns_the_answer_effect_and_audit"
+      ]
+    },
+    {
+      "id": "MP68",
+      "title": "validate_text_messages no longer refuses max_output_tokens, so a hosted output limit is not context_rejected",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "    if input.get(\"max_output_tokens\").is_some()\n        && !matches!(offer.adapter, AdapterConfig::LocalLlamaCppText { .. })\n    {\n        return Err(AdapterFault::context(\n            \"model output request is not supported by this offer\",\n            \"max_output_tokens is supported only by local llama offers\",\n        ));\n    }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "hosted_token_and_byte_bounds_refuse_before_any_send"
+      ]
+    },
+    {
+      "id": "MP69",
+      "title": "the input byte comparison accepts one byte past the offer limit, so an oversized input is not policy_limit",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "        if input_bytes > offer.policy.input_bytes_limit {",
+          "new": "        if input_bytes > offer.policy.input_bytes_limit.saturating_add(1) {"
+        }
+      ],
+      "tests": [
+        "hosted_token_and_byte_bounds_refuse_before_any_send"
+      ]
+    },
+      {
+        "id": "MP70",
+        "title": "the freshness error is discarded, so an unseen expired request id is not request_expired",
+        "command": "provider",
+        "expect": "caught",
+        "edits": [
+          {
+            "file": "../../capsules/model-provider/src/state.rs",
+            "old": ".map_err(|_| ProviderFault::request_expired())?;",
+            "new": ".ok();"
+          }
+        ],
+        "tests": [
+          "hosted_unseen_request_ids_expire_before_any_send"
+        ]
+      },
+      {
+        "id": "MP71",
+        "title": "freshness runs before the retained lookup, so a retained expired id is refused",
+        "command": "provider",
+        "expect": "caught",
+        "edits": [
+          {
+            "file": "../../capsules/model-provider/src/state.rs",
+            "old": "        let run_id = deterministic_run_id(&request.runtime_binding);\n        // A retained request owns its original result, including legacy IDs and\n        // results whose offer has since changed or retired.\n        if let Some(mut existing) = self.journal.load_run_if_present(&run_id)? {\n            if request_fingerprint(&existing.runtime_binding, &existing.input_hash)? != fingerprint\n            {\n                return Err(ProviderFault::invalid_request(\n                    \"request_id conflicts with an existing model run\",\n                ));\n            }\n            self.project_archived_run(&mut existing)?;\n            if !existing.status.is_terminal() {\n                let current_offer = self.current_execution_offer_for_run(&existing)?;\n                self.refresh_run_if_needed(current_offer.as_ref(), &mut existing)?;\n            }\n            return serialize_run_view(&existing);\n        }\n        elastos_model_contract::validate_new_model_request_id(\n            &request.runtime_binding.request_id,\n            now_ms(),\n            self.journal.pruned_issued_floor_ms()?,\n        )\n        .map_err(|_| ProviderFault::request_expired())?;\n",
+            "new": "        let run_id = deterministic_run_id(&request.runtime_binding);\n        elastos_model_contract::validate_new_model_request_id(\n            &request.runtime_binding.request_id,\n            now_ms(),\n            self.journal.pruned_issued_floor_ms()?,\n        )\n        .map_err(|_| ProviderFault::request_expired())?;\n        // A retained request owns its original result, including legacy IDs and\n        // results whose offer has since changed or retired.\n        if let Some(mut existing) = self.journal.load_run_if_present(&run_id)? {\n            if request_fingerprint(&existing.runtime_binding, &existing.input_hash)? != fingerprint\n            {\n                return Err(ProviderFault::invalid_request(\n                    \"request_id conflicts with an existing model run\",\n                ));\n            }\n            self.project_archived_run(&mut existing)?;\n            if !existing.status.is_terminal() {\n                let current_offer = self.current_execution_offer_for_run(&existing)?;\n                self.refresh_run_if_needed(current_offer.as_ref(), &mut existing)?;\n            }\n            return serialize_run_view(&existing);\n        }\n"
+          }
+        ],
+        "tests": [
+          "state::tests::retained_request_precedes_freshness_floor_policy_and_unrelated_pruning"
+        ]
+      },
+    {
+      "id": "MP72",
+      "title": "the pending, denied and ended arms are dropped, so a pending Runtime denial is not hosted_access_pending",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "            Some(\"pending\") => (\n                \"hosted_access_pending\",\n                \"Hosted access is waiting for approval in Inbox.\",\n            ),\n            Some(\"denied\") => (\"hosted_access_denied\", \"Hosted access was denied in Inbox.\"),\n            Some(\"ended\") => (\n                \"hosted_access_ended\",\n                \"Hosted access ended. Approve the new request in Inbox to use it again.\",\n            ),\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "hosted_access_states_fail_the_run_on_the_socket"
+      ]
+    },
+    {
+      "id": "MP73",
+      "title": "the in-band end line is ignored, so a mid-reply end is not hosted_access_ended_during_reply",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "            if runtime_end_line_possible && current_line == HOSTED_ACCESS_ENDED_LINE {\n                // Keep the text that already arrived, then say why the reply stopped.\n                if !stream_state.delta_buffer.is_empty() {\n                    flush_local_text_delta(\n                        &task.offer,\n                        &task.run_id,\n                        task.generation,\n                        &task.updates,\n                        &mut stream_state.delta_buffer,\n                        timing,\n                    )\n                    .await?;\n                }\n                return Err(hosted_access_ended_during_reply_fault());\n            }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "hosted_access_states_fail_the_run_on_the_socket"
+      ]
+    },
+    {
+      "id": "MP74",
+      "title": "the entry cap is dropped, so a journal of 256 crash files is not policy_limit",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/journal.rs",
+          "old": "            if usage.entries >= MAX_NEW_JOURNAL_ENTRIES\n                || usage\n                    .charged_bytes\n                    .checked_add(charge)\n                    .is_none_or(|total| total > MAX_JOURNAL_GROWTH_BYTES)\n            {\n                // This check precedes the durable Prepared record and dispatch.\n                return Err(journal_budget_fault());\n            }",
+          "new": "            if usage\n                    .charged_bytes\n                    .checked_add(charge)\n                    .is_none_or(|total| total > MAX_JOURNAL_GROWTH_BYTES)\n            {\n                // This check precedes the durable Prepared record and dispatch.\n                return Err(journal_budget_fault());\n            }"
+        }
+      ],
+      "tests": [
+        "hosted_full_journal_refuses_before_any_send"
+      ]
+    },
+    {
+      "id": "MP75",
+      "title": "the charged-growth cap is dropped, so the 64-run arm admits the next run",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/journal.rs",
+          "old": "            if usage.entries >= MAX_NEW_JOURNAL_ENTRIES\n                || usage\n                    .charged_bytes\n                    .checked_add(charge)\n                    .is_none_or(|total| total > MAX_JOURNAL_GROWTH_BYTES)\n            {\n                // This check precedes the durable Prepared record and dispatch.\n                return Err(journal_budget_fault());\n            }",
+          "new": "            if usage.entries >= MAX_NEW_JOURNAL_ENTRIES\n            {\n                // This check precedes the durable Prepared record and dispatch.\n                return Err(journal_budget_fault());\n            }"
+        }
+      ],
+      "tests": [
+        "state::tests::journal_admission_refuses_before_prepared_and_backend_effects"
       ]
     }
   ]
