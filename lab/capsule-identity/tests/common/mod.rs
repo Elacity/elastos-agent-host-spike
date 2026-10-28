@@ -1366,21 +1366,26 @@ pub fn published(folder: &Path) -> (String, PathBuf) {
 /// Lab stand-in for the Runtime's launch route, not the Runtime. It lives in
 /// test code and runs nothing: a launched instance is a record.
 ///
-/// Its two methods are named for the two routes of draft PR #309's RA-6 at
-/// `513988ebd`, `POST /api/capsules` ([`StandInRuntime::post_capsules`],
-/// RI-2) and `GET /api/capsules` ([`StandInRuntime::get_capsules`], RI-3),
-/// and take and return JSON bodies. It holds a store (printed lab CID ->
-/// bundle folder, filled at publish time by [`published`]), the publishers'
-/// package records and an explicit list of accepted publisher DIDs. A launch
-/// ends in one of two states: "launched", with one new instance, or
-/// "refused", status 400 with the reason and no instance. The one request
-/// field, `cid`, is a lab field, not in #309: today's route takes `path`.
+/// [`StandInRuntime::new`] builds it. Each other public method is named for a
+/// route of draft PR #309 at `513988ebd`, or is a lab test seam, not a route:
+/// - [`StandInRuntime::post_capsules`]: RA-6's `POST /api/capsules` (RI-2);
+/// - [`StandInRuntime::get_capsules`]: RA-6's `GET /api/capsules` (RI-3);
+/// - [`StandInRuntime::get_capability_list_all_sessions_live`]: RA-1's
+///   `GET /api/capability/list?scope=all_sessions_live`, the grant view;
+/// - [`StandInRuntime::seed_grant`]: Lab test seam, not a route;
+/// - [`StandInRuntime::asks_of`]: Lab test seam, not a route.
 ///
-/// Its grant view is named for #309 RA-1's
-/// `GET /api/capability/list?scope=all_sessions_live`
-/// ([`StandInRuntime::get_capability_list_all_sessions_live`]). A launch adds
-/// no grant: a valid publisher signature alone yields none. No shell approval
-/// is modelled; a grant exists only through the test seam
+/// The route methods take and return JSON bodies. It holds a store (printed
+/// lab CID -> bundle folder, filled at publish time by [`published`]), the
+/// publishers' package records and an explicit list of accepted publisher
+/// DIDs. A launch ends in one of two states: "launched", with one new
+/// instance, or "refused", status 400 with the reason and no instance. The
+/// one request field, `cid`, is a lab field, not in #309: today's route takes
+/// `path`.
+///
+/// The grant view lists every held grant of every session. A launch adds no
+/// grant: a valid publisher signature alone yields none. No shell approval is
+/// modelled; a grant exists only through the test seam
 /// [`StandInRuntime::seed_grant`].
 ///
 /// A launched instance is handed its asks only as the `asks.json` bytes of

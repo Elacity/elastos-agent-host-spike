@@ -8,6 +8,7 @@
 //! and these tests say nothing about what the Runtime does.
 mod common;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -432,6 +433,80 @@ fn standin_grant_view_lists_a_seeded_grant() {
 
     // The seed is not a launch: the instance list is unchanged.
     assert_eq!(listed_instances(&stand_in).len(), 1);
+}
+
+#[test]
+fn standin_grant_view_lists_every_held_grant_of_every_session() {
+    let published = publish_agent_host();
+    let (mut stand_in, _) = signed_stand_in(&published);
+    let first = launched(&mut stand_in);
+    let second = launched(&mut stand_in);
+    let a = first["session_id"].as_str().expect("a session id");
+    let b = second["session_id"].as_str().expect("a session id");
+    assert_ne!(a, b, "two launches give two sessions");
+
+    // One grant for A, then two for B, each a different (resource, action).
+    let seeded = [
+        (
+            a,
+            "localhost://Users/self/.AppData/Agents/agent-host/journal",
+            "write",
+            "session",
+        ),
+        (
+            b,
+            "localhost://Users/self/Documents/notes.md",
+            "read",
+            "once",
+        ),
+        (
+            b,
+            "localhost://Users/self/.AppData/Agents/agent-host/cache",
+            "delete",
+            "session",
+        ),
+    ];
+    for (session, resource, action, duration) in seeded {
+        stand_in.seed_grant(session, resource, action, duration);
+    }
+
+    let held = grant_view(&stand_in);
+    assert_eq!(held.len(), 3, "every held grant is listed: {held:?}");
+    let mut listed: Vec<(&str, &str, &str, &str)> = held
+        .iter()
+        .map(|entry| {
+            let text = |key: &str| entry[key].as_str().expect("a string");
+            (
+                text("session_id"),
+                text("resource"),
+                text("action"),
+                text("duration"),
+            )
+        })
+        .collect();
+    listed.sort();
+    let mut expected = seeded.to_vec();
+    expected.sort();
+    assert_eq!(listed, expected, "each entry is a seeded grant, as seeded");
+
+    for session in [a, b] {
+        assert!(
+            held.iter().any(|entry| entry["session_id"] == session),
+            "the grants of session {session} are listed: {held:?}"
+        );
+    }
+    let request_ids: BTreeSet<&str> = held
+        .iter()
+        .map(|entry| entry["request_id"].as_str().expect("a request id"))
+        .collect();
+    assert_eq!(
+        request_ids.len(),
+        3,
+        "three different request ids: {held:?}"
+    );
+
+    // Seeding is not a launch: the instance list is unchanged.
+    assert_eq!(listed_instances(&stand_in).len(), 2);
 }
 
 /// Change one byte of the stored `asks.json` in `folder`; the changed bytes.
