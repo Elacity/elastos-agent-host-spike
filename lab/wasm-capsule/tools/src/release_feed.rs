@@ -129,10 +129,7 @@ impl Feed {
 
     /// Every entry in arrival order, as canonical lines.
     pub fn canonical_lines(&self) -> Vec<Vec<u8>> {
-        self.entries
-            .iter()
-            .map(Entry::canonical_line)
-            .collect()
+        self.entries.iter().map(Entry::canonical_line).collect()
     }
 
     /// The number of accepted entries.
@@ -211,7 +208,10 @@ mod tests {
         feed.append(entry("alpha", 1, 5, 1)).expect("first");
         let refused = feed.append(entry("alpha", 2, 5, 2));
         assert_eq!(refused, Err(AppendRefusal::SeqNotIncreasing));
-        assert_eq!(AppendRefusal::SeqNotIncreasing.to_string(), "seq-not-increasing");
+        assert_eq!(
+            AppendRefusal::SeqNotIncreasing.to_string(),
+            "seq-not-increasing"
+        );
         assert_eq!(feed.len(), 1);
     }
 
