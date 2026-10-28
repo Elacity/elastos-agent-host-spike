@@ -6594,6 +6594,7 @@ const WALLET_OPERATION_ARM: &str = "WalletProviderOperationV2::";
 /// One operations table row, reduced to the cells the row check reads.
 struct OperationsRow {
     operation: String,
+    inputs: String,
     right: String,
     macos: String,
     linux: String,
@@ -6703,6 +6704,7 @@ fn operations_table_rows(
         }
         rows.push(OperationsRow {
             operation: cells[0].to_string(),
+            inputs: cells[1].to_string(),
             right: cells[3].to_string(),
             macos: cells[5].to_string(),
             linux: cells[6].to_string(),
@@ -6757,6 +6759,593 @@ fn dispatch_arm_variants(source: &str, signature: &str, arm_type: &str) -> Optio
         }
     }
     body.then_some(variants)
+}
+
+/// The body of the `enum <name>` or `struct <name>` declaration in `source`,
+/// or `None` when `source` holds no such declaration.
+///
+/// The declaration is a line whose qualifier words precede `enum <name> {` or
+/// `struct <name> {`, and whose text after the brace is empty, so a use of the
+/// name elsewhere does not count. The body runs from that `{` to the `}` that
+/// closes it, and a brace inside a string literal does not count.
+fn item_body<'a>(source: &'a str, name: &str, kind: &str) -> Option<&'a str> {
+    let declaration = format!("{kind} {name} {{");
+    let mut from = 0;
+    while let Some(offset) = source[from..].find(&declaration) {
+        let start = from + offset;
+        from = start + declaration.len();
+        let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
+        if !declaration_qualifier(source[line_start..start].trim()) {
+            continue;
+        }
+        let line_end = source[from..]
+            .find('\n')
+            .map_or(source.len(), |index| from + index);
+        if !source[from..line_end].trim().is_empty() {
+            continue;
+        }
+        let body = &source[from..];
+        return declaration_end(body).map(|end| &body[..end]);
+    }
+    None
+}
+
+/// Whether the text before a declaration's name on its line can precede an
+/// item: nothing, or the qualifier words `pub`, a `pub(...)` visibility, and
+/// the item kinds `struct` and `enum`.
+fn declaration_qualifier(text: &str) -> bool {
+    text.split_whitespace()
+        .all(|word| word == "pub" || word.starts_with("pub(") || matches!(word, "struct" | "enum"))
+}
+
+/// The wire field names of one enum arm or struct `item` in `source`, in
+/// declaration order, or `None` when `source` holds no such declaration.
+///
+/// A declaration starts at a line whose items before `item` are qualifier words
+/// and whose text after it is `{` or `,`; a longer name that merely starts with
+/// `item`, and a name that sits inside another item or a string, are other
+/// items. A declaration with no fields, such as `Status,`, returns an empty
+/// list, so a missing item and an item with no fields stay apart. Inside the
+/// braces every field is one comma-separated item, and
+/// `#[serde(rename = "...")]` on that item names the wire field; every other
+/// field keeps its Rust name. A trailing comma is optional.
+fn wire_field_names(source: &str, item: &str) -> Option<Vec<String>> {
+    let mut from = 0;
+    while let Some(offset) = source[from..].find(item) {
+        let start = from + offset;
+        from = start + item.len();
+        let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
+        if !declaration_qualifier(source[line_start..start].trim()) {
+            continue;
+        }
+        let rest = &source[from..];
+        let head = rest.trim_start();
+        let after_item = from + (rest.len() - head.len());
+        match head.chars().next() {
+            Some('{') => {
+                let body = &source[after_item + 1..];
+                return declaration_end(body).map(|end| field_names(&body[..end]));
+            }
+            Some(',') => return Some(Vec::new()),
+            _ => continue,
+        }
+    }
+    None
+}
+
+/// The wire names of the field items of one declaration body.
+fn field_names(body: &str) -> Vec<String> {
+    declaration_items(body)
+        .into_iter()
+        .filter(|field| !field.trim().is_empty())
+        .map(field_wire_name)
+        .collect()
+}
+
+/// The index of the `}` that closes a body whose opening brace sits directly
+/// before `text`, or `None` when `text` ends first. A brace inside a string
+/// literal does not count.
+fn declaration_end(text: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut in_string = false;
+    let mut quote_escape = false;
+    for (index, character) in text.char_indices() {
+        if in_string {
+            if character == '"' && !quote_escape {
+                in_string = false;
+            }
+            quote_escape = character == '\\' && !quote_escape;
+            continue;
+        }
+        match character {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The comma-separated items of one declaration body, split at the commas
+/// outside parentheses, brackets, braces and angle brackets, so a field type
+/// such as `Option<String>` and an attribute such as
+/// `#[serde(default, skip_serializing_if = "x")]` each stay one item.
+fn declaration_items(text: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (index, character) in text.char_indices() {
+        match character {
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' | '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                items.push(&text[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    items.push(&text[start..]);
+    items
+}
+
+/// The wire name of one field item: its `#[serde(rename = "...")]` when it
+/// carries one, else the name it declares before its `:`, without its leading
+/// attributes and without a `pub` qualifier.
+fn field_wire_name(field: &str) -> String {
+    if let Some(rest) = field.split("rename = \"").nth(1) {
+        let end = rest
+            .find(|character| matches!(character, '"' | '\'' | ')'))
+            .unwrap_or(rest.len());
+        return rest[..end].to_string();
+    }
+    let mut declared = field.trim_start();
+    while let Some(attributes) = declared.strip_prefix("#[") {
+        let Some(end) = attribute_end(attributes) else {
+            break;
+        };
+        declared = attributes[end + 1..].trim_start();
+    }
+    declared
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .last()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The index of the `]` that closes the attribute whose text follows `#[`, or
+/// `None` when the attribute ends first.
+fn attribute_end(text: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut in_string = false;
+    let mut quote_escape = false;
+    for (index, character) in text.char_indices() {
+        if in_string {
+            if character == '"' && !quote_escape {
+                in_string = false;
+            }
+            quote_escape = character == '\\' && !quote_escape;
+            continue;
+        }
+        match character {
+            '"' => in_string = true,
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// One item of an Inputs cell: a name, with the items of its parentheses when
+/// it has any.
+#[derive(Clone, Debug, PartialEq)]
+struct InputsItem {
+    name: String,
+    children: Option<Vec<InputsItem>>,
+}
+
+impl InputsItem {
+    /// An item with no parentheses.
+    fn leaf(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            children: None,
+        }
+    }
+
+    /// An item holding the items of its parentheses.
+    fn group(name: &str, children: Vec<Self>) -> Self {
+        Self {
+            name: name.to_string(),
+            children: Some(children),
+        }
+    }
+}
+
+/// The items of one Inputs cell, or `None` when the cell is not a
+/// comma-separated list of names, each with optional parenthesised items.
+///
+/// A name is a backtick span or a bare word. The one bare word both tables use
+/// is `none` inside `params` (none).
+fn input_items(cell: &str) -> Option<Vec<InputsItem>> {
+    let mut rest = cell.trim();
+    let items = input_item_list(&mut rest, false)?;
+    rest.is_empty().then_some(items)
+}
+
+/// One comma-separated list of items read from `rest`, up to the `)` that
+/// closes it when `closing`. A closing list must reach its `)`; an outer list
+/// ends at the end of the cell.
+fn input_item_list(rest: &mut &str, closing: bool) -> Option<Vec<InputsItem>> {
+    let mut items = Vec::new();
+    loop {
+        *rest = rest.trim_start();
+        if let Some(after) = rest.strip_prefix(')') {
+            *rest = after;
+            return closing.then_some(items);
+        }
+        if rest.is_empty() {
+            return (!closing).then_some(items);
+        }
+        items.push(input_item(rest)?);
+        *rest = rest.trim_start();
+        if let Some(after) = rest.strip_prefix(',') {
+            *rest = after;
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix(')') {
+            *rest = after;
+            return closing.then_some(items);
+        }
+        return rest.is_empty().then_some(items);
+    }
+}
+
+/// One item read from `rest`: a name, then any parentheses of items.
+fn input_item(rest: &mut &str) -> Option<InputsItem> {
+    *rest = rest.trim_start();
+    let name = match rest.strip_prefix('`') {
+        Some(after) => {
+            let end = after.find('`')?;
+            *rest = &after[end + 1..];
+            after[..end].to_string()
+        }
+        None => {
+            let end = rest
+                .find(|character| matches!(character, ',' | '(' | ')'))
+                .unwrap_or(rest.len());
+            let name = rest[..end].trim();
+            if name.is_empty() {
+                return None;
+            }
+            *rest = &rest[end..];
+            name.to_string()
+        }
+    };
+    *rest = rest.trim_start();
+    let Some(after) = rest.strip_prefix('(') else {
+        return Some(InputsItem::leaf(&name));
+    };
+    *rest = after;
+    Some(InputsItem::group(&name, input_item_list(rest, true)?))
+}
+
+/// Whether one observed Inputs cell is the expected one: the same names in the
+/// same order, each with the same parenthesised items. The `params` group is
+/// empty on both sides, because `without_params_names` clears the observed one
+/// and `params_names_match` compares its names on their own.
+fn inputs_match(observed: &[InputsItem], expected: &[InputsItem]) -> bool {
+    observed.len() == expected.len()
+        && observed.iter().zip(expected).all(|(observed, expected)| {
+            observed.name == expected.name
+                && match (&observed.children, &expected.children) {
+                    (Some(observed), Some(expected)) => inputs_match(observed, expected),
+                    (None, None) => true,
+                    _ => false,
+                }
+        })
+}
+
+/// One item list with the items of every `PARAMS_ITEM` group dropped, so no
+/// compare sees the names inside `params`. This is the one place the rule reads
+/// `params`, and WP148 removes it.
+fn without_params_names(items: Vec<InputsItem>) -> Vec<InputsItem> {
+    items
+        .into_iter()
+        .map(|item| {
+            let children = item.children.map(|children| {
+                if item.name == PARAMS_ITEM {
+                    Vec::new()
+                } else {
+                    without_params_names(children)
+                }
+            });
+            InputsItem {
+                name: item.name,
+                children,
+            }
+        })
+        .collect()
+}
+
+/// Whether the `params` group of `cell` holds `declared` in declaration order,
+/// or the one `NO_CONTRACT_FIELDS` word when no field is declared.
+fn params_names_match(cell: &str, declared: &[String]) -> bool {
+    let Some(items) = input_items(cell) else {
+        return false;
+    };
+    let Some(observed) = params_items(&items) else {
+        return false;
+    };
+    let expected: Vec<InputsItem> = if declared.is_empty() {
+        vec![InputsItem::leaf(NO_CONTRACT_FIELDS)]
+    } else {
+        declared.iter().map(|name| InputsItem::leaf(name)).collect()
+    };
+    observed == expected
+}
+
+/// The items inside the `params` group of `items`, wherever that group sits.
+fn params_items(items: &[InputsItem]) -> Option<&[InputsItem]> {
+    for item in items {
+        if item.name == PARAMS_ITEM {
+            return item.children.as_deref();
+        }
+        if let Some(found) = item.children.as_deref().and_then(params_items) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// One item list as an Inputs cell writes it, for a refusal's expected side.
+/// The one bare word both tables use, `none`, carries no backticks, and a
+/// `PARAMS_ITEM` group shows the contract arm's declared fields from `params`.
+fn render_inputs(items: &[InputsItem], params: &[String]) -> String {
+    items
+        .iter()
+        .map(|item| match &item.children {
+            Some(_) if item.name == PARAMS_ITEM => {
+                let inner = render_inputs(&params_items_of(params), params);
+                format!("`{}` ({inner})", item.name)
+            }
+            Some(children) => format!("`{}` ({})", item.name, render_inputs(children, params)),
+            None if item.name == NO_CONTRACT_FIELDS => item.name.clone(),
+            None => format!("`{}`", item.name),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The items a contract arm's declared fields render as.
+fn params_items_of(params: &[String]) -> Vec<InputsItem> {
+    if params.is_empty() {
+        vec![InputsItem::leaf(NO_CONTRACT_FIELDS)]
+    } else {
+        params.iter().map(|field| InputsItem::leaf(field)).collect()
+    }
+}
+
+/// The Inputs items an ordinary row must hold: `op`, then the arm's field
+/// names in declaration order.
+fn ordinary_row_inputs(fields: &[String]) -> Vec<InputsItem> {
+    let mut items = vec![InputsItem::leaf("op")];
+    items.extend(fields.iter().map(|field| InputsItem::leaf(field)));
+    items
+}
+
+/// The one name an Inputs cell gives the contract arm's fields.
+const PARAMS_ITEM: &str = "params";
+
+/// The one bare word an Inputs cell writes when a contract arm declares no
+/// field.
+const NO_CONTRACT_FIELDS: &str = "none";
+
+/// The Inputs items a `wallet_contract` row must hold: `op`, the envelope
+/// arm's field names, and inside the first of them `kind: <kind>` and an empty
+/// `PARAMS_ITEM` group that `params_names_match` fills from the row's contract
+/// arm.
+fn contract_row_inputs(kind: &str, envelope: &[String]) -> Vec<InputsItem> {
+    let request = vec![
+        InputsItem::leaf(&format!("kind: {kind}")),
+        InputsItem::group(PARAMS_ITEM, Vec::new()),
+    ];
+    let mut items = vec![InputsItem::leaf("op")];
+    for (index, field) in envelope.iter().enumerate() {
+        if index == 0 {
+            items.push(InputsItem::group(field, request.clone()));
+        } else {
+            items.push(InputsItem::leaf(field));
+        }
+    }
+    items
+}
+
+/// The file, relative to a provider directory, that declares the `Request`
+/// enum a table's Inputs cells name. Wallet declares it in `src/protocol.rs`
+/// and answers it from `src/main.rs`; did declares and answers it in its one
+/// `src/main.rs`, and every other provider uses that one file for both.
+fn request_declaration_file(name: &str) -> &'static str {
+    match name {
+        "wallet-provider" => "src/protocol.rs",
+        _ => "src/main.rs",
+    }
+}
+
+/// The one path, relative to this crate, of the contract source that declares
+/// wallet's `WalletProviderOperationV2` arms.
+const WALLET_CONTRACT_SOURCE: &str = "../../elastos/crates/elastos-wallet-contract/src/lib.rs";
+
+/// The sources one operations table's Inputs cells are read, each with the
+/// path a refusal names.
+struct WireSources<'a> {
+    /// The provider's `src/main.rs`, which holds its dispatch.
+    dispatch: &'a str,
+    /// The provider file that declares its `Request` enum.
+    declarations: &'a str,
+    declarations_path: &'a Path,
+    /// The shared contract crate's `src/lib.rs`.
+    contract: &'a str,
+    contract_path: &'a Path,
+}
+
+/// Every problem with one table's Inputs cells, each naming the document, the
+/// row, the cell and the source it read.
+///
+/// An ordinary row's cell holds `op` and then the field names its provider's
+/// `Request` arm declares, in declaration order. A `wallet_contract <kind>`
+/// row's cell holds `op`, the envelope arm's field names in declaration order,
+/// and inside the first of them `kind: <kind>` and `params` holding that
+/// contract arm's field names in declaration order, or `none` when the arm
+/// declares no field. Another name, another order, a missing name and an extra
+/// name are each one problem for that row. A row whose operation has no
+/// dispatch arm, and a source with no `fn handle`, stay with
+/// `row_set_problems`.
+///
+/// Honesty limits: this rule reads declarations, not serde's output, so a
+/// field carrying `#[serde(skip)]` would be required here and would need the
+/// rule widened when one is added; `#[serde(default)]` and
+/// `#[serde(skip_serializing_if = ...)]` fields are real wire names and are
+/// required. The rule checks the names and their order inside each cell, not
+/// the nested types of a `params` value.
+///
+/// Falsifiers: WP146 makes the field reader ignore `#[serde(rename = "...")]`,
+/// so a cell naming a renamed field's Rust name is accepted; WP147 makes the
+/// compare tolerate a cell that stops before a declared field; WP148 makes
+/// every `wallet_contract` row expect `params` (none), so a cell naming another
+/// `params` name is accepted. `operations_table_row_check_refuses_each_bad_table`
+/// fails on each.
+fn inputs_cell_problems(
+    document_name: &str,
+    rows: &[OperationsRow],
+    sources: &WireSources<'_>,
+) -> Vec<String> {
+    let Some(handle_arms) = dispatch_arm_variants(sources.dispatch, "fn handle(", REQUEST_ARM)
+    else {
+        return Vec::new();
+    };
+    let Some(request_body) = item_body(sources.declarations, "Request", "enum") else {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} Inputs cells cannot be checked \
+             because {} declares no enum Request",
+            sources.declarations_path.display()
+        )];
+    };
+    let contract_body = item_body(sources.contract, "WalletProviderOperationV2", "enum");
+    let kind_arms = dispatch_arm_variants(
+        sources.dispatch,
+        "fn dispatch_wallet_operation(",
+        WALLET_OPERATION_ARM,
+    )
+    .unwrap_or_default();
+    let contract_prefix = format!("{WALLET_CONTRACT_ARM} ");
+    let mut problems = Vec::new();
+    for row in rows {
+        let (expected, params, read) = match row.operation.strip_prefix(&contract_prefix) {
+            Some(kind) => {
+                let Some(variant) = kind_arms.iter().find(|arm| variant_snake_case(arm) == kind)
+                else {
+                    continue;
+                };
+                let Some(envelope) = handle_arms
+                    .iter()
+                    .find(|arm| variant_snake_case(arm) == WALLET_CONTRACT_ARM)
+                    .and_then(|arm| wire_field_names(request_body, arm))
+                else {
+                    continue;
+                };
+                let params = match contract_body {
+                    Some(body) => match wire_field_names(body, variant) {
+                        Some(fields) => fields,
+                        None => {
+                            problems.push(format!(
+                                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} \
+                                 holds the Inputs cell {}, and {} declares no {variant} arm",
+                                row.operation,
+                                row.inputs,
+                                sources.contract_path.display()
+                            ));
+                            continue;
+                        }
+                    },
+                    None => {
+                        problems.push(format!(
+                            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds \
+                             the Inputs cell {}, and {} declares no enum \
+                             WalletProviderOperationV2",
+                            row.operation,
+                            row.inputs,
+                            sources.contract_path.display()
+                        ));
+                        continue;
+                    }
+                };
+                (
+                    contract_row_inputs(kind, &envelope),
+                    Some(params),
+                    format!(
+                        "{} with {}",
+                        sources.declarations_path.display(),
+                        sources.contract_path.display()
+                    ),
+                )
+            }
+            None => {
+                let Some(variant) = handle_arms
+                    .iter()
+                    .find(|arm| variant_snake_case(arm) == row.operation)
+                else {
+                    continue;
+                };
+                let Some(fields) = wire_field_names(request_body, variant) else {
+                    problems.push(format!(
+                        "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the \
+                         Inputs cell {}, and {} declares no {variant} arm",
+                        row.operation,
+                        row.inputs,
+                        sources.declarations_path.display()
+                    ));
+                    continue;
+                };
+                (
+                    ordinary_row_inputs(&fields),
+                    None,
+                    sources.declarations_path.display().to_string(),
+                )
+            }
+        };
+        let rendered = render_inputs(&expected, params.as_deref().unwrap_or_default());
+        let matched = input_items(&row.inputs).is_some_and(|observed| {
+            let shape = without_params_names(observed);
+            inputs_match(&shape, &expected)
+                && params
+                    .as_deref()
+                    .is_none_or(|declared| params_names_match(&row.inputs, declared))
+        });
+        if !matched {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the Inputs cell \
+                 {}, and {read} names {rendered}",
+                row.operation, row.inputs
+            ));
+        }
+    }
+    problems
 }
 
 /// Every problem with one table's row set, each naming the document and the row
@@ -6980,23 +7569,27 @@ fn linux_status_problems(document_name: &str, row: &OperationsRow) -> Vec<String
 /// The section under `OPERATIONS_HEADING` must hold a table whose first line is
 /// complete `TABLE_HEADER` and whose second is the dash separator. Every later
 /// nonempty line is a row, including repeated headers and rows with leading
-/// whitespace or omitted outer bars. Then the section must hold four things. Its row set,
-/// in table order, must equal the operations `<provider_dir>/src/main.rs`
-/// answers through `fn handle`, with a `wallet_contract` arm expanded to one
-/// `wallet_contract <kind>` row per `fn dispatch_wallet_operation` arm. Each
-/// Right cell must be exactly `NO_DECLARED_RIGHT` or one backtick span holding
-/// an id `CONTRACT_RIGHTS` or `PLATFORM_BASELINE_IDS` declares. A row whose
-/// Right is a declared right must cite `permitted:` and `nearest outside
-/// refused:` in its macOS cell, and a `none:` row must cite neither. Every
-/// Linux cell must be `LINUX_STATUS`.
+/// whitespace or omitted outer bars. Then the section must hold five things.
+/// Its row set, in table order, must equal the operations
+/// `<provider_dir>/src/main.rs` answers through `fn handle`, with a
+/// `wallet_contract` arm expanded to one `wallet_contract <kind>` row per
+/// `fn dispatch_wallet_operation` arm. Every Inputs cell must hold the wire
+/// names that row's operation reads, by `inputs_cell_problems`. Each Right cell
+/// must be exactly `NO_DECLARED_RIGHT` or one backtick span holding an id
+/// `CONTRACT_RIGHTS` or `PLATFORM_BASELINE_IDS` declares. A row whose Right is
+/// a declared right must cite `permitted:` and `nearest outside refused:` in
+/// its macOS cell, and a `none:` row must cite neither. Every Linux cell must
+/// be `LINUX_STATUS`. `contract_path` holds the source of the shared contract
+/// crate, which the Inputs rule reads and no other rule needs.
 ///
 /// Honesty limits: rule 1 reads the dispatch arms as text, so it shows the row
-/// set matches the arms, not that every arm is reachable; and it says nothing
-/// about the Outputs keys, which stay held in BACKLOG item 21.
+/// set matches the arms, not that every arm is reachable; rules 1 and 2 say
+/// nothing about the Outputs keys, which stay held in BACKLOG item 21.
 fn operations_table_row_problems(
     document_name: &str,
     document: &str,
     provider_dir: &Path,
+    contract_path: &Path,
 ) -> Vec<String> {
     let section = match section_under_one_heading(document_name, document, OPERATIONS_HEADING) {
         Ok(section) => section,
@@ -7015,6 +7608,13 @@ fn operations_table_row_problems(
                 &source,
                 &provider_path,
             ));
+            problems.extend(inputs_problems(
+                document_name,
+                &rows,
+                provider_dir,
+                &source,
+                contract_path,
+            ));
         }
         Err(err) => problems.push(format!(
             "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row set cannot be checked \
@@ -7028,6 +7628,53 @@ fn operations_table_row_problems(
         problems.extend(linux_status_problems(document_name, row));
     }
     problems
+}
+
+/// Every problem with one table's Inputs cells, reading the files they name.
+///
+/// The provider's `Request` enum is declared in the file
+/// `request_declaration_file` names for it, and `contract_path` holds the
+/// shared contract crate's arms. A file that cannot be read is one refusal
+/// naming its path.
+fn inputs_problems(
+    document_name: &str,
+    rows: &[OperationsRow],
+    provider_dir: &Path,
+    dispatch: &str,
+    contract_path: &Path,
+) -> Vec<String> {
+    let declaration_relative = request_declaration_file(document_name);
+    let declaration_path = provider_dir.join(declaration_relative);
+    let declarations = match fs::read_to_string(&declaration_path) {
+        Ok(source) => source,
+        Err(err) => {
+            return vec![format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} Inputs cells cannot be \
+                 checked because {declaration_relative} is not readable: {err}"
+            )]
+        }
+    };
+    let contract = match fs::read_to_string(contract_path) {
+        Ok(source) => source,
+        Err(err) => {
+            return vec![format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} Inputs cells cannot be \
+                 checked because {} is not readable: {err}",
+                contract_path.display()
+            )]
+        }
+    };
+    inputs_cell_problems(
+        document_name,
+        rows,
+        &WireSources {
+            dispatch,
+            declarations: &declarations,
+            declarations_path: &declaration_path,
+            contract: &contract,
+            contract_path,
+        },
+    )
 }
 
 /// The top-level allow forms of `profile`, in profile order. This is the one
@@ -8009,28 +8656,36 @@ fn every_operations_table_cites_existing_tests() {
 ///
 /// The check reads `capsules/<name>/CONFINEMENT.md` for each name in
 /// `OPERATIONS_TABLES`, cuts the section under `OPERATIONS_HEADING`, and
-/// requires four things of every row: the row set, in table order, equals the
+/// requires five things of every row: the row set, in table order, equals the
 /// operations `capsules/<name>/src/main.rs` answers through `fn handle`, with a
 /// `wallet_contract` arm expanded to one row per `fn dispatch_wallet_operation`
-/// arm; the Right cell is exactly `none: needs no declared right` or one
-/// declared id in a backtick span; a row whose Right is a declared right cites
-/// both `permitted:` and `nearest outside refused:`, and a `none:` row cites
-/// neither; and every Linux cell is exactly `designed, not enforced`. Each
-/// fault is one line naming the document, the row (or the arm) and the value.
-/// The check reads files and starts no process, so it runs on every platform.
+/// arm; the Inputs cell holds the wire names that row's operation declares, by
+/// `inputs_cell_problems`; the Right cell is exactly
+/// `none: needs no declared right` or one declared id in a backtick span; a row
+/// whose Right is a declared right cites both `permitted:` and
+/// `nearest outside refused:`, and a `none:` row cites neither; and every Linux
+/// cell is exactly `designed, not enforced`. Each fault is one line naming the
+/// document, the row (or the arm) and the value. The check reads files and
+/// starts no process, so it runs on every platform.
 ///
 /// Falsifier: WP141 disables the row-set rule, so a table that omits a row or
 /// adds one passes; WP142 disables the Right-vocabulary rule, so a Right cell
 /// naming an undeclared id or `no named test shows this` passes; WP143 disables
 /// the both-sides rule, so a right row with one side and a `none:` row with a
 /// side pass; WP144 disables the Linux-status rule, so a cell naming another
-/// status passes. `operations_table_row_check_refuses_each_bad_table` catches
+/// status passes; WP146 to WP148 open the Inputs rules, so a cell that names a
+/// renamed field's Rust name, omits a declared field or lists another `params`
+/// name passes. `operations_table_row_check_refuses_each_bad_table` catches
 /// each mutation with a bad-table fixture; this test checks the real tables.
 #[test]
 fn every_operations_table_row_matches_its_provider_and_the_contract() {
     let capsules = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("capsules/wallet-provider must sit under capsules/");
+    let contract_path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(WALLET_CONTRACT_SOURCE)
+        .components()
+        .collect();
     let mut problems = Vec::new();
     for name in OPERATIONS_TABLES {
         let document =
@@ -8039,6 +8694,7 @@ fn every_operations_table_row_matches_its_provider_and_the_contract() {
             name,
             &document,
             &capsules.join(name),
+            &contract_path,
         ));
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
@@ -8763,10 +9419,34 @@ fn operations_table_check_rejects_paths_outside_provider() {
     }
 }
 
-/// The operations-table fixtures' provider source: `fn handle` answers
-/// `init`, `status`, `wallet_contract` and `shutdown`, and `fn
-/// dispatch_wallet_operation` answers the one `list_accounts` kind.
+/// The operations-table fixtures' provider source: `enum Request` declares the
+/// arms the fixture table names, `fn handle` answers `init`, `status`,
+/// `wallet_contract` and `shutdown`, and `fn dispatch_wallet_operation` answers
+/// the one `list_accounts` kind.
+///
+/// `init` carries a field whose wire name is `wire_name` by
+/// `#[serde(rename = "...")]`. `Ping` declares a field and no dispatch arm
+/// answers it, so the fixture table names no field of it. `Status` and
+/// `Shutdown` declare no field.
 const ROW_FIXTURE_PROVIDER: &str = "\
+enum Request {
+    Init {
+        config: Value,
+        #[serde(rename = \"wire_name\")]
+        field_name: Option<Value>,
+    },
+    Status,
+    WalletContract {
+        request: Value,
+        #[serde(rename = \"_runtime_invocation\")]
+        runtime_invocation: Box<RuntimeInvocationEnvelope>,
+    },
+    Ping {
+        reason: String,
+    },
+    Shutdown,
+}
+
 fn handle(&mut self, request: Request) -> Response {
     match request {
         Request::Init { config } => self.init(config),
@@ -8783,20 +9463,59 @@ fn dispatch_wallet_operation(&mut self, request: &WalletProviderRequestV2) -> Re
 }
 ";
 
-/// One fixture operations row. The Inputs, Outputs and Effect cells are unread
-/// by the row check, so every row carries the same filler there.
-fn fixture_row(operation: &str, right: &str, macos: &str, linux: &str) -> String {
+/// The fixtures' contract source, built in memory in the shape of the real
+/// crate's `WalletProviderOperationV2`: `list_accounts` declares one field,
+/// `export_managed_recovery_set` declares none, and `default_account` is an arm
+/// the fixture table names no field of.
+const ROW_FIXTURE_CONTRACT: &str = "\
+#[serde(tag = \"kind\", content = \"params\", rename_all = \"snake_case\")]
+pub enum WalletProviderOperationV2 {
+    ListAccounts {
+        include_revoked: bool,
+    },
+    GetDID {},
+    DefaultAccount {
+        chain_namespace: String,
+        intent: String,
+    },
+    ExportManagedRecoverySet {},
+}
+";
+
+/// The Inputs cell of one fixture operation's row, as its declaration writes
+/// it. An operation the fixture answers but no rule reads keeps `op` alone.
+fn fixture_inputs(operation: &str) -> String {
+    match operation {
+        "init" => "`op`, `config`, `wire_name`".to_string(),
+        "wallet_contract list_accounts" => {
+            "`op`, `request` (`kind: list_accounts`, `params` (`include_revoked`)), \
+             `_runtime_invocation`"
+                .to_string()
+        }
+        "wallet_contract get_d_i_d" => {
+            "`op`, `request` (`kind: get_d_i_d`, `params` (none)), `_runtime_invocation`"
+                .to_string()
+        }
+        _ => "`op`".to_string(),
+    }
+}
+
+/// One fixture operations row. The Outputs and Effect cells are unread by the
+/// row check, so every row carries the same filler there.
+fn fixture_row(operation: &str, inputs: &str, right: &str, macos: &str, linux: &str) -> String {
     format!(
-        "| {operation} | `op` | ok: `status` | {right} | answers in memory | {macos} | {linux} |\n"
+        "| {operation} | {inputs} | ok: `status` | {right} | answers in memory | {macos} | {linux} |\n"
     )
 }
 
 /// One fixture operations row whose rows are in the fixture dispatch order and
-/// whose Right, macOS and Linux cells follow all four rules.
+/// whose Inputs, Right, macOS and Linux cells follow all five rules.
 fn passing_fixture_row(operation: &str) -> String {
+    let inputs = fixture_inputs(operation);
     if operation == "init" {
         fixture_row(
             operation,
+            &inputs,
             "`storage`",
             "permitted: `tests/confine.rs::present_case` shows the write. \
              nearest outside refused: `tests/confine.rs::present_case` shows the refusal.",
@@ -8805,6 +9524,7 @@ fn passing_fixture_row(operation: &str) -> String {
     } else {
         fixture_row(
             operation,
+            &inputs,
             NO_DECLARED_RIGHT,
             "`tests/confine.rs::present_case` shows the answer.",
             LINUX_STATUS,
@@ -8837,10 +9557,12 @@ const FIXTURE_OPERATIONS: [&str; 4] = [
 /// The row check refuses each bad table, one case per rule and sub-rule, and
 /// names the rule.
 ///
-/// A temporary provider folder holds `src/main.rs` with the fixture dispatch:
-/// `fn handle` answers `init`, `status`, `wallet_contract` and `shutdown`, and
-/// `fn dispatch_wallet_operation` answers `list_accounts`. The passing table
-/// returns no problem. Rule 1 refuses a `handle` arm with no row, a row with no
+/// A temporary provider folder holds `src/main.rs` with the fixture dispatch
+/// and a `enum Request` declaration: `fn handle` answers `init`, `status`,
+/// `wallet_contract` and `shutdown`, and `fn dispatch_wallet_operation` answers
+/// `list_accounts`. A second temporary folder holds a contract source in the
+/// shape of `WalletProviderOperationV2`. The passing table returns no problem.
+/// Rule 1 refuses a `handle` arm with no row, a row with no
 /// arm, a kind arm with no row, ordinary rows in another order and a kind row
 /// before an ordinary row. A two-kind fixture also refuses swapped kind rows,
 /// duplicate ordinary and kind rows, and equal-length rows with the wrong
@@ -8856,20 +9578,36 @@ const FIXTURE_OPERATIONS: [&str; 4] = [
 /// id and one that says `no named test shows this`. Rule 3 refuses a right row
 /// missing `permitted:`, a right row missing `nearest outside refused:` and a
 /// `none:` row citing `permitted:`. Rule 4 refuses a Linux cell that is not
-/// `designed, not enforced`, naming every row. The four `snake_case` names the
-/// contract already uses pin the helper. A missing or doubled heading stays with
-/// `section_under_one_heading`, which already refuses it once. The fixtures are
-/// a temporary directory; no process starts.
+/// `designed, not enforced`, naming every row. Rule 5 refuses an Inputs cell
+/// with an extra name, a missing name, another order, a renamed field's Rust
+/// name and no `op`; it refuses a `wallet_contract` row that omits an envelope
+/// name, names another kind, names another `params` name, omits `params`, and
+/// writes `params` (none) for an arm with fields or a name for an arm with
+/// none. A provider source that cannot be read, one with no `fn handle` and
+/// one with no `fn dispatch_wallet_operation` each keep their own reason. The
+/// four `snake_case` names the contract already uses pin the helper. A missing
+/// or doubled heading stays with `section_under_one_heading`, which already
+/// refuses it once. The fixtures are a temporary directory; no process starts.
 ///
 /// Falsifiers: WP141 disables the row-set rule, WP142 the Right-vocabulary
-/// rule, WP143 the both-sides rule and WP144 the Linux-status rule; this test
-/// fails on that rule's cases, because the bad table is then accepted.
+/// rule, WP143 the both-sides rule, WP144 the Linux-status rule, WP146 the
+/// field reader's rename, WP147 the Inputs compare's length rule and WP148 the
+/// `params`-name compare; this test fails on that rule's cases, because the bad
+/// table is then accepted.
 #[test]
 fn operations_table_row_check_refuses_each_bad_table() {
     let provider = tempfile::tempdir().expect("temporary provider folder");
     fs::create_dir_all(provider.path().join("src")).expect("fixture src folder");
     let provider_source = provider.path().join("src/main.rs");
     fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source");
+    // The contract source sits beside the provider folder, as the real one does
+    // in its own crate, and the Inputs rule reads it through its path.
+    let contract = tempfile::tempdir().expect("temporary contract folder");
+    let contract_source = contract.path().join("lib.rs");
+    fs::write(&contract_source, ROW_FIXTURE_CONTRACT).expect("fixture contract source");
+    let row_problems = |document_name: &str, document: &str, provider_dir: &Path| {
+        operations_table_row_problems(document_name, document, provider_dir, &contract_source)
+    };
 
     for (case, variant) in [
         ("VerifyDidRecovery", "verify_did_recovery"),
@@ -8889,9 +9627,9 @@ fn operations_table_row_check_refuses_each_bad_table() {
 
     let passing = fixture_row_document(&FIXTURE_OPERATIONS);
     assert_eq!(
-        operations_table_row_problems("fixture-provider", &passing, provider.path()),
+        row_problems("fixture-provider", &passing, provider.path()),
         Vec::<String>::new(),
-        "a table that follows all four rules must pass"
+        "a table that follows all five rules must pass"
     );
 
     // Rule 1: an arm with no row, and a kind arm with no row.
@@ -8915,7 +9653,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
             "{case} must change the source"
         );
         fs::write(&provider_source, &source).expect("fixture provider source rewrite");
-        let problems = operations_table_row_problems("fixture-provider", &passing, provider.path());
+        let problems = row_problems("fixture-provider", &passing, provider.path());
         assert_eq!(
             problems.len(),
             1,
@@ -8935,7 +9673,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
     let mut extra = fixture_row_document(&FIXTURE_OPERATIONS);
     extra.push_str(&passing_fixture_row("ping"));
     assert_eq!(
-        operations_table_row_problems("fixture-provider", &extra, provider.path()),
+        row_problems("fixture-provider", &extra, provider.path()),
         vec![format!(
             "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row ping has no \
              arm in {}",
@@ -8945,7 +9683,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
     );
 
     // A row that repeats the header words or sits under leading whitespace is
-    // still a body row, so no appended row hides from the four rules.
+    // still a body row, so no appended row hides from the other rules.
     let clean = fixture_row_document(&FIXTURE_OPERATIONS);
     for (case, row, row_name) in [
         (
@@ -8961,7 +9699,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
     ] {
         let document = format!("{clean}{row}");
         assert_eq!(
-            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            row_problems("fixture-provider", &document, provider.path()),
             vec![
                 format!(
                     "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row \
@@ -8991,7 +9729,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
     ] {
         let document = format!("{clean}{row}");
         assert_eq!(
-            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            row_problems("fixture-provider", &document, provider.path()),
             vec![
                 format!(
                     "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row \
@@ -9012,7 +9750,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
         );
     }
     assert_eq!(
-        operations_table_row_problems(
+        row_problems(
             "fixture-provider",
             &format!("{clean}phantom\n"),
             provider.path()
@@ -9043,7 +9781,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(
-            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            row_problems("fixture-provider", &document, provider.path()),
             Vec::<String>::new(),
             "optional outer bars must preserve a valid table"
         );
@@ -9117,7 +9855,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
         ),
     ] {
         assert_eq!(
-            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            row_problems("fixture-provider", &document, provider.path()),
             vec![format!("fixture-provider CONFINEMENT.md: {reason}")],
             "{case} must be refused as one problem"
         );
@@ -9137,7 +9875,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
         assert_ne!(document, clean, "the {label} header must change");
         let header = document.lines().nth(2).expect("fixture header line");
         assert_eq!(
-            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            row_problems("fixture-provider", &document, provider.path()),
             vec![format!(
                 "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} table line 1 is not the \
                  header {OPERATION_HEADER} over {TABLE_CELLS} cells: {header}"
@@ -9148,7 +9886,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
 
     let short_row = format!("{clean}| init | op | ok |\n");
     assert_eq!(
-        operations_table_row_problems("fixture-provider", &short_row, provider.path()),
+        row_problems("fixture-provider", &short_row, provider.path()),
         vec![format!(
             "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds 3 cells, and \
              every row holds {TABLE_CELLS}"
@@ -9158,7 +9896,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
 
     // Rule 1: rows in another order, and a kind row before an ordinary row.
     assert_eq!(
-        operations_table_row_problems(
+        row_problems(
             "fixture-provider",
             &fixture_row_document(&[
                 "status",
@@ -9176,7 +9914,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
         "ordinary rows out of dispatch order must be refused"
     );
     assert_eq!(
-        operations_table_row_problems(
+        row_problems(
             "fixture-provider",
             &fixture_row_document(&[
                 "wallet_contract list_accounts",
@@ -9210,7 +9948,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
         "wallet_contract list_accounts",
     ];
     assert_eq!(
-        operations_table_row_problems(
+        row_problems(
             "fixture-provider",
             &fixture_row_document(&two_kind_operations),
             provider.path()
@@ -9222,7 +9960,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
     let mut swapped_kinds = two_kind_operations;
     swapped_kinds.swap(3, 4);
     assert_eq!(
-        operations_table_row_problems(
+        row_problems(
             "fixture-provider",
             &fixture_row_document(&swapped_kinds),
             provider.path()
@@ -9240,7 +9978,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
         let mut duplicate = two_kind_operations.to_vec();
         duplicate.insert(index + 1, duplicate[index]);
         assert_eq!(
-            operations_table_row_problems(
+            row_problems(
                 "fixture-provider",
                 &fixture_row_document(&duplicate),
                 provider.path()
@@ -9258,7 +9996,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
     let mut replaced_kind = two_kind_operations;
     replaced_kind[3] = replaced_kind[4];
     assert_eq!(
-        operations_table_row_problems(
+        row_problems(
             "fixture-provider",
             &fixture_row_document(&replaced_kind),
             provider.path()
@@ -9281,7 +10019,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
     let mut wrong_acronym = two_kind_operations;
     wrong_acronym[3] = "wallet_contract get_did";
     assert_eq!(
-        operations_table_row_problems(
+        row_problems(
             "fixture-provider",
             &fixture_row_document(&wrong_acronym),
             provider.path()
@@ -9309,8 +10047,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
     ] {
         let document = passing.replacen("| `storage` |", &format!("| {right} |"), 1);
         assert_ne!(document, passing, "the fixture must hold the storage row");
-        let problems =
-            operations_table_row_problems("fixture-provider", &document, provider.path());
+        let problems = row_problems("fixture-provider", &document, provider.path());
         assert_eq!(
             problems,
             vec![format!(
@@ -9354,7 +10091,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
     ] {
         assert_ne!(document, passing, "{case} must change the fixture");
         assert_eq!(
-            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            row_problems("fixture-provider", &document, provider.path()),
             vec![reason],
             "{case} must be refused as one problem"
         );
@@ -9363,7 +10100,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
     // Rule 4: a Linux cell that is not `designed, not enforced`, one per row.
     let enforced = passing.replace(LINUX_STATUS, "enforced by Landlock");
     assert_ne!(enforced, passing, "the fixture must name its Linux cells");
-    let problems = operations_table_row_problems("fixture-provider", &enforced, provider.path());
+    let problems = row_problems("fixture-provider", &enforced, provider.path());
     assert_eq!(
         problems.len(),
         FIXTURE_OPERATIONS.len(),
@@ -9379,11 +10116,273 @@ fn operations_table_row_check_refuses_each_bad_table() {
             "the refusal must name the rule, the row and the value"
         );
     }
+
+    // Rule 5: an Inputs cell that names a field the arm does not declare, one
+    // that omits a declared field, one that puts the fields in another order,
+    // one that names a renamed field's Rust name, and one that names no `op`.
+    let provider_paths = format!("{}", provider.path().join("src/main.rs").display());
+    for (case, cell, expected) in [
+        (
+            "an extra name",
+            "`op`, `config`, `phantom`, `wire_name`",
+            "`op`, `config`, `wire_name`",
+        ),
+        (
+            "a missing name",
+            "`op`, `config`",
+            "`op`, `config`, `wire_name`",
+        ),
+        (
+            "another order",
+            "`op`, `wire_name`, `config`",
+            "`op`, `config`, `wire_name`",
+        ),
+        (
+            "a renamed field's Rust name",
+            "`op`, `config`, `field_name`",
+            "`op`, `config`, `wire_name`",
+        ),
+        (
+            "no op",
+            "`config`, `wire_name`",
+            "`op`, `config`, `wire_name`",
+        ),
+    ] {
+        let document = passing.replacen(
+            &passing_fixture_row("init"),
+            &passing_fixture_row("init").replacen(&fixture_inputs("init"), cell, 1),
+            1,
+        );
+        assert_eq!(
+            row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds the Inputs \
+                 cell {cell}, and {provider_paths} names {expected}"
+            )],
+            "an Inputs cell with {case} must be refused"
+        );
+    }
+
+    // Rule 5: a `wallet_contract` row's outer names, its `kind`, and its
+    // `params` names.
+    let contract_path = contract_source.display().to_string();
+    for (case, cell, expected) in [
+        (
+            "a missing envelope name",
+            "`op`, `request` (`kind: list_accounts`, `params` (`include_revoked`))",
+            "`op`, `request` (`kind: list_accounts`, `params` (`include_revoked`)), \
+             `_runtime_invocation`",
+        ),
+        (
+            "another kind",
+            "`op`, `request` (`kind: default_account`, `params` (`include_revoked`)), \
+             `_runtime_invocation`",
+            "`op`, `request` (`kind: list_accounts`, `params` (`include_revoked`)), \
+             `_runtime_invocation`",
+        ),
+        (
+            "another params name",
+            "`op`, `request` (`kind: list_accounts`, `params` (`phantom`)), \
+             `_runtime_invocation`",
+            "`op`, `request` (`kind: list_accounts`, `params` (`include_revoked`)), \
+             `_runtime_invocation`",
+        ),
+        (
+            "no params",
+            "`op`, `request` (`kind: list_accounts`), `_runtime_invocation`",
+            "`op`, `request` (`kind: list_accounts`, `params` (`include_revoked`)), \
+             `_runtime_invocation`",
+        ),
+        (
+            "no (none) on an arm with fields",
+            "`op`, `request` (`kind: list_accounts`, `params` (none)), `_runtime_invocation`",
+            "`op`, `request` (`kind: list_accounts`, `params` (`include_revoked`)), \
+             `_runtime_invocation`",
+        ),
+    ] {
+        let operation = "wallet_contract list_accounts";
+        let document = passing.replacen(
+            &passing_fixture_row(operation),
+            &passing_fixture_row(operation).replacen(&fixture_inputs(operation), cell, 1),
+            1,
+        );
+        assert_eq!(
+            row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {operation} holds the \
+                 Inputs cell {cell}, and {provider_paths} with {contract_path} names {expected}"
+            )],
+            "a wallet_contract Inputs cell with {case} must be refused"
+        );
+    }
+
+    // Rule 5: `params` (none) for an arm with no fields, and a `params` name on
+    // such an arm. The fixture provider answers the empty `get_d_i_d` arm for
+    // this case, so the row set stays satisfied.
+    let empty_arm_source = ROW_FIXTURE_PROVIDER.replace(
+        "        WalletProviderOperationV2::ListAccounts",
+        "        WalletProviderOperationV2::GetDID {} => self.get_did(),\n\
+         WalletProviderOperationV2::ListAccounts",
+    );
+    assert_ne!(empty_arm_source, ROW_FIXTURE_PROVIDER);
+    fs::write(&provider_source, &empty_arm_source).expect("empty-arm fixture provider source");
+    let empty_arm_operations = [
+        "init",
+        "status",
+        "shutdown",
+        "wallet_contract get_d_i_d",
+        "wallet_contract list_accounts",
+    ];
+    assert_eq!(
+        row_problems(
+            "fixture-provider",
+            &fixture_row_document(&empty_arm_operations),
+            provider.path()
+        ),
+        Vec::<String>::new(),
+        "an empty contract arm's `params` (none) must pass"
+    );
+    let operation = "wallet_contract get_d_i_d";
+    let cell = "`op`, `request` (`kind: get_d_i_d`, `params` (`phantom`)), \
+                `_runtime_invocation`";
+    let document = fixture_row_document(&empty_arm_operations).replacen(
+        &passing_fixture_row(operation),
+        &passing_fixture_row(operation).replacen(&fixture_inputs(operation), cell, 1),
+        1,
+    );
+    assert_eq!(
+        row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {operation} holds the \
+             Inputs cell {cell}, and {provider_paths} with {contract_path} names `op`, `request` \
+             (`kind: get_d_i_d`, `params` (none)), `_runtime_invocation`"
+        )],
+        "a `params` name on an arm with no fields must be refused"
+    );
+
+    // 117's two gaps: a provider source that cannot be read, and a source with
+    // no dispatch signature. Both keep their own reason and stay one problem.
+    fs::remove_file(&provider_source).expect("fixture provider source removal");
+    let unreadable = row_problems("fixture-provider", &passing, provider.path());
+    assert_eq!(
+        unreadable.len(),
+        1,
+        "an unreadable provider source must be one refusal: {unreadable:?}"
+    );
+    assert!(
+        unreadable[0].starts_with(&format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set cannot be checked \
+             because {} is not readable",
+            provider_source.display()
+        )),
+        "an unreadable provider source must keep its reason: {}",
+        unreadable[0]
+    );
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    let no_handle = ROW_FIXTURE_PROVIDER.replace("fn handle(", "fn answer(");
+    assert_ne!(no_handle, ROW_FIXTURE_PROVIDER);
+    fs::write(&provider_source, &no_handle).expect("no-handle fixture provider source");
+    let problems = row_problems("fixture-provider", &passing, provider.path());
+    assert_eq!(
+        problems,
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set cannot be checked \
+             because {} holds no fn handle",
+            provider_source.display()
+        )],
+        "a source with no fn handle must keep its own reason"
+    );
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    let no_dispatch = ROW_FIXTURE_PROVIDER.replace("fn dispatch_wallet_operation(", "fn route(");
+    assert_ne!(no_dispatch, ROW_FIXTURE_PROVIDER);
+    fs::write(&provider_source, &no_dispatch).expect("no-dispatch fixture provider source");
+    let problems = row_problems("fixture-provider", &passing, provider.path());
+    assert_eq!(
+        problems,
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set cannot be checked \
+             because {} answers wallet_contract and holds no fn dispatch_wallet_operation",
+            provider_source.display()
+        )],
+        "a source with no fn dispatch_wallet_operation must keep its own reason"
+    );
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
 }
 
-/// The one contract check refuses a profile that omits the explicit network
-/// denial, and names that rule. The fixtures are built in the test; no file
-/// is read.
+/// The one field reader keeps an item with no fields apart from a missing item,
+/// and reads the five declaration shapes the two provider sources hold.
+///
+/// A unit arm (`Status,`, `GetDid`), an empty arm (`ExportManagedRecoverySet
+/// {}`) and a struct item with no body each return an empty list, so a cell that
+/// names no field of them is correct. An item the source does not declare
+/// returns `None`, so a missing item is a named refusal and never an empty
+/// list. A single-line arm (`Init { config }`), a multi-line arm whose fields
+/// are one `name: Type,` per line, a field carrying `#[serde(...)]` before it,
+/// a field carrying `#[serde(rename = "...")]`, a trailing comma and no trailing
+/// comma each return their wire names in declaration order, and a `pub` struct
+/// qualifier and a field type such as `Option<String>` do not change them. An
+/// item named inside a string or after another item does not match. The text is
+/// built in the test; no file is read.
+#[test]
+fn wire_field_reader_keeps_an_empty_item_apart_from_a_missing_one() {
+    let source = "\
+enum Request {
+    Init { config: Value, count: u64 },
+    Status,
+    WalletContract {
+        request: Value,
+        #[serde(rename = \"_runtime_invocation\")]
+        runtime_invocation: Box<RuntimeInvocationEnvelope>,
+    },
+    Empty {},
+    Shutdown,
+}
+
+pub struct Envelope {
+    pub schema: String,
+    #[serde(default, skip_serializing_if = \"Option::is_none\")]
+    label: Option<String>,
+    #[serde(rename = \"wire_name\", default)]
+    field_name: Option<Value>,
+}
+";
+
+    for (case, item, expected) in [
+        ("a unit arm", "Status", Some(Vec::<String>::new())),
+        (
+            "an arm ending the enum",
+            "Shutdown",
+            Some(Vec::<String>::new()),
+        ),
+        ("an empty arm", "Empty", Some(Vec::new())),
+        (
+            "a single-line arm",
+            "Init",
+            Some(vec!["config".into(), "count".into()]),
+        ),
+        (
+            "a multi-line arm with an attribute and a rename",
+            "WalletContract",
+            Some(vec!["request".into(), "_runtime_invocation".into()]),
+        ),
+        (
+            "a struct with a pub qualifier, a type argument and a rename",
+            "Envelope",
+            Some(vec!["schema".into(), "label".into(), "wire_name".into()]),
+        ),
+        ("an item the source does not declare", "Missing", None),
+        ("a name inside another item", "config", None),
+        ("a name inside a string", "wire_name", None),
+    ] {
+        assert_eq!(
+            wire_field_names(source, item),
+            expected,
+            "{case} must read {item} as {expected:?}"
+        );
+    }
+}
 ///
 /// Falsifier: delete the `(deny network*)` requirement from
 /// `check_profile_contract`; this test fails because the incomplete fixture

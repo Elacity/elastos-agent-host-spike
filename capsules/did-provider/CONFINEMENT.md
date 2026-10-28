@@ -113,10 +113,13 @@ check `every_operations_table_cites_existing_tests` in
 `../wallet-provider/tests/confine.rs` finds `fn <fn>(` in that file and does
 not decide whether the function is a `#[test]`. The check
 `every_operations_table_row_matches_its_provider_and_the_contract` holds every
-row to four rules: the row set follows the provider's own dispatch, a Right
-cell names a declared id or `none: needs no declared right`, a right row cites
-both sides, and every Linux cell stays `designed, not enforced`. A refusal
-under `(deny default)` is a denial, not a grant, and no row writes it as a
+row to five rules: the row set follows the provider's own dispatch, the Inputs
+cell names `op` first and then, in declaration order, the field names the
+provider's `Request` arm declares and honours `#[serde(rename = "...")]`, a
+Right cell names a declared id or `none: needs no declared right`, a right row
+cites both sides, and every Linux cell stays `designed, not enforced`. A
+refusal under `(deny default)` is a denial, not a
+grant, and no row writes it as a
 right. The
 startup grants stay in "What the profile allows". A `storage` row cites both
 sides of its right: `permitted:` names the test that shows the operation under

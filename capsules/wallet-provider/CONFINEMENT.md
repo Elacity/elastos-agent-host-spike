@@ -488,10 +488,17 @@ colons and a function name. The check
 `fn <fn>(` in that file and does not decide whether the function is a
 `#[test]`. The check
 `every_operations_table_row_matches_its_provider_and_the_contract` holds every
-row to four rules: the row set follows the provider's own dispatch, a Right
-cell names a declared id or `none: needs no declared right`, a right row cites
-both sides, and every Linux cell stays `designed, not enforced`. A refusal
-under `(deny default)` is a denial, not a grant, and no
+row to five rules: the row set follows the provider's own dispatch, the Inputs
+cell names the wire fields that operation reads, a Right cell names a declared
+id or `none: needs no declared right`, a right row cites both sides, and every
+Linux cell stays `designed, not enforced`. An ordinary row's Inputs cell names
+`op` first and then, in declaration order, the field names of its `Request` arm
+in `src/protocol.rs`, honouring `#[serde(rename = "...")]`; a
+`wallet_contract <kind>` row names `op`, `request` with `kind: <kind>` and the
+`params` names of that kind's `WalletProviderOperationV2` arm (`params` (none)
+when the arm declares no field), then `_runtime_invocation`. A refusal under
+`(deny default)` is a denial, not a
+grant, and no
 row writes it as a right. A refusal from a `kind` comes back as an outer
 `status` `ok` whose `data.result` holds `status` `error`, `code` and `message`;
 the outer `status`/`code`/`message` error covers envelope failures only. A
@@ -1306,6 +1313,17 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` fails
   at its final wallet directory compare after `shutdown`, which finds
   `shutdown-falsifier.hex`, a name the setup did not leave.
+- Make the field reader ignore a field's `#[serde(rename = "...")]` (WP146):
+  `operations_table_row_check_refuses_each_bad_table` fails on its
+  renamed-field case, because a cell naming the Rust name `field_name` instead
+  of the wire name `wire_name` is then accepted.
+- Make the Inputs compare tolerate a cell that stops before a declared field
+  (WP147): the same test fails on its missing-name case, because a cell naming
+  `op` and `config` without `wire_name` is then accepted.
+- Drop the `params`-name compare from the Inputs rule (WP148): the same test
+  fails on its `params` cases, because a `wallet_contract` row naming
+  `params` (`phantom`) or `params` (none) for an arm with fields is then
+  accepted.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
