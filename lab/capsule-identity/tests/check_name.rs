@@ -93,7 +93,8 @@ fn check_name_preserves_lab_cid_refusals() {
 fn check_name_uses_the_single_naming_path() {
     // P10: check_name names the bundle only by calling lab_cid, and computes
     // no name of its own. The library creates a SHA-256 hasher in exactly two
-    // places: once in the encoder (the one naming hash) and once in
+    // places: once in naming_hash (the one naming hash, which the encoder
+    // calls for every leaf, file root block and directory block) and once in
     // domain_separated_digest (the one message hash, which the name
     // signature and the package record share).
     let code = library_code();
@@ -131,12 +132,154 @@ fn check_name_uses_the_single_naming_path() {
     );
     assert_eq!(code.matches("Sha256::new()").count(), 2, "Sha256::new()");
     assert_eq!(
-        library_item(&code, "pub fn encode_entries(")
+        library_item(&code, "fn naming_hash(")
             .matches("Sha256::new()")
             .count(),
         1,
-        "encode_entries is not the one naming hash"
+        "naming_hash is not the one naming hash"
     );
+    // Task 048: one file rule and one tree builder. encode_entries makes each
+    // file's node with file_node and hands the nodes to encode_tree;
+    // encode_listed_files makes each listed file's leaf with raw_leaf and
+    // hands the leaves to the same encode_tree. Task 055: encode_chunked_files
+    // makes each file's leaves and file root with file_root_leaves, the one
+    // builder that file_root calls with the digests of its bytes, and hands
+    // the nodes to the same encode_tree. Only encode_tree builds the
+    // directories, and only it and the recursion call encode_directory, so a
+    // second copy of the directory encoding fails here.
+    let entries = library_item(&code, "pub fn encode_entries(");
+    for (call, count) in [("file_node(", 1), ("encode_tree(", 1)] {
+        assert_eq!(entries.matches(call).count(), count, "{call}\n{entries}");
+    }
+    let listed = library_item(&code, "pub fn encode_listed_files(");
+    for (call, count) in [("raw_leaf(", 1), ("encode_tree(", 1)] {
+        assert_eq!(listed.matches(call).count(), count, "{call}\n{listed}");
+    }
+    let chunked = library_item(&code, "pub fn encode_chunked_files(");
+    for (call, count) in [("file_root_leaves(", 1), ("encode_tree(", 1)] {
+        assert_eq!(chunked.matches(call).count(), count, "{call}\n{chunked}");
+    }
+    for (name, body) in [
+        ("encode_entries", entries),
+        ("encode_listed_files", listed),
+        ("encode_chunked_files", chunked),
+    ] {
+        for own_encoding in [
+            "Sha256",
+            "naming_hash(",
+            "Directory",
+            "encode_directory(",
+            "cid_bytes(",
+            "_block(",
+        ] {
+            assert!(
+                !body.contains(own_encoding),
+                "{name} encodes by itself ({own_encoding}):\n{body}"
+            );
+        }
+    }
+    let tree = library_item(&code, "fn encode_tree(");
+    for call in ["Directory::default()", ".insert(", "encode_directory("] {
+        assert_eq!(tree.matches(call).count(), 1, "{call}\n{tree}");
+    }
+    assert_eq!(code.matches("encode_tree(").count(), 4, "encode_tree");
+    assert_eq!(code.matches("encode_listed_files(").count(), 1);
+    assert_eq!(code.matches("encode_chunked_files(").count(), 1);
+    assert_eq!(code.matches("encode_directory(").count(), 3);
+    assert_eq!(code.matches("Directory::default()").count(), 2);
+    // Task 064: one store of a path part. `owned_path_part`'s definition and
+    // the directory-part push and the file-name push in `Directory::insert`
+    // are the three places, so no push copies a part itself and the one
+    // store is the one place a name's bytes are kept.
+    assert_eq!(
+        code.matches("owned_path_part(").count(),
+        3,
+        "owned_path_part"
+    );
+    // One leaf rule: every raw leaf, a listed file's, a one-leaf file's and
+    // each leaf of a file root, is made by raw_leaf.
+    assert_eq!(code.matches("cid_bytes(RAW_CODEC").count(), 1, "RAW_CODEC");
+    assert_eq!(
+        library_item(&code, "fn raw_leaf(")
+            .matches("cid_bytes(RAW_CODEC")
+            .count(),
+        1,
+        "raw_leaf is not the one leaf rule"
+    );
+    assert_eq!(code.matches("raw_leaf(").count(), 4, "raw_leaf");
+    // One file rule: file_node makes a file's node from its bytes, and only
+    // it calls file_root, whose leaves then reach file_root_leaves, the one
+    // builder of a file root block.
+    let node = library_item(&code, "fn file_node(");
+    for (call, count) in [("raw_leaf(", 1), ("file_root(", 1), ("naming_hash(", 1)] {
+        assert_eq!(node.matches(call).count(), count, "{call}\n{node}");
+    }
+    assert_eq!(code.matches("file_root(").count(), 2, "file_root");
+    let root = library_item(&code, "fn file_root(");
+    for (call, count) in [
+        ("raw_leaf(", 0),
+        ("file_root_block(", 0),
+        ("naming_hash(", 1),
+        ("cid_bytes(DAG_PB_CODEC", 0),
+        ("file_root_leaves(", 1),
+    ] {
+        assert_eq!(root.matches(call).count(), count, "{call}\n{root}");
+    }
+    let leaves = library_item(&code, "fn file_root_leaves(");
+    for (call, count) in [
+        ("raw_leaf(", 1),
+        ("file_root_block(", 1),
+        ("naming_hash(", 1),
+        ("cid_bytes(DAG_PB_CODEC", 1),
+    ] {
+        assert_eq!(leaves.matches(call).count(), count, "{call}\n{leaves}");
+    }
+    assert_eq!(
+        code.matches("file_root_leaves(").count(),
+        3,
+        "file_root_leaves"
+    );
+    assert_eq!(code.matches("file_root_block(").count(), 2);
+    assert_eq!(code.matches("FILE_TYPE").count(), 2, "FILE_TYPE");
+    // One link encoding: directory blocks, file roots and HAMT shard blocks
+    // write their links only through put_links.
+    assert_eq!(code.matches("put_links(").count(), 4, "put_links");
+    assert_eq!(code.matches("let mut pb_link").count(), 1, "pb_link");
+    for block in [
+        "fn directory_block(",
+        "fn file_root_block(",
+        "fn hamt_block(",
+    ] {
+        assert_eq!(
+            library_item(&code, block).matches("put_links(").count(),
+            1,
+            "{block}"
+        );
+    }
+    // One Tsize rule: a dag-pb node's block length plus its children's Tsizes
+    // is written once, in dag_pb_tsize, and each node's encoder calls it once.
+    let tsize = library_item(&code, "fn dag_pb_tsize(");
+    assert_eq!(
+        code.matches("block_len + children").count(),
+        1,
+        "the Tsize formula is not written once:\n{tsize}"
+    );
+    assert!(
+        tsize.contains("block_len + children"),
+        "dag_pb_tsize does not add the block length to the children:\n{tsize}"
+    );
+    for item in [
+        "fn encode_directory(",
+        "fn encode_hamt(",
+        "fn hamt_shard<'a>(",
+        "fn file_root_leaves(",
+    ] {
+        assert_eq!(
+            library_item(&code, item).matches("dag_pb_tsize(").count(),
+            1,
+            "{item} does not use the one Tsize rule"
+        );
+    }
     assert_eq!(
         library_item(&code, "pub fn domain_separated_digest(")
             .matches("Sha256::new()")
