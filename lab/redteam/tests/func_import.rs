@@ -122,6 +122,8 @@ fn finding_uses_live_head_and_bytes() {
         COMPONENT_FINDING_ID,
         GLOBAL_FINDING_ID,
         TABLE_FINDING_ID,
+        TAG_FINDING_ID,
+        EXACT_FUNC_FINDING_ID,
     ] {
         let line = read_live_attribution(finding_id);
         assert_live_attribution(&line, finding_id, &commit, &digest);
@@ -231,6 +233,16 @@ fn clean_run_writes_no_finding() {
             TABLE_FINDING_FILE,
             accept_detail("table", "env.t"),
         ),
+        (
+            TAG_FINDING_ID,
+            TAG_FINDING_FILE,
+            accept_detail("tag", "env.e"),
+        ),
+        (
+            EXACT_FUNC_FINDING_ID,
+            EXACT_FUNC_FINDING_FILE,
+            accept_detail("func-exact", "env.f"),
+        ),
     ];
     for (finding_id, file_name, detail) in cases {
         let finding = dir.join(file_name);
@@ -250,6 +262,8 @@ fn clean_run_writes_no_finding() {
     assert_no_finding(&finding_path(COMPONENT_FINDING_FILE));
     assert_no_finding(&finding_path(GLOBAL_FINDING_FILE));
     assert_no_finding(&finding_path(TABLE_FINDING_FILE));
+    assert_no_finding(&finding_path(TAG_FINDING_FILE));
+    assert_no_finding(&finding_path(EXACT_FUNC_FINDING_FILE));
     let _ = fs::remove_dir_all(&dir);
 }
 

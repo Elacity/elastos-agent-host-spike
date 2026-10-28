@@ -30,6 +30,10 @@ pub const GLOBAL_FINDING_ID: &str = "cx-wasm-audit-005";
 pub const GLOBAL_FINDING_FILE: &str = "cx-wasm-audit-005.md";
 pub const TABLE_FINDING_ID: &str = "cx-wasm-audit-006";
 pub const TABLE_FINDING_FILE: &str = "cx-wasm-audit-006.md";
+pub const TAG_FINDING_ID: &str = "cx-wasm-audit-007";
+pub const TAG_FINDING_FILE: &str = "cx-wasm-audit-007.md";
+pub const EXACT_FUNC_FINDING_ID: &str = "cx-wasm-audit-008";
+pub const EXACT_FUNC_FINDING_FILE: &str = "cx-wasm-audit-008.md";
 pub const MUST_REFUSE: &str = "must refuse";
 pub const COULD_NOT_COMPILE: &str = "could not compile";
 pub const LOCKFILE_ERROR: &str = "lockfile failed";
@@ -739,10 +743,11 @@ pub fn assert_live_attribution(line: &str, finding_id: &str, commit: &str, diges
 }
 
 pub fn accept_detail(kind: &str, fixture: &str) -> String {
-    // Core module imports are globals and tables. Component kinds keep the
-    // component label; a blanket word would misidentify one of the two.
+    // Core module imports are globals, tables, tags, and exact function
+    // imports. Component kinds keep the component label; a blanket word
+    // would misidentify one of the two.
     let world = match kind {
-        "global" | "table" => "core",
+        "global" | "table" | "tag" | "func-exact" => "core",
         _ => "component",
     };
     format!("accepted an undeclared {world} {kind} import\nfixture: {fixture}\ndeclarations: empty")
