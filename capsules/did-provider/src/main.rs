@@ -760,11 +760,17 @@ mod tests {
     /// appended parent write grant, task 065 adds DID29 for the shutdown
     /// arm that writes into the provider's own executable while it lies
     /// beneath its storage root, and task 071 adds DID30 for the appended
-    /// parent read that adopts a planted persona key.
-    const EXPECTED_FALSIFIER_IDS: [&str; 30] = [
+    /// parent read that adopts a planted persona key. Task 115 adds DID31,
+    /// which reads `/etc/hosts`, outside every grant, in `get_did`'s ok arm and
+    /// answers `storage_error` when that read is denied, so `get_did` stops
+    /// answering ok and
+    /// `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged`
+    /// fails.
+    const EXPECTED_FALSIFIER_IDS: [&str; 31] = [
         "DID01", "DID02", "DID03", "DID04", "DID05", "DID06", "DID07", "DID08", "DID09", "DID10",
         "DID11", "DID12", "DID13", "DID14", "DID15", "DID16", "DID17", "DID18", "DID19", "DID20",
         "DID21", "DID22", "DID23", "DID24", "DID25", "DID26", "DID27", "DID28", "DID29", "DID30",
+        "DID31",
     ];
 
     /// The repository root; this crate, its test targets and the one runner's
