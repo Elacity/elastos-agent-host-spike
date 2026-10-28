@@ -323,7 +323,7 @@ fn signature_paths_share_one_implementation() {
         1
     );
     assert_eq!(
-        library_item(&code, "pub fn encode_entries(")
+        library_item(&code, "fn naming_hash(")
             .matches("Sha256::new()")
             .count(),
         1

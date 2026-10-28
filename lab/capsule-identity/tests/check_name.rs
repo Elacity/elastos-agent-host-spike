@@ -93,7 +93,8 @@ fn check_name_preserves_lab_cid_refusals() {
 fn check_name_uses_the_single_naming_path() {
     // P10: check_name names the bundle only by calling lab_cid, and computes
     // no name of its own. The library creates a SHA-256 hasher in exactly two
-    // places: once in the encoder (the one naming hash) and once in
+    // places: once in naming_hash (the one naming hash, which the encoder
+    // calls for every leaf and directory block) and once in
     // domain_separated_digest (the one message hash, which the name
     // signature and the package record share).
     let code = library_code();
@@ -131,12 +132,33 @@ fn check_name_uses_the_single_naming_path() {
     );
     assert_eq!(code.matches("Sha256::new()").count(), 2, "Sha256::new()");
     assert_eq!(
-        library_item(&code, "pub fn encode_entries(")
+        library_item(&code, "fn naming_hash(")
             .matches("Sha256::new()")
             .count(),
         1,
-        "encode_entries is not the one naming hash"
+        "naming_hash is not the one naming hash"
     );
+    // Task 047: encode_entries takes each entry's SHA-256 (through
+    // naming_hash) and length, then calls encode_listed_files, the one
+    // encoder. Only that encoder builds the directories, and only it and
+    // the recursion call encode_directory, so a second copy of the directory
+    // encoding fails here.
+    let entries = library_item(&code, "pub fn encode_entries(");
+    for (call, count) in [("naming_hash(", 1), ("encode_listed_files(", 1)] {
+        assert_eq!(entries.matches(call).count(), count, "{call}\n{entries}");
+    }
+    for own_encoding in ["Sha256", "Directory", "encode_directory(", "cid_bytes("] {
+        assert!(
+            !entries.contains(own_encoding),
+            "encode_entries encodes by itself ({own_encoding}):\n{entries}"
+        );
+    }
+    let listed = library_item(&code, "pub fn encode_listed_files(");
+    assert!(!listed.contains("Sha256"), "{listed}");
+    assert_eq!(listed.matches("encode_directory(").count(), 1, "{listed}");
+    assert_eq!(code.matches("encode_listed_files(").count(), 2);
+    assert_eq!(code.matches("encode_directory(").count(), 3);
+    assert_eq!(code.matches("Directory::default()").count(), 2);
     assert_eq!(
         library_item(&code, "pub fn domain_separated_digest(")
             .matches("Sha256::new()")
