@@ -162,6 +162,14 @@ pub const FILE_ROOT_INSIDE_A_HAMT_LAB_CID: &str =
 /// basic. Built in a temp dir and in memory and never committed.
 pub const MULTIBYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID: &str =
     "bafybeif7njjvh2l3tb7qp643e4p2q4qry77ukedkjhy2qrumxcr5wvawau";
+/// Task 064: the 262145-estimate flat bundle with its second 200-byte filler
+/// replaced by 66 `e` and U+0301 (a combining acute accent) and `aa`: 200
+/// UTF-8 bytes in 134 Unicode scalars, 66 of them marks, so the byte estimate
+/// stays 262145 and the directory is a HAMT shard. The same name with its
+/// marks stripped is 68 bytes, an estimate of 262013 that would stay a basic
+/// directory. Built in a temp dir and in memory and never committed.
+pub const COMBINING_MARK_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeifmsz5xc6qpfifs2uutit6v3cs27gdjv4kogrniosezwfpeeft4eq";
 
 /// The empty files that bring content-sample's root block to 262144 bytes
 /// and `longer` more: 1064 named by 200 digits and one by 235 + `longer`
@@ -283,6 +291,65 @@ pub fn multibyte_name_over_the_hamt_threshold_bundle() -> Vec<BundleEntry> {
     entries
 }
 
+/// Task 064: [`directory_at_hamt_threshold_bundle`]`(1)` with its second
+/// 200-byte filler (a name of digits only) replaced by 66 `e` and U+0301 (a
+/// combining acute accent) and `aa`: 200 UTF-8 bytes in 134 Unicode scalars,
+/// 66 of them marks, with empty content. A path part is stored as those
+/// bytes, so the mark stays in the name and no normalization runs. The byte
+/// estimate stays 262145 and the directory is a HAMT shard; the same name
+/// with its marks stripped is 68 bytes, an estimate of 262013 that would
+/// stay a basic directory. The first 200-byte filler and the measured name
+/// are left as they are. Built in a temp dir and in memory and never
+/// committed.
+pub fn combining_mark_over_the_hamt_threshold_bundle() -> Vec<BundleEntry> {
+    let combining = format!("{}aa", "e\u{0301}".repeat(66));
+    assert_eq!(
+        (
+            combining.len(),
+            combining.chars().count(),
+            combining.matches('\u{0301}').count(),
+            combining.replace('\u{0301}', "").len(),
+        ),
+        (200, 134, 66, 68),
+        "the combining-mark name's bytes, scalars, marks and stripped bytes"
+    );
+    let mut seen = 0;
+    let mut replaced = 0;
+    let entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(1)
+        .into_iter()
+        .map(|entry| {
+            if entry.path.len() == 200 {
+                seen += 1;
+                if seen == 2 {
+                    replaced += 1;
+                    return BundleEntry {
+                        path: combining.clone(),
+                        content: entry.content,
+                    };
+                }
+            }
+            entry
+        })
+        .collect();
+    assert_eq!(
+        (seen, replaced),
+        (1110, 1),
+        "the 200-byte fillers and the one replacement"
+    );
+    let bytes: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(bytes, HAMT_LINKS_LIMIT + 1, "the byte estimate");
+    let stripped: usize = entries
+        .iter()
+        .map(|entry| entry.path.replace('\u{0301}', "").len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(bytes - 132, stripped, "the stripped bytes");
+    assert_eq!(stripped, 262_013, "the stripped estimate");
+    entries
+}
+
 /// Task 061's pair: two 200-byte names whose `hamt_digest` values share
 /// bytes 0 and 1 (`FE 57`) and differ at byte 2 (`79` and `37`), and whose
 /// first digest byte `FE` no other name in
@@ -330,7 +397,7 @@ pub fn directory_with_a_one_link_hamt_shard_bundle() -> Vec<BundleEntry> {
 /// being `i % 251`, instead of empty bytes. The name keeps its 200 bytes, so
 /// the links estimate stays 262145 and the directory is still a shard. The
 /// file is a file root over two raw leaves, whose Tsize is its block and its
-/// leaves (262246), so a HAMT leaf link that stored its byte length would
+/// leaves (262249), so a HAMT leaf link that stored its byte length would
 /// print another name. Built in a temp dir and in memory and never committed.
 pub fn file_root_inside_a_hamt_bundle() -> Vec<BundleEntry> {
     let mut replaced = 0;
@@ -1048,13 +1115,15 @@ pub fn readme_python_name_digests(names: &[&str]) -> Result<Vec<String>, String>
     python_name_digests(&block, names)
 }
 
-/// The three counts README states for the pinned bundles, from its
+/// The five counts README states for the pinned bundles, from its
 /// cross-implementation section: the Python test's "For each of the N pins",
 /// its "A missing block is no pass: exactly N bundles are checked" table
-/// cell and Kubo's "writes each of the N pinned bundles". Read word by word,
-/// so README may wrap a sentence anywhere. A missing count, two counts in
-/// one place, or digits that are not a number are refused with their reason.
-pub fn readme_pinned_bundle_counts() -> Result<[usize; 3], String> {
+/// cell, Kubo's "writes each of the N pinned bundles", the same test's
+/// "checked exactly N bundles" and its "The N are" list of rows (task 064).
+/// Read word by word, so README may wrap a sentence anywhere. A missing
+/// count, two counts in one place, or digits that are not a number are
+/// refused with their reason.
+pub fn readme_pinned_bundle_counts() -> Result<[usize; 5], String> {
     let section = section_under(README, CROSS_IMPLEMENTATION_HEADING)?;
     let words: Vec<&str> = section.split_whitespace().collect();
     Ok([
@@ -1065,6 +1134,8 @@ pub fn readme_pinned_bundle_counts() -> Result<[usize; 3], String> {
             "bundles",
         )?,
         count_after(&words, &["writes", "each", "of", "the"], "pinned")?,
+        count_after(&words, &["checked", "exactly"], "bundles")?,
+        count_after(&words, &["The"], "are")?,
     ])
 }
 

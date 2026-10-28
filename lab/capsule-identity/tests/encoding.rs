@@ -434,6 +434,69 @@ fn multibyte_name_over_the_hamt_threshold_is_a_shard() {
 }
 
 #[test]
+fn combining_mark_over_the_hamt_threshold_is_a_shard() {
+    // Task 064: the second 200-byte filler of the 262145-estimate bundle is
+    // replaced by 66 `e` and U+0301 and `aa`. A path part is stored as its
+    // UTF-8 bytes, so the mark stays in the name: the byte estimate is
+    // 262145 and the directory is a HAMT shard, and the same name with its
+    // marks stripped (68 bytes) would give 262013 and stay a basic
+    // directory. The pin was recomputed by README's Python rule and printed
+    // by Kubo v0.40.1 with the provider's HAMT config.
+    let entries = combining_mark_over_the_hamt_threshold_bundle();
+    let bytes: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    let stripped: usize = entries
+        .iter()
+        .map(|entry| entry.path.replace('\u{0301}', "").len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(bytes, HAMT_LINKS_LIMIT + 1, "the byte estimate");
+    assert_eq!(bytes - 132, 262_013, "the stripped estimate");
+    assert_eq!(stripped, 262_013, "the stripped estimate");
+    let marked: Vec<&BundleEntry> = entries
+        .iter()
+        .filter(|entry| entry.path.contains('\u{0301}'))
+        .collect();
+    assert_eq!(marked.len(), 1, "one name with a combining mark");
+    assert_eq!(marked[0].path.len(), 200, "the replaced path's bytes");
+    assert_eq!(
+        marked[0].path.chars().count(),
+        134,
+        "the replaced path's scalars"
+    );
+    assert_eq!(
+        marked[0].path.matches('\u{0301}').count(),
+        66,
+        "the replaced path's combining marks"
+    );
+    assert_eq!(
+        marked[0].path.replace('\u{0301}', "").len(),
+        68,
+        "the stripped name's bytes"
+    );
+    assert_eq!(marked[0].path, format!("{}aa", "e\u{0301}".repeat(66)));
+    let (_bundle, walked, encoded) = walk_and_encode(&entries);
+    assert_eq!(
+        (walked.as_str(), encoded.as_str()),
+        (
+            COMBINING_MARK_OVER_HAMT_THRESHOLD_LAB_CID,
+            COMBINING_MARK_OVER_HAMT_THRESHOLD_LAB_CID
+        ),
+        "(lab_cid, encode_entries) against the pin"
+    );
+    assert!(walked.starts_with("bafybei"), "{walked}");
+    assert_ne!(
+        walked, DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID,
+        "a combining mark got the ASCII shard's name"
+    );
+    assert_ne!(
+        walked, MULTIBYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID,
+        "a combining mark got the multibyte shard's name"
+    );
+}
+
+#[test]
 fn child_directory_over_the_hamt_threshold_is_a_shard() {
     // The 262145-estimate flat bundle sits under `photos/`, and
     // content-sample's own two files stay at the root, so `photos/capsule.json`

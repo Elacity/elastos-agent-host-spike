@@ -187,6 +187,15 @@ fn check_name_uses_the_single_naming_path() {
     assert_eq!(code.matches("encode_chunked_files(").count(), 1);
     assert_eq!(code.matches("encode_directory(").count(), 3);
     assert_eq!(code.matches("Directory::default()").count(), 2);
+    // Task 064: one store of a path part. `owned_path_part`'s definition and
+    // the directory-part push and the file-name push in `Directory::insert`
+    // are the three places, so no push copies a part itself and the one
+    // store is the one place a name's bytes are kept.
+    assert_eq!(
+        code.matches("owned_path_part(").count(),
+        3,
+        "owned_path_part"
+    );
     // One leaf rule: every raw leaf, a listed file's, a one-leaf file's and
     // each leaf of a file root, is made by raw_leaf.
     assert_eq!(code.matches("cid_bytes(RAW_CODEC").count(), 1, "RAW_CODEC");

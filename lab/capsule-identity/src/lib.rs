@@ -1250,7 +1250,7 @@ impl Directory {
                 Some(at) => at,
                 None => {
                     let made = Child::Directory(Directory::default());
-                    directory.children.push(((*part).to_owned(), made));
+                    directory.children.push((owned_path_part(part), made));
                     directory.children.len() - 1
                 }
             };
@@ -1265,7 +1265,7 @@ impl Directory {
         }
         match directory.position(name).map(|at| &directory.children[at].1) {
             None => {
-                directory.children.push(((*name).to_owned(), file));
+                directory.children.push((owned_path_part(name), file));
                 Ok(())
             }
             Some(Child::File { .. }) => Err(Refusal::DuplicatePath {
@@ -1281,6 +1281,15 @@ impl Directory {
     fn position(&self, name: &str) -> Option<usize> {
         self.children.iter().position(|(child, _)| child == name)
     }
+}
+
+/// Store one path part as the UTF-8 bytes the walk gives it, so a name that
+/// holds a combining mark keeps that mark: U+0301 stays in the name, and the
+/// links estimate and the HAMT bucket hash read the same bytes. No
+/// normalization runs, so two names that a normalizer would fold stay two
+/// names.
+fn owned_path_part(part: &str) -> String {
+    part.to_owned()
 }
 
 /// One link of a directory block or a file root: the child's name (empty
