@@ -985,9 +985,26 @@ def _source_asks_checked(parsed):
     return asks, None
 
 
+def _b2_field(value):
+    """Return VALUE as one printable field inside a B2 refusal.
+
+    JSON escapes admit a lone surrogate, which a UTF-8 source can hold and a
+    UTF-8 stream cannot print. Such a field prints as its backslash escape, so
+    every B2 reason stays one clear line instead of raising on the stream.
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return value.encode("utf-8", "backslashreplace").decode("utf-8")
+    return value
+
+
 def _b2_pair(prefix, pair):
     """One B2 reason that names a (kind, resource) pair."""
-    return "refuse: B2 " + prefix + ": " + pair[0] + " | " + pair[1]
+    return (
+        "refuse: B2 " + prefix + ": "
+        + _b2_field(pair[0]) + " | " + _b2_field(pair[1])
+    )
 
 
 def _b2_section_bounds(lines, contexts):
@@ -1017,11 +1034,36 @@ def _b2_section_bounds(lines, contexts):
 
 
 def _b2_cells(line):
-    """Return the stripped cells of one table ROW, or None when it is not a row."""
+    """Return the stripped cells of one table ROW, or None when it is not a row.
+
+    A backslash escapes the pipe or the backslash after it, so ``\\|`` is one
+    literal pipe inside a cell. Markdown renders it that way, so a row that
+    escaped a separator has fewer cells than a reader that splits on every
+    pipe, and that row refuses instead of passing as six cells.
+    """
     text = line.strip()
     if len(text) < 2 or not text.startswith("|") or not text.endswith("|"):
         return None
-    return [cell.strip() for cell in text[1:-1].split("|")]
+    cells = []
+    cell = []
+    escaped = False
+    for char in text[1:-1]:
+        if escaped:
+            if char not in "|\\":
+                cell.append("\\")
+            cell.append(char)
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "|":
+            cells.append("".join(cell).strip())
+            cell = []
+        else:
+            cell.append(char)
+    if escaped:
+        cell.append("\\")
+    cells.append("".join(cell).strip())
+    return cells
 
 
 def _b2_code(cell):
@@ -1057,7 +1099,7 @@ def _b2_rows(block):
     for line in rows[2:]:
         cells = _b2_cells(line)
         if cells is None or len(cells) != len(B2_COLUMNS):
-            return None, "refuse: B2 mapping row is not six cells: " + line.strip()
+            return None, "refuse: B2 mapping row is not six cells: " + _b2_field(line.strip())
         for index, column in enumerate(B2_COLUMNS):
             if not _b2_code(cells[index]).strip():
                 if index < 2:

@@ -8588,6 +8588,24 @@ class B2CoverageTests(CaughtMixin, unittest.TestCase):
             check.worktree_root = original
         return code, buf.getvalue()
 
+    def _main_encoded(self, root):
+        """Run the CLI onto a strict UTF-8 stream, as a real stdout does.
+
+        ``StringIO`` accepts any str, so it cannot show a reason the process
+        cannot print. This stream encodes each reason, so a value that no
+        UTF-8 byte can hold raises here exactly as it would on the console.
+        """
+        original = check.worktree_root
+        stream = io.TextIOWrapper(io.BytesIO(), encoding="utf-8", errors="strict")
+        try:
+            check.worktree_root = lambda: root
+            with contextlib.redirect_stdout(stream):
+                code = check.main()
+            stream.flush()
+        finally:
+            check.worktree_root = original
+        return code, stream.buffer.getvalue().decode("utf-8")
+
     def _pinned_pairs(self):
         """The ask pairs at this worktree's draft pin, or the fixture set.
 
@@ -8952,6 +8970,27 @@ class B2CoverageTests(CaughtMixin, unittest.TestCase):
             section + "\n".join(lines),
             "refuse: B2 mapping row is not six cells: broken row",
         ),)
+        # A backslash escapes the pipe after it, so an escaped separator holds
+        # one literal pipe inside its cell. Markdown then renders a row with a
+        # missing cell, and the last column shows nothing. A splitter that
+        # breaks on every pipe still counts six cells and accepts that row.
+        body_cells = b2_cells(B2_PAIRS[0])
+        for after in range(len(B2_MAP_COLUMNS) - 1):
+            escaped = "| "
+            for index, cell in enumerate(body_cells):
+                if index:
+                    escaped += " \\| " if index - 1 == after else " | "
+                escaped += cell
+            escaped += " |"
+            lines = table_lines[:]
+            lines[3] = escaped
+            cases += ((
+                section + "\n".join(lines),
+                "refuse: B2 mapping row is not six cells: " + escaped,
+            ),)
+        # The same escape inside a cell keeps its own cell, so six cells stay
+        # six cells. That positive case is its own test, so this refusal test
+        # can stay the one the escaped-delimiter falsifier plants a bug into.
         # Each internal boundary matters: header/separator, separator/first
         # row, and every pair of body rows, including whitespace-only gaps.
         for index in range(2, len(table_lines) - 1):
@@ -8986,6 +9025,29 @@ class B2CoverageTests(CaughtMixin, unittest.TestCase):
         )
         root = self._b2_draft(section + padded, asks=asks_json(B2_PAIRS))
         self.assertEqual(check.problems(root), [])
+
+    def test_b2_escaped_pipe_inside_a_cell_passes(self):
+        """A cell may draw one literal pipe, so the table still has six cells.
+
+        This is the positive side of the escaped-delimiter rule: an escape
+        inside a cell keeps that cell, so the mapping stays complete. A reader
+        that dropped the escape or split on it would lose the cell or the row.
+        """
+        section = "## 6. B2 mapping\n\n"
+        escaped = list(b2_cells(B2_PAIRS[0]))
+        escaped[3] = escaped[3] + " \\| more"
+
+        def row(pair):
+            return escaped if pair == B2_PAIRS[0] else b2_cells(pair)
+
+        root = self._b2_draft(
+            section + b2_table(B2_PAIRS, row=row), asks=asks_json(B2_PAIRS)
+        )
+        self.assertEqual(check.problems(root), [])
+        text = (root / DRAFT_REL).read_text(encoding="utf-8")
+        pairs, reason = check.b2_mapping(text)
+        self.assertIsNone(reason, reason)
+        self.assertEqual(pairs, list(B2_PAIRS))
 
     def test_b2_pinned_source_is_refused(self):
         body = b2_body(b2_table(B2_PAIRS))
@@ -9070,6 +9132,86 @@ class B2CoverageTests(CaughtMixin, unittest.TestCase):
             code, out = self._main_at(root)
             self.assertEqual(code, 1, expected)
             self.assertEqual(out, expected + "\n", expected)
+            # The same reason must encode on a real UTF-8 stream.
+            code, out = self._main_encoded(root)
+            self.assertEqual(code, 1, expected)
+            self.assertEqual(out, expected + "\n", expected)
+
+    def test_b2_unprintable_pair_is_refused(self):
+        """A JSON escape admits a lone surrogate, and a UTF-8 stream cannot.
+
+        Both refusal paths that name a pair print it, so both must hold a
+        value that the console can encode. The reason keeps the escape, so the
+        reviewer sees which source spelling the refusal names.
+        """
+        escaped = "\\ud800"
+        # The asks file carries the escape as six ASCII bytes, so the source is
+        # valid UTF-8 JSON and the decoder produces the lone surrogate.
+        row = '{"kind": "read", "resource": "' + escaped + '"}'
+
+        def with_rows(rows):
+            return (
+                '{\n  "schema": "elastos.agent-host.asks/v1",\n  "asks": [\n'
+                + ",\n".join(rows)
+                + "\n  ]\n}\n"
+            ).encode("ascii")
+
+        good = ['{"kind": "%s", "resource": "%s"}' % pair for pair in B2_PAIRS]
+        body = b2_body(b2_table(B2_PAIRS))
+        cases = (
+            # A pinned pair the mapping does not hold. The rest of the source
+            # is the complete set, so this pair is the one refusal.
+            (
+                with_rows(good + [row]),
+                b2_reason("mapping misses", ("read", escaped)),
+            ),
+            # The same pair twice in the source.
+            (
+                with_rows(good + [row, row]),
+                b2_reason("source asks repeat", ("read", escaped)),
+            ),
+        )
+        for asks, expected in cases:
+            root = self._b2_draft(body, asks=asks)
+            self.assertEqual(check.problems(root), [expected], expected)
+            try:
+                code, out = self._main_encoded(root)
+            except UnicodeEncodeError as error:
+                self.fail("%s is not printable: %s" % (expected, error))
+            self.assertEqual(code, 1, expected)
+            self.assertEqual(out, expected + "\n", expected)
+            # The escape stays an escape and never becomes a raw surrogate.
+            self.assertNotIn("\ud800", out)
+
+    def test_falsifier_b2_escaped_delimiter_is_caught(self):
+        """A splitter that breaks on every pipe accepts a five-cell row."""
+
+        def split_on_every_pipe(line):
+            text = line.strip()
+            if len(text) < 2 or not text.startswith("|") or not text.endswith("|"):
+                return None
+            return [cell.strip() for cell in text[1:-1].split("|")]
+
+        self._caught_all(
+            "_b2_cells",
+            split_on_every_pipe,
+            (
+                self.test_b2_table_shape_is_refused,
+                self.test_b2_escaped_pipe_inside_a_cell_passes,
+            ),
+            "refuse: B2 mapping row is not six cells",
+            "CAUGHT b2-escaped-delimiter",
+        )
+
+    def test_falsifier_b2_unprintable_pair_is_caught(self):
+        """A pair field that keeps a lone surrogate raises on a UTF-8 stream."""
+        self._caught(
+            "_b2_field",
+            lambda value: value,
+            self.test_b2_unprintable_pair_is_refused,
+            "refuse: B2",
+            "CAUGHT b2-unprintable-pair",
+        )
 
     def test_b2_invalid_pin_skips_source_read(self):
         body = b2_body(b2_table(B2_PAIRS))
