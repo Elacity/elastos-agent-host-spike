@@ -31,6 +31,11 @@ second unrecorded failure stay failures.
 A path dependency Cargo resolves through a TOML escape, while the link test
 still passes, is ``findings/grant-binding-002.md``. ``record_escaped_link``
 is the only writer for that file.
+
+An immediate ``timeout_hold`` after ``SettleOutcome::Unknown`` is refused.
+No ledger call sits between that settle and the timeout. An ``Ok`` from the
+live call is ``findings/grant-binding-003.md``. That writer reads the live
+ledger file. It is not ``record_escaped_link``.
 """
 
 from __future__ import annotations
@@ -64,6 +69,13 @@ CLEAN_NAME = "test_clean_full_ceiling_reserve_succeeds"
 PATH_NAME = "test_stale_call_use_path_is_refused"
 IDENTITY_NAME = "test_stale_call_identity_replay_is_refused"
 LINK_NAME = "redteam_manifest_is_not_a_grant_link"
+TIMEOUT_NAME = "test_immediate_timeout_after_unknown_is_refused"
+TIMEOUT_FINDING = REPO / "lab" / "redteam" / "findings" / "grant-binding-003.md"
+TIMEOUT_LEDGER = "lab/grant-binding/src/ledger.rs"
+TIMEOUT_OK_PANIC = "immediate timeout returned Ok"
+TIMEOUT_FREED_PANIC = "immediate timeout freed the hold"
+TIMEOUT_OK_OBSERVED = "timeout_hold returned Ok"
+TIMEOUT_FREED_OBSERVED = "timeout_hold freed the hold"
 PROBE_NAMES = (SESSION_NAME, SIBLING_NAME, CLEAN_NAME, PATH_NAME, IDENTITY_NAME)
 STALE_NAMES = (SESSION_NAME, SIBLING_NAME)
 REPO_MARKER = "@@REDTEAM_REPO@@"
@@ -136,7 +148,7 @@ COMPILE_NEW = "        let _: u32 = \"compile error\";\n        Call { instance 
 
 REPLAY_RS = r"""//! Stale-call probe. Public API only. The crate's ledger stays private.
 
-use grant_binding::ledger::ReserveRefuse;
+use grant_binding::ledger::{ReserveRefuse, SettleOutcome, SettleRefuse};
 use grant_binding::{GuestRequest, Handle, Refuse, Rights, Verifier};
 
 fn rights() -> Rights {
@@ -353,6 +365,32 @@ fn test_stale_call_identity_replay_is_refused() {
 }
 
 #[test]
+fn test_immediate_timeout_after_unknown_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let request = guest(handle);
+    let call = verifier.open_call(instance);
+    verifier.admit(4);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
+    match verifier.timeout_hold(&call, &request, reservation) {
+        Ok(()) => panic!("immediate timeout returned Ok"),
+        Err(refusal) => assert!(!refusal.to_string().is_empty()),
+    }
+    match verifier.reserve(&call, &request, 1) {
+        Err(ReserveRefuse::OverCeiling { .. }) => {}
+        other => panic!("immediate timeout freed the hold: {other:?}"),
+    }
+}
+
+#[test]
 fn redteam_manifest_is_not_a_grant_link() {
     let repo = "@@REDTEAM_REPO@@";
     let baked = format!("{repo}/lab/redteam/Cargo.toml");
@@ -500,6 +538,68 @@ def record_escaped_link(outcome, metadata_code, metadata_output, finding):
     )
     Path(finding).write_text(text)
     return text
+
+
+def timeout_pin_line():
+    """The first line of grant-binding-003, from the live ledger file.
+
+    The commit is ``git log -1`` of that file at HEAD. The digest is the
+    sha256 of the bytes this process reads.
+    """
+    commit = git_text("log", "-1", "--format=%H", "HEAD", "--", TIMEOUT_LEDGER)
+    digest = sha256_file(REPO / TIMEOUT_LEDGER)
+    return f"grant-binding-003 {TIMEOUT_LEDGER} {commit} sha256 {digest}"
+
+
+def timeout_finding_text(observed):
+    """grant-binding-003 from the live ledger file and one observed line."""
+    if observed not in (TIMEOUT_OK_OBSERVED, TIMEOUT_FREED_OBSERVED):
+        raise ProbeError(f"timeout observed line is {observed}")
+    return (
+        timeout_pin_line()
+        + "\n\n"
+        + f"probe: {TIMEOUT_NAME}\n"
+        + f"observed: {observed}\n"
+    )
+
+
+def write_timeout_finding(observed, finding):
+    """Write grant-binding-003 from the live ledger bytes."""
+    text = timeout_finding_text(observed)
+    Path(finding).write_text(text)
+    return text
+
+
+def handle_timeout(real_error, outcome, finding):
+    """Classify one immediate-timeout result.
+
+    A set ``real_error`` is raised and writes nothing. A pass deletes a
+    stale finding. An Ok panic writes ``timeout_hold returned Ok``. A freed
+    hold writes ``timeout_hold freed the hold``. Both panics, any other
+    failure, and an error raise and leave the destination unchanged.
+    """
+    if real_error is not None:
+        raise real_error
+    if outcome is None:
+        raise ProbeError("timeout probe did not run")
+    if outcome.kind == "error":
+        raise ProbeError(f"timeout outcome was error: {outcome.detail}")
+    path = Path(finding)
+    if outcome.kind == "passed":
+        if path.is_file():
+            path.unlink()
+        return "refused", None
+    if outcome.kind != "failed":
+        raise ProbeError(f"timeout outcome was {outcome.kind}")
+    ok = TIMEOUT_OK_PANIC in outcome.output
+    freed = TIMEOUT_FREED_PANIC in outcome.output
+    if ok and freed:
+        raise ProbeError("timeout outcome names both panics")
+    if ok:
+        return "finding", write_timeout_finding(TIMEOUT_OK_OBSERVED, path)
+    if freed:
+        return "finding", write_timeout_finding(TIMEOUT_FREED_OBSERVED, path)
+    raise ProbeError("timeout outcome was an unrelated failure")
 
 
 def toolchain_reason():
@@ -1053,6 +1153,298 @@ class GrantReplayProbe(unittest.TestCase):
     def test_stale_call_identity_replay_is_refused(self):
         """A grant on the call opened before the identity change is refused after it."""
         self.check_real(IDENTITY_NAME)
+
+    def test_immediate_timeout_after_unknown_is_refused(self):
+        """Reserve, settle Unknown, then timeout_hold with nothing between them.
+
+        A refusal leaves no finding. An Ok panic records grant-binding-003.
+        ``setUp`` raises ``real_error`` only for ``PROBE_NAMES``, so this
+        method raises it itself. This method does not start cargo.
+        """
+        source = inspect.getsource(GrantReplayProbe.test_immediate_timeout_after_unknown_is_refused)
+        self.assertNotIn("check" + "_real", source)
+        self.assertNotIn("run" + "_suite", source)
+        self.assertNotIn(".pl" + "ant(", source)
+        self.assertNotIn("carg" + "o(", source)
+        self.assertIn(
+            "outcome_for(TIMEOUT_NAME, self.real.code, self.real.output)",
+            source,
+        )
+        self.assertNotIn(TIMEOUT_NAME, PROBE_NAMES)
+        self.assertNotIn(TIMEOUT_NAME, STALE_NAMES)
+        self.assertNotIn(TIMEOUT_NAME, CLEAN)
+        if self.real_error is not None:
+            handle_timeout(self.real_error, None, TIMEOUT_FINDING)
+        outcome = outcome_for(TIMEOUT_NAME, self.real.code, self.real.output)
+        status, text = handle_timeout(None, outcome, TIMEOUT_FINDING)
+        for name in PROBE_NAMES:
+            self.assertEqual(
+                self.real.by_name[name].kind,
+                "passed",
+                evidence(self.real.output),
+            )
+        if status == "refused":
+            self.assertFalse(TIMEOUT_FINDING.exists())
+            self.assertIsNone(text)
+            print("immediate timeout: refused", file=sys.stderr, flush=True)
+            return
+        self.assertEqual(status, "finding")
+        self.assertEqual(TIMEOUT_FINDING.read_text(), text)
+        self.assertEqual(text.splitlines()[0], timeout_pin_line())
+        observed = text.splitlines()[3]
+        if TIMEOUT_OK_PANIC in outcome.output:
+            self.assertEqual(observed, "observed: " + TIMEOUT_OK_OBSERVED)
+        if TIMEOUT_FREED_PANIC in outcome.output:
+            self.assertEqual(observed, "observed: " + TIMEOUT_FREED_OBSERVED)
+        print("immediate timeout: finding", file=sys.stderr, flush=True)
+
+    def test_timeout_probe_calls_settle_before_timeout(self):
+        """Unknown settle, then one timeout_hold, then reserve again.
+
+        ``release`` does not occur. This test launches nothing and does not
+        read the ledger for a deadline.
+        """
+        source = inspect.getsource(
+            GrantReplayProbe.test_timeout_probe_calls_settle_before_timeout
+        )
+        self.assertNotIn("carg" + "o(", source)
+        self.assertNotIn("run" + "_suite", source)
+        self.assertNotIn(".pl" + "ant(", source)
+        self.assertNotIn("ledger" + ".rs", source)
+        start = REPLAY_RS.find("fn test_immediate_timeout_after_unknown_is_refused")
+        identity = REPLAY_RS.find("fn test_stale_call_identity_replay_is_refused")
+        self.assertGreater(start, identity)
+        end = REPLAY_RS.find("fn redteam_manifest_is_not_a_grant_link", start)
+        self.assertGreater(end, start)
+        body = REPLAY_RS[start:end]
+        self.assertNotIn("\nfn ", body)
+        reserve = body.find("reserve")
+        unknown = body.find("SettleOutcome::Unknown")
+        timeout = body.find("timeout_hold")
+        again = body.find("reserve", timeout + 1)
+        self.assertGreaterEqual(reserve, 0)
+        self.assertLess(reserve, unknown)
+        self.assertLess(unknown, timeout)
+        self.assertEqual(body.count("timeout_hold"), 1)
+        self.assertEqual(body.count("SettleOutcome::Unknown"), 1)
+        self.assertEqual(body.count(".reserve("), 2)
+        self.assertLess(timeout, again)
+        self.assertNotIn("release", body)
+        self.assertNotIn("reserve", body[unknown:timeout])
+        self.assertIn(
+            "use grant_binding::ledger::{ReserveRefuse, SettleOutcome, SettleRefuse};",
+            REPLAY_RS,
+        )
+        self.assertIn(
+            "use grant_binding::{GuestRequest, Handle, Refuse, Rights, Verifier};",
+            REPLAY_RS,
+        )
+
+    def test_timeout_probe_errors_write_nothing(self):
+        """Each timeout error is its own ProbeError and writes nothing.
+
+        A real_error, an error outcome, both panic markers, and an unrelated
+        failure each raise. A handler that writes or deletes a finding fails
+        that case. The reasons stay distinct.
+        """
+        boom = ProbeError("real suite failed")
+        both = TIMEOUT_OK_PANIC + "\n" + TIMEOUT_FREED_PANIC + "\n"
+        cases = (
+            (
+                "real_error",
+                boom,
+                Outcome("failed", "failed", TIMEOUT_OK_PANIC),
+                boom,
+                True,
+            ),
+            (
+                "error",
+                None,
+                Outcome(
+                    "error",
+                    "compile error",
+                    "could not compile\n" + TIMEOUT_OK_PANIC + "\n",
+                ),
+                "timeout outcome was error: compile error",
+                False,
+            ),
+            (
+                "both panics",
+                None,
+                Outcome("failed", "failed", both),
+                "timeout outcome names both panics",
+                False,
+            ),
+            (
+                "unrelated",
+                None,
+                Outcome("failed", "failed", "assertion failed: ceiling"),
+                "timeout outcome was an unrelated failure",
+                False,
+            ),
+            (
+                "other kind",
+                None,
+                Outcome("skipped", "skipped", TIMEOUT_FREED_PANIC),
+                "timeout outcome was skipped",
+                False,
+            ),
+        )
+        reasons = []
+        root = self.work / "timeout-errors"
+        root.mkdir(parents=True, exist_ok=True)
+        findings = REPO / "lab" / "redteam" / "findings"
+        before = {
+            path.name: path.read_bytes()
+            for path in findings.iterdir()
+            if path.is_file()
+        }
+        saved_error = self.real_error
+        try:
+            for index, (name, real_error, outcome, reason, same) in enumerate(cases):
+                with self.subTest(name):
+                    dest = root / f"{index}.md"
+                    dest.write_bytes(b"keep\n")
+                    with self.assertRaises(ProbeError) as caught:
+                        handle_timeout(real_error, outcome, dest)
+                    if same:
+                        self.assertIs(caught.exception, boom)
+                    else:
+                        self.assertEqual(str(caught.exception), reason)
+                    self.assertEqual(dest.read_bytes(), b"keep\n")
+                    reasons.append(str(caught.exception))
+            self.assertEqual(len(reasons), len(set(reasons)))
+            self.real_error = boom
+            with self.assertRaises(ProbeError) as caught:
+                self.test_immediate_timeout_after_unknown_is_refused()
+            self.assertIs(caught.exception, boom)
+        finally:
+            self.real_error = saved_error
+        after = {
+            path.name: path.read_bytes()
+            for path in findings.iterdir()
+            if path.is_file()
+        }
+        self.assertEqual(after, before)
+
+    def test_timeout_finding_contract(self):
+        """A pass deletes a stale finding. Each panic writes its own line and the live pin.
+
+        No cargo run. A leftover finding, a swapped observed line, or a wrong
+        commit or digest fails.
+        """
+        self.assertNotIn("record_escaped_link", inspect.getsource(write_timeout_finding))
+        self.assertNotIn("record_escaped_link", inspect.getsource(handle_timeout))
+        self.assertNotIn("introducing_merge", inspect.getsource(timeout_pin_line))
+        self.assertNotIn("introducing_merge", inspect.getsource(write_timeout_finding))
+        self.assertIn("write_timeout_finding", inspect.getsource(handle_timeout))
+        commit = git_text("log", "-1", "--format=%H", "HEAD", "--", TIMEOUT_LEDGER)
+        digest = hashlib.sha256((REPO / TIMEOUT_LEDGER).read_bytes()).hexdigest()
+        self.assertRegex(commit, r"^[0-9a-f]{40}$")
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+        self.assertEqual(timeout_pin_line(), f"grant-binding-003 {TIMEOUT_LEDGER} {commit} sha256 {digest}")
+        pin = f"grant-binding-003 {TIMEOUT_LEDGER} {commit} sha256 {digest}"
+        stale_commit = "0" * 40
+        stale_digest = "ab" * 32
+        self.assertNotEqual(stale_commit, commit)
+        self.assertNotEqual(stale_digest, digest)
+
+        def stale(observed):
+            return (
+                f"grant-binding-003 {TIMEOUT_LEDGER} {stale_commit} sha256 {stale_digest}\n"
+                "\n"
+                f"probe: {TIMEOUT_NAME}\n"
+                f"observed: {observed}\n"
+            )
+
+        def expect(observed):
+            return (
+                pin
+                + "\n\n"
+                + f"probe: {TIMEOUT_NAME}\n"
+                + f"observed: {observed}\n"
+            )
+
+        calls = []
+        real_cargo = cargo
+
+        def wrapped(*args, **kwargs):
+            calls.append(args)
+            raise ProbeError("cargo ran")
+
+        findings = REPO / "lab" / "redteam" / "findings"
+        before = {
+            path.name: path.read_bytes()
+            for path in findings.iterdir()
+            if path.is_file()
+        }
+        root = self.work / "timeout-contract"
+        root.mkdir(parents=True, exist_ok=True)
+        try:
+            globals()["cargo"] = wrapped
+            passed = root / "passed.md"
+            passed.write_text(stale(TIMEOUT_OK_OBSERVED))
+            status, text = handle_timeout(
+                None,
+                Outcome("passed", f"test {TIMEOUT_NAME} ... ok", ""),
+                passed,
+            )
+            self.assertEqual(status, "refused")
+            self.assertIsNone(text)
+            self.assertFalse(passed.exists())
+
+            ok_path = root / "ok.md"
+            ok_path.write_text(stale(TIMEOUT_FREED_OBSERVED))
+            status, text = handle_timeout(
+                None,
+                Outcome("failed", f"test {TIMEOUT_NAME} ... FAILED", TIMEOUT_OK_PANIC),
+                ok_path,
+            )
+            self.assertEqual(status, "finding")
+            self.assertEqual(text, expect(TIMEOUT_OK_OBSERVED))
+            self.assertEqual(ok_path.read_text(), text)
+            self.assertEqual(text.splitlines()[0].split(" "), [
+                "grant-binding-003",
+                TIMEOUT_LEDGER,
+                commit,
+                "sha256",
+                digest,
+            ])
+            self.assertEqual(text.splitlines()[1], "")
+            self.assertEqual(text.splitlines()[2], f"probe: {TIMEOUT_NAME}")
+            self.assertEqual(text.splitlines()[3], "observed: " + TIMEOUT_OK_OBSERVED)
+            self.assertNotIn(TIMEOUT_FREED_OBSERVED, text)
+            self.assertNotIn(stale_commit, text)
+            self.assertNotIn(stale_digest, text)
+            self.assertNotIn(TIMEOUT_OK_PANIC, text)
+
+            freed_path = root / "freed.md"
+            freed_path.write_text(stale(TIMEOUT_OK_OBSERVED))
+            status, text = handle_timeout(
+                None,
+                Outcome(
+                    "failed",
+                    f"test {TIMEOUT_NAME} ... FAILED",
+                    TIMEOUT_FREED_PANIC + ": Ok(())",
+                ),
+                freed_path,
+            )
+            self.assertEqual(status, "finding")
+            self.assertEqual(text, expect(TIMEOUT_FREED_OBSERVED))
+            self.assertEqual(freed_path.read_text(), text)
+            self.assertEqual(text.splitlines()[3], "observed: " + TIMEOUT_FREED_OBSERVED)
+            self.assertNotIn(TIMEOUT_OK_OBSERVED, text)
+            self.assertNotIn(TIMEOUT_FREED_PANIC, text)
+            self.assertNotIn(stale_commit, text)
+            self.assertEqual(calls, [])
+        finally:
+            globals()["cargo"] = real_cargo
+        after = {
+            path.name: path.read_bytes()
+            for path in findings.iterdir()
+            if path.is_file()
+        }
+        self.assertEqual(after, before)
 
     def test_renamed_identity_method_turns_compile_error_into_failure(self):
         """The identity method name is ``IDENTITY_NAME``. ``setUp`` and ``expect_recorded`` look up that name.
