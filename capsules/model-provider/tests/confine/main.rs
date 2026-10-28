@@ -2453,6 +2453,31 @@ fn operations_section_cites_existing_tests() {
         "{failure}"
     );
 
+    // A comma inside the answer object, a comma inside a helper call, and a
+    // nested object each stay one literal. A cut at the first comma and a
+    // reader that descends into the value both fail these.
+    let trailing_comma_arm =
+        "ProviderOperation::Shutdown => Ok(ok_response(serde_json::json!({ \"shutdown\": true, }))),";
+    let helper_comma_arm =
+        "ProviderOperation::Shutdown => Ok(ok_response(serde_json::json!({\"shutdown\": helper(1, 2)}))),";
+    let nested_arm =
+        "ProviderOperation::Shutdown => Ok(ok_response(serde_json::json!({ \"shutdown\": { \"inner\": true } }))),";
+    for arm in [trailing_comma_arm, helper_comma_arm, nested_arm] {
+        assert_eq!(
+            operations_outputs_match_the_answers(
+                &shutdown_row,
+                answer_contract,
+                answer_offers,
+                arm
+            ),
+            Ok(()),
+            "{arm}"
+        );
+    }
+    let nested_keys = json_literal_keys(nested_arm).expect("the nested arm has one json! literal");
+    assert_eq!(nested_keys, vec!["shutdown".to_string()]);
+    assert!(!nested_keys.contains(&"inner".to_string()));
+
     // The reader accepts whitespace and comments before the `(` and before
     // the `{`. The substring reader `json!({` misses both forms.
     assert_eq!(
