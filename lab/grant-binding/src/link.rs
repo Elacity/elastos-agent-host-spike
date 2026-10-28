@@ -1,7 +1,9 @@
 //! The one detector for a dependency on this crate.
 
 use std::ffi::OsString;
+use std::fmt;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 ///
 /// The package's own name is not a dependency. A manifest cargo cannot parse
 /// is not a link.
+/// Operational failures stop the check with a reason.
 #[rustfmt::skip]
 pub fn cargo_toml_path_depends_on_grant_binding(cargo_toml: &str) -> bool {
     dependency_names(cargo_toml).iter().any(|name| name == "grant-binding")
@@ -20,28 +23,84 @@ pub fn cargo_toml_path_depends_on_grant_binding(cargo_toml: &str) -> bool {
 /// A manifest cargo cannot parse yields an empty list. The package's own
 /// name is not included.
 fn dependency_names(cargo_toml: &str) -> Vec<String> {
-    let dir = fresh_manifest_dir();
-    let names = metadata_dependency_names(&dir, cargo_toml);
-    let _ = fs::remove_dir_all(&dir);
-    names
+    with_manifest_dir(&std::env::temp_dir(), |dir| {
+        metadata_dependency_names(dir, cargo_toml)
+    })
+    .unwrap_or_else(|error| panic!("dependency check failed: {error}"))
 }
 
-fn fresh_manifest_dir() -> PathBuf {
+#[derive(Debug)]
+enum MetadataRefuse {
+    CreateDirectory,
+    CreateSourceDirectory,
+    WriteManifest,
+    WriteSource,
+    LaunchCargo,
+    DecodeOutput,
+    RemoveDirectory,
+    CleanupAfter(Box<MetadataRefuse>),
+}
+
+impl fmt::Display for MetadataRefuse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::CreateDirectory => "cannot create temporary manifest directory",
+            Self::CreateSourceDirectory => "cannot create temporary source directory",
+            Self::WriteManifest => "cannot write temporary Cargo.toml",
+            Self::WriteSource => "cannot write temporary src/lib.rs",
+            Self::LaunchCargo => "cannot launch cargo metadata",
+            Self::DecodeOutput => "cargo metadata output is not UTF-8",
+            Self::RemoveDirectory => "cannot remove temporary manifest directory",
+            Self::CleanupAfter(error) => {
+                return write!(f, "{error}; {}", Self::RemoveDirectory);
+            }
+        })
+    }
+}
+
+/// This is the shared ownership boundary for all metadata files and cleanup.
+fn with_manifest_dir<T>(
+    parent: &Path,
+    operation: impl FnOnce(&Path) -> Result<T, MetadataRefuse>,
+) -> Result<T, MetadataRefuse> {
+    let dir = fresh_manifest_dir(parent)?;
+    let result = operation(&dir);
+    match fs::remove_dir_all(&dir) {
+        Ok(()) => result,
+        Err(_) => Err(match result {
+            Ok(_) => MetadataRefuse::RemoveDirectory,
+            Err(error) => MetadataRefuse::CleanupAfter(Box::new(error)),
+        }),
+    }
+}
+
+fn fresh_manifest_dir(parent: &Path) -> Result<PathBuf, MetadataRefuse> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("grant-binding-meta-{}-{n}", std::process::id()))
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    loop {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = parent.join(format!("grant-binding-meta-{}-{n}", std::process::id()));
+        match builder.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(MetadataRefuse::CreateDirectory),
+        }
+    }
 }
 
-fn metadata_dependency_names(dir: &Path, cargo_toml: &str) -> Vec<String> {
-    if fs::create_dir_all(dir.join("src")).is_err() {
-        return Vec::new();
-    }
-    if fs::write(dir.join("Cargo.toml"), cargo_toml).is_err() {
-        return Vec::new();
-    }
-    if fs::write(dir.join("src/lib.rs"), "").is_err() {
-        return Vec::new();
-    }
+fn write_metadata_inputs(dir: &Path, cargo_toml: &str) -> Result<(), MetadataRefuse> {
+    fs::write(dir.join("Cargo.toml"), cargo_toml).map_err(|_| MetadataRefuse::WriteManifest)?;
+    fs::write(dir.join("src/lib.rs"), "").map_err(|_| MetadataRefuse::WriteSource)
+}
+
+fn metadata_dependency_names(dir: &Path, cargo_toml: &str) -> Result<Vec<String>, MetadataRefuse> {
+    fs::create_dir(dir.join("src")).map_err(|_| MetadataRefuse::CreateSourceDirectory)?;
+    write_metadata_inputs(dir, cargo_toml)?;
     let program = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let manifest = dir.join("Cargo.toml");
     let output = Command::new(program)
@@ -56,17 +115,13 @@ fn metadata_dependency_names(dir: &Path, cargo_toml: &str) -> Vec<String> {
             "--manifest-path",
         ])
         .arg(&manifest)
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
+        .output()
+        .map_err(|_| MetadataRefuse::LaunchCargo)?;
     if !output.status.success() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let Ok(json) = String::from_utf8(output.stdout) else {
-        return Vec::new();
-    };
-    names_in_dependency_arrays(&json)
+    let json = String::from_utf8(output.stdout).map_err(|_| MetadataRefuse::DecodeOutput)?;
+    Ok(names_in_dependency_arrays(&json))
 }
 
 /// `name` strings of objects inside a `dependencies` array.
@@ -249,6 +304,221 @@ fn dependency_manifest(deps: &str) -> String {
 #[cfg(test)]
 fn root_then_package(root: &str) -> String {
     format!("{root}\n[package]\nname = \"fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n")
+}
+
+#[cfg(test)]
+fn metadata_test_child(dir: &Path, cargo: Option<&Path>) -> std::process::Output {
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args(["--exact", std::thread::current().name().expect("test name")])
+        .env("GRANT_BINDING_METADATA_TEST_CHILD", "1")
+        .env("TMPDIR", dir)
+        .env("TMP", dir)
+        .env("TEMP", dir);
+    if let Some(cargo) = cargo {
+        command.env("CARGO", cargo);
+    }
+    command.output().expect("run metadata test child")
+}
+
+#[cfg(test)]
+fn assert_metadata_child_failure(output: std::process::Output, reason: &str) {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.status.code(), Some(101), "{text}");
+    assert!(
+        text.lines()
+            .any(|line| line == format!("dependency check failed: {reason}")),
+        "{text}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn model_metadata_collisions_preserve_existing_files() {
+    use std::os::unix::fs::symlink;
+
+    if std::env::var_os("GRANT_BINDING_METADATA_TEST_CHILD").is_some() {
+        // The child runs only this test, so its first candidate uses counter 0.
+        let parent = std::env::temp_dir();
+        let candidate = |n| parent.join(format!("grant-binding-meta-{}-{n}", std::process::id()));
+        let planted = candidate(0);
+        fs::create_dir(&planted).expect("collision directory");
+        fs::create_dir(planted.join("src")).expect("planted source directory");
+        fs::write(planted.join("sentinel"), "keep sentinel").expect("sentinel");
+        fs::write(planted.join("Cargo.toml"), "keep manifest").expect("manifest sentinel");
+        let target = parent.join("disposable-source");
+        fs::write(&target, "keep source").expect("disposable source");
+        symlink(&target, planted.join("src/lib.rs")).expect("planted source symlink");
+        fs::write(candidate(1), "keep file collision").expect("file collision");
+        symlink(&planted, candidate(2)).expect("directory symlink collision");
+        symlink(parent.join("absent"), candidate(3)).expect("dangling symlink collision");
+
+        assert!(cargo_toml_path_depends_on_grant_binding(
+            &dependency_manifest("grant-binding = '1.2.3'\n\n[workspace]\n")
+        ));
+        assert_eq!(
+            fs::read_to_string(planted.join("sentinel")).unwrap(),
+            "keep sentinel"
+        );
+        assert_eq!(
+            fs::read_to_string(planted.join("Cargo.toml")).unwrap(),
+            "keep manifest"
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep source");
+        assert_eq!(fs::read_link(planted.join("src/lib.rs")).unwrap(), target);
+        assert_eq!(
+            fs::read_to_string(candidate(1)).unwrap(),
+            "keep file collision"
+        );
+        assert_eq!(fs::read_link(candidate(2)).unwrap(), planted);
+        assert_eq!(fs::read_link(candidate(3)).unwrap(), parent.join("absent"));
+        assert!(!candidate(4).exists(), "owned directory was cleaned");
+        assert_eq!(fs::read_dir(parent).unwrap().count(), 5);
+        return;
+    }
+    with_manifest_dir(&std::env::temp_dir(), |dir| {
+        let output = metadata_test_child(dir, None);
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn model_metadata_file_failures_have_reasons_and_cleanup() {
+    with_manifest_dir(&std::env::temp_dir(), |parent| {
+        let missing_parent = parent.join("missing");
+        let error = with_manifest_dir(&missing_parent, |_| -> Result<(), MetadataRefuse> {
+            panic!("operation requires an owned directory")
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "cannot create temporary manifest directory"
+        );
+        for (stage, reason) in [
+            (0, "cannot create temporary source directory"),
+            (1, "cannot write temporary Cargo.toml"),
+            (2, "cannot write temporary src/lib.rs"),
+        ] {
+            let error = with_manifest_dir(parent, |dir| {
+                if stage == 0 {
+                    fs::write(dir.join("src"), "occupied").unwrap();
+                    return metadata_dependency_names(dir, &package_manifest(""));
+                }
+                fs::create_dir(dir.join("src")).unwrap();
+                let blocked = if stage == 1 {
+                    "Cargo.toml"
+                } else {
+                    "src/lib.rs"
+                };
+                fs::create_dir(dir.join(blocked)).unwrap();
+                write_metadata_inputs(dir, &package_manifest(""))?;
+                Ok(Vec::new())
+            })
+            .unwrap_err();
+            assert_eq!(error.to_string(), reason);
+            assert_eq!(fs::read_dir(parent).unwrap().count(), 0);
+        }
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn model_metadata_missing_cargo_stops_the_detector() {
+    if std::env::var_os("GRANT_BINDING_METADATA_TEST_CHILD").is_some() {
+        assert!(!cargo_toml_path_depends_on_grant_binding(
+            &dependency_manifest("grant-binding = { path = 'missing-gb' }\n")
+        ));
+        return;
+    }
+    with_manifest_dir(&std::env::temp_dir(), |dir| {
+        let output = metadata_test_child(dir, Some(&dir.join("missing-cargo")));
+        assert_metadata_child_failure(output, "cannot launch cargo metadata");
+        assert_eq!(fs::read_dir(dir).unwrap().count(), 0);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn model_metadata_output_failure_and_nonzero_exit_stay_distinct() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if std::env::var_os("GRANT_BINDING_METADATA_TEST_CHILD").is_some() {
+        assert!(!cargo_toml_path_depends_on_grant_binding(
+            &dependency_manifest("grant-binding = { path = 'missing-gb' }\n")
+        ));
+        return;
+    }
+    with_manifest_dir(&std::env::temp_dir(), |dir| {
+        let cargo = dir.join("cargo-fixture");
+        for status in [0, 1] {
+            fs::write(
+                &cargo,
+                format!("#!/bin/sh\nprintf '\\377'\nexit {status}\n"),
+            )
+            .unwrap();
+            fs::set_permissions(&cargo, fs::Permissions::from_mode(0o700)).unwrap();
+            let output = metadata_test_child(dir, Some(&cargo));
+            if status == 0 {
+                assert_metadata_child_failure(output, "cargo metadata output is not UTF-8");
+            } else {
+                assert!(
+                    output.status.success(),
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            assert_eq!(
+                fs::read_dir(dir).unwrap().count(),
+                1,
+                "only the fixture remains"
+            );
+        }
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn model_metadata_cleanup_failure_keeps_both_reasons() {
+    with_manifest_dir(&std::env::temp_dir(), |parent| {
+        for failed in [false, true] {
+            let error = with_manifest_dir(parent, |dir| {
+                fs::remove_dir(dir).unwrap();
+                fs::write(dir, "block directory cleanup").unwrap();
+                if failed {
+                    Err(MetadataRefuse::LaunchCargo)
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                if failed {
+                    "cannot launch cargo metadata; cannot remove temporary manifest directory"
+                } else {
+                    "cannot remove temporary manifest directory"
+                }
+            );
+        }
+        Ok(())
+    })
+    .unwrap();
 }
 
 #[test]
