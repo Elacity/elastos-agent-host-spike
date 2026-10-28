@@ -170,6 +170,15 @@ pub const MULTIBYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID: &str =
 /// directory. Built in a temp dir and in memory and never committed.
 pub const COMBINING_MARK_OVER_HAMT_THRESHOLD_LAB_CID: &str =
     "bafybeifmsz5xc6qpfifs2uutit6v3cs27gdjv4kogrniosezwfpeeft4eq";
+/// Task 065: the 262145-estimate flat bundle with its first 200-byte filler
+/// replaced by `photo-tail.jpeg` (15 bytes, its last byte `g`, empty content)
+/// and its 51-byte measured name lengthened by 185 bytes to 236, so the
+/// links estimate stays 262145 and the directory is a HAMT shard. The
+/// 15-byte name leaves a 15-byte murmur3 tail, so tail index 14, its last
+/// byte, enters the hash's second word. Built in a temp dir and in memory
+/// and never committed.
+pub const FIFTEEN_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeihjth7idik23jjnvdaiy4ciznq3x4bggs3vc76jwfpinfif7eauk4";
 
 /// The empty files that bring content-sample's root block to 262144 bytes
 /// and `longer` more: 1064 named by 200 digits and one by 235 + `longer`
@@ -252,7 +261,7 @@ pub fn directory_at_hamt_threshold_bundle(longer: usize) -> Vec<BundleEntry> {
 /// `aa`: 200 UTF-8 bytes in 68 Unicode scalars, with empty content. The name
 /// keeps its 200 bytes, so the byte estimate stays 262145 and the directory
 /// is a HAMT shard; a Unicode scalar count would be 262013 and stay a basic
-/// directory. The measured name longer than 200 bytes is left as it is. The
+/// directory. The measured 51-byte name is left as it is. The
 /// name has no NFD decomposition, so a folder walk reads the bytes the helper
 /// wrote. Built in a temp dir and in memory and never committed.
 pub fn multibyte_name_over_the_hamt_threshold_bundle() -> Vec<BundleEntry> {
@@ -298,9 +307,9 @@ pub fn multibyte_name_over_the_hamt_threshold_bundle() -> Vec<BundleEntry> {
 /// bytes, so the mark stays in the name and no normalization runs. The byte
 /// estimate stays 262145 and the directory is a HAMT shard; the same name
 /// with its marks stripped is 68 bytes, an estimate of 262013 that would
-/// stay a basic directory. The first 200-byte filler and the measured name
-/// are left as they are. Built in a temp dir and in memory and never
-/// committed.
+/// stay a basic directory. The first 200-byte filler and the 51-byte
+/// measured name are left as they are. Built in a temp dir and in memory and
+/// never committed.
 pub fn combining_mark_over_the_hamt_threshold_bundle() -> Vec<BundleEntry> {
     let combining = format!("{}aa", "e\u{0301}".repeat(66));
     assert_eq!(
@@ -347,6 +356,69 @@ pub fn combining_mark_over_the_hamt_threshold_bundle() -> Vec<BundleEntry> {
         .sum();
     assert_eq!(bytes - 132, stripped, "the stripped bytes");
     assert_eq!(stripped, 262_013, "the stripped estimate");
+    entries
+}
+
+/// Task 065: [`directory_at_hamt_threshold_bundle`]`(1)` with its first
+/// 200-byte filler replaced by `photo-tail.jpeg` (15 bytes, its last byte
+/// `g`, empty content) and its 51-byte measured name lengthened by 185 bytes
+/// to 236. The links estimate stays 262145, so the directory is a HAMT
+/// shard, and exactly one path leaves a 15-byte murmur3 tail, so tail index
+/// 14 enters the bucket hash. Built in a temp dir and in memory and never
+/// committed.
+pub fn fifteen_byte_name_over_the_hamt_threshold_bundle() -> Vec<BundleEntry> {
+    let photo = "photo-tail.jpeg";
+    assert_eq!(photo.len(), 15, "the photo name's bytes");
+    assert_eq!(photo.as_bytes().last(), Some(&b'g'), "the last byte");
+    let mut replaced = 0;
+    let mut lengthened = 0;
+    let entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(1)
+        .into_iter()
+        .map(|entry| {
+            if replaced == 0 && entry.path.len() == 200 {
+                replaced += 1;
+                return BundleEntry {
+                    path: photo.to_owned(),
+                    content: Vec::new(),
+                };
+            }
+            if entry.path.len() == 51 {
+                lengthened += 1;
+                return BundleEntry {
+                    path: format!("{}{}", entry.path, "0".repeat(185)),
+                    content: entry.content,
+                };
+            }
+            entry
+        })
+        .collect();
+    assert_eq!(
+        (replaced, lengthened),
+        (1, 1),
+        "one 200-byte filler replaced and the measured name lengthened"
+    );
+    let photo_len = entries
+        .iter()
+        .find(|entry| entry.path == photo)
+        .map(|entry| entry.path.len())
+        .expect("the photo name is in the bundle");
+    assert_eq!(photo_len, 15, "the replaced name's bytes");
+    let measured_len = entries
+        .iter()
+        .find(|entry| entry.path.len() == 236)
+        .map(|entry| entry.path.len())
+        .expect("the lengthened measured name is in the bundle");
+    assert_eq!(measured_len, 236, "the measured name's bytes");
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    let fifteen_tails = entries
+        .iter()
+        .filter(|entry| entry.path.len() % 16 == 15)
+        .count();
+    assert_eq!(fifteen_tails, 1, "one name leaves a 15-byte tail");
     entries
 }
 

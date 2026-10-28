@@ -2421,6 +2421,21 @@ mod tests {
     }
 
     #[test]
+    fn fifteen_byte_name_mixes_the_last_tail_byte() {
+        // Task 065: `photo-tail.jpeg` is 15 bytes, so its murmur3 tail holds
+        // tail indexes 0 to 14 and its last byte `g` is tail index 14, mixed
+        // into the hash's second word. README's `murmur64` prints these eight
+        // big-endian bytes for that name.
+        let name = "photo-tail.jpeg";
+        assert_eq!(name.len(), 15, "the name's bytes");
+        assert_eq!(name.as_bytes().last(), Some(&b'g'), "the last byte");
+        assert_eq!(
+            hamt_digest(name.as_bytes()),
+            [0x19, 0x64, 0x8b, 0xa3, 0x83, 0x36, 0xe8, 0xe4]
+        );
+    }
+
+    #[test]
     fn hamt_data_trims_leading_zero_bitmap_bytes() {
         // Bucket 0 is the last byte's low bit, so its bitmap is one byte.
         let mut low = [0u8; HAMT_BITMAP_BYTES];

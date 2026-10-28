@@ -253,6 +253,14 @@ fn directory_at_the_hamt_threshold_stays_basic() {
         .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
         .sum();
     assert_eq!(estimate, HAMT_LINKS_LIMIT, "the links estimate");
+    let measured: Vec<&BundleEntry> = entries
+        .iter()
+        .filter(|entry| {
+            entry.path.len() != 200 && entry.path.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        .collect();
+    assert_eq!(measured.len(), 1, "one added name whose length is not 200");
+    assert_eq!(measured[0].path.len(), 50, "the measured name's bytes");
     // Each link still adds its field-2 tag and length, the CID's tag and
     // length, the name's length, and the Tsize's tag and zero: at least 8
     // bytes beyond the estimate's name and 36, and the UnixFS data adds 4.
@@ -286,6 +294,14 @@ fn directory_over_the_hamt_threshold_is_a_shard() {
         .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
         .sum();
     assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    let measured: Vec<&BundleEntry> = entries
+        .iter()
+        .filter(|entry| {
+            entry.path.len() != 200 && entry.path.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        .collect();
+    assert_eq!(measured.len(), 1, "one added name whose length is not 200");
+    assert_eq!(measured[0].path.len(), 51, "the measured name's bytes");
     let (_bundle, walked, encoded) = walk_and_encode(&entries);
     assert_eq!(
         (walked.as_str(), encoded.as_str()),
@@ -493,6 +509,62 @@ fn combining_mark_over_the_hamt_threshold_is_a_shard() {
     assert_ne!(
         walked, MULTIBYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID,
         "a combining mark got the multibyte shard's name"
+    );
+}
+
+#[test]
+fn fifteen_byte_name_over_the_hamt_threshold_is_a_shard() {
+    // Task 065: the first 200-byte filler of the 262145-estimate bundle is
+    // `photo-tail.jpeg`, 15 bytes with `g` last, and the 51-byte measured
+    // name grows by 185 bytes to 236, so the links estimate stays 262145 and
+    // the directory is a HAMT shard. The 15-byte name leaves a 15-byte
+    // murmur3 tail, so its last byte is tail index 14. The pin was recomputed
+    // by README's Python rule and printed by Kubo v0.40.1 with the provider's
+    // HAMT config.
+    let entries = fifteen_byte_name_over_the_hamt_threshold_bundle();
+    let photo: Vec<&BundleEntry> = entries
+        .iter()
+        .filter(|entry| entry.path == "photo-tail.jpeg")
+        .collect();
+    assert_eq!(photo.len(), 1, "one 15-byte photo name");
+    assert_eq!(photo[0].path.len(), 15, "the photo name's bytes");
+    assert_eq!(
+        photo[0].path.as_bytes().last(),
+        Some(&b'g'),
+        "the last byte"
+    );
+    let measured: Vec<&BundleEntry> = entries
+        .iter()
+        .filter(|entry| entry.path.len() == 236)
+        .collect();
+    assert_eq!(measured.len(), 1, "the one lengthened measured name");
+    assert_eq!(measured[0].path.len(), 236, "the measured name's bytes");
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    let (_bundle, walked, encoded) = walk_and_encode(&entries);
+    assert_eq!(
+        (walked.as_str(), encoded.as_str()),
+        (
+            FIFTEEN_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID,
+            FIFTEEN_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID
+        ),
+        "(lab_cid, encode_entries) against the pin"
+    );
+    assert!(walked.starts_with("bafybei"), "{walked}");
+    assert_ne!(
+        walked, DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID,
+        "a 15-byte tail got the empty fillers' name"
+    );
+    assert_ne!(
+        walked, MULTIBYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID,
+        "a 15-byte tail got the multibyte shard's name"
+    );
+    assert_ne!(
+        walked, COMBINING_MARK_OVER_HAMT_THRESHOLD_LAB_CID,
+        "a 15-byte tail got the combining-mark shard's name"
     );
 }
 
