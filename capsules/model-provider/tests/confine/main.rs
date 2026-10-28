@@ -898,7 +898,9 @@ fn wait_for_terminal(
 /// missing and an extra struct field, a dropped error key, a changed wrapper
 /// key, reordered keys, a nested key, a dropped `json!` key, zero and two
 /// literals, character and raw string literals, a prefix declaration name,
-/// a doubled declaration, the `unsupported` ok side and a row without `from`.
+/// a doubled declaration, a nested declaration, a nested arm block, a later
+/// attributed declaration, an unbraced region, the `unsupported` ok side and
+/// a row without `from`.
 ///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
 /// test no longer finds that function. F-cc49a drops the `generated_`
@@ -1519,17 +1521,98 @@ fn operations_section_cites_existing_tests() {
         }
         Ok(keys)
     }
+    // The lines of the region that starts at `start`, through the brace that
+    // closes the first `{` at or after it.
+    //
+    // A string, a character literal, a line comment and a block comment are
+    // skipped whole, so a brace inside one does not move the boundary. A
+    // region with no opening brace and a region whose first brace never
+    // closes are refused with their own reasons.
+    fn braced_region(source: &str, start: usize) -> Result<&str, String> {
+        let bytes = source.as_bytes();
+        let mut opened = false;
+        let mut depth = 0usize;
+        let mut index = start;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'"' => {
+                    index += 1;
+                    while index < bytes.len() {
+                        match bytes[index] {
+                            b'\\' => index += 2,
+                            b'"' => {
+                                index += 1;
+                                break;
+                            }
+                            _ => index += 1,
+                        }
+                    }
+                }
+                b'\'' => {
+                    index += 1;
+                    while index < bytes.len() {
+                        match bytes[index] {
+                            b'\\' => index += 2,
+                            b'\'' => {
+                                index += 1;
+                                break;
+                            }
+                            _ => index += 1,
+                        }
+                    }
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                    while index < bytes.len() && bytes[index] != b'\n' {
+                        index += 1;
+                    }
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    index += 2;
+                    while index + 1 < bytes.len()
+                        && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                    {
+                        index += 1;
+                    }
+                    index += 2;
+                }
+                b'{' => {
+                    opened = true;
+                    depth += 1;
+                    index += 1;
+                }
+                b'}' => {
+                    if depth == 0 {
+                        return Err("the region has no opening `{`".to_string());
+                    }
+                    depth -= 1;
+                    index += 1;
+                    if depth == 0 {
+                        return Ok(&source[start..index]);
+                    }
+                }
+                _ => index += 1,
+            }
+        }
+        if !opened {
+            return Err("the region has no opening `{`".to_string());
+        }
+        Err("the region has no closing `}` for its first `{`".to_string())
+    }
     // The lines of the one function whose declaration line starts with
-    // `marker` after the optional declaration words, from that line through
-    // the line before the next declaration line. Only a declaration line
-    // matches, so a longer name such as `ok_response_example` is not
-    // `fn ok_response(`. Zero and two such declarations are refused with
-    // their own reasons.
+    // `marker` through the brace that closes that function's body.
+    //
+    // A declaration is what `after_declaration_prefix` leaves, so a same-line
+    // attribute, `pub`, `pub(crate)`, `pub(super)`, `pub(in ...)`, `async`,
+    // `unsafe` and `const` are all read by that one rule. Only a declaration
+    // line matches, so a longer name such as `ok_response_example` is not
+    // `fn ok_response(`. Zero and two such declarations are refused with their
+    // own reasons. The region ends at the function's own closing brace, so a
+    // nested declaration or a later function never supplies the keys.
     fn function_region<'a>(source: &'a str, marker: &str) -> Result<&'a str, String> {
         let mut starts = Vec::new();
         let mut offset = 0;
         for line in source.split_inclusive('\n') {
-            if declaration_text(line).starts_with(marker) {
+            if after_declaration_prefix(line).starts_with(marker) {
                 starts.push(offset);
             }
             offset += line.len();
@@ -1543,28 +1626,11 @@ fn operations_section_cites_existing_tests() {
         let Some(&start) = starts.first() else {
             return Err(format!("the source has no `{marker}` declaration"));
         };
-        let mut offset = start;
-        for line in source[start..].split_inclusive('\n') {
-            if offset > start && declaration_text(line).starts_with("fn ") {
-                return Ok(&source[start..offset]);
-            }
-            offset += line.len();
-        }
-        Ok(&source[start..])
+        braced_region(source, start)
     }
-    // One line without its leading space and the optional `pub(crate)`,
-    // `pub`, `async`, `unsafe` and `const` words.
-    fn declaration_text(line: &str) -> &str {
-        let mut rest = line.trim_start();
-        for prefix in ["pub(crate) ", "pub ", "async ", "unsafe ", "const "] {
-            if let Some(after) = rest.strip_prefix(prefix) {
-                rest = after;
-            }
-        }
-        rest
-    }
-    // The lines of the one `ProviderOperation::Shutdown =>` match arm, from
-    // its line through the line before the next arm or the match close.
+    // The lines of the one `ProviderOperation::Shutdown =>` match arm, through
+    // the brace that closes that arm. The arm's own body boundary is that
+    // brace, so a nested block's close does not end the arm.
     fn shutdown_arm_region(source: &str) -> Result<&str, String> {
         const MARKER: &str = "ProviderOperation::Shutdown =>";
         let occurrences = source.matches(MARKER).count();
@@ -1578,15 +1644,7 @@ fn operations_section_cites_existing_tests() {
         }
         let at = source.find(MARKER).expect("the count found one arm");
         let start = source[..at].rfind('\n').map_or(0, |index| index + 1);
-        let mut offset = start;
-        for line in source[start..].split_inclusive('\n') {
-            let trimmed = line.trim();
-            if offset > start && (trimmed.starts_with("ProviderOperation::") || trimmed == "}") {
-                return Ok(&source[start..offset]);
-            }
-            offset += line.len();
-        }
-        Ok(&source[start..])
+        braced_region(source, start)
     }
     // The backtick names of one side equal the keys of one answer `json!`, in
     // order. A mismatch names the operation and the name or key with no
@@ -2791,6 +2849,91 @@ pub fn error_response(code: &str, message: &str) -> Value {
             "ProviderOperation::Shutdown => x,\nProviderOperation::Shutdown => y,\n"
         ),
         "`src/execution.rs` has 2 `ProviderOperation::Shutdown =>` arms"
+    );
+
+    // The region ends at the function's own brace, so a later function with a
+    // same-line attribute never supplies the keys.
+    let later_declaration_state = "\
+    pub fn handle_offers_list() {}
+
+    #[inline] pub fn handle_runs_create(&self) -> Value {
+        json!({
+            \"schema\": schema,
+            \"provider\": provider,
+            \"protocol_version\": version,
+            \"offers\": offers,
+            \"offer_revisions\": revisions,
+        })
+    }
+";
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("offers_list", offers_full),
+            &answers,
+            later_declaration_state,
+            ""
+        ),
+        "json: the region has no `json!({` literal"
+    );
+
+    // A nested declaration does not end the function: both literals are read,
+    // so a discarded one cannot stand in for the returned one.
+    let nested_ok_contract = "\
+pub fn ok_response(data: Value) -> Value {
+    let _ = serde_json::json!({
+        \"status\": \"ok\",
+        \"data\": data,
+    });
+    fn unused() {}
+    serde_json::json!({
+        \"status\": \"ok\",
+        \"result\": data,
+    })
+}
+
+pub fn error_response(code: &str, message: &str) -> Value {
+    serde_json::json!({
+        \"status\": \"error\",
+        \"code\": code,
+        \"message\": message,
+    })
+}
+"
+    .to_string()
+        + status_struct;
+    assert_eq!(
+        outputs_failure(&init_row, &nested_ok_contract, "", ""),
+        "json: the region has 2 `json!({` literals, not one"
+    );
+
+    // A nested block's close is not the arm's close: both literals are read.
+    let nested_shutdown_arm = "\
+ProviderOperation::Shutdown => {
+    if false {
+        let _ = json!({\"shutdown\": true});
+    }
+    Ok(ok_response(json!({\"renamed\": true})))
+}
+ProviderOperation::OffersList => {
+";
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            &answers,
+            "",
+            nested_shutdown_arm
+        ),
+        "json: the region has 2 `json!({` literals, not one"
+    );
+
+    // A region with no opening brace or with no closing brace is refused.
+    assert_eq!(
+        outputs_failure(&init_row, "pub fn ok_response() ;\n", "", ""),
+        "the region has no opening `{`"
+    );
+    assert_eq!(
+        outputs_failure(&init_row, "pub fn ok_response() {\n", "", ""),
+        "the region has no closing `}` for its first `{`"
     );
 
     // An unreadable answer source is an error that names its path.
