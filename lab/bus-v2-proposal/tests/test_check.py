@@ -23,6 +23,44 @@ IDENTITY = {
     "GIT_COMMITTER_EMAIL": "citation-check@example.com",
 }
 
+# The shared asks source and mapping. A citation-only draft carries both, so it
+# keeps testing its own refusal without a bypass in the live checker.
+B2_ASKS_REL = "examples/agent-host/asks.json"
+B2_FIXTURE_ASKS = (
+    '{\n'
+    '  "schema": "elastos.agent-host.asks/v1",\n'
+    '  "asks": [\n'
+    '    {"kind": "read", "resource": "<principal>/"},\n'
+    '    {"kind": "edit", "resource": "<principal>/"}\n'
+    "  ]\n"
+    "}\n"
+).encode("utf-8")
+B2_FIXTURE_ROWS = (("read", "<principal>/"), ("edit", "<principal>/"))
+
+
+def b2_fixture_table(rows=B2_FIXTURE_ROWS):
+    """Return one valid mapping table over ROWS."""
+    lines = [
+        "<!-- b2-map -->",
+        "| Kind | Resource | Operation and action | Constraint | Extension | Evidence |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for kind, resource in rows:
+        lines.append(
+            "| %s | `%s` | The step records the ask. | The resource pattern holds. "
+            "| extension required: no typed operation. | The section paragraphs. |"
+            % (kind, resource)
+        )
+    lines.append("<!-- /b2-map -->")
+    return "\n".join(lines) + "\n"
+
+
+B2_FIXTURE_SECTION = (
+    "\n## 6. B2 mapping\n\nThis section is design input for B2.\n\n"
+    + b2_fixture_table()
+)
+
+
 OWNED_REL = "examples/agent-host/src/lib.rs"
 OWNED_NUMBER = 3754
 OWNED_SPAN = "examples/agent-host/src/lib.rs:3754"
@@ -1283,6 +1321,20 @@ PROVIDER_WALKS = (
 )
 
 
+def caught(case, global_name, planted, named_test, prefix, label):
+    """Run NAMED_TEST, plant a bug, and require the same test to fail."""
+    named_test()
+    original = getattr(check, global_name)
+    try:
+        setattr(check, global_name, planted)
+        with case.assertRaises(AssertionError) as failure:
+            named_test()
+        case.assertIn(prefix, str(failure.exception))
+    finally:
+        setattr(check, global_name, original)
+    print(label)
+
+
 class CitationCheckTests(unittest.TestCase):
     def _temp_root(self):
         tmp = tempfile.TemporaryDirectory()
@@ -1328,23 +1380,35 @@ class CitationCheckTests(unittest.TestCase):
         self._git(root, "commit", "-q", "-m", "fixture")
         return self._git_output(root, "rev-parse", "HEAD")
 
-    def _draft(self, body, files=None):
+    def _draft(self, body, files=None, b2=True):
         """A temp root whose draft pins the repository's committed HEAD."""
         root = self._temp_root()
-        self._write(root, body, files or {})
+        self._write(root, self._b2_body(body) if b2 else body, self._b2_files(files, b2))
         sha = self._commit_all(root)
         (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
-            "Pinned commit: " + sha + "\n" + body, encoding="utf-8"
+            "Pinned commit: " + sha + "\n" + (self._b2_body(body) if b2 else body),
+            encoding="utf-8",
         )
         return root
 
-    def _raw_draft(self, body, files=None, commit=False):
+    def _raw_draft(self, body, files=None, commit=False, b2=True):
         """A temp draft with the caller's pin text and no automatic pin."""
         root = self._temp_root()
-        self._write(root, body, files or {})
+        self._write(root, self._b2_body(body) if b2 else body, self._b2_files(files, b2))
         if commit:
             self._commit_all(root)
         return root
+
+    def _b2_files(self, files, b2=True):
+        """Return FILES with the shared asks source when B2 needs one."""
+        merged = dict(files or {})
+        if b2:
+            merged.setdefault(B2_ASKS_REL, B2_FIXTURE_ASKS)
+        return merged
+
+    def _b2_body(self, body):
+        """Return BODY with the shared valid mapping table in its own section 6."""
+        return body + B2_FIXTURE_SECTION
 
     def _assert_one(self, body, files, expected):
         got = check.problems(self._draft(body, files))
@@ -2061,16 +2125,7 @@ class CitationCheckTests(unittest.TestCase):
         return "".join(parts)
 
     def _caught(self, global_name, planted, named_test, prefix, label):
-        named_test()
-        original = getattr(check, global_name)
-        try:
-            setattr(check, global_name, planted)
-            with self.assertRaises(AssertionError) as caught:
-                named_test()
-            self.assertIn(prefix, str(caught.exception))
-        finally:
-            setattr(check, global_name, original)
-        print(label)
+        caught(self, global_name, planted, named_test, prefix, label)
 
     def _pinned_reads(self, body, files, restore=None):
         """Return the problems and the numbers read from the pinned commit."""
@@ -8386,4 +8441,648 @@ class CitationCheckTests(unittest.TestCase):
             "`" + CHILD_HOST_DOC_SPAN + "`",
             self.test_one_prose_line_citing_3455_3470_and_3471_walks_each_marker,
             "CAUGHT shared-line-child-host-index",
+        )
+
+
+# The asks the B2 tests map. Two hosted asks with different resources, so a
+# test never leans on the live source's row count or on one hosted row.
+B2_TEST_ASKS = (
+    ("read", "<principal>/"),
+    ("hosted", "Models/"),
+    ("hosted", "<principal>/.AppData/Models/"),
+    ("journal-append", "<principal>/.AppData/Agents/agent-host/"),
+)
+
+B2_SECTION = "## 6. B2 mapping"
+
+
+def b2_asks_bytes(asks=B2_TEST_ASKS, schema="elastos.agent-host.asks/v1"):
+    """Return an asks file that declares ASKS under SCHEMA."""
+    rows = ",\n".join(
+        '    {"kind": "%s", "resource": "%s"}' % (kind, resource)
+        for kind, resource in asks
+    )
+    return (
+        '{\n  "schema": "%s",\n  "asks": [\n%s\n  ]\n}\n' % (schema, rows)
+    ).encode("utf-8")
+
+
+def b2_row(
+    kind,
+    resource,
+    operation="The step records the ask.",
+    constraint="The declared pattern holds.",
+    extension="extension required: no typed operation.",
+    evidence="The section paragraphs.",
+):
+    """Return one mapping row with all six cells filled."""
+    return "| %s | `%s` | %s | %s | %s | %s |" % (
+        kind,
+        resource,
+        operation,
+        constraint,
+        extension,
+        evidence,
+    )
+
+
+def b2_table(rows, header=None, rule=True):
+    """Return one mapping table bounded by its markers."""
+    lines = ["<!-- b2-map -->"]
+    lines.append(
+        header
+        or "| Kind | Resource | Operation and action | Constraint | Extension | Evidence |"
+    )
+    if rule:
+        lines.append("| --- | --- | --- | --- | --- | --- |")
+    lines.extend(rows)
+    lines.append("<!-- /b2-map -->")
+    return "\n".join(lines)
+
+
+def b2_pairs(asks=B2_TEST_ASKS):
+    """Return one full mapping over ASKS."""
+    return [b2_row(kind, resource) for kind, resource in asks]
+
+
+def b2_draft_body(table, heading=B2_SECTION, before="Section 6 maps every ask.\n\n"):
+    """Return a draft body with TABLE under HEADING."""
+    return before + heading + "\n\nThe table below is the coverage index.\n\n" + table + "\n\n"
+
+
+class B2CoverageTests(unittest.TestCase):
+    """The B2 coverage rule: one row per pinned ask pair, with filled fields."""
+
+    def _caught(self, global_name, planted, named_test, prefix, label):
+        caught(self, global_name, planted, named_test, prefix, label)
+
+    def _temp_root(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / "lab" / "bus-v2-proposal").mkdir(parents=True)
+        return root
+
+    def _write(self, root, body, asks):
+        (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
+            body, encoding="utf-8"
+        )
+        path = root / B2_ASKS_REL
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(asks)
+
+    def _git(self, root, *args):
+        env = dict(os.environ)
+        env.update(IDENTITY)
+        subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=True,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def _head(self, root):
+        return subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def _commit(self, root):
+        self._git(root, "add", "-A")
+        self._git(root, "commit", "-q", "-m", "fixture")
+        return self._head(root)
+
+    def _repo(self, body, asks=b2_asks_bytes()):
+        """A temp repo. Return its root and the commit its asks source is at."""
+        root = self._temp_root()
+        self._git(root, "init", "-q")
+        self._write(root, body, asks)
+        return root, self._commit(root)
+
+    def _pinned(self, body, asks=b2_asks_bytes()):
+        """A temp repo whose draft pins the commit that holds ASKS."""
+        root, sha = self._repo(body, asks)
+        (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
+            "Pinned commit: " + sha + "\n" + body, encoding="utf-8"
+        )
+        return root
+
+    def _repoint(self, root, sha, body):
+        (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
+            "Pinned commit: " + sha + "\n" + body, encoding="utf-8"
+        )
+
+    def _problems(self, table, asks=b2_asks_bytes(), heading=B2_SECTION):
+        body = b2_draft_body(table, heading)
+        return check.problems(self._pinned(body, asks))
+
+    def test_b2_complete_mapping_passes(self):
+        self.assertEqual(self._problems(b2_table(b2_pairs())), [])
+        permuted = b2_table(list(reversed(b2_pairs())))
+        self.assertEqual(self._problems(permuted), [])
+
+    def test_b2_missing_pair_is_refused(self):
+        rows = b2_pairs()
+        for index in range(len(rows)):
+            kind, resource = B2_TEST_ASKS[index]
+            expected = check._b2_refusal(
+                "mapping has no row for the pair (%s, %s)" % (kind, resource)
+            )
+            got = self._problems(b2_table(rows[:index] + rows[index + 1:]))
+            self.assertIn(expected, got, resource)
+            self.assertTrue(all(reason.startswith("refuse: B2 ") for reason in got))
+        hosted = [i for i, pair in enumerate(B2_TEST_ASKS) if pair[0] == "hosted"]
+        self.assertEqual(len(hosted), 2)
+        for index in hosted:
+            kind, resource = B2_TEST_ASKS[index]
+            got = self._problems(b2_table(rows[:index] + rows[index + 1:]))
+            self.assertIn(
+                check._b2_refusal(
+                    "mapping has no row for the pair (%s, %s)" % (kind, resource)
+                ),
+                got,
+            )
+
+    def test_b2_duplicate_or_extra_pair_is_refused(self):
+        rows = b2_pairs()
+        # Every source pair is still present, and one of them stands twice. A
+        # set-only comparison accepts this table, so the multiplicity is the rule.
+        repeated = rows + [rows[0]]
+        self.assertEqual(
+            self._problems(b2_table(repeated)),
+            [check._b2_refusal("mapping repeats the pair (read, <principal>/)")],
+        )
+        # A duplicate that takes the place of another pair hides an omission.
+        replaced = rows[:-1] + [rows[0]]
+        got = self._problems(b2_table(replaced))
+        self.assertIn(
+            check._b2_refusal("mapping repeats the pair (read, <principal>/)"), got
+        )
+        self.assertIn(
+            check._b2_refusal(
+                "mapping has no row for the pair (journal-append, "
+                "<principal>/.AppData/Agents/agent-host/)"
+            ),
+            got,
+        )
+        extra = rows + [b2_row("run", "<principal>/Projects/")]
+        self.assertEqual(
+            self._problems(b2_table(extra)),
+            [
+                check._b2_refusal(
+                    "mapping has an extra row for the pair (run, <principal>/Projects/)"
+                )
+            ],
+        )
+        changed = [b2_row("read", "<principal>")] + rows[1:]
+        self.assertEqual(
+            self._problems(b2_table(changed)),
+            [
+                check._b2_refusal(
+                    "mapping has no row for the pair (read, <principal>/)"
+                ),
+                check._b2_refusal(
+                    "mapping has an extra row for the pair (read, <principal>)"
+                ),
+            ],
+        )
+        swapped = [b2_row("edit", "<principal>/")] + rows[1:]
+        self.assertEqual(
+            self._problems(b2_table(swapped)),
+            [
+                check._b2_refusal(
+                    "mapping has no row for the pair (read, <principal>/)"
+                ),
+                check._b2_refusal(
+                    "mapping has an extra row for the pair (edit, <principal>/)"
+                ),
+            ],
+        )
+
+    def test_b2_table_shape_is_refused(self):
+        cases = (
+            (
+                "absent table",
+                b2_draft_body("No table here.\n"),
+                check._b2_refusal("mapping table is absent"),
+            ),
+            (
+                "duplicate table",
+                b2_draft_body(b2_table(b2_pairs()) + "\n" + b2_table(b2_pairs())),
+                check._b2_refusal("mapping table is not one"),
+            ),
+            (
+                "two sections 6",
+                b2_draft_body(b2_table(b2_pairs()))
+                + "\n## 6. B2 mapping\n\nThe second one.\n",
+                check._b2_refusal("section 6 is not one"),
+            ),
+            (
+                "no section 6",
+                "## 3. Grant requests\n\n" + b2_table(b2_pairs()) + "\n",
+                check._b2_refusal("section 6 is absent"),
+            ),
+            (
+                "table outside section 6",
+                "## 3. Grant requests\n\n" + b2_table(b2_pairs()) + "\n"
+                + "## 6. B2 mapping\n\nThe table stands in section 3.\n",
+                check._b2_refusal("mapping table is outside section 6"),
+            ),
+            (
+                "wrong columns",
+                b2_draft_body(
+                    b2_table(
+                        b2_pairs(),
+                        header="| Kind | Pattern | Operation and action | Constraint "
+                        "| Extension | Evidence |",
+                    )
+                ),
+                check._b2_refusal("table header is not the six columns"),
+            ),
+            (
+                "missing column",
+                b2_draft_body(
+                    b2_table(
+                        [
+                            "| %s | `%s` | %s | %s | %s |"
+                            % (kind, resource, "op", "constraint", "extension")
+                            for kind, resource in B2_TEST_ASKS
+                        ]
+                    )
+                ),
+                check._b2_refusal("table row 1 is malformed"),
+            ),
+            (
+                "broken row",
+                b2_draft_body(
+                    b2_table([b2_pairs()[0], "| read | `<principal>/` | short |"])
+                ),
+                check._b2_refusal("table row 2 is malformed"),
+            ),
+            (
+                "no row",
+                b2_draft_body(b2_table([])),
+                check._b2_refusal("mapping table has no row"),
+            ),
+            (
+                "no rule row",
+                b2_draft_body(b2_table(b2_pairs(), rule=False)),
+                check._b2_refusal("table header has no rule row"),
+            ),
+        )
+        for name, body, expected in cases:
+            got = check.problems(self._pinned(body))
+            self.assertEqual(got, [expected], name)
+        for index, column in enumerate(check.B2_COLUMNS):
+            rows = b2_pairs()
+            cells = [cell.strip() for cell in rows[0].strip("|").split("|")]
+            cells[index] = ""
+            rows[0] = "| " + " | ".join(cells) + " |"
+            expected = check._b2_refusal("table row 1 has an empty " + column)
+            got = self._problems(b2_table(rows))
+            self.assertEqual(got, [expected], column)
+
+    def test_b2_pinned_source_is_refused(self):
+        table = b2_table(b2_pairs())
+        body = b2_draft_body(table)
+        cases = (
+            (
+                "missing asks file",
+                None,
+                check._b2_refusal("asks source is absent: " + B2_ASKS_REL),
+            ),
+            (
+                "invalid UTF-8",
+                b"{\n\xff\n",
+                check._b2_refusal("asks source is not utf-8 text: " + B2_ASKS_REL),
+            ),
+            (
+                "invalid JSON",
+                b"{\n",
+                check._b2_refusal("asks source is not JSON: " + B2_ASKS_REL),
+            ),
+            (
+                "wrong schema",
+                b2_asks_bytes(schema="elastos.agent-host.asks/v2"),
+                check._b2_refusal(
+                    "asks source is not schema elastos.agent-host.asks/v1: "
+                    + B2_ASKS_REL
+                ),
+            ),
+            (
+                "asks is not a list",
+                b'{"schema": "elastos.agent-host.asks/v1", "asks": {}}',
+                check._b2_refusal("asks source is not a list of asks: " + B2_ASKS_REL),
+            ),
+            (
+                "ask is not a kind and a resource",
+                b'{"schema": "elastos.agent-host.asks/v1", "asks": [{"kind": 1, '
+                b'"resource": "<principal>/"}]}',
+                check._b2_refusal(
+                    "ask 1 is not a kind and a resource: " + B2_ASKS_REL
+                ),
+            ),
+            (
+                "empty resource",
+                b'{"schema": "elastos.agent-host.asks/v1", "asks": [{"kind": '
+                b'"read", "resource": ""}]}',
+                check._b2_refusal(
+                    "ask 1 is not a kind and a resource: " + B2_ASKS_REL
+                ),
+            ),
+            (
+                "ask is not an object",
+                b'{"schema": "elastos.agent-host.asks/v1", "asks": ["read"]}',
+                check._b2_refusal(
+                    "ask 1 is not a kind and a resource: " + B2_ASKS_REL
+                ),
+            ),
+            (
+                "no ask",
+                b'{"schema": "elastos.agent-host.asks/v1", "asks": []}',
+                check._b2_refusal("asks source declares no ask: " + B2_ASKS_REL),
+            ),
+            (
+                "duplicate source pair",
+                b2_asks_bytes(
+                    (("read", "<principal>/"), ("read", "<principal>/"))
+                ),
+                check._b2_refusal(
+                    "asks source repeats the pair (read, <principal>/): "
+                    + B2_ASKS_REL
+                ),
+            ),
+        )
+        for name, asks, expected in cases:
+            if asks is None:
+                root = self._temp_root()
+                self._git(root, "init", "-q")
+                (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
+                    body, encoding="utf-8"
+                )
+                sha = self._commit(root)
+                self._repoint(root, sha, body)
+            else:
+                root = self._pinned(body, asks)
+            got = check.problems(root)
+            self.assertEqual(got, [expected], name)
+            code, out = self._main_at(root)
+            self.assertEqual(code, 1, name)
+            self.assertEqual(out, expected + "\n", name)
+
+    def _main_at(self, root):
+        original = check.worktree_root
+        buf = io.StringIO()
+        try:
+            check.worktree_root = lambda: root
+            with contextlib.redirect_stdout(buf):
+                code = check.main()
+        finally:
+            check.worktree_root = original
+        return code, buf.getvalue()
+
+    def test_b2_invalid_pin_skips_source_read(self):
+        body = b2_draft_body(b2_table(b2_pairs()))
+        original = check._pinned_bytes
+        reads = []
+
+        def record(root, sha, rel):
+            reads.append(rel)
+            return original(root, sha, rel)
+
+        pinned = original
+        try:
+            check._pinned_bytes = record
+            for pin, expected in (
+                ("", "refuse: draft has no pinned commit"),
+                (
+                    "Pinned commit: HEAD\n",
+                    "refuse: pinned commit is not one 40-hex commit",
+                ),
+                (
+                    "Pinned commit: " + "f" * 40 + "\n",
+                    "refuse: pinned commit is not a commit: " + "f" * 40,
+                ),
+            ):
+                root = self._temp_root()
+                self._git(root, "init", "-q")
+                (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
+                    pin + body, encoding="utf-8"
+                )
+                path = root / B2_ASKS_REL
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b2_asks_bytes())
+                self._commit(root)
+                reads.clear()
+                self.assertEqual(check.problems(root), [expected], pin)
+                self.assertNotIn(B2_ASKS_REL, reads, pin)
+                self.assertEqual(reads, [], pin)
+        finally:
+            check._pinned_bytes = pinned
+
+    def test_b2_asks_use_the_pinned_commit(self):
+        body = b2_draft_body(b2_table(b2_pairs()))
+        root, sha = self._repo(body)
+        self._repoint(root, sha, body)
+        self.assertEqual(check.problems(root), [])
+        # A dirty working-tree asks file cannot change a valid pinned mapping.
+        asks = root / B2_ASKS_REL
+        asks.write_bytes(b2_asks_bytes((("read", "<principal>/"),)))
+        self.assertEqual(check.problems(root), [])
+        asks.write_bytes(b2_asks_bytes())
+        self.assertEqual(check.problems(root), [])
+        # A working-tree repair cannot make an invalid pinned source pass.
+        pinned = b2_asks_bytes(B2_TEST_ASKS + (("run", "<principal>/Projects/"),))
+        root, sha = self._repo(body, pinned)
+        self._repoint(root, sha, body)
+        expected = check._b2_refusal(
+            "mapping has no row for the pair (run, <principal>/Projects/)"
+        )
+        self.assertIn(expected, check.problems(root))
+        (root / B2_ASKS_REL).write_bytes(b2_asks_bytes())
+        self.assertIn(expected, check.problems(root))
+        # A second commit with a different ask pair changes the expected mapping.
+        short = (("read", "<principal>/"), ("hosted", "Models/"))
+        longer = short + (("run", "<principal>/Projects/"),)
+        body = b2_draft_body(b2_table(b2_pairs(short)))
+        root, first = self._repo(body, b2_asks_bytes(short))
+        self._repoint(root, first, body)
+        self.assertEqual(check.problems(root), [])
+        (root / B2_ASKS_REL).write_bytes(b2_asks_bytes(longer))
+        second = self._commit(root)
+        self._repoint(root, second, body)
+        self.assertEqual(
+            check.problems(root),
+            [
+                check._b2_refusal(
+                    "mapping has no row for the pair (run, <principal>/Projects/)"
+                )
+            ],
+        )
+        self._repoint(root, first, body)
+        self.assertEqual(check.problems(root), [])
+
+    def test_live_draft_b2_mapping_covers_every_pinned_ask(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        rows, reason = check.b2_table(text)
+        self.assertIsNone(reason)
+        pairs, reason = check.b2_source_ask_pairs(root, sha)
+        self.assertIsNone(reason)
+        self.assertEqual([check.b2_pair_of(row) for row in rows], pairs)
+        for row in rows:
+            for cell in row:
+                self.assertTrue(check.b2_text(cell), row)
+        self.assertEqual(check.problems(root), [])
+
+    def test_b2_named_refusals(self):
+        """Every named B2 refusal answers the draft that plants it."""
+        rows = b2_pairs()
+        table = b2_table(rows)
+        cases = (
+            (
+                "mapping table is absent",
+                b2_draft_body("No table here.\n"),
+                b2_asks_bytes(),
+            ),
+            (
+                "mapping table is not one",
+                b2_draft_body(table + "\n" + table),
+                b2_asks_bytes(),
+            ),
+            (
+                "mapping table is outside section 6",
+                "## 3. Grant requests\n\n"
+                + table
+                + "\n\n"
+                + B2_SECTION
+                + "\n\nThe table stands in section 3.\n",
+                b2_asks_bytes(),
+            ),
+            (
+                "table header is not the six columns",
+                b2_draft_body(
+                    table.replace(
+                        "| Kind | Resource |", "| Kind | Pattern |", 1
+                    )
+                ),
+                b2_asks_bytes(),
+            ),
+            (
+                "table row 1 is malformed",
+                b2_draft_body(
+                    b2_table(
+                        [
+                            "| %s | `%s` | %s |"
+                            % (kind, resource, "short")
+                            for kind, resource in B2_TEST_ASKS
+                        ]
+                    )
+                ),
+                b2_asks_bytes(),
+            ),
+            (
+                "table row 1 has an empty Constraint",
+                b2_draft_body(
+                    b2_table(
+                        [b2_row(B2_TEST_ASKS[0][0], B2_TEST_ASKS[0][1], constraint="")]
+                        + rows[1:]
+                    )
+                ),
+                b2_asks_bytes(),
+            ),
+            (
+                "mapping has no row for the pair (read, <principal>/)",
+                b2_draft_body(b2_table(rows[1:])),
+                b2_asks_bytes(),
+            ),
+            (
+                "mapping has an extra row for the pair (run, <principal>/Projects/)",
+                b2_draft_body(b2_table(rows + [b2_row("run", "<principal>/Projects/")])),
+                b2_asks_bytes(),
+            ),
+            (
+                "mapping repeats the pair (read, <principal>/)",
+                b2_draft_body(b2_table(rows + [rows[0]])),
+                b2_asks_bytes(),
+            ),
+            (
+                "asks source is absent: " + B2_ASKS_REL,
+                b2_draft_body(table),
+                None,
+            ),
+            (
+                "asks source is not utf-8 text: " + B2_ASKS_REL,
+                b2_draft_body(table),
+                b"{\n\xff\n",
+            ),
+            (
+                "asks source is not JSON: " + B2_ASKS_REL,
+                b2_draft_body(table),
+                b"{\n",
+            ),
+            (
+                "asks source is not schema elastos.agent-host.asks/v1: "
+                + B2_ASKS_REL,
+                b2_draft_body(table),
+                b2_asks_bytes(schema="elastos.agent-host.asks/v2"),
+            ),
+        )
+        for expected, body, asks in cases:
+            if asks is None:
+                root = self._temp_root()
+                self._git(root, "init", "-q")
+                (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
+                    body, encoding="utf-8"
+                )
+                sha = self._commit(root)
+                self._repoint(root, sha, body)
+            else:
+                root = self._pinned(body, asks)
+            self.assertIn(check._b2_refusal(expected), check.problems(root), expected)
+
+    def test_falsifier_b2_coverage_is_caught(self):
+        named = (
+            self.test_b2_named_refusals,
+            self.test_b2_missing_pair_is_refused,
+            self.test_b2_duplicate_or_extra_pair_is_refused,
+            self.test_b2_table_shape_is_refused,
+            self.test_b2_pinned_source_is_refused,
+        )
+        for case in named:
+            case()
+        original = check.b2_refusals
+        try:
+            check.b2_refusals = lambda root, text, sha: []
+            for case in named:
+                with self.assertRaises(AssertionError, msg=case.__name__):
+                    case()
+        finally:
+            check.b2_refusals = original
+        for case in named:
+            case()
+        print("CAUGHT b2-coverage")
+
+    def test_falsifier_b2_working_tree_read_is_caught(self):
+        original = check._pinned_bytes
+
+        def planted(root, sha, rel):
+            if rel == B2_ASKS_REL:
+                path = Path(root) / rel
+                return path.read_bytes() if path.is_file() else None
+            return original(root, sha, rel)
+
+        self._caught(
+            "_pinned_bytes",
+            planted,
+            self.test_b2_asks_use_the_pinned_commit,
+            "refuse: B2",
+            "CAUGHT b2-pinned-source",
         )
