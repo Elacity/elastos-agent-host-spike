@@ -220,8 +220,14 @@ use std::process::Command;
 /// catches it, at did's launched-profile check, because the head keeps its
 /// order, the contract checks read only allow forms and no suite case reads
 /// that literal, so the journey fails at its launched profile and its oracle
-/// disagree panic, which names the planted form.
-const EXPECTED_FALSIFIERS: usize = 136;
+/// disagree panic, which names the planted form. Task 116 adds WP139, which
+/// reads `/etc/hosts`, outside every grant, in `status`'s ok arm and answers
+/// `storage_error` when that read is denied, and WP140, which appends one byte
+/// to `wallet-key.hex` inside the granted root in the same arm while every
+/// answer stays ok, so
+/// `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged`
+/// fails on its first answer and on its wallet directory comparison.
+const EXPECTED_FALSIFIERS: usize = 138;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
