@@ -53,7 +53,10 @@
 //! before that list is read. `record_use` appends one `capability_use` after
 //! `protected_write` or `protected_read` succeeds. The list is newest first.
 //! A refusal appends nothing. The lab event has no token, and the body has
-//! no epoch.
+//! no epoch. A shell grant, deny or revoke appends one event through that
+//! same `record_use` after the decision succeeds. `get_audit_types` answers
+//! `GET /api/audit/types` with the four type names and reads no store. A
+//! stop's revoke stays unwritten.
 
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -639,7 +642,9 @@ impl StandIn {
     /// `shell` as settler. A `starting` instance with that session ends
     /// `failed` with the deny reason as its cause, revokes its live grants and
     /// settles its remaining pending requests through the session cleanup.
-    /// Any other phase stays. Ok is `{"success": true}`.
+    /// Any other phase stays. Ok is `{"success": true}`. After that writer
+    /// and that life change, `record_use` appends one `capability_denied`.
+    /// A refusal appends nothing.
     pub fn post_capability_deny(
         &mut self,
         caller: Caller<'_>,
@@ -658,6 +663,8 @@ impl StandIn {
             return Err((400, format!("request is not pending: {request_id}")));
         }
         let session_id = request.session_id.clone();
+        let resource = request.resource.clone();
+        let action = request.action.clone();
         self.settle_record(request_id, RequestStatus::Denied, reason, "shell");
         let instant = self.instant;
         if let Some(instance) = self
@@ -673,6 +680,14 @@ impl StandIn {
                 self.settle_pending(&session_id, reason);
             }
         }
+        self.record_use(
+            "capability_denied",
+            false,
+            request_id,
+            &session_id,
+            &resource,
+            &action,
+        );
         Ok(json!({ "success": true }))
     }
 
@@ -681,7 +696,9 @@ impl StandIn {
     /// A shell grants one pending request through the one writer, which stores
     /// `granted`, the rationale and `shell` as settler. `seed_grant` then
     /// stores the one `Live` grant for that request. Ok is
-    /// `{"success": true}` and carries no token.
+    /// `{"success": true}` and carries no token. After that writer and that
+    /// live grant, `record_use` appends one `capability_grant`. A refusal
+    /// appends nothing.
     pub fn post_capability_grant(
         &mut self,
         caller: Caller<'_>,
@@ -714,6 +731,14 @@ impl StandIn {
             instant,
             Life::Live,
             false,
+        );
+        self.record_use(
+            "capability_grant",
+            true,
+            &request_id,
+            &session_id,
+            &resource,
+            &action,
         );
         Ok(json!({ "success": true }))
     }
@@ -765,23 +790,43 @@ impl StandIn {
     /// ` was not granted`. On success the one writer stores `denied`,
     /// `Revoked by user` and `shell`, and the one life function drops that
     /// id's live grant. Ok is `{"success": true, "revoked_request_id": ...}`
-    /// and carries no token.
+    /// and carries no token. After that writer and that life change,
+    /// `record_use` appends one `capability_revoke` from that grant. A
+    /// refusal appends nothing.
     pub fn delete_capability(
         &mut self,
         caller: Caller<'_>,
         request_id: &str,
     ) -> Result<Value, (u16, String)> {
         require_shell(caller)?;
-        let Some(request) = self
-            .requests
-            .iter()
-            .find(|request| request.request_id == request_id)
-        else {
-            return Err((404, format!("Capability request not found: {request_id}")));
+        let (session_id, resource, action) = {
+            let Some(request) = self
+                .requests
+                .iter()
+                .find(|request| request.request_id == request_id)
+            else {
+                return Err((404, format!("Capability request not found: {request_id}")));
+            };
+            if request.status != RequestStatus::Granted {
+                return Err((400, format!("Capability {request_id} was not granted")));
+            }
+            match self
+                .grants
+                .iter()
+                .find(|grant| grant.request_id == request_id)
+            {
+                Some(grant) => (
+                    grant.session_id.clone(),
+                    grant.resource.clone(),
+                    grant.action.clone(),
+                ),
+                None => (
+                    request.session_id.clone(),
+                    request.resource.clone(),
+                    request.action.clone(),
+                ),
+            }
         };
-        if request.status != RequestStatus::Granted {
-            return Err((400, format!("Capability {request_id} was not granted")));
-        }
         self.settle_record(
             request_id,
             RequestStatus::Denied,
@@ -789,6 +834,14 @@ impl StandIn {
             "shell",
         );
         self.revoke_grant(request_id);
+        self.record_use(
+            "capability_revoke",
+            true,
+            request_id,
+            &session_id,
+            &resource,
+            &action,
+        );
         Ok(json!({
             "success": true,
             "revoked_request_id": request_id,
@@ -803,6 +856,10 @@ impl StandIn {
     /// string `reason`; a missing one is `Revoked all by user`. Another key is
     /// refused before a non-string `reason` is checked. Ok is
     /// `{"success": true, "reason": ...}` and carries no epoch or token.
+    /// The call snapshots the `Live` grants, revokes through this path, then
+    /// `record_use` appends one `capability_revoke` per snapshot entry,
+    /// sorted by `session_id` then `request_id`. An `Exhausted` grant and a
+    /// pending request append nothing. A refusal appends nothing.
     pub fn post_capability_revoke_all(
         &mut self,
         caller: Caller<'_>,
@@ -832,6 +889,20 @@ impl StandIn {
             }
             _ => return Err((400, "revoke body needs an object".to_owned())),
         };
+        let mut snapshot = self
+            .grants
+            .iter()
+            .filter(|grant| is_live(grant.life))
+            .map(|grant| {
+                (
+                    grant.session_id.clone(),
+                    grant.request_id.clone(),
+                    grant.resource.clone(),
+                    grant.action.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
         let granted = self
             .requests
             .iter()
@@ -849,6 +920,16 @@ impl StandIn {
             .collect::<Vec<_>>();
         for request_id in live {
             self.revoke_grant(&request_id);
+        }
+        for (session_id, request_id, resource, action) in &snapshot {
+            self.record_use(
+                "capability_revoke",
+                true,
+                request_id,
+                session_id,
+                resource,
+                action,
+            );
         }
         Ok(json!({ "success": true, "reason": reason }))
     }
@@ -946,7 +1027,14 @@ impl StandIn {
         )?;
         self.protected_objects
             .insert(resolved.clone(), bytes.to_vec());
-        self.record_use(request_id, instance_id, &resolved, "write");
+        self.record_use(
+            "capability_use",
+            true,
+            request_id,
+            instance_id,
+            &resolved,
+            "write",
+        );
         Ok(resolved)
     }
 
@@ -974,24 +1062,42 @@ impl StandIn {
             .get(&resolved)
             .cloned()
             .ok_or_else(|| (404, "protected object is absent".to_owned()))?;
-        self.record_use(request_id, instance_id, &resolved, "read");
+        self.record_use(
+            "capability_use",
+            true,
+            request_id,
+            instance_id,
+            &resolved,
+            "read",
+        );
         Ok(stored)
     }
 
-    /// Appends one approved use and returns nothing.
+    /// Appends one audit event and returns nothing.
     ///
-    /// `protected_write` and `protected_read` are the only callers, and each
-    /// calls this once after the bytes are stored or found. `at` is the test
-    /// instant. The resource is the resolved uri.
-    fn record_use(&mut self, request_id: &str, session_id: &str, resource: &str, action: &str) {
+    /// This is the only append. `event_type` and `success` name the decision.
+    /// `protected_write` and `protected_read` pass `capability_use` and `true`
+    /// after the bytes are stored or found. A shell grant, deny or revoke
+    /// calls this once after that decision succeeds. A refusal returns before
+    /// this call. `at` is the test instant. The event has no token and no
+    /// reason.
+    fn record_use(
+        &mut self,
+        event_type: &'static str,
+        success: bool,
+        request_id: &str,
+        session_id: &str,
+        resource: &str,
+        action: &str,
+    ) {
         self.audit.push(AuditUse {
-            event_type: "capability_use",
+            event_type,
             at: self.instant,
             request_id: request_id.to_owned(),
             session_id: session_id.to_owned(),
             resource: resource.to_owned(),
             action: action.to_owned(),
-            success: true,
+            success,
         });
     }
 
@@ -1032,6 +1138,25 @@ impl StandIn {
         Ok(json!({
             "events": events,
             "total_in_memory": total_in_memory,
+        }))
+    }
+
+    /// `GET /api/audit/types`.
+    ///
+    /// A client is status 403 with `This endpoint requires shell privileges`,
+    /// and that check runs before any other work. The Ok object's only key is
+    /// `event_types`. The value is `capability_denied`, `capability_grant`,
+    /// `capability_revoke` and `capability_use`, in that order, including when
+    /// the store is empty. This method reads no event store and appends nothing.
+    pub fn get_audit_types(&self, caller: Caller<'_>) -> Result<Value, (u16, String)> {
+        require_shell(caller)?;
+        Ok(json!({
+            "event_types": [
+                "capability_denied",
+                "capability_grant",
+                "capability_revoke",
+                "capability_use",
+            ],
         }))
     }
 
@@ -1467,7 +1592,8 @@ fn keep(grant: &Grant, caller: Caller<'_>) -> bool {
     is_live(grant.life) && visible(grant, caller)
 }
 
-/// One life test. `keep`, `revoke_live`, `revoke_grant` and `authorise` use it.
+/// One life test. `keep`, `revoke_live`, `revoke_grant`, `authorise` and the
+/// revoke-all audit snapshot use it.
 fn is_live(life: Life) -> bool {
     life == Life::Live
 }
@@ -10987,6 +11113,145 @@ mod tests {
         );
     }
 
+    fn expected_types() -> Value {
+        json!({
+            "event_types": [
+                "capability_denied",
+                "capability_grant",
+                "capability_revoke",
+                "capability_use",
+            ],
+        })
+    }
+
+    fn shell_types(standin: &StandIn) -> Value {
+        let body = standin
+            .get_audit_types(Caller::Shell)
+            .expect("the stand-in did the work: the shell reads the audit types");
+        assert_keys(
+            &body,
+            &["event_types"],
+            "the stand-in did the work: the audit type body's only key is event_types",
+        );
+        body
+    }
+
+    macro_rules! refused_audit {
+        ($standin:ident, $call:expr, $status:expr, $reason:expr, $total:expr, $message:expr $(,)?) => {{
+            let result = $call;
+            assert_eq!(
+                result,
+                Err(($status, $reason.to_owned())),
+                "the stand-in did the work: {}",
+                $message
+            );
+            assert_eq!(
+                audit_total(&$standin),
+                $total,
+                "the stand-in did the work: {} appends nothing",
+                $message
+            );
+        }};
+    }
+
+    fn assert_decision(
+        event: &Value,
+        event_type: &str,
+        at: u64,
+        request_id: &str,
+        session_id: &str,
+        resource: &str,
+        action: &str,
+        success: bool,
+        message: &str,
+    ) {
+        assert_keys(
+            event,
+            &[
+                "action",
+                "at",
+                "request_id",
+                "resource",
+                "session_id",
+                "success",
+                "type",
+            ],
+            &format!(
+                "the stand-in did the work: {message} has type, at, request_id, session_id, resource, action and success"
+            ),
+        );
+        assert_eq!(
+            event,
+            &json!({
+                "type": event_type,
+                "at": at,
+                "request_id": request_id,
+                "session_id": session_id,
+                "resource": resource,
+                "action": action,
+                "success": success,
+            }),
+            "the stand-in did the work: {message}"
+        );
+    }
+
+    fn audit_events(standin: &StandIn) -> Vec<Value> {
+        shell_audit(standin, None, None)["events"]
+            .as_array()
+            .expect("the stand-in did the work: events is a list")
+            .clone()
+    }
+
+    fn assert_audit_list(events: &[Value], expected: &[(&str, u64, &str, &str, &str, &str, bool)]) {
+        assert_eq!(
+            events.len(),
+            expected.len(),
+            "the stand-in did the work: the audit list has one event per decision"
+        );
+        for (event, (event_type, at, request_id, session_id, resource, action, success)) in
+            events.iter().zip(expected)
+        {
+            assert_decision(
+                event,
+                event_type,
+                *at,
+                request_id,
+                session_id,
+                resource,
+                action,
+                *success,
+                &format!("{event_type} {request_id}"),
+            );
+        }
+    }
+
+    fn decision_reason(standin: &StandIn, session_id: &str, request_id: &str) -> String {
+        request_entries(standin, session_id)
+            .into_iter()
+            .find(|entry| entry["request_id"] == request_id)
+            .expect("the stand-in did the work: the request record stays")["decision_reason"]
+            .as_str()
+            .expect("the stand-in did the work: the request record holds a decision reason")
+            .to_owned()
+    }
+
+    fn request_status(standin: &StandIn, session_id: &str, request_id: &str) -> String {
+        request_entries(standin, session_id)
+            .into_iter()
+            .find(|entry| entry["request_id"] == request_id)
+            .expect("the stand-in did the work: the request record stays")["status"]
+            .as_str()
+            .expect("the stand-in did the work: the request record holds a status")
+            .to_owned()
+    }
+
+    fn assert_absent(events: &[Value], request_id: &str) {
+        assert!(
+            events.iter().all(|event| event["request_id"] != request_id),
+            "the stand-in did the work: {request_id} adds no audit event"
+        );
+    }
+
     fn refusal<T>(result: Result<T, (u16, String)>) -> Result<(), (u16, String)> {
         result.map(|_| ())
     }
@@ -12858,6 +13123,1187 @@ mod tests {
             ),
             Ok(bytes),
             "the stand-in did the work: the refusal leaves the stored bytes"
+        );
+    }
+
+    #[test]
+    fn standin_shell_decisions_join_the_audit_list() {
+        let mut standin = StandIn::new();
+        launch_two_running(&mut standin);
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 is running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 is running",
+        );
+
+        let client = Caller::Client {
+            session_id: "component-1",
+        };
+        const SHELL: &str = "This endpoint requires shell privileges";
+        let shared = SHARED_RESOURCE;
+        let orphan = "localhost://Public/resident-instances/orphan.txt";
+        let spent = "localhost://Public/resident-instances/spent.txt";
+        let old = "localhost://Public/resident-instances/old.txt";
+        let wait = "localhost://Public/resident-instances/wait.txt";
+        let guest = "localhost://UsersAI/self/journal";
+        let digest = &crate::identity::sha256(b"agent-ada")[..24];
+        let resolved = format!("localhost://UsersAI/{digest}/journal");
+
+        assert_eq!(
+            shell_audit(&standin, None, None),
+            json!({"events": [], "total_in_memory": 0}),
+            "the stand-in did the work: the shell audit list starts empty"
+        );
+        assert_eq!(
+            shell_types(&standin),
+            expected_types(),
+            "the stand-in did the work: the shell type list names the four audit types"
+        );
+        refused_audit!(
+            standin,
+            standin.get_audit_types(client),
+            403,
+            SHELL,
+            0,
+            "a client is refused before the type list is built",
+        );
+        assert_eq!(
+            shell_types(&standin),
+            expected_types(),
+            "the stand-in did the work: the shell type list stays the four audit types"
+        );
+        assert_eq!(
+            audit_total(&standin),
+            0,
+            "the stand-in did the work: reading the type list appends nothing"
+        );
+        refused_audit!(
+            standin,
+            standin.get_audit(client, None, None),
+            403,
+            SHELL,
+            0,
+            "a client is refused before the audit list is read",
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_grant(client, &json!([])),
+            403,
+            SHELL,
+            0,
+            "a client grant is refused before the body is read",
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_deny(client, &json!({})),
+            403,
+            SHELL,
+            0,
+            "a client deny is refused before the body is read",
+        );
+        refused_audit!(
+            standin,
+            standin.delete_capability(client, "missing"),
+            403,
+            SHELL,
+            0,
+            "a client revoke is refused before the request is read",
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_revoke_all(client, &json!({})),
+            403,
+            SHELL,
+            0,
+            "a client revoke-all is refused before the body is read",
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_grant(Caller::Shell, &json!([])),
+            400,
+            "grant body needs request_id",
+            0,
+            "a grant body that is not an object is refused",
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_grant(Caller::Shell, &json!({"request_id": 1})),
+            400,
+            "grant request_id must be a string",
+            0,
+            "a non-string grant request_id is refused",
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_grant(
+                Caller::Shell,
+                &json!({"request_id": "missing", "token": "x"}),
+            ),
+            400,
+            "grant body rejects token",
+            0,
+            "a grant body with token is refused",
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_grant(
+                Caller::Shell,
+                &json!({"request_id": "missing", "duration": "week"}),
+            ),
+            400,
+            "Invalid duration: week. Expected 'once' or 'session'",
+            0,
+            "a grant duration other than once or session is refused",
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_deny(Caller::Shell, &json!([])),
+            400,
+            "deny body needs request_id",
+            0,
+            "a deny body that is not an object is refused",
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_deny(Caller::Shell, &json!({"reason": "x"})),
+            400,
+            "deny body needs request_id",
+            0,
+            "a deny body without request_id is refused",
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_deny(
+                Caller::Shell,
+                &json!({"request_id": "missing", "token": "x"}),
+            ),
+            400,
+            "deny body rejects token",
+            0,
+            "a deny body with token is refused",
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_deny(Caller::Shell, &json!({"request_id": 1})),
+            400,
+            "deny request_id must be a string",
+            0,
+            "a non-string deny request_id is refused",
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_deny(Caller::Shell, &json!({"request_id": "missing"})),
+            400,
+            "unknown request: missing",
+            0,
+            "an unknown deny is refused",
+        );
+        refused_audit!(
+            standin,
+            standin.delete_capability(Caller::Shell, "missing"),
+            404,
+            "Capability request not found: missing",
+            0,
+            "an unknown revoke is refused",
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_revoke_all(Caller::Shell, &json!([])),
+            400,
+            "revoke body needs an object",
+            0,
+            "a revoke-all body that is not an object is refused",
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_revoke_all(Caller::Shell, &json!({"token": "x"})),
+            400,
+            "revoke body rejects token",
+            0,
+            "a revoke-all body with token is refused",
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_revoke_all(Caller::Shell, &json!({"reason": 1})),
+            400,
+            "revoke reason must be a string",
+            0,
+            "a non-string revoke-all reason is refused",
+        );
+        let empty_revoke = standin
+            .post_capability_revoke_all(Caller::Shell, &json!({}))
+            .expect("the stand-in did the work: an empty revoke-all succeeds");
+        assert_eq!(
+            empty_revoke,
+            json!({"success": true, "reason": "Revoked all by user"}),
+            "the stand-in did the work: an empty revoke-all keeps its Ok keys"
+        );
+        assert_eq!(
+            audit_total(&standin),
+            0,
+            "the stand-in did the work: a revoke-all with no Live grant appends nothing"
+        );
+
+        for (request_id, session_id) in [
+            ("req-a", "component-1"),
+            ("req-c", "component-1"),
+            ("req-b", "component-2"),
+            ("req-x", "component-2"),
+        ] {
+            standin
+                .seed_request(request_id, session_id, shared, "read", "read shared")
+                .expect("the stand-in did the work: it stores the pending request");
+        }
+        assert_eq!(
+            audit_total(&standin),
+            0,
+            "the stand-in did the work: seeding a request appends nothing"
+        );
+        let unknown = standin.post_capability_grant(
+            Caller::Shell,
+            &json!({"request_id": "missing", "duration": "session"}),
+        );
+        assert!(
+            matches!(&unknown, Err((400, reason)) if reason.starts_with("unknown request:")),
+            "the stand-in did the work: an unknown grant is refused: {unknown:?}"
+        );
+        assert_eq!(
+            unknown,
+            Err((400, "unknown request: missing".to_owned())),
+            "the stand-in did the work: an unknown grant names the id"
+        );
+        assert_eq!(
+            shell_audit(&standin, None, None),
+            json!({"events": [], "total_in_memory": 0}),
+            "the stand-in did the work: an unknown grant appends nothing"
+        );
+
+        standin.set_instant(4);
+        let grant_a = standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({
+                    "request_id": "req-a",
+                    "duration": "session",
+                    "rationale": "grant shared read",
+                }),
+            )
+            .expect("the stand-in did the work: it grants req-a");
+        assert_eq!(
+            grant_a,
+            json!({"success": true}),
+            "the stand-in did the work: the req-a grant answers success true"
+        );
+        let grant_b = standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({
+                    "request_id": "req-b",
+                    "duration": "session",
+                    "rationale": "grant sibling",
+                }),
+            )
+            .expect("the stand-in did the work: it grants req-b");
+        assert_eq!(
+            grant_b,
+            json!({"success": true}),
+            "the stand-in did the work: the req-b grant answers success true"
+        );
+        let grant_c = standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({
+                    "request_id": "req-c",
+                    "duration": "once",
+                    "rationale": "grant once",
+                }),
+            )
+            .expect("the stand-in did the work: it grants req-c");
+        assert_eq!(
+            grant_c,
+            json!({"success": true}),
+            "the stand-in did the work: the req-c grant answers success true"
+        );
+        assert_eq!(
+            audit_total(&standin),
+            3,
+            "the stand-in did the work: three grants append three events"
+        );
+        assert_eq!(
+            shell_types(&standin),
+            expected_types(),
+            "the stand-in did the work: the type list stays the four names when the store holds grants"
+        );
+        assert_eq!(
+            audit_total(&standin),
+            3,
+            "the stand-in did the work: reading the type list still appends nothing"
+        );
+        assert_eq!(
+            decision_reason(&standin, "component-1", "req-a"),
+            "grant shared read",
+            "the stand-in did the work: the request record holds the grant rationale"
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_revoke_all(client, &json!({})),
+            403,
+            SHELL,
+            3,
+            "a client revoke-all leaves the three grant events",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-a"),
+            (Life::Live, false),
+            "the stand-in did the work: req-a stays live after the client revoke-all"
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_grant(
+                Caller::Shell,
+                &json!({"request_id": "req-a", "duration": "session"}),
+            ),
+            400,
+            "request is not pending: req-a",
+            3,
+            "a second grant of req-a is refused",
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_deny(
+                Caller::Shell,
+                &json!({"request_id": "req-a", "reason": "too late"}),
+            ),
+            400,
+            "request is not pending: req-a",
+            3,
+            "a deny of a granted request is refused",
+        );
+        assert_eq!(
+            decision_reason(&standin, "component-1", "req-a"),
+            "grant shared read",
+            "the stand-in did the work: the refused deny leaves the grant rationale"
+        );
+        assert_audit_list(
+            &audit_events(&standin),
+            &[
+                (
+                    "capability_grant",
+                    4,
+                    "req-c",
+                    "component-1",
+                    shared,
+                    "read",
+                    true,
+                ),
+                (
+                    "capability_grant",
+                    4,
+                    "req-b",
+                    "component-2",
+                    shared,
+                    "read",
+                    true,
+                ),
+                (
+                    "capability_grant",
+                    4,
+                    "req-a",
+                    "component-1",
+                    shared,
+                    "read",
+                    true,
+                ),
+            ],
+        );
+        let listed = shell_audit(&standin, None, None);
+        assert!(
+            !listed.to_string().contains("token"),
+            "the stand-in did the work: the audit response has no token"
+        );
+        assert!(
+            !listed.to_string().contains("current_epoch"),
+            "the stand-in did the work: the audit response has no current_epoch"
+        );
+        assert!(
+            !listed.to_string().contains("grant shared read"),
+            "the stand-in did the work: the audit event does not copy the rationale"
+        );
+
+        let denied = standin
+            .post_capability_deny(
+                Caller::Shell,
+                &json!({"request_id": "req-x", "reason": "sibling read denied"}),
+            )
+            .expect("the stand-in did the work: it denies req-x");
+        assert_eq!(
+            denied,
+            json!({"success": true}),
+            "the stand-in did the work: the req-x deny answers success true"
+        );
+        assert_eq!(
+            audit_total(&standin),
+            4,
+            "the stand-in did the work: the deny appends one event"
+        );
+        assert_eq!(
+            decision_reason(&standin, "component-2", "req-x"),
+            "sibling read denied",
+            "the stand-in did the work: the request record holds the deny reason"
+        );
+        assert_audit_list(
+            &audit_events(&standin),
+            &[
+                (
+                    "capability_denied",
+                    4,
+                    "req-x",
+                    "component-2",
+                    shared,
+                    "read",
+                    false,
+                ),
+                (
+                    "capability_grant",
+                    4,
+                    "req-c",
+                    "component-1",
+                    shared,
+                    "read",
+                    true,
+                ),
+                (
+                    "capability_grant",
+                    4,
+                    "req-b",
+                    "component-2",
+                    shared,
+                    "read",
+                    true,
+                ),
+                (
+                    "capability_grant",
+                    4,
+                    "req-a",
+                    "component-1",
+                    shared,
+                    "read",
+                    true,
+                ),
+            ],
+        );
+        assert!(
+            !shell_audit(&standin, None, None)
+                .to_string()
+                .contains("sibling read denied"),
+            "the stand-in did the work: the deny event does not copy the reason"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 stays running after the deny",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running after the deny",
+        );
+        let grants = shell_audit(&standin, None, Some("capability_grant"));
+        assert_eq!(
+            grants["total_in_memory"], 4,
+            "the stand-in did the work: the grant filter leaves the stored count"
+        );
+        assert_audit_list(
+            grants["events"]
+                .as_array()
+                .expect("the stand-in did the work: events is a list"),
+            &[
+                (
+                    "capability_grant",
+                    4,
+                    "req-c",
+                    "component-1",
+                    shared,
+                    "read",
+                    true,
+                ),
+                (
+                    "capability_grant",
+                    4,
+                    "req-b",
+                    "component-2",
+                    shared,
+                    "read",
+                    true,
+                ),
+                (
+                    "capability_grant",
+                    4,
+                    "req-a",
+                    "component-1",
+                    shared,
+                    "read",
+                    true,
+                ),
+            ],
+        );
+        assert_eq!(
+            shell_audit(&standin, None, Some("capability_use")),
+            json!({"events": [], "total_in_memory": 4}),
+            "the stand-in did the work: a capability_use filter keeps no shell decision"
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_deny(Caller::Shell, &json!({"request_id": "req-x"})),
+            400,
+            "request is not pending: req-x",
+            4,
+            "a second deny of req-x is refused",
+        );
+        refused_audit!(
+            standin,
+            standin.post_capability_grant(
+                Caller::Shell,
+                &json!({"request_id": "req-x", "duration": "session"}),
+            ),
+            400,
+            "request is not pending: req-x",
+            4,
+            "a grant of a denied request is refused",
+        );
+
+        standin.set_instant(5);
+        let revoked = standin
+            .delete_capability(Caller::Shell, "req-a")
+            .expect("the stand-in did the work: it revokes req-a");
+        assert_eq!(
+            revoked,
+            json!({"success": true, "revoked_request_id": "req-a"}),
+            "the stand-in did the work: the revoke keeps its Ok keys"
+        );
+        assert_eq!(
+            audit_total(&standin),
+            5,
+            "the stand-in did the work: the revoke appends one event"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-a"),
+            (Life::Revoked, false),
+            "the stand-in did the work: req-a is revoked"
+        );
+        assert_eq!(
+            decision_reason(&standin, "component-1", "req-a"),
+            "Revoked by user",
+            "the stand-in did the work: the request record holds the revoke reason"
+        );
+        assert_decision(
+            &audit_events(&standin)[0],
+            "capability_revoke",
+            5,
+            "req-a",
+            "component-1",
+            shared,
+            "read",
+            true,
+            "the revoke of req-a",
+        );
+        assert!(
+            !shell_audit(&standin, None, None)
+                .to_string()
+                .contains("Revoked by user"),
+            "the stand-in did the work: the revoke event does not copy the reason"
+        );
+        refused_audit!(
+            standin,
+            standin.delete_capability(Caller::Shell, "req-a"),
+            400,
+            "Capability req-a was not granted",
+            5,
+            "a second revoke of req-a is refused",
+        );
+
+        standin.seed_grant(
+            "req-orphan",
+            "component-2",
+            orphan,
+            "read",
+            "session",
+            4,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-spent",
+            "component-2",
+            spent,
+            "spend",
+            "once",
+            4,
+            Life::Exhausted,
+            false,
+        );
+        standin.seed_grant(
+            "req-old",
+            "component-1",
+            old,
+            "expire",
+            "session",
+            4,
+            Life::Expired,
+            false,
+        );
+        standin
+            .seed_request("req-wait", "component-1", wait, "wait", "still waiting")
+            .expect("the stand-in did the work: it stores the pending request");
+        assert_eq!(
+            audit_total(&standin),
+            5,
+            "the stand-in did the work: a seeded grant and a pending request append nothing"
+        );
+        refused_audit!(
+            standin,
+            standin.delete_capability(Caller::Shell, "req-wait"),
+            400,
+            "Capability req-wait was not granted",
+            5,
+            "a pending request is not a revoke",
+        );
+        assert_eq!(
+            request_status(&standin, "component-1", "req-wait"),
+            "pending",
+            "the stand-in did the work: the refused revoke leaves the pending request"
+        );
+
+        let revoke_all = standin
+            .post_capability_revoke_all(Caller::Shell, &json!({"reason": "stop every grant"}))
+            .expect("the stand-in did the work: it revokes every live grant");
+        assert_eq!(
+            revoke_all,
+            json!({"success": true, "reason": "stop every grant"}),
+            "the stand-in did the work: revoke-all keeps its Ok keys"
+        );
+        let revoked_events = audit_events(&standin);
+        for request_id in ["req-spent", "req-old", "req-wait"] {
+            assert_absent(&revoked_events, request_id);
+        }
+        assert_audit_list(
+            &revoked_events[..3],
+            &[
+                (
+                    "capability_revoke",
+                    5,
+                    "req-orphan",
+                    "component-2",
+                    orphan,
+                    "read",
+                    true,
+                ),
+                (
+                    "capability_revoke",
+                    5,
+                    "req-b",
+                    "component-2",
+                    shared,
+                    "read",
+                    true,
+                ),
+                (
+                    "capability_revoke",
+                    5,
+                    "req-c",
+                    "component-1",
+                    shared,
+                    "read",
+                    true,
+                ),
+            ],
+        );
+        assert_eq!(
+            audit_total(&standin),
+            8,
+            "the stand-in did the work: revoke-all appends one event per Live grant"
+        );
+        assert_audit_list(
+            &revoked_events,
+            &[
+                (
+                    "capability_revoke",
+                    5,
+                    "req-orphan",
+                    "component-2",
+                    orphan,
+                    "read",
+                    true,
+                ),
+                (
+                    "capability_revoke",
+                    5,
+                    "req-b",
+                    "component-2",
+                    shared,
+                    "read",
+                    true,
+                ),
+                (
+                    "capability_revoke",
+                    5,
+                    "req-c",
+                    "component-1",
+                    shared,
+                    "read",
+                    true,
+                ),
+                (
+                    "capability_revoke",
+                    5,
+                    "req-a",
+                    "component-1",
+                    shared,
+                    "read",
+                    true,
+                ),
+                (
+                    "capability_denied",
+                    4,
+                    "req-x",
+                    "component-2",
+                    shared,
+                    "read",
+                    false,
+                ),
+                (
+                    "capability_grant",
+                    4,
+                    "req-c",
+                    "component-1",
+                    shared,
+                    "read",
+                    true,
+                ),
+                (
+                    "capability_grant",
+                    4,
+                    "req-b",
+                    "component-2",
+                    shared,
+                    "read",
+                    true,
+                ),
+                (
+                    "capability_grant",
+                    4,
+                    "req-a",
+                    "component-1",
+                    shared,
+                    "read",
+                    true,
+                ),
+            ],
+        );
+        assert!(
+            !shell_audit(&standin, None, None)
+                .to_string()
+                .contains("stop every grant"),
+            "the stand-in did the work: the revoke-all events do not copy the reason"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-b"),
+            (Life::Revoked, false),
+            "the stand-in did the work: req-b is revoked"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-c"),
+            (Life::Revoked, false),
+            "the stand-in did the work: req-c is revoked"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-orphan"),
+            (Life::Revoked, false),
+            "the stand-in did the work: req-orphan is revoked"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-spent"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: the exhausted grant stays exhausted"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-old"),
+            (Life::Expired, false),
+            "the stand-in did the work: the expired grant stays expired"
+        );
+        assert_eq!(
+            request_status(&standin, "component-1", "req-wait"),
+            "pending",
+            "the stand-in did the work: the pending request stays pending"
+        );
+        assert_eq!(
+            decision_reason(&standin, "component-2", "req-b"),
+            "stop every grant",
+            "the stand-in did the work: req-b's request record holds the revoke-all reason"
+        );
+        assert_eq!(
+            decision_reason(&standin, "component-1", "req-c"),
+            "stop every grant",
+            "the stand-in did the work: req-c's request record holds the revoke-all reason"
+        );
+        assert_eq!(
+            decision_reason(&standin, "component-1", "req-a"),
+            "Revoked by user",
+            "the stand-in did the work: the earlier revoke reason stays"
+        );
+        let limited = shell_audit(&standin, Some(1), None);
+        assert_eq!(
+            limited["total_in_memory"], 8,
+            "the stand-in did the work: limit 1 leaves the stored count"
+        );
+        assert_decision(
+            &limited["events"][0],
+            "capability_revoke",
+            5,
+            "req-orphan",
+            "component-2",
+            orphan,
+            "read",
+            true,
+            "limit 1 keeps the newest revoke",
+        );
+        assert_eq!(
+            limited["events"]
+                .as_array()
+                .expect("the stand-in did the work: events is a list")
+                .len(),
+            1,
+            "the stand-in did the work: limit 1 keeps one event"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 stays running after revoke-all",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running after revoke-all",
+        );
+
+        let again = standin
+            .post_capability_revoke_all(Caller::Shell, &json!({}))
+            .expect("the stand-in did the work: a second revoke-all succeeds");
+        assert_eq!(
+            again,
+            json!({"success": true, "reason": "Revoked all by user"}),
+            "the stand-in did the work: the empty revoke-all keeps its Ok keys"
+        );
+        assert_eq!(
+            audit_total(&standin),
+            8,
+            "the stand-in did the work: a revoke-all with no Live grant appends nothing"
+        );
+        for request_id in ["req-spent", "req-old", "req-wait"] {
+            assert_absent(&audit_events(&standin), request_id);
+        }
+        assert_eq!(
+            grant_record(&standin, "req-spent"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: the second revoke-all leaves the exhausted grant"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-old"),
+            (Life::Expired, false),
+            "the stand-in did the work: the second revoke-all leaves the expired grant"
+        );
+        assert_eq!(
+            request_status(&standin, "component-1", "req-wait"),
+            "pending",
+            "the stand-in did the work: the second revoke-all leaves the pending request"
+        );
+        assert_eq!(
+            shell_types(&standin),
+            expected_types(),
+            "the stand-in did the work: the type list does not shrink to the stored types"
+        );
+
+        standin
+            .bind_verified_principal(SHARED_PATH, "agent-ada")
+            .expect("the stand-in did the work: the launch principal binds");
+        let third = launch_finished(&mut standin);
+        assert_eq!(
+            third, "component-3",
+            "the stand-in did the work: the protected use has its own instance"
+        );
+        standin.set_instant(6);
+        standin
+            .seed_request("req-use", "component-3", guest, "write", "write journal")
+            .expect("the stand-in did the work: it stores the protected request");
+        let grant_use = standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({
+                    "request_id": "req-use",
+                    "duration": "session",
+                    "rationale": "grant journal",
+                }),
+            )
+            .expect("the stand-in did the work: it grants the protected write");
+        assert_eq!(
+            grant_use,
+            json!({"success": true}),
+            "the stand-in did the work: the protected grant answers success true"
+        );
+        assert_eq!(
+            audit_total(&standin),
+            9,
+            "the stand-in did the work: the protected grant joins the same audit list"
+        );
+        let missed = standin.protected_write("component-3", "req-missing", guest, b"no");
+        assert_eq!(
+            missed,
+            Err((400, "unknown grant: req-missing".to_owned())),
+            "the stand-in did the work: an unknown protected use is refused"
+        );
+        assert_eq!(
+            audit_total(&standin),
+            9,
+            "the stand-in did the work: a refused protected use appends nothing"
+        );
+        assert_eq!(
+            standin.protected_write("component-3", "req-use", guest, b"note"),
+            Ok(resolved.clone()),
+            "the stand-in did the work: the protected write stores the bytes"
+        );
+        assert_eq!(
+            audit_total(&standin),
+            10,
+            "the stand-in did the work: the protected use joins the same audit list"
+        );
+        assert_eq!(
+            decision_reason(&standin, "component-3", "req-use"),
+            "grant journal",
+            "the stand-in did the work: the protected request holds its rationale"
+        );
+        let combined = audit_events(&standin);
+        assert_decision(
+            &combined[0],
+            "capability_use",
+            6,
+            "req-use",
+            "component-3",
+            &resolved,
+            "write",
+            true,
+            "the protected use is newest on the same list",
+        );
+        assert_decision(
+            &combined[1],
+            "capability_grant",
+            6,
+            "req-use",
+            "component-3",
+            guest,
+            "write",
+            true,
+            "the protected grant stays behind its use",
+        );
+        assert_decision(
+            &combined[2],
+            "capability_revoke",
+            5,
+            "req-orphan",
+            "component-2",
+            orphan,
+            "read",
+            true,
+            "the earlier revoke stays on the same list",
+        );
+        assert!(
+            !shell_audit(&standin, None, None)
+                .to_string()
+                .contains("grant journal"),
+            "the stand-in did the work: the protected grant event does not copy the rationale"
+        );
+        let uses = shell_audit(&standin, None, Some("capability_use"));
+        assert_eq!(
+            uses["total_in_memory"], 10,
+            "the stand-in did the work: the use filter leaves the stored count"
+        );
+        assert_audit_list(
+            uses["events"]
+                .as_array()
+                .expect("the stand-in did the work: events is a list"),
+            &[(
+                "capability_use",
+                6,
+                "req-use",
+                "component-3",
+                &resolved,
+                "write",
+                true,
+            )],
+        );
+        let later_grants = shell_audit(&standin, None, Some("capability_grant"));
+        assert_eq!(later_grants["total_in_memory"], 10);
+        assert_audit_list(
+            later_grants["events"]
+                .as_array()
+                .expect("the stand-in did the work: events is a list"),
+            &[
+                (
+                    "capability_grant",
+                    6,
+                    "req-use",
+                    "component-3",
+                    guest,
+                    "write",
+                    true,
+                ),
+                (
+                    "capability_grant",
+                    4,
+                    "req-c",
+                    "component-1",
+                    shared,
+                    "read",
+                    true,
+                ),
+                (
+                    "capability_grant",
+                    4,
+                    "req-b",
+                    "component-2",
+                    shared,
+                    "read",
+                    true,
+                ),
+                (
+                    "capability_grant",
+                    4,
+                    "req-a",
+                    "component-1",
+                    shared,
+                    "read",
+                    true,
+                ),
+            ],
+        );
+        let revokes = shell_audit(&standin, None, Some("capability_revoke"));
+        assert_eq!(revokes["total_in_memory"], 10);
+        assert_audit_list(
+            revokes["events"]
+                .as_array()
+                .expect("the stand-in did the work: events is a list"),
+            &[
+                (
+                    "capability_revoke",
+                    5,
+                    "req-orphan",
+                    "component-2",
+                    orphan,
+                    "read",
+                    true,
+                ),
+                (
+                    "capability_revoke",
+                    5,
+                    "req-b",
+                    "component-2",
+                    shared,
+                    "read",
+                    true,
+                ),
+                (
+                    "capability_revoke",
+                    5,
+                    "req-c",
+                    "component-1",
+                    shared,
+                    "read",
+                    true,
+                ),
+                (
+                    "capability_revoke",
+                    5,
+                    "req-a",
+                    "component-1",
+                    shared,
+                    "read",
+                    true,
+                ),
+            ],
+        );
+        let denials = shell_audit(&standin, None, Some("capability_denied"));
+        assert_eq!(denials["total_in_memory"], 10);
+        assert_audit_list(
+            denials["events"]
+                .as_array()
+                .expect("the stand-in did the work: events is a list"),
+            &[(
+                "capability_denied",
+                4,
+                "req-x",
+                "component-2",
+                shared,
+                "read",
+                false,
+            )],
+        );
+        assert_eq!(
+            shell_audit(&standin, None, Some("capsule_launch")),
+            json!({"events": [], "total_in_memory": 10}),
+            "the stand-in did the work: another type keeps no event from this list"
+        );
+        let newest = shell_audit(&standin, Some(1), None);
+        assert_eq!(newest["total_in_memory"], 10);
+        assert_decision(
+            &newest["events"][0],
+            "capability_use",
+            6,
+            "req-use",
+            "component-3",
+            &resolved,
+            "write",
+            true,
+            "limit 1 keeps the protected use",
+        );
+        assert_eq!(
+            shell_types(&standin),
+            expected_types(),
+            "the stand-in did the work: the type list stays the four names after every decision"
+        );
+        assert_eq!(
+            audit_total(&standin),
+            10,
+            "the stand-in did the work: the type list still appends nothing"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 stays running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running",
         );
     }
 }

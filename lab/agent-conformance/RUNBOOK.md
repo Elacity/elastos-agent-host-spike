@@ -759,3 +759,5 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 `standin_approved_use_is_on_the_audit_list` is this stand-in, and a PASS there gives the Runtime no A15 credit.
 
 `standin_hostcall_returns_the_protected_result` is this stand-in, and a PASS there gives the Runtime no A15 credit.
+
+`standin_shell_decisions_join_the_audit_list` is this stand-in, and a PASS there gives the Runtime no A15 credit and no A6 credit.

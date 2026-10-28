@@ -13251,3 +13251,443 @@ Repair checks use `RUST_TEST_THREADS=2`, `CARGO_INCREMENTAL=0`, and `CARGO_NET_O
 - Exact restored proof: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_returns_the_protected_result -- --exact`: exit 0, 1 passed, real 0.07 seconds.
 
 Source hashes before and after the repair confirm that `bridge_envelope`, `protected_write`, `protected_read`, `authorise`, `authorise_presented`, `bind_verified_principal`, `resolve_protected_uri`, `record_use`, and `get_audit` are unchanged. The Public invoke arm remains within the unchanged `bridge_envelope`. The repair changes only `standin-runtime/mod.rs` and this record. Full-suite verification remains with the supervisor: this repair turn forbids Git commands, and the integration tests invoke Git through their receipt and source checks. The supervisor's fresh review remains required.
+
+## 081 — Shell grant, deny and revoke join the audit list
+
+081: `record_use` is the only append. A shell grant, deny, or revoke calls it once after that decision succeeds. A refusal appends nothing. `get_audit_types` answers `GET /api/audit/types` with `capability_denied`, `capability_grant`, `capability_revoke` and `capability_use`. `standin_shell_decisions_join_the_audit_list` fails on each hand-run plant and passes when they are restored. A PASS gives the Runtime no A15 credit and no A6 credit. `session_id` still equals the instance id. A stop's revoke stays unwritten.
+
+### Quotes from the contract (read only)
+
+`docs/AGENT_ARCHITECTURE.md`, Request flow, step 9:
+
+```text
+Runtime dispatches an approved operation to the owning provider and records
+the result in the same audit path used for a human action.
+```
+
+This task is that record for a shell grant, a shell deny, and a shell revoke. It is not a new list.
+
+`elastos/crates/elastos-runtime/src/primitives/audit.rs`, `event_type_name`:
+
+```text
+AuditEvent::CapabilityGrant { .. } => "capability_grant",
+AuditEvent::CapabilityDenied { .. } => "capability_denied",
+AuditEvent::CapabilityRevoke { .. } => "capability_revoke",
+```
+
+`elastos/crates/elastos-server/src/api/handlers/capability.rs`, `get_audit_event_types`, returns `event_types`. The three strings above are the shell decisions. This stand-in also names the existing `capability_use`. It does not copy the handler's full type list, a token, or an epoch.
+
+### Plants
+
+Each plant was applied alone. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_decisions_join_the_audit_list -- --exact`. The planted crate compiled, and that test failed on its assertion. The file was restored before the next plant. Restored, that test passes. No `falsifiers.json` id. Panic lines are `src/../standin-runtime/mod.rs`.
+
+F-standin-audit-decision-stub: the start of `post_capability_grant` returns Ok of `{"success": true}` before the writer and before `record_use`. Failed at `src/../standin-runtime/mod.rs:13198:9`: `a client grant is refused before the body is read`, left `Ok` of `{"success": true}`, right `Err((403, "This endpoint requires shell privileges"))`.
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let (request_id, duration, rationale) = grant_body(body)?;
+```
+
+New:
+
+```text
+        return Ok(json!({ "success": true }));
+        require_shell(caller)?;
+        let (request_id, duration, rationale) = grant_body(body)?;
+```
+
+F-standin-audit-decision-before: after the shell check and the body parse, `post_capability_grant` calls `record_use` and then continues, so the unknown id is listed. Failed at `src/../standin-runtime/mod.rs:13392:9`: `an unknown grant appends nothing`, left one event with `request_id` `missing`, right `{"events":[],"total_in_memory":0}`.
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let (request_id, duration, rationale) = grant_body(body)?;
+```
+
+New:
+
+```text
+        require_shell(caller)?;
+        let (request_id, duration, rationale) = grant_body(body)?;
+        self.record_use(
+            "capability_grant",
+            true,
+            request_id,
+            "component-1",
+            "localhost://Public/resident-instances/shared.txt",
+            "read",
+        );
+```
+
+F-standin-audit-grant-as-use: the grant success appends `capability_use`. Failed at `src/../standin-runtime/mod.rs:11183:9`: `capability_grant req-c`, left `type` `capability_use`, right `type` `capability_grant`.
+
+Old:
+
+```text
+        self.record_use(
+            "capability_grant",
+            true,
+            &request_id,
+            &session_id,
+            &resource,
+            &action,
+        );
+```
+
+New:
+
+```text
+        self.record_use(
+            "capability_use",
+            true,
+            &request_id,
+            &session_id,
+            &resource,
+            &action,
+        );
+```
+
+F-standin-audit-revoke-skip: `delete_capability` does not call `record_use`. Failed at `src/../standin-runtime/mod.rs:13689:9`: `the revoke appends one event`, left `4`, right `5`.
+
+Old:
+
+```text
+        self.revoke_grant(request_id);
+        self.record_use(
+            "capability_revoke",
+            true,
+            request_id,
+            &session_id,
+            &resource,
+            &action,
+        );
+```
+
+New:
+
+```text
+        self.revoke_grant(request_id);
+```
+
+F-standin-audit-revoke-all-one: `post_capability_revoke_all` appends one `capability_revoke` and returns, so `req-b` and `req-orphan` are absent. Failed at `src/../standin-runtime/mod.rs:11184:9`: `capability_revoke req-orphan`, left `request_id` `req-c`, right `request_id` `req-orphan`.
+
+Old:
+
+```text
+        for (session_id, request_id, resource, action) in &snapshot {
+            self.record_use(
+                "capability_revoke",
+                true,
+                request_id,
+                session_id,
+                resource,
+                action,
+            );
+        }
+```
+
+New:
+
+```text
+        if let Some((session_id, request_id, resource, action)) = snapshot.first() {
+            self.record_use(
+                "capability_revoke",
+                true,
+                request_id,
+                session_id,
+                resource,
+                action,
+            );
+        }
+        return Ok(json!({ "success": true, "reason": reason }));
+```
+
+F-standin-audit-types-stored: `get_audit_types` returns only types present in the store. Failed at `src/../standin-runtime/mod.rs:13166:9`: `the shell type list names the four audit types`, left `event_types` `[]`, right the four names.
+
+Old:
+
+```text
+        require_shell(caller)?;
+        Ok(json!({
+            "event_types": [
+                "capability_denied",
+                "capability_grant",
+                "capability_revoke",
+                "capability_use",
+            ],
+        }))
+```
+
+New:
+
+```text
+        require_shell(caller)?;
+        let mut names = self
+            .audit
+            .iter()
+            .map(|event| event.event_type)
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        Ok(json!({ "event_types": names }))
+```
+
+F-standin-audit-client-grant: the client branch of `post_capability_grant` appends and then returns 403. Failed at `src/../standin-runtime/mod.rs:13208:9`: `a client grant is refused before the body is read appends nothing`, left `1`, right `0`.
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let (request_id, duration, rationale) = grant_body(body)?;
+```
+
+New:
+
+```text
+        if let Caller::Client { .. } = caller {
+            self.record_use(
+                "capability_grant",
+                true,
+                "client",
+                "component-1",
+                "localhost://Public/resident-instances/shared.txt",
+                "read",
+            );
+            return Err((403, "This endpoint requires shell privileges".to_owned()));
+        }
+        require_shell(caller)?;
+        let (request_id, duration, rationale) = grant_body(body)?;
+```
+
+F-standin-audit-body-grant: a malformed grant body appends and then returns the body error. Failed at `src/../standin-runtime/mod.rs:13242:9`: `a grant body that is not an object is refused appends nothing`, left `1`, right `0`.
+
+Old:
+
+```text
+        let (request_id, duration, rationale) = grant_body(body)?;
+```
+
+New:
+
+```text
+        let (request_id, duration, rationale) = match grant_body(body) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                self.record_use(
+                    "capability_grant",
+                    false,
+                    "bad",
+                    "component-1",
+                    "localhost://Public/resident-instances/shared.txt",
+                    "read",
+                );
+                return Err(error);
+            }
+        };
+```
+
+F-standin-audit-pending-grant: a request that is not pending appends and then returns. Failed at `src/../standin-runtime/mod.rs:13478:9`: `a second grant of req-a is refused appends nothing`, left `4`, right `3`.
+
+Old:
+
+```text
+        if request.status != RequestStatus::Pending {
+            return Err((400, format!("request is not pending: {request_id}")));
+        }
+        let request_id = request.request_id.clone();
+```
+
+New:
+
+```text
+        let not_pending = request.status != RequestStatus::Pending;
+        if not_pending {
+            self.record_use(
+                "capability_grant",
+                false,
+                request_id,
+                "component-1",
+                "localhost://Public/resident-instances/shared.txt",
+                "read",
+            );
+            return Err((400, format!("request is not pending: {request_id}")));
+        }
+        let request_id = request.request_id.clone();
+```
+
+F-standin-audit-deny-skip: `post_capability_deny` does not call `record_use`. Failed at `src/../standin-runtime/mod.rs:13545:9`: `the deny appends one event`, left `3`, right `4`.
+
+Old:
+
+```text
+        self.record_use(
+            "capability_denied",
+            false,
+            request_id,
+            &session_id,
+            &resource,
+            &action,
+        );
+```
+
+New: that call is removed.
+
+F-standin-audit-types-shell: `get_audit_types` returns the type list before the shell check. Failed at `src/../standin-runtime/mod.rs:13171:9`: `a client is refused before the type list is built`, left `Ok` of the four names, right `Err((403, "This endpoint requires shell privileges"))`.
+
+Old:
+
+```text
+        require_shell(caller)?;
+```
+
+New:
+
+```text
+        let _ = caller;
+```
+
+F-standin-audit-revoke-excluded: the revoke-all snapshot keeps every grant and every pending request. Failed at `src/../standin-runtime/mod.rs:11261:9`: `req-spent adds no audit event`.
+
+Old:
+
+```text
+            .filter(|grant| is_live(grant.life))
+            .map(|grant| {
+                (
+                    grant.session_id.clone(),
+                    grant.request_id.clone(),
+                    grant.resource.clone(),
+                    grant.action.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+```
+
+New:
+
+```text
+            .filter(|_| true)
+            .map(|grant| {
+                (
+                    grant.session_id.clone(),
+                    grant.request_id.clone(),
+                    grant.resource.clone(),
+                    grant.action.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for request in self
+            .requests
+            .iter()
+            .filter(|request| request.status == RequestStatus::Pending)
+        {
+            snapshot.push((
+                request.session_id.clone(),
+                request.request_id.clone(),
+                request.resource.clone(),
+                request.action.clone(),
+            ));
+        }
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+```
+
+F-standin-audit-revoke-empty: an empty Live snapshot appends one `capability_revoke`. Failed at `src/../standin-runtime/mod.rs:13360:9`: `a revoke-all with no Live grant appends nothing`, left `1`, right `0`.
+
+Old:
+
+```text
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+```
+
+New:
+
+```text
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+        if snapshot.is_empty() {
+            self.record_use(
+                "capability_revoke",
+                true,
+                "empty",
+                "component-1",
+                "localhost://Public/resident-instances/shared.txt",
+                "read",
+            );
+        }
+```
+
+F-standin-audit-field: the grant event stores resource `localhost://Public/resident-instances/swapped.txt`. Failed at `src/../standin-runtime/mod.rs:11183:9`: `capability_grant req-c`, left that swapped resource, right `localhost://Public/resident-instances/shared.txt`.
+
+Old:
+
+```text
+        self.record_use(
+            "capability_grant",
+            true,
+            &request_id,
+            &session_id,
+            &resource,
+            &action,
+        );
+```
+
+New:
+
+```text
+        self.record_use(
+            "capability_grant",
+            true,
+            &request_id,
+            &session_id,
+            "localhost://Public/resident-instances/swapped.txt",
+            &action,
+        );
+```
+
+F-standin-audit-token: `audit_entry` adds `reason`, `token` and `current_epoch`. Failed at `src/../standin-runtime/mod.rs:2124:9`: `capability_grant req-c has type, at, request_id, session_id, resource, action and success`, left those three extra keys, right the seven names.
+
+Old:
+
+```text
+        "success": event.success,
+    })
+```
+
+New:
+
+```text
+        "success": event.success,
+        "reason": "",
+        "token": "",
+        "current_epoch": 0,
+    })
+```
+
+F-standin-audit-separate-list: `record_use` returns before the append when the type is not `capability_use`, so shell decisions stay off the list. Failed at `src/../standin-runtime/mod.rs:13439:9`: `three grants append three events`, left `0`, right `3`.
+
+Old:
+
+```text
+        self.audit.push(AuditUse {
+```
+
+New:
+
+```text
+        if event_type != "capability_use" {
+            return;
+        }
+        self.audit.push(AuditUse {
+```
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.16 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 262.46 seconds, inside the 600-second bound. Targets: lib 79 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0.
+- Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_decisions_join_the_audit_list -- --exact`: exit 0, 1 passed, real 0.11 seconds.
+
