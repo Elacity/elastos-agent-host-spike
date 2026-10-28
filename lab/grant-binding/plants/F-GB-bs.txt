@@ -1,0 +1,8 @@
+id: F-GB-bs
+file: src/link.rs
+test: link::model_backspace_escape_is_not_a_link
+--- old
+        b'b' => Some(('\u{08}', simple)),
+--- new
+        b'b' => Some(('b', simple)),
+--- end
