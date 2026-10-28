@@ -8676,6 +8676,7 @@ class B2CoverageTests(CaughtMixin, unittest.TestCase):
         section = "## 6. B2 mapping\n\nText.\n\n"
         after = "\n## 7. Open questions\n\n"
         wrong_columns = ("Kind", "Resource", "Operation", "Constraint", "Extension", "Evidence")
+        table_lines = b2_table(B2_PAIRS).splitlines()
         cases = (
             (
                 section,
@@ -8711,6 +8712,38 @@ class B2CoverageTests(CaughtMixin, unittest.TestCase):
                 + " |",
             ),
         )
+        # Exercise every table-parser refusal, including each separator guard.
+        for content in ([], [table_lines[1]], ["", " \t "]):
+            cases += ((
+                section + "\n".join([table_lines[0]] + content + [table_lines[-1]]),
+                "refuse: B2 mapping table has no header and separator row",
+            ),)
+        for separator in (
+            "separator",
+            "| --- |",
+            "| --- | --- | --- | --- | --- | -- |",
+        ):
+            lines = table_lines[:]
+            lines[2] = separator
+            cases += ((
+                section + "\n".join(lines),
+                "refuse: B2 mapping table has no separator row",
+            ),)
+        lines = table_lines[:]
+        lines[3] = "broken row"
+        cases += ((
+            section + "\n".join(lines),
+            "refuse: B2 mapping row is not six cells: broken row",
+        ),)
+        # Each internal boundary matters: header/separator, separator/first
+        # row, and every pair of body rows, including whitespace-only gaps.
+        for index in range(2, len(table_lines) - 1):
+            for blank in ("", " \t "):
+                lines = table_lines[:index] + [blank] + table_lines[index:]
+                cases += ((
+                    section + "\n".join(lines),
+                    "refuse: B2 mapping table has an internal blank line",
+                ),)
         for body, expected in cases:
             root = self._b2_draft(body, asks=asks_json(B2_PAIRS))
             self.assertEqual(check.problems(root), [expected], expected)
@@ -8727,6 +8760,15 @@ class B2CoverageTests(CaughtMixin, unittest.TestCase):
             )
             root = self._b2_draft(body, asks=asks_json(B2_PAIRS))
             self.assertEqual(check.problems(root), [expected], expected)
+
+        # Blank lines at the marker boundaries leave the table intact.
+        padded = "\n".join(
+            [table_lines[0], "", " \t "]
+            + table_lines[1:-1]
+            + [" \t ", "", table_lines[-1]]
+        )
+        root = self._b2_draft(section + padded, asks=asks_json(B2_PAIRS))
+        self.assertEqual(check.problems(root), [])
 
     def test_b2_pinned_source_is_refused(self):
         body = b2_body(b2_table(B2_PAIRS))
@@ -8761,7 +8803,43 @@ class B2CoverageTests(CaughtMixin, unittest.TestCase):
                 asks_json(B2_PAIRS + (B2_PAIRS[0],)),
                 b2_reason("source asks repeat", B2_PAIRS[0]),
             ),
+            (
+                b'{"schema":"elastos.agent-host.asks/v1","asks":'
+                + b"[" * 1200 + b"]" * 1200 + b"}",
+                "refuse: B2 source JSON nesting is too deep: " + check.B2_REL,
+            ),
         )
+        # The decoder sees decoded keys: escaped spellings and duplicates
+        # anywhere in an object must retain the same refusal.
+        for spelling in ("literal", "escaped"):
+            for key in ("schema", "asks", "kind", "resource"):
+                repeated = key if spelling == "literal" else "\\u%04x%s" % (
+                    ord(key[0]), key[1:]
+                )
+                if key == "schema":
+                    source = (
+                        '{"schema":"discarded","%s":"elastos.agent-host.asks/v1",'
+                        '"asks":[{"kind":"read","resource":"B/"}]}' % repeated
+                    )
+                elif key == "asks":
+                    source = (
+                        '{"schema":"elastos.agent-host.asks/v1",'
+                        '"asks":[{"kind":"edit","resource":"A/"}],'
+                        '"%s":[{"kind":"read","resource":"B/"}]}' % repeated
+                    )
+                else:
+                    value = "read" if key == "kind" else "B/"
+                    other = '"resource":"B/"' if key == "kind" else '"kind":"read"'
+                    source = (
+                        '{"schema":"elastos.agent-host.asks/v1",'
+                        '"asks":[{"%s":"discarded","%s":"%s",%s}]}'
+                        % (key, repeated, value, other)
+                    )
+                cases += ((
+                    source.encode("utf-8"),
+                    "refuse: B2 source repeats object key: "
+                    + json.dumps(key) + ": " + check.B2_REL,
+                ),)
         for asks, expected in cases:
             root = self._b2_draft(body, asks=asks)
             self.assertEqual(check.problems(root), [expected], expected)

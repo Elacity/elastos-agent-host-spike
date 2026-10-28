@@ -905,6 +905,20 @@ def b2_pairs(asks):
     return [(ask["kind"], ask["resource"]) for ask in asks]
 
 
+class _B2DuplicateKey(ValueError):
+    """A decoded JSON object repeats a key."""
+
+
+def _b2_unique_object(pairs):
+    """Build one JSON object, refusing duplicate decoded key spellings."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise _B2DuplicateKey(key)
+        result[key] = value
+    return result
+
+
 def source_asks(root, sha):
     """Return the asks at commit SHA, or a ``refuse: B2 source ...`` reason.
 
@@ -919,7 +933,15 @@ def source_asks(root, sha):
     except UnicodeDecodeError:
         return None, "refuse: B2 source is not utf-8 text: " + B2_REL
     try:
-        parsed = json.loads(text)
+        parsed = json.loads(text, object_pairs_hook=_b2_unique_object)
+    except _B2DuplicateKey as error:
+        return None, (
+            "refuse: B2 source repeats object key: "
+            + json.dumps(error.args[0])
+            + ": " + B2_REL
+        )
+    except RecursionError:
+        return None, "refuse: B2 source JSON nesting is too deep: " + B2_REL
     except ValueError:
         return None, "refuse: B2 source is not JSON: " + B2_REL
     return _source_asks_checked(parsed)
@@ -983,9 +1005,16 @@ def _b2_code(cell):
 
 def _b2_rows(block):
     """Return the (kind, resource) pairs of the table lines in BLOCK, or a reason."""
-    rows = [line for line in block if line.strip()]
+    start, end = 0, len(block)
+    while start < end and not block[start].strip():
+        start += 1
+    while end > start and not block[end - 1].strip():
+        end -= 1
+    rows = block[start:end]
     if len(rows) < 2:
         return None, "refuse: B2 mapping table has no header and separator row"
+    if any(not line.strip() for line in rows):
+        return None, "refuse: B2 mapping table has an internal blank line"
     header = _b2_cells(rows[0])
     if header != list(B2_COLUMNS):
         return None, "refuse: B2 mapping table columns are not " + ", ".join(B2_COLUMNS)
