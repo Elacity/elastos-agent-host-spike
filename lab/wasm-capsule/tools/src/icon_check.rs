@@ -249,7 +249,13 @@ mod tests {
     fn sound_square_png_is_declared() {
         let icon = png(64, 64, IHDR_LEN);
         let got = IconCheck::preset().resolve(Some(&icon));
-        assert_eq!(got, Ok(Icon::Declared { bytes: icon, side: 64 }));
+        assert_eq!(
+            got,
+            Ok(Icon::Declared {
+                bytes: icon,
+                side: 64
+            })
+        );
     }
 
     // P6: both preset side bounds are inclusive, so 32 px and 512 px pass
@@ -259,15 +265,23 @@ mod tests {
         let check = IconCheck::preset();
         assert_eq!(check.check(&png(32, 32, IHDR_LEN)).map(side_of), Ok(32));
         assert_eq!(check.check(&png(512, 512, IHDR_LEN)).map(side_of), Ok(512));
-        assert_eq!(check.check(&png(31, 31, IHDR_LEN)).unwrap_err().code(), "too_small");
-        assert_eq!(check.check(&png(513, 513, IHDR_LEN)).unwrap_err().code(), "too_wide");
+        assert_eq!(
+            check.check(&png(31, 31, IHDR_LEN)).unwrap_err().code(),
+            "too_small"
+        );
+        assert_eq!(
+            check.check(&png(513, 513, IHDR_LEN)).unwrap_err().code(),
+            "too_wide"
+        );
     }
 
     // P6: a non-square PNG is refused with not_square, even when both sides
     // are within bounds.
     #[test]
     fn non_square_png_is_refused() {
-        let err = IconCheck::preset().check(&png(64, 65, IHDR_LEN)).unwrap_err();
+        let err = IconCheck::preset()
+            .check(&png(64, 65, IHDR_LEN))
+            .unwrap_err();
         assert_eq!(err.code(), "not_square");
     }
 
@@ -329,13 +343,27 @@ mod tests {
     // because zero bytes can never equal the PNG signature.
     #[test]
     fn zero_limits_refuse_every_icon() {
-        let zero = IconLimits { max_bytes: 0, min_side: 0, max_side: 0 };
+        let zero = IconLimits {
+            max_bytes: 0,
+            min_side: 0,
+            max_side: 0,
+        };
         let check = IconCheck::with_limits(zero);
         assert_eq!(check.limits(), zero);
-        assert_eq!(check.check(&png(64, 64, IHDR_LEN)).unwrap_err().code(), "too_large");
-        assert_eq!(check.check(&png(32, 32, IHDR_LEN)).unwrap_err().code(), "too_large");
+        assert_eq!(
+            check.check(&png(64, 64, IHDR_LEN)).unwrap_err().code(),
+            "too_large"
+        );
+        assert_eq!(
+            check.check(&png(32, 32, IHDR_LEN)).unwrap_err().code(),
+            "too_large"
+        );
         assert_eq!(check.check(&[]).unwrap_err().code(), "not_png");
-        let tight = IconLimits { max_bytes: 64 * 1024, min_side: 0, max_side: 0 };
+        let tight = IconLimits {
+            max_bytes: 64 * 1024,
+            min_side: 0,
+            max_side: 0,
+        };
         let err = IconCheck::with_limits(tight)
             .check(&png(64, 64, IHDR_LEN))
             .unwrap_err();

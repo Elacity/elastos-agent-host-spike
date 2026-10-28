@@ -97,10 +97,7 @@ pub struct BusReplyRoute {
 }
 
 fn check_capsule(capsule: &str) -> Result<(), BusReplyError> {
-    if capsule.is_empty()
-        || capsule.len() > MAX_CAPSULE_ID_LEN
-        || capsule.starts_with('/')
-    {
+    if capsule.is_empty() || capsule.len() > MAX_CAPSULE_ID_LEN || capsule.starts_with('/') {
         return Err(BusReplyError::BadCapsule);
     }
     Ok(())
@@ -210,9 +207,7 @@ mod tests {
     fn reply_is_delivered_only_to_the_requester() {
         let mut bus = BusReplyRoute::new();
         bus.open("req-1", "capsule-a", "capsule-b").unwrap();
-        let got = bus
-            .route_reply("req-1", "capsule-a", "capsule-b")
-            .unwrap();
+        let got = bus.route_reply("req-1", "capsule-a", "capsule-b").unwrap();
         assert_eq!(got.delivered_to, "capsule-a");
         assert_eq!(got.answered_for, "capsule-a");
         assert_ne!(got.delivered_to, "capsule-b");
@@ -229,9 +224,7 @@ mod tests {
 
         // Reply intended for req-1 but naming req-2's requester and sender:
         // that is a valid reply for req-2, so it is not misrouted.
-        assert!(bus
-            .route_reply("req-2", "capsule-a", "capsule-b")
-            .is_ok());
+        assert!(bus.route_reply("req-2", "capsule-a", "capsule-b").is_ok());
 
         // Reply naming req-2 but with req-3's capsule pair is misrouted.
         let err = bus
@@ -246,9 +239,7 @@ mod tests {
         assert_eq!(err.code(), "unknown_request");
 
         // req-1 remains open and unanswered: a correct reply succeeds once.
-        let got = bus
-            .route_reply("req-1", "capsule-a", "capsule-b")
-            .unwrap();
+        let got = bus.route_reply("req-1", "capsule-a", "capsule-b").unwrap();
         assert_eq!(got.delivered_to, "capsule-a");
 
         // A reply that names a different request id than the one it carries
