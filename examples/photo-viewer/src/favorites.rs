@@ -53,7 +53,10 @@ impl fmt::Display for FavoritesError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             FavoritesError::FavoritesFull => {
-                write!(f, "{REASON_FULL}: at most {MAX_FAVORITES} favourites are kept")
+                write!(
+                    f,
+                    "{REASON_FULL}: at most {MAX_FAVORITES} favourites are kept"
+                )
             }
             FavoritesError::NotACid(text) => {
                 write!(f, "{REASON_NOT_A_CID}: {text:?} is not a CID")

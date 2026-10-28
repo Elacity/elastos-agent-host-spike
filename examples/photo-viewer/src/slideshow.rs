@@ -166,7 +166,9 @@ impl Slideshow {
         self.current = (self.current + advanced) % n;
         // Re-anchor to the start of the current dwell so partial time is not
         // double-counted on the next tick.
-        self.started_at_ms = self.started_at_ms.saturating_add(steps as u64 * self.interval_ms);
+        self.started_at_ms = self
+            .started_at_ms
+            .saturating_add(steps as u64 * self.interval_ms);
         advanced
     }
 

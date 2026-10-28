@@ -76,10 +76,7 @@ pub fn sniff(bytes: &[u8]) -> Result<MediaType, SniffError> {
     if bytes.starts_with(&GIF87A_SIGNATURE) || bytes.starts_with(&GIF89A_SIGNATURE) {
         return Ok(MediaType::Gif);
     }
-    if bytes.len() >= 12
-        && bytes[..4] == WEBP_RIFF_SIGNATURE
-        && bytes[8..12] == WEBP_FORM_TYPE
-    {
+    if bytes.len() >= 12 && bytes[..4] == WEBP_RIFF_SIGNATURE && bytes[8..12] == WEBP_FORM_TYPE {
         return Ok(MediaType::Webp);
     }
     Err(SniffError::UnknownMediaType)
@@ -90,7 +87,8 @@ fn parse_declared(declared_type: &str) -> Option<MediaType> {
     let trimmed = declared_type.split(';').next().unwrap_or("").trim();
     if trimmed.eq_ignore_ascii_case("image/png") {
         Some(MediaType::Png)
-    } else if trimmed.eq_ignore_ascii_case("image/jpeg") || trimmed.eq_ignore_ascii_case("image/jpg")
+    } else if trimmed.eq_ignore_ascii_case("image/jpeg")
+        || trimmed.eq_ignore_ascii_case("image/jpg")
     {
         Some(MediaType::Jpeg)
     } else if trimmed.eq_ignore_ascii_case("image/gif") {
