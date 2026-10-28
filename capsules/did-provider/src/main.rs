@@ -2200,3 +2200,287 @@ mod tests {
         }
     }
 }
+
+/// The refusal strings of the DID recovery request validator, the
+/// localhost-root check and the storage cipher, one test per string.
+///
+/// These tests pin behaviour the production lines already have: they add no
+/// rule and change no answer. Each asserts the whole `Err` value, so a dropped
+/// check, a changed message or a reordered check fails the named test.
+#[cfg(test)]
+mod uf_did_refusal_tests {
+    use super::*;
+
+    /// The moment every case below reads as "now".
+    const NOW: u64 = 1_800_000_000;
+
+    const PRINCIPAL_ID: &str = "person:local:abc123";
+    const LOCALHOST_ROOT: &str = "localhost://Users/person:local:abc123";
+    const PROTECTOR_ID: &str = "protector:did:abc123";
+    const DATA_KEY_ID: &str = "pdek:abc123";
+    const NONCE: &str = "nonce:abc123";
+
+    /// A key of the length `encrypt_data` and `decrypt_data` take.
+    const CIPHER_KEY: [u8; 32] = [7u8; 32];
+
+    /// The canonical `did:key` every request case starts from, produced by the
+    /// crate's own encoder so the test pastes no literal.
+    fn subject_did() -> String {
+        encode_signing_key_did(&SigningKey::from_bytes(&[3u8; 32]))
+    }
+
+    /// A recovery request that passes every check in
+    /// `validate_did_recovery_request`, so a case changes one field and pins
+    /// the check it names.
+    fn valid_request<'a>(did: &'a str) -> DidRecoveryPayload<'a> {
+        DidRecoveryPayload {
+            did,
+            principal_id: PRINCIPAL_ID,
+            localhost_root: LOCALHOST_ROOT,
+            protector_id: PROTECTOR_ID,
+            data_key_id: DATA_KEY_ID,
+            nonce: NONCE,
+            issued_at: NOW - 60,
+            expires_at: NOW + 240,
+        }
+    }
+
+    fn refuse(payload: &DidRecoveryPayload<'_>) -> String {
+        validate_did_recovery_request(payload, NOW).unwrap_err()
+    }
+
+    /// Pins `Data too short` (`decrypt_data` :566).
+    ///
+    /// Falsifier: drop the length check, so `split_at` panics; this test fails
+    /// on the panic instead of the refusal.
+    #[test]
+    fn decrypt_data_refuses_input_shorter_than_its_nonce() {
+        assert_eq!(
+            decrypt_data(&CIPHER_KEY, &[0u8; NONCE_LEN - 1]).unwrap_err(),
+            "Data too short"
+        );
+    }
+
+    /// Pins `Decryption failed: {e}` (`decrypt_data` :575), with the text
+    /// `aead`'s own `Display` gives for its single error value.
+    ///
+    /// Falsifier: replace the format argument with an empty string, or let the
+    /// authentication error pass, and this test fails.
+    #[test]
+    fn decrypt_data_refuses_a_ciphertext_that_fails_authentication() {
+        let mut sealed =
+            encrypt_data(&CIPHER_KEY, b"elastos did recovery").expect("sealing succeeds");
+        *sealed
+            .last_mut()
+            .expect("a sealed payload is longer than its nonce") ^= 0x01;
+        assert_eq!(
+            decrypt_data(&CIPHER_KEY, &sealed).unwrap_err(),
+            "Decryption failed: aead::Error"
+        );
+    }
+
+    /// Pins `invalid DID recovery subject: {e}` (:619), with the text
+    /// `decode_did_key` returns for a subject that is not a canonical
+    /// Ed25519 `did:key`.
+    ///
+    /// Falsifier: drop the `decode_did_key` call at :619; this request then
+    /// answers `Ok` and the `unwrap_err` panics.
+    #[test]
+    fn did_recovery_refuses_a_subject_that_is_not_a_canonical_did_key() {
+        let payload = valid_request("did:elastos:alice");
+        assert_eq!(
+            refuse(&payload),
+            "invalid DID recovery subject: DID must be one canonical Ed25519 did:key"
+        );
+    }
+
+    /// Pins `data_key_id must start with pdek:` (:625). The subject, the
+    /// principal, the root, the protector and the id itself all pass their
+    /// earlier checks first, so only the prefix rule fires.
+    ///
+    /// Falsifier: remove the prefix check at :625; this request then answers
+    /// `Ok`.
+    #[test]
+    fn did_recovery_refuses_a_data_key_id_without_its_prefix() {
+        let did = subject_did();
+        let mut payload = valid_request(&did);
+        payload.data_key_id = "xkey:abc123";
+        assert_eq!(refuse(&payload), "data_key_id must start with pdek:");
+    }
+
+    /// Pins `DID recovery proof issued_at is in the future` (:629), one second
+    /// past the 300-second allowance. Every other check passes.
+    ///
+    /// Falsifier: remove the issued_at check at :629; this request then answers
+    /// `Ok`.
+    #[test]
+    fn did_recovery_refuses_an_issued_at_in_the_future() {
+        let did = subject_did();
+        let mut payload = valid_request(&did);
+        payload.issued_at = NOW + 301;
+        payload.expires_at = NOW + 361;
+        assert_eq!(
+            refuse(&payload),
+            "DID recovery proof issued_at is in the future"
+        );
+    }
+
+    /// Pins `DID recovery proof expired` (:632) at its boundary, where
+    /// `expires_at` equals now. The ends stay ordered and within the maximum
+    /// TTL, so the expiry rule at :634 to :635 would accept this request.
+    ///
+    /// Falsifier: remove the expired check at :632; this request then answers
+    /// `Ok`.
+    #[test]
+    fn did_recovery_refuses_an_expired_proof() {
+        let did = subject_did();
+        let mut payload = valid_request(&did);
+        payload.issued_at = NOW - 60;
+        payload.expires_at = NOW;
+        assert_eq!(refuse(&payload), "DID recovery proof expired");
+    }
+
+    /// Pins `DID recovery proof expiry is invalid` (:637), which one string
+    /// carries for two rules, from two cases that each catch one rule's
+    /// removal on its own.
+    ///
+    /// Falsifier, first case: remove the `expires_at <= issued_at` comparison
+    /// at :634; the ends are ordered backwards yet both lie after now, so the
+    /// request answers `Ok` and the first assertion fails.
+    ///
+    /// Falsifier, second case: remove the `DID_RECOVERY_MAX_TTL_SECS`
+    /// comparison at :635; the ends are ordered and after now, so the request
+    /// answers `Ok` and the second assertion fails.
+    #[test]
+    fn did_recovery_refuses_an_invalid_expiry() {
+        let did = subject_did();
+        let mut payload = valid_request(&did);
+
+        payload.issued_at = NOW + 300;
+        payload.expires_at = NOW + 200;
+        assert_eq!(refuse(&payload), "DID recovery proof expiry is invalid");
+
+        payload.issued_at = NOW;
+        payload.expires_at = NOW + DID_RECOVERY_MAX_TTL_SECS + 1;
+        assert_eq!(refuse(&payload), "DID recovery proof expiry is invalid");
+    }
+
+    /// Pins `localhost_root must be a principal-owned localhost user root`,
+    /// raised at two sites: :647 for a value without the `localhost://Users/`
+    /// prefix, and :658 for a segment that is empty, `self`, `.`, `..`, over
+    /// 256 characters, or carries a slash, backslash, control or whitespace.
+    /// The request reaches the check through its call at :621.
+    ///
+    /// The prefix case is the bare principal id: it carries no slash, is not
+    /// reserved, fits 256 characters and equals `principal_id`, so only the
+    /// missing prefix refuses it.
+    ///
+    /// Falsifier, per case: weaken the guard that case names (accept an
+    /// unprefixed root at :647, or remove the matching term of the :649 to :656
+    /// condition); that request then reaches the principal match and answers
+    /// `localhost_root must match the DID recovery principal`, so the assertion
+    /// fails. Removing the call at :621 makes every case answer `Ok`.
+    #[test]
+    fn did_recovery_refuses_a_root_that_is_not_a_principal_owned_user_root() {
+        let did = subject_did();
+        let overlong = format!("localhost://Users/{}", "a".repeat(257));
+        for (case, root) in [
+            ("no prefix", PRINCIPAL_ID),
+            ("empty segment", "localhost://Users/"),
+            ("self", "localhost://Users/self"),
+            ("dot", "localhost://Users/."),
+            ("dot dot", "localhost://Users/.."),
+            ("over 256 characters", overlong.as_str()),
+            ("slash", "localhost://Users/person/local"),
+            ("backslash", "localhost://Users/person\\local"),
+            ("control", "localhost://Users/person\u{7f}local"),
+            ("whitespace", "localhost://Users/person local"),
+        ] {
+            let mut payload = valid_request(&did);
+            payload.localhost_root = root;
+            assert_eq!(
+                refuse(&payload),
+                "localhost_root must be a principal-owned localhost user root",
+                "case {case}: root {root:?}"
+            );
+        }
+    }
+
+    /// Pins `localhost_root must match the DID recovery principal` (:661). The
+    /// root is well formed in both cases and only its segment differs from
+    /// `principal_id`: one names another principal, and one extends the
+    /// principal with a suffix, so a prefix test cannot replace the exact
+    /// match.
+    ///
+    /// Falsifier, per case: remove the match check at :660, or weaken it to a
+    /// `starts_with` test; that request then answers `Ok`, so the assertion
+    /// fails.
+    #[test]
+    fn did_recovery_refuses_a_root_for_another_principal() {
+        let did = subject_did();
+        for (case, root) in [
+            ("another principal", "localhost://Users/person:local:other"),
+            (
+                "principal plus a suffix",
+                "localhost://Users/person:local:abc123x",
+            ),
+        ] {
+            let mut payload = valid_request(&did);
+            payload.localhost_root = root;
+            assert_eq!(
+                refuse(&payload),
+                "localhost_root must match the DID recovery principal",
+                "case {case}: root {root:?}"
+            );
+        }
+    }
+
+    /// Pins `{field} is invalid` (:675), the one string four call sites raise:
+    /// `principal_id` (:620), `protector_id` (:622), `data_key_id` (:623) and
+    /// `nonce` (:627). Every case changes one field of a request that passes
+    /// the checks ahead of that field, and each predicate of
+    /// `validate_token_like_id` has a case only that predicate refuses: the
+    /// blank case is a non-ASCII space, which `trim` removes but the ASCII
+    /// whitespace term leaves alone, and the whitespace case is an ASCII space.
+    ///
+    /// Falsifier, per case: remove the guard that case names (the matching term
+    /// of the :667 to :673 condition for a predicate case, or the call at :620,
+    /// :622, :623 or :627 for a site case); that request then passes the token
+    /// check and answers whatever the next check says, so the assertion fails.
+    #[test]
+    fn did_recovery_refuses_an_invalid_token_like_id() {
+        let did = subject_did();
+        let overlong = "a".repeat(513);
+
+        for (case, principal_id) in [
+            ("blank", "\u{a0}"),
+            ("over 512 bytes", overlong.as_str()),
+            ("dot", "."),
+            ("dot dot", ".."),
+            ("slash", "person/local"),
+            ("backslash", "person\\local"),
+            ("control", "person\u{7f}local"),
+            ("whitespace", "person local"),
+        ] {
+            let mut payload = valid_request(&did);
+            payload.principal_id = principal_id;
+            assert_eq!(
+                refuse(&payload),
+                "principal_id is invalid",
+                "case {case}: principal_id {principal_id:?}"
+            );
+        }
+
+        let mut payload = valid_request(&did);
+        payload.protector_id = "protector/local";
+        assert_eq!(refuse(&payload), "protector_id is invalid");
+
+        let mut payload = valid_request(&did);
+        payload.data_key_id = "pdek/local";
+        assert_eq!(refuse(&payload), "data_key_id is invalid");
+
+        let mut payload = valid_request(&did);
+        payload.nonce = "nonce local";
+        assert_eq!(refuse(&payload), "nonce is invalid");
+    }
+}
