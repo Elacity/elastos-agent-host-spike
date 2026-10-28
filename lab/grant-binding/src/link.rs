@@ -44,8 +44,14 @@ enum MetadataRefuse {
     WriteSource,
     LaunchCargo,
     DecodeOutput,
+    ResolveManifest,
+    ManifestParent,
+    WorkspaceRoot,
+    ResolveWorkspaceRoot,
+    ResolvePackageManifest,
     RemoveDirectory,
     CleanupAfter(Box<MetadataRefuse>),
+    CleanupAfterPanic(String),
 }
 
 impl fmt::Display for MetadataRefuse {
@@ -57,46 +63,52 @@ impl fmt::Display for MetadataRefuse {
             Self::WriteSource => "cannot write temporary src/lib.rs",
             Self::LaunchCargo => "cannot launch cargo metadata",
             Self::DecodeOutput => "cargo metadata output is not UTF-8",
+            Self::ResolveManifest => "cannot resolve input manifest path",
+            Self::ManifestParent => "input manifest path has no parent directory",
+            Self::WorkspaceRoot => "cargo metadata has no workspace root",
+            Self::ResolveWorkspaceRoot => "cannot resolve metadata workspace root",
+            Self::ResolvePackageManifest => "cannot resolve metadata package manifest path",
             Self::RemoveDirectory => "cannot remove temporary manifest directory",
             Self::CleanupAfter(error) => {
                 return write!(f, "{error}; {}", Self::RemoveDirectory);
+            }
+            Self::CleanupAfterPanic(reason) => {
+                return write!(
+                    f,
+                    "metadata operation panicked: {reason}; {}",
+                    Self::RemoveDirectory
+                );
             }
         })
     }
 }
 
-/// Removes the owned directory when a panic skips the explicit cleanup.
-struct ManifestCleanup<'a> {
-    dir: &'a Path,
-    armed: bool,
-}
-
-impl Drop for ManifestCleanup<'_> {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = fs::remove_dir_all(self.dir);
-        }
-    }
-}
-
 /// This is the shared ownership boundary for all metadata files and cleanup.
+/// Cleanup runs once, including after a panic, and preserves both failures.
 fn with_manifest_dir<T>(
     parent: &Path,
     operation: impl FnOnce(&Path) -> Result<T, MetadataRefuse>,
 ) -> Result<T, MetadataRefuse> {
     let dir = fresh_manifest_dir(parent)?;
-    let mut cleanup = ManifestCleanup {
-        dir: &dir,
-        armed: true,
-    };
-    let result = operation(&dir);
-    cleanup.armed = false;
-    match fs::remove_dir_all(&dir) {
-        Ok(()) => result,
-        Err(_) => Err(match result {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(&dir)));
+    match (result, fs::remove_dir_all(&dir)) {
+        (Ok(result), Ok(())) => result,
+        (Ok(result), Err(_)) => Err(match result {
             Ok(_) => MetadataRefuse::RemoveDirectory,
             Err(error) => MetadataRefuse::CleanupAfter(Box::new(error)),
         }),
+        (Err(panic), Ok(())) => std::panic::resume_unwind(panic),
+        (Err(panic), Err(_)) => Err(MetadataRefuse::CleanupAfterPanic(
+            panic
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| {
+                    panic
+                        .downcast_ref::<&str>()
+                        .map(|reason| (*reason).to_owned())
+                })
+                .unwrap_or_else(|| "non-string panic".to_owned()),
+        )),
     }
 }
 
@@ -141,7 +153,18 @@ fn metadata_dependency_names(dir: &Path, cargo_toml: &str) -> Result<Vec<String>
 /// The list is dependency names, plus member names when this directory is the
 /// workspace root.
 fn metadata_names(manifest: &Path) -> Vec<String> {
-    let manifest_dir = manifest.parent().unwrap_or(Path::new("."));
+    let manifest = fs::canonicalize(manifest).unwrap_or_else(|_| {
+        panic!(
+            "dependency check failed: {}",
+            MetadataRefuse::ResolveManifest
+        )
+    });
+    let manifest_dir = manifest.parent().unwrap_or_else(|| {
+        panic!(
+            "dependency check failed: {}",
+            MetadataRefuse::ManifestParent
+        )
+    });
     let program = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let output = match Command::new(program)
         .current_dir(manifest_dir)
@@ -154,7 +177,7 @@ fn metadata_names(manifest: &Path) -> Vec<String> {
             "1",
             "--manifest-path",
         ])
-        .arg(manifest)
+        .arg(&manifest)
         .output()
     {
         Ok(output) => output,
@@ -167,7 +190,8 @@ fn metadata_names(manifest: &Path) -> Vec<String> {
         Ok(json) => json,
         Err(_) => panic!("dependency check failed: {}", MetadataRefuse::DecodeOutput),
     };
-    names_for_manifest(&read_metadata(&json), manifest)
+    names_for_manifest(&read_metadata(&json), &manifest)
+        .unwrap_or_else(|error| panic!("dependency check failed: {error}"))
 }
 
 /// `name` strings from each package object's `dependencies` array.
@@ -210,53 +234,37 @@ fn read_metadata(json: &str) -> MetadataSeen {
     seen
 }
 
-/// Dependency names of the package at `manifest`, plus member names when
-/// this directory is the workspace root.
+/// Dependency names of the checked package or workspace, plus member names
+/// when this directory is the workspace root.
 ///
-/// Another package's dependencies are not this file's link. The package
-/// whose manifest is this file is left out of the member names. A member
-/// manifest does not collect sibling names, because its directory is not
-/// the root.
-fn names_for_manifest(seen: &MetadataSeen, manifest: &Path) -> Vec<String> {
-    let Ok(own) = fs::canonicalize(manifest) else {
-        return Vec::new();
-    };
+/// A member manifest collects its own dependencies. A workspace root also
+/// collects its members' dependencies and names, leaving its own package name
+/// out. Each package path is resolved once before either collection rule.
+fn names_for_manifest(seen: &MetadataSeen, manifest: &Path) -> Result<Vec<String>, MetadataRefuse> {
+    let own = fs::canonicalize(manifest).map_err(|_| MetadataRefuse::ResolveManifest)?;
+    // The canonical manifest already gives us a resolved directory, including
+    // for a relative path or a symlink to a manifest in another directory.
+    let manifest_dir = own.parent().ok_or(MetadataRefuse::ManifestParent)?;
+    let workspace_root = seen
+        .workspace_root
+        .as_deref()
+        .ok_or(MetadataRefuse::WorkspaceRoot)?;
+    let workspace_root =
+        fs::canonicalize(workspace_root).map_err(|_| MetadataRefuse::ResolveWorkspaceRoot)?;
+    let is_workspace_root = manifest_dir == workspace_root;
     let mut names = Vec::new();
     for package in &seen.packages {
-        let Ok(path) = fs::canonicalize(Path::new(&package.manifest_path)) else {
-            continue;
-        };
-        if path == own {
+        let path = fs::canonicalize(&package.manifest_path)
+            .map_err(|_| MetadataRefuse::ResolvePackageManifest)?;
+        let is_member = seen.member_ids.iter().any(|id| id == &package.id);
+        if path == own || (is_workspace_root && is_member) {
             names.extend(package.dependencies.iter().cloned());
         }
-    }
-    let Some(workspace_root) = seen.workspace_root.as_deref() else {
-        return names;
-    };
-    let Some(manifest_dir) = manifest.parent() else {
-        return names;
-    };
-    let Ok(manifest_dir) = fs::canonicalize(manifest_dir) else {
-        return names;
-    };
-    let Ok(workspace_root) = fs::canonicalize(workspace_root) else {
-        return names;
-    };
-    if manifest_dir != workspace_root {
-        return names;
-    }
-    for package in &seen.packages {
-        if !seen.member_ids.iter().any(|id| id == &package.id) {
-            continue;
+        if is_workspace_root && is_member && path != own {
+            names.push(package.name.clone());
         }
-        if let Ok(path) = fs::canonicalize(Path::new(&package.manifest_path)) {
-            if path == own {
-                continue;
-            }
-        }
-        names.push(package.name.clone());
     }
-    names
+    Ok(names)
 }
 
 struct JsonScan<'a> {
@@ -1121,6 +1129,227 @@ fn model_metadata_dependencies_are_not_a_link() {
     assert_eq!(names_in_dependency_arrays(ahead), vec!["kept".to_string()]);
     let absent = r#"{"packages":[{"name":"grant-binding","metadata":{"dependencies":[{"name":"grant-binding"}],"packages":[{"dependencies":[{"name":"grant-binding"}]}]},"dependencies":[]}],"metadata":{"dependencies":[{"name":"grant-binding"}]}}"#;
     assert!(names_in_dependency_arrays(absent).is_empty());
+}
+
+#[test]
+fn model_metadata_panics_preserve_cleanup_failures() {
+    with_manifest_dir(&std::env::temp_dir(), |parent| {
+        let panic = std::panic::catch_unwind(|| {
+            with_manifest_dir(parent, |_| -> Result<(), MetadataRefuse> {
+                panic!("fixture operation failed")
+            })
+        })
+        .unwrap_err();
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"fixture operation failed")
+        );
+        assert_eq!(fs::read_dir(parent).unwrap().count(), 0);
+
+        for (kind, reason) in [
+            (0, "metadata operation panicked: fixture operation failed; cannot remove temporary manifest directory"),
+            (1, "metadata operation panicked: owned panic reason; cannot remove temporary manifest directory"),
+            (2, "metadata operation panicked: non-string panic; cannot remove temporary manifest directory"),
+        ] {
+            let error = with_manifest_dir(parent, |dir| -> Result<(), MetadataRefuse> {
+                fs::remove_dir(dir).unwrap();
+                fs::write(dir, "block directory cleanup").unwrap();
+                match kind {
+                    0 => panic!("fixture operation failed"),
+                    1 => std::panic::panic_any(String::from("owned panic reason")),
+                    _ => std::panic::panic_any(17u8),
+                }
+            })
+            .unwrap_err();
+            assert_eq!(error.to_string(), reason);
+        }
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn model_workspace_relative_manifest_is_a_link() {
+    // Keep a relative manifest beneath the test working directory without
+    // changing the process directory used by other tests.
+    fs::create_dir_all("target").unwrap();
+    with_manifest_dir(Path::new("target"), |dir| {
+        let root = dir.join("ws");
+        fs::create_dir(&root).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = ['gb', 'other']\nresolver = '2'\n",
+        )
+        .unwrap();
+        for (member, name) in [("gb", "grant-binding"), ("other", "other")] {
+            let package = root.join(member);
+            fs::create_dir(&package).unwrap();
+            stage_manifest(
+                &package,
+                &format!("[package]\nname = '{name}'\nversion = '0.0.0'\nedition = '2021'\n"),
+            )?;
+        }
+        let manifest = root.join("Cargo.toml");
+        assert!(manifest.is_relative());
+        assert!(manifest_depends_on_grant_binding(
+            &manifest.canonicalize().unwrap()
+        ));
+        assert!(manifest_depends_on_grant_binding(&manifest));
+        assert!(!manifest_depends_on_grant_binding(
+            &root.join("gb/Cargo.toml")
+        ));
+        assert!(!manifest_depends_on_grant_binding(
+            &root.join("other/Cargo.toml")
+        ));
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[cfg(test)]
+fn stage_registry_workspace(dir: &Path) -> PathBuf {
+    fs::write(
+        dir.join("Cargo.toml"),
+        "[workspace]\nmembers = ['app', 'other']\nresolver = '2'\n",
+    )
+    .unwrap();
+    for (name, dependencies) in [
+        ("app", "[dependencies]\ngrant-binding = '1.2.3'\n"),
+        ("other", ""),
+    ] {
+        let package = dir.join(name);
+        fs::create_dir(&package).unwrap();
+        stage_manifest(
+            &package,
+            &format!(
+                "[package]\nname = '{name}'\nversion = '0.0.0'\nedition = '2021'\n\n{dependencies}"
+            ),
+        )
+        .unwrap();
+    }
+    dir.join("Cargo.toml")
+}
+
+#[test]
+fn model_virtual_workspace_keeps_member_dependency_names() {
+    with_manifest_dir(&std::env::temp_dir(), |dir| {
+        let manifest = stage_registry_workspace(dir);
+        assert!(manifest_depends_on_grant_binding(&manifest));
+        assert!(manifest_depends_on_grant_binding(
+            &dir.join("app/Cargo.toml")
+        ));
+        assert!(!manifest_depends_on_grant_binding(
+            &dir.join("other/Cargo.toml")
+        ));
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn model_metadata_path_failures_have_exact_reasons() {
+    with_manifest_dir(&std::env::temp_dir(), |dir| {
+        let dir = &dir.canonicalize().unwrap();
+        let manifest = stage_registry_workspace(dir);
+        // Capture real metadata while all referenced files exist. The same
+        // parsed snapshot must fail explicitly when one of its paths is lost.
+        let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .current_dir(dir)
+            .args([
+                "metadata",
+                "--offline",
+                "--no-deps",
+                "--format-version",
+                "1",
+                "--manifest-path",
+            ])
+            .arg(&manifest)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut seen = read_metadata(&String::from_utf8(output.stdout).unwrap());
+        let mut names = names_for_manifest(&seen, &manifest).unwrap();
+        names.sort();
+        assert_eq!(names, ["app", "grant-binding", "other"]);
+
+        let workspace_root = seen.workspace_root.take();
+        assert_eq!(
+            names_for_manifest(&seen, &manifest)
+                .unwrap_err()
+                .to_string(),
+            "cargo metadata has no workspace root"
+        );
+        seen.workspace_root = Some(dir.join("missing-root").to_str().unwrap().to_owned());
+        assert_eq!(
+            names_for_manifest(&seen, &manifest)
+                .unwrap_err()
+                .to_string(),
+            "cannot resolve metadata workspace root"
+        );
+        seen.workspace_root = workspace_root;
+
+        let text = fs::read_to_string(&manifest).unwrap();
+        fs::remove_file(&manifest).unwrap();
+        assert_eq!(
+            names_for_manifest(&seen, &manifest)
+                .unwrap_err()
+                .to_string(),
+            "cannot resolve input manifest path"
+        );
+        fs::write(&manifest, text).unwrap();
+
+        let filesystem_root = manifest.ancestors().last().unwrap();
+        assert_eq!(
+            names_for_manifest(&seen, filesystem_root)
+                .unwrap_err()
+                .to_string(),
+            "input manifest path has no parent directory"
+        );
+        for package in &seen.packages {
+            let text = fs::read_to_string(&package.manifest_path).unwrap();
+            fs::remove_file(&package.manifest_path).unwrap();
+            for input in [&manifest, &dir.join("app/Cargo.toml")] {
+                // A removed input has its own reason; this checks a removed
+                // referenced package for both root and member queries.
+                if input != Path::new(&package.manifest_path) {
+                    assert_eq!(
+                        names_for_manifest(&seen, input).unwrap_err().to_string(),
+                        "cannot resolve metadata package manifest path"
+                    );
+                }
+            }
+            fs::write(&package.manifest_path, text).unwrap();
+        }
+        assert_eq!(names_for_manifest(&seen, &manifest).unwrap().len(), 3);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn model_metadata_input_path_failures_stop_the_detector() {
+    with_manifest_dir(&std::env::temp_dir(), |dir| {
+        for (manifest, reason) in [
+            (
+                dir.join("missing/Cargo.toml"),
+                "dependency check failed: cannot resolve input manifest path",
+            ),
+            (
+                dir.ancestors().last().unwrap().to_owned(),
+                "dependency check failed: input manifest path has no parent directory",
+            ),
+        ] {
+            let panic = std::panic::catch_unwind(|| manifest_depends_on_grant_binding(&manifest))
+                .unwrap_err();
+            assert_eq!(panic.downcast_ref::<String>().unwrap(), reason);
+        }
+        Ok(())
+    })
+    .unwrap();
 }
 
 #[test]
