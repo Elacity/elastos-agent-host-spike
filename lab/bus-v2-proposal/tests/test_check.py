@@ -232,6 +232,203 @@ KIND_DECISION_ORDER = (
     KIND_APPEND_NUMBER,
 )
 
+OBSERVE_NUMBER = 2067
+OBSERVE_SPAN = "examples/agent-host/src/lib.rs:2067"
+OBSERVE_LINES = (
+    "/// Append a read. A path that `path_refusal` refuses, or the version",
+    "/// u64::MAX, adds nothing. A higher version is a new read. An older version is allowed only when the",
+    "/// text still matches that version, so a reread can make it current again",
+    "/// without replacing the page. This does not start a series and does not",
+    "/// read a file.",
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    "fn observe(journal: &mut Journal, resource: &str, version: u64, text: &str) -> bool {",
+    "    if path_refusal(resource).is_some()",
+    "        || version == u64::MAX",
+    "        || version_bound_elsewhere(&journal.events, resource, version, None)",
+    "    {",
+    "        return false;",
+    "    }",
+    "    if let Some(row) = current_observation(&journal.events, resource) {",
+    "        if version <= row.version",
+    "            && observed_text_at(&journal.events, resource, version).as_deref() != Some(text)",
+    "        {",
+    "            return false;",
+    "        }",
+    "    }",
+    "    let epoch = journal.epoch;",
+    "    journal",
+    "        .events",
+    "        .push(observation_record(resource, version, text));",
+    "    journal.epoch == epoch",
+    "}",
+)
+OBSERVE_QUOTE = OBSERVE_LINES[4]
+
+REVISION_NUMBER = 2741
+REVISION_SPAN = "examples/agent-host/src/lib.rs:2741"
+OP_NUMBER = 2749
+OP_SPAN = "examples/agent-host/src/lib.rs:2749"
+REQUEST_LINES = (
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    "fn request_body(bound: &[BoundEdit]) -> Vec<u8> {",
+    "    let files: Vec<serde_json::Value> = bound",
+    "        .iter()",
+    "        .map(|edit| {",
+    "            serde_json::json!({",
+    '                "path": edit.resource,',
+    '                "if_revision": edit.revision,',
+    '                "first_line": edit.first_line,',
+    '                "line_count": line_count(&edit.run),',
+    '                "old": edit.old,',
+    '                "new": edit.new,',
+    "            })",
+    "        })",
+    "        .collect();",
+    '    serde_json::json!({ "op": "edit", "all_or_none": true, "files": files })',
+    "        .to_string()",
+    "        .into_bytes()",
+    "}",
+)
+REVISION_QUOTE = REQUEST_LINES[7]
+OP_QUOTE = REQUEST_LINES[15]
+
+NO_WRITE_NUMBER = 3308
+NO_WRITE_SPAN = "examples/agent-host/src/lib.rs:3308"
+NO_WRITE_LINES = (
+    "/// Propose restoring an observed version. An unknown version, or a version",
+    "/// that is no longer current, creates no step. The step keeps the observed",
+    "/// text as the text to replace and as the text to write, so a granted",
+    "/// dispatch sends the restore through the same `bind_change` and",
+    "/// `note_change_wrote` path an edit uses. This does not write.",
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    "fn propose_restore(",
+    "    journal: &mut Journal,",
+    "    resource: &str,",
+    "    version: u64,",
+    ") -> Result<u64, &'static str> {",
+    "    let Some(text) = observed_text_at(&journal.events, resource, version) else {",
+    '        return Err("unknown");',
+    "    };",
+    "    let Some(current) = current_observation(&journal.events, resource) else {",
+    '        return Err("unknown");',
+    "    };",
+    "    if current.version != version {",
+    '        return Err("stale");',
+    "    }",
+    "    let id = propose_step(journal);",
+    "    let step = journal",
+    "        .steps",
+    "        .iter_mut()",
+    "        .find(|step| step.id == id)",
+    '        .expect("just pushed");',
+    "    step.kind = ProposalKind::Restore;",
+    "    step.resource = resource.to_string();",
+    "    step.old = text.clone();",
+    "    step.new = text;",
+    "    step.seen_version = Some(version);",
+    "    Ok(id)",
+    "}",
+)
+NO_WRITE_QUOTE = NO_WRITE_LINES[4]
+
+COVER_NUMBER = 8488
+COVER_SPAN = "examples/agent-host/src/lib.rs:8488"
+COVER_LINES = (
+    "/// The declaration's answer for one proposal. `Unspecified` matches nothing.",
+    "#[cfg(test)]",
+    "fn declared_ask(kind: ProposalKind, resource: &str) -> bool {",
+    "    declared_asks()",
+    "        .iter()",
+    "        .any(|ask| ask.kind == kind && ask_covers(ask, resource))",
+    "}",
+)
+COVER_QUOTE = COVER_LINES[5]
+
+# The five file-ask quotes, their pinned lines, their walk and their index.
+FILE_ASK_CASES = (
+    ("observe", OBSERVE_NUMBER, OBSERVE_SPAN, OBSERVE_LINES, 4),
+    ("revision", REVISION_NUMBER, REVISION_SPAN, REQUEST_LINES, 7),
+    ("op", OP_NUMBER, OP_SPAN, REQUEST_LINES, 15),
+    ("no_write", NO_WRITE_NUMBER, NO_WRITE_SPAN, NO_WRITE_LINES, 4),
+    ("cover", COVER_NUMBER, COVER_SPAN, COVER_LINES, 5),
+)
+
+# The groups one combined body cites, in the order it emits them.
+FILE_ASK_GROUPS = (
+    "observe",
+    "revision",
+    "op",
+    "no_write",
+    "deny",
+    "mint",
+    "owned",
+    "journal",
+    "grant",
+    "ask",
+    "asks",
+    "marker",
+    "launching",
+    "kind",
+    "arms",
+    "cover",
+)
+
+# The order in which the quote decisions read their pinned lines.
+QUOTE_DECISION_ORDER = (
+    OBSERVE_NUMBER,
+    REVISION_NUMBER,
+    OP_NUMBER,
+    NO_WRITE_NUMBER,
+    DENY_NUMBER,
+    MINT_NUMBER,
+    OWNED_NUMBER,
+    NEXT_NUMBER,
+    JOURNAL_NUMBER,
+    GRANT_NUMBER,
+    WRITE_NUMBER,
+    READ_NUMBER,
+    ASKS_NUMBER,
+    MARKER_NUMBER,
+    LAUNCHING_NUMBER,
+    KIND_READ_NUMBER,
+    KIND_EDIT_NUMBER,
+    KIND_RUN_NUMBER,
+    KIND_RESTORE_NUMBER,
+    KIND_HOSTED_NUMBER,
+    KIND_CHILD_NUMBER,
+    KIND_INIT_NUMBER,
+    KIND_APPEND_NUMBER,
+    COVER_NUMBER,
+)
+
+# One correct pinned line for every quote decision the combined body cites.
+FILE_ASK_LINES = {
+    OBSERVE_NUMBER: OBSERVE_QUOTE,
+    REVISION_NUMBER: REVISION_QUOTE,
+    OP_NUMBER: OP_QUOTE,
+    NO_WRITE_NUMBER: NO_WRITE_QUOTE,
+    DENY_NUMBER: DENY_QUOTE,
+    MINT_NUMBER: MINT_SECOND,
+    OWNED_NUMBER: OWNED_QUOTE,
+    NEXT_NUMBER: NEXT_QUOTE,
+    JOURNAL_NUMBER: JOURNAL_CONST,
+    GRANT_NUMBER: GRANT_QUOTE,
+    WRITE_NUMBER: WRITE_QUOTE,
+    READ_NUMBER: READ_QUOTE,
+    ASKS_NUMBER: ASKS_THIRD,
+    MARKER_NUMBER: MARKER_CONST,
+    LAUNCHING_NUMBER: LAUNCHING_CONST,
+    KIND_READ_NUMBER: KIND_READ_QUOTE,
+    KIND_EDIT_NUMBER: KIND_EDIT_QUOTE,
+    KIND_RUN_NUMBER: KIND_RUN_QUOTE,
+    KIND_RESTORE_NUMBER: KIND_RESTORE_QUOTE,
+    KIND_HOSTED_NUMBER: KIND_HOSTED_QUOTE,
+    KIND_CHILD_NUMBER: KIND_CHILD_QUOTE,
+    KIND_INIT_NUMBER: KIND_INIT_QUOTE,
+    KIND_APPEND_NUMBER: KIND_APPEND_QUOTE,
+    COVER_NUMBER: COVER_QUOTE,
+}
+
 
 class CitationCheckTests(unittest.TestCase):
     def _temp_root(self):
@@ -745,6 +942,114 @@ class CitationCheckTests(unittest.TestCase):
                 body += "\n    " + quotes[span] + "\n"
             body += "\n"
         return body
+
+    def _file_ask_source(self, count=COVER_NUMBER, lines=None):
+        """A committed file with one correct line for every cited quote decision."""
+        rows = ["// filler"] * COVER_NUMBER
+        for number, text in (lines or FILE_ASK_LINES).items():
+            rows[number - 1] = text
+        return ("\n".join(rows[:count]) + "\n").encode("utf-8")
+
+    def _changed(self, lines, index):
+        """Return LINES with the one line at INDEX altered by one character."""
+        rows = list(lines)
+        rows[index] = rows[index] + "x"
+        return tuple(rows)
+
+    def _cited(self, span, copies=1):
+        sentence = "`" + span + "` is cited."
+        return " ".join([sentence] * copies)
+
+    def _file_ask_body(
+        self,
+        observe=OBSERVE_LINES,
+        revision=REQUEST_LINES,
+        op=REQUEST_LINES,
+        no_write=NO_WRITE_LINES,
+        cover=COVER_LINES,
+        deny=DENY_QUOTE,
+        ask_third=ASKS_THIRD,
+        append=KIND_APPEND_QUOTE,
+        groups=None,
+        copies=None,
+        indented=True,
+    ):
+        """A draft that cites the file-ask spans and indents their walks."""
+        copies = copies or {}
+        chosen = FILE_ASK_GROUPS if groups is None else tuple(groups)
+        blocks = (
+            ("observe", [OBSERVE_SPAN], list(observe)),
+            ("revision", [REVISION_SPAN], list(revision)),
+            ("op", [OP_SPAN], list(op)),
+            ("no_write", [NO_WRITE_SPAN], list(no_write)),
+            ("deny", [DENY_SPAN], [deny] + list(DENY_LINES[1:])),
+            ("mint", [MINT_SPAN], [MINT_FIRST, MINT_SECOND]),
+            ("owned", [OWNED_SPAN, NEXT_SPAN], [OWNED_QUOTE, NEXT_QUOTE]),
+            ("journal", [JOURNAL_SPAN], [JOURNAL_CFG, JOURNAL_CONST]),
+            ("grant", [GRANT_SPAN], list(GRANT_LINES)),
+            ("ask", [WRITE_SPAN, READ_SPAN], list(ASK_LINES)),
+            (
+                "asks",
+                [ASKS_SPAN],
+                [
+                    ASKS_FIRST,
+                    ASKS_SECOND,
+                    ask_third,
+                    ASKS_FOURTH,
+                    ASKS_FIFTH,
+                    ASKS_SIXTH,
+                    ASKS_CFG,
+                    ASKS_CONST,
+                ],
+            ),
+            (
+                "marker",
+                [MARKER_SPAN],
+                [MARKER_HEAD, MARKER_TAIL, MARKER_CFG, MARKER_CONST],
+            ),
+            (
+                "launching",
+                [LAUNCHING_SPAN],
+                [
+                    LAUNCHING_HEAD,
+                    LAUNCHING_SECOND,
+                    LAUNCHING_THIRD,
+                    LAUNCHING_CFG,
+                    LAUNCHING_CONST,
+                ],
+            ),
+            (
+                "kind",
+                [KIND_READ_SPAN, KIND_EDIT_SPAN, KIND_RESTORE_SPAN],
+                list(KIND_LINES),
+            ),
+            ("cover", [COVER_SPAN], list(cover)),
+        )
+        parts = []
+        for name, spans, lines in blocks:
+            if name not in chosen:
+                continue
+            prose = " ".join(
+                self._cited(span, copies.get(name, 1)) for span in spans
+            )
+            parts.append(prose + "\n")
+            if indented:
+                parts.append("".join("    " + line + "\n" for line in lines))
+            parts.append("\n")
+        if "arms" in chosen:
+            arms = (
+                (KIND_RUN_SPAN, KIND_RUN_QUOTE),
+                (KIND_HOSTED_SPAN, KIND_HOSTED_QUOTE),
+                (KIND_CHILD_SPAN, KIND_CHILD_QUOTE),
+                (KIND_INIT_SPAN, KIND_INIT_QUOTE),
+                (KIND_APPEND_SPAN, append),
+            )
+            for span, quote in arms:
+                parts.append(self._cited(span, copies.get("arms", 1)) + "\n")
+                if indented:
+                    parts.append("    " + quote + "\n")
+                parts.append("\n")
+        return "".join(parts)
 
     def _caught(self, global_name, planted, named_test, prefix, label):
         named_test()
@@ -3448,3 +3753,396 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(found, ["refuse: path does not exist: missing/no-such.rs"])
         self.assertEqual(code, 1)
         self.assertEqual(out, found[0] + "\n")
+
+    def _file_ask_case(self, name):
+        for case in FILE_ASK_CASES:
+            if case[0] == name:
+                return case
+        raise AssertionError(name)
+
+    def test_live_draft_file_ask_quotes_match_their_pinned_lines(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        for name, number, span, lines, index in FILE_ASK_CASES:
+            selector = getattr(check, name + "_quote")
+            self.assertEqual(selector(text), lines[index], span)
+            self.assertEqual(
+                len(check._remainders(text, "`" + span + "`")), len(lines), span
+            )
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        for name, number, span, lines, index in FILE_ASK_CASES:
+            self.assertEqual(
+                check.pinned_line(root, sha, OWNED_REL, number), lines[index], span
+            )
+        self.assertEqual(check.problems(root), [])
+
+    def test_file_ask_fixture_keeps_every_decision_on_its_pinned_line(self):
+        body = self._file_ask_body()
+        files = {OWNED_REL: self._file_ask_source()}
+        got, reads = self._pinned_reads(body, files)
+        self.assertEqual(got, [])
+        self.assertEqual(reads, list(QUOTE_DECISION_ORDER))
+
+    def test_file_ask_quotes_are_absent_below_their_index(self):
+        for name, number, span, lines, index in FILE_ASK_CASES:
+            selector = getattr(check, name + "_quote")
+            self.assertIsNone(
+                selector(self._file_ask_body(groups=[name], indented=False)), span
+            )
+            self.assertIsNone(selector("No file-ask span here.\n"), span)
+            self.assertIsNone(
+                selector(
+                    self._file_ask_body(groups=[name], **{name: lines[:index]})
+                ),
+                span,
+            )
+
+    def _assert_file_ask_mismatch(self, name):
+        _, number, span, lines, index = self._file_ask_case(name)
+        expected = "refuse: quoted line does not match " + span
+        body = self._file_ask_body(
+            groups=[name], **{name: self._changed(lines, index)}
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [number])
+        root = self._draft(body, {OWNED_REL: self._file_ask_source()})
+        (root / OWNED_REL).write_bytes(
+            self._file_ask_source(
+                lines={**FILE_ASK_LINES, number: "// edited in the worktree"}
+            )
+        )
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_observe_quoted_line_mismatch_is_refused(self):
+        self._assert_file_ask_mismatch("observe")
+
+    def test_revision_quoted_line_mismatch_is_refused(self):
+        self._assert_file_ask_mismatch("revision")
+
+    def test_op_quoted_line_mismatch_is_refused(self):
+        self._assert_file_ask_mismatch("op")
+
+    def test_no_write_quoted_line_mismatch_is_refused(self):
+        self._assert_file_ask_mismatch("no_write")
+
+    def test_cover_quoted_line_mismatch_is_refused(self):
+        self._assert_file_ask_mismatch("cover")
+
+    def test_file_ask_quote_match_ignores_the_worktree_file(self):
+        root = self._draft(
+            self._file_ask_body(), {OWNED_REL: self._file_ask_source()}
+        )
+        self.assertEqual(check.problems(root), [])
+        for name, number, span, lines, index in FILE_ASK_CASES:
+            (root / OWNED_REL).write_bytes(
+                self._file_ask_source(
+                    lines={**FILE_ASK_LINES, number: "// edited in the worktree"}
+                )
+            )
+            self.assertEqual(check.problems(root), [], span)
+
+    def _assert_file_ask_line_not_cited(self, name, index):
+        _, number, span, lines, _ = self._file_ask_case(name)
+        body = self._file_ask_body(groups=[name], **{name: self._changed(lines, index)})
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(got, [], span)
+        self.assertEqual(reads, [number], span)
+
+    def test_observe_series_line_does_not_stand_for_line_2067(self):
+        self._assert_file_ask_line_not_cited("observe", 3)
+
+    def test_revision_path_line_does_not_stand_for_line_2741(self):
+        self._assert_file_ask_line_not_cited("revision", 6)
+
+    def test_op_revision_line_does_not_stand_for_line_2749(self):
+        self._assert_file_ask_line_not_cited("op", 7)
+
+    def test_no_write_doc_line_does_not_stand_for_line_3308(self):
+        self._assert_file_ask_line_not_cited("no_write", 0)
+
+    def test_cover_iter_line_does_not_stand_for_line_8488(self):
+        self._assert_file_ask_line_not_cited("cover", 4)
+
+    def test_file_ask_block_lines_do_not_stand_for_the_cited_lines(self):
+        cases = (
+            ("observe", 0),
+            ("observe", 25),
+            ("revision", 0),
+            ("revision", 18),
+            ("op", 0),
+            ("op", 18),
+            ("no_write", 5),
+            ("no_write", 32),
+            ("cover", 0),
+            ("cover", 6),
+        )
+        for name, index in cases:
+            self._assert_file_ask_line_not_cited(name, index)
+
+    def test_two_file_ask_spans_are_refused(self):
+        for name, number, span, lines, index in FILE_ASK_CASES:
+            expected = "refuse: quoted line is not one line: " + span
+            body = self._file_ask_body(copies={name: 2})
+            got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+            self.assertEqual(got, [expected], span)
+            self.assertEqual(
+                reads,
+                list(QUOTE_DECISION_ORDER[: QUOTE_DECISION_ORDER.index(number)]),
+                span,
+            )
+
+    def test_draft_without_a_file_ask_span_adds_no_refusal(self):
+        for name, number, span, lines, index in FILE_ASK_CASES:
+            groups = tuple(group for group in FILE_ASK_GROUPS if group != name)
+            body = self._file_ask_body(groups=groups)
+            got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+            self.assertEqual(got, [], span)
+            self.assertEqual(
+                reads,
+                [other for other in QUOTE_DECISION_ORDER if other != number],
+                span,
+            )
+
+    def test_file_ask_span_without_an_indented_line_adds_no_refusal(self):
+        body = self._file_ask_body(indented=False)
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [])
+
+    def test_file_ask_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        for name, number, span, lines, index in FILE_ASK_CASES:
+            expected = "refuse: quoted line is not in the pinned commit: " + span
+            got, reads = self._pinned_reads(
+                self._file_ask_body(),
+                {OWNED_REL: self._file_ask_source(count=number - 1)},
+                {OWNED_REL: self._file_ask_source()},
+            )
+            self.assertEqual(got, [expected], span)
+            self.assertEqual(
+                reads,
+                list(
+                    QUOTE_DECISION_ORDER[
+                        : QUOTE_DECISION_ORDER.index(number) + 1
+                    ]
+                ),
+                span,
+            )
+
+    def test_observe_mismatch_stops_every_later_decision(self):
+        got, reads = self._pinned_reads(
+            self._file_ask_body(observe=self._changed(OBSERVE_LINES, 4)),
+            {OWNED_REL: self._file_ask_source()},
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + OBSERVE_SPAN]
+        )
+        self.assertEqual(reads, [OBSERVE_NUMBER])
+
+    def test_revision_mismatch_stops_the_op_decision(self):
+        got, reads = self._pinned_reads(
+            self._file_ask_body(revision=self._changed(REQUEST_LINES, 7)),
+            {OWNED_REL: self._file_ask_source()},
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + REVISION_SPAN]
+        )
+        self.assertEqual(reads, [OBSERVE_NUMBER, REVISION_NUMBER])
+
+    def test_op_mismatch_stops_the_no_write_decision(self):
+        got, reads = self._pinned_reads(
+            self._file_ask_body(op=self._changed(REQUEST_LINES, 15)),
+            {OWNED_REL: self._file_ask_source()},
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + OP_SPAN])
+        self.assertEqual(
+            reads, [OBSERVE_NUMBER, REVISION_NUMBER, OP_NUMBER]
+        )
+
+    def test_no_write_mismatch_stops_the_deny_and_cover_decisions(self):
+        got, reads = self._pinned_reads(
+            self._file_ask_body(no_write=self._changed(NO_WRITE_LINES, 4)),
+            {OWNED_REL: self._file_ask_source()},
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + NO_WRITE_SPAN]
+        )
+        self.assertEqual(
+            reads,
+            [OBSERVE_NUMBER, REVISION_NUMBER, OP_NUMBER, NO_WRITE_NUMBER],
+        )
+
+    def test_append_mismatch_stops_the_cover_decision(self):
+        got, reads = self._pinned_reads(
+            self._file_ask_body(append=KIND_APPEND_QUOTE + "x"),
+            {OWNED_REL: self._file_ask_source()},
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + KIND_APPEND_SPAN]
+        )
+        self.assertEqual(
+            reads,
+            list(
+                QUOTE_DECISION_ORDER[
+                    : QUOTE_DECISION_ORDER.index(KIND_APPEND_NUMBER) + 1
+                ]
+            ),
+        )
+
+    def test_observe_mismatch_wins_over_the_deny_mismatch(self):
+        body = self._file_ask_body(
+            observe=self._changed(OBSERVE_LINES, 4), deny=DENY_QUOTE + "x"
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + OBSERVE_SPAN]
+        )
+        self.assertEqual(reads, [OBSERVE_NUMBER])
+
+    def test_deny_mismatch_without_the_file_ask_spans_stays_the_deny_refusal(self):
+        groups = tuple(
+            group
+            for group in FILE_ASK_GROUPS
+            if group not in ("observe", "revision", "op", "no_write")
+        )
+        body = self._file_ask_body(groups=groups, deny=DENY_QUOTE + "x")
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(got, ["refuse: quoted line does not match " + DENY_SPAN])
+        self.assertEqual(reads, [DENY_NUMBER])
+
+    def test_asks_mismatch_follows_the_file_ask_matches(self):
+        body = self._file_ask_body(ask_third=ASKS_THIRD + "x")
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(got, ["refuse: quoted line does not match " + ASKS_SPAN])
+        self.assertEqual(
+            reads,
+            list(QUOTE_DECISION_ORDER[: QUOTE_DECISION_ORDER.index(ASKS_NUMBER) + 1]),
+        )
+
+    def test_file_ask_quote_refusal_waits_for_a_known_pin(self):
+        body = self._file_ask_body(observe=self._changed(OBSERVE_LINES, 4))
+        files = {OWNED_REL: self._file_ask_source()}
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+        self.assertEqual(
+            check.problems(
+                self._raw_draft("Pinned commit: HEAD\n" + body, files)
+            ),
+            ["refuse: pinned commit is not one 40-hex commit"],
+        )
+        self.assertEqual(
+            check.problems(
+                self._raw_draft(
+                    "Pinned commit: " + "f" * 40 + "\n" + body, files, commit=True
+                )
+            ),
+            ["refuse: pinned commit is not a commit: " + "f" * 40],
+        )
+
+    def _caught_file_ask_line(self, name, index, named_test, label):
+        _, number, span, lines, _ = self._file_ask_case(name)
+        marker = "`" + span + "`"
+
+        def planted(text):
+            remainders = check._remainders(text, marker)
+            if len(remainders) <= index:
+                return None
+            return remainders[index]
+
+        self._caught(
+            name + "_quote",
+            planted,
+            named_test,
+            "refuse: quoted line does not match",
+            label,
+        )
+
+    def test_falsifier_observe_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_observe_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT observe-quoted-line",
+        )
+
+    def test_falsifier_observe_series_line_is_caught(self):
+        self._caught_file_ask_line(
+            "observe",
+            3,
+            self.test_observe_series_line_does_not_stand_for_line_2067,
+            "CAUGHT observe-series-line",
+        )
+
+    def test_falsifier_revision_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_revision_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT revision-quoted-line",
+        )
+
+    def test_falsifier_revision_path_line_is_caught(self):
+        self._caught_file_ask_line(
+            "revision",
+            6,
+            self.test_revision_path_line_does_not_stand_for_line_2741,
+            "CAUGHT revision-path-line",
+        )
+
+    def test_falsifier_op_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_op_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT op-quoted-line",
+        )
+
+    def test_falsifier_op_revision_line_is_caught(self):
+        self._caught_file_ask_line(
+            "op",
+            7,
+            self.test_op_revision_line_does_not_stand_for_line_2749,
+            "CAUGHT op-revision-line",
+        )
+
+    def test_falsifier_no_write_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_no_write_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT no-write-quoted-line",
+        )
+
+    def test_falsifier_no_write_doc_line_is_caught(self):
+        self._caught_file_ask_line(
+            "no_write",
+            0,
+            self.test_no_write_doc_line_does_not_stand_for_line_3308,
+            "CAUGHT no-write-doc-line",
+        )
+
+    def test_falsifier_cover_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_cover_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT cover-quoted-line",
+        )
+
+    def test_falsifier_cover_iter_line_is_caught(self):
+        self._caught_file_ask_line(
+            "cover",
+            4,
+            self.test_cover_iter_line_does_not_stand_for_line_8488,
+            "CAUGHT cover-iter-line",
+        )

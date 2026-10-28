@@ -94,6 +94,26 @@ KIND_INIT_MARKER = "`" + KIND_INIT_SPAN + "`"
 KIND_APPEND_SPAN = "examples/agent-host/src/lib.rs:8194"
 KIND_APPEND_MARKER = "`" + KIND_APPEND_SPAN + "`"
 
+# Its quotation is remainder 4 after the observe span, source line 2067.
+OBSERVE_SPAN = "examples/agent-host/src/lib.rs:2067"
+OBSERVE_MARKER = "`" + OBSERVE_SPAN + "`"
+
+# Its quotation is remainder 7 after the request span, source line 2741.
+REVISION_SPAN = "examples/agent-host/src/lib.rs:2741"
+REVISION_MARKER = "`" + REVISION_SPAN + "`"
+
+# Its quotation is remainder 15 after the request span, source line 2749.
+OP_SPAN = "examples/agent-host/src/lib.rs:2749"
+OP_MARKER = "`" + OP_SPAN + "`"
+
+# Its quotation is remainder 4 after the restore span, source line 3308.
+NO_WRITE_SPAN = "examples/agent-host/src/lib.rs:3308"
+NO_WRITE_MARKER = "`" + NO_WRITE_SPAN + "`"
+
+# Its quotation is remainder 5 after the declaration span, source line 8488.
+COVER_SPAN = "examples/agent-host/src/lib.rs:8488"
+COVER_MARKER = "`" + COVER_SPAN + "`"
+
 # The draft indents a quotation by exactly four spaces.
 DRAFT_INDENT = "    "
 
@@ -391,6 +411,46 @@ def kind_append_quote(text):
     return remainders[0]
 
 
+def observe_quote(text):
+    """Return remainder 4 after the observe span, or None when it is absent."""
+    remainders = _remainders(text, OBSERVE_MARKER)
+    if len(remainders) <= 4:
+        return None
+    return remainders[4]
+
+
+def revision_quote(text):
+    """Return remainder 7 after the revision span, or None when it is absent."""
+    remainders = _remainders(text, REVISION_MARKER)
+    if len(remainders) <= 7:
+        return None
+    return remainders[7]
+
+
+def op_quote(text):
+    """Return remainder 15 after the op span, or None when it is absent."""
+    remainders = _remainders(text, OP_MARKER)
+    if len(remainders) <= 15:
+        return None
+    return remainders[15]
+
+
+def no_write_quote(text):
+    """Return remainder 4 after the no-write span, or None when it is absent."""
+    remainders = _remainders(text, NO_WRITE_MARKER)
+    if len(remainders) <= 4:
+        return None
+    return remainders[4]
+
+
+def cover_quote(text):
+    """Return remainder 5 after the cover span, or None when it is absent."""
+    remainders = _remainders(text, COVER_MARKER)
+    if len(remainders) <= 5:
+        return None
+    return remainders[5]
+
+
 def quoted_line_matches(quoted, source):
     """True only when the quotation equals the pinned source line."""
     return quoted == source
@@ -455,6 +515,70 @@ def _asks_quote_refusal(root, text, sha):
         return "refuse: quoted line is not in the pinned commit: " + ASKS_SPAN
     if not quoted_line_matches(quoted, source):
         return "refuse: quoted line does not match " + ASKS_SPAN
+    return None
+
+
+def _observe_quote_refusal(root, text, sha):
+    """Return the 2067 refusal, or None when that quote is absent or matches."""
+    if text.count(OBSERVE_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + OBSERVE_SPAN
+    quoted = observe_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(OBSERVE_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + OBSERVE_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + OBSERVE_SPAN
+    return None
+
+
+def _revision_quote_refusal(root, text, sha):
+    """Return the 2741 refusal, or None when that quote is absent or matches."""
+    if text.count(REVISION_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + REVISION_SPAN
+    quoted = revision_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(REVISION_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + REVISION_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + REVISION_SPAN
+    return None
+
+
+def _op_quote_refusal(root, text, sha):
+    """Return the 2749 refusal, or None when that quote is absent or matches."""
+    if text.count(OP_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + OP_SPAN
+    quoted = op_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(OP_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + OP_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + OP_SPAN
+    return None
+
+
+def _no_write_quote_refusal(root, text, sha):
+    """Return the 3308 refusal, or None when that quote is absent or matches."""
+    if text.count(NO_WRITE_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + NO_WRITE_SPAN
+    quoted = no_write_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(NO_WRITE_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + NO_WRITE_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + NO_WRITE_SPAN
     return None
 
 
@@ -682,8 +806,36 @@ def _kind_append_quote_refusal(root, text, sha):
     return None
 
 
+def _cover_quote_refusal(root, text, sha):
+    """Return the 8488 refusal, or None when that quote is absent or matches."""
+    if text.count(COVER_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + COVER_SPAN
+    quoted = cover_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(COVER_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + COVER_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + COVER_SPAN
+    return None
+
+
 def _quote_refusals(root, text, sha):
-    """Return the quote refusals in source order: 3526, 3549, 3754, 3755, 3757, 3767, 3849, 3850, 8149, 8162, 8168, 8187, 8188, 8189, 8190, 8191, 8192, 8193, then 8194."""
+    """Return the quote refusals in source order: 2067, 2741, 2749, 3308, 3526, 3549, 3754, 3755, 3757, 3767, 3849, 3850, 8149, 8162, 8168, 8187, 8188, 8189, 8190, 8191, 8192, 8193, 8194, then 8488."""
+    observe = _observe_quote_refusal(root, text, sha)
+    if observe is not None:
+        return [observe]
+    revision = _revision_quote_refusal(root, text, sha)
+    if revision is not None:
+        return [revision]
+    op = _op_quote_refusal(root, text, sha)
+    if op is not None:
+        return [op]
+    no_write = _no_write_quote_refusal(root, text, sha)
+    if no_write is not None:
+        return [no_write]
     deny = _deny_quote_refusal(root, text, sha)
     if deny is not None:
         return [deny]
@@ -746,9 +898,12 @@ def _quote_refusals(root, text, sha):
     if kind_init is not None:
         return [kind_init]
     kind_append = _kind_append_quote_refusal(root, text, sha)
-    if kind_append is None:
+    if kind_append is not None:
+        return [kind_append]
+    cover = _cover_quote_refusal(root, text, sha)
+    if cover is None:
         return []
-    return [kind_append]
+    return [cover]
 
 
 def _past_end(number, rel, count):
