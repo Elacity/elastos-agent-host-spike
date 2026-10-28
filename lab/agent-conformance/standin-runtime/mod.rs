@@ -20,7 +20,10 @@
 //! and a `starting` instance of that session ends `failed` with the reason.
 //! `post_capability_grant` answers `POST /api/capability/grant` through the
 //! same writer with `granted` and `shell`, then `seed_grant` stores the one
-//! `Live` grant. A grant body carries no token.
+//! `Live` grant. A grant body carries no token. `delete_capability` answers
+//! `DELETE /api/capability/:id` through that writer with `denied`,
+//! `Revoked by user` and `shell`, then the one life function drops that id's
+//! `Live` grant. The instance stays.
 //!
 //! `set_instant` calls `expire_due`, which passes the one writer `expired`,
 //! `Request timed out` and `runtime` for each pending request at least 300
@@ -503,6 +506,44 @@ impl StandIn {
         Ok(json!({ "success": true }))
     }
 
+    /// `DELETE /api/capability/:id`.
+    ///
+    /// `request_id` is the path, a method argument, not a JSON field. A shell
+    /// revokes one granted record through the one writer with `denied`,
+    /// `Revoked by user` and `shell` as settler, then the one life function
+    /// drops that id's `Live` grant. The instance stays, and another grant of
+    /// that session stays. A missing record is status 404 with
+    /// `Capability request not found: ` plus that id. A record that is not
+    /// granted is status 400 with `Capability ` plus that id plus
+    /// ` was not granted`. Ok is `{"success": true, "revoked_request_id": ...}`
+    /// and carries no token.
+    pub fn delete_capability(
+        &mut self,
+        caller: Caller<'_>,
+        request_id: &str,
+    ) -> Result<Value, (u16, String)> {
+        require_shell(caller)?;
+        let Some(status) = self
+            .requests
+            .iter()
+            .find(|request| request.request_id == request_id)
+            .map(|request| request.status)
+        else {
+            return Err((404, format!("Capability request not found: {request_id}")));
+        };
+        if status != RequestStatus::Granted {
+            return Err((400, format!("Capability {request_id} was not granted")));
+        }
+        self.settle_record(
+            request_id,
+            RequestStatus::Denied,
+            "Revoked by user",
+            "shell",
+        );
+        self.revoke_grant(request_id);
+        Ok(json!({ "success": true, "revoked_request_id": request_id }))
+    }
+
     /// `GET /api/capability/request/:id`.
     ///
     /// `request_id` is the path, a method argument, not a JSON field. The
@@ -716,10 +757,26 @@ impl StandIn {
 
     /// Writes `Revoked` on `Live` grants of one session. Other lives stay.
     fn revoke_live(&mut self, session_id: &str) {
-        for grant in &mut self.grants {
-            if grant.session_id == session_id && is_live(grant.life) {
-                grant.life = Life::Revoked;
-            }
+        let ids = self
+            .grants
+            .iter()
+            .filter(|grant| grant.session_id == session_id && is_live(grant.life))
+            .map(|grant| grant.request_id.clone())
+            .collect::<Vec<_>>();
+        for request_id in ids {
+            self.revoke_grant(&request_id);
+        }
+    }
+
+    /// Not a route. Writes `Revoked` on the one `Live` grant of that id.
+    /// Another id and another life stay.
+    fn revoke_grant(&mut self, request_id: &str) {
+        if let Some(grant) = self
+            .grants
+            .iter_mut()
+            .find(|grant| grant.request_id == request_id && is_live(grant.life))
+        {
+            grant.life = Life::Revoked;
         }
     }
 
@@ -6042,5 +6099,347 @@ mod tests {
             "the stand-in did the work: the reads leave the runtime denial record as it was"
         );
         assert_live_request_ids_empty(&standin, "the denial read leaves no live grant");
+    }
+
+    #[test]
+    fn standin_shell_revoke_drops_one_live_grant() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        let first = launch_finished(&mut standin);
+        let second = launch_finished(&mut standin);
+        assert_eq!(
+            (first.as_str(), second.as_str()),
+            ("component-1", "component-2"),
+            "the stand-in numbers the two finished launches component-1 and component-2"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in runs the first instance",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in runs the second instance",
+        );
+        seed_shared_request(&mut standin, "req-1", "component-1");
+        seed_shared_request(&mut standin, "req-3", "component-1");
+        seed_shared_request(&mut standin, "req-2", "component-2");
+        standin.set_instant(4);
+        for (request_id, duration, rationale) in [
+            ("req-1", "session", "grant shared read"),
+            ("req-3", "once", "grant once"),
+            ("req-2", "session", "grant sibling"),
+        ] {
+            let granted = standin
+                .post_capability_grant(
+                    Caller::Shell,
+                    &json!({
+                        "request_id": request_id,
+                        "duration": duration,
+                        "rationale": rationale,
+                    }),
+                )
+                .expect("the stand-in grants the pending request");
+            assert_eq!(
+                granted,
+                json!({ "success": true }),
+                "the stand-in answers success true for the {request_id} grant and stores no token"
+            );
+        }
+        assert_eq!(
+            request_ids(
+                &standin
+                    .get_capability_list(Caller::Shell, None)
+                    .expect("the stand-in shell live-grant view"),
+            ),
+            BTreeSet::from(["req-1".to_owned(), "req-2".to_owned(), "req-3".to_owned()]),
+            "the stand-in did the work: the live-grant set is exactly req-1, req-2 and req-3 after the three grants"
+        );
+        standin
+            .authorise(
+                Caller::Client {
+                    session_id: "component-1",
+                },
+                "req-1",
+            )
+            .expect("the stand-in authorises the component-1 client for req-1");
+        assert_eq!(
+            grant_record(&standin, "req-1"),
+            (Life::Live, false),
+            "the stand-in did the work: the req-1 session grant stays live"
+        );
+
+        let revoked = standin
+            .delete_capability(Caller::Shell, "req-3")
+            .expect("the stand-in revokes req-3");
+        assert_keys(
+            &revoked,
+            &["success", "revoked_request_id"],
+            "the stand-in did the work: the revoke body has exactly success and revoked_request_id",
+        );
+        assert_eq!(
+            revoked,
+            json!({ "success": true, "revoked_request_id": "req-3" }),
+            "the stand-in did the work: the shell revoke answers success true for req-3 and stores no token"
+        );
+        let mut revoked_record = denied_request("req-3", "component-1", "Revoked by user");
+        revoked_record["settled_by"] = json!("shell");
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![
+                granted_request("req-1", "component-1", "grant shared read"),
+                revoked_record,
+            ],
+            "the stand-in did the work: the shell revoke denies req-3 with Revoked by user and leaves req-1 granted"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1")[1]["settled_by"],
+            json!("shell"),
+            "the stand-in did the work: the shell revoke stores shell as settler"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-3"),
+            (Life::Revoked, false),
+            "the stand-in did the work: the one life function sets the req-3 grant to Revoked"
+        );
+        assert_eq!(
+            request_ids(
+                &standin
+                    .get_capability_list(Caller::Shell, None)
+                    .expect("the stand-in shell live-grant view"),
+            ),
+            BTreeSet::from(["req-1".to_owned(), "req-2".to_owned()]),
+            "the stand-in did the work: the shell live-grant set is exactly req-1 and req-2 after the revoke"
+        );
+        let revoked_use = standin.authorise(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "req-3",
+        );
+        assert_request_refused(
+            &revoked_use,
+            "grant is not live: Revoked",
+            "the stand-in did the work: a use of the revoked req-3 is refused with grant is not live: Revoked",
+        );
+        standin
+            .authorise(
+                Caller::Client {
+                    session_id: "component-1",
+                },
+                "req-1",
+            )
+            .expect("the stand-in still authorises the component-1 client for req-1");
+        assert_eq!(
+            grant_record(&standin, "req-1"),
+            (Life::Live, false),
+            "the stand-in did the work: the req-1 grant stays live after the revoke"
+        );
+        standin
+            .authorise(
+                Caller::Client {
+                    session_id: "component-2",
+                },
+                "req-2",
+            )
+            .expect("the stand-in still authorises the component-2 client for req-2");
+        assert_eq!(
+            grant_record(&standin, "req-2"),
+            (Life::Live, false),
+            "the stand-in did the work: the sibling req-2 grant stays live after the revoke"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1")[0],
+            granted_request("req-1", "component-1", "grant shared read"),
+            "the stand-in did the work: the req-1 record stays granted with the shell as settler"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-2"),
+            vec![granted_request("req-2", "component-2", "grant sibling")],
+            "the stand-in did the work: the sibling record stays granted with decision_reason grant sibling"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-2")[0]["settled_by"],
+            json!("shell"),
+            "the stand-in did the work: the sibling record keeps the shell as settler"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in leaves the revoked instance running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in leaves the sibling instance running",
+        );
+
+        let again = standin.delete_capability(Caller::Shell, "req-3");
+        assert_delete(
+            &again,
+            400,
+            "Capability req-3 was not granted",
+            "the stand-in did the work: a second revoke of req-3 is refused as not granted",
+        );
+        let mut revoked_record = denied_request("req-3", "component-1", "Revoked by user");
+        revoked_record["settled_by"] = json!("shell");
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![
+                granted_request("req-1", "component-1", "grant shared read"),
+                revoked_record,
+            ],
+            "the stand-in did the work: the second revoke leaves the denied record and the granted req-1"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-3"),
+            (Life::Revoked, false),
+            "the stand-in did the work: the second revoke leaves the req-3 grant revoked"
+        );
+        assert_eq!(
+            request_ids(
+                &standin
+                    .get_capability_list(Caller::Shell, None)
+                    .expect("the stand-in shell live-grant view"),
+            ),
+            BTreeSet::from(["req-1".to_owned(), "req-2".to_owned()]),
+            "the stand-in did the work: the second revoke leaves the live-grant set exactly req-1 and req-2"
+        );
+    }
+
+    #[test]
+    fn standin_shell_revoke_refuses_without_a_grant() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        let first = launch_finished(&mut standin);
+        let second = launch_finished(&mut standin);
+        assert_eq!(
+            (first.as_str(), second.as_str()),
+            ("component-1", "component-2"),
+            "the stand-in numbers the two finished launches component-1 and component-2"
+        );
+        seed_shared_request(&mut standin, "req-1", "component-1");
+        seed_shared_request(&mut standin, "req-3", "component-1");
+        seed_shared_request(&mut standin, "req-2", "component-2");
+        standin.set_instant(4);
+        for (request_id, duration, rationale) in [
+            ("req-1", "session", "grant shared read"),
+            ("req-3", "once", "grant once"),
+            ("req-2", "session", "grant sibling"),
+        ] {
+            let granted = standin
+                .post_capability_grant(
+                    Caller::Shell,
+                    &json!({
+                        "request_id": request_id,
+                        "duration": duration,
+                        "rationale": rationale,
+                    }),
+                )
+                .expect("the stand-in grants the pending request");
+            assert_eq!(
+                granted,
+                json!({ "success": true }),
+                "the stand-in answers success true for the {request_id} grant and stores no token"
+            );
+        }
+        standin
+            .authorise(
+                Caller::Client {
+                    session_id: "component-1",
+                },
+                "req-1",
+            )
+            .expect("the stand-in authorises the component-1 client for req-1");
+
+        let client_refusal = standin.delete_capability(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            "req-1",
+        );
+        assert_delete(
+            &client_refusal,
+            403,
+            "This endpoint requires shell privileges",
+            "the stand-in did the work: a client revoke of req-1 is refused as shell only",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-1"),
+            (Life::Live, false),
+            "the stand-in did the work: the client refusal leaves the req-1 grant live"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1")[0],
+            granted_request("req-1", "component-1", "grant shared read"),
+            "the stand-in did the work: the client refusal leaves the req-1 record granted"
+        );
+        assert_eq!(
+            request_ids(
+                &standin
+                    .get_capability_list(Caller::Shell, None)
+                    .expect("the stand-in shell live-grant view"),
+            ),
+            BTreeSet::from(["req-1".to_owned(), "req-2".to_owned(), "req-3".to_owned()]),
+            "the stand-in did the work: the client refusal leaves every live grant"
+        );
+
+        let missing = standin.delete_capability(Caller::Shell, "missing");
+        assert_delete(
+            &missing,
+            404,
+            "Capability request not found: missing",
+            "the stand-in did the work: a revoke of missing is refused as a missing record",
+        );
+
+        seed_shared_request(&mut standin, "req-p", "component-1");
+        let pending_refusal = standin.delete_capability(Caller::Shell, "req-p");
+        assert_delete(
+            &pending_refusal,
+            400,
+            "Capability req-p was not granted",
+            "the stand-in did the work: a revoke of the pending req-p is refused as not granted",
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![
+                granted_request("req-1", "component-1", "grant shared read"),
+                granted_request("req-3", "component-1", "grant once"),
+                pending_request("req-p", "component-1"),
+            ],
+            "the stand-in did the work: the refusals leave the granted records and the pending req-p"
+        );
+        assert_eq!(
+            request_ids(
+                &standin
+                    .get_capability_list(Caller::Shell, None)
+                    .expect("the stand-in shell live-grant view"),
+            ),
+            BTreeSet::from(["req-1".to_owned(), "req-2".to_owned(), "req-3".to_owned()]),
+            "the stand-in did the work: the refusals leave the live-grant set with req-1"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in leaves the first instance running after every refusal",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in leaves the second instance running after every refusal",
+        );
     }
 }

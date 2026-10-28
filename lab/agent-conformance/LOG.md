@@ -9786,3 +9786,152 @@ New:
 | 8. Identity, admission and allowance stay separate? | Yes | The count matches the record's `session_id` at `:284` and the phase gate at `:362-370` stays separate; a granted record frees one slot and mints no allowance by itself. |
 
 A passing row gives the real Runtime no A11 credit for this cap.
+
+## 069 — A6: shell revoke drops one live grant
+
+069: `StandIn` gains one route, `delete_capability(&mut self, caller, request_id: &str) -> Result<Value, (u16, String)>` at `standin-runtime/mod.rs:520`. Its doc comment starts `DELETE /api/capability/:id.` The id is the path, a method argument, not a JSON field. It calls `require_shell` at `:525` before it reads the request store at `:526-531`. A client is status 403 with the reason `This endpoint requires shell privileges`. An id that matches no record is status 404 with `Capability request not found: ` plus that id at `:532`. A record whose status word is not `granted` is status 400 with `Capability ` plus that id plus ` was not granted` at `:535`, which covers `pending`, `denied` and `expired`. Each refusal writes nothing. On success the one writer `settle_record` at `:537-542` stores `denied`, `Revoked by user` and `shell` on that one record, then the one life function `revoke_grant` at `:543` sets that id's `Live` grant to `Revoked`. The Ok body's only keys are `success` and `revoked_request_id` at `:544`; there is no `token`, `error` or `reason` key. The instance keeps its phase and cause, and another grant of that session stays.
+
+The life assignment moved out of the session loop. `revoke_live` at `:759-769` now collects the `Live` grant ids of one session and calls `revoke_grant` for each. `revoke_grant` at `:773-781` is the only new private function; the assignment `grant.life = Life::Revoked` at `:779` appears once in the file. A missing id is a no-op and a grant whose life is not `Live` stays, so a stop still changes every `Live` grant of that session and nothing else.
+
+### Quote from the contract (read only)
+
+`docs/AGENT_ARCHITECTURE.md:318-320`, section `Delegation and mandates`:
+
+> **Allow once** authorizes one exact operation.
+> **Allow for this session** authorizes a bounded operation set until the
+> session ends or the grant is revoked.
+
+This task takes the revoke half of Allow for this session. The one use of a `once` grant stays 065, and a standing mandate stays out.
+
+### Quote from the Runtime route (read only, `elastos/crates/elastos-server/src/api/`)
+
+`server.rs:264`:
+
+> ```rust
+>         .route("/api/capability/:id", delete(handlers::revoke_capability))
+> ```
+
+`handlers/capability.rs:470-509`, `revoke_capability`:
+
+> ```rust
+>     let request = state
+>         .pending_store
+>         .get_request(&request_id)
+>         .await
+>         .ok_or_else(|| {
+>             (
+>                 StatusCode::NOT_FOUND,
+>                 format!("Capability request not found: {}", request_id),
+>             )
+>         })?;
+>
+>     match &request.status {
+>         elastos_runtime::capability::RequestStatus::Granted { token, .. } => {
+>             state
+>                 .capability_manager
+>                 .revoke(*token.id(), "Revoked by user via API")
+>                 .await;
+>
+>             state.pending_store.revoke_request(&request_id).await;
+>
+>             Ok(Json(RevokeCapabilityOutput {
+>                 success: true,
+>                 revoked_request_id: request_id,
+>                 error: None,
+>             }))
+>         }
+>         _ => Err((
+>             StatusCode::BAD_REQUEST,
+>             format!("Capability {} was not granted", request_id),
+>         )),
+>     }
+> ```
+
+The Ok body's keys are `success` and `revoked_request_id`; `error` is skipped when it is `None` (`capability.rs:460-464`). A client is status 403 with the reason `This endpoint requires shell privileges` (`middleware.rs:93`, `shell_only_middleware`). `elastos-runtime/src/capability/pending.rs:525-545`, `revoke_request`, sets a granted record to denied with the reason `Revoked by user`. The stand-in copies the three refusals, the one writer fields and the two Ok keys. It does not copy a token, an epoch, or the reason `Revoked by user via API`.
+
+### Tests
+
+`standin_shell_revoke_drops_one_live_grant` at `:6105` admits `/capsules/read-shared` as `read-shared` with `Start::Ok`, launches `component-1` and `component-2`, finishes both, seeds `req-1` and `req-3` on `component-1` and `req-2` on `component-2`, sets instant 4, and grants all three through the shell: `req-1` and `req-2` as `session`, `req-3` as `once`. The live set is exactly `req-1`, `req-2` and `req-3`. After one `authorise` of `req-1`, the shell `delete_capability` of `req-3` returns `{"success": true, "revoked_request_id": "req-3"}` with exactly those two keys; the record becomes `denied_request("req-3", "component-1", "Revoked by user")` with `settled_by` `shell`; the grant becomes `(Life::Revoked, false)`; the live set becomes exactly `req-1` and `req-2`. A use of `req-3` is status 400 with `grant is not live: Revoked`, while `req-1` and `req-2` still authorise and stay `Live`. Both instances stay `running` with cause `""`. A second revoke of `req-3` is status 400 with `Capability req-3 was not granted`, and the denied record, the `Revoked` grant and the live set stay.
+
+`standin_shell_revoke_refuses_without_a_grant` at `:6320` continues from that state before any delete. A client revoke of `req-1` is status 403 with `This endpoint requires shell privileges`, and the record and the `Live` grant stay. A shell revoke of `missing` is status 404 with `Capability request not found: missing`. A shell revoke of the seeded but ungranted `req-p` is status 400 with `Capability req-p was not granted`, its record stays `pending_request("req-p", "component-1")`, and the live set still holds `req-1`. Both instances stay `running` with cause `""`.
+
+### Hand-run plants
+
+Each plant was applied alone, run with `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_revoke_drops_one_live_grant -- --exact`, and restored. The planted crate compiled each time.
+
+F-standin-revoke-stub. The route returns success before the request store is read. Assertion: `src/../standin-runtime/mod.rs:6193:9` `assertion \`left == right\` failed: the stand-in did the work: the shell revoke denies req-3 with Revoked by user and leaves req-1 granted`; the second left entry is `"decision_reason": String("grant once"), "status": String("granted")`, the second right entry is `"decision_reason": String("Revoked by user"), "status": String("denied")`.
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let Some(status) = self
+```
+
+New:
+
+```text
+        require_shell(caller)?;
+        return Ok(json!({ "success": true, "revoked_request_id": "req-3" }));
+        let Some(status) = self
+```
+
+F-standin-revoke-keep. The route writes the denied record and does not change that grant's life. Assertion: `src/../standin-runtime/mod.rs:6204:9` `assertion \`left == right\` failed: the stand-in did the work: the one life function sets the req-3 grant to Revoked`, `left: (Live, false)`, `right: (Revoked, false)`.
+
+Old:
+
+```text
+        self.revoke_grant(request_id);
+        Ok(json!({ "success": true, "revoked_request_id": request_id }))
+```
+
+New:
+
+```text
+        Ok(json!({ "success": true, "revoked_request_id": request_id }))
+```
+
+F-standin-revoke-session. The route calls `revoke_live` for `component-1`, so `req-1` becomes `Revoked` too. Assertion: `src/../standin-runtime/mod.rs:6210:9` `assertion \`left == right\` failed: the stand-in did the work: the shell live-grant set is exactly req-1 and req-2 after the revoke`, `left: {"req-2"}`, `right: {"req-1", "req-2"}`.
+
+Old:
+
+```text
+        self.revoke_grant(request_id);
+```
+
+New:
+
+```text
+        self.revoke_live("component-1");
+```
+
+After the restores, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows no plant. `falsifiers.json` gains no id and `standin-runtime/mod.rs` is not a recovery target; the plants ran by hand.
+
+### Docs
+
+`standin-runtime/README.md:59` adds one paragraph immediately before `## Callers`. It states that `delete_capability` answers `DELETE /api/capability/:id`; a shell revoke sets that granted record to `denied` with `decision_reason` `Revoked by user` and `settled_by` `shell`; the one `Revoked` assignment then drops that live grant; the instance stays and another grant of that session stays; the Ok body is `success` and `revoked_request_id` with no token; a client is 403 with `This endpoint requires shell privileges`; a missing record is 404 with `Capability request not found: ` plus the id; a record that is not granted is 400 with `Capability ` plus the id plus ` was not granted`; a stop still revokes every live grant of that session through `revoke_live`; a PASS gives the Runtime no A6 credit for this revoke. The RA-1 section, the RI-1 to RI-4 section, the settlement paragraph and the watch, survivor, expiry, once-grant, request-route, later-read and pending-cap paragraphs keep their bytes.
+
+`RUNBOOK.md:743` adds one paragraph after the last stand-in paragraph: `standin_shell_revoke_drops_one_live_grant` is this stand-in, and a PASS there gives the Runtime no A6 credit for a shell revoke. Every other RUNBOOK paragraph keeps its bytes.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged; `git diff` for `src/harness.rs`, `src/census.rs`, `tests/effects.rs`, `tests/common/grants.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. The only changed files are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.13 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 239.53 seconds, inside the 600-second bound. Targets in order: lib 64 passed (both new tests among them); bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.13 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_revoke_drops_one_live_grant -- --exact` exit 0, 1 passed and 0 failed, real 0.07 seconds.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The route matches stored `request_id` strings at `standin-runtime/mod.rs:526-531` and adds no code or content identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | The route only marks one request denied at `:537-542` and one grant `Revoked` at `:773-781`; it mints no grant, token or resource access, and Home holds nothing new. |
+| 3. A second path or a second copy of one rule? | No | One writer `settle_record` at `:789`, one life function `revoke_grant` at `:773`, and one assignment at `:779`; `revoke_live` at `:759-769` and `delete_capability` at `:543` both call that one function. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`; `elastos/` is untouched and its route is quoted only. |
+| 5. Refusals deny by default with a clear reason? | Yes | The 403, 404 and 400 refusals at `:525-536` run before any write and name the caller, the id or the status gap. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The change is shell-only control state; the instance keeps its phase, and no capsule code, import or world changes. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_shell_revoke_drops_one_live_grant` at `:6105` and `standin_shell_revoke_refuses_without_a_grant` at `:6320`; the stub, keep and session plants each failed the named test on its assertion, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | The revoke changes the request record and the grant's life only; the instance's id, phase and cause stay `running` and `""`, so admission is not implied by the allowance change. |
+
+A passing row gives the real Runtime no A6 credit for this revoke.

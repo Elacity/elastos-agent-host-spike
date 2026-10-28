@@ -739,3 +739,5 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 `standin_guest_reads_its_request_later` is this stand-in, and a PASS there gives the Runtime no A11 credit for a later read.
 
 `standin_session_pending_cap` is this stand-in, and a PASS there gives the Runtime no A11 credit for the pending cap.
+
+`standin_shell_revoke_drops_one_live_grant` is this stand-in, and a PASS there gives the Runtime no A6 credit for a shell revoke.
