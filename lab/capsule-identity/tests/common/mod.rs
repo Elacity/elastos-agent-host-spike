@@ -149,6 +149,13 @@ pub const CHILD_DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID: &str =
 /// Built in a temp dir and in memory and never committed.
 pub const DIRECTORY_WITH_A_ONE_LINK_HAMT_SHARD_LAB_CID: &str =
     "bafybeiap7fmepwaka7go2lxcfkxuhpi3ifs3rhpy7u6oolxtrtb77v5maq";
+/// Task 062: the 262145-estimate flat bundle with one 200-byte filler holding
+/// 262145 bytes, byte `i` being `i % 251`: a file root over two raw leaves
+/// inside the HAMT shard, so its leaf link stores the file root's Tsize
+/// (262249), which is more than the file's byte length. Built in a temp dir
+/// and in memory and never committed.
+pub const FILE_ROOT_INSIDE_A_HAMT_LAB_CID: &str =
+    "bafybeifpzyxcurfmvho4qwltsy5wtgyiwt7qvviwzcj5oqzgejmqyajdqa";
 
 /// The empty files that bring content-sample's root block to 262144 bytes
 /// and `longer` more: 1064 named by 200 digits and one by 235 + `longer`
@@ -260,6 +267,38 @@ pub fn directory_with_a_one_link_hamt_shard_bundle() -> Vec<BundleEntry> {
         })
         .collect();
     assert_eq!(replaced, pair.len(), "two 200-byte fillers are replaced");
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    entries
+}
+
+/// Task 062: [`directory_at_hamt_threshold_bundle`]`(1)` with its first
+/// 200-byte filler (a name of digits only) holding 262145 bytes, byte `i`
+/// being `i % 251`, instead of empty bytes. The name keeps its 200 bytes, so
+/// the links estimate stays 262145 and the directory is still a shard. The
+/// file is a file root over two raw leaves, whose Tsize is its block and its
+/// leaves (262246), so a HAMT leaf link that stored its byte length would
+/// print another name. Built in a temp dir and in memory and never committed.
+pub fn file_root_inside_a_hamt_bundle() -> Vec<BundleEntry> {
+    let mut replaced = 0;
+    let entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(1)
+        .into_iter()
+        .map(|entry| {
+            if replaced == 0 && entry.path.len() == 200 {
+                replaced += 1;
+                BundleEntry {
+                    path: entry.path,
+                    content: (0..262_145u32).map(|i| (i % 251) as u8).collect(),
+                }
+            } else {
+                entry
+            }
+        })
+        .collect();
+    assert_eq!(replaced, 1, "one 200-byte filler is replaced");
     let estimate: usize = entries
         .iter()
         .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
@@ -856,6 +895,10 @@ pub const NAME_SIGNATURE_HEADING: &str = "## Test-key publisher signature (lab p
 /// payload and digest, `record_payload` and `record_digest`.
 pub const PACKAGE_RECORD_HEADING: &str = "## Lab package record (outside the bundle)\n";
 
+/// The heading of README's section that holds the cross-implementation
+/// check: the Python pin test's count and the Kubo cross-check.
+pub const CROSS_IMPLEMENTATION_HEADING: &str = "### The cross-implementation check\n";
+
 /// The ```python block of README's "The encoding" section: the one Python
 /// copy of the naming rule, as committed.
 pub fn readme_python_block() -> Result<String, String> {
@@ -953,6 +996,57 @@ print(name_digest(sys.stdin.read()))
 pub fn readme_python_name_digests(names: &[&str]) -> Result<Vec<String>, String> {
     let block = python_block_under(README, NAME_SIGNATURE_HEADING)?;
     python_name_digests(&block, names)
+}
+
+/// The three counts README states for the pinned bundles, from its
+/// cross-implementation section: the Python test's "For each of the N pins",
+/// its "A missing block is no pass: exactly N bundles are checked" table
+/// cell and Kubo's "writes each of the N pinned bundles". Read word by word,
+/// so README may wrap a sentence anywhere. A missing count, two counts in
+/// one place, or digits that are not a number are refused with their reason.
+pub fn readme_pinned_bundle_counts() -> Result<[usize; 3], String> {
+    let section = section_under(README, CROSS_IMPLEMENTATION_HEADING)?;
+    let words: Vec<&str> = section.split_whitespace().collect();
+    Ok([
+        count_after(&words, &["For", "each", "of", "the"], "pins,")?,
+        count_after(
+            &words,
+            &["A", "missing", "block", "is", "no", "pass:", "exactly"],
+            "bundles",
+        )?,
+        count_after(&words, &["writes", "each", "of", "the"], "pinned")?,
+    ])
+}
+
+/// The number in the one place `words` holds `before`, then digits, then
+/// `after`. A place with no digits, no such place, or two of them is
+/// refused.
+fn count_after(words: &[&str], before: &[&str], after: &str) -> Result<usize, String> {
+    let mut found = Vec::new();
+    for at in 0..words.len().saturating_sub(before.len() + 1) {
+        if &words[at..at + before.len()] != before || words[at + before.len() + 1] != after {
+            continue;
+        }
+        let number = words[at + before.len()];
+        found.push(number.parse::<usize>().map_err(|_| {
+            format!(
+                "README's {:?} count {number:?} is not a number",
+                before.join(" ")
+            )
+        })?);
+    }
+    match found[..] {
+        [count] => Ok(count),
+        [] => Err(format!(
+            "README has no {:?} ... {after:?} count",
+            before.join(" ")
+        )),
+        _ => Err(format!(
+            "README has {} {:?} ... {after:?} counts, not one",
+            found.len(),
+            before.join(" ")
+        )),
+    }
 }
 
 /// `block` and [`NAME_DIGEST_DRIVER`] run once per name, through

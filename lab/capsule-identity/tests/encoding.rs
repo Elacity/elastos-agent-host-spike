@@ -4,7 +4,8 @@
 mod common;
 
 use capsule_identity::{
-    encode_entries, encode_listed_files, lab_cid, BundleEntry, ListedFile, Refusal,
+    encode_chunked_files, encode_entries, encode_listed_files, lab_cid, BundleEntry, ChunkedFile,
+    ListedFile, Refusal,
 };
 use common::*;
 use tempfile::TempDir;
@@ -330,6 +331,54 @@ fn directory_with_a_one_link_hamt_shard_has_the_pinned_cid() {
     assert_ne!(
         walked, DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID,
         "a one-link child shard got the same name as a two-link one"
+    );
+}
+
+#[test]
+fn file_root_inside_a_hamt_has_the_pinned_cid() {
+    // Task 062: one 200-byte filler of the 262145-estimate bundle holds a
+    // file of 262145 bytes, a file root over two raw leaves. A HAMT leaf
+    // link stores the child node's Tsize, which for a file over one leaf is
+    // the file root's block and its leaves, not the file's byte length. The
+    // pin was recomputed by README's Python rule and printed by Kubo v0.40.1
+    // with the provider's HAMT config.
+    let entries = file_root_inside_a_hamt_bundle();
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    let files: Vec<&BundleEntry> = entries
+        .iter()
+        .filter(|entry| entry.content.len() > 262_144)
+        .collect();
+    assert_eq!(files.len(), 1, "one file over one leaf");
+    assert_eq!(files[0].content.len(), 262_145, "the replaced file's bytes");
+    let chunked: Vec<ChunkedFile> = entries
+        .iter()
+        .map(|entry| chunked_file(&entry.path, &entry.content))
+        .collect();
+    let (_bundle, walked, encoded) = walk_and_encode(&entries);
+    let from_chunks = encode_chunked_files(&chunked)
+        .unwrap_or_else(|refusal| panic!("{refusal}"))
+        .to_string();
+    assert_eq!(
+        (walked.as_str(), encoded.as_str(), from_chunks.as_str()),
+        (
+            FILE_ROOT_INSIDE_A_HAMT_LAB_CID,
+            FILE_ROOT_INSIDE_A_HAMT_LAB_CID,
+            FILE_ROOT_INSIDE_A_HAMT_LAB_CID
+        ),
+        "(lab_cid, encode_entries, encode_chunked_files) against the pin"
+    );
+    assert!(walked.starts_with("bafybei"), "{walked}");
+    assert_ne!(
+        walked, DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID,
+        "the file root got the empty fillers' name"
+    );
+    assert_ne!(
+        walked, TWO_LEAF_FILE_LAB_CID,
+        "a file root in a shard got a basic directory's name"
     );
 }
 

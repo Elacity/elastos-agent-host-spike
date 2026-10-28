@@ -38,9 +38,10 @@ use tempfile::TempDir;
 /// the three bundles built for the profile tests, the photo stand-in
 /// consumer copy (task 047), the two bundles with a file over one leaf
 /// (task 048), the bundle with a file of two tree levels (task 051), the
-/// bundle whose root block is exactly 262144 bytes (task 053) and the four
-/// HAMT bundles (tasks 056 and 061): 20.
-const PINNED_BUNDLES: usize = 20;
+/// bundle whose root block is exactly 262144 bytes (task 053), the four
+/// HAMT bundles (tasks 056 and 061) and the bundle with a file root inside a
+/// HAMT shard (task 062): 21.
+const PINNED_BUNDLES: usize = 21;
 
 /// How many committed fixtures have a pin: all but wc001-core.
 const PINNED_FIXTURES: usize = 7;
@@ -198,6 +199,11 @@ fn pinned_bundles() -> Vec<Pinned> {
         pin: CHILD_DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID,
         entries: child_directory_at_hamt_threshold_bundle(1),
     });
+    bundles.push(Pinned {
+        what: "file root inside a HAMT shard".to_owned(),
+        pin: FILE_ROOT_INSIDE_A_HAMT_LAB_CID,
+        entries: file_root_inside_a_hamt_bundle(),
+    });
     bundles
 }
 
@@ -250,6 +256,16 @@ fn readme_python_recomputes_every_lab_cid_pin() {
         );
     }
     assert_eq!(README_PYTHON_DRIVER.matches("lab_cid(").count(), 1);
+
+    // README names the count this test checks, in the Python sentences and
+    // in the Kubo cross-check, and the three say one count.
+    let counts = readme_pinned_bundle_counts().unwrap_or_else(|reason| panic!("{reason}"));
+    for count in counts {
+        assert_eq!(
+            count, PINNED_BUNDLES,
+            "README names a count of pinned bundles that this test does not check"
+        );
+    }
 
     // Python, the pin and the Rust encoder agree on every pinned bundle.
     let bundles = pinned_bundles();
