@@ -1,0 +1,8 @@
+id: F-GB-tab
+file: src/link.rs
+test: link::model_tab_escape_is_not_a_link
+--- old
+        b't' => Some(('\t', simple)),
+--- new
+        b't' => Some(('t', simple)),
+--- end
