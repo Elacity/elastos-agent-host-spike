@@ -106,6 +106,31 @@ JOURNAL_SPAN = "examples/agent-host/src/lib.rs:3757"
 JOURNAL_CFG = '#[cfg(any(test, target_arch = "wasm32"))]'
 JOURNAL_CONST = 'const JOURNAL_ROOT: &str = "localhost://Users/self/.AppData/Agents/";'
 
+GRANT_REL = OWNED_REL
+GRANT_NUMBER = 3767
+GRANT_SPAN = "examples/agent-host/src/lib.rs:3767"
+GRANT_QUOTE = "/// A grant the Runtime gave this guest for its own journal, one resource and"
+GRANT_SECOND = "/// one action. It is held in memory only: the journal format has no field for"
+GRANT_THIRD = "/// it, and `Debug` does not print it."
+GRANT_CFG = '#[cfg(any(test, target_arch = "wasm32"))]'
+GRANT_STRUCT = "struct JournalGrant(String);"
+GRANT_LINES = (
+    GRANT_QUOTE,
+    GRANT_SECOND,
+    GRANT_THIRD,
+    GRANT_CFG,
+    GRANT_STRUCT,
+    GRANT_CFG,
+    "impl JournalGrant {",
+    "    fn new(id: &str) -> Option<Self> {",
+    "        (!id.is_empty()).then(|| Self(id.to_string()))",
+    "    }",
+    "    fn id(&self) -> &str {",
+    "        &self.0",
+    "    }",
+    "}",
+)
+
 
 class CitationCheckTests(unittest.TestCase):
     def _temp_root(self):
@@ -365,10 +390,14 @@ class CitationCheckTests(unittest.TestCase):
         third=ASKS_THIRD,
         marker_last=MARKER_CONST,
         launching_last=LAUNCHING_CONST,
+        grant_first=GRANT_QUOTE,
+        grant_last=GRANT_LINES[-1],
     ):
-        """A committed file with line 3757 below 3755 and above the asks block."""
+        """A committed file with line 3757 below 3755, line 3767 below 3757, and the asks block."""
         rows = ["// filler"] * (OWNED_NUMBER - 1) + [owned, following]
         rows += [first, second]
+        rows += ["// filler"] * (GRANT_NUMBER - 1 - len(rows))
+        rows += [grant_first] + list(GRANT_LINES[1:-1]) + [grant_last]
         rows += ["// filler"] * (ASKS_NUMBER - 3 - len(rows))
         rows += [
             ASKS_FIRST,
@@ -396,6 +425,26 @@ class CitationCheckTests(unittest.TestCase):
         """A draft that cites the journal span and indents its two lines below it."""
         lines = [first, second]
         body = "`" + JOURNAL_SPAN + "` sets `JOURNAL_ROOT`.\n\n"
+        body += "".join("    " + line + "\n" for line in lines[:count])
+        return body + "\n"
+
+    def _grant_block(
+        self,
+        first=GRANT_QUOTE,
+        second=GRANT_SECOND,
+        struct_line=GRANT_STRUCT,
+        last=GRANT_LINES[-1],
+        count=14,
+    ):
+        """A draft that cites the grant span and indents its quotation below it."""
+        lines = (
+            [first, second]
+            + list(GRANT_LINES[2:4])
+            + [struct_line]
+            + list(GRANT_LINES[5:-1])
+            + [last]
+        )
+        body = "`" + GRANT_SPAN + "` is `JournalGrant`.\n\n"
         body += "".join("    " + line + "\n" for line in lines[:count])
         return body + "\n"
 
@@ -1530,6 +1579,181 @@ class CitationCheckTests(unittest.TestCase):
             ["refuse: pinned commit is not a commit: " + "f" * 40],
         )
 
+    def test_grant_quote_refusal_waits_for_a_known_pin(self):
+        body = self._grant_block(first=GRANT_QUOTE + "x")
+        files = {GRANT_REL: self._journal_source()}
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+        bad_pin = "Pinned commit: HEAD\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(bad_pin, files)),
+            ["refuse: pinned commit is not one 40-hex commit"],
+        )
+        unknown = "Pinned commit: " + "f" * 40 + "\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(unknown, files, commit=True)),
+            ["refuse: pinned commit is not a commit: " + "f" * 40],
+        )
+
+    def test_live_draft_grant_quote_matches_its_pinned_line(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        self.assertEqual(check.grant_quote(text), GRANT_QUOTE)
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        self.assertEqual(
+            check.pinned_line(root, sha, GRANT_REL, GRANT_NUMBER), GRANT_QUOTE
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_grant_quote_is_absent_without_an_indented_line(self):
+        self.assertIsNone(check.grant_quote("No grant span here.\n"))
+        self.assertIsNone(
+            check.grant_quote("`" + GRANT_SPAN + "` is `JournalGrant`.\n")
+        )
+
+    def test_grant_fixture_keeps_line_3767_between_3757_and_8149(self):
+        root = self._draft(self._grant_block(), {GRANT_REL: self._journal_source()})
+        sha = check.pin_sha(check.load_draft(root))
+        self.assertIsNotNone(sha)
+        self.assertEqual(
+            check.pinned_line(root, sha, GRANT_REL, JOURNAL_NUMBER), JOURNAL_CONST
+        )
+        self.assertEqual(
+            check.pinned_line(root, sha, GRANT_REL, GRANT_NUMBER), GRANT_QUOTE
+        )
+        self.assertEqual(
+            check.pinned_line(root, sha, GRANT_REL, ASKS_NUMBER), ASKS_THIRD
+        )
+        self.assertIsNone(
+            check.pinned_line(root, sha, GRANT_REL, LAUNCHING_NUMBER + 1)
+        )
+
+    def test_grant_quoted_line_mismatch_is_refused(self):
+        expected = "refuse: quoted line does not match " + GRANT_SPAN
+        root = self._draft(
+            self._grant_block(first=GRANT_QUOTE + "x"),
+            {GRANT_REL: self._journal_source()},
+        )
+        self.assertEqual(check.problems(root), [expected])
+        (root / GRANT_REL).write_bytes(
+            self._journal_source(grant_first="// edited in the worktree")
+        )
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_grant_quoted_line_match_ignores_the_worktree_file(self):
+        root = self._draft(self._grant_block(), {GRANT_REL: self._journal_source()})
+        self.assertEqual(check.problems(root), [])
+        (root / GRANT_REL).write_bytes(
+            self._journal_source(grant_first="// edited in the worktree")
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_grant_second_line_does_not_stand_for_line_3767(self):
+        root = self._draft(
+            self._grant_block(second=GRANT_SECOND + "x"),
+            {GRANT_REL: self._journal_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_grant_struct_line_does_not_stand_for_line_3767(self):
+        root = self._draft(
+            self._grant_block(struct_line=GRANT_STRUCT + "x"),
+            {GRANT_REL: self._journal_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_grant_last_line_does_not_stand_for_line_3767(self):
+        root = self._draft(
+            self._grant_block(last=GRANT_LINES[-1] + "x"),
+            {GRANT_REL: self._journal_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_grant_span_without_an_indented_line_adds_no_refusal(self):
+        got, reads = self._pinned_reads(
+            self._grant_block(count=0), {GRANT_REL: self._journal_source()}
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [])
+
+    def test_grant_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        expected = "refuse: quoted line is not in the pinned commit: " + GRANT_SPAN
+        short = ("// filler\n" * 10).encode("utf-8")
+        root = self._draft(self._grant_block(), {GRANT_REL: short})
+        (root / GRANT_REL).write_bytes(self._journal_source())
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_two_grant_spans_are_refused(self):
+        expected = "refuse: quoted line is not one line: " + GRANT_SPAN
+        body = (
+            self._grant_block()
+            + "\nAgain `"
+            + GRANT_SPAN
+            + "`.\n"
+            + self._asks_block()
+        )
+        got, reads = self._pinned_reads(body, {GRANT_REL: self._journal_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [])
+
+    def test_draft_without_the_grant_span_adds_no_grant_refusal(self):
+        root = self._draft(self._journal_block(), {GRANT_REL: self._journal_source()})
+        self.assertEqual(check.problems(root), [])
+
+    def test_journal_line_mismatch_adds_no_grant_refusal(self):
+        expected = "refuse: quoted line does not match " + JOURNAL_SPAN
+        body = self._journal_block(
+            second=JOURNAL_CONST + "x"
+        ) + self._grant_block(first=GRANT_QUOTE + "y")
+        got, reads = self._pinned_reads(body, {GRANT_REL: self._journal_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [JOURNAL_NUMBER])
+
+    def test_grant_line_mismatch_adds_no_asks_refusal(self):
+        expected = "refuse: quoted line does not match " + GRANT_SPAN
+        body = (
+            self._journal_block()
+            + self._grant_block(first=GRANT_QUOTE + "x")
+            + self._asks_block(third=ASKS_THIRD + "y")
+        )
+        got, reads = self._pinned_reads(body, {GRANT_REL: self._journal_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [JOURNAL_NUMBER, GRANT_NUMBER])
+
+    def test_grant_line_match_follows_to_the_asks_refusal(self):
+        expected = "refuse: quoted line does not match " + ASKS_SPAN
+        body = (
+            self._journal_block()
+            + self._grant_block()
+            + self._asks_block(third=ASKS_THIRD + "x")
+        )
+        got, reads = self._pinned_reads(body, {GRANT_REL: self._journal_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [JOURNAL_NUMBER, GRANT_NUMBER, ASKS_NUMBER])
+
+    def test_draft_without_the_journal_span_still_refuses_a_grant_mismatch(self):
+        expected = "refuse: quoted line does not match " + GRANT_SPAN
+        got, reads = self._pinned_reads(
+            self._grant_block(first=GRANT_QUOTE + "x"),
+            {GRANT_REL: self._journal_source()},
+        )
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [GRANT_NUMBER])
+
+    def test_draft_without_the_grant_span_still_refuses_a_journal_mismatch(self):
+        expected = "refuse: quoted line does not match " + JOURNAL_SPAN
+        got, reads = self._pinned_reads(
+            self._journal_block(second=JOURNAL_CONST + "x"),
+            {GRANT_REL: self._journal_source()},
+        )
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [JOURNAL_NUMBER])
+
     def test_falsifier_missing_path_is_caught(self):
         self._caught(
             "read_file",
@@ -1696,6 +1920,30 @@ class CitationCheckTests(unittest.TestCase):
             self.test_journal_first_line_does_not_stand_for_line_3757,
             "refuse: quoted line does not match",
             "CAUGHT journal-first-line",
+        )
+
+    def test_falsifier_grant_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_grant_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT grant-quoted-line",
+        )
+
+    def test_falsifier_grant_second_line_is_caught(self):
+        def planted(text):
+            remainders = check._remainders(text, check.GRANT_MARKER)
+            if len(remainders) < 2:
+                return None
+            return remainders[1]
+
+        self._caught(
+            "grant_quote",
+            planted,
+            self.test_grant_second_line_does_not_stand_for_line_3767,
+            "refuse: quoted line does not match",
+            "CAUGHT grant-second-line",
         )
 
     def test_worktree_root_contains_checker(self):
