@@ -2096,7 +2096,7 @@ class CitationCheckTests(unittest.TestCase):
 
     def test_quoted_line_match_ignores_the_worktree_file(self):
         root = self._draft(
-            self._quote_body(OWNED_QUOTE),
+            self._quote_body(OWNED_QUOTE, NEXT_QUOTE),
             {OWNED_REL: self._source(OWNED_QUOTE)},
         )
         self.assertEqual(check.problems(root), [])
@@ -2360,13 +2360,15 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(got, ["refuse: quoted line does not match " + OWNED_SPAN])
         self.assertEqual(reads, [OWNED_NUMBER])
 
-    def test_absent_next_quote_skips_the_next_line_read(self):
+    def test_shared_marker_compares_the_next_line_against_its_window(self):
         got, reads = self._pinned_reads(
             self._quote_body(OWNED_QUOTE),
             {OWNED_REL: self._source(OWNED_QUOTE)},
         )
-        self.assertEqual(got, [])
-        self.assertEqual(reads, [OWNED_NUMBER])
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + NEXT_SPAN]
+        )
+        self.assertEqual(reads, [OWNED_NUMBER, NEXT_NUMBER])
 
     def test_next_quote_refusal_waits_for_a_known_pin(self):
         body = self._quote_body(OWNED_QUOTE, NEXT_QUOTE + "x")
@@ -2543,12 +2545,14 @@ class CitationCheckTests(unittest.TestCase):
         )
         self.assertEqual(check.problems(root), [])
 
-    def test_two_asks_lines_are_not_read(self):
+    def test_two_asks_lines_are_read_once_through_the_window(self):
         got, reads = self._pinned_reads(
             self._asks_block(count=2), {ASKS_REL: self._asks_source()}
         )
-        self.assertEqual(got, [])
-        self.assertEqual(reads, [])
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + ASKS_SPAN]
+        )
+        self.assertEqual(reads, [ASKS_NUMBER])
 
     def test_asks_quoted_line_absent_from_the_pinned_commit_is_refused(self):
         expected = "refuse: quoted line is not in the pinned commit: " + ASKS_SPAN
@@ -2787,9 +2791,9 @@ class CitationCheckTests(unittest.TestCase):
             MINT_SECOND,
         )
 
-    def test_mint_quote_is_absent_with_one_indented_line(self):
+    def test_mint_quote_with_one_indented_line_is_the_first_line(self):
         body = self._mint_block(count=1)
-        self.assertIsNone(check.mint_quote(body))
+        self.assertEqual(check.mint_quote(body), MINT_FIRST)
         self.assertIsNone(check.mint_quote("No mint span here.\n"))
 
     def test_mint_quoted_line_mismatch_is_refused(self):
@@ -2822,12 +2826,14 @@ class CitationCheckTests(unittest.TestCase):
         )
         self.assertEqual(check.problems(root), [])
 
-    def test_mint_span_without_two_indented_lines_adds_no_refusal(self):
+    def test_mint_span_without_two_indented_lines_still_compares(self):
         got, reads = self._pinned_reads(
             self._mint_block(count=1), {MINT_REL: self._mint_source()}
         )
-        self.assertEqual(got, [])
-        self.assertEqual(reads, [])
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + MINT_SPAN]
+        )
+        self.assertEqual(reads, [MINT_NUMBER])
 
     def test_mint_quoted_line_absent_from_the_pinned_commit_is_refused(self):
         expected = "refuse: quoted line is not in the pinned commit: " + MINT_SPAN
@@ -2931,8 +2937,10 @@ class CitationCheckTests(unittest.TestCase):
         )
         self.assertEqual(check.problems(root), [])
 
-    def test_journal_quote_is_absent_below_two_indented_lines(self):
-        self.assertIsNone(check.journal_quote(self._journal_block(count=1)))
+    def test_journal_quote_below_two_indented_lines_is_the_first_line(self):
+        self.assertEqual(
+            check.journal_quote(self._journal_block(count=1)), JOURNAL_CFG
+        )
         self.assertIsNone(check.journal_quote("No journal span here.\n"))
 
     def test_journal_fixture_keeps_line_3757_between_3755_and_8149(self):
@@ -2989,12 +2997,14 @@ class CitationCheckTests(unittest.TestCase):
         )
         self.assertEqual(check.problems(root), [])
 
-    def test_journal_span_without_two_indented_lines_adds_no_refusal(self):
+    def test_journal_span_without_two_indented_lines_still_compares(self):
         got, reads = self._pinned_reads(
             self._journal_block(count=1), {JOURNAL_REL: self._journal_source()}
         )
-        self.assertEqual(got, [])
-        self.assertEqual(reads, [])
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + JOURNAL_SPAN]
+        )
+        self.assertEqual(reads, [JOURNAL_NUMBER])
 
     def test_journal_quoted_line_absent_from_the_pinned_commit_is_refused(self):
         expected = "refuse: quoted line is not in the pinned commit: " + JOURNAL_SPAN
@@ -3300,14 +3310,14 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(remainders[17], READ_QUOTE)
         self.assertEqual(check._remainders(text, check.READ_MARKER), remainders)
 
-    def test_write_quote_is_absent_below_seventeen_remainders(self):
+    def test_write_quote_below_seventeen_remainders_is_the_last_line(self):
         self.assertIsNone(check.write_quote("No write span here.\n"))
-        self.assertIsNone(check.write_quote(self._ask_block(count=16)))
+        self.assertEqual(check.write_quote(self._ask_block(count=16)), ASK_LINES[15])
         self.assertEqual(check.write_quote(self._ask_block(count=17)), WRITE_QUOTE)
 
-    def test_read_quote_is_absent_below_eighteen_remainders(self):
+    def test_read_quote_below_eighteen_remainders_is_the_last_line(self):
         self.assertIsNone(check.read_quote("No read span here.\n"))
-        self.assertIsNone(check.read_quote(self._ask_block(count=17)))
+        self.assertEqual(check.read_quote(self._ask_block(count=17)), ASK_LINES[16])
         self.assertEqual(check.read_quote(self._ask_block(count=18)), READ_QUOTE)
 
     def test_ask_fixture_keeps_line_3849_between_3767_and_3850(self):
@@ -3789,12 +3799,18 @@ class CitationCheckTests(unittest.TestCase):
             check.pinned_line(root, sha, KIND_REL, KIND_BLOCK_END + 1)
         )
 
-    def test_kind_quotes_are_absent_below_their_index(self):
+    def test_kind_quotes_below_their_index_read_their_own_windows(self):
         cases = (
-            (8, (None, None, None)),
-            (9, (KIND_READ_QUOTE, None, None)),
-            (11, (KIND_READ_QUOTE, KIND_EDIT_QUOTE, None)),
-            (12, (KIND_READ_QUOTE, KIND_EDIT_QUOTE, KIND_RESTORE_QUOTE)),
+            (8, (KIND_LINES[7], KIND_LINES[7], KIND_LINES[7])),
+            (9, (KIND_READ_QUOTE, KIND_READ_QUOTE, KIND_READ_QUOTE)),
+            (
+                11,
+                (KIND_READ_QUOTE, KIND_EDIT_QUOTE, KIND_RUN_QUOTE),
+            ),
+            (
+                12,
+                (KIND_READ_QUOTE, KIND_EDIT_QUOTE, KIND_RESTORE_QUOTE),
+            ),
         )
         for count, expected in cases:
             body = self._kind_block(count=count)
@@ -4597,6 +4613,229 @@ class CitationCheckTests(unittest.TestCase):
             "CAUGHT append-block-arm",
         )
 
+    def _zero_score_case(self):
+        """A draft whose cited line sits in a window that scores zero.
+
+        The pinned file holds text at 3754 that the walk does not repeat, so
+        every window that contains 3754 scores 0. That window is still the one
+        compared, so the walk's second line is refused against 3754.
+        """
+        body = (
+            "`" + OWNED_SPAN + "` states the journal root.\n"
+            "\n"
+            "    /// the line before the cited one\n"
+            "    /// the line after the cited one\n"
+            "\n"
+        )
+        return body, {OWNED_REL: self._source("// not the owned quote")}
+
+    def _foreign_source(self, away=3800):
+        """A pinned file whose unchanged 3754 text stands at AWAY, not at 3754."""
+        rows = ["// filler"] * (away - 1)
+        rows[OWNED_NUMBER - 1] = "// not the owned quote"
+        rows += [OWNED_QUOTE, NEXT_QUOTE]
+        return ("\n".join(rows) + "\n").encode("utf-8")
+
+    def test_quote_window_score_is_the_matching_lines(self):
+        """The window with more matching lines wins."""
+        remainders = ["/// one", "/// two"]
+        pinned = (
+            (11, "/// no match here"),
+            (12, "/// one"),
+            (13, "/// two"),
+        )
+        self.assertEqual(
+            check._quote_window(remainders, pinned, 12),
+            pinned[1:3],
+            "refuse: quoted line does not match " + OWNED_SPAN,
+        )
+        self.assertEqual(
+            check._quote_window(remainders, pinned, 11),
+            pinned[0:2],
+            "refuse: quoted line does not match " + OWNED_SPAN,
+        )
+
+    def test_quote_window_scores_only_windows_that_contain_the_line(self):
+        """A window away from the cited line is never scored for it."""
+        remainders = ["/// one", "/// two"]
+        pinned = (
+            (10, "/// no match here"),
+            (11, "/// no match here"),
+            (14, "/// one"),
+            (15, "/// two"),
+        )
+        self.assertEqual(
+            check._quote_window(remainders, pinned, 11),
+            pinned[0:2],
+            "refuse: quoted line does not match " + OWNED_SPAN,
+        )
+        self.assertIsNone(check._quote_window([], pinned, 11))
+        self.assertIsNone(check._quote_window(remainders, pinned, 17))
+        self.assertIsNone(check._quote_window(remainders, (), 11))
+
+    def test_quote_window_tie_uses_earliest_start(self):
+        """Two windows that score the same keep the earlier start line."""
+        remainders = ["/// one", "/// two"]
+        pinned = (
+            (10, "/// one"),
+            (11, "/// one"),
+            (12, "/// one"),
+        )
+        self.assertEqual(
+            check._quote_window(remainders, pinned, 11),
+            pinned[0:2],
+            "refuse: quoted line does not match " + OWNED_SPAN,
+        )
+
+    def test_zero_score_window_is_refused(self):
+        """A zero score is a window that gets compared, not a skip."""
+        body, files = self._zero_score_case()
+        got = check.problems(self._draft(body, files))
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + OWNED_SPAN]
+        )
+
+    def test_falsifier_zero_score_window_is_caught(self):
+        original = check._quote_window
+
+        def skip_a_zero_score(remainders, pinned_lines, number):
+            window = original(remainders, pinned_lines, number)
+            if window is None:
+                return None
+            score = sum(
+                1
+                for offset, row in enumerate(window)
+                if remainders[offset] == row[1]
+            )
+            return None if score == 0 else window
+
+        self._caught(
+            "_quote_window",
+            skip_a_zero_score,
+            self.test_zero_score_window_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT zero-score-window",
+        )
+
+    def test_foreign_match_does_not_hide_a_mismatch(self):
+        """A higher score away from the cited line does not win the window."""
+        remainders = ["/// one", "/// two"]
+        pinned = (
+            (10, "/// no match here"),
+            (11, "/// one"),
+            (12, "/// two"),
+        )
+        self.assertEqual(
+            check._quote_window(remainders, pinned, 10),
+            pinned[0:2],
+            "refuse: quoted line does not match " + OWNED_SPAN,
+        )
+        self.assertEqual(
+            check.quote_for(remainders, pinned, 10),
+            "/// one",
+            "refuse: quoted line does not match " + OWNED_SPAN,
+        )
+
+    def test_unchanged_text_away_from_the_line_does_not_stand_for_it(self):
+        """The 3754 text that stands at 3800 does not cover line 3754."""
+        body = (
+            "`" + OWNED_SPAN + "` states the journal root.\n"
+            "\n"
+            "    " + OWNED_QUOTE + "\n"
+            "    " + NEXT_QUOTE + "\n"
+            "\n"
+        )
+        files = {OWNED_REL: self._foreign_source()}
+        got = check.problems(self._draft(body, files))
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + OWNED_SPAN]
+        )
+
+    def test_falsifier_foreign_match_is_caught(self):
+        def keep_a_foreign_match(remainders, pinned_lines, number):
+            width = len(remainders)
+            if width == 0:
+                return None
+            best = None
+            best_score = -1
+            for start in range(len(pinned_lines) - width + 1):
+                window = pinned_lines[start:start + width]
+                score = sum(
+                    1
+                    for offset, row in enumerate(window)
+                    if remainders[offset] == row[1]
+                )
+                if score > best_score:
+                    best = window
+                    best_score = score
+            return best
+
+        self._caught(
+            "_quote_window",
+            keep_a_foreign_match,
+            self.test_foreign_match_does_not_hide_a_mismatch,
+            "refuse: quoted line does not match",
+            "CAUGHT foreign-match",
+        )
+
+    def test_falsifier_later_tie_is_caught(self):
+        def keep_the_later_tie(remainders, pinned_lines, number):
+            width = len(remainders)
+            if width == 0:
+                return None
+            best = None
+            best_score = -1
+            for start in range(len(pinned_lines) - width + 1):
+                window = pinned_lines[start:start + width]
+                if not any(row[0] == number for row in window):
+                    continue
+                score = sum(
+                    1
+                    for offset, row in enumerate(window)
+                    if remainders[offset] == row[1]
+                )
+                if score >= best_score:
+                    best = window
+                    best_score = score
+            return best
+
+        self._caught(
+            "_quote_window",
+            keep_the_later_tie,
+            self.test_quote_window_tie_uses_earliest_start,
+            "refuse: quoted line does not match",
+            "CAUGHT tie-earliest-start",
+        )
+
+    def test_falsifier_lower_score_window_is_caught(self):
+        def keep_the_lower_score(remainders, pinned_lines, number):
+            width = len(remainders)
+            if width == 0:
+                return None
+            best = None
+            best_score = None
+            for start in range(len(pinned_lines) - width + 1):
+                window = pinned_lines[start:start + width]
+                if not any(row[0] == number for row in window):
+                    continue
+                score = sum(
+                    1
+                    for offset, row in enumerate(window)
+                    if remainders[offset] == row[1]
+                )
+                if best_score is None or score < best_score:
+                    best = window
+                    best_score = score
+            return best
+
+        self._caught(
+            "_quote_window",
+            keep_the_lower_score,
+            self.test_quote_window_score_is_the_matching_lines,
+            "refuse: quoted line does not match",
+            "CAUGHT lower-score-window",
+        )
+
     def test_worktree_root_contains_checker(self):
         root = check.worktree_root()
         checker = root / "lab" / "bus-v2-proposal" / "check.py"
@@ -4691,17 +4930,29 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(got, [])
         self.assertEqual(reads, list(QUOTE_DECISION_ORDER))
 
-    def test_file_ask_quotes_are_absent_below_their_index(self):
+    def _assert_truncated_walk(self, selector, body, index, span):
+        """A walk cut below INDEX still selects the window that holds the line.
+
+        An empty walk has no remainder and selects nothing. A shorter walk still
+        has a window of that width around the cited line, so it selects that
+        window even when no line in it matches.
+        """
+        if index == 0:
+            self.assertIsNone(selector(body), span)
+            return
+        self.assertIsNotNone(selector(body), span)
+
+    def test_file_ask_quotes_read_their_own_windows(self):
         for name, number, span, lines, index in FILE_ASK_CASES:
             selector = getattr(check, name + "_quote")
             self.assertIsNone(
                 selector(self._file_ask_body(groups=[name], indented=False)), span
             )
             self.assertIsNone(selector("No file-ask span here.\n"), span)
-            self.assertIsNone(
-                selector(
-                    self._file_ask_body(groups=[name], **{name: lines[:index]})
-                ),
+            self._assert_truncated_walk(
+                selector,
+                self._file_ask_body(groups=[name], **{name: lines[:index]}),
+                index,
                 span,
             )
 
@@ -5099,7 +5350,7 @@ class CitationCheckTests(unittest.TestCase):
             )
         self.assertEqual(check.problems(root), [])
 
-    def test_edit_walks_are_absent_below_their_index(self):
+    def test_edit_walks_read_their_own_windows(self):
         for name, number, span, lines, index in EDIT_CASES:
             selector = getattr(check, name + "_quote")
             group = self._edit_group(name)
@@ -5107,13 +5358,13 @@ class CitationCheckTests(unittest.TestCase):
                 selector(self._edit_walk_body(groups=[group], indented=False)), span
             )
             self.assertIsNone(selector("No edit span here.\n"), span)
-            self.assertIsNone(
-                selector(
-                    self._edit_walk_body(
-                        groups=[group],
-                        **{self._edit_lines_arg(name): lines[:index]}
-                    )
+            self._assert_truncated_walk(
+                selector,
+                self._edit_walk_body(
+                    groups=[group],
+                    **{self._edit_lines_arg(name): lines[:index]}
                 ),
+                index,
                 span,
             )
 
@@ -5585,17 +5836,17 @@ class CitationCheckTests(unittest.TestCase):
             )
         self.assertEqual(check.problems(root), [])
 
-    def test_provider_selectors_are_absent_below_their_index(self):
+    def test_provider_selectors_read_their_own_windows(self):
         for name, number, span, lines, index in PROVIDER_CASES:
             selector = getattr(check, name + "_quote")
             self.assertIsNone(selector("No provider span here.\n"), span)
             self.assertIsNone(
                 selector(self._provider_body(groups=[name], indented=False)), span
             )
-            self.assertIsNone(
-                selector(
-                    self._provider_body(groups=[name], **{name: lines[:index]})
-                ),
+            self._assert_truncated_walk(
+                selector,
+                self._provider_body(groups=[name], **{name: lines[:index]}),
+                index,
                 span,
             )
 
@@ -6029,7 +6280,7 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(got, [])
         self.assertEqual(reads, list(RUN_BODY_DECISION_ORDER))
 
-    def test_run_body_selectors_are_absent_below_their_index(self):
+    def test_run_body_selectors_read_their_own_windows(self):
         for name, number, span, lines, index in RUN_BODY_CASES:
             selector = getattr(check, name + "_quote")
             group = self._run_body_group(name)
@@ -6037,10 +6288,10 @@ class CitationCheckTests(unittest.TestCase):
                 selector(self._file_ask_body(groups=[group], indented=False)), span
             )
             self.assertIsNone(selector("No run or write-body span here.\n"), span)
-            self.assertIsNone(
-                selector(
-                    self._file_ask_body(groups=[group], **{group: lines[:index]})
-                ),
+            self._assert_truncated_walk(
+                selector,
+                self._file_ask_body(groups=[group], **{group: lines[:index]}),
+                index,
                 span,
             )
 
@@ -6592,7 +6843,7 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(got, [])
         self.assertEqual(reads, list(APPEND_DECISION_ORDER))
 
-    def test_append_selectors_are_absent_below_their_index(self):
+    def test_append_selectors_read_their_own_windows(self):
         for name, number, span, lines, index in APPEND_CASES:
             selector = getattr(check, name + "_quote")
             group = self._append_group(name)
@@ -6600,10 +6851,10 @@ class CitationCheckTests(unittest.TestCase):
                 selector(self._append_body(groups=[group], indented=False)), span
             )
             self.assertIsNone(selector("No append span here.\n"), span)
-            self.assertIsNone(
-                selector(
-                    self._append_body(groups=[group], **{group: lines[:index]})
-                ),
+            self._assert_truncated_walk(
+                selector,
+                self._append_body(groups=[group], **{group: lines[:index]}),
+                index,
                 span,
             )
 
@@ -7325,7 +7576,7 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(got, [])
         self.assertEqual(reads, list(HOSTED_READ_ORDER))
 
-    def test_hosted_selectors_are_absent_below_their_index(self):
+    def test_hosted_selectors_read_their_own_windows(self):
         for name, number, span, lines, index in HOSTED_CASES:
             selector = getattr(check, name + "_quote")
             group = self._hosted_group(name)
@@ -7333,10 +7584,10 @@ class CitationCheckTests(unittest.TestCase):
                 selector(self._hosted_body(groups=[group], indented=False)), span
             )
             self.assertIsNone(selector("No hosted span here.\n"), span)
-            self.assertIsNone(
-                selector(
-                    self._hosted_body(groups=[group], **{group: lines[:index]})
-                ),
+            self._assert_truncated_walk(
+                selector,
+                self._hosted_body(groups=[group], **{group: lines[:index]}),
+                index,
                 span,
             )
 
