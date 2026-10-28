@@ -56,6 +56,8 @@ After one instance has ended, `post_capability_grant` of the survivor's pending 
 
 `seed_request` holds at most 32 pending records for one session. The next pending record of that session is status 400 with the reason `Too many pending requests for this session`, and it stores nothing. A record whose status is `granted`, `denied` or `expired` does not count, and a pending record of another session does not count, so the sibling session still stores its request. `post_capability_request` returns that status and reason and does not count pending records. A PASS gives the Runtime no A11 credit for this cap.
 
+`StandIn::delete_capability` answers `DELETE /api/capability/:id`. The id is the path segment, a method argument, not a JSON field. A client is status 403 with the reason `This endpoint requires shell privileges`, checked before the request store is read. A missing record is status 404 with `Capability request not found: ` plus that id. A record that is not granted is status 400 with `Capability ` plus that id plus ` was not granted`. A shell revoke sets that granted record to `denied` with `decision_reason` `Revoked by user` and `settled_by` `shell`, and the one `Revoked` assignment then drops that live grant. The instance stays, and another grant of that session stays. The Ok body's only keys are `success` and `revoked_request_id`, and it carries no token. A stop still revokes every live grant of the session through `revoke_live`. A PASS gives the Runtime no A6 credit for this revoke.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.
