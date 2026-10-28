@@ -1,9 +1,22 @@
 id: F-GB-case
 file: src/link.rs
 test: link::model_case_different_manifest_is_not_a_link
+test: link::model_git_or_registry_dependency_is_a_link
 --- old
-    cargo_toml.contains("grant-binding") && cargo_toml.contains("path")
+    let packed: String = cargo_toml.chars().filter(|ch| !ch.is_whitespace()).collect();
+    (cargo_toml.contains("grant-binding") && cargo_toml.contains("path"))
+        || packed.contains("grant-binding={git")
+        || packed.contains("grant-binding={version")
+        || packed.contains("grant-binding=\"")
+        || (packed.contains("package=\"grant-binding\"")
+            && (packed.contains("git") || packed.contains("version")))
 --- new
     let folded = cargo_toml.to_ascii_lowercase();
-    folded.contains("grant-binding") && folded.contains("path")
+    let packed: String = folded.chars().filter(|ch| !ch.is_whitespace()).collect();
+    (folded.contains("grant-binding") && folded.contains("path"))
+        || packed.contains("grant-binding={git")
+        || packed.contains("grant-binding={version")
+        || packed.contains("grant-binding=\"")
+        || (packed.contains("package=\"grant-binding\"")
+            && (packed.contains("git") || packed.contains("version")))
 --- end

@@ -1,13 +1,18 @@
 //! The one detector for a path dependency on this crate.
 
-/// True only when the text names `grant-binding` and carries a `path` key.
+/// True when the decoded text is a path, git, or registry dependency on this crate.
 ///
-/// A manifest that names the crate without a path dependency is not a link
-/// to this crate's source.
+/// A manifest that only names the crate, including its own `version` field, is not a link.
 #[rustfmt::skip]
 pub fn cargo_toml_path_depends_on_grant_binding(cargo_toml: &str) -> bool {
     let cargo_toml = decode_toml_basic_strings(cargo_toml);
-    cargo_toml.contains("grant-binding") && cargo_toml.contains("path")
+    let packed: String = cargo_toml.chars().filter(|ch| !ch.is_whitespace()).collect();
+    (cargo_toml.contains("grant-binding") && cargo_toml.contains("path"))
+        || packed.contains("grant-binding={git")
+        || packed.contains("grant-binding={version")
+        || packed.contains("grant-binding=\"")
+        || (packed.contains("package=\"grant-binding\"")
+            && (packed.contains("git") || packed.contains("version")))
 }
 
 /// Decode escapes in TOML basic strings, so an escaped link stays visible.
@@ -376,4 +381,40 @@ fn model_hash_inside_a_string_is_still_a_link() {
     assert!(literal.contains("grant-binding"));
     assert!(literal.contains("path"));
     assert!(cargo_toml_path_depends_on_grant_binding(literal));
+}
+
+#[test]
+fn model_git_or_registry_dependency_is_a_link() {
+    let git = "grant-binding = { git = \"https://example.com/gb.git\" }\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(git));
+    let git_tight = "grant-binding={git=\"https://example.com/gb.git\"}\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(git_tight));
+    let version = "grant-binding = { version = \"1.2.3\" }\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(version));
+    let version_tight = "grant-binding={version=\"1.2.3\"}\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(version_tight));
+    let inline = "grant-binding = \"1.2.3\"\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(inline));
+    let inline_tight = "grant-binding=\"1.2.3\"\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(inline_tight));
+    let package = "gb = { package = \"grant-binding\", version = \"1.2.3\" }\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(package));
+    let package_git =
+        "gb = { package = \"grant-binding\", git = \"https://example.com/gb.git\" }\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(package_git));
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        "name = \"grant-binding\"\n"
+    ));
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        "name = \"grant-binding\"\nversion = \"0.1.0\"\n"
+    ));
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        "package = \"grant-binding\"\n"
+    ));
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        "Grant-Binding = { git = \"https://example.com/gb.git\" }\n"
+    ));
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        "Grant-Binding = { version = \"1.2.3\" }\n"
+    ));
 }
