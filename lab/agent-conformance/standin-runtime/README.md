@@ -60,6 +60,8 @@ After one instance has ended, `post_capability_grant` of the survivor's pending 
 
 `StandIn::post_capability_revoke_all` answers `POST /api/capability/revoke-all`. A shell revoke sets every granted record to `denied` through the one writer, with the shell reason and `settled_by` `shell`, and the one `Revoked` assignment then drops every live grant. The body's only key is a string `reason`; a missing reason is `Revoked all by user`. The instances stay. A pending record stays pending. An exhausted grant stays `Exhausted`. The Ok body's only keys are `success` and `reason`, with no epoch. A stop still revokes one session through `revoke_live`, and one grant still revokes through `delete_capability`. A PASS gives the Runtime no A6 credit for this revoke.
 
+`seed_request` holds at most 1024 pending records in the store. The next pending record is status 400 with the reason `Too many pending requests`, and it stores nothing. A record whose status is `granted`, `denied` or `expired` does not count, and the check does not remove it. The per-session cap of 32 stays, and it is the reason when the store holds fewer than 1024 pending records. At 1024 pending records the store reason wins. `post_capability_request` returns that status and reason and does not count pending records. A PASS gives the Runtime no A11 credit for this cap.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.
