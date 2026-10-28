@@ -23,6 +23,11 @@ IDENTITY = {
     "GIT_COMMITTER_EMAIL": "citation-check@example.com",
 }
 
+OWNED_REL = "examples/agent-host/src/lib.rs"
+OWNED_NUMBER = 3754
+OWNED_SPAN = "examples/agent-host/src/lib.rs:3754"
+OWNED_QUOTE = "/// The one place a task journal lives. The guest names only `Users/self`."
+
 
 class CitationCheckTests(unittest.TestCase):
     def _temp_root(self):
@@ -90,6 +95,20 @@ class CitationCheckTests(unittest.TestCase):
     def _assert_one(self, body, files, expected):
         got = check.problems(self._draft(body, files))
         assert got == [expected], expected
+
+    def _source(self, quote):
+        """A committed file whose line 3754 is QUOTE."""
+        rows = ["// filler"] * (OWNED_NUMBER - 1) + [quote, "// tail"]
+        return ("\n".join(rows) + "\n").encode("utf-8")
+
+    def _quote_body(self, quote):
+        """A draft that cites the owned span and indents QUOTE below it."""
+        return (
+            "`" + OWNED_SPAN + "` states that the guest names only `Users/self`.\n"
+            "\n"
+            "    " + quote + "\n"
+            "\n"
+        )
 
     def _caught(self, global_name, planted, named_test, prefix, label):
         named_test()
@@ -200,6 +219,97 @@ class CitationCheckTests(unittest.TestCase):
             ],
         )
 
+    def test_quoted_line_mismatch_is_refused(self):
+        expected = "refuse: quoted line does not match " + OWNED_SPAN
+        root = self._draft(
+            self._quote_body(OWNED_QUOTE + "x"),
+            {OWNED_REL: self._source(OWNED_QUOTE)},
+        )
+        self.assertEqual(check.problems(root), [expected])
+        (root / OWNED_REL).write_bytes(self._source("// edited in the worktree"))
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_quoted_line_match_ignores_the_worktree_file(self):
+        root = self._draft(
+            self._quote_body(OWNED_QUOTE),
+            {OWNED_REL: self._source(OWNED_QUOTE)},
+        )
+        self.assertEqual(check.problems(root), [])
+        (root / OWNED_REL).write_bytes(self._source("// edited in the worktree"))
+        self.assertEqual(check.problems(root), [])
+
+    def test_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        expected = "refuse: quoted line is not in the pinned commit: " + OWNED_SPAN
+        short = ("// filler\n" * 10).encode("utf-8")
+        root = self._draft(self._quote_body(OWNED_QUOTE), {OWNED_REL: short})
+        (root / OWNED_REL).write_bytes(self._source(OWNED_QUOTE))
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_two_quoted_spans_are_refused(self):
+        expected = "refuse: quoted line is not one line: " + OWNED_SPAN
+        body = (
+            "`" + OWNED_SPAN + "` states the journal root.\n"
+            "\n"
+            "    " + OWNED_QUOTE + "\n"
+            "\n"
+            "Again `" + OWNED_SPAN + "`.\n"
+        )
+        original = check.pinned_line
+        try:
+            check.pinned_line = lambda root, sha, rel, number: None
+            got = check.problems(
+                self._draft(body, {OWNED_REL: self._source(OWNED_QUOTE)})
+            )
+        finally:
+            check.pinned_line = original
+        self.assertEqual(got, [expected])
+
+    def test_draft_without_the_owned_span_adds_no_quote_refusal(self):
+        bodies = (
+            "Open `pkg/kept.rs:1`.\n\n    /// Not the owned quote.\n",
+            "`" + OWNED_SPAN + "` states the journal root.\n\n  /// Two-space indent.\n",
+        )
+        for body in bodies:
+            root = self._draft(
+                body,
+                {
+                    OWNED_REL: self._source(OWNED_QUOTE),
+                    "pkg/kept.rs": b"fn kept(\n",
+                },
+            )
+            self.assertEqual(check.problems(root), [], body)
+
+    def test_quote_refusal_waits_for_a_known_pin(self):
+        body = self._quote_body(OWNED_QUOTE + "x")
+        files = {OWNED_REL: self._source(OWNED_QUOTE)}
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+        bad_pin = "Pinned commit: HEAD\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(bad_pin, files)),
+            ["refuse: pinned commit is not one 40-hex commit"],
+        )
+        unknown = "Pinned commit: " + "f" * 40 + "\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(unknown, files, commit=True)),
+            ["refuse: pinned commit is not a commit: " + "f" * 40],
+        )
+
+    def test_live_draft_owned_quote_matches_its_pinned_line(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        self.assertEqual(check.owned_quote(text), OWNED_QUOTE)
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        self.assertEqual(
+            check.pinned_line(root, sha, OWNED_REL, OWNED_NUMBER),
+            OWNED_QUOTE,
+        )
+
     def test_falsifier_missing_path_is_caught(self):
         self._caught(
             "read_file",
@@ -279,6 +389,15 @@ class CitationCheckTests(unittest.TestCase):
             self.test_unknown_pin_is_refused,
             "refuse: pinned commit is not a commit:",
             "CAUGHT unknown-pin",
+        )
+
+    def test_falsifier_quoted_line_mismatch_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT quoted-line",
         )
 
     def test_worktree_root_contains_checker(self):
