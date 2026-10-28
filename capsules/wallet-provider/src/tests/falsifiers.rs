@@ -232,8 +232,12 @@ use std::process::Command;
 /// return early, WP143, which does the same for the both-sides refusal, and
 /// WP144, which does the same for the Linux-status refusal;
 /// `operations_table_row_check_refuses_each_bad_table` fails on that rule's
-/// cases.
-const EXPECTED_FALSIFIERS: usize = 142;
+/// cases. Task 119 adds WP145, which writes one file into the wallet directory
+/// in the `Request::Shutdown` arm of `fn handle` before it answers
+/// `Response::empty_ok()`, so the final wallet directory compare in
+/// `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged`
+/// fails because it finds a name the setup did not leave.
+const EXPECTED_FALSIFIERS: usize = 143;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
