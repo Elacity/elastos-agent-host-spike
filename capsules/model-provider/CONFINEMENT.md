@@ -500,6 +500,9 @@ after `init`. A snapshot cannot see a read or a write that restores the
 original bytes, and it counts no syscalls. The profile still grants
 `file-read*` on the literal `STORAGE_PARENT`, so the parent directory can be
 stat'ed. Each Linux cell must be `designed, not enforced`.
+`operations_section_cites_existing_tests` also requires the Operation cells, in
+order, to equal the `parse_request` arms, and the `other` arm is the
+`unsupported` row.
 
 | Operation | Inputs | Outputs | Right | Effect | macOS rule and test | Linux |
 | --- | --- | --- | --- | --- | --- | --- |
