@@ -124,14 +124,17 @@ fn metadata_dependency_names(dir: &Path, cargo_toml: &str) -> Result<Vec<String>
     Ok(names_in_dependency_arrays(&json))
 }
 
-/// `name` strings of objects inside a `dependencies` array.
+/// `name` strings from each package object's `dependencies` array.
+///
+/// A `dependencies` array inside metadata is not a package dependency.
+/// The package object's own `name` is not a dependency.
 fn names_in_dependency_arrays(json: &str) -> Vec<String> {
     let mut names = Vec::new();
     let mut scan = JsonScan {
         bytes: json.as_bytes(),
         index: 0,
     };
-    scan.walk_value(&mut names);
+    scan.walk_document(&mut names);
     names
 }
 
@@ -151,11 +154,20 @@ impl JsonScan<'_> {
         }
     }
 
+    fn walk_document(&mut self, names: &mut Vec<String>) {
+        self.skip_ws();
+        if self.bytes.get(self.index) == Some(&b'{') {
+            self.walk_object(names, false, false, true);
+        } else {
+            self.walk_value(names);
+        }
+    }
+
     fn walk_value(&mut self, names: &mut Vec<String>) {
         self.skip_ws();
         match self.bytes.get(self.index).copied() {
-            Some(b'{') => self.walk_object(names, false),
-            Some(b'[') => self.walk_array(names, false),
+            Some(b'{') => self.walk_object(names, false, false, false),
+            Some(b'[') => self.walk_array(names, false, false),
             Some(b'"') => {
                 let _ = self.parse_string();
             }
@@ -166,7 +178,15 @@ impl JsonScan<'_> {
         }
     }
 
-    fn walk_object(&mut self, names: &mut Vec<String>, in_dependency: bool) {
+    /// `is_package` is an element of the root `packages` array.
+    /// Metadata objects stay plain: their keys are not dependency data.
+    fn walk_object(
+        &mut self,
+        names: &mut Vec<String>,
+        in_dependency: bool,
+        is_package: bool,
+        is_root: bool,
+    ) {
         self.index += 1;
         loop {
             self.skip_ws();
@@ -186,8 +206,16 @@ impl JsonScan<'_> {
                     self.skip_ws();
                     if in_dependency && key == "name" && self.bytes.get(self.index) == Some(&b'"') {
                         names.push(self.parse_string());
-                    } else if key == "dependencies" && self.bytes.get(self.index) == Some(&b'[') {
-                        self.walk_array(names, true);
+                    } else if is_package
+                        && key == "dependencies"
+                        && self.bytes.get(self.index) == Some(&b'[')
+                    {
+                        self.walk_array(names, true, false);
+                    } else if is_root
+                        && key == "packages"
+                        && self.bytes.get(self.index) == Some(&b'[')
+                    {
+                        self.walk_array(names, false, true);
                     } else {
                         self.walk_value(names);
                     }
@@ -196,7 +224,12 @@ impl JsonScan<'_> {
         }
     }
 
-    fn walk_array(&mut self, names: &mut Vec<String>, dependency_elements: bool) {
+    fn walk_array(
+        &mut self,
+        names: &mut Vec<String>,
+        dependency_elements: bool,
+        package_elements: bool,
+    ) {
         self.index += 1;
         loop {
             self.skip_ws();
@@ -207,7 +240,9 @@ impl JsonScan<'_> {
                     return;
                 }
                 Some(b',') => self.index += 1,
-                Some(b'{') if dependency_elements => self.walk_object(names, true),
+                Some(b'{') => {
+                    self.walk_object(names, dependency_elements, package_elements, false);
+                }
                 Some(_) => self.walk_value(names),
             }
         }
@@ -891,4 +926,29 @@ fn model_workspace_member_is_a_link() {
     assert!(!cargo_toml_path_depends_on_grant_binding(
         "[workspace]\nmembers = [\"lab/grant-binding\"]\n"
     ));
+}
+
+#[test]
+fn model_metadata_dependencies_are_not_a_link() {
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        &package_manifest("[package.metadata]\ndependencies = [{ name = \"grant-binding\" }]\n",)
+    ));
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        &package_manifest(
+            "[package.metadata.nested]\ndependencies = [{ name = \"grant-binding\" }]\n",
+        )
+    ));
+    assert!(!cargo_toml_path_depends_on_grant_binding(&format!(
+        "[workspace.metadata]\ndependencies = [{{ name = \"grant-binding\" }}]\npackages = [{{ dependencies = [{{ name = \"grant-binding\" }}] }}]\n\n{}",
+        package_manifest("")
+    )));
+    assert!(cargo_toml_path_depends_on_grant_binding(
+        &package_manifest(
+            "[package.metadata]\ndependencies = [{ name = \"other\" }]\n\n[dependencies]\ngrant-binding = { path = \"missing-gb\" }\n",
+        )
+    ));
+    let ahead = r#"{"metadata":{"dependencies":[{"name":"grant-binding"}],"packages":[{"dependencies":[{"name":"grant-binding"}]}]},"packages":[{"metadata":{"dependencies":[{"name":"grant-binding"}]},"name":"grant-binding","dependencies":[{"name":"kept"}]}]}"#;
+    assert_eq!(names_in_dependency_arrays(ahead), vec!["kept".to_string()]);
+    let absent = r#"{"packages":[{"name":"grant-binding","metadata":{"dependencies":[{"name":"grant-binding"}],"packages":[{"dependencies":[{"name":"grant-binding"}]}]},"dependencies":[]}],"metadata":{"dependencies":[{"name":"grant-binding"}]}}"#;
+    assert!(names_in_dependency_arrays(absent).is_empty());
 }
