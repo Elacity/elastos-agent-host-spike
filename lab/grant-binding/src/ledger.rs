@@ -3,17 +3,18 @@
 //!
 //! `admit` sets the allowance ceiling and leaves outstanding holds alone.
 //! `reserve` first takes the binding decision from `Verifier::resolve`, then
-//! records the hold on this ledger. `settle`, `release`, and `timeout_hold` are
-//! the only ways a hold ends, and each takes that same binding decision first.
+//! records the hold on this ledger. `settle` and `release` end a hold.
+//! `timeout_hold` records an uncertain hold and does not end it. Each takes
+//! the binding decision first.
 //! The guest's
 //! `reported_usage` claim is not read: a known settle charges the figure the
 //! verifier passes in when it stays at or under the stored hold, refuses a
 //! larger one, and an unknown outcome marks that hold uncertain when its bound
 //! handle is presented and keeps it, release of an uncertain hold is refused,
-//! and a timeout before the verifier deadline is refused, and a timeout at that
-//! deadline ends that hold with nothing charged. The ledger value
-//! sits behind one mutex, and admit, reserve, settle, release, and timeout_hold
-//! lock it for the check and the write.
+//! and a timeout before the verifier deadline is refused, and a timeout at
+//! that deadline records timed out, outcome unknown and keeps the hold. The
+//! ledger value sits behind one mutex, and admit, reserve, settle, release,
+//! and timeout_hold lock it for the check and the write.
 
 use std::collections::HashMap;
 
@@ -24,6 +25,7 @@ struct OpenHold {
     handle: Handle,
     amount: u64,
     uncertain: bool,
+    timed_out: bool,
     deadline: u64,
 }
 
@@ -192,6 +194,16 @@ impl std::fmt::Display for TimeoutRefuse {
     }
 }
 
+/// The record a due timeout leaves on an uncertain hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeoutRecord;
+
+impl std::fmt::Display for TimeoutRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("timed out, outcome unknown")
+    }
+}
+
 impl Verifier {
     /// Stages the grant identity whose admitted amount the next `admit` keeps.
     pub(crate) fn stage_admitted_identity(&self, identity: &str) {
@@ -288,6 +300,7 @@ impl Verifier {
                 handle: request.handle,
                 amount,
                 uncertain: false,
+                timed_out: false,
                 deadline: 0,
             },
         );
@@ -357,17 +370,18 @@ impl Verifier {
         self.ledger.lock().expect("ledger lock").verifier_deadline = deadline;
     }
 
-    /// Ends one hold without charging anything. A binding refusal records
-    /// nothing, a reservation that is not outstanding is refused, a hold
-    /// that is not uncertain stays open, and a timeout that arrives before
-    /// the verifier deadline is refused.
+    /// Records a due timeout on an uncertain hold. A binding refusal records
+    /// nothing, a reservation that is not outstanding is refused, a hold that
+    /// is not uncertain stays open, and a timeout that arrives before the
+    /// verifier deadline is refused. A due timeout records timed out, outcome
+    /// unknown and keeps the hold, so a second timeout records it again.
     pub fn timeout_hold(
         &self,
         call: &Call,
         request: &GuestRequest,
         reservation: Reservation,
         now: u64,
-    ) -> Result<(), TimeoutRefuse> {
+    ) -> Result<TimeoutRecord, TimeoutRefuse> {
         self.resolve(*call, request.handle)
             .map_err(TimeoutRefuse::Binding)?;
         let mut ledger = self.ledger.lock().expect("ledger lock");
@@ -384,8 +398,11 @@ impl Verifier {
         if now < deadline {
             return Err(TimeoutRefuse::Early);
         }
-        Self::return_unused_hold(&mut ledger, reservation, amount, request);
-        Ok(())
+        let _kept = amount;
+        if let Some(open) = ledger.open.get_mut(&reservation.id) {
+            open.timed_out = true;
+        }
+        Ok(TimeoutRecord)
     }
 
     /// Returns one hold's amount to the ceiling and drops the hold.
@@ -446,6 +463,7 @@ struct Books {
     held: u64,
     charged: u64,
     open: HashMap<u64, u64>,
+    timed_out: HashMap<u64, bool>,
 }
 
 #[cfg(test)]
@@ -458,6 +476,12 @@ fn books(verifier: &Verifier) -> Books {
             .open
             .iter()
             .map(|(id, open)| (*id, open.amount))
+            .collect(),
+        timed_out: ledger
+            .open
+            .iter()
+            .filter(|(_, open)| open.timed_out)
+            .map(|(id, open)| (*id, open.timed_out))
             .collect(),
     }
 }
@@ -1409,14 +1433,22 @@ fn model_timeout_ends_an_uncertain_hold() {
     assert_eq!(blocked.to_string(), "uncertain hold is not released");
     assert_eq!(books(&verifier).held, 7);
     assert_eq!(books(&verifier).charged, 0);
-    verifier
+    let record = verifier
         .timeout_hold(&call, &request, first, 0)
-        .expect("timeout ends the uncertain hold");
+        .expect("a due timeout records the uncertain hold");
+    assert_eq!(record.to_string(), "timed out, outcome unknown");
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
-    assert_eq!(after.held, 3);
-    assert!(!after.open.contains_key(&first.id));
+    assert_eq!(after.held, 7);
+    assert_eq!(after.open.get(&first.id), Some(&4));
     assert_eq!(after.open.get(&second.id), Some(&3));
+    assert!(after.timed_out.contains_key(&first.id));
+    assert!(!after.timed_out.contains_key(&second.id));
+    let blocked = verifier
+        .release(&call, &request, first)
+        .expect_err("release of a recorded hold stays refused");
+    assert_eq!(blocked, ReleaseRefuse::Uncertain);
+    assert_eq!(blocked.to_string(), "uncertain hold is not released");
 }
 
 #[test]
@@ -1441,13 +1473,15 @@ fn model_early_timeout_is_refused() {
     assert_eq!(stayed.charged, 0);
     assert_eq!(stayed.held, 4);
     assert_eq!(stayed.open.get(&reservation.id), Some(&4));
-    verifier
+    let record = verifier
         .timeout_hold(&call, &request, reservation, 5)
         .expect("deadline reached");
+    assert_eq!(record.to_string(), "timed out, outcome unknown");
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
-    assert_eq!(after.held, 0);
-    assert!(!after.open.contains_key(&reservation.id));
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+    assert!(after.timed_out.contains_key(&reservation.id));
 }
 
 #[test]
@@ -1491,18 +1525,25 @@ fn model_timeout_twice_is_refused() {
     assert_eq!(unknown, SettleRefuse::UnknownOutcome);
     assert_eq!(
         verifier.timeout_hold(&call, &request, reservation, 0),
-        Ok(())
+        Ok(TimeoutRecord)
     );
-    assert_eq!(books(&verifier).held, 0);
+    assert_eq!(books(&verifier).held, 10);
     assert_eq!(books(&verifier).charged, 0);
-    let refusal = verifier
+    assert_eq!(books(&verifier).open.get(&reservation.id), Some(&10));
+    let record = verifier
         .timeout_hold(&call, &request, reservation, 0)
-        .expect_err("second timeout");
+        .expect("a second timeout records it again");
+    assert_eq!(record.to_string(), "timed out, outcome unknown");
+    assert_eq!(books(&verifier).held, 10);
+    assert_eq!(books(&verifier).charged, 0);
+    assert_eq!(books(&verifier).open.get(&reservation.id), Some(&10));
+    let refusal = verifier
+        .timeout_hold(&call, &request, Reservation { id: 0 }, 0)
+        .expect_err("missing reservation");
     assert_eq!(refusal, TimeoutRefuse::NotOutstanding);
     assert_eq!(refusal.to_string(), "reservation is not outstanding");
-    assert_eq!(books(&verifier).held, 0);
-    assert_eq!(books(&verifier).charged, 0);
-    assert!(!books(&verifier).open.contains_key(&reservation.id));
+    assert_eq!(books(&verifier).held, 10);
+    assert!(books(&verifier).open.contains_key(&reservation.id));
 }
 
 #[test]
@@ -1539,12 +1580,13 @@ fn model_timeout_on_another_handle_is_refused() {
     assert_eq!(after_refusal.open.get(&reservation.id), Some(&4));
     assert_eq!(
         verifier.timeout_hold(&call, &request, reservation, 0),
-        Ok(())
+        Ok(TimeoutRecord)
     );
     let after_timeout = books(&verifier);
     assert_eq!(after_timeout.charged, 0);
-    assert_eq!(after_timeout.held, 0);
-    assert!(!after_timeout.open.contains_key(&reservation.id));
+    assert_eq!(after_timeout.held, 4);
+    assert_eq!(after_timeout.open.get(&reservation.id), Some(&4));
+    assert!(after_timeout.timed_out.contains_key(&reservation.id));
 }
 
 #[test]
@@ -1574,10 +1616,11 @@ fn model_timeout_on_a_sibling_instance_is_refused() {
     assert!(books(&verifier).open.contains_key(&reservation.id));
     assert_eq!(
         verifier.timeout_hold(&call, &request, reservation, 0),
-        Ok(())
+        Ok(TimeoutRecord)
     );
-    assert_eq!(books(&verifier).held, 0);
+    assert_eq!(books(&verifier).held, 10);
     assert_eq!(books(&verifier).charged, 0);
+    assert!(books(&verifier).open.contains_key(&reservation.id));
 }
 
 #[test]
@@ -1601,13 +1644,15 @@ fn model_forged_instance_does_not_move_the_timeout() {
         ..guest(handle)
     };
     assert_eq!(request.forged_instance, Some(sibling));
-    verifier
+    let record = verifier
         .timeout_hold(&call, &request, reservation, 0)
         .expect("forged instance does not move the timeout");
+    assert_eq!(record.to_string(), "timed out, outcome unknown");
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
-    assert_eq!(after.held, 0);
-    assert!(!after.open.contains_key(&reservation.id));
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+    assert!(after.timed_out.contains_key(&reservation.id));
 }
 
 #[test]
