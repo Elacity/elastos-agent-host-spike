@@ -872,11 +872,19 @@ Rewritten by task 021 for the lab commit read, `01f6add1f`. Each citation here i
 sentence on `c641bcff2` and the Runtime line in the last "Not shown", which is the b3 citation as it stands.
 What the lab's B1 and B2 tests show and do not show, and the `pre-CID, not B1 evidence` label, are in "B1 and B2
 (Anders, 26 Oct)" above.
+Changed by task 038, on 2026-10-27: a third exception is the sentence below on the lab's launch path, which cites
+README at `dd84ef2fe` (`dd84ef2feed8ec62d6bd8c4f921efc390e8c5e9d`, this task's base), and keeps its `01f6add1f`
+quote only as the record of what README said then.
 
 The lab checks identity apart from admission. It answers whether bytes match a name and whether a test key
 signed that name
 (`lab/capsule-identity/README.md:13` `- It answers two questions: do these bytes match this name, and did this test`),
-and it sits in no admission or launch path
+and it sits in no Runtime admission or launch path and no Runtime code calls it; the lab's stand-in launcher, in
+test code, calls it (task 032)
+(`lab/capsule-identity/README.md:16-17` at `dd84ef2fe`
+`decision. It sits in no Runtime admission or launch path, and no Runtime`
+`code calls it; the lab's stand-in launcher, in test code, calls it (see [the`).
+Record of what README said at `01f6add1f`, before task 032, and not the lab's claim now:
 (`lab/capsule-identity/README.md:16` `decision. It sits in no admission or launch path, and no Runtime code calls`).
 Its schema check is still the Runtime's own manifest type
 (`lab/capsule-identity/src/lib.rs:1143` `let manifest: CapsuleManifest = serde_json::from_slice(bytes)`).
