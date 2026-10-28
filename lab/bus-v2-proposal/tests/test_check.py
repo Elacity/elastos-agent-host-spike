@@ -495,6 +495,161 @@ BODY_DOC_QUOTE = WRITE_BODY_LINES[0]
 CREATE_ONLY_QUOTE = WRITE_BODY_LINES[5]
 PRESENT_REVISION_QUOTE = WRITE_BODY_LINES[6]
 
+APPEND_CONDITION_NUMBER = 3935
+APPEND_CONDITION_SPAN = "examples/agent-host/src/lib.rs:3935"
+HOST_PATH_ERR_NUMBER = 3936
+HOST_PATH_ERR_SPAN = "examples/agent-host/src/lib.rs:3936"
+HELD_ERR_NUMBER = 3947
+HELD_ERR_SPAN = "examples/agent-host/src/lib.rs:3947"
+APPEND_CAP_NUMBER = 4023
+APPEND_CAP_SPAN = "examples/agent-host/src/lib.rs:4023"
+APPEND_CALL_NUMBER = 4032
+APPEND_CALL_SPAN = "examples/agent-host/src/lib.rs:4032"
+APPEND_RANGE_SPAN = "examples/agent-host/src/lib.rs:4032-4033"
+OUTCOME_HELD_NUMBER = 4033
+OUTCOME_HELD_SPAN = "examples/agent-host/src/lib.rs:4033"
+WRITE_INVOKE_NUMBER = 4061
+WRITE_INVOKE_SPAN = "examples/agent-host/src/lib.rs:4061"
+
+# The one propose_journal_append walk, as the live draft indents it.
+APPEND_WALK_LINES = (
+    "/// An append records a step. It waits while an earlier append has no result,",
+    "/// so a lost reply is never followed by a second write.",
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    "fn propose_journal_append(",
+    "    journal: &mut Journal,",
+    "    cursor: &JournalCursor,",
+    ") -> Result<u64, &'static str> {",
+    "    if !cursor.resource.starts_with(JOURNAL_ROOT) || host_path(&cursor.resource) {",
+    '        return Err("host path");',
+    "    }",
+    "    let open = journal.steps.iter().any(|step| {",
+    "        step.kind == ProposalKind::JournalAppend",
+    "            && !step.has_result",
+    "            && matches!(",
+    "                step.state,",
+    "                StepState::Prepared | StepState::Dispatched | StepState::SettlementUnknown",
+    "            )",
+    "    });",
+    "    if cursor.pending.is_some() || cursor.stale || open {",
+    '        return Err("held");',
+    "    }",
+    "    let id = propose_step(journal);",
+    "    let step = journal",
+    "        .steps",
+    "        .iter_mut()",
+    "        .find(|step| step.id == id)",
+    '        .expect("just pushed");',
+    "    step.kind = ProposalKind::JournalAppend;",
+    "    step.resource = cursor.resource.clone();",
+    "    step.old = cursor.revision.clone().unwrap_or_default();",
+    "    Ok(id)",
+    "}",
+)
+APPEND_CONDITION_QUOTE = APPEND_WALK_LINES[7]
+HOST_PATH_ERR_QUOTE = APPEND_WALK_LINES[8]
+HELD_ERR_QUOTE = APPEND_WALK_LINES[19]
+
+# The one append_journal walk, as the live draft indents it.
+DOC_WALK_LINES = (
+    "/// Write the whole journal as the next version, with the journal write grant.",
+    "/// No grant, an open append, or a journal over the cap sends nothing. The",
+    "/// stored copy shows this step as dispatched with no result.",
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    "fn append_journal(",
+    "    bus: &mut impl ResourceBus,",
+    "    journal: &mut Journal,",
+    "    cursor: &mut JournalCursor,",
+    "    grant: Option<&JournalGrant>,",
+    ") -> AppendOutcome {",
+    "    let Ok(id) = propose_journal_append(journal, cursor) else {",
+    "        return AppendOutcome::Held;",
+    "    };",
+    '    let reply = bus.invoke(&cursor.resource, "write", &body, grant.id());',
+)
+APPEND_CAP_QUOTE = DOC_WALK_LINES[1]
+APPEND_CALL_QUOTE = DOC_WALK_LINES[10]
+OUTCOME_HELD_QUOTE = DOC_WALK_LINES[11]
+WRITE_INVOKE_QUOTE = DOC_WALK_LINES[13]
+
+# The seven append quotes, their pinned lines, their walk and their index.
+APPEND_CASES = (
+    (
+        "append_condition",
+        APPEND_CONDITION_NUMBER,
+        APPEND_CONDITION_SPAN,
+        APPEND_WALK_LINES,
+        7,
+    ),
+    (
+        "host_path_err",
+        HOST_PATH_ERR_NUMBER,
+        HOST_PATH_ERR_SPAN,
+        APPEND_WALK_LINES,
+        8,
+    ),
+    (
+        "held_err",
+        HELD_ERR_NUMBER,
+        HELD_ERR_SPAN,
+        APPEND_WALK_LINES,
+        19,
+    ),
+    (
+        "append_cap",
+        APPEND_CAP_NUMBER,
+        APPEND_CAP_SPAN,
+        DOC_WALK_LINES,
+        1,
+    ),
+    (
+        "append_call",
+        APPEND_CALL_NUMBER,
+        APPEND_CALL_SPAN,
+        DOC_WALK_LINES,
+        10,
+    ),
+    (
+        "outcome_held",
+        OUTCOME_HELD_NUMBER,
+        OUTCOME_HELD_SPAN,
+        DOC_WALK_LINES,
+        11,
+    ),
+    (
+        "write_invoke",
+        WRITE_INVOKE_NUMBER,
+        WRITE_INVOKE_SPAN,
+        DOC_WALK_LINES,
+        13,
+    ),
+)
+
+# The append decisions read their pinned lines in this order.
+APPEND_DECISION_ORDER = (
+    APPEND_CONDITION_NUMBER,
+    HOST_PATH_ERR_NUMBER,
+    HELD_ERR_NUMBER,
+    APPEND_CAP_NUMBER,
+    APPEND_CALL_NUMBER,
+    OUTCOME_HELD_NUMBER,
+    WRITE_INVOKE_NUMBER,
+)
+
+# The groups one append body cites, in the order it emits them.
+APPEND_GROUPS = ("condition", "doc")
+
+# One correct pinned line for every append decision the body cites.
+APPEND_LINES = {
+    APPEND_CONDITION_NUMBER: APPEND_CONDITION_QUOTE,
+    HOST_PATH_ERR_NUMBER: HOST_PATH_ERR_QUOTE,
+    HELD_ERR_NUMBER: HELD_ERR_QUOTE,
+    APPEND_CAP_NUMBER: APPEND_CAP_QUOTE,
+    APPEND_CALL_NUMBER: APPEND_CALL_QUOTE,
+    OUTCOME_HELD_NUMBER: OUTCOME_HELD_QUOTE,
+    WRITE_INVOKE_NUMBER: WRITE_INVOKE_QUOTE,
+}
+
 # The five run and write-body quotes, their pinned lines, walk and index.
 RUN_BODY_CASES = (
     ("no_process", NO_PROCESS_NUMBER, NO_PROCESS_SPAN, RUN_LINES, 1),
@@ -1455,6 +1610,56 @@ class CitationCheckTests(unittest.TestCase):
             prose = " ".join(
                 self._cited(span, copies.get(name, 1)) for span in spans
             )
+            parts.append(prose + "\n")
+            if indented:
+                parts.append("".join("    " + line + "\n" for line in lines))
+            parts.append("\n")
+        return "".join(parts)
+
+    def _append_source(self, count=WRITE_INVOKE_NUMBER, lines=None):
+        """A committed file with one correct line for every append quote."""
+        rows = ["// filler"] * WRITE_INVOKE_NUMBER
+        for number, text in (lines or APPEND_LINES).items():
+            rows[number - 1] = text
+        return ("\n".join(rows[:count]) + "\n").encode("utf-8")
+
+    def _append_body(
+        self,
+        condition=APPEND_WALK_LINES,
+        doc=DOC_WALK_LINES,
+        groups=None,
+        copies=None,
+        span_copies=None,
+        indented=True,
+        omit=(),
+    ):
+        """A draft that cites the append spans and indents their walks."""
+        copies = copies or {}
+        span_copies = span_copies or {}
+        chosen = APPEND_GROUPS if groups is None else tuple(groups)
+        blocks = (
+            (
+                "condition",
+                [APPEND_CONDITION_SPAN, HOST_PATH_ERR_SPAN, HELD_ERR_SPAN],
+                list(condition),
+            ),
+            (
+                "doc",
+                [APPEND_CAP_SPAN, APPEND_RANGE_SPAN, WRITE_INVOKE_SPAN],
+                list(doc),
+            ),
+        )
+        parts = []
+        for name, spans, lines in blocks:
+            if name not in chosen:
+                continue
+            prose = " ".join(
+                self._cited(span, span_copies.get(span, copies.get(name, 1)))
+                for span in spans
+                if span not in omit
+            )
+            if not prose:
+                continue
             parts.append(prose + "\n")
             if indented:
                 parts.append("".join("    " + line + "\n" for line in lines))
@@ -6001,4 +6206,643 @@ class CitationCheckTests(unittest.TestCase):
             PRESENT_REVISION_SPAN,
             self.test_create_only_line_does_not_stand_for_line_3967,
             "CAUGHT create-only-as-present",
+        )
+
+    def _append_case(self, name):
+        for case in APPEND_CASES:
+            if case[0] == name:
+                return case
+        raise AssertionError(name)
+
+    def _append_group(self, name):
+        if name in ("append_condition", "host_path_err", "held_err"):
+            return "condition"
+        return "doc"
+
+    def _append_span(self, number):
+        if number in (APPEND_CALL_NUMBER, OUTCOME_HELD_NUMBER):
+            return APPEND_RANGE_SPAN
+        for name, case_number, span, lines, index in APPEND_CASES:
+            if case_number == number:
+                return span
+        raise AssertionError(number)
+
+    def _present_append_decisions(self, body):
+        """Return the append decisions whose span the draft cites."""
+        return [
+            number
+            for number in APPEND_DECISION_ORDER
+            if "`" + self._append_span(number) + "`" in body
+        ]
+
+    def _assert_append_quote_mismatch(self, name):
+        _, number, span, lines, index = self._append_case(name)
+        group = self._append_group(name)
+        expected = "refuse: quoted line does not match " + span
+        body = self._append_body(
+            groups=[group], **{group: self._changed(lines, index)}
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._append_source()})
+        self.assertEqual(got, [expected])
+        present = self._present_append_decisions(body)
+        self.assertEqual(reads, present[: present.index(number) + 1])
+        root = self._draft(body, {OWNED_REL: self._append_source()})
+        (root / OWNED_REL).write_bytes(
+            self._append_source(
+                lines={**APPEND_LINES, number: "// edited in the worktree"}
+            )
+        )
+        self.assertEqual(check.problems(root), [expected])
+        root = self._draft(
+            self._append_body(groups=[group]),
+            {OWNED_REL: self._append_source()},
+        )
+        (root / OWNED_REL).write_bytes(
+            self._append_source(
+                lines={**APPEND_LINES, number: "// edited in the worktree"}
+            )
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def _assert_append_line_not_cited(self, name, index):
+        _, number, span, lines, _ = self._append_case(name)
+        group = self._append_group(name)
+        body = self._append_body(
+            groups=[group], **{group: self._changed(lines, index)}
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._append_source()})
+        self.assertEqual(got, [], span)
+        self.assertEqual(reads, self._present_append_decisions(body), span)
+
+    def test_live_draft_append_quotes_match_their_pinned_lines(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        for name, number, span, lines, index in APPEND_CASES:
+            selector = getattr(check, name + "_quote")
+            self.assertEqual(selector(text), lines[index], span)
+            self.assertEqual(
+                len(check._remainders(text, "`" + self._append_span(number) + "`")),
+                len(lines),
+                span,
+            )
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        for name, number, span, lines, index in APPEND_CASES:
+            self.assertEqual(
+                check.pinned_line(root, sha, OWNED_REL, number), lines[index], span
+            )
+        self.assertEqual(check.problems(root), [])
+
+    def test_append_fixture_keeps_every_decision_on_its_pinned_line(self):
+        got, reads = self._pinned_reads(
+            self._append_body(), {OWNED_REL: self._append_source()}
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, list(APPEND_DECISION_ORDER))
+
+    def test_append_selectors_are_absent_below_their_index(self):
+        for name, number, span, lines, index in APPEND_CASES:
+            selector = getattr(check, name + "_quote")
+            group = self._append_group(name)
+            self.assertIsNone(
+                selector(self._append_body(groups=[group], indented=False)), span
+            )
+            self.assertIsNone(selector("No append span here.\n"), span)
+            self.assertIsNone(
+                selector(
+                    self._append_body(groups=[group], **{group: lines[:index]})
+                ),
+                span,
+            )
+
+    def test_append_condition_quoted_line_mismatch_is_refused(self):
+        self._assert_append_quote_mismatch("append_condition")
+
+    def test_host_path_err_quoted_line_mismatch_is_refused(self):
+        self._assert_append_quote_mismatch("host_path_err")
+
+    def test_held_err_quoted_line_mismatch_is_refused(self):
+        self._assert_append_quote_mismatch("held_err")
+
+    def test_append_cap_quoted_line_mismatch_is_refused(self):
+        self._assert_append_quote_mismatch("append_cap")
+
+    def test_append_call_quoted_line_mismatch_is_refused(self):
+        self._assert_append_quote_mismatch("append_call")
+
+    def test_outcome_held_quoted_line_mismatch_is_refused(self):
+        self._assert_append_quote_mismatch("outcome_held")
+
+    def test_write_invoke_quoted_line_mismatch_is_refused(self):
+        self._assert_append_quote_mismatch("write_invoke")
+
+    def test_host_path_return_does_not_stand_for_line_3935(self):
+        lines = {
+            **APPEND_LINES,
+            APPEND_CONDITION_NUMBER: HOST_PATH_ERR_QUOTE,
+            HOST_PATH_ERR_NUMBER: HOST_PATH_ERR_QUOTE,
+        }
+        body = self._append_body(groups=["condition"])
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._append_source(lines=lines)}
+        )
+        self.assertEqual(
+            got,
+            ["refuse: quoted line does not match " + APPEND_CONDITION_SPAN],
+        )
+        self.assertEqual(reads, [APPEND_CONDITION_NUMBER])
+
+    def test_append_walk_other_lines_do_not_stand_for_line_3935(self):
+        for index in (0, 18, 31):
+            self._assert_append_line_not_cited("append_condition", index)
+
+    def test_append_condition_does_not_stand_for_line_3936(self):
+        lines = {
+            **APPEND_LINES,
+            HOST_PATH_ERR_NUMBER: APPEND_CONDITION_QUOTE,
+        }
+        body = self._append_body(groups=["condition"])
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._append_source(lines=lines)}
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + HOST_PATH_ERR_SPAN]
+        )
+        self.assertEqual(
+            reads, [APPEND_CONDITION_NUMBER, HOST_PATH_ERR_NUMBER]
+        )
+
+    def test_host_path_return_does_not_stand_for_line_3947(self):
+        lines = {**APPEND_LINES, HELD_ERR_NUMBER: HOST_PATH_ERR_QUOTE}
+        body = self._append_body(groups=["condition"])
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._append_source(lines=lines)}
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + HELD_ERR_SPAN])
+        self.assertEqual(
+            reads,
+            [APPEND_CONDITION_NUMBER, HOST_PATH_ERR_NUMBER, HELD_ERR_NUMBER],
+        )
+
+    def test_append_grant_line_does_not_stand_for_line_4023(self):
+        lines = {**APPEND_LINES, APPEND_CAP_NUMBER: DOC_WALK_LINES[0]}
+        body = self._append_body(groups=["doc"])
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._append_source(lines=lines)}
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + APPEND_CAP_SPAN])
+        self.assertEqual(reads, [APPEND_CAP_NUMBER])
+
+    def test_append_doc_walk_other_lines_do_not_stand_for_line_4023(self):
+        for index in (2, 12):
+            self._assert_append_line_not_cited("append_cap", index)
+
+    def test_outcome_held_line_does_not_stand_for_line_4032(self):
+        lines = {
+            **APPEND_LINES,
+            APPEND_CALL_NUMBER: OUTCOME_HELD_QUOTE,
+            OUTCOME_HELD_NUMBER: OUTCOME_HELD_QUOTE,
+        }
+        body = self._append_body(groups=["doc"])
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._append_source(lines=lines)}
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + APPEND_CALL_SPAN])
+        self.assertEqual(reads, [APPEND_CAP_NUMBER, APPEND_CALL_NUMBER])
+
+    def test_append_call_line_does_not_stand_for_line_4033(self):
+        lines = {**APPEND_LINES, OUTCOME_HELD_NUMBER: APPEND_CALL_QUOTE}
+        body = self._append_body(groups=["doc"])
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._append_source(lines=lines)}
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + OUTCOME_HELD_SPAN]
+        )
+        self.assertEqual(
+            reads,
+            [APPEND_CAP_NUMBER, APPEND_CALL_NUMBER, OUTCOME_HELD_NUMBER],
+        )
+
+    def test_outcome_held_line_does_not_stand_for_line_4061(self):
+        lines = {**APPEND_LINES, WRITE_INVOKE_NUMBER: OUTCOME_HELD_QUOTE}
+        body = self._append_body(groups=["doc"])
+        got, reads = self._pinned_reads(
+            body, {OWNED_REL: self._append_source(lines=lines)}
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + WRITE_INVOKE_SPAN]
+        )
+        self.assertEqual(reads, list(APPEND_DECISION_ORDER[3:]))
+
+    def test_append_spans_without_an_indented_line_add_no_refusal(self):
+        got, reads = self._pinned_reads(
+            self._append_body(indented=False), {OWNED_REL: self._append_source()}
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [])
+
+    def test_append_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        for name, number, span, lines, index in APPEND_CASES:
+            expected = "refuse: quoted line is not in the pinned commit: " + span
+            body = self._append_body(groups=[self._append_group(name)])
+            got, reads = self._pinned_reads(
+                body,
+                {OWNED_REL: self._append_source(count=number - 1)},
+                {OWNED_REL: self._append_source()},
+            )
+            self.assertEqual(got, [expected], span)
+            present = self._present_append_decisions(body)
+            self.assertEqual(reads, present[: present.index(number) + 1], span)
+
+    def test_two_append_spans_are_refused(self):
+        cases = (
+            (
+                "condition",
+                {APPEND_CONDITION_SPAN: 2},
+                APPEND_CONDITION_SPAN,
+                [],
+            ),
+            (
+                "condition",
+                {HOST_PATH_ERR_SPAN: 2},
+                HOST_PATH_ERR_SPAN,
+                [APPEND_CONDITION_NUMBER],
+            ),
+            (
+                "condition",
+                {HELD_ERR_SPAN: 2},
+                HELD_ERR_SPAN,
+                [APPEND_CONDITION_NUMBER, HOST_PATH_ERR_NUMBER],
+            ),
+            ("doc", {APPEND_CAP_SPAN: 2}, APPEND_CAP_SPAN, []),
+            (
+                "doc",
+                {APPEND_RANGE_SPAN: 2},
+                APPEND_RANGE_SPAN,
+                [APPEND_CAP_NUMBER],
+            ),
+            (
+                "doc",
+                {WRITE_INVOKE_SPAN: 2},
+                WRITE_INVOKE_SPAN,
+                [
+                    APPEND_CAP_NUMBER,
+                    APPEND_CALL_NUMBER,
+                    OUTCOME_HELD_NUMBER,
+                ],
+            ),
+        )
+        for group, span_copies, span, present in cases:
+            body = self._append_body(groups=[group], span_copies=span_copies)
+            got, reads = self._pinned_reads(
+                body, {OWNED_REL: self._append_source()}
+            )
+            self.assertEqual(
+                got, ["refuse: quoted line is not one line: " + span], span
+            )
+            self.assertEqual(reads, present, span)
+
+    def test_draft_without_an_append_span_adds_no_refusal(self):
+        removed = (
+            (APPEND_CONDITION_SPAN, (APPEND_CONDITION_NUMBER,)),
+            (HOST_PATH_ERR_SPAN, (HOST_PATH_ERR_NUMBER,)),
+            (HELD_ERR_SPAN, (HELD_ERR_NUMBER,)),
+            (APPEND_CAP_SPAN, (APPEND_CAP_NUMBER,)),
+            (APPEND_RANGE_SPAN, (APPEND_CALL_NUMBER, OUTCOME_HELD_NUMBER)),
+            (WRITE_INVOKE_SPAN, (WRITE_INVOKE_NUMBER,)),
+        )
+        for span, gone in removed:
+            body = self._append_body(omit=(span,))
+            got, reads = self._pinned_reads(
+                body, {OWNED_REL: self._append_source()}
+            )
+            self.assertEqual(got, [], span)
+            self.assertEqual(
+                reads,
+                [number for number in APPEND_DECISION_ORDER if number not in gone],
+                span,
+            )
+
+    def test_3850_mismatch_does_not_read_the_append_lines(self):
+        body = self._file_ask_body(
+            groups=["ask"], ask=self._changed(ASK_LINES, 17)
+        ) + self._append_body(
+            groups=["condition"],
+            condition=self._changed(APPEND_WALK_LINES, 7),
+        )
+        got, reads = self._pinned_reads(
+            body,
+            {
+                OWNED_REL: self._file_ask_source(
+                    lines={**FILE_ASK_LINES, **APPEND_LINES}
+                )
+            },
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + READ_SPAN])
+        self.assertEqual(reads, [WRITE_NUMBER, READ_NUMBER])
+
+    def test_3935_mismatch_does_not_read_the_host_path_line(self):
+        body = self._append_body(condition=self._changed(APPEND_WALK_LINES, 7))
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._append_source()})
+        self.assertEqual(
+            got,
+            ["refuse: quoted line does not match " + APPEND_CONDITION_SPAN],
+        )
+        self.assertEqual(reads, [APPEND_CONDITION_NUMBER])
+
+    def test_3936_mismatch_does_not_read_the_held_line(self):
+        body = self._append_body(condition=self._changed(APPEND_WALK_LINES, 8))
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._append_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + HOST_PATH_ERR_SPAN]
+        )
+        self.assertEqual(
+            reads, [APPEND_CONDITION_NUMBER, HOST_PATH_ERR_NUMBER]
+        )
+
+    def test_3947_mismatch_does_not_read_the_body_doc_line(self):
+        body = self._append_body(
+            condition=self._changed(APPEND_WALK_LINES, 19)
+        ) + self._file_ask_body(groups=["write_body"])
+        got, reads = self._pinned_reads(
+            body,
+            {
+                OWNED_REL: self._file_ask_source(
+                    lines={**FILE_ASK_LINES, **APPEND_LINES}
+                )
+            },
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + HELD_ERR_SPAN])
+        self.assertEqual(
+            reads,
+            [APPEND_CONDITION_NUMBER, HOST_PATH_ERR_NUMBER, HELD_ERR_NUMBER],
+        )
+
+    def test_3961_mismatch_does_not_read_the_append_doc_lines(self):
+        body = self._file_ask_body(
+            groups=["write_body"],
+            write_body=self._changed(WRITE_BODY_LINES, 0),
+        ) + self._append_body(groups=["doc"])
+        got, reads = self._pinned_reads(
+            body,
+            {
+                OWNED_REL: self._file_ask_source(
+                    lines={**FILE_ASK_LINES, **APPEND_LINES}
+                )
+            },
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + BODY_DOC_SPAN])
+        self.assertEqual(reads, [BODY_DOC_NUMBER])
+
+    def test_3967_mismatch_does_not_read_the_append_doc_lines(self):
+        body = self._file_ask_body(
+            groups=["write_body"],
+            write_body=self._changed(WRITE_BODY_LINES, 6),
+        ) + self._append_body(groups=["doc"])
+        got, reads = self._pinned_reads(
+            body,
+            {
+                OWNED_REL: self._file_ask_source(
+                    lines={**FILE_ASK_LINES, **APPEND_LINES}
+                )
+            },
+        )
+        self.assertEqual(
+            got,
+            ["refuse: quoted line does not match " + PRESENT_REVISION_SPAN],
+        )
+        self.assertEqual(
+            reads, [BODY_DOC_NUMBER, CREATE_ONLY_NUMBER, PRESENT_REVISION_NUMBER]
+        )
+
+    def test_4023_mismatch_does_not_read_the_call_line(self):
+        body = self._append_body(
+            groups=["doc"], doc=self._changed(DOC_WALK_LINES, 1)
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._append_source()})
+        self.assertEqual(got, ["refuse: quoted line does not match " + APPEND_CAP_SPAN])
+        self.assertEqual(reads, [APPEND_CAP_NUMBER])
+
+    def test_4032_mismatch_does_not_read_the_outcome_line(self):
+        body = self._append_body(
+            groups=["doc"], doc=self._changed(DOC_WALK_LINES, 10)
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._append_source()})
+        self.assertEqual(got, ["refuse: quoted line does not match " + APPEND_CALL_SPAN])
+        self.assertEqual(reads, [APPEND_CAP_NUMBER, APPEND_CALL_NUMBER])
+
+    def test_4033_mismatch_does_not_read_the_invoke_line(self):
+        body = self._append_body(
+            groups=["doc"], doc=self._changed(DOC_WALK_LINES, 11)
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._append_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + OUTCOME_HELD_SPAN]
+        )
+        self.assertEqual(
+            reads,
+            [APPEND_CAP_NUMBER, APPEND_CALL_NUMBER, OUTCOME_HELD_NUMBER],
+        )
+
+    def test_4061_mismatch_does_not_read_the_asks_line(self):
+        body = self._append_body(
+            groups=["doc"], doc=self._changed(DOC_WALK_LINES, 13)
+        ) + self._file_ask_body(groups=["asks"], ask_third=ASKS_THIRD + "x")
+        got, reads = self._pinned_reads(
+            body,
+            {
+                OWNED_REL: self._file_ask_source(
+                    lines={**FILE_ASK_LINES, **APPEND_LINES}
+                )
+            },
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + WRITE_INVOKE_SPAN]
+        )
+        self.assertEqual(reads, list(APPEND_DECISION_ORDER[3:]))
+
+    def test_asks_mismatch_follows_the_append_matches(self):
+        body = self._append_body() + self._file_ask_body(
+            groups=["asks", "marker"], ask_third=ASKS_THIRD + "x"
+        )
+        got, reads = self._pinned_reads(
+            body,
+            {
+                OWNED_REL: self._file_ask_source(
+                    lines={**FILE_ASK_LINES, **APPEND_LINES}
+                )
+            },
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + ASKS_SPAN])
+        self.assertEqual(reads, list(APPEND_DECISION_ORDER) + [ASKS_NUMBER])
+
+    def test_cover_mismatch_follows_the_append_matches(self):
+        body = (
+            self._append_body()
+            + self._file_ask_body(
+                groups=["cover"], cover=self._changed(COVER_LINES, 5)
+            )
+            + self._provider_body(groups=["scheme"])
+        )
+        got, reads = self._pinned_reads(
+            body,
+            {
+                OWNED_REL: self._file_ask_source(
+                    lines={**FILE_ASK_LINES, **APPEND_LINES}
+                ),
+                PROVIDER_REL: self._provider_source(),
+            },
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + COVER_SPAN])
+        self.assertEqual(reads, list(APPEND_DECISION_ORDER) + [COVER_NUMBER])
+
+    def test_append_quote_refusal_waits_for_a_known_pin(self):
+        body = self._append_body(condition=self._changed(APPEND_WALK_LINES, 7))
+        files = {OWNED_REL: self._append_source()}
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+        self.assertEqual(
+            check.problems(
+                self._raw_draft("Pinned commit: HEAD\n" + body, files)
+            ),
+            ["refuse: pinned commit is not one 40-hex commit"],
+        )
+        self.assertEqual(
+            check.problems(
+                self._raw_draft(
+                    "Pinned commit: " + "f" * 40 + "\n" + body, files, commit=True
+                )
+            ),
+            ["refuse: pinned commit is not a commit: " + "f" * 40],
+        )
+
+    def test_falsifier_append_condition_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_append_condition_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT append-condition-quoted-line",
+        )
+
+    def test_falsifier_host_path_return_as_condition_is_caught(self):
+        self._caught_run_body_index(
+            "append_condition_quote",
+            8,
+            APPEND_CONDITION_SPAN,
+            self.test_host_path_return_does_not_stand_for_line_3935,
+            "CAUGHT host-path-return-as-condition",
+        )
+
+    def test_falsifier_host_path_err_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_host_path_err_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT host-path-err-quoted-line",
+        )
+
+    def test_falsifier_append_condition_as_return_is_caught(self):
+        self._caught_run_body_index(
+            "host_path_err_quote",
+            7,
+            HOST_PATH_ERR_SPAN,
+            self.test_append_condition_does_not_stand_for_line_3936,
+            "CAUGHT append-condition-as-return",
+        )
+
+    def test_falsifier_held_err_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_held_err_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT held-err-quoted-line",
+        )
+
+    def test_falsifier_host_path_return_as_held_is_caught(self):
+        self._caught_run_body_index(
+            "held_err_quote",
+            8,
+            HELD_ERR_SPAN,
+            self.test_host_path_return_does_not_stand_for_line_3947,
+            "CAUGHT host-path-return-as-held",
+        )
+
+    def test_falsifier_append_cap_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_append_cap_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT append-cap-quoted-line",
+        )
+
+    def test_falsifier_append_grant_line_is_caught(self):
+        self._caught_run_body_index(
+            "append_cap_quote",
+            0,
+            APPEND_CAP_SPAN,
+            self.test_append_grant_line_does_not_stand_for_line_4023,
+            "CAUGHT append-grant-line",
+        )
+
+    def test_falsifier_append_call_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_append_call_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT append-call-quoted-line",
+        )
+
+    def test_falsifier_outcome_held_as_call_is_caught(self):
+        self._caught_run_body_index(
+            "append_call_quote",
+            11,
+            APPEND_RANGE_SPAN,
+            self.test_outcome_held_line_does_not_stand_for_line_4032,
+            "CAUGHT outcome-held-as-call",
+        )
+
+    def test_falsifier_outcome_held_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_outcome_held_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT outcome-held-quoted-line",
+        )
+
+    def test_falsifier_append_call_as_outcome_is_caught(self):
+        self._caught_run_body_index(
+            "outcome_held_quote",
+            10,
+            APPEND_RANGE_SPAN,
+            self.test_append_call_line_does_not_stand_for_line_4033,
+            "CAUGHT append-call-as-outcome",
+        )
+
+    def test_falsifier_write_invoke_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_write_invoke_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT write-invoke-quoted-line",
+        )
+
+    def test_falsifier_outcome_held_as_invoke_is_caught(self):
+        self._caught_run_body_index(
+            "write_invoke_quote",
+            11,
+            WRITE_INVOKE_SPAN,
+            self.test_outcome_held_line_does_not_stand_for_line_4061,
+            "CAUGHT outcome-held-as-invoke",
         )
