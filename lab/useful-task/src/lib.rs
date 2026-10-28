@@ -16,15 +16,90 @@ const CHECK_ORDER: [Reason; 5] = [
     Reason::Mismatch,
 ];
 
-/// One task acceptance spec.
+/// One task acceptance spec, validated by [`load_spec`].
+///
+/// Callers can inspect the spec through shared references. Only the loader can
+/// construct it, so every call to [`judge`] uses the validated check sequence.
+///
+/// Clearing the checks is a compile-time error:
+/// ```compile_fail,E0616
+/// fn bypass(mut spec: useful_task::Spec) {
+///     spec.reasons.clear();
+/// }
+/// ```
+/// Removing only the comparison check is also a compile-time error:
+/// ```compile_fail,E0616
+/// fn bypass(mut spec: useful_task::Spec) {
+///     spec.reasons.retain(|reason| *reason != useful_task::Reason::Mismatch);
+/// }
+/// ```
+/// The accessor keeps the checks read-only:
+/// ```compile_fail,E0599
+/// fn bypass(mut spec: useful_task::Spec) {
+///     spec.reasons().clear();
+/// }
+/// ```
+/// The fixed strings are also read-only:
+/// ```compile_fail,E0599
+/// fn bypass(mut spec: useful_task::Spec) {
+///     spec.fixed_strings().clear();
+/// }
+/// ```
+/// Schema fields also stay behind a shared reference:
+/// ```compile_fail,E0596
+/// fn bypass(mut spec: useful_task::Spec) {
+///     match spec.schema() {
+///         useful_task::Schema::Fields(fields) | useful_task::Schema::Items(fields) => {
+///             fields.clear();
+///         }
+///     }
+/// }
+/// ```
+/// Direct construction requires the loader's validation:
+/// ```compile_fail,E0451
+/// let spec = useful_task::Spec {
+///     task_id: String::new(),
+///     m1: String::new(),
+///     input_sha256: String::new(),
+///     fixed_strings: Vec::new(),
+///     reasons: Vec::new(),
+///     schema: useful_task::Schema::Fields(Vec::new()),
+/// };
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Spec {
-    pub task_id: String,
-    pub m1: String,
-    pub input_sha256: String,
-    pub fixed_strings: Vec<String>,
-    pub reasons: Vec<Reason>,
-    pub schema: Schema,
+    task_id: String,
+    m1: String,
+    input_sha256: String,
+    fixed_strings: Vec<String>,
+    reasons: Vec<Reason>,
+    schema: Schema,
+}
+
+impl Spec {
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
+
+    pub fn m1(&self) -> &str {
+        &self.m1
+    }
+
+    pub fn input_sha256(&self) -> &str {
+        &self.input_sha256
+    }
+
+    pub fn fixed_strings(&self) -> &[String] {
+        &self.fixed_strings
+    }
+
+    pub fn reasons(&self) -> &[Reason] {
+        &self.reasons
+    }
+
+    pub fn schema(&self) -> &Schema {
+        &self.schema
+    }
 }
 
 /// One reason an answer is refused.

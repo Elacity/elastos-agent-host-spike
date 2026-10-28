@@ -2,6 +2,10 @@
 
 ## 001 — judge two agent tasks and refuse stubs
 
+Here, “fixed stub” means exactly `ok`, `done`, `TODO`, or `pass`. A constant
+answer equal to `recorded.json` passes. These fixtures measure answer validity;
+they cannot prove rejection of every constant-answer program or a real model turn.
+
 Added the `useful-task` workspace with one task and acceptance spec for
 `agent-a` and `agent-b`, their hand-captured answers, and a checker that judges
 a model proposal against the parsed recorded value. The checker trims the
@@ -10,7 +14,7 @@ that order; it reads no file, opens no socket, and grants nothing. The test also
 accepts equivalent JSON with different formatting and key order, and refuses
 malformed JSON, extra keys, non-string values and a spec swap.
 
-Checks on the committed tree (source SHA-256
+Initial checks before this repair (source SHA-256
 `3172093cf08032b0c96fcd735f258855c6d11fa7e80e969e173f9c21297709ec`,
 fixtures with their specified hashes):
 
@@ -88,3 +92,73 @@ It failed at `tests/checker.rs:66:5`:
 `right: Accept { answer_sha256: "be6bff0dff3b3ebdcd97da9db1cdbe24aaa194e90fef6ac158ff8b0b36eb5ba5" }`.
 
 - 001: Added `lab/useful-task` with agent-a/agent-b inputs, specs and recorded answers, and a hash-checking stub-refusing judge; planted eight faults and restored the source before commit.
+
+### Validated spec repair
+
+`Spec` now owns its validated fields privately and provides shared read access.
+The compile-fail examples exercise clearing the reason list, removing only
+`Mismatch`, changing lists through accessors, changing schema fields, and direct
+construction. The named test checks every loader refusal string for both specs,
+including empty, reordered, duplicated and individually omitted checks.
+
+Each of the following faults was applied separately, tested, and restored.
+For all twelve loader faults, this command exited 101 at the assertion in
+`tests/checker.rs:30`:
+
+```sh
+cargo test --offline --locked --manifest-path lab/useful-task/Cargo.toml -- checker_accepts_recorded_answer_and_refuses_stubs --exact
+```
+
+| Fault in `load_spec` or its validation helper | Observed assertion failure |
+| --- | --- |
+| JSON parse fallback to `null` | `spec is not an object` instead of `spec is not JSON: EOF while parsing a list at line 1 column 1` |
+| Replace a non-object with an empty object | `spec is missing kind` instead of `spec is not an object` |
+| Unknown kind becomes `Schema::Fields(Vec::new())` | `expect_err("malformed spec")` received `Ok(Spec)` |
+| Disable the unexpected-key check | `expect_err("malformed spec")` received `Ok(Spec)` |
+| Unknown reason becomes `Reason::Empty` | `spec reasons are not the canonical checks` instead of `spec reason unknown is unknown` |
+| Disable the canonical check-order check | `expect_err("malformed spec")` received `Ok(Spec)` with `reasons: []` |
+| Missing required field becomes `Value::Null` | `spec kind is not a string` instead of `spec is missing kind` |
+| Non-string field becomes an empty string | `spec kind  is unknown` instead of `spec kind is not a string` |
+| Non-array field becomes an empty array | `spec fields is empty` instead of `spec fields is not an array` |
+| Non-string array element becomes an empty string | `expect_err("malformed spec")` received `Ok(Spec)` |
+| Disable the empty-schema check | `expect_err("malformed spec")` received `Ok(Spec)` |
+| Disable the duplicate-schema-field check | `expect_err("malformed spec")` received `Ok(Spec)` |
+
+Each loader fault produced:
+
+```text
+test checker_accepts_recorded_answer_and_refuses_stubs ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+A separate privacy fault changed the field to `pub reasons: Vec<Reason>`.
+`cargo test --offline --locked --manifest-path lab/useful-task/Cargo.toml --doc`
+exited 101 because both bypass examples compiled:
+
+```text
+---- src/lib.rs - Spec (line 25) stdout ----
+Test compiled successfully, but it's marked `compile_fail`.
+---- src/lib.rs - Spec (line 31) stdout ----
+Test compiled successfully, but it's marked `compile_fail`.
+test result: FAILED. 4 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+```
+
+After restoring all faults, formatting and the complete test suite succeeded:
+
+```sh
+cargo fmt --manifest-path lab/useful-task/Cargo.toml -- --check
+cargo test --offline --locked --manifest-path lab/useful-task/Cargo.toml
+```
+
+```text
+test checker_accepts_recorded_answer_and_refuses_stubs ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+```
+
+The restored `src/lib.rs` SHA-256 is
+`f073b66a62bd1af48e5d8d6044114fef3180272ff9fa3cc6586d04d8c99d67cb`.
+These runs used `RUST_TEST_THREADS=2`, `CARGO_INCREMENTAL=0`, and Cargo target
+and build directories under `lab/useful-task/target/`. The privacy-fault run
+used the default test thread count. The repair remains pending the supervisor's
+checks and fresh review.

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use serde_json::Value;
-use useful_task::{judge, load_spec, sha256_hex, Verdict};
+use serde_json::{json, Value};
+use useful_task::{judge, load_spec, sha256_hex, Schema, Verdict};
 
 const M1: &str = "A4: Each agent completes one useful task through real Runtime resources (model via a Runtime grant, DeepSeek on the Sparks); the permitted effect succeeds (granted_effect_succeeds).";
 const REASONS: [&str; 5] = ["empty", "echo", "fixed-string", "shape", "mismatch"];
@@ -24,6 +24,20 @@ fn refused(reason: &'static str) -> Verdict {
 
 fn parsed(json: &str) -> Value {
     serde_json::from_str(json).expect("test JSON parses")
+}
+
+fn refused_spec(bytes: &str, reason: &str) {
+    assert_eq!(load_spec(bytes).expect_err("malformed spec"), reason);
+}
+
+fn changed_spec_refused(spec: &Value, key: &str, value: Option<Value>, reason: &str) {
+    let mut changed = spec.clone();
+    let object = changed.as_object_mut().unwrap();
+    match value {
+        Some(value) => object.insert(key.to_owned(), value),
+        None => object.remove(key),
+    };
+    refused_spec(&changed.to_string(), reason);
 }
 
 #[test]
@@ -52,14 +66,111 @@ fn checker_accepts_recorded_answer_and_refuses_stubs() {
 
     let a_spec = load_spec(&read("tasks/agent-a/accept.json")).expect("agent-a spec parses");
     let b_spec = load_spec(&read("tasks/agent-b/accept.json")).expect("agent-b spec parses");
-    for spec in [&a_spec, &b_spec] {
-        assert_eq!(spec.m1, M1);
-        let labels: Vec<&str> = spec.reasons.iter().map(|reason| reason.label()).collect();
-        assert_eq!(labels, REASONS);
-        assert_eq!(spec.fixed_strings, FIXED_STRINGS);
+    refused_spec(
+        "[",
+        "spec is not JSON: EOF while parsing a list at line 1 column 1",
+    );
+    refused_spec("null", "spec is not an object");
+    for (bytes, schema_key) in [
+        (read("tasks/agent-a/accept.json"), "fields"),
+        (read("tasks/agent-b/accept.json"), "item_fields"),
+    ] {
+        let spec = parsed(&bytes);
+        for key in ["kind", "task_id", "m1", "input_sha256"] {
+            changed_spec_refused(&spec, key, None, &format!("spec is missing {key}"));
+            changed_spec_refused(
+                &spec,
+                key,
+                Some(json!(17)),
+                &format!("spec {key} is not a string"),
+            );
+        }
+        for key in [schema_key, "reasons", "fixed_strings"] {
+            changed_spec_refused(&spec, key, None, &format!("spec is missing {key}"));
+            changed_spec_refused(
+                &spec,
+                key,
+                Some(json!("empty")),
+                &format!("spec {key} is not an array"),
+            );
+            changed_spec_refused(
+                &spec,
+                key,
+                Some(json!([17])),
+                &format!("spec {key} holds a non-string"),
+            );
+        }
+        changed_spec_refused(
+            &spec,
+            "kind",
+            Some(json!("unknown")),
+            "spec kind unknown is unknown",
+        );
+        changed_spec_refused(
+            &spec,
+            "extra",
+            Some(json!(true)),
+            "spec has unexpected key extra",
+        );
+        changed_spec_refused(
+            &spec,
+            schema_key,
+            Some(json!([])),
+            &format!("spec {schema_key} is empty"),
+        );
+        changed_spec_refused(
+            &spec,
+            schema_key,
+            Some(json!(["duplicate", "duplicate"])),
+            &format!("spec {schema_key} repeats duplicate"),
+        );
+        changed_spec_refused(
+            &spec,
+            "reasons",
+            Some(json!(["unknown"])),
+            "spec reason unknown is unknown",
+        );
+        let mut reordered = REASONS.to_vec();
+        reordered.swap(0, 1);
+        let mut duplicated = REASONS.to_vec();
+        duplicated.push("mismatch");
+        let mut invalid_orders = vec![Vec::new(), reordered, duplicated];
+        for omitted in REASONS {
+            invalid_orders.push(
+                REASONS
+                    .iter()
+                    .copied()
+                    .filter(|reason| *reason != omitted)
+                    .collect(),
+            );
+        }
+        for reasons in invalid_orders {
+            changed_spec_refused(
+                &spec,
+                "reasons",
+                Some(json!(reasons)),
+                "spec reasons are not the canonical checks",
+            );
+        }
     }
-    assert_eq!(a_spec.input_sha256, sha256_hex(&a_input));
-    assert_eq!(b_spec.input_sha256, sha256_hex(&b_input));
+    for spec in [&a_spec, &b_spec] {
+        assert_eq!(spec.m1(), M1);
+        let labels: Vec<&str> = spec.reasons().iter().map(|reason| reason.label()).collect();
+        assert_eq!(labels, REASONS);
+        assert_eq!(spec.fixed_strings(), FIXED_STRINGS);
+    }
+    assert_eq!(a_spec.input_sha256(), sha256_hex(&a_input));
+    assert_eq!(b_spec.input_sha256(), sha256_hex(&b_input));
+    assert_eq!(a_spec.task_id(), "agent-a");
+    assert_eq!(b_spec.task_id(), "agent-b");
+    assert_eq!(
+        a_spec.schema(),
+        &Schema::Fields(["place", "goods", "close"].map(str::to_owned).to_vec())
+    );
+    assert_eq!(
+        b_spec.schema(),
+        &Schema::Items(["date", "text"].map(str::to_owned).to_vec())
+    );
 
     let a_expected = parsed(&a_recorded);
     let b_expected = parsed(&b_recorded);
@@ -73,7 +184,7 @@ fn checker_accepts_recorded_answer_and_refuses_stubs() {
     );
 
     for spec in [&a_spec, &b_spec] {
-        let (input, expected) = if spec.task_id == "agent-a" {
+        let (input, expected) = if spec.task_id() == "agent-a" {
             (&a_input, &a_expected)
         } else {
             (&b_input, &b_expected)
@@ -151,6 +262,13 @@ fn checker_accepts_recorded_answer_and_refuses_stubs() {
             refused("shape"),
         ),
         (r#"{"items":"stall opens"}"#, refused("shape")),
+        (r#"{}"#, refused("shape")),
+        (r#"[]"#, refused("shape")),
+        (r#"{"items":[17]}"#, refused("shape")),
+        (
+            r#"{"items":[{"date":"2026-03-14","text":"stall opens","extra":"value"}]}"#,
+            refused("shape"),
+        ),
     ];
     for (answer, verdict) in b_answers {
         assert_eq!(
