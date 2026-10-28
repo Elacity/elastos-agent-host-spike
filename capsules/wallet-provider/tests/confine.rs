@@ -6673,13 +6673,23 @@ struct OperationsRow {
 /// The one first cell of an operations table's header line.
 const OPERATION_HEADER: &str = "Operation";
 
-/// The one cell count every line of an operations table holds.
-const TABLE_CELLS: usize = 7;
+/// Every header cell, in the order used to read body cells.
+const TABLE_HEADER: [&str; 7] = [
+    OPERATION_HEADER,
+    "Inputs",
+    "Outputs",
+    "Right",
+    "Effect",
+    "macOS rule and test",
+    "Linux",
+];
 
-/// Whether `line` is one line of a Markdown table, which may sit under leading
-/// whitespace.
+/// The one cell count every line of an operations table holds.
+const TABLE_CELLS: usize = TABLE_HEADER.len();
+
+/// Whether `line` can start a Markdown table. Outer bars are optional.
 fn is_table_line(line: &str) -> bool {
-    line.trim_start().starts_with('|')
+    line.contains('|')
 }
 
 /// The trimmed cells of one Markdown table line, without its outer bars.
@@ -6707,11 +6717,11 @@ fn is_separator_cells(cells: &[&str]) -> bool {
 /// Every data row of one operations table section, in table order, and every
 /// row that cannot be read.
 ///
-/// The first table line, a line that starts with `|` under optional leading
-/// whitespace, is the header and the second is the separator. Only the later
-/// table lines are rows, so no line is skipped by its cells: a line that
-/// repeats the header words is a row, and so is an indented row. Every one of
-/// the three holds the table's `TABLE_CELLS` cells. A section with no table
+/// The first line containing `|` is the complete `TABLE_HEADER`, and the next
+/// nonempty line is the separator. Every later nonempty line is read as a row,
+/// including a repeated header, an indented row and a row with either or both
+/// outer bars omitted. Short rows are refused even when they hold no bar.
+/// Every line holds the table's `TABLE_CELLS` cells. A section with no table
 /// line, a first line that is not the header, a second line that would be a row
 /// and a header with no second line are refusals that name the document and the
 /// line; so is a row with any other cell count.
@@ -6719,14 +6729,17 @@ fn operations_table_rows(
     document_name: &str,
     section: &str,
 ) -> Result<(Vec<OperationsRow>, Vec<String>), Vec<String>> {
-    let mut lines = section.lines().filter(|line| is_table_line(line));
+    let mut lines = section
+        .lines()
+        .skip_while(|line| !is_table_line(line))
+        .filter(|line| !line.trim().is_empty());
     let Some(header) = lines.next() else {
         return Err(vec![format!(
             "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} holds no table line"
         )]);
     };
     let header_cells = table_cells(header);
-    if header_cells.len() != TABLE_CELLS || header_cells.first() != Some(&OPERATION_HEADER) {
+    if header_cells != TABLE_HEADER {
         return Err(vec![format!(
             "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} table line 1 is not the header \
              {OPERATION_HEADER} over {TABLE_CELLS} cells: {}",
@@ -7036,9 +7049,9 @@ fn linux_status_problems(document_name: &str, row: &OperationsRow) -> Vec<String
 /// the row (or the arm) and the value.
 ///
 /// The section under `OPERATIONS_HEADING` must hold a table whose first line is
-/// the `Operation` header and whose second is the dash separator: only the
-/// lines after those two are rows, so no row hides behind a repeated header or
-/// leading whitespace. Then the section must hold four things. Its row set,
+/// complete `TABLE_HEADER` and whose second is the dash separator. Every later
+/// nonempty line is a row, including repeated headers and rows with leading
+/// whitespace or omitted outer bars. Then the section must hold four things. Its row set,
 /// in table order, must equal the operations `<provider_dir>/src/main.rs`
 /// answers through `fn handle`, with a `wallet_contract` arm expanded to one
 /// `wallet_contract <kind>` row per `fn dispatch_wallet_operation` arm. Each
@@ -8903,8 +8916,10 @@ const FIXTURE_OPERATIONS: [&str; 4] = [
 /// before an ordinary row. A two-kind fixture also refuses swapped kind rows,
 /// duplicate ordinary and kind rows, and equal-length rows with the wrong
 /// multiplicity. An acronym fixture requires serde's wire name. The table's
-/// header and separator are read by position, so an appended row that repeats
-/// the header words or sits under leading whitespace reaches every rule, and a
+/// complete header and separator are checked before reading positional cells.
+/// An appended row that repeats the header words, sits under leading whitespace
+/// or omits either outer bar reaches every rule. Short rows, including a row
+/// with no bars, are refused. Changed or swapped header labels are refused, and a
 /// section with no table line, a first line that is not the header, a header
 /// with no separator, a second line that would be a row and a separator with
 /// another cell count are each refused as one problem. Rule 2 refuses a Right
@@ -9038,6 +9053,73 @@ fn operations_table_row_check_refuses_each_bad_table() {
         );
     }
 
+    // Markdown permits either outer bar to be omitted. Each form must expose
+    // the same extra operation, undeclared Right and invalid Linux claim.
+    for row in [
+        "phantom | op | ok | undeclared | effect | permitted: | enforced |\n",
+        "| phantom | op | ok | undeclared | effect | permitted: | enforced\n",
+        "phantom | op | ok | undeclared | effect | permitted: | enforced\n",
+    ] {
+        let document = format!("{clean}{row}");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![
+                format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row \
+                     phantom has no arm in {}",
+                    provider_source.display()
+                ),
+                format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row phantom holds \
+                     the Right cell undeclared, which is neither {NO_DECLARED_RIGHT} nor one \
+                     declared contract id"
+                ),
+                format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row phantom names \
+                     the Linux cell enforced, and every Linux cell is {LINUX_STATUS}"
+                ),
+            ],
+            "a row with optional outer bars must reach rules 1, 2 and 4: {row}"
+        );
+    }
+    assert_eq!(
+        operations_table_row_problems(
+            "fixture-provider",
+            &format!("{clean}phantom\n"),
+            provider.path()
+        ),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row phantom holds 1 cells, \
+             and every row holds {TABLE_CELLS}"
+        )],
+        "a short row with no bars must be refused instead of skipped"
+    );
+
+    // Valid headers, separators and rows also accept either optional outer bar.
+    for (omit_leading, omit_trailing) in [(true, false), (false, true), (true, true)] {
+        let document = clean
+            .lines()
+            .map(|line| {
+                let line = if omit_leading {
+                    line.strip_prefix('|').unwrap_or(line)
+                } else {
+                    line
+                };
+                if omit_trailing {
+                    line.strip_suffix('|').unwrap_or(line)
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            Vec::<String>::new(),
+            "optional outer bars must preserve a valid table"
+        );
+    }
+
     // The table's shape is read by position, so a section that hides its rows
     // or its header is refused instead of read as an empty table.
     for (case, document, reason) in [
@@ -9064,6 +9146,19 @@ fn operations_table_row_check_refuses_each_bad_table() {
             format!(
                 "{OPERATIONS_HEADING} table line 1 is the header and the table holds no \
                  separator line"
+            ),
+        ),
+        (
+            "swapped Right and Linux header labels",
+            clean.replacen(
+                "| Right | Effect | macOS rule and test | Linux |",
+                "| Linux | Effect | macOS rule and test | Right |",
+                1,
+            ),
+            format!(
+                "{OPERATIONS_HEADING} table line 1 is not the header {OPERATION_HEADER} over \
+                 {TABLE_CELLS} cells: | Operation | Inputs | Outputs | Linux | Effect | macOS \
+                 rule and test | Right |"
             ),
         ),
         (
@@ -9096,6 +9191,29 @@ fn operations_table_row_check_refuses_each_bad_table() {
             operations_table_row_problems("fixture-provider", &document, provider.path()),
             vec![format!("fixture-provider CONFINEMENT.md: {reason}")],
             "{case} must be refused as one problem"
+        );
+    }
+
+    // Every label owns its column's meaning, including the unchecked body cells.
+    for label in [
+        "Operation",
+        "Inputs",
+        "Outputs",
+        "Right",
+        "Effect",
+        "macOS rule and test",
+        "Linux",
+    ] {
+        let document = clean.replacen(&format!("| {label} |"), "| changed |", 1);
+        assert_ne!(document, clean, "the {label} header must change");
+        let header = document.lines().nth(2).expect("fixture header line");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} table line 1 is not the \
+                 header {OPERATION_HEADER} over {TABLE_CELLS} cells: {header}"
+            )],
+            "the complete header must be checked before reading the {label} column"
         );
     }
 
