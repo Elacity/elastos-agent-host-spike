@@ -25,12 +25,12 @@ const RUN_MARKER: &str = "fn run() -> Result<(), elastos::bus::types::BusError>"
 const EXPORT_MARKER: &str = "export!(AgentHost)";
 
 /// The record claims this test checks. A missing claim is a stale record.
-const REQUIRED_PROSE: [&str; 10] = [
+/// The full sentences keep a contradictory negation from passing substring
+/// checks.
+const REQUIRED_PROSE: [&str; 8] = [
     "lab stand-in, not admission",
-    "two concurrent bounded activations",
-    "no A3 credit",
-    "no resident credit",
-    "binds an instance to its component hash",
+    "A later run on this Runtime is two concurrent bounded activations, not two resident instances.",
+    "This lane claims no A3 credit and no resident credit until the stand-in binds an instance to its component hash.",
     "not the component target",
     "not the A3 target",
     "scripts/build-component-capsule.sh",
@@ -136,38 +136,26 @@ fn hex_tokens(line: &str, len: usize) -> Vec<&str> {
 /// A bridge entry is a public, synchronous `StandIn` method with the
 /// `BridgeHostcall` shape: `(&str, &str, Option<&str>) -> Result<String, String>`.
 fn bridge_entry(source: &str) -> String {
+    let code = code_without_strings_and_comments(source);
+    let Some(block) = impl_block(&code, "StandIn") else {
+        return "none".to_string();
+    };
     let mut entries: Vec<String> = Vec::new();
-    let mut in_impl = false;
-    let mut collecting = false;
-    let mut signature = String::new();
-    for line in source.lines() {
-        if !in_impl {
-            if line.trim_end() == "impl StandIn {" {
-                in_impl = true;
-            }
+    let mut search = 0;
+    while let Some(offset) = block[search..].find("pub fn ") {
+        let start = search + offset;
+        let before = block[..start].chars().next_back();
+        if before.is_some_and(|character| character.is_alphanumeric() || character == '_') {
+            search = start + "pub fn ".len();
             continue;
         }
-        if line == "}" {
-            in_impl = false;
-            continue;
+        let Some(brace) = block[start..].find('{') else {
+            break;
+        };
+        if let Some(name) = bridge_shaped(&block[start..start + brace]) {
+            entries.push(name);
         }
-        if !collecting {
-            if let Some(rest) = line.strip_prefix("    pub fn ") {
-                signature.clear();
-                signature.push_str("pub fn ");
-                signature.push_str(rest);
-                collecting = true;
-            }
-        } else {
-            signature.push(' ');
-            signature.push_str(line.trim());
-        }
-        if collecting && signature.contains('{') {
-            if let Some(name) = bridge_shaped(&signature) {
-                entries.push(name);
-            }
-            collecting = false;
-        }
+        search = start + brace + 1;
     }
     match entries.len() {
         0 => "none".to_string(),
@@ -176,8 +164,41 @@ fn bridge_entry(source: &str) -> String {
     }
 }
 
+fn impl_block<'a>(code: &'a str, name: &str) -> Option<&'a str> {
+    let needle = format!("impl {name}");
+    let start = code.find(&needle)?;
+    let after = &code[start + needle.len()..];
+    if after
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_alphanumeric() || character == '_')
+    {
+        return None;
+    }
+    let open = start + needle.len() + after.find('{')?;
+    let close = matching_brace(code, open)?;
+    Some(&code[open + 1..close])
+}
+
+fn matching_brace(text: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (offset, character) in text[open..].char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(open + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn bridge_shaped(signature: &str) -> Option<String> {
-    let after = signature.strip_prefix("pub fn ")?;
+    let after = signature.trim_start().strip_prefix("pub fn ")?;
     let open = after.find('(')?;
     let name = after[..open].trim();
     if name.is_empty() {
@@ -197,10 +218,100 @@ fn bridge_shaped(signature: &str) -> Option<String> {
         return None;
     }
     let rest = after[close + 1..].trim();
-    // The opening brace ends the signature even when the body shares its line.
-    let (returned, _) = rest.strip_prefix("->")?.split_once('{')?;
+    let returned = rest.strip_prefix("->")?.trim();
     let returned = normalize_type(returned);
     (returned == "Result<String,String>").then(|| name.to_string())
+}
+
+/// Removes string contents and comments while keeping their delimiters and
+/// line breaks. Discovery then reads code tokens, not prose that mentions them.
+fn code_without_strings_and_comments(source: &str) -> String {
+    let characters = source.chars().collect::<Vec<_>>();
+    let mut out = String::with_capacity(source.len());
+    let mut index = 0;
+    let mut line_comment = false;
+    let mut block_comment = false;
+    let mut string = false;
+    let mut escape = false;
+    while index < characters.len() {
+        let character = characters[index];
+        let next = characters.get(index + 1).copied();
+        if line_comment {
+            if character == '\n' {
+                line_comment = false;
+                out.push('\n');
+            } else {
+                out.push(' ');
+            }
+            index += 1;
+            continue;
+        }
+        if block_comment {
+            if character == '*' && next == Some('/') {
+                block_comment = false;
+                out.push_str("  ");
+                index += 2;
+                continue;
+            }
+            out.push(if character == '\n' { '\n' } else { ' ' });
+            index += 1;
+            continue;
+        }
+        if string {
+            if escape {
+                escape = false;
+                out.push(' ');
+            } else if character == '\\' {
+                escape = true;
+                out.push(' ');
+            } else if character == '"' {
+                string = false;
+                out.push('"');
+            } else {
+                out.push(if character == '\n' { '\n' } else { ' ' });
+            }
+            index += 1;
+            continue;
+        }
+        if character == '\'' {
+            // A char literal (for example b'"') is not a lifetime and must not
+            // start a string. Copy its delimiters and blank its contents.
+            let mut end = index + 1;
+            if characters.get(end) == Some(&'\\') {
+                end += 1;
+            }
+            if end < characters.len() {
+                end += 1;
+                if characters.get(end) == Some(&'\'') {
+                    out.push('\'');
+                    for _ in index + 1..end {
+                        out.push(' ');
+                    }
+                    out.push('\'');
+                    index = end + 1;
+                    continue;
+                }
+            }
+        }
+        if character == '/' && next == Some('/') {
+            line_comment = true;
+            out.push_str("  ");
+            index += 2;
+            continue;
+        }
+        if character == '/' && next == Some('*') {
+            block_comment = true;
+            out.push_str("  ");
+            index += 2;
+            continue;
+        }
+        if character == '"' {
+            string = true;
+        }
+        out.push(character);
+        index += 1;
+    }
+    out
 }
 
 fn matching_paren(text: &str, open: usize) -> Option<usize> {
@@ -281,7 +392,7 @@ fn json_string(text: &str, key: &str) -> Option<String> {
 }
 
 fn marker(source: &str, marker: &str) -> String {
-    if source.contains(marker) {
+    if code_without_strings_and_comments(source).contains(marker) {
         marker.to_string()
     } else {
         "absent".to_string()
@@ -297,13 +408,13 @@ fn falsify_command(source: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     let Some((_, table)) = source.split_once("PROVIDER_CRATES =") else {
-        return "absent".to_string();
+        return "table-not-found".to_string();
     };
     let Some(table) = table.trim_start().strip_prefix('{') else {
-        return "absent".to_string();
+        return "table-not-brace".to_string();
     };
     let Some((table, _)) = table.split_once('}') else {
-        return "absent".to_string();
+        return "table-unterminated".to_string();
     };
     for row in split_parameters(table) {
         let Some((key, value)) = row.split_once(':') else {
@@ -336,32 +447,68 @@ fn falsify_command(source: &str) -> String {
 
 fn component_build_step(source: &str) -> String {
     const BUILDER: &str = "scripts/build-component-capsule.sh";
-    // Inspect the command position, including a shell/exec prefix and line
-    // continuations. A comment, assignment or echo argument is not a call.
-    let source = source.replace("\\\n", " ");
-    for line in source.lines() {
-        let mut words = line.split_whitespace();
-        let mut command = words.next();
-        if command == Some("exec") {
-            command = words.next();
+    // A command word can follow a prefix such as env, nice or exec, an
+    // operator such as &&, or a line continuation. A comment, assignment or
+    // echo argument is not a call.
+    let source = shell_without_comments(source).replace("\\\n", " ");
+    for segment in source.split([';', '&', '|', '\n']) {
+        let words = segment.split_whitespace().collect::<Vec<_>>();
+        let mut start = 0;
+        while start < words.len() {
+            let word = words[start].trim_matches(['"', '\'']);
+            if word.contains('=') {
+                start += 1;
+            } else {
+                break;
+            }
         }
-        if matches!(command, Some("bash" | "sh")) {
-            command = words.next();
-        }
-        let Some(command) = command else {
+        let Some(first) = words.get(start) else {
             continue;
         };
-        let command = command.trim_matches(['"', '\'']);
-        let relative = command
-            .strip_prefix("${REPO_ROOT}/")
-            .or_else(|| command.strip_prefix("$REPO_ROOT/"))
-            .or_else(|| command.strip_prefix("./"))
-            .unwrap_or(command);
-        if relative == BUILDER {
-            return BUILDER.to_string();
+        let first = first.trim_matches(['"', '\'']);
+        if matches!(first, "echo" | "printf" | "test" | "[") {
+            continue;
+        }
+        for word in words {
+            let word = word.trim_matches(['"', '\'']);
+            let relative = word
+                .strip_prefix("${REPO_ROOT}/")
+                .or_else(|| word.strip_prefix("$REPO_ROOT/"))
+                .or_else(|| word.strip_prefix("./"))
+                .unwrap_or(word);
+            if relative == BUILDER {
+                return BUILDER.to_string();
+            }
         }
     }
     "absent".to_string()
+}
+
+/// Removes shell comments while keeping quoted text, so a commented call and
+/// a quoted builder path stay different.
+fn shell_without_comments(source: &str) -> String {
+    let characters = source.chars().collect::<Vec<_>>();
+    let mut out = String::with_capacity(source.len());
+    let mut index = 0;
+    let mut single = false;
+    let mut double = false;
+    while index < characters.len() {
+        let character = characters[index];
+        if character == '#' && !single && !double {
+            while index < characters.len() && characters[index] != '\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if character == '\'' && !double {
+            single = !single;
+        } else if character == '"' && !single {
+            double = !double;
+        }
+        out.push(character);
+        index += 1;
+    }
+    out
 }
 
 /// A component binary starts with `\0asm` and the component-model version;
@@ -522,6 +669,11 @@ fn check_component_artifact(
         return;
     }
     if digest == "ambiguous" {
+        problems.push(
+            "field component_sha256: tree says \"ambiguous\" because the last matching LOG \
+             line names more than one digest; it supplies neither one SHA-256 nor verified bytes"
+                .to_string(),
+        );
         return;
     }
     if found == "none" || found == "<missing>" {
@@ -705,11 +857,15 @@ fn bridge_entry_accepts_equivalent_signature_layouts() {
         "pub fn bridge(&self, line: &str, id: &str, principal: Option<&str>) -> Result<String, String> { Ok(line.to_owned()) }",
         "pub fn bridge(\n        &self,\n        line: &str,\n        id: &str,\n        principal: Option<&str>,\n    ) -> Result<String, String> { Ok(line.to_owned()) }",
         "pub fn bridge(&self, line: &str, id: &str, principal: Option<&str>)\n        -> Result<String, String>\n    {\n        Ok(line.to_owned())\n    }",
+        "pub fn bridge(&self, line: &str, id: &str, principal: Option<&str>) -> Result<String, String> // hostcall\n    {\n        Ok(line.to_owned())\n    }",
         "pub fn bridge(&mut self, line: &str, id: &str, principal: Option< &str >) -> std::result::Result< String, String > { Ok(line.to_owned()) }",
     ] {
         let source = format!("impl StandIn {{\n    {method}\n}}\n");
         assert_eq!(bridge_entry(&source), "bridge", "{source}");
     }
+
+    let inline_impl = "impl StandIn { pub fn bridge(&self, line: &str, id: &str, principal: Option<&str>) -> Result<String, String> { Ok(line.to_owned()) } }";
+    assert_eq!(bridge_entry(inline_impl), "bridge", "{inline_impl}");
 }
 
 #[test]
@@ -731,6 +887,24 @@ fn inline_bridge_stales_the_record() {
 }
 
 #[test]
+#[should_panic(
+    expected = "field bridge_entry: record says \"none\", tree says \"bridge\"\nthe record is stale; this task does not start activations."
+)]
+fn inline_impl_bridge_stales_the_record() {
+    let repo = repo_root();
+    let source = "impl StandIn { pub fn bridge(&self, line: &str, id: &str, principal: Option<&str>) -> Result<String, String> { Ok(line.to_owned()) } }";
+    let tree = observe_sources(&repo, |path| {
+        if path == BRIDGE_PATH {
+            Ok(source.to_string())
+        } else {
+            read(&repo, path)
+        }
+    })
+    .expect("observe the inline impl fixture");
+    assert_record_matches(&repo, &read_record(&repo), &tree);
+}
+
+#[test]
 fn component_build_requires_an_invocation() {
     const CALL: &str = "\"${REPO_ROOT}/scripts/build-component-capsule.sh\" \"${HOST_DIR}\"";
     for source in [
@@ -739,6 +913,10 @@ fn component_build_requires_an_invocation() {
         format!("    {CALL} # build the component\n"),
         format!("exec {CALL}\n"),
         format!("bash \\\n    {CALL}\n"),
+        format!("env {CALL}\n"),
+        format!("nice -n 5 {CALL}\n"),
+        format!("true && {CALL}\n"),
+        format!("VAR=1 {CALL}\n"),
     ] {
         assert_eq!(
             component_build_step(&source),
@@ -797,6 +975,53 @@ fn falsify_command_matches_the_complete_manifest() {
     ] {
         assert_eq!(falsify_command(source), "absent", "{source}");
     }
+    assert_eq!(falsify_command(""), "table-not-found");
+    assert_eq!(
+        falsify_command("PROVIDER_CRATES = [\n    \"two\": (REPO / \"lab/two-capsule-run/Cargo.toml\", ()),\n]\n"),
+        "table-not-brace"
+    );
+    assert_eq!(
+        falsify_command(
+            "PROVIDER_CRATES = {\n    \"two\": (REPO / \"lab/two-capsule-run/Cargo.toml\", ()),\n"
+        ),
+        "table-unterminated"
+    );
+}
+
+#[test]
+#[should_panic(
+    expected = "field falsify_command: record says \"absent\", tree says \"table-not-brace\"\nthe record is stale; this task does not start activations."
+)]
+fn non_brace_runner_table_stales_the_record() {
+    let repo = repo_root();
+    let source =
+        "PROVIDER_CRATES = [\n    \"two\": (REPO / \"lab/two-capsule-run/Cargo.toml\", ()),\n]\n";
+    let tree = observe_sources(&repo, |path| {
+        if path == FALSIFY_PATH {
+            Ok(source.to_string())
+        } else {
+            read(&repo, path)
+        }
+    })
+    .expect("observe the non-brace runner fixture");
+    assert_record_matches(&repo, &read_record(&repo), &tree);
+}
+
+#[test]
+#[should_panic(
+    expected = "field falsify_command: record says \"absent\", tree says \"table-not-found\"\nthe record is stale; this task does not start activations."
+)]
+fn missing_runner_table_stales_the_record() {
+    let repo = repo_root();
+    let tree = observe_sources(&repo, |path| {
+        if path == FALSIFY_PATH {
+            Ok("OTHER_CRATES = {}\n".to_string())
+        } else {
+            read(&repo, path)
+        }
+    })
+    .expect("observe the missing runner fixture");
+    assert_record_matches(&repo, &read_record(&repo), &tree);
 }
 
 #[test]
@@ -833,6 +1058,146 @@ fn unrelated_runner_manifest_keeps_the_record_current() {
 }
 
 #[test]
+#[should_panic(
+    expected = "field component_sha256: tree says \"ambiguous\" because the last matching LOG line names more than one digest"
+)]
+fn ambiguous_component_digest_stales_the_record() {
+    let repo = repo_root();
+    let log = format!("component {} {}\n", "a".repeat(64), "b".repeat(64));
+    let tree = observe_sources(&repo, |path| {
+        if path == LOG_PATH {
+            Ok(log.clone())
+        } else {
+            read(&repo, path)
+        }
+    })
+    .expect("observe the ambiguous digest fixture");
+    assert_eq!(tree.component_sha256, "ambiguous");
+    let record = with_field(&read_record(&repo), "component_sha256", "ambiguous");
+    assert_record_matches(&repo, &record, &tree);
+}
+
+#[test]
+#[should_panic(
+    expected = "field agent_host_export: record says \"export!(AgentHost)\", tree says \"absent\"\nthe record is stale; this task does not start activations."
+)]
+fn export_in_a_test_string_stales_the_record() {
+    let repo = repo_root();
+    let source = read(&repo, AGENT_HOST_SRC).expect("agent host source");
+    let source = source
+        .lines()
+        .filter(|line| line.trim_end() != "export!(AgentHost);")
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(source.contains("export!(AgentHost)"));
+    let tree = observe_sources(&repo, |path| {
+        if path == AGENT_HOST_SRC {
+            Ok(source.clone())
+        } else {
+            read(&repo, path)
+        }
+    })
+    .expect("observe the test-string fixture");
+    assert_record_matches(&repo, &read_record(&repo), &tree);
+}
+
+#[test]
+#[should_panic(
+    expected = "prose \"A later run on this Runtime is two concurrent bounded activations, not two resident instances.\""
+)]
+fn contradictory_activation_claim_stales_the_record() {
+    let repo = repo_root();
+    let tree = observe(&repo).expect("observe the tree");
+    let record = read_record(&repo).replace(
+        "is two concurrent bounded activations, not two resident instances.",
+        "is **not** two concurrent bounded activations.",
+    );
+    assert_record_matches(&repo, &record, &tree);
+}
+
+#[test]
+fn component_artifact_refusals_are_specific() {
+    let repo = repo_root();
+    let record = read_record(&repo);
+
+    let mut tree = observe(&repo).expect("observe the tree");
+    tree.component_sha256 = "unpublished".to_string();
+    let path_record = with_field(
+        &record,
+        "component_artifact",
+        "lab/two-capsule-run/README.md",
+    );
+    let problems = mismatches(&repo, &path_record, &tree);
+    assert!(
+        problems.iter().any(|problem| problem
+            == "field component_artifact: record says \"lab/two-capsule-run/README.md\", tree says \"none\" because no LOG line names a component SHA-256"),
+        "{problems:?}"
+    );
+
+    tree.component_sha256 = "ambiguous".to_string();
+    let ambiguous_record = with_field(&record, "component_sha256", "ambiguous");
+    let problems = mismatches(&repo, &ambiguous_record, &tree);
+    assert!(
+        problems.iter().any(|problem| problem
+            == "field component_sha256: tree says \"ambiguous\" because the last matching LOG line names more than one digest; it supplies neither one SHA-256 nor verified bytes"),
+        "{problems:?}"
+    );
+
+    let bytes = fs::read(repo.join("lab/two-capsule-run/README.md")).expect("README.md");
+    let digest = sha256_hex(&bytes);
+    tree.component_sha256 = digest.clone();
+    let missing_record = with_field(&record, "component_sha256", &digest);
+    let problems = mismatches(&repo, &missing_record, &tree);
+    assert!(
+        problems.iter().any(|problem| problem
+            == &format!("field component_artifact: record says \"none\", tree says a path whose bytes hash to {digest}")),
+        "{problems:?}"
+    );
+
+    let cargo = fs::read(repo.join("lab/two-capsule-run/Cargo.toml")).expect("Cargo.toml");
+    let cargo_digest = sha256_hex(&cargo);
+    let wrong_record = with_field(
+        &missing_record,
+        "component_artifact",
+        "lab/two-capsule-run/Cargo.toml",
+    );
+    let problems = mismatches(&repo, &wrong_record, &tree);
+    assert!(
+        problems.iter().any(|problem| problem
+            == &format!("field component_artifact: record says \"lab/two-capsule-run/Cargo.toml\" with SHA-256 {cargo_digest}, tree says {digest} for the last matching LOG line")),
+        "{problems:?}"
+    );
+
+    let unreadable_record = with_field(
+        &missing_record,
+        "component_artifact",
+        "lab/two-capsule-run/no-such-file",
+    );
+    let problems = mismatches(&repo, &unreadable_record, &tree);
+    assert!(
+        problems.iter().any(|problem| problem.starts_with(
+            "field component_artifact: record says \"lab/two-capsule-run/no-such-file\", tree says it is unreadable:"
+        )),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn two_bridge_shaped_methods_are_ambiguous() {
+    let source = "impl StandIn {\n    pub fn first(&self, line: &str, id: &str, principal: Option<&str>) -> Result<String, String> { Ok(line.to_owned()) }\n    pub fn second(&self, line: &str, id: &str, principal: Option<&str>) -> Result<String, String> { Ok(id.to_owned()) }\n}\n";
+    assert_eq!(bridge_entry(source), "ambiguous (first, second)");
+}
+
+#[test]
+fn markers_ignore_strings_and_comments() {
+    let source =
+        "// export!(AgentHost);\nconst TEXT: &str = \"export!(AgentHost)\";\nexport!(AgentHost);\n";
+    assert_eq!(marker(source, EXPORT_MARKER), EXPORT_MARKER);
+    let source = "// export!(AgentHost);\nconst TEXT: &str = \"export!(AgentHost)\";\n";
+    assert_eq!(marker(source, EXPORT_MARKER), "absent");
+}
+
+#[test]
 fn sha256_matches_known_vectors() {
     assert_eq!(
         sha256_hex(b""),
@@ -845,6 +1210,7 @@ fn sha256_matches_known_vectors() {
 }
 
 #[test]
+#[should_panic(expected = "field bridge_entry")]
 fn planted_bridge_entry_is_caught() {
     let repo = repo_root();
     let tree = observe(&repo).expect("observe the tree");
@@ -853,30 +1219,20 @@ fn planted_bridge_entry_is_caught() {
         "bridge_entry",
         "planted-not-a-function",
     );
-    let problems = mismatches(&repo, &record, &tree);
-    assert!(
-        problems
-            .iter()
-            .any(|problem| problem.contains("field bridge_entry")),
-        "{problems:?}"
-    );
+    assert_record_matches(&repo, &record, &tree);
 }
 
 #[test]
+#[should_panic(expected = "field component_sha256")]
 fn planted_component_hash_is_caught() {
     let repo = repo_root();
     let tree = observe(&repo).expect("observe the tree");
     let record = with_field(&read_record(&repo), "component_sha256", &"0".repeat(64));
-    let problems = mismatches(&repo, &record, &tree);
-    assert!(
-        problems
-            .iter()
-            .any(|problem| problem.contains("field component_sha256")),
-        "{problems:?}"
-    );
+    assert_record_matches(&repo, &record, &tree);
 }
 
 #[test]
+#[should_panic(expected = "field component_artifact")]
 fn planted_component_artifact_path_is_caught() {
     let repo = repo_root();
     let tree = observe(&repo).expect("observe the tree");
@@ -885,13 +1241,7 @@ fn planted_component_artifact_path_is_caught() {
         "component_artifact",
         "lab/two-capsule-run/README.md",
     );
-    let problems = mismatches(&repo, &record, &tree);
-    assert!(
-        problems
-            .iter()
-            .any(|problem| problem.contains("field component_artifact")),
-        "{problems:?}"
-    );
+    assert_record_matches(&repo, &record, &tree);
 }
 
 /// A published digest needs an artifact whose bytes hash to that digest. This
@@ -934,6 +1284,7 @@ fn planted_component_artifact_bytes_are_caught() {
 }
 
 #[test]
+#[should_panic(expected = "field agent_host_component")]
 fn planted_agent_host_component_is_caught() {
     let repo = repo_root();
     let tree = observe(&repo).expect("observe the tree");
@@ -942,13 +1293,7 @@ fn planted_agent_host_component_is_caught() {
         "agent_host_component",
         "planted-not-a-component",
     );
-    let problems = mismatches(&repo, &record, &tree);
-    assert!(
-        problems
-            .iter()
-            .any(|problem| problem.contains("field agent_host_component")),
-        "{problems:?}"
-    );
+    assert_record_matches(&repo, &record, &tree);
 }
 
 #[test]
@@ -980,6 +1325,7 @@ fn planted_agent_host_fields_are_caught() {
 }
 
 #[test]
+#[should_panic(expected = "field core_module_lab_cid")]
 fn planted_core_module_cid_is_caught() {
     let repo = repo_root();
     let tree = observe(&repo).expect("observe the tree");
@@ -988,40 +1334,23 @@ fn planted_core_module_cid_is_caught() {
         "core_module_lab_cid",
         &format!("lab-cid:sha256:{}", "0".repeat(64)),
     );
-    let problems = mismatches(&repo, &record, &tree);
-    assert!(
-        problems
-            .iter()
-            .any(|problem| problem.contains("field core_module_lab_cid")),
-        "{problems:?}"
-    );
+    assert_record_matches(&repo, &record, &tree);
 }
 
 #[test]
+#[should_panic(expected = "field falsify_command")]
 fn planted_falsify_command_is_caught() {
     let repo = repo_root();
     let tree = observe(&repo).expect("observe the tree");
     let record = with_field(&read_record(&repo), "falsify_command", "planted-command");
-    let problems = mismatches(&repo, &record, &tree);
-    assert!(
-        problems
-            .iter()
-            .any(|problem| problem.contains("field falsify_command")),
-        "{problems:?}"
-    );
+    assert_record_matches(&repo, &record, &tree);
 }
 
 #[test]
+#[should_panic(expected = "prose \"lab stand-in, not admission\"")]
 fn planted_required_claim_is_caught() {
     let repo = repo_root();
     let tree = observe(&repo).expect("observe the tree");
     let record = read_record(&repo).replace("lab stand-in, not admission", "lab stand-in");
-    let problems = mismatches(&repo, &record, &tree);
-    assert!(
-        problems
-            .iter()
-            .any(|problem| problem.contains("prose")
-                && problem.contains("lab stand-in, not admission")),
-        "{problems:?}"
-    );
+    assert_record_matches(&repo, &record, &tree);
 }
