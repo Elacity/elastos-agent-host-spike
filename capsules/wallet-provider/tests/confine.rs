@@ -6767,8 +6767,10 @@ fn dispatch_arm_variants(source: &str, signature: &str, arm_type: &str) -> Optio
 /// The declaration is a line whose qualifier words precede `enum <name> {` or
 /// `struct <name> {`, and whose text after the brace is empty, so a use of the
 /// name elsewhere does not count. The body runs from that `{` to the `}` that
-/// closes it, and a brace inside a string literal does not count.
-fn item_body<'a>(source: &'a str, name: &str, kind: &str) -> Option<&'a str> {
+/// closes it, and a brace inside a string literal does not count. Comments are
+/// removed before selecting the declaration or finding its closing brace.
+fn item_body(source: &str, name: &str, kind: &str) -> Option<String> {
+    let source = without_comments(source);
     let declaration = format!("{kind} {name} {{");
     let mut from = 0;
     while let Some(offset) = source[from..].find(&declaration) {
@@ -6785,7 +6787,7 @@ fn item_body<'a>(source: &'a str, name: &str, kind: &str) -> Option<&'a str> {
             continue;
         }
         let body = &source[from..];
-        return declaration_end(body).map(|end| &body[..end]);
+        return declaration_end(body).map(|end| body[..end].to_string());
     }
     None
 }
@@ -6848,8 +6850,8 @@ fn field_names(body: &str) -> Vec<String> {
 /// `text` with every `//` line comment and every `/* ... */` block comment
 /// removed. A `//` or `/*` inside a string literal stays part of that string, a
 /// line comment ends at its newline and keeps it, so the items around it keep
-/// their own lines, and a block comment keeps one space so the tokens around it
-/// stay apart.
+/// their own lines, and a block comment keeps its newlines and one space so the
+/// tokens around it stay apart. Block comments can nest.
 fn without_comments(text: &str) -> String {
     let mut kept = String::with_capacity(text.len());
     let mut characters = text.chars().peekable();
@@ -6882,13 +6884,22 @@ fn without_comments(text: &str) -> String {
         }
         if character == '/' && characters.peek() == Some(&'*') {
             characters.next();
+            let mut depth = 1usize;
+            kept.push(' ');
             while let Some(next) = characters.next() {
-                if next == '*' && characters.peek() == Some(&'/') {
+                if next == '/' && characters.peek() == Some(&'*') {
                     characters.next();
-                    break;
+                    depth += 1;
+                } else if next == '*' && characters.peek() == Some(&'/') {
+                    characters.next();
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                } else if next == '\n' {
+                    kept.push('\n');
                 }
             }
-            kept.push(' ');
             continue;
         }
         kept.push(character);
@@ -6929,13 +6940,24 @@ fn declaration_end(text: &str) -> Option<usize> {
 /// The comma-separated items of one declaration body, split at the commas
 /// outside parentheses, brackets, braces and angle brackets, so a field type
 /// such as `Option<String>` and an attribute such as
-/// `#[serde(default, skip_serializing_if = "x")]` each stay one item.
+/// `#[serde(default, skip_serializing_if = "x")]` each stay one item. Delimiters
+/// inside a string literal, including after an escaped quote, do not count.
 fn declaration_items(text: &str) -> Vec<&str> {
     let mut items = Vec::new();
     let mut depth = 0usize;
     let mut start = 0;
+    let mut in_string = false;
+    let mut quote_escape = false;
     for (index, character) in text.char_indices() {
+        if in_string {
+            if character == '"' && !quote_escape {
+                in_string = false;
+            }
+            quote_escape = character == '\\' && !quote_escape;
+            continue;
+        }
         match character {
+            '"' => in_string = true,
             '(' | '[' | '{' | '<' => depth += 1,
             ')' | ']' | '}' | '>' => depth = depth.saturating_sub(1),
             ',' if depth == 0 => {
@@ -7335,7 +7357,7 @@ fn inputs_cell_problems(
                 else {
                     continue;
                 };
-                let Some(envelope) = wire_field_names(request_body, envelope_variant) else {
+                let Some(envelope) = wire_field_names(&request_body, envelope_variant) else {
                     problems.push(format!(
                         "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the \
                          Inputs cell {}, and {} declares no {envelope_variant} arm",
@@ -7345,7 +7367,7 @@ fn inputs_cell_problems(
                     ));
                     continue;
                 };
-                let params = match contract_body {
+                let params = match contract_body.as_deref() {
                     Some(body) => match wire_field_names(body, variant) {
                         Some(fields) => fields,
                         None => {
@@ -7388,7 +7410,7 @@ fn inputs_cell_problems(
                 else {
                     continue;
                 };
-                let Some(fields) = wire_field_names(request_body, variant) else {
+                let Some(fields) = wire_field_names(&request_body, variant) else {
                     problems.push(format!(
                         "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the \
                          Inputs cell {}, and {} declares no {variant} arm",
@@ -9660,6 +9682,10 @@ const FIXTURE_OPERATIONS: [&str; 4] = [
 /// `designed, not enforced`, naming every row. Rule 5 refuses an Inputs cell
 /// with an extra name, a missing name, another order, a renamed field's Rust
 /// name, a name only a comment mentions and no `op`; it refuses a
+/// stale cell when a comment holds an old enum before the active declaration,
+/// and an omitted field after a rename whose string contains delimiters. It
+/// keeps escaped quotes inside attribute strings.
+/// It refuses a
 /// `wallet_contract` row that omits an envelope
 /// name, names another kind, names another `params` name, omits `params`, and
 /// writes `params` (none) for an arm with fields or a name for an arm with
@@ -10253,6 +10279,132 @@ fn operations_table_row_check_refuses_each_bad_table() {
             )],
             "an Inputs cell with {case} must be refused"
         );
+    }
+
+    // Rule 5: a commented copy of an old enclosing enum cannot hide a field
+    // renamed in the active declaration. Exercise both source selectors and
+    // line, block and nested block comments before the real enum.
+    for (source, path, anchor, replacement, operation, expected) in [
+        (
+            ROW_FIXTURE_PROVIDER,
+            &provider_source,
+            "config: Value,",
+            "config_v2: Value,",
+            "init",
+            "`op`, `config_v2`, `wire_name`",
+        ),
+        (
+            ROW_FIXTURE_CONTRACT,
+            &contract_source,
+            "include_revoked: bool,",
+            "include_revoked_v2: bool,",
+            "wallet_contract list_accounts",
+            "`op`, `request` (`kind: list_accounts`, `params` (`include_revoked_v2`)), \
+             `_runtime_invocation`",
+        ),
+    ] {
+        let old_enum = source.split("\n\nfn handle(").next().unwrap();
+        let changed = source.replacen(anchor, replacement, 1);
+        assert_ne!(changed, source, "the active declaration must change");
+        for comment in [
+            format!("/*\n{old_enum}\n*/\n"),
+            format!("/*\n/* previous declaration */\n{old_enum}\n*/\n"),
+            old_enum
+                .lines()
+                .map(|line| format!("// {line}\n"))
+                .collect(),
+        ] {
+            fs::write(path, format!("{comment}{changed}")).expect("commented enum fixture");
+            let read = if operation == "init" {
+                provider_paths.clone()
+            } else {
+                format!("{provider_paths} with {}", contract_source.display())
+            };
+            let cell = fixture_inputs(operation);
+            assert_eq!(
+                row_problems("fixture-provider", &passing, provider.path()),
+                vec![format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {operation} \
+                     holds the Inputs cell {cell}, and {read} names {expected}"
+                )],
+                "a commented enum must leave {operation}'s active wire fields visible"
+            );
+        }
+        fs::write(path, source).expect("fixture declaration source restore");
+    }
+
+    // Rule 5: quoted delimiters belong to the attribute value. The field
+    // following the renamed field remains a separate required input, in both
+    // provider and contract arms. Escaped quotes and backslashes keep the
+    // same boundary, including when another attribute precedes serde.
+    for wire_name in [
+        "wire<name",
+        "wire>name",
+        "wire(name",
+        "wire)name",
+        "wire[name",
+        "wire]name",
+        "wire{name",
+        "wire}name",
+        "wire,name",
+    ] {
+        for prefix in [
+            "",
+            r#"#[doc = "quote: \", delimiters: <([{, backslash: \\"] "#,
+        ] {
+            let fields = format!(
+                "{prefix}#[serde(rename = \"{wire_name}\")] field: String, required: String,"
+            );
+            for (source, path, anchor, operation, cell, expected) in [
+                (
+                    ROW_FIXTURE_PROVIDER,
+                    &provider_source,
+                    "config: Value,",
+                    "init",
+                    format!("`op`, `{wire_name}`, `wire_name`"),
+                    format!("`op`, `{wire_name}`, `required`, `wire_name`"),
+                ),
+                (
+                    ROW_FIXTURE_CONTRACT,
+                    &contract_source,
+                    "include_revoked: bool,",
+                    "wallet_contract list_accounts",
+                    format!(
+                        "`op`, `request` (`kind: list_accounts`, `params` (`{wire_name}`)), \
+                         `_runtime_invocation`"
+                    ),
+                    format!(
+                        "`op`, `request` (`kind: list_accounts`, `params` (`{wire_name}`, \
+                         `required`)), `_runtime_invocation`"
+                    ),
+                ),
+            ] {
+                let changed = source.replacen(anchor, &fields, 1);
+                assert_ne!(changed, source, "the fixture must add both fields");
+                fs::write(path, changed).expect("quoted delimiter fixture");
+                let read = if operation == "init" {
+                    provider_paths.clone()
+                } else {
+                    format!("{provider_paths} with {}", contract_source.display())
+                };
+                let document = passing.replacen(&fixture_inputs(operation), &cell, 1);
+                assert_eq!(
+                    row_problems("fixture-provider", &document, provider.path()),
+                    vec![format!(
+                        "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {operation} \
+                         holds the Inputs cell {cell}, and {read} names {expected}"
+                    )],
+                    "the field after {wire_name:?} must stay required with prefix {prefix:?}"
+                );
+                let complete = passing.replacen(&fixture_inputs(operation), &expected, 1);
+                assert_eq!(
+                    row_problems("fixture-provider", &complete, provider.path()),
+                    Vec::<String>::new(),
+                    "the complete cell must include both {wire_name:?} and required"
+                );
+                fs::write(path, source).expect("fixture declaration source restore");
+            }
+        }
     }
 
     // Rule 5: a `wallet_contract` row's outer names, its `kind`, and its
