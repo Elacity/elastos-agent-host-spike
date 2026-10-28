@@ -1324,4 +1324,439 @@ mod uf_proof_refusal_tests {
 }
 
 #[cfg(test)]
+mod uf_managed_key_refusal_tests {
+    use super::*;
+
+    /// The one managed chain every case starts from.
+    const EVM_CHAIN: &str = "eip155:20";
+    /// The one principal every case starts from.
+    const PRINCIPAL: &str = "person:local:managed-key";
+    /// The private key the fixture encrypts; every case re-encrypts this key
+    /// unless it names a different one.
+    const FIXTURE_KEY_BYTES: [u8; 32] = [0x11; 32];
+    /// A second private key, used where the stored key must differ.
+    const OTHER_KEY_BYTES: [u8; 32] = [0x33; 32];
+    /// An EVM address that is not the fixture key's, so a case can put an
+    /// account and a secret out of step without an invalid address.
+    const OTHER_EVM_ADDRESS: &str = "0x2222222222222222222222222222222222222222";
+
+    /// One initialised provider, one valid linked account and its encrypted
+    /// secret, so a case changes one field and meets every check ahead of the
+    /// one it names.
+    struct ManagedKeyFixture {
+        _dir: tempfile::TempDir,
+        provider: WalletProvider,
+        account: LinkedAccount,
+        secret: ManagedWalletSecret,
+        signing_key: SigningKey,
+    }
+
+    impl ManagedKeyFixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let mut provider = WalletProvider::new();
+            let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+            assert!(
+                matches!(response, Response::Ok { .. }),
+                "init must succeed, got {response:?}"
+            );
+            let signing_key =
+                SigningKey::from_slice(&FIXTURE_KEY_BYTES).expect("fixture signing key");
+            let address = managed_address_for_signing_key(&signing_key, EVM_CHAIN)
+                .expect("eip155:20 is a managed chain");
+            let account = LinkedAccount {
+                account_id: account_id(EVM_CHAIN, &address),
+                principal_id: PRINCIPAL.to_string(),
+                proof_binding_id: format!("proof:wallet:managed:{EVM_CHAIN}:{address}"),
+                chain_namespace: EVM_CHAIN.to_string(),
+                address: address.clone(),
+                proof_type: MANAGED_EVM_PROOF_TYPE.to_string(),
+                connector_id: None,
+                label: None,
+                linked_at: 1,
+                revoked_at: None,
+            };
+            let secret = provider
+                .encrypt_managed_key(
+                    &account.account_id,
+                    &account.principal_id,
+                    &account.chain_namespace,
+                    &account.address,
+                    signing_key.to_bytes().as_ref(),
+                    1,
+                )
+                .expect("fixture secret");
+            provider.store.accounts.push(account.clone());
+            provider.store.managed_wallets.push(secret.clone());
+            Self {
+                _dir: dir,
+                provider,
+                account,
+                secret,
+                signing_key,
+            }
+        }
+
+        /// Re-encrypts the fixture key under a caller-chosen account id, so a
+        /// case can move the stored account id without breaking the AEAD
+        /// authentication that binds it.
+        fn reencrypt_under_account_id(&mut self, account_id: &str) {
+            self.provider.store.managed_wallets[0] = self
+                .provider
+                .encrypt_managed_key(
+                    account_id,
+                    &self.account.principal_id,
+                    &self.account.chain_namespace,
+                    &self.account.address,
+                    self.signing_key.to_bytes().as_ref(),
+                    1,
+                )
+                .expect("re-encrypted secret");
+        }
+
+        /// Re-encrypts a caller-chosen private key under the fixture account,
+        /// so the stored address still matches the account and only the key's
+        /// derived address can differ.
+        fn reencrypt_under_key(&mut self, key_bytes: &[u8; 32]) {
+            self.provider.store.managed_wallets[0] = self
+                .provider
+                .encrypt_managed_key(
+                    &self.account.account_id,
+                    &self.account.principal_id,
+                    &self.account.chain_namespace,
+                    &self.account.address,
+                    key_bytes.as_ref(),
+                    1,
+                )
+                .expect("re-encrypted secret");
+        }
+    }
+
+    /// Catches removal of the revocation guard in
+    /// `managed_signing_key_for_account` (:812).
+    ///
+    /// `src/tests/accounts.rs:230` in
+    /// `substituted_decryptable_managed_key_is_not_account_authority` asserts
+    /// `is_err()` on this function for a different reason; the assertion here
+    /// is the whole message, which no test made before.
+    #[test]
+    fn managed_signing_key_refuses_revoked_account() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.account.revoked_at = Some(1);
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet account is revoked".to_string())
+        );
+    }
+
+    /// Catches removal of the connector-authority guard in
+    /// `managed_signing_key_for_account` (:815): without it an account linked
+    /// through an external connector could sign with a provider-held key.
+    ///
+    /// `src/tests/accounts.rs:230` asserts `is_err()` only; the assertion here
+    /// is the whole message.
+    #[test]
+    fn managed_signing_key_refuses_connector_account() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.account.connector_id = Some("wallet-metamask".to_string());
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet account cannot carry connector authority".to_string())
+        );
+    }
+
+    /// Catches removal of the proof-type guard in
+    /// `managed_signing_key_for_account` (:819): without it an account whose
+    /// stored proof type names the other managed chain still signs.
+    ///
+    /// The chain namespace stays `eip155:20`, so `managed_proof_type` answers
+    /// the EVM type and this guard is the one that refuses; an unmanaged
+    /// namespace would refuse earlier inside `managed_proof_type`.
+    ///
+    /// `src/tests/accounts.rs:230` asserts `is_err()` only; the assertion here
+    /// is the whole message.
+    #[test]
+    fn managed_signing_key_refuses_mismatched_proof_type() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.account.proof_type = MANAGED_BTC_P2WPKH_PROOF_TYPE.to_string();
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet account proof type does not match its chain".to_string())
+        );
+    }
+
+    /// Catches removal of the secret lookup in
+    /// `managed_signing_key_for_account` (:836): without it an account with no
+    /// stored secret reaches decryption with nothing to decrypt.
+    ///
+    /// The account record stays in the store, so the refusal is the missing
+    /// secret and not a missing account.
+    ///
+    /// `src/tests/accounts.rs:230` asserts `is_err()` only; the assertion here
+    /// is the whole message.
+    #[test]
+    fn managed_signing_key_refuses_missing_secret() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.provider.store.managed_wallets.clear();
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet key not found".to_string())
+        );
+    }
+
+    /// Catches removal of the second-match guard in
+    /// `managed_signing_key_for_account` (:839): without it two active secrets
+    /// for one account silently resolve to the first, so which key signs
+    /// depends on store order.
+    ///
+    /// `src/tests/accounts.rs:230` asserts `is_err()` only; the assertion here
+    /// is the whole message.
+    #[test]
+    fn managed_signing_key_refuses_duplicate_active_keys() {
+        let mut fixture = ManagedKeyFixture::new();
+        let duplicate = fixture.secret.clone();
+        fixture.provider.store.managed_wallets.push(duplicate);
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet account has multiple active signing keys".to_string())
+        );
+    }
+
+    /// Catches removal of the metadata comparison in
+    /// `managed_signing_key_for_account` (:842): without it a secret written by
+    /// another schema version is decrypted as if it were current.
+    ///
+    /// The lookup filter at :831 already requires the principal and the account
+    /// id to match, so the schema is the field that can still disagree here.
+    ///
+    /// `src/tests/accounts.rs:230` asserts `is_err()` only; the assertion here
+    /// is the whole message.
+    #[test]
+    fn managed_signing_key_refuses_mismatched_secret_schema() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.provider.store.managed_wallets[0].schema =
+            "elastos.wallet.managed_secret/v2".to_string();
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet key metadata does not match its account".to_string())
+        );
+    }
+
+    /// Catches removal of the stored-address comparison in
+    /// `managed_signing_key_for_account` (:850): without it a secret that names
+    /// another address is handed back as this account's authority.
+    ///
+    /// The address here is a valid EVM address, so `canonical_address` accepts
+    /// both sides and only the comparison can answer.
+    ///
+    /// `src/tests/accounts.rs:230` asserts `is_err()` only; the assertion here
+    /// is the whole message.
+    #[test]
+    fn managed_signing_key_refuses_mismatched_secret_address() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.provider.store.managed_wallets[0].address = OTHER_EVM_ADDRESS.to_string();
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet key address does not match its account".to_string())
+        );
+    }
+
+    /// Catches removal of the derived-address comparison in
+    /// `managed_signing_key_for_account` (:858): without it a decryptable key
+    /// that derives another account's address signs for this one.
+    ///
+    /// The stored address stays equal to the account's address, so the check at
+    /// :850 passes, and a different private key is encrypted under both, so
+    /// only the derived address can disagree. That is the ordering trap the
+    /// task names: re-encrypt the key rather than move the stored address.
+    ///
+    /// `src/tests/accounts.rs:230` in
+    /// `substituted_decryptable_managed_key_is_not_account_authority` asserts
+    /// `is_err()` on this same substitution; the assertion here is the whole
+    /// message, so it pins which check refuses.
+    #[test]
+    fn managed_signing_key_refuses_derived_address_mismatch() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.reencrypt_under_key(&OTHER_KEY_BYTES);
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet key derives a different account address".to_string())
+        );
+    }
+
+    /// Catches removal of the account-id comparison in
+    /// `managed_signing_key_for_account` (:862): without it an account whose id
+    /// names another key authority signs with this one.
+    ///
+    /// This is the second ordering trap. The lookup filter at :831 and the
+    /// metadata check at :842 both require the secret's account id to equal the
+    /// account's, so both ids move together; the key is then re-encrypted under
+    /// the wrong id, because the account id is part of the AEAD associated
+    /// data and a bare field edit would fail decryption at :802 instead. With
+    /// that, the revocation, connector, proof-type, lookup, metadata, address
+    /// and derived-address checks all pass, and only :862 can refuse.
+    ///
+    /// `src/tests/accounts.rs:230` asserts `is_err()` only; the assertion here
+    /// is the whole message.
+    #[test]
+    fn managed_signing_key_refuses_mismatched_account_id() {
+        let mut fixture = ManagedKeyFixture::new();
+        let wrong_account_id = account_id(EVM_CHAIN, OTHER_EVM_ADDRESS);
+        fixture.reencrypt_under_account_id(&wrong_account_id);
+        fixture.account.account_id = wrong_account_id;
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet account id does not match its key authority".to_string())
+        );
+    }
+
+    /// Catches removal of the proof-binding comparison in
+    /// `managed_signing_key_for_account` (:869): without it a proof binding
+    /// earned for another address is accepted as this key's authority.
+    ///
+    /// `src/tests/accounts.rs:230` asserts `is_err()` only; the assertion here
+    /// is the whole message.
+    #[test]
+    fn managed_signing_key_refuses_mismatched_proof_binding() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.account.proof_binding_id =
+            format!("proof:wallet:managed:{EVM_CHAIN}:{OTHER_EVM_ADDRESS}");
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet proof binding does not match its key authority".to_string())
+        );
+    }
+
+    /// Catches removal of the envelope guard in `decrypt_managed_key` (:772):
+    /// without it a secret sealed with another algorithm or cipher is fed to
+    /// AES-256-GCM as if it were that cipher.
+    ///
+    /// `src/tests/accounts.rs:382` and `:385` in
+    /// `create_managed_account_persists_encrypted_key_and_is_idempotent` assert
+    /// `is_err()` for a changed principal and a changed chain; the assertion
+    /// here is the whole message.
+    #[test]
+    fn decrypt_managed_key_refuses_unsupported_envelope() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.secret.key_algorithm = "ed25519".to_string();
+
+        assert_eq!(
+            fixture.provider.decrypt_managed_key(&fixture.secret),
+            Err("unsupported managed wallet key envelope".to_string())
+        );
+    }
+
+    /// Catches removal of the nonce-length check in `decrypt_managed_key`
+    /// (:777): without it an eight-byte nonce reaches `try_into` and answers a
+    /// conversion error instead of the provider's own reason.
+    ///
+    /// This string is raised from two sites, :777 and :782. Only :777 is
+    /// reachable: :782 runs after the length check has already refused every
+    /// slice whose length is not twelve, and a twelve-byte slice converts
+    /// infallibly. :782 is recorded, not forced.
+    ///
+    /// `src/tests/accounts.rs:382` asserts `is_err()` only; the assertion here
+    /// is the whole message.
+    #[test]
+    fn decrypt_managed_key_refuses_short_nonce() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.secret.nonce = hex::encode([0_u8; 8]);
+
+        assert_eq!(
+            fixture.provider.decrypt_managed_key(&fixture.secret),
+            Err("managed wallet nonce must be 12 bytes".to_string())
+        );
+    }
+
+    /// Catches removal of the decryption-failure branch in `decrypt_managed_key`
+    /// (:801): without it a secret whose associated data no longer matches is
+    /// handed on to signature parsing instead of being reported as unreadable.
+    ///
+    /// This string is raised from two sites, :753 inside `encrypt_managed_key`
+    /// and :801 here. Only :801 is in this module's scope; the encryption
+    /// direction is pinned from the request side elsewhere, so this test drives
+    /// the decryption site.
+    ///
+    /// `src/tests/accounts.rs:382` in
+    /// `create_managed_account_persists_encrypted_key_and_is_idempotent`
+    /// asserts `is_err()` for the same changed principal; the assertion here is
+    /// the whole message.
+    #[test]
+    fn decrypt_managed_key_refuses_unreadable_secret() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.secret.principal_id = "person:local:other".to_string();
+
+        assert_eq!(
+            fixture.provider.decrypt_managed_key(&fixture.secret),
+            Err(
+                "managed wallet key could not be decrypted; recover or recreate this account"
+                    .to_string()
+            )
+        );
+    }
+
+    /// Catches removal of the storage-key guard in `managed_storage_key`
+    /// (:880): without it a provider with no storage key derives one from
+    /// nothing and decrypts secrets that were never sealed for it.
+    ///
+    /// One site raises this string, and both entry paths reach it, so this test
+    /// drives both: `decrypt_managed_key` (:774) and `encrypt_managed_key`
+    /// (:738).
+    ///
+    /// No existing test asserts this string; `src/tests/accounts.rs:382` is the
+    /// closest `is_err()` on the decrypt path that reaches the same helper.
+    #[test]
+    fn managed_storage_key_refuses_uninitialized_provider() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.provider.storage_key = None;
+
+        assert_eq!(
+            fixture.provider.decrypt_managed_key(&fixture.secret),
+            Err("managed wallet storage key is not initialized".to_string())
+        );
+        assert_eq!(
+            fixture.provider.encrypt_managed_key(
+                &fixture.account.account_id,
+                &fixture.account.principal_id,
+                &fixture.account.chain_namespace,
+                &fixture.account.address,
+                fixture.signing_key.to_bytes().as_ref(),
+                1,
+            ),
+            Err("managed wallet storage key is not initialized".to_string())
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests;
