@@ -749,20 +749,6 @@ mod uf_account_refusal_tests {
     /// id checks pass and only the record lookup can answer.
     const UNLINKED_ACCOUNT_ID: &str = "wallet:eip155:20:0x9999999999999999999999999999999999999999";
 
-    /// An initialised provider on its own temporary root, built the way
-    /// `init` itself is called. The directory outlives the provider in every
-    /// test that uses it.
-    fn initialized_provider() -> (tempfile::TempDir, WalletProvider) {
-        let dir = tempfile::tempdir().unwrap();
-        let mut provider = WalletProvider::new();
-        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
-        assert!(
-            matches!(response, Response::Ok { .. }),
-            "init must succeed, got {response:?}"
-        );
-        (dir, provider)
-    }
-
     /// Links an external account on `eip155:20` and answers its account id.
     fn link_external_account(provider: &mut WalletProvider) -> String {
         let response = provider.link_account(LinkAccountInput {
@@ -833,7 +819,13 @@ mod uf_account_refusal_tests {
     /// One string is raised from three sites, so this test drives all three.
     #[test]
     fn account_refuses_missing_active_account() {
-        let (_dir, mut provider) = initialized_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
 
         assert_eq!(
             provider.rename_account(PRINCIPAL, UNLINKED_ACCOUNT_ID, "Spending"),
@@ -859,7 +851,13 @@ mod uf_account_refusal_tests {
     /// account had been revoked.
     #[test]
     fn account_refuses_missing_linked_account() {
-        let (_dir, mut provider) = initialized_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
         assert_eq!(
             provider.revoke_account(PRINCIPAL, UNLINKED_ACCOUNT_ID),
             error("not_found", "linked account not found")
@@ -870,7 +868,13 @@ mod uf_account_refusal_tests {
     /// without it a blank label clears the account's name.
     #[test]
     fn account_refuses_empty_label() {
-        let (_dir, mut provider) = initialized_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
         assert_eq!(
             provider.rename_account(PRINCIPAL, UNLINKED_ACCOUNT_ID, "   "),
             error("invalid_request", "label is required")
@@ -882,7 +886,13 @@ mod uf_account_refusal_tests {
     /// recovery key answer for an account whose key an external connector holds.
     #[test]
     fn account_refuses_export_of_external_account() {
-        let (_dir, mut provider) = initialized_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
         let linked_account_id = link_external_account(&mut provider);
         assert_eq!(
             provider.export_managed_recovery_key(PRINCIPAL, &linked_account_id),
@@ -897,7 +907,13 @@ mod uf_account_refusal_tests {
     /// without it an `eip155:1` default points at an `eip155:20` account.
     #[test]
     fn account_refuses_default_chain_mismatch() {
-        let (_dir, mut provider) = initialized_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
         let linked_account_id = link_external_account(&mut provider);
         assert_eq!(
             provider.set_default_account(SetDefaultAccountInput {
@@ -917,7 +933,13 @@ mod uf_account_refusal_tests {
     /// without it an unset default answers as an account.
     #[test]
     fn account_refuses_default_account_not_set() {
-        let (_dir, provider) = initialized_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
         assert_eq!(
             provider.default_account(PRINCIPAL, EVM_CHAIN, "browser_personal_sign"),
             error("not_found", "default linked account not set")
@@ -937,7 +959,13 @@ mod uf_account_refusal_tests {
     /// answer `default linked account not set` instead.
     #[test]
     fn account_refuses_default_account_not_active() {
-        let (_dir, mut provider) = initialized_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
         provider.store.default_accounts.push(DefaultWalletAccount {
             schema: "elastos.wallet.default_account/v1".to_string(),
             principal_id: PRINCIPAL.to_string(),
@@ -966,7 +994,13 @@ mod uf_account_refusal_tests {
     /// stay active in one scope.
     #[test]
     fn account_refuses_ambiguous_managed_key_reuse() {
-        let (_dir, mut provider) = initialized_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
         assert!(matches!(
             create_managed_account(&mut provider, true),
             Response::Ok { .. }
@@ -988,7 +1022,13 @@ mod uf_account_refusal_tests {
     /// (:212): without it a recovery key of another schema is imported.
     #[test]
     fn account_refuses_recovery_key_schema() {
-        let (_dir, mut provider) = initialized_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
         let mut recovery_key = recovery_key_value();
         recovery_key["schema"] = json!("elastos.wallet.recovery-key/v2");
         assert_eq!(
@@ -1002,7 +1042,13 @@ mod uf_account_refusal_tests {
     /// address.
     #[test]
     fn account_refuses_recovery_key_missing_account_id() {
-        let (_dir, mut provider) = initialized_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
         let mut recovery_key = recovery_key_value();
         recovery_key.as_object_mut().unwrap().remove("account_id");
         assert_eq!(
@@ -1015,7 +1061,13 @@ mod uf_account_refusal_tests {
     /// it a recovery key with no chain reaches the address checks.
     #[test]
     fn account_refuses_recovery_key_missing_chain_namespace() {
-        let (_dir, mut provider) = initialized_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
         let mut recovery_key = recovery_key_value();
         recovery_key
             .as_object_mut()
@@ -1031,7 +1083,13 @@ mod uf_account_refusal_tests {
     /// recovery key with no address reaches the account-id match.
     #[test]
     fn account_refuses_recovery_key_missing_address() {
-        let (_dir, mut provider) = initialized_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
         let mut recovery_key = recovery_key_value();
         recovery_key.as_object_mut().unwrap().remove("address");
         assert_eq!(
@@ -1044,7 +1102,13 @@ mod uf_account_refusal_tests {
     /// kind the provider cannot decrypt is imported as a secp256k1 key.
     #[test]
     fn account_refuses_recovery_key_secret_type() {
-        let (_dir, mut provider) = initialized_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
         let mut recovery_key = recovery_key_value();
         recovery_key["secret_type"] = json!("bip39_seed_phrase");
         assert_eq!(
@@ -1057,7 +1121,13 @@ mod uf_account_refusal_tests {
     /// imported under an id that names another chain and address.
     #[test]
     fn account_refuses_recovery_key_account_id_mismatch() {
-        let (_dir, mut provider) = initialized_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
         let mut recovery_key = recovery_key_value();
         recovery_key["account_id"] = json!(account_id(EVM_CHAIN, OTHER_ADDRESS));
         assert_eq!(
@@ -1073,7 +1143,13 @@ mod uf_account_refusal_tests {
     /// recovery key with no private key reaches the length check.
     #[test]
     fn account_refuses_recovery_key_missing_private_key_hex() {
-        let (_dir, mut provider) = initialized_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
         let mut recovery_key = recovery_key_value();
         recovery_key
             .as_object_mut()
@@ -1089,7 +1165,13 @@ mod uf_account_refusal_tests {
     /// private key reaches the curve parser instead of the length answer.
     #[test]
     fn account_refuses_recovery_key_private_key_length() {
-        let (_dir, mut provider) = initialized_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
         let mut recovery_key = recovery_key_value();
         recovery_key["private_key_hex"] = json!(hex::encode([1_u8; 31]));
         assert_eq!(
@@ -1102,7 +1184,13 @@ mod uf_account_refusal_tests {
     /// that is not a secp256k1 scalar reaches the address derivation.
     #[test]
     fn account_refuses_recovery_key_invalid_private_key() {
-        let (_dir, mut provider) = initialized_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
         let mut recovery_key = recovery_key_value();
         recovery_key["private_key_hex"] = json!(hex::encode([0_u8; 32]));
         assert_eq!(
@@ -1115,7 +1203,13 @@ mod uf_account_refusal_tests {
     /// key is imported for an address a different key controls.
     #[test]
     fn account_refuses_recovery_key_private_key_address_mismatch() {
-        let (_dir, mut provider) = initialized_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
         let mut recovery_key = recovery_key_value();
         recovery_key["private_key_hex"] = json!(hex::encode([9_u8; 32]));
         assert_eq!(
@@ -1136,7 +1230,13 @@ mod uf_account_refusal_tests {
     /// answer.
     #[test]
     fn account_refuses_recovery_set_account_id_mismatch() {
-        let (_dir, mut provider) = initialized_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
         let recovery_set = ManagedRecoverySetV1 {
             schema: MANAGED_RECOVERY_SET_SCHEMA.to_string(),
             keys: vec![ManagedRecoveryKeyEntryV1 {
