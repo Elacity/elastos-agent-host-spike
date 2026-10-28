@@ -1057,5 +1057,271 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+/// One unit test per proof-handler refusal in this file.
+///
+/// The three proof handlers (`verify_proof`, `verify_bitcoin_proof` and
+/// `verify_contract_proof`) refuse a proof before any signature check when its
+/// challenge binding, its stored record, its consumption, its expiry or its
+/// whole message is wrong. Each string below is asserted as the whole
+/// `Response::Error` value, so a dropped guard fails one named test in about a
+/// second instead of only the confined process suite.
+///
+/// A string raised from several sites gets one test that drives each site, and
+/// its doc comment names them.
+#[cfg(test)]
+mod uf_proof_refusal_tests {
+    use super::*;
+
+    /// A mainnet P2WPKH address, so a Bitcoin challenge is issuable without a key.
+    const BITCOIN_ADDRESS: &str = "bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l";
+    /// An EVM address the challenge validator accepts.
+    const EVM_ADDRESS: &str = "0x1111111111111111111111111111111111111111";
+    /// A signature the handlers never reach: every case here stops at a
+    /// challenge check that runs before verification.
+    const UNREACHED_SIGNATURE: &str = "0x01020304";
+
+    /// An initialised provider over its own temporary root.
+    fn init_provider() -> (tempfile::TempDir, WalletProvider) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
+        (dir, provider)
+    }
+
+    fn error(code: &str, message: &str) -> Response {
+        Response::Error {
+            code: code.to_string(),
+            message: message.to_string(),
+        }
+    }
+
+    /// Issues a SIWE challenge and answers its message, so a case changes only
+    /// the part it names.
+    fn siwe_challenge_message(provider: &mut WalletProvider) -> String {
+        let response = provider.challenge(ChallengeInput {
+            domain: "http://elastos.local".to_string(),
+            uri: "http://elastos.local/apps/home/".to_string(),
+            address: EVM_ADDRESS.to_string(),
+            chain_id: 20,
+            resources: Vec::new(),
+        });
+        match response {
+            Response::Ok { data: Some(data) } => data["message"].as_str().unwrap().to_string(),
+            other => panic!("expected challenge, got {other:?}"),
+        }
+    }
+
+    /// Issues a Bitcoin challenge and answers its message, so a case changes
+    /// only the part it names.
+    fn bitcoin_challenge_message(provider: &mut WalletProvider) -> String {
+        let response = provider.bitcoin_challenge(BitcoinChallengeInput {
+            domain: "elastos.local".to_string(),
+            uri: "http://elastos.local/apps/home/".to_string(),
+            address: BITCOIN_ADDRESS.to_string(),
+            network: "bitcoin".to_string(),
+            resources: Vec::new(),
+        });
+        match response {
+            Response::Ok { data: Some(data) } => data["message"].as_str().unwrap().to_string(),
+            other => panic!("expected Bitcoin challenge, got {other:?}"),
+        }
+    }
+
+    /// Catches removal of the challenge-resource lookup in `verify_proof`
+    /// (:556) and `verify_contract_proof` (:687): without it a SIWE message
+    /// that binds no Runtime challenge reaches the store lookup with no
+    /// challenge id, and any stored challenge could answer it.
+    ///
+    /// One string is raised from both sites, so this test drives both.
+    #[test]
+    fn proof_refuses_siwe_proof_without_challenge_resource() {
+        let (_dir, mut provider) = init_provider();
+        let message = siwe_challenge_message(&mut provider)
+            .replace("- elastos://auth/challenge/", "- elastos://auth/other/");
+
+        assert_eq!(
+            provider.verify_proof(&message, UNREACHED_SIGNATURE),
+            error("invalid_proof", "SIWE proof missing challenge resource")
+        );
+        assert_eq!(
+            provider.verify_contract_proof(&message, UNREACHED_SIGNATURE, &json!({})),
+            error("invalid_proof", "SIWE proof missing challenge resource")
+        );
+    }
+
+    /// Catches removal of the stored-challenge lookup in `verify_proof` (:565)
+    /// and `verify_contract_proof` (:696): without it a well-formed SIWE
+    /// message naming an id the store does not hold is verified as if a
+    /// challenge existed.
+    ///
+    /// One string is raised from both sites, so this test drives both.
+    ///
+    /// The issued challenge stays in the store and only the id the message
+    /// names is changed, so a lookup that falls back to any stored record is
+    /// caught here rather than passing on an empty store.
+    #[test]
+    fn proof_refuses_siwe_unknown_challenge() {
+        let (_dir, mut provider) = init_provider();
+        let message = siwe_challenge_message(&mut provider)
+            .replace("elastos://auth/challenge/", "elastos://auth/challenge/0");
+
+        assert_eq!(
+            provider.verify_proof(&message, UNREACHED_SIGNATURE),
+            error("not_found", "wallet proof challenge not found")
+        );
+        assert_eq!(
+            provider.verify_contract_proof(&message, UNREACHED_SIGNATURE, &json!({})),
+            error("not_found", "wallet proof challenge not found")
+        );
+    }
+
+    /// Catches removal of the consumption guard in `verify_proof` (:568) and
+    /// `verify_contract_proof` (:699): without it one SIWE challenge answers
+    /// any number of proofs, so a captured message replays.
+    ///
+    /// `src/tests/proofs.rs:412` and `:523` assert `contains("already
+    /// consumed")` on the wallet's answer to a whole confined call, which is a
+    /// fragment of this message and of the Bitcoin one; the assertion here is
+    /// the whole message, so it pins which of the two is raised.
+    ///
+    /// One string is raised from both sites, so this test drives both.
+    #[test]
+    fn proof_refuses_siwe_consumed_challenge() {
+        let (_dir, mut provider) = init_provider();
+        let message = siwe_challenge_message(&mut provider);
+        provider.store.challenges[0].consumed_at = Some(now_ts());
+
+        assert_eq!(
+            provider.verify_proof(&message, UNREACHED_SIGNATURE),
+            error("invalid_proof", "wallet proof challenge already consumed")
+        );
+        assert_eq!(
+            provider.verify_contract_proof(&message, UNREACHED_SIGNATURE, &json!({})),
+            error("invalid_proof", "wallet proof challenge already consumed")
+        );
+    }
+
+    /// Catches removal of the expiry guard in `verify_proof` (:571): without it
+    /// a SIWE challenge past its lifetime still answers a proof.
+    ///
+    /// `src/tests/proofs.rs:606` pins the same rule with
+    /// `contains("expired")`, which is a fragment of this message and of the
+    /// Bitcoin one; the assertion here is the whole message, so it pins which
+    /// of the two is raised. That is one rule with one test per handler, not a
+    /// second path: `verify_contract_proof` has no expiry guard of its own.
+    #[test]
+    fn proof_refuses_siwe_expired_challenge() {
+        let (_dir, mut provider) = init_provider();
+        let message = siwe_challenge_message(&mut provider);
+        provider.store.challenges[0].challenge.expires_at = now_ts().saturating_sub(1);
+
+        assert_eq!(
+            provider.verify_proof(&message, UNREACHED_SIGNATURE),
+            error("invalid_proof", "wallet proof challenge expired")
+        );
+    }
+
+    /// Catches removal of the challenge-line scan in `verify_bitcoin_proof`
+    /// (:609): without it a BIP-322 message that binds no Runtime challenge
+    /// reaches no id and could be verified against any stored challenge.
+    #[test]
+    fn proof_refuses_bip322_proof_without_challenge_resource() {
+        let (_dir, mut provider) = init_provider();
+        let message = bitcoin_challenge_message(&mut provider).replace(
+            "- elastos://auth/bitcoin-challenge/",
+            "- elastos://auth/other/",
+        );
+
+        assert_eq!(
+            provider.verify_bitcoin_proof(&message, UNREACHED_SIGNATURE, None, None),
+            error("invalid_proof", "BIP-322 proof missing challenge resource")
+        );
+    }
+
+    /// Catches removal of the stored-challenge lookup in
+    /// `verify_bitcoin_proof` (:618): without it a well-formed BIP-322 message
+    /// naming an id the store does not hold is verified as if a challenge
+    /// existed.
+    ///
+    /// The issued challenge stays in the store and only the id the message
+    /// names is changed, so a lookup that falls back to any stored record is
+    /// caught here rather than passing on an empty store.
+    #[test]
+    fn proof_refuses_bip322_unknown_challenge() {
+        let (_dir, mut provider) = init_provider();
+        let message = bitcoin_challenge_message(&mut provider).replace(
+            "elastos://auth/bitcoin-challenge/",
+            "elastos://auth/bitcoin-challenge/0",
+        );
+
+        assert_eq!(
+            provider.verify_bitcoin_proof(&message, UNREACHED_SIGNATURE, None, None),
+            error("not_found", "Bitcoin wallet proof challenge not found")
+        );
+    }
+
+    /// Catches removal of the consumption guard in `verify_bitcoin_proof`
+    /// (:623): without it one Bitcoin challenge answers any number of
+    /// BIP-322 proofs, so a captured message replays.
+    ///
+    /// `src/tests/proofs.rs:222` reaches the same rule through a whole confined
+    /// call and asserts `contains("already consumed")`, which is a fragment of
+    /// this message and of the SIWE one; the assertion here is the whole
+    /// message, so it pins which of the two is raised.
+    #[test]
+    fn proof_refuses_bip322_consumed_challenge() {
+        let (_dir, mut provider) = init_provider();
+        let message = bitcoin_challenge_message(&mut provider);
+        provider.store.bitcoin_challenges[0].consumed_at = Some(now_ts());
+
+        assert_eq!(
+            provider.verify_bitcoin_proof(&message, UNREACHED_SIGNATURE, None, None),
+            error(
+                "invalid_proof",
+                "Bitcoin wallet proof challenge already consumed"
+            )
+        );
+    }
+
+    /// Catches removal of the expiry guard in `verify_bitcoin_proof` (:627):
+    /// without it a Bitcoin challenge past its lifetime still answers a
+    /// BIP-322 proof.
+    #[test]
+    fn proof_refuses_bip322_expired_challenge() {
+        let (_dir, mut provider) = init_provider();
+        let message = bitcoin_challenge_message(&mut provider);
+        provider.store.bitcoin_challenges[0].challenge.expires_at = now_ts().saturating_sub(1);
+
+        assert_eq!(
+            provider.verify_bitcoin_proof(&message, UNREACHED_SIGNATURE, None, None),
+            error("invalid_proof", "Bitcoin wallet proof challenge expired")
+        );
+    }
+
+    /// Catches removal of the whole-message comparison in
+    /// `verify_bitcoin_proof` (:630): without it a signed BIP-322 message that
+    /// names a stored challenge but carries different words than the challenge
+    /// it names is verified against that challenge's address.
+    ///
+    /// The only difference below is a trailing newline, so the challenge id
+    /// still resolves and every check ahead of the comparison passes; only the
+    /// equality can answer.
+    #[test]
+    fn proof_refuses_bip322_message_mismatch() {
+        let (_dir, mut provider) = init_provider();
+        let message = bitcoin_challenge_message(&mut provider);
+        let altered = format!("{message}\n");
+
+        assert_eq!(
+            provider.verify_bitcoin_proof(&altered, UNREACHED_SIGNATURE, None, None),
+            error("invalid_proof", "Bitcoin challenge message does not match")
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests;
