@@ -897,10 +897,10 @@ fn wait_for_terminal(
 /// `json_literal_keys` reader. In-memory answers cover the matching cell, a
 /// missing and an extra struct field, a dropped error key, a changed wrapper
 /// key, reordered keys, a nested key, a dropped `json!` key, zero and two
-/// literals, character and raw string literals, a prefix declaration name,
-/// a doubled declaration, a nested declaration, a nested arm block, a later
-/// attributed declaration, an unbraced region, the `unsupported` ok side and
-/// a row without `from`.
+/// literals, unsupported key expressions, character and raw string literals,
+/// a prefix declaration name, a doubled declaration, a nested declaration,
+/// a nested arm block, a later attributed declaration, an unbraced region,
+/// the `unsupported` ok side and a row without `from`.
 ///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
 /// test no longer finds that function. F-cc49a drops the `generated_`
@@ -1429,6 +1429,10 @@ fn operations_section_cites_existing_tests() {
     /// closing brace or a later key. Raw string literals (including raw byte
     /// and C strings, with any number of hashes) are also refused: their
     /// internal quotes and backslashes follow different rules.
+    /// Each top-level key must start with a quoted string immediately followed
+    /// by its colon (apart from whitespace). Other key expressions are refused,
+    /// including parenthesized strings. Braces, brackets and parentheses keep
+    /// commas and quoted names inside values separate from top-level keys.
     ///
     /// Honesty limit: this reads literal text, not a serialized answer. A key
     /// a helper adds at run time is not read. Nested values (`offers`,
@@ -1457,20 +1461,34 @@ fn operations_section_cites_existing_tests() {
             &region[region.find(OPENER).expect("the count found one opener") + OPENER.len()..];
         let bytes = body.as_bytes();
         let mut keys = Vec::new();
-        let mut depth = 1usize;
+        let mut delimiters = vec![b'}'];
+        let mut expecting_key = true;
         let mut index = 0;
         while index < bytes.len() {
-            match bytes[index] {
-                b'r' => {
-                    let mut quote = index + 1;
-                    while bytes.get(quote) == Some(&b'#') {
-                        quote += 1;
-                    }
-                    if bytes.get(quote) == Some(&b'"') {
-                        return Err("json: a raw string literal is not supported".to_string());
-                    }
-                    index += 1;
+            let raw_start = match bytes[index] {
+                b'r' => Some(index + 1),
+                b'b' | b'c' if bytes.get(index + 1) == Some(&b'r') => Some(index + 2),
+                _ => None,
+            };
+            if let Some(mut quote) = raw_start {
+                while bytes.get(quote) == Some(&b'#') {
+                    quote += 1;
                 }
+                if bytes.get(quote) == Some(&b'"') {
+                    return Err("json: a raw string literal is not supported".to_string());
+                }
+            }
+            if bytes[index] == b'\'' {
+                return Err("json: a character literal is not supported".to_string());
+            }
+            let at_key = delimiters.len() == 1 && expecting_key;
+            if at_key
+                && !bytes[index].is_ascii_whitespace()
+                && !matches!(bytes[index], b'"' | b'}' | b']' | b')')
+            {
+                return Err("json: a top-level key must be a quoted string literal".to_string());
+            }
+            match bytes[index] {
                 b'"' => {
                     let mut end = index + 1;
                     let mut escaped = false;
@@ -1494,29 +1512,48 @@ fn operations_section_cites_existing_tests() {
                     while next < bytes.len() && bytes[next].is_ascii_whitespace() {
                         next += 1;
                     }
-                    if depth == 1 && next < bytes.len() && bytes[next] == b':' {
+                    if at_key {
+                        if bytes.get(next) != Some(&b':') {
+                            return Err(
+                                "json: a top-level string key must be followed by `:`".to_string()
+                            );
+                        }
                         keys.push(body[index + 1..end].to_string());
+                        expecting_key = false;
+                        index = next + 1;
+                    } else {
+                        index = end + 1;
                     }
-                    index = end + 1;
                 }
-                b'\'' => {
-                    return Err("json: a character literal is not supported".to_string());
-                }
-                b'{' | b'[' => {
-                    depth += 1;
+                b'{' | b'[' | b'(' => {
+                    delimiters.push(match bytes[index] {
+                        b'{' => b'}',
+                        b'[' => b']',
+                        _ => b')',
+                    });
                     index += 1;
                 }
-                b'}' | b']' => {
-                    depth -= 1;
-                    if depth == 0 {
+                b'}' | b']' | b')' => {
+                    let expected = delimiters.pop().expect("the literal is still open");
+                    if bytes[index] != expected {
+                        return Err(format!(
+                            "json: closing `{}` does not match expected `{}`",
+                            bytes[index] as char, expected as char
+                        ));
+                    }
+                    if delimiters.is_empty() {
                         break;
                     }
+                    index += 1;
+                }
+                b',' if delimiters.len() == 1 => {
+                    expecting_key = true;
                     index += 1;
                 }
                 _ => index += 1,
             }
         }
-        if depth != 0 {
+        if !delimiters.is_empty() {
             return Err("json: the literal never closes".to_string());
         }
         Ok(keys)
@@ -2462,6 +2499,95 @@ pub fn error_response(code: &str, message: &str) -> Value {
         Ok(())
     );
 
+    // A key written directly in the literal must be read or refused. The
+    // parenthesized key accepted by serde_json must not leave the cell stale.
+    let parenthesized_shutdown_literal = r#"json!({"shutdown": true, ("extra"): true})"#;
+    let parenthesized_shutdown_arm = shutdown_arm.replace(
+        "json!({\n                \"shutdown\": true\n            })",
+        parenthesized_shutdown_literal,
+    );
+    assert_ne!(parenthesized_shutdown_arm, shutdown_arm);
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            &answers,
+            "",
+            &parenthesized_shutdown_arm
+        ),
+        "json: a top-level key must be a quoted string literal"
+    );
+    // The same key boundary covers expressions at the first, middle and last
+    // entry. A string followed by an expression has its own refusal reason.
+    for (key, reason) in [
+        (
+            r#"("extra")"#,
+            "json: a top-level key must be a quoted string literal",
+        ),
+        (
+            r#"(("extra"))"#,
+            "json: a top-level key must be a quoted string literal",
+        ),
+        (
+            "extra",
+            "json: a top-level key must be a quoted string literal",
+        ),
+        (
+            "r#extra",
+            "json: a top-level key must be a quoted string literal",
+        ),
+        (
+            "keys::EXTRA",
+            "json: a top-level key must be a quoted string literal",
+        ),
+        (
+            r#"format!("extra")"#,
+            "json: a top-level key must be a quoted string literal",
+        ),
+        (
+            r#"{ "extra" }"#,
+            "json: a top-level key must be a quoted string literal",
+        ),
+        (
+            r#"["extra"][0]"#,
+            "json: a top-level key must be a quoted string literal",
+        ),
+        (
+            r#"b"extra""#,
+            "json: a top-level key must be a quoted string literal",
+        ),
+        (
+            r#"c"extra""#,
+            "json: a top-level key must be a quoted string literal",
+        ),
+        (
+            r#""extra".to_owned()"#,
+            "json: a top-level string key must be followed by `:`",
+        ),
+        (
+            r#""extra" + """#,
+            "json: a top-level string key must be followed by `:`",
+        ),
+    ] {
+        for entries in [
+            format!("{key}: true, \"shutdown\": true"),
+            format!("\"shutdown\": true, {key}: true, \"last\": true"),
+            format!("\"shutdown\": true, {key}: true"),
+        ] {
+            let expression_arm = shutdown_arm.replace("\"shutdown\": true", &entries);
+            assert_ne!(expression_arm, shutdown_arm);
+            assert_eq!(
+                outputs_failure(
+                    &outputs_row("shutdown", shutdown_outputs),
+                    &answers,
+                    "",
+                    &expression_arm
+                ),
+                reason,
+                "{entries}"
+            );
+        }
+    }
+
     // Commented keys and comment braces cannot make a stale Outputs cell pass.
     // Both comment forms go through the same reader used by every answer.
     for (commented_key, shutdown_value, reason) in [
@@ -2615,12 +2741,48 @@ pub fn error_response(code: &str, message: &str) -> Value {
         json_literal_keys("json!({ \"outer\": { \"inner\": true }, \"next\": 1 })"),
         Ok(vec!["outer".to_string(), "next".to_string()])
     );
+    // Commas and quoted names in a value stay inside that value, including
+    // parentheses and nested objects with expression keys. Empty objects and
+    // a trailing comma remain supported.
+    assert_eq!(json_literal_keys("json!({})"), Ok(Vec::<String>::new()));
+    for value in [
+        r#"call("ignored", true)"#,
+        r#"value!("ignored": true, "also_ignored": false)"#,
+        r#"{ ("ignored"): true, variable_key: false }"#,
+        r#"[{ "ignored": [call(true, false)] }]"#,
+    ] {
+        assert_eq!(
+            json_literal_keys(&format!("json!({{ \"outer\": {value}, \"next\": 1, }})")),
+            Ok(vec!["outer".to_string(), "next".to_string()]),
+            "{value}"
+        );
+    }
     for (region, reason) in [
         (
             "json!({ \"unfinished",
             "json: a string in the literal never closes",
         ),
         ("json!({ \"key\": true", "json: the literal never closes"),
+        (
+            "json!({ \"key\" })",
+            "json: a top-level string key must be followed by `:`",
+        ),
+        (
+            "json!({ \"key\": true ])",
+            "json: closing `]` does not match expected `}`",
+        ),
+        (
+            "json!({ \"key\": [true} })",
+            "json: closing `}` does not match expected `]`",
+        ),
+        (
+            "json!({ \"key\": call(true] })",
+            "json: closing `]` does not match expected `)`",
+        ),
+        (
+            "json!({ \"key\": {\"nested\": true) })",
+            "json: closing `)` does not match expected `}`",
+        ),
     ] {
         assert_eq!(json_literal_keys(region), Err(reason.to_string()));
     }
