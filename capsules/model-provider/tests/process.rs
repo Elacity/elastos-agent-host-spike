@@ -1632,6 +1632,30 @@ impl LocalRelayBackend {
         }
         recorded
     }
+
+    /// Every request already recorded, including none. A refusal returns before
+    /// the relay, so this call's backend has no request to wait for.
+    fn take_requests(mut self) -> Vec<RecordedRequest> {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(accept) = self.accept.take() {
+            let _ = accept.join();
+        }
+        while let Ok((stream, _)) = self.listener.accept() {
+            serve_local_relay_request(stream, &self.sender);
+        }
+        let mut recorded = Vec::new();
+        let deadline = Instant::now() + Duration::from_millis(200);
+        loop {
+            match self.requests.try_recv() {
+                Ok(request) => recorded.push(request),
+                Err(_) if recorded.is_empty() && Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+        recorded
+    }
 }
 
 /// Reads one request from an accepted loopback connection, records it, and
@@ -2834,8 +2858,20 @@ struct RelayedHostedTurn {
 
 /// The `runs_create` body every hosted text turn sends. A missing `grant_id`
 /// is refused before any send, so the grant id is non-empty. The stand-in
-/// decides whether a live grant exists for `request_id`.
+/// decides whether a live grant exists for `request_id`. The session is the
+/// fixture session.
 fn hosted_text_create_request(request_id: &str, grant_id: &str, prompt: &str) -> Value {
+    hosted_text_create_request_for_session(request_id, grant_id, HOSTED_FIXTURE_SESSION_ID, prompt)
+}
+
+/// The same body with the caller's session in the runtime binding. The
+/// fixture helper passes `HOSTED_FIXTURE_SESSION_ID`.
+fn hosted_text_create_request_for_session(
+    request_id: &str,
+    grant_id: &str,
+    session_id: &str,
+    prompt: &str,
+) -> Value {
     let input = json!({
         "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
         "prompt": prompt
@@ -2849,7 +2885,7 @@ fn hosted_text_create_request(request_id: &str, grant_id: &str, prompt: &str) ->
         "runtime_binding": {
             "schema": RUNTIME_CREATE_BINDING_SCHEMA,
             "principal_id": "person:local:test",
-            "session_id": HOSTED_FIXTURE_SESSION_ID,
+            "session_id": session_id,
             "capsule_id": "assistant",
             "grant_id": grant_id,
             "request_id": request_id,
@@ -2861,17 +2897,19 @@ fn hosted_text_create_request(request_id: &str, grant_id: &str, prompt: &str) ->
 }
 
 /// One hosted text run on an already started provider: `runs_create` with the
-/// binding's grant and request id, then the settled run. The provider only
-/// checks that `grant_id` is not empty; the stand-in decides whether a live
-/// grant exists for `request_id`, so the caller owns the grant.
+/// binding's grant, session and request id, then the settled run. The provider
+/// only checks that `grant_id` is not empty; the stand-in decides whether a
+/// live grant exists for `request_id`, so the caller owns the grant.
 fn run_hosted_text_turn(
     provider: &mut ProviderProcess,
     request_id: &str,
     grant_id: &str,
+    session_id: &str,
     prompt: &str,
     settle_deadline: Duration,
 ) -> Value {
-    let create_request = hosted_text_create_request(request_id, grant_id, prompt);
+    let create_request =
+        hosted_text_create_request_for_session(request_id, grant_id, session_id, prompt);
     let binding: RuntimeCreateBinding =
         serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
     let expected_run_id = model_run_id(&binding);
@@ -2940,6 +2978,7 @@ fn run_granted_hosted_turn_through_relay(
         &mut provider,
         &test_support::fixture_model_request_id(&format!("request:{label}")),
         "grant:test",
+        HOSTED_FIXTURE_SESSION_ID,
         prompt,
         settle_deadline,
     );
@@ -3385,51 +3424,22 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
         );
         return;
     }
-    let backend = LocalRelayBackend::bind();
     let grants = Arc::new(Mutex::new(StandIn::new()));
-    let root = test_support::temp_root_path("model-provider-process", "ra1-granted-turn");
-    std::fs::create_dir_all(&root).unwrap();
-    let root = std::fs::canonicalize(root).unwrap();
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let stand_in = HostedEffectStandIn::bind_granting(
-        "ra1-granted-turn",
-        backend.url(),
-        Arc::clone(&grants),
-        HOSTED_FIXTURE_SESSION_ID,
-    );
-    let init = hosted_effect_init(
-        &root,
-        &stand_in,
-        HOSTED_FIXTURE_MODEL,
-        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
-    );
-    let mut provider = ProviderProcess::start();
-    let started = provider.request(init);
-    assert_eq!(
-        started["status"], "ok",
-        "unexpected init response: {started}"
-    );
-
     // The shared stand-in's shell view keeps only live grants
     // (`lab/agent-conformance/standin-runtime/mod.rs:128-139`), so it starts
-    // empty.
+    // empty. `ra1_view` reads this same call.
     assert_eq!(
-        stand_in.ra1_view(),
+        shell_live_grant_view(&grants),
         json!({"scope": SHELL_LIVE_GRANT_SCOPE, "capabilities": []}),
         "the shared stand-in shell view must list no grant before one is seeded"
     );
 
     // Run A names a grant id, but no grant was seeded for its request id, so
     // the effect has no live entry to be reached through.
-    let request_a = test_support::fixture_model_request_id("request:ra1-denied");
-    let prompt = "a turn reached only through a live grant";
-    let settled_a = run_hosted_text_turn(
-        &mut provider,
-        &request_a,
-        "grant:ra1-denied",
-        prompt,
-        FIXTURE_EVENT_TIMEOUT,
-    );
+    let prompt_a = "a turn with no live grant";
+    let request_a = granted_model_turn_request_id(HOSTED_FIXTURE_SESSION_ID, prompt_a);
+    let denied = granted_model_turn(Arc::clone(&grants), HOSTED_FIXTURE_SESSION_ID, prompt_a);
+    let settled_a = denied.settled;
     assert_eq!(
         settled_a["data"]["status"],
         "failed",
@@ -3449,7 +3459,7 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
         run_status_and_error_code(&settled_a)
     );
     assert_eq!(
-        stand_in.refusal_reasons(),
+        denied.refusal_reasons,
         vec![format!("no live grant for request {request_a}")],
         "the stand-in must record why it refused run A"
     );
@@ -3458,7 +3468,8 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
     // stand-in's `seed_grant` is its lab seam
     // (`lab/agent-conformance/standin-runtime/mod.rs:104-124`); the values are
     // this test's fixture, and the shared stand-in decides liveness.
-    let request_b = test_support::fixture_model_request_id("request:ra1-granted");
+    let prompt_b = "a turn reached only through a live grant";
+    let request_b = granted_model_turn_request_id(HOSTED_FIXTURE_SESSION_ID, prompt_b);
     let resource = "model:fixture/text";
     let action = "text.generate";
     let duration = "once";
@@ -3482,7 +3493,7 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
         "granted_at": granted_at,
     });
     assert_eq!(
-        stand_in.ra1_view(),
+        shell_live_grant_view(&grants),
         json!({
             "scope": SHELL_LIVE_GRANT_SCOPE,
             "capabilities": [expected_entry.clone()],
@@ -3490,15 +3501,10 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
         "the shared stand-in shell view must list the one live grant with every field"
     );
 
-    // Run B carries the same input with a new request id, and the one live
-    // grant reaches the model.
-    let settled_b = run_hosted_text_turn(
-        &mut provider,
-        &request_b,
-        "grant:ra1-granted",
-        prompt,
-        FIXTURE_EVENT_TIMEOUT,
-    );
+    // Run B carries a new request id, and the one live grant reaches the model
+    // through `granted_model_turn`.
+    let granted = granted_model_turn(Arc::clone(&grants), HOSTED_FIXTURE_SESSION_ID, prompt_b);
+    let settled_b = granted.settled;
     assert_eq!(
         settled_b["data"]["status"],
         "completed",
@@ -3520,7 +3526,11 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
         "the granted run must report the backend's usage: {}",
         run_status_and_error_code(&settled_b)
     );
-    match wait_for_relay_outcome(&stand_in, &settled_b) {
+    match granted
+        .relay
+        .clone()
+        .expect("the granted turn records the backend answer")
+    {
         RelayOutcome::Answered { status: 200, .. } => {}
         RelayOutcome::Answered {
             status,
@@ -3537,7 +3547,7 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
     // The shared stand-in has no seam that spends a grant and this lane adds
     // none, so the entry stays listed after run B.
     assert_eq!(
-        stand_in.ra1_view(),
+        shell_live_grant_view(&grants),
         json!({
             "scope": SHELL_LIVE_GRANT_SCOPE,
             "capabilities": [expected_entry],
@@ -3546,7 +3556,11 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
     );
 
     // Only run B reached the model: the backend counted exactly one request.
-    let backend_requests = backend.observe();
+    assert!(
+        denied.backend_requests.is_empty(),
+        "only the granted run may reach the model; run A must send it nothing"
+    );
+    let backend_requests = granted.backend_requests;
     assert_eq!(
         backend_requests.len(),
         1,
@@ -3559,22 +3573,26 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
 
     // Both runs reach the stand-in, and each request carries its own binding's
     // request id.
-    let (connections, requests) = stand_in.observe();
+    let connections = denied.connections + granted.connections;
+    let requests_a = denied.hosted_requests;
+    let requests_b = granted.hosted_requests;
     assert_eq!(
         connections, 2,
         "each run must open one connection to the Runtime socket stand-in"
     );
-    assert_eq!(requests.len(), 2, "each run must send one hosted request");
     assert_eq!(
-        requests[0].value("x-elastos-request-id"),
+        requests_a.len() + requests_b.len(),
+        2,
+        "each run must send one hosted request"
+    );
+    assert_eq!(
+        requests_a[0].value("x-elastos-request-id"),
         Some(request_a.as_str())
     );
     assert_eq!(
-        requests[1].value("x-elastos-request-id"),
+        requests_b[0].value("x-elastos-request-id"),
         Some(request_b.as_str())
     );
-
-    provider.shutdown();
 }
 
 /// A hosted model turn is reached only through a live grant for the session the
@@ -3606,35 +3624,13 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
         );
         return;
     }
-    let backend = LocalRelayBackend::bind();
     let grants = Arc::new(Mutex::new(StandIn::new()));
-    let root = test_support::temp_root_path("model-provider-process", "ra1-other-session");
-    std::fs::create_dir_all(&root).unwrap();
-    let root = std::fs::canonicalize(root).unwrap();
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let stand_in = HostedEffectStandIn::bind_granting(
-        "ra1-other-session",
-        backend.url(),
-        Arc::clone(&grants),
-        HOSTED_FIXTURE_SESSION_ID,
-    );
-    let init = hosted_effect_init(
-        &root,
-        &stand_in,
-        HOSTED_FIXTURE_MODEL,
-        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
-    );
-    let mut provider = ProviderProcess::start();
-    let started = provider.request(init);
-    assert_eq!(
-        started["status"], "ok",
-        "unexpected init response: {started}"
-    );
 
     // The shell seeds one `Live` grant for run C's request id, and it belongs
     // to another session than the one the stand-in serves. The values are this
     // test's fixture, and the shared stand-in decides liveness.
-    let request_c = test_support::fixture_model_request_id("request:ra1-other-session");
+    let prompt_c = "a turn whose grant belongs to another session";
+    let request_c = granted_model_turn_request_id(HOSTED_FIXTURE_SESSION_ID, prompt_c);
     let other_session = "session:other";
     let resource = "model:fixture/text";
     let action = "text.generate";
@@ -3659,7 +3655,7 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
         "granted_at": granted_at,
     });
     assert_eq!(
-        stand_in.ra1_view(),
+        shell_live_grant_view(&grants),
         json!({
             "scope": SHELL_LIVE_GRANT_SCOPE,
             "capabilities": [expected_c],
@@ -3669,15 +3665,9 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
 
     // Run C carries a non-empty `grant_id` and its own request id, so the live
     // entry exists but is for another session: the stand-in refuses C before
-    // any backend call.
-    let prompt = "a turn whose grant belongs to another session";
-    let settled_c = run_hosted_text_turn(
-        &mut provider,
-        &request_c,
-        "grant:ra1-other-session",
-        prompt,
-        FIXTURE_EVENT_TIMEOUT,
-    );
+    // any backend call. The turn goes through `granted_model_turn`.
+    let refused = granted_model_turn(Arc::clone(&grants), HOSTED_FIXTURE_SESSION_ID, prompt_c);
+    let settled_c = refused.settled;
     assert_eq!(
         settled_c["data"]["status"],
         "failed",
@@ -3697,7 +3687,7 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
         run_status_and_error_code(&settled_c)
     );
     assert_eq!(
-        stand_in.refusal_reasons(),
+        refused.refusal_reasons,
         vec![format!(
             "wrong capsule: expected {other_session}, got {HOSTED_FIXTURE_SESSION_ID}"
         )],
@@ -3705,8 +3695,9 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
     );
 
     // Run D's live entry is for the session the stand-in serves, so D reaches
-    // the model.
-    let request_d = test_support::fixture_model_request_id("request:ra1-served-session");
+    // the model. Its request id is not run C's, so C's grant does not hide it.
+    let prompt_d = "a turn whose grant belongs to the served session";
+    let request_d = granted_model_turn_request_id(HOSTED_FIXTURE_SESSION_ID, prompt_d);
     grants.lock().unwrap().seed_grant(
         &request_d,
         HOSTED_FIXTURE_SESSION_ID,
@@ -3717,13 +3708,8 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
         Life::Live,
         false,
     );
-    let settled_d = run_hosted_text_turn(
-        &mut provider,
-        &request_d,
-        "grant:ra1-served-session",
-        prompt,
-        FIXTURE_EVENT_TIMEOUT,
-    );
+    let served = granted_model_turn(Arc::clone(&grants), HOSTED_FIXTURE_SESSION_ID, prompt_d);
+    let settled_d = served.settled;
     assert_eq!(
         settled_d["data"]["status"],
         "completed",
@@ -3736,7 +3722,11 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
         "the served-session run must carry the streamed text: {}",
         run_status_and_error_code(&settled_d)
     );
-    match wait_for_relay_outcome(&stand_in, &settled_d) {
+    match served
+        .relay
+        .clone()
+        .expect("the served-session turn records the backend answer")
+    {
         RelayOutcome::Answered { status: 200, .. } => {}
         RelayOutcome::Answered {
             status,
@@ -3752,7 +3742,11 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
 
     // Only run D reached the model: the backend counted exactly one request,
     // and it is the model endpoint the relay posts to.
-    let backend_requests = backend.observe();
+    assert!(
+        refused.backend_requests.is_empty(),
+        "only the served-session run may reach the model; the other-session run must send it nothing"
+    );
+    let backend_requests = served.backend_requests;
     assert_eq!(
         backend_requests.len(),
         1,
@@ -3762,8 +3756,331 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
         backend_requests[0].request_line, "POST /v1/chat/completions HTTP/1.1",
         "the one request must be run D's model turn"
     );
+}
 
+/// The provider journal schema (`RUN_JOURNAL_SCHEMA` in `src/journal.rs`).
+const PROVIDER_RUN_JOURNAL_SCHEMA: &str = "elastos.model.provider-run-journal/v1";
+
+const GRANTED_MODEL_TURN_GRANT_ID: &str = "grant:granted-model-turn";
+
+static GRANTED_MODEL_TURN_LABEL: AtomicUsize = AtomicUsize::new(0);
+
+/// The request id `granted_model_turn` sends for this session and prompt.
+/// A caller seeds a grant for this id before the call.
+fn granted_model_turn_request_id(session_id: &str, prompt: &str) -> String {
+    test_support::fixture_model_request_id(&format!(
+        "request:granted-model-turn:{session_id}:{prompt}"
+    ))
+}
+
+fn granted_model_turn_binding(session_id: &str, prompt: &str) -> RuntimeCreateBinding {
+    let request = hosted_text_create_request_for_session(
+        &granted_model_turn_request_id(session_id, prompt),
+        GRANTED_MODEL_TURN_GRANT_ID,
+        session_id,
+        prompt,
+    );
+    serde_json::from_value(request["runtime_binding"].clone()).unwrap()
+}
+
+fn seed_live_model_grant(grants: &Arc<Mutex<StandIn>>, request_id: &str, session_id: &str) {
+    grants.lock().unwrap().seed_grant(
+        request_id,
+        session_id,
+        "model:fixture/text",
+        "text.generate",
+        "once",
+        1_790_000_000,
+        Life::Live,
+        false,
+    );
+}
+
+/// The one run file under `<fixture-root>/journal/runs`. `hosted_effect_init`
+/// sets the journal root to `<fixture-root>/journal`, and the provider opens
+/// `runs` under that root (`src/journal.rs`). This reads the file the provider
+/// wrote. It does not hash the run id again.
+fn read_provider_run_journal(root: &Path) -> Value {
+    let runs = root.join("journal").join("runs");
+    let entries = std::fs::read_dir(&runs)
+        .unwrap_or_else(|error| panic!("the provider journal is at {}: {error}", runs.display()));
+    let mut paths = Vec::new();
+    for entry in entries {
+        let path = entry.expect("a provider journal entry").path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let Some(rest) = name.strip_prefix("sha256-") else {
+            continue;
+        };
+        let Some(hex) = rest.strip_suffix(".json") else {
+            continue;
+        };
+        if !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            paths.push(path);
+        }
+    }
+    assert_eq!(
+        paths.len(),
+        1,
+        "the provider writes one run journal under {}",
+        runs.display()
+    );
+    let bytes = std::fs::read(&paths[0]).expect("read the provider run journal");
+    serde_json::from_slice(&bytes).expect("the provider run journal is JSON")
+}
+
+/// One granted model turn: the recorded answer, the contract run id, and the
+/// provider journal when the turn completed. A refusal carries the stand-in's
+/// reason and no loopback request.
+struct GrantedModelTurn {
+    answer: Option<String>,
+    effect_id: String,
+    journal: Option<Value>,
+    binding: RuntimeCreateBinding,
+    hosted_run_id: Option<String>,
+    backend_requests: Vec<RecordedRequest>,
+    refusal_reasons: Vec<String>,
+    settled: Value,
+    relay: Option<RelayOutcome>,
+    connections: usize,
+    hosted_requests: Vec<RecordedRequest>,
+}
+
+/// One lab call on the Request flow in `docs/AGENT_ARCHITECTURE.md`
+/// ("Request flow"): the model request, then the same audit path as a human
+/// action. The turn reaches a recorded answer only through the `Granted` arm
+/// of `serve_hosted_effect`, which asks the shared stand-in before it relays.
+/// A granted session returns the recorded answer `ready`, the contract run id,
+/// and the provider journal `elastos.model.provider-run-journal/v1` read from
+/// `<fixture-root>/journal/runs`. A missing grant returns `no live grant for
+/// request <id>`. Agent A's grant on agent B's session returns `wrong capsule:
+/// expected <grant session>, got <served session>`. Each refusal leaves this
+/// call's loopback backend with no request. useful-task calls this read only.
+/// This task adds no caller under `lab/useful-task/`.
+///
+/// `session_id` is the session `bind_granting` serves and the session the
+/// request binding carries.
+fn granted_model_turn(
+    grants: Arc<Mutex<StandIn>>,
+    session_id: &str,
+    prompt: &str,
+) -> GrantedModelTurn {
+    let request_id = granted_model_turn_request_id(session_id, prompt);
+    let binding = granted_model_turn_binding(session_id, prompt);
+    let label = format!(
+        "gmt-{}",
+        GRANTED_MODEL_TURN_LABEL.fetch_add(1, Ordering::Relaxed)
+    );
+    let root = test_support::temp_root_path("model-provider-process", &label);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let backend = LocalRelayBackend::bind();
+    let stand_in =
+        HostedEffectStandIn::bind_granting(&label, backend.url(), Arc::clone(&grants), session_id);
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+    let settled = run_hosted_text_turn(
+        &mut provider,
+        &request_id,
+        GRANTED_MODEL_TURN_GRANT_ID,
+        session_id,
+        prompt,
+        FIXTURE_EVENT_TIMEOUT,
+    );
+    let completed = settled["data"]["status"] == "completed";
+    let relay = if completed {
+        Some(wait_for_relay_outcome(&stand_in, &settled))
+    } else {
+        None
+    };
+    let refusal_reasons = stand_in.refusal_reasons();
+    assert_eq!(
+        stand_in.ra1_view(),
+        shell_live_grant_view(&grants),
+        "the granting stand-in reads the shared stand-in's shell view"
+    );
+    let (connections, hosted_requests) = stand_in.observe();
+    let backend_requests = if completed {
+        backend.observe()
+    } else {
+        backend.take_requests()
+    };
+    let answer = settled["data"]["terminal"]["output"]["text"]
+        .as_str()
+        .map(str::to_string);
+    let effect_id = settled["data"]["run_id"]
+        .as_str()
+        .expect("runs_create returns the run id")
+        .to_string();
+    let hosted_run_id = hosted_requests
+        .first()
+        .and_then(|request| request.value("x-elastos-run-id"))
+        .map(str::to_string);
     provider.shutdown();
+    let journal = completed.then(|| read_provider_run_journal(&root));
+    GrantedModelTurn {
+        answer,
+        effect_id,
+        journal,
+        binding,
+        hosted_run_id,
+        backend_requests,
+        refusal_reasons,
+        settled,
+        relay,
+        connections,
+        hosted_requests,
+    }
+}
+
+fn assert_granted_model_turn(turn: &GrantedModelTurn, session_id: &str) {
+    assert_eq!(
+        turn.answer.as_deref(),
+        Some("ready"),
+        "a granted session returns the recorded answer"
+    );
+    assert_eq!(
+        turn.effect_id,
+        model_run_id(&turn.binding),
+        "the effect id is the contract run id"
+    );
+    assert_eq!(
+        turn.hosted_requests.len(),
+        1,
+        "the granted call records one hosted request"
+    );
+    assert_eq!(
+        turn.hosted_run_id.as_deref(),
+        Some(turn.effect_id.as_str()),
+        "the effect id is the x-elastos-run-id on the one recorded hosted request"
+    );
+    assert_eq!(
+        turn.backend_requests.len(),
+        1,
+        "the loopback backend records one request for the granted call"
+    );
+    let journal = turn
+        .journal
+        .as_ref()
+        .expect("a granted session returns the provider journal");
+    assert_eq!(
+        journal["schema"], PROVIDER_RUN_JOURNAL_SCHEMA,
+        "the journal schema is elastos.model.provider-run-journal/v1"
+    );
+    assert_eq!(
+        journal["run_id"], turn.effect_id,
+        "the journal run id is the effect id"
+    );
+    assert_eq!(
+        journal["runtime_binding"]["session_id"], session_id,
+        "the journal records the supplied session"
+    );
+    assert_eq!(
+        journal["output"]["text"], "ready",
+        "the journal output text is the recorded answer"
+    );
+    assert_eq!(
+        turn.binding.session_id, session_id,
+        "the request binding carries the supplied session"
+    );
+}
+
+/// A granted turn returns the recorded answer, the contract run id and the
+/// provider journal. The same call returns the existing refusal reason, and
+/// no loopback request, when the grant is missing or belongs to another
+/// session. A granted session other than `session:test` is carried in
+/// `bind_granting` and in the request binding. useful-task calls
+/// `granted_model_turn` read only.
+///
+/// This is Runtime-socket lab evidence. It books no M1 check.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn granted_model_turn_returns_the_answer_effect_and_audit() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider granted model turn: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let session_id = HOSTED_FIXTURE_SESSION_ID;
+    let prompt = "a granted turn returns the answer, the effect id and the journal";
+    let grants = Arc::new(Mutex::new(StandIn::new()));
+    seed_live_model_grant(
+        &grants,
+        &granted_model_turn_request_id(session_id, prompt),
+        session_id,
+    );
+    let granted = granted_model_turn(Arc::clone(&grants), session_id, prompt);
+    assert_granted_model_turn(&granted, session_id);
+
+    let missing_prompt = "a turn with no live grant";
+    let missing = granted_model_turn(
+        Arc::new(Mutex::new(StandIn::new())),
+        HOSTED_FIXTURE_SESSION_ID,
+        missing_prompt,
+    );
+    let missing_id = granted_model_turn_request_id(HOSTED_FIXTURE_SESSION_ID, missing_prompt);
+    assert_eq!(
+        missing.refusal_reasons,
+        vec![format!("no live grant for request {missing_id}")],
+        "a missing grant returns the stand-in's named reason"
+    );
+    assert!(
+        missing.backend_requests.is_empty(),
+        "a missing grant leaves the loopback backend with no request"
+    );
+
+    let other_prompt = "a grant for another session";
+    let other_session = "session:other";
+    let other_grants = Arc::new(Mutex::new(StandIn::new()));
+    seed_live_model_grant(
+        &other_grants,
+        &granted_model_turn_request_id(HOSTED_FIXTURE_SESSION_ID, other_prompt),
+        other_session,
+    );
+    let other = granted_model_turn(
+        Arc::clone(&other_grants),
+        HOSTED_FIXTURE_SESSION_ID,
+        other_prompt,
+    );
+    assert_eq!(
+        other.refusal_reasons,
+        vec![format!(
+            "wrong capsule: expected {other_session}, got {HOSTED_FIXTURE_SESSION_ID}"
+        )],
+        "another session's grant returns the stand-in's named reason"
+    );
+    assert!(
+        other.backend_requests.is_empty(),
+        "another session's grant leaves the loopback backend with no request"
+    );
+
+    let supplied = "session:lab-granted";
+    let supplied_prompt = "a granted turn for a non-default session";
+    let supplied_grants = Arc::new(Mutex::new(StandIn::new()));
+    seed_live_model_grant(
+        &supplied_grants,
+        &granted_model_turn_request_id(supplied, supplied_prompt),
+        supplied,
+    );
+    let supplied_turn = granted_model_turn(supplied_grants, supplied, supplied_prompt);
+    assert_granted_model_turn(&supplied_turn, supplied);
 }
 
 /// The relay records a provider socket that closed mid-stream as unreachable,
