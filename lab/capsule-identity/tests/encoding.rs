@@ -402,6 +402,11 @@ fn directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused() {
         .unwrap_or_else(|refusal| panic!("{refusal}"))
         .to_string();
     assert_eq!(walked, encoded, "the walk and the encoder disagree");
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert!(estimate <= HAMT_LINKS_LIMIT, "{estimate}");
     assert!(walked.starts_with("bafybei"), "{walked}");
     assert_ne!(walked, DIRECTORY_AT_LIMIT_LAB_CID);
 }
