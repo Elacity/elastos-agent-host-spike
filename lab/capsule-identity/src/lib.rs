@@ -1188,8 +1188,7 @@ fn file_root_leaves(leaves: &[FileLeaf]) -> (Vec<u8>, u64) {
                 let blocksizes: Vec<u64> = children.iter().map(|child| child.filesize).collect();
                 let filesize = children.iter().map(|child| child.filesize).sum();
                 let block = file_root_block(&links, &blocksizes, filesize);
-                let tsize =
-                    block.len() as u64 + children.iter().map(|child| child.tsize).sum::<u64>();
+                let tsize = dag_pb_tsize(&block, children.iter().map(|child| child.tsize));
                 FileTreeNode {
                     cid: cid_bytes(DAG_PB_CODEC, &naming_hash(&block)),
                     tsize,
@@ -1343,7 +1342,7 @@ fn encode_directory(
         return encode_hamt(&links, path, sha256);
     }
     let block = directory_block(&links);
-    let tsize = block.len() as u64 + links.iter().map(|link| link.tsize).sum::<u64>();
+    let tsize = dag_pb_tsize(&block, links.iter().map(|link| link.tsize));
     Ok((sha256(&block), tsize))
 }
 
@@ -1425,7 +1424,7 @@ fn encode_hamt(
     let indices: Vec<usize> = (0..links.len()).collect();
     let shard = hamt_shard(links, &indices, &digests, 0, path, sha256)?;
     let block = hamt_block(&shard.links, &shard.bitmap);
-    let tsize = block.len() as u64 + shard.links.iter().map(|link| link.tsize).sum::<u64>();
+    let tsize = dag_pb_tsize(&block, shard.links.iter().map(|link| link.tsize));
     Ok((sha256(&block), tsize))
 }
 
@@ -1473,7 +1472,7 @@ fn hamt_shard<'a>(
         } else {
             let child = hamt_shard(links, &bucket_indices, digests, depth + 1, path, sha256)?;
             let block = hamt_block(&child.links, &child.bitmap);
-            let tsize = block.len() as u64 + child.links.iter().map(|link| link.tsize).sum::<u64>();
+            let tsize = dag_pb_tsize(&block, child.links.iter().map(|link| link.tsize));
             shard.links.push(Link {
                 name: Cow::Owned(format!("{bucket:02X}")),
                 cid: cid_bytes(DAG_PB_CODEC, &sha256(&block)),
@@ -1555,6 +1554,15 @@ fn put_links(block: &mut Vec<u8>, links: &[Link<'_>]) {
         put_varint(&mut pb_link, link.tsize);
         put_length_delimited(block, 2, &pb_link);
     }
+}
+
+/// The Tsize of a dag-pb node: its block's length plus its children's
+/// Tsizes. A basic directory, a HAMT shard, a child shard and every file
+/// node take their Tsize here, so one sum names them all.
+fn dag_pb_tsize(block: &[u8], child_tsizes: impl IntoIterator<Item = u64>) -> u64 {
+    let block_len = block.len() as u64;
+    let children = child_tsizes.into_iter().sum::<u64>();
+    block_len + children
 }
 
 /// Protobuf field `field` of wire type 2: its tag, the length of `bytes` as a

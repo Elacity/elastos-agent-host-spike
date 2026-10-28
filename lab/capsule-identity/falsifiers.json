@@ -2908,18 +2908,22 @@
     },
     {
       "id": "F-CI18m",
-      "title": "a link to a directory has Tsize of its block alone, without the child's link Tsizes",
+      "title": "a dag-pb node's Tsize is its block alone, without its children's Tsizes",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let tsize = block.len() as u64 + links.iter().map(|link| link.tsize).sum::<u64>();\n",
-          "new": "    let tsize = block.len() as u64;\n"
+          "old": "    block_len + children\n",
+          "new": "    block_len\n"
         }
       ],
       "tests": [
-        "lab_cid_matches_the_pinned_value_for_each_fixture"
+        "lab_cid_matches_the_pinned_value_for_each_fixture",
+        "directory_over_the_hamt_threshold_is_a_shard",
+        "child_directory_over_the_hamt_threshold_is_a_shard",
+        "file_over_one_leaf_has_the_pinned_cid",
+        "check_name_uses_the_single_naming_path"
       ]
     },
     {
@@ -4500,14 +4504,14 @@
     },
     {
       "id": "F-CI48d",
-      "title": "a link to a file root has the leaves' lengths as Tsize, without the root block's length (anchor moved by task 051: every file node's Tsize line)",
+      "title": "a file node's Tsize is its children's lengths alone, without the node's block length (anchor moved by task 060: the one dag-pb Tsize line)",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "                let tsize =\n                    block.len() as u64 + children.iter().map(|child| child.tsize).sum::<u64>();\n",
-          "new": "                let tsize = children.iter().map(|child| child.tsize).sum::<u64>();\n"
+          "old": "    block_len + children\n",
+          "new": "    children\n"
         }
       ],
       "tests": [
@@ -4722,7 +4726,8 @@
       ],
       "tests": [
         "directory_over_the_hamt_threshold_is_a_shard",
-        "child_directory_over_the_hamt_threshold_is_a_shard"
+        "child_directory_over_the_hamt_threshold_is_a_shard",
+        "tests::hamt_digest_is_the_marked_murmur3_copy"
       ]
     },
     {
@@ -4880,19 +4885,21 @@
     },
     {
       "id": "F-CI56k",
-      "title": "a child shard's Tsize leaves out its block's length",
+      "title": "a dag-pb node's Tsize is its children's Tsizes alone, without its block's length",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "            let tsize = block.len() as u64 + child.links.iter().map(|link| link.tsize).sum::<u64>();\n",
-          "new": "            let tsize = child.links.iter().map(|link| link.tsize).sum::<u64>();\n"
+          "old": "    block_len + children\n",
+          "new": "    children\n"
         }
       ],
       "tests": [
+        "lab_cid_matches_the_pinned_value_for_each_fixture",
         "directory_over_the_hamt_threshold_is_a_shard",
-        "child_directory_over_the_hamt_threshold_is_a_shard"
+        "child_directory_over_the_hamt_threshold_is_a_shard",
+        "file_over_one_leaf_has_the_pinned_cid"
       ]
     },
     {

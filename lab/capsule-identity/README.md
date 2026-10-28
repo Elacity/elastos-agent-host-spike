@@ -107,10 +107,13 @@ To recompute a lab CID by hand:
    bytes. A directory is judged on the sum over its direct children of the
    name's byte length plus 36 (a CIDv1 SHA-256). At most 262144 is a basic
    directory, whatever the block's length; greater is a HAMT shard. A child
-   directory is judged on its own sum, which the third test below shows. The
-   largest root block the lab names (262144 bytes) got the same CID from Kubo
-   with the provider's HAMT config, unsharded (task 053,
-   `directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused`).
+   directory is judged on its own sum, which the third test below shows. A
+   basic directory's block may be larger than 262144 bytes: the links
+   estimate decides. The 262144-byte root is the block task 053 pinned, and
+   it got the same CID from Kubo with the provider's HAMT config, unsharded
+   (`directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused`).
+   The exact-threshold bundle is a larger basic block, and it is named
+   (`directory_at_the_hamt_threshold_stays_basic`).
 6. A directory whose sum is greater than 262144 is a **HAMT shard** (task
    056): fanout 256, bucket hash murmur3 `New64` (the first 64 bits of
    x64-128 with seed 0), one digest byte per level. Hash each child's name,

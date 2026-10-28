@@ -247,6 +247,30 @@ fn check_name_uses_the_single_naming_path() {
             "{block}"
         );
     }
+    // One Tsize rule: a dag-pb node's block length plus its children's Tsizes
+    // is written once, in dag_pb_tsize, and each node's encoder calls it once.
+    let tsize = library_item(&code, "fn dag_pb_tsize(");
+    assert_eq!(
+        code.matches("block_len + children").count(),
+        1,
+        "the Tsize formula is not written once:\n{tsize}"
+    );
+    assert!(
+        tsize.contains("block_len + children"),
+        "dag_pb_tsize does not add the block length to the children:\n{tsize}"
+    );
+    for item in [
+        "fn encode_directory(",
+        "fn encode_hamt(",
+        "fn hamt_shard<'a>(",
+        "fn file_root_leaves(",
+    ] {
+        assert_eq!(
+            library_item(&code, item).matches("dag_pb_tsize(").count(),
+            1,
+            "{item} does not use the one Tsize rule"
+        );
+    }
     assert_eq!(
         library_item(&code, "pub fn domain_separated_digest(")
             .matches("Sha256::new()")
