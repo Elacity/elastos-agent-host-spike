@@ -1373,7 +1373,8 @@ pub fn published(folder: &Path) -> (String, PathBuf) {
 /// - [`StandInRuntime::get_capability_list_all_sessions_live`]: RA-1's
 ///   `GET /api/capability/list?scope=all_sessions_live`, the grant view;
 /// - [`StandInRuntime::seed_grant`]: Lab test seam, not a route;
-/// - [`StandInRuntime::asks_of`]: Lab test seam, not a route.
+/// - [`StandInRuntime::asks_of`]: Lab test seam, not a route;
+/// - [`StandInRuntime::set_after_walk`]: Lab test seam, not a route.
 ///
 /// The route methods take and return JSON bodies. It holds a store (printed
 /// lab CID -> bundle folder, filled at publish time by [`published`]), the
@@ -1391,13 +1392,16 @@ pub fn published(folder: &Path) -> (String, PathBuf) {
 /// A launched instance is handed its asks only as the `asks.json` bytes of
 /// the checked bundle it was launched from, read through the test seam
 /// [`StandInRuntime::asks_of`]: a change on disk after launch does not reach
-/// it. The bytes are never parsed, and #309 has no asks field.
+/// it. The bytes are never parsed, and #309 has no asks field. A change on
+/// disk between the walk and the launch does not reach it either, shown
+/// through the test seam [`StandInRuntime::set_after_walk`].
 pub struct StandInRuntime {
     store: BTreeMap<String, PathBuf>,
     records: Vec<PackageRecord>,
     accepted: Vec<String>,
     instances: Vec<Instance>,
     grants: Vec<Grant>,
+    after_walk: Option<fn(&Path)>,
 }
 
 /// One launched instance: a record, never a running program.
@@ -1450,6 +1454,7 @@ impl StandInRuntime {
             accepted,
             instances: Vec::new(),
             grants: Vec::new(),
+            after_walk: None,
         }
     }
 
@@ -1523,6 +1528,15 @@ impl StandInRuntime {
             .and_then(|instance| instance.asks.clone())
     }
 
+    /// Lab test seam, not a route: every later launch calls `hook` once, on
+    /// the stored bundle folder, right after the one walk and before the name
+    /// compare (e). A test uses it to change the bytes on disk between the
+    /// walk and the launch, and shows that the instance is still handed the
+    /// bytes the walk read. With no hook set, nothing is called.
+    pub fn set_after_walk(&mut self, hook: fn(&Path)) {
+        self.after_walk = Some(hook);
+    }
+
     /// The checks of a launch, in this order, each library refusal as its own
     /// text: (a) the body, (b) the one parse of a printed lab CID, (c) the
     /// store, (d) the one walk, (e) the one name compare against the stored
@@ -1530,7 +1544,9 @@ impl StandInRuntime {
     /// (a), (b) and (c) come before the CID check. The answer is the stored
     /// manifest's `name`, from [`CheckedBundle::manifest_name`], and the
     /// bundle's `asks.json` bytes, both from the one checked bundle that
-    /// passed every check.
+    /// passed every check. The hook of [`StandInRuntime::set_after_walk`], if
+    /// set, runs on the stored folder right after (d); no check after (d)
+    /// and no part of the answer reads the folder.
     fn checked_launch(&self, body: &Value) -> Result<(String, Option<Vec<u8>>), String> {
         let cid = self.launch_cid(body)?;
         cid.parse::<LabCid>().map_err(said)?;
@@ -1539,6 +1555,9 @@ impl StandInRuntime {
             .get(&cid)
             .ok_or_else(|| format!("no bundle is stored under {cid}"))?;
         let checked = checked_bundle(folder).map_err(said)?;
+        if let Some(hook) = self.after_walk {
+            hook(folder);
+        }
         checked.check_name(&cid).map_err(said)?;
         self.check_records(&checked, &cid)?;
         Ok((checked.manifest_name().to_owned(), signed_asks(&checked)))

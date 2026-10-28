@@ -587,6 +587,7 @@ Lane diff: `git diff 1503ac6f4^1 1503ac6f4 -- lab/capsule-identity/` (6 files, +
   of 257) was not rerun here, only F-CI35.
 
 FOLLOWUP: lab/capsule-identity/GAP-REPORT.md:839 says "a stub that reads the folder again fails", but only a re-read when `asks_of` is called (F-CI35a) fails; a stub that reads `asks.json` from the stored folder again at launch passes both named tests, because no test changes the folder between the walk and the launch; hand check: in `lab/capsule-identity/tests/common/mod.rs:1544` replace `signed_asks(&checked)` with `fs::read(folder.join(ASKS_FILE)).ok()`, run `RUST_TEST_THREADS=2 cargo test --locked --offline --manifest-path lab/capsule-identity/Cargo.toml --test stand_in -- standin_hands_an_instance_only_its_signed_asks_bytes standin_gives_each_session_its_own_asks` (`test result: ok. 2 passed`), then put the file back.
+Answered by task 044, on 2026-10-28: `standin_takes_the_asks_from_the_walk_not_the_folder` changes the stored `asks.json` between the walk and the launch, and F-CI44a (this stub) is CAUGHT by it. The line's `GAP-REPORT.md:839` is at this section's base `9bd839491`; at task 044's base `6664cc655`, `grep -n "a stub that reads the folder again fails" lab/capsule-identity/GAP-REPORT.md` finds the sentence at `:849`.
 
 Principles check:
 
