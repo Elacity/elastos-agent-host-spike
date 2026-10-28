@@ -6768,7 +6768,9 @@ fn dispatch_arm_variants(source: &str, signature: &str, arm_type: &str) -> Optio
 /// `struct <name> {`, and whose text after the brace is empty, so a use of the
 /// name elsewhere does not count. The body runs from that `{` to the `}` that
 /// closes it, and a brace inside a string literal does not count. Comments are
-/// removed before selecting the declaration or finding its closing brace.
+/// removed before selecting the declaration or finding its closing brace. A
+/// declaration spelled inside a string literal, including one that spans lines,
+/// is text in that string and never the declaration.
 fn item_body(source: &str, name: &str, kind: &str) -> Option<String> {
     let source = without_comments(source);
     let declaration = format!("{kind} {name} {{");
@@ -6776,6 +6778,9 @@ fn item_body(source: &str, name: &str, kind: &str) -> Option<String> {
     while let Some(offset) = source[from..].find(&declaration) {
         let start = from + offset;
         from = start + declaration.len();
+        if inside_string(&source, start) {
+            continue;
+        }
         let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
         if !declaration_qualifier(source[line_start..start].trim()) {
             continue;
@@ -6811,7 +6816,9 @@ fn declaration_qualifier(text: &str) -> bool {
 /// braces every field is one comma-separated item, and the active
 /// `#[serde(rename = "...")]` on that item names the wire field; every other
 /// field keeps its Rust name. A trailing comma is optional. The source's
-/// comments are read as nothing, so no comment names an item or a field.
+/// comments are read as nothing, so no comment names an item or a field, and a
+/// declaration spelled inside a string literal, including one that spans lines,
+/// is text in that string and never the declaration.
 fn wire_field_names(source: &str, item: &str) -> Option<Vec<String>> {
     let source = without_comments(source);
     let source = source.as_str();
@@ -6819,6 +6826,9 @@ fn wire_field_names(source: &str, item: &str) -> Option<Vec<String>> {
     while let Some(offset) = source[from..].find(item) {
         let start = from + offset;
         from = start + item.len();
+        if inside_string(source, start) {
+            continue;
+        }
         let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
         if !declaration_qualifier(source[line_start..start].trim()) {
             continue;
@@ -6845,6 +6855,37 @@ fn field_names(body: &str) -> Vec<String> {
         .filter(|field| !field.trim().is_empty())
         .map(field_wire_name)
         .collect()
+}
+
+/// Whether `index`, a byte offset into `text`, falls inside a `"..."` string
+/// literal, so text a string holds never selects a declaration.
+///
+/// The scan starts at the beginning of `text` and counts quote characters the
+/// way `without_comments` does: a `"` opens a string, the matching unescaped
+/// `"` closes it, and a backslash escapes the character after it, so an escaped
+/// quote keeps the string open. Text at `index` itself is not read, so the
+/// opening quote of a string is outside it. This is the one boundary test for
+/// both item and field selection (P10).
+fn inside_string(text: &str, index: usize) -> bool {
+    let mut in_string = false;
+    let mut quote_escape = false;
+    for (at, character) in text.char_indices() {
+        if at >= index {
+            break;
+        }
+        if in_string {
+            if character == '"' && !quote_escape {
+                in_string = false;
+            }
+            quote_escape = character == '\\' && !quote_escape;
+            continue;
+        }
+        if character == '"' {
+            in_string = true;
+            quote_escape = false;
+        }
+    }
+    in_string
 }
 
 /// `text` with every `//` line comment and every `/* ... */` block comment
@@ -9683,8 +9724,9 @@ const FIXTURE_OPERATIONS: [&str; 4] = [
 /// with an extra name, a missing name, another order, a renamed field's Rust
 /// name, a name only a comment mentions and no `op`; it refuses a
 /// stale cell when a comment holds an old enum before the active declaration,
-/// and an omitted field after a rename whose string contains delimiters. It
-/// keeps escaped quotes inside attribute strings.
+/// an omitted field after a rename whose string contains delimiters, and an
+/// omitted field when a multiline string holds a copy of the active arm without
+/// it. It keeps escaped quotes inside attribute strings.
 /// It refuses a
 /// `wallet_contract` row that omits an envelope
 /// name, names another kind, names another `params` name, omits `params`, and
@@ -10407,6 +10449,77 @@ fn operations_table_row_check_refuses_each_bad_table() {
         }
     }
 
+    // Rule 5: a declaration spelled inside a string literal is that string's
+    // text, not the declaration, including when the string spans lines. The
+    // contract's `ListAccounts` arm gains a documentation string that holds a
+    // copy of the arm without `required`, and the real arm keeps the field, so
+    // a reader that selects by substring alone omits `required` and accepts a
+    // stale cell.
+    let documented_arm = ROW_FIXTURE_CONTRACT.replacen(
+        "    ListAccounts {\n        include_revoked: bool,\n    },\n",
+        "    #[doc = \"\n    ListAccounts { include_revoked: bool },\n    \"]\n    ListAccounts {\n        include_revoked: bool,\n        required: String,\n    },\n",
+        1,
+    );
+    assert_ne!(documented_arm, ROW_FIXTURE_CONTRACT);
+    fs::write(&contract_source, &documented_arm).expect("documented arm fixture");
+    let operation = "wallet_contract list_accounts";
+    let stale = "`op`, `request` (`kind: list_accounts`, `params` (`include_revoked`)), \
+                 `_runtime_invocation`";
+    let complete = "`op`, `request` (`kind: list_accounts`, `params` (`include_revoked`, \
+                    `required`)), `_runtime_invocation`";
+    assert_eq!(
+        row_problems(
+            "fixture-provider",
+            &passing.replacen(&fixture_inputs(operation), stale, 1),
+            provider.path()
+        ),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {operation} holds the \
+             Inputs cell {stale}, and {provider_paths} with {} names {complete}",
+            contract_source.display()
+        )],
+        "a declaration inside a multiline string must not hide a declared field"
+    );
+    assert_eq!(
+        row_problems(
+            "fixture-provider",
+            &passing.replacen(&fixture_inputs(operation), complete, 1),
+            provider.path()
+        ),
+        Vec::<String>::new(),
+        "the real arm's fields must be the ones the cell names"
+    );
+    fs::write(&contract_source, ROW_FIXTURE_CONTRACT).expect("fixture contract source restore");
+
+    // Rule 5: the same boundary holds for the enclosing enum's body. A
+    // multiline string before `enum Request` holds a copy of the enum whose
+    // `Init` arm lacks `wire_name`, so a body reader that selects by substring
+    // alone omits the field and accepts a stale cell.
+    let documented_enum = format!(
+        "#[doc = \"\nenum Request {{\n    Init {{ config: Value }},\n}}\n\"]\n{ROW_FIXTURE_PROVIDER}"
+    );
+    fs::write(&provider_source, &documented_enum).expect("documented enum fixture");
+    let stale = "`op`, `config`";
+    let complete = "`op`, `config`, `wire_name`";
+    assert_eq!(
+        row_problems(
+            "fixture-provider",
+            &passing.replacen(&fixture_inputs("init"), stale, 1),
+            provider.path()
+        ),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds the Inputs cell \
+             {stale}, and {provider_paths} names {complete}"
+        )],
+        "an enum spelled inside a string must not hide a declared field"
+    );
+    assert_eq!(
+        row_problems("fixture-provider", &passing, provider.path()),
+        Vec::<String>::new(),
+        "the real enum's fields must be the ones the passing table names"
+    );
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
     // Rule 5: a `wallet_contract` row's outer names, its `kind`, and its
     // `params` names.
     let contract_path = contract_source.display().to_string();
@@ -10665,7 +10778,9 @@ fn operations_table_row_check_refuses_each_bad_table() {
 /// item named inside a string or after another item does not match. A comment
 /// names no item and no field, whether it is a `//` line comment or a
 /// `/* ... */` block comment, so a comment before a renamed field that mentions
-/// another `rename` leaves the active attribute's name. The text is
+/// another `rename` leaves the active attribute's name. An arm whose own name
+/// and a field-less copy of it sit inside a multiline string reads that arm's
+/// real fields, so a string never supplies or hides a field. The text is
 /// built in the test; no file is read.
 #[test]
 fn wire_field_reader_keeps_an_empty_item_apart_from_a_missing_one() {
@@ -10699,6 +10814,16 @@ pub struct Envelope {
 pub struct BlockCommented {
     /* Previously rename = \"block_stale\" */ #[serde(rename = \"block_wire\")]
     field_name: Option<Value>,
+}
+
+enum Documented {
+    #[doc = \"
+    DocNamed { stale: u8 },
+    \"]
+    DocNamed {
+        kept: u8,
+        required: String,
+    },
 }
 ";
 
@@ -10744,6 +10869,11 @@ pub struct BlockCommented {
         ("a name inside another item", "config", None),
         ("a name inside a string", "wire_name", None),
         ("a name inside a comment", "stale_name", None),
+        (
+            "an arm whose own copy sits inside a multiline string",
+            "DocNamed",
+            Some(vec!["kept".into(), "required".into()]),
+        ),
     ] {
         assert_eq!(
             wire_field_names(source, item),
