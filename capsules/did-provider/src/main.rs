@@ -765,12 +765,15 @@ mod tests {
     /// answers `storage_error` when that read is denied, so `get_did` stops
     /// answering ok and
     /// `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged`
-    /// fails.
-    const EXPECTED_FALSIFIER_IDS: [&str; 31] = [
+    /// fails. Task 118 adds DID32, which writes one file into the provider's
+    /// own storage root in the `Request::Shutdown` arm of `fn handle` before
+    /// it answers, so that same test fails on its final compare after
+    /// `shutdown`.
+    const EXPECTED_FALSIFIER_IDS: [&str; 32] = [
         "DID01", "DID02", "DID03", "DID04", "DID05", "DID06", "DID07", "DID08", "DID09", "DID10",
         "DID11", "DID12", "DID13", "DID14", "DID15", "DID16", "DID17", "DID18", "DID19", "DID20",
         "DID21", "DID22", "DID23", "DID24", "DID25", "DID26", "DID27", "DID28", "DID29", "DID30",
-        "DID31",
+        "DID31", "DID32",
     ];
 
     /// The repository root; this crate, its test targets and the one runner's
