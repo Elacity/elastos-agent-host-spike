@@ -65,7 +65,8 @@ DATA = HERE / "falsifiers.json"
 # Each provider crate is its own workspace with its own lockfile.
 PROVIDER_MANIFEST = REPO / "capsules" / "model-provider" / "Cargo.toml"
 # One table for the three provider crates, the lab's capsule-identity crate,
-# the lab's agent-conformance crate, the lab's grant-binding crate and the
+# the lab's agent-conformance crate, the lab's grant-binding crate, the
+# mission crates two-capsule-run, useful-task and plan-approval, and the
 # lab's wasm-capsule workspace.
 # Each row is a crate's manifest plus the optional Cargo arguments its command
 # adds; each entry is its own workspace with its own lockfile, and its command
@@ -75,7 +76,10 @@ PROVIDER_MANIFEST = REPO / "capsules" / "model-provider" / "Cargo.toml"
 # and its audit member's tests live behind that flag. The agent-conformance
 # crate needs no argument: its `default-members` already select its `probe`
 # member. The grant-binding crate is one package in its own empty `[workspace]`
-# with a committed lockfile, so it needs none either.
+# with a committed lockfile, so it needs none either. The three mission crates
+# need none either. They are registered before their manifests exist; spec()
+# still only builds argv, and a selected command whose manifest is absent is
+# refused before any baseline or mutation.
 PROVIDER_CRATES = {
     "provider": (PROVIDER_MANIFEST, ()),
     "did": (REPO / "capsules" / "did-provider" / "Cargo.toml", ()),
@@ -83,6 +87,9 @@ PROVIDER_CRATES = {
     "capsule-identity": (REPO / "lab" / "capsule-identity" / "Cargo.toml", ()),
     "agent-conformance": (REPO / "lab" / "agent-conformance" / "Cargo.toml", ()),
     "grant-binding": (REPO / "lab" / "grant-binding" / "Cargo.toml", ()),
+    "two-capsule-run": (REPO / "lab" / "two-capsule-run" / "Cargo.toml", ()),
+    "useful-task": (REPO / "lab" / "useful-task" / "Cargo.toml", ()),
+    "plan-approval": (REPO / "lab" / "plan-approval" / "Cargo.toml", ()),
     "lab": (REPO / "lab" / "wasm-capsule" / "Cargo.toml", ("--workspace",)),
 }
 BACKUP_SUFFIX = ".falsify-original"
@@ -331,7 +338,10 @@ def load(path=DATA):
 #   probe/capsule.json, probe/src/lib.rs, src/census.rs, src/harness.rs,
 #   src/report.rs, tests/artifact.rs, tests/common/grants.rs,
 #   tests/common/mod.rs, tests/common/operator.rs, tests/common/probe.rs,
-#   tests/effects.rs and tests/runtime.rs. Its values are
+#   tests/effects.rs and tests/runtime.rs; its shared stand-in
+#   standin-runtime/mod.rs is registered here ahead of the pending WP move,
+#   so a killed edit to that authority implementation is restored too. Its
+#   values are
 #   `../../lab/agent-conformance/...`, relative to examples/agent-host, the
 #   folder the runner resolves every list's edit against, so recovery finds
 #   each of these files under lab/agent-conformance.
@@ -402,6 +412,7 @@ PROVIDER_TARGETS = (
     "lab/agent-conformance/src/census.rs",
     "lab/agent-conformance/src/harness.rs",
     "lab/agent-conformance/src/report.rs",
+    "lab/agent-conformance/standin-runtime/mod.rs",
     "lab/agent-conformance/tests/artifact.rs",
     "lab/agent-conformance/tests/common/grants.rs",
     "lab/agent-conformance/tests/common/mod.rs",
@@ -2141,10 +2152,11 @@ def a_killed_provider_edit_is_recovered():
     tools/src/bin/bundle.rs, tools/src/bundle.rs, tools/src/lib.rs,
     tools/src/receipt.rs, tools/src/run.rs, tools/src/verify.rs,
     tools/src/lab_name.rs and audit Cargo.toml, INTERFACE.md and src/lib.rs,
-    agent-conformance's 19 edit targets and grant-binding's five edit targets
-    all come back in either startup mode. Foreign backups, including both
-    providers' confinement documents, each harness's support neighbour, the
-    model provider tests' other.rs neighbour, wallet's test support
+    agent-conformance's 19 edit targets and its shared stand-in, which is
+    registered ahead of the pending WP move, and grant-binding's five edit
+    targets all come back in either startup mode. Foreign backups, including
+    both providers' confinement documents, each harness's support neighbour,
+    the model provider tests' other.rs neighbour, wallet's test support
     neighbour, the labs' adoption note, gap report and web-app fixture, the
     lab's tools manifest and a tools/src neighbour, stay with their owners."""
     owned = {entry["id"]: entry
@@ -2157,7 +2169,8 @@ def a_killed_provider_edit_is_recovered():
     # capsule-identity's .gitignore, README.md,
     # src/lib.rs, tests/common/mod.rs and fixtures/wc001-core/capsule.json,
     # the wasm lab's edit and run-log files, agent-conformance's 19 edit
-    # targets and grant-binding's five edit targets are named here, not read
+    # targets plus its shared stand-in, registered ahead of the pending WP
+    # move, and grant-binding's five edit targets are named here, not read
     # from the table, so a target dropped from PROVIDER_TARGETS is caught.
     # Their original bytes are written in the isolated tree, never read from
     # the real lab or crates.
@@ -2207,6 +2220,7 @@ def a_killed_provider_edit_is_recovered():
                  "../../lab/agent-conformance/src/census.rs",
                  "../../lab/agent-conformance/src/harness.rs",
                  "../../lab/agent-conformance/src/report.rs",
+                 "../../lab/agent-conformance/standin-runtime/mod.rs",
                  "../../lab/agent-conformance/tests/artifact.rs",
                  "../../lab/agent-conformance/tests/common/grants.rs",
                  "../../lab/agent-conformance/tests/common/mod.rs",
@@ -3068,16 +3082,18 @@ def argv_refusal_precedes_work():
 def provider_spec_uses_locked_manifest():
     """Every crate in the table — the three provider crates, the lab's
     capsule-identity crate, the lab's agent-conformance crate, the lab's
-    grant-binding crate and the lab's wasm-capsule workspace — is a registered
+    grant-binding crate, the mission crates two-capsule-run, useful-task and
+    plan-approval, and the lab's wasm-capsule workspace — is a registered
     command, and both its build and run argv name --locked and the manifest
     that follows --manifest-path. The lab workspace adds --workspace before
-    the libtest separator; every other row, agent-conformance and
-    grant-binding included, adds no argument. The expected manifests and
-    arguments are written here, so a table that maps one crate to another
-    crate's manifest is caught (PV43, PV50, PV118, PV129); lab registration,
-    its manifest, its omitted workspace flag and a flag that leaks into a
-    provider row are caught (PV65-PV68); an absent agent-conformance row is
-    caught (PV117), and an absent grant-binding row is caught (PV128)."""
+    the libtest separator; every other row, agent-conformance, grant-binding
+    and the three mission crates included, adds no argument. The expected
+    manifests and arguments are written here, so a table that maps one crate
+    to another crate's manifest is caught (PV43, PV50, PV118, PV129); lab
+    registration, its manifest, its omitted workspace flag and a flag that
+    leaks into a provider row are caught (PV65-PV68); an absent
+    agent-conformance row is caught (PV117), an absent grant-binding row is
+    caught (PV128), and an absent mission-crate row is caught here."""
     ok = True
     expected = {
         "provider": (str(REPO / "capsules" / "model-provider" / "Cargo.toml"), ()),
@@ -3086,6 +3102,9 @@ def provider_spec_uses_locked_manifest():
         "capsule-identity": (str(REPO / "lab" / "capsule-identity" / "Cargo.toml"), ()),
         "agent-conformance": (str(REPO / "lab" / "agent-conformance" / "Cargo.toml"), ()),
         "grant-binding": (str(REPO / "lab" / "grant-binding" / "Cargo.toml"), ()),
+        "two-capsule-run": (str(REPO / "lab" / "two-capsule-run" / "Cargo.toml"), ()),
+        "useful-task": (str(REPO / "lab" / "useful-task" / "Cargo.toml"), ()),
+        "plan-approval": (str(REPO / "lab" / "plan-approval" / "Cargo.toml"), ()),
         "lab": (str(REPO / "lab" / "wasm-capsule" / "Cargo.toml"), ("--workspace",)),
     }
     for command, (manifest, extra) in expected.items():
@@ -3502,6 +3521,123 @@ def a_backup_refusal_removes_this_runs_temporary_file():
     return ok
 
 
+def new_mission_commands_list_and_refuse_missing_manifests():
+    """Each new mission command loads from a synthetic list and is displayed
+    while its manifest is absent. Selecting that command exits 2 with the
+    command, its exact manifest path and `manifest does not exist`, and
+    calls neither the baseline nor a mutation. caught, survives and
+    compile_error all refuse the same way. A missing manifest for a command
+    this run did not select does not stop a selected command whose scratch
+    manifest exists. Fixtures live only under SELF_TEST_DIR, so the proof
+    still holds after the real crates arrive."""
+    commands = ("two-capsule-run", "useful-task", "plan-approval")
+    expects = ("caught", "survives", "compile_error")
+    ok = True
+    shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    try:
+        SELF_TEST_DIR.mkdir(parents=True)
+        manifests = SELF_TEST_DIR / "manifests"
+        patched = {command: (manifests / command / "Cargo.toml", extra)
+                   for command, (_manifest, extra) in PROVIDER_CRATES.items()}
+        calls = {"baseline": 0, "mutation": 0}
+        real_mutation = Mutation
+
+        def counting_baseline(chosen, how_for):
+            calls["baseline"] += 1
+            return {entry["command"]: (True, {}) for entry in chosen}
+
+        class CountingMutation(real_mutation):
+            def __enter__(self):
+                calls["mutation"] += 1
+                return super().__enter__()
+
+        def quiet_run(_argv, _cwd):
+            return 0, ""
+
+        def skip_disk():
+            return None
+
+        def one_entry(command, expect, entry_id):
+            tests = [] if expect == "compile_error" else ["tests::planted_check"]
+            return {"id": entry_id, "title": f"{command} {expect}",
+                    "command": command, "expect": expect, "edits": [],
+                    "tests": tests}
+
+        def run_main(argv):
+            calls["baseline"] = 0
+            calls["mutation"] = 0
+            stdout, stderr = io.StringIO(), io.StringIO()
+            code = None
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                try:
+                    code = main(argv)
+                except SystemExit as stop:
+                    code = stop.code
+            return (code, stdout.getvalue(), stderr.getvalue(),
+                    calls["baseline"], calls["mutation"])
+
+        with mock.patch.dict(globals(), PROVIDER_CRATES=patched,
+                             baseline=counting_baseline,
+                             Mutation=CountingMutation, run=quiet_run,
+                             check_disk=skip_disk):
+            for command in commands:
+                if command not in COMMANDS:
+                    print(f"self-test: {command} is not a registered command")
+                    ok = False
+                entries = [one_entry(command, expect, expect) for expect in expects]
+                path = SELF_TEST_DIR / f"{command}.json"
+                path.write_text(json.dumps({"falsifiers": entries}), encoding="utf-8")
+                code, out, err, _base_n, _mut_n = run_main(
+                    ["--from", str(path), "--keep-backups", "--list"])
+                listed = code == 0 and all(
+                    f"{expect:6} {command:8} {expect:13}" in out for expect in expects)
+                shown = out.strip() if code == 0 else (err.strip() or out.strip())
+                print(f"self-test: {command} list -> exit {code}: {shown}")
+                if not listed:
+                    ok = False
+                if command not in COMMANDS:
+                    continue
+                manifest = patched[command][0]
+                if manifest.is_file():
+                    print(f"self-test: {command} fixture manifest was created")
+                    ok = False
+                for expect in expects:
+                    code, _out, err, base_n, mut_n = run_main(
+                        ["--from", str(path), "--keep-backups", expect])
+                    want = f"{manifest}: {command}: manifest does not exist\n"
+                    print(f"self-test: {command} {expect} missing manifest -> "
+                          f"exit {code}: {err.strip()}; "
+                          f"baseline={base_n}, mutation={mut_n}")
+                    if code != 2 or err != want or base_n != 0 or mut_n != 0:
+                        ok = False
+            present = "plan-approval"
+            absent = "two-capsule-run"
+            if present not in patched or absent not in patched:
+                print(f"self-test: {absent} or {present} is not a registered command")
+                ok = False
+            else:
+                present_manifest = patched[present][0]
+                present_manifest.parent.mkdir(parents=True)
+                present_manifest.write_text("[package]\nname = \"scratch\"\n",
+                                            encoding="utf-8")
+                mixed = [one_entry(absent, "compile_error", "ABSENT"),
+                         one_entry(present, "compile_error", "PRESENT")]
+                mixed_path = SELF_TEST_DIR / "mixed.json"
+                mixed_path.write_text(json.dumps({"falsifiers": mixed}),
+                                      encoding="utf-8")
+                code, out, err, base_n, mut_n = run_main(
+                    ["--from", str(mixed_path), "--keep-backups", "PRESENT"])
+                print(f"self-test: unselected {absent} missing, selected {present} "
+                      f"continues -> exit {code}: {err.strip() or out.strip()}; "
+                      f"baseline={base_n}, mutation={mut_n}")
+                if (code == 2 or "manifest does not exist" in err or base_n == 0
+                        or patched[absent][0].is_file()):
+                    ok = False
+    finally:
+        shutil.rmtree(SELF_TEST_DIR, ignore_errors=True)
+    return ok
+
+
 # Each self-test case is named, so a falsifier names one and the runner runs
 # it on its own. A name not listed here is not a case: the runner reports it
 # as not run, never as caught.
@@ -3577,6 +3713,8 @@ SELF_TEST_CASES = {
         an_agent_conformance_entry_loads_and_runs_its_crate,
     "a grant-binding entry loads and runs its crate":
         a_grant_binding_entry_loads_and_runs_its_crate,
+    "new mission commands list and refuse missing manifests":
+        new_mission_commands_list_and_refuse_missing_manifests,
     "list mode displays": list_mode_displays,
     "prefix token still selects": prefix_token_still_selects,
     "list with a bare token is refused": list_with_a_bare_token_is_refused,
@@ -3636,6 +3774,22 @@ def stop_on_term(*_):
     raise KeyboardInterrupt
 
 
+def refuse_absent_selected_manifests(chosen):
+    """One check for the selected table commands, after ids are chosen and
+    before run_chosen() builds a baseline or applies a mutation. spec() only
+    builds argv. A command this run did not select is not checked, so its
+    missing manifest does not stop the selected work."""
+    seen = set()
+    for entry in chosen:
+        command = entry["command"]
+        if command not in PROVIDER_CRATES or command in seen:
+            continue
+        seen.add(command)
+        manifest = PROVIDER_CRATES[command][0]
+        if not manifest.is_file():
+            load_refuse(manifest, f"{command}: manifest does not exist")
+
+
 def main(argv):
     signal.signal(signal.SIGTERM, stop_on_term)
     parsed = parse_argv(argv)
@@ -3671,6 +3825,7 @@ def main(argv):
     if not chosen:
         print("no falsifier matches", " ".join(parsed.filters))
         return 2
+    refuse_absent_selected_manifests(chosen)
     counts = {}
     bad = []
     ran_e2e = False
