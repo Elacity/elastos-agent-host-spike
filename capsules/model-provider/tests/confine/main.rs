@@ -1653,7 +1653,9 @@ fn operations_section_cites_existing_tests() {
     /// in order. A literal in a string or a comment is not a literal. Zero or
     /// two literals, a mismatched closer, an unsupported key, a parenthesized
     /// key, a raw string or a character literal inside the body, and an
-    /// unfinished token are errors. The reader does not descend into a value.
+    /// unfinished token are errors. Each top-level entry must start with a
+    /// quoted key followed by a colon; other key expressions are refused.
+    /// The reader does not descend into a value.
     fn json_literal_keys(region: &str, label: &str) -> Result<Vec<String>, String> {
         const OPEN: &str = "json!({";
         let masked =
@@ -1669,6 +1671,7 @@ fn operations_section_cites_existing_tests() {
         let mut cursor = &region[open_at..];
         let mut stack = vec![b'{'];
         let mut keys = Vec::new();
+        let mut expect_key = true;
         loop {
             if cursor.is_empty() {
                 return Err(format!("{label}: the `json!({{` body has no closing `}}`"));
@@ -1684,7 +1687,7 @@ fn operations_section_cites_existing_tests() {
                     ));
                 }
                 Ok(Some((after, Opaque::OrdinaryString))) => {
-                    if stack.len() == 1 {
+                    if stack.len() == 1 && expect_key {
                         let token_len = cursor.len() - after.len();
                         let content = &cursor[1..token_len - 1];
                         let mut after_key = after.trim_start();
@@ -1696,14 +1699,20 @@ fn operations_section_cites_existing_tests() {
                         {
                             after_key = after_comment.trim_start();
                         }
-                        if after_key.starts_with(':') {
-                            if !is_json_key(content) {
-                                return Err(format!(
-                                    "{label}: unsupported key `{content}` in the `json!({{` body"
-                                ));
-                            }
-                            keys.push(content.to_string());
+                        let Some(after_colon) = after_key.strip_prefix(':') else {
+                            return Err(format!(
+                                "{label}: unsupported key expression after a quoted string in the `json!({{` body"
+                            ));
+                        };
+                        if !is_json_key(content) {
+                            return Err(format!(
+                                "{label}: unsupported key `{content}` in the `json!({{` body"
+                            ));
                         }
+                        keys.push(content.to_string());
+                        expect_key = false;
+                        cursor = after_colon;
+                        continue;
                     }
                     cursor = after;
                     continue;
@@ -1715,10 +1724,6 @@ fn operations_section_cites_existing_tests() {
                 Ok(None) => {}
             }
             match cursor.as_bytes()[0] {
-                open @ (b'{' | b'[') => {
-                    stack.push(open);
-                    cursor = &cursor[1..];
-                }
                 close @ (b'}' | b']') => {
                     let expected = if close == b'}' { b'{' } else { b'[' };
                     let top = stack.pop().expect("the outer `{` is on the stack");
@@ -1738,6 +1743,20 @@ fn operations_section_cites_existing_tests() {
                         "{label}: unsupported key syntax `{}` in the `json!({{` body",
                         paren as char
                     ));
+                }
+                b',' if stack.len() == 1 => {
+                    expect_key = true;
+                    cursor = &cursor[1..];
+                }
+                byte if byte.is_ascii_whitespace() => cursor = &cursor[1..],
+                _ if stack.len() == 1 && expect_key => {
+                    return Err(format!(
+                        "{label}: unsupported key expression in the `json!({{` body"
+                    ));
+                }
+                open @ (b'{' | b'[') => {
+                    stack.push(open);
+                    cursor = &cursor[1..];
                 }
                 _ => cursor = next_char(cursor),
             }
@@ -2785,6 +2804,115 @@ fn operations_section_cites_existing_tests() {
         );
     }
 
+    // Identifier keys are supported by serde_json, but this reader cannot
+    // resolve their values. The reported plant must reach its own refusal.
+    let identifier_key_arm = r#"ProviderOperation::Shutdown => {
+        let extra = "extra";
+        Ok(ok_response(serde_json::json!({
+            "shutdown": true, extra: true
+        })))
+    },"#;
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            answers_contract,
+            answers_state,
+            identifier_key_arm,
+        ),
+        "Shutdown: unsupported key expression in the `json!({` body"
+    );
+    // The same key-position rule covers expressions at the start, after a
+    // value, and between entries, including comments before the expression.
+    for key in [
+        "extra",
+        "r#extra",
+        "caf\u{e9}",
+        "crate::EXTRA",
+        "holder.key",
+        "keys[0]",
+        "extra.clone()",
+        "concat!(\"ex\", \"tra\")",
+        "{ \"extra\" }",
+        "[\"extra\"][0]",
+        "*extra",
+        "&extra",
+        "b\"extra\"",
+        "c\"extra\"",
+        "1",
+        "true",
+    ] {
+        for body in [
+            format!("{key}: true, \"shutdown\": true"),
+            format!("\"shutdown\": true, {key}: true"),
+            format!("\"shutdown\": true, /* key */ // key\n {key}: true, \"tail\": true"),
+        ] {
+            let arm = format!("ProviderOperation::Shutdown => Ok(ok_response(json!({{{body}}}))),");
+            assert_eq!(
+                outputs_failure(
+                    &outputs_row("shutdown", shutdown_outputs),
+                    answers_contract,
+                    answers_state,
+                    &arm,
+                ),
+                "Shutdown: unsupported key expression in the `json!({` body",
+                "the key expression `{key}` must be refused in `{body}`"
+            );
+        }
+    }
+    for key in [
+        "\"extra\".to_string()",
+        "\"extra\" /* key */ .trim()",
+        "\"extra\".to_owned() + suffix",
+        "\"extra\"",
+    ] {
+        let separator = if key == "\"extra\"" { "" } else { ": true" };
+        let arm = format!(
+            "ProviderOperation::Shutdown => Ok(ok_response(json!({{\"shutdown\": true, {key}{separator}}}))),"
+        );
+        assert_eq!(
+            outputs_failure(
+                &outputs_row("shutdown", shutdown_outputs),
+                answers_contract,
+                answers_state,
+                &arm,
+            ),
+            "Shutdown: unsupported key expression after a quoted string in the `json!({` body",
+            "a quoted string only supplies a key when its next token is a colon"
+        );
+    }
+    // Values stay opaque to the key comparison, and their nested commas
+    // cannot change the position of the next top-level key.
+    for value in [
+        "true",
+        "\"value\"",
+        "{\"nested\": [1, 2], extra: 3}",
+        "[{\"nested\": 1}, 2]",
+    ] {
+        let arm = format!(
+            "ProviderOperation::Shutdown => Ok(ok_response(json!({{\"shutdown\": {value},}}))),"
+        );
+        assert_eq!(
+            operations_outputs_match_the_answers(
+                &outputs_row("shutdown", shutdown_outputs),
+                answers_contract,
+                answers_state,
+                &arm,
+            ),
+            Ok(()),
+            "the value `{value}` stays one key"
+        );
+        assert_eq!(
+            outputs_failure(
+                &outputs_row("shutdown", shutdown_outputs),
+                answers_contract,
+                answers_state,
+                &arm.replace(",}))),", ", extra: true}))),"),
+            ),
+            "Shutdown: unsupported key expression in the `json!({` body",
+            "the key after `{value}` must be checked"
+        );
+    }
+
     // A parenthesized key is a key serde reads. The reader refuses it rather
     // than dropping it, so the extra name cannot pass.
     let parenthesized_key_arm = "ProviderOperation::Shutdown => Ok(ok_response(\n    json!({\"shutdown\": true, (\"extra\"): true})\n)),\n";
@@ -2883,6 +3011,25 @@ fn operations_section_cites_existing_tests() {
     assert_eq!(
         json_literal_keys(r#"json!({"a": 1"#, "ok_response"),
         Err("ok_response: the `json!({` body has no closing `}`".to_string())
+    );
+    for (source, reason) in [
+        ("json!({\"a: 1})", "unfinished string"),
+        ("json!({\"a\": r#\"value})", "unfinished raw string"),
+        ("json!({\"a\": '})", "unfinished character literal"),
+        ("json!({\"a\": 1 /* })", "unfinished block comment"),
+    ] {
+        assert_eq!(
+            json_literal_keys(source, "ok_response"),
+            Err(format!("ok_response: {reason} before `json!({{`"))
+        );
+    }
+    assert_eq!(
+        json_literal_keys("json!({)})", "ok_response"),
+        Err("ok_response: unsupported key syntax `)` in the `json!({` body".to_string())
+    );
+    assert_eq!(
+        json_literal_keys(r#"json!({"a": [1}})"#, "ok_response"),
+        Err("ok_response: `}` closes a `[` in the `json!({` body".to_string())
     );
     assert_eq!(
         shutdown_arm_region("fn unrelated() {}\n"),
