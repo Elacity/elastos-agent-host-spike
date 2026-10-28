@@ -16,19 +16,32 @@
 //!
 //! The profile is Kubo v0.40.1's import flags as
 //! `capsules/ipfs-provider/src/directory_hash.rs` sends them: CIDv1, sha2-256,
-//! raw leaves, chunker `size-262144`, no inline, no HAMT shard below its
-//! threshold. The lab CID follows the
-//! Kubo v0.40.1 profile, computed by the lab: no Kubo has computed any pin,
-//! so until an offline Kubo cross-check prints the same value as a committed
-//! pin, it is not called equal to the Runtime's CID or to Kubo's output.
-//! This crate runs no Kubo and pins only the single-block, non-sharded
-//! subset of that profile:
+//! raw leaves, chunker `size-262144`, no inline, a HAMT shard only past its
+//! links threshold. The lab CID follows the
+//! Kubo v0.40.1 profile, computed by the lab: one offline Kubo v0.40.1
+//! hash-only cross-check with the Runtime's profile flags was run by hand on
+//! this Mac (task 050) and printed every committed pin, and the claim stays
+//! these words until Rong or Flint changes them. This crate runs no Kubo
+//! and pins that profile at any tree depth, with a basic directory or a HAMT
+//! shard as Kubo names it:
 //!
 //! 1. Each regular file of at most 262144 bytes (`CHUNK_SIZE`) is one raw
 //!    leaf: its block is the file's bytes (an empty file is an empty block),
 //!    its CID is the bytes `01 55 12 20` and the SHA-256 of the block (CID
 //!    version 1, raw codec `0x55`, multihash sha2-256 of 32 bytes), and its
-//!    Tsize is its length. A larger file is refused: no chunked file DAG.
+//!    Tsize is its length. A larger file is split into 262144-byte raw
+//!    leaves, the last one shorter, under Kubo's balanced dag-pb file tree
+//!    (trickle off) at any depth: the depth is the smallest `d >= 1` with
+//!    `174^d >= leaves` (`max-file-links` 174). A node at depth 1 links up to
+//!    174 leaves; a node at depth `k > 1` links up to 174 nodes of depth
+//!    `k - 1`. Nodes are filled left to right, each full before the next, so
+//!    only a level's last node can be short, and a last node that holds one
+//!    leaf is still a node of one link. Each node's block has, for each child
+//!    in order, a link with the child's CID, an empty name and the child's
+//!    Tsize; then the UnixFS data `08 02` (type file), the bytes under it
+//!    (filesize, field 3) and each child's filesize (blocksizes, field 4, one
+//!    tag per value). Its CID is `01 70 12 20` and the SHA-256 of that block,
+//!    and its Tsize is the block's length plus its children's Tsizes.
 //! 2. A bundle path such as `browser/app.js` is a directory `browser` that
 //!    links `app.js`. Each directory's block is dag-pb: one link per child,
 //!    sorted by name bytes, each as protobuf field 2 holding the child's CID
@@ -36,12 +49,50 @@
 //!    the UnixFS data `08 01` (type directory) as field 1. A directory's CID
 //!    is `01 70 12 20` and the SHA-256 of its block (dag-pb codec `0x70`).
 //!    The Tsize of a link to a directory is that directory's block length
-//!    plus the Tsizes of its links. A block over 262144 bytes is refused: no
-//!    HAMT shard.
+//!    plus the Tsizes of its links. A directory is judged on its own direct
+//!    children: when the sum over them of each name's byte length and 36 (a
+//!    CIDv1 SHA-256) is at most 262144, it is a basic directory, even when
+//!    its block is longer. When that links estimate is greater, it is a HAMT
+//!    shard: fanout 256, hash murmur3 `New64` (the first 64 bits of
+//!    x64-128, seed 0), one digest byte per level. A bucket with one child
+//!    is one link named the bucket's two uppercase hex digits and the
+//!    child's name; a bucket with two or more is one link named only the
+//!    prefix, pointing at a child shard built from the next digest byte. A
+//!    ninth byte is refused with [`Refusal::HamtTooDeep`]. The shard's links
+//!    go out in bucket order; its UnixFS data is `08 05`, field 2 the
+//!    bitmap with bucket `i` in byte `31 - i / 8` at `1 << (i % 8)` and its
+//!    leading zero bytes dropped, `28 22` (hash type) and `30 80 02`
+//!    (fanout 256). Its CID is `01 70 12 20` and the SHA-256 of its block,
+//!    and its Tsize is its block's length plus its links' Tsizes. A child
+//!    directory is judged on its own estimate, so a root of a few names
+//!    stays basic over a sharded child (task 056:
+//!    `directory_at_the_hamt_threshold_stays_basic`,
+//!    `directory_over_the_hamt_threshold_is_a_shard`,
+//!    `child_directory_over_the_hamt_threshold_is_a_shard` and the
+//!    `hello` digest test; falsifiers F-CI56a to F-CI56l, with F-CI18h,
+//!    F-CI53a and F-CI53b retargeted).
 //! 3. The root is the directory of the bundle's entries. Its CID prints as
 //!    `b` and the RFC 4648 base32 of its 36 bytes, lowercase, no padding.
 //!
-//! No empty directory is emitted. Nothing else enters a block: no folder
+//! A path with a part that starts with `.` (a hidden name, such as the
+//! `.DS_Store` macOS Finder writes, or the folder in `.well-known/a.txt`) is
+//! refused with [`Refusal::HiddenName`]: Kubo's `add` without `--hidden`,
+//! and neither Runtime flag list gives it, leaves such a name out of the
+//! CID, so skipping it would leave bytes out of the name, and keeping it
+//! would print a name Kubo does not give. The lab names every byte or
+//! refuses. A dot inside or at the end of a name (`a.b`, `x.`) is a plain
+//! name.
+//!
+//! A folder that holds no file, at any depth (an empty folder, or one that
+//! holds only such folders), is refused with [`Refusal::EmptyFolder`].
+//! Kubo's import with the Runtime's flags (`--empty-dirs=false`) leaves out
+//! an empty folder but keeps a folder that holds only empty folders (task
+//! 052's hand run), so the lab names no folder without a file rather than
+//! print a name Kubo may not give. So no empty directory is ever encoded.
+//! Only the walk sees folders, so the check is in the walk, once; a caller of
+//! the encoder gives file paths, which hold no empty folder.
+//!
+//! Nothing else enters a block: no folder
 //! name, absolute path, mtime, mode, owner or symlink target. The CIDv1 bytes
 //! and the base32 text are one marked lab copy in this crate, so the lab adds
 //! no crate (the Runtime's `cid` crate lives only in server crates the lab
@@ -50,9 +101,19 @@
 //! # One naming path
 //!
 //! [`checked_bundle`] walks a bundle, checks its root manifest, and hands its
-//! entries to [`encode_entries`], the encoder. Together the walk and the
-//! encoder are the only code that names a bundle; tests and tools call them
-//! and re-implement neither. [`lab_cid`] is the same walk and returns only
+//! entries to [`encode_entries`]. That makes each entry's node from its bytes
+//! (one raw leaf, or a file root over its leaves) and hands the nodes to the
+//! one tree builder. [`encode_listed_files`], which a caller with its own
+//! walk calls directly with a closure listing ([`ListedFile`]: path, size,
+//! SHA-256), makes one raw leaf per listed file with the same leaf rule and
+//! hands them to the same builder. [`encode_chunked_files`] is the same
+//! encoder for a file of any size whose caller kept each raw leaf's SHA-256
+//! ([`ChunkedFile`]: path, size, the leaves' digests): it makes the leaves
+//! and the balanced file root with the builder [`encode_entries`] uses, and
+//! checks only that the digest count matches the size. Together the walk and
+//! these three calls are the only code that names a bundle; tests and tools
+//! call them and re-implement none. [`lab_cid`] is the same walk and returns
+//! only
 //! its lab CID. [`check_name`] checks a claimed name, such as one a URL or a
 //! Store row gives, by recomputing the name with [`lab_cid`]: it computes no
 //! name of its own. [`CheckedBundle::check_name`] is its checked form: the
@@ -91,12 +152,17 @@
 //! names the signer and binds the printed lab CID. Its bytes are
 //! [`PackageRecord::package_record_payload`], compact JSON with the keys
 //! `cid`, `schema` ([`PACKAGE_RECORD_SCHEMA`]) and `signer_did`, and no name
-//! field. [`sign_package_record`] signs [`domain_separated_digest`] of
-//! [`PACKAGE_RECORD_DOMAIN`] and that payload; it writes nothing.
-//! [`verify_checked_package_record`] checks, in order, the signer's
-//! `did:key`, the explicit accepted list, the record's CID against the
-//! checked bundle's, then the Ed25519 signature. [`verify_package_record`]
-//! is [`checked_bundle`] and then that check. Both signatures share one
+//! field. The record binds a lab CID however it was computed: a folder walk,
+//! a checked bundle, entries or a closure listing. [`sign_cid_record`] signs
+//! [`domain_separated_digest`] of [`PACKAGE_RECORD_DOMAIN`] and the payload
+//! for one [`LabCid`]; it writes nothing. [`verify_cid_record`] checks, in
+//! order, the signer's `did:key`, the explicit accepted list, the record's
+//! CID against that lab CID, then the Ed25519 signature.
+//! [`sign_package_record`] is [`lab_cid`] and then [`sign_cid_record`];
+//! [`verify_checked_package_record`] is [`verify_cid_record`] over the
+//! checked bundle's CID; [`verify_package_record`] is [`checked_bundle`] and
+//! then the checked call. So a record is built, signed and checked in one
+//! place each. Both signatures share one
 //! digest, one DID encoder and decoder, one accepted-list check and one
 //! Ed25519 verification. `Ok(())` grants nothing.
 //!
@@ -149,6 +215,7 @@
 //! exactly as the bytes its checked handle held.
 #![forbid(unsafe_code)]
 
+use std::borrow::Cow;
 use std::ffi::{CString, OsStr};
 use std::fmt;
 use std::fs::File;
@@ -209,7 +276,8 @@ pub const VARIANT_RECIPE_ENTRY: &str = "provider-variant.recipe";
 
 // The profile: Kubo v0.40.1's import flags as
 // `capsules/ipfs-provider/src/directory_hash.rs` `ADD_OPTIONS` sends them, for
-// one chunk and no HAMT shard, computed by the lab (no Kubo runs here). Each
+// files at any tree depth and a basic directory or a HAMT shard, computed by
+// the lab (no Kubo runs here). Each
 // one changes the CID or the refusal, and each has a falsifier. There is no
 // inline setting: no CID here uses the identity multihash, whatever the size of the block.
 
@@ -224,14 +292,32 @@ const RAW_CODEC: u8 = 0x55;
 /// The codec of a directory block, dag-pb.
 const DAG_PB_CODEC: u8 = 0x70;
 /// The largest file one raw leaf holds (`chunker: size-262144`). A larger
-/// file would need a chunked file DAG, which the lab refuses.
+/// file is split into leaves of this size under one file root.
 const CHUNK_SIZE: usize = 262_144;
+/// The most children one node of a file's tree links, at every level
+/// (`max-file-links: 174`). A file of more leaves gets a deeper tree.
+const MAX_FILE_LINKS: usize = 174;
 /// The UnixFS data type of a directory, written in its block as `08 01`.
 const DIRECTORY_TYPE: u8 = 1;
-/// The longest directory block the lab names. Kubo shards a directory into a
-/// HAMT once its links' estimated size passes 256KiB; the lab refuses a block
-/// over this length instead, which is earlier, so it fails closed.
-const DIRECTORY_BLOCK_LIMIT: usize = 262_144;
+/// The UnixFS data type of a file root, written in its block as `08 02`.
+const FILE_TYPE: u8 = 2;
+/// The largest links estimate of a basic directory (256KiB). A directory
+/// whose estimate is greater is a HAMT shard. Kubo shards only when the
+/// estimate is greater; an estimate of exactly this value stays basic.
+const DIRECTORY_LINKS_LIMIT: usize = 262_144;
+/// The bytes a directory link's estimate counts for a child's CID: a CIDv1
+/// SHA-256 multihash is 36 bytes.
+const CIDV1_SHA256_LENGTH: usize = 36;
+/// The UnixFS data type of a HAMT shard, written in its block as `08 05`.
+const HAMT_SHARD_TYPE: u8 = 5;
+/// The hash type Kubo writes for a HAMT shard, murmur3, as `28 22`.
+const HAMT_HASH_TYPE: u64 = 0x22;
+/// The HAMT fanout: 256 buckets, so each level takes one digest byte.
+const HAMT_FANOUT: u32 = 256;
+/// The bytes of a murmur3 digest: one byte per level, at most eight.
+const HAMT_DIGEST_BYTES: usize = 8;
+/// The bytes of a HAMT shard's bitmap: one bit per bucket.
+const HAMT_BITMAP_BYTES: usize = HAMT_FANOUT as usize / 8;
 
 /// A lab CID, a lab package CID: the SHA-256 digest of a bundle's UnixFS
 /// root directory block. It prints as that root's CIDv1 in base32, 59
@@ -405,16 +491,44 @@ pub enum Refusal {
     /// An entry given to the encoder has a path with an empty, `.` or `..`
     /// part, so it names no UnixFS link. The walk never makes one.
     BadPathPart { path: String },
+    /// An entry given to the encoder has a path with a part that starts with
+    /// `.` (and is not `.` or `..`), such as `.DS_Store` or `.well-known/a`.
+    /// Kubo's import with the Runtime's flags has no `--hidden`, so it leaves
+    /// such a name out of the CID; the lab names every byte or refuses.
+    HiddenName { path: String },
+    /// A folder below the bundle root holds no file at any depth: it is
+    /// empty, or holds only folders that hold no file. Kubo's import with the
+    /// Runtime's flags (`--empty-dirs=false`) leaves out an empty folder but
+    /// keeps a folder that holds only empty folders, so the lab refuses any
+    /// folder with no file rather than print a name Kubo may not give. Only
+    /// the walk sees folders; `path` is the folder's bundle path.
+    EmptyFolder { path: String },
     /// One path given to the encoder is both a file and a directory, as
     /// `a` and `a/b` would be. The walk never makes one.
     FileAndDirectory { path: String },
-    /// A file is longer than one raw leaf holds, 262144 bytes. The lab names
-    /// no chunked file DAG. `length` is the file's length.
+    /// A listed file ([`encode_listed_files`]) is longer than one raw leaf
+    /// holds, 262144 bytes. Its one SHA-256 names a single raw leaf, so a
+    /// larger file is named from its bytes, by [`encode_entries`] or
+    /// [`lab_cid`]. `length` is the listed size.
     FileOverChunkLimit { path: String, length: usize },
-    /// A directory's encoded block is longer than 262144 bytes; `.` is the
-    /// bundle root. The lab names no HAMT-sharded directory. `length` is the
-    /// block's length.
-    DirectoryOverBlockLimit { path: String, length: usize },
+    /// A chunked file ([`encode_chunked_files`]) holds a number of raw-leaf
+    /// digests its size does not give: a file's chunks are [`CHUNK_SIZE`]
+    /// bytes with a short last one, and an empty file is one leaf. `expected`
+    /// is `max(1, ceil(size / CHUNK_SIZE))`, and `supplied` is the length of
+    /// its digest list.
+    ChunkCountMismatch {
+        path: String,
+        size: u64,
+        expected: usize,
+        supplied: usize,
+    },
+    /// A HAMT bucket needs a ninth digest byte: the eight bytes of a 64-bit
+    /// murmur3 digest are one level each, and this bucket's children still
+    /// share all of them. Kubo's hash bits are exhausted here, so the lab
+    /// refuses rather than name a deeper shard. Two distinct names with one
+    /// 64-bit digest reach it; no test can make one, so this refusal has no
+    /// falsifier and no test seam. `path` is the directory's bundle path.
+    HamtTooDeep { path: String },
     /// An entry's open handle is not the kind its folder's listing said: the
     /// entry changed between the listing and the open.
     Changed { path: String },
@@ -508,17 +622,34 @@ impl fmt::Display for Refusal {
                 f,
                 "the path {path:?} has an empty, . or .. part: each part names one UnixFS link"
             ),
+            Refusal::HiddenName { path } => write!(
+                f,
+                "the path {path:?} has a part that starts with .: Kubo's import with the Runtime's flags (no --hidden) leaves a name starting with . out of the CID, and the lab names every byte or refuses"
+            ),
+            Refusal::EmptyFolder { path } => write!(
+                f,
+                "the folder {path:?} holds no file: Kubo's import with the Runtime's flags (--empty-dirs=false) leaves out an empty folder but keeps a folder that holds only empty folders, so the lab refuses any folder with no file rather than print a name Kubo may not give"
+            ),
             Refusal::FileAndDirectory { path } => write!(
                 f,
                 "{path} is both a file and a directory: a bundle path names one or the other"
             ),
             Refusal::FileOverChunkLimit { path, length } => write!(
                 f,
-                "{path} is {length} bytes, over the {CHUNK_SIZE}-byte limit of one raw leaf: the lab names no chunked file"
+                "{path} is {length} bytes, over the {CHUNK_SIZE}-byte limit of one raw leaf: a listed file's one SHA-256 names a single raw leaf, so a larger file is named from its bytes (encode_entries or lab_cid)"
             ),
-            Refusal::DirectoryOverBlockLimit { path, length } => write!(
+            Refusal::ChunkCountMismatch {
+                path,
+                size,
+                expected,
+                supplied,
+            } => write!(
                 f,
-                "the directory {path} encodes to {length} bytes, over the {DIRECTORY_BLOCK_LIMIT}-byte block limit: the lab names no HAMT-sharded directory"
+                "{path} is {size} bytes and holds {supplied} chunk digests: its size gives {expected} chunks of at most {CHUNK_SIZE} bytes, one for an empty file"
+            ),
+            Refusal::HamtTooDeep { path } => write!(
+                f,
+                "the directory {path} needs a ninth murmur3 byte: {HAMT_DIGEST_BYTES} levels of 256 buckets do not separate its names, and the lab writes no deeper HAMT"
             ),
             Refusal::Changed { path } => write!(f, "{path} changed while the bundle was named"),
             Refusal::Unreadable { path, reason } => write!(f, "could not read {path}: {reason}"),
@@ -794,40 +925,288 @@ fn decode_base32(text: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// The encoder: the lab CID of `entries`, given in any order. It is the one
-/// naming hash; every leaf and every directory block is hashed by the one
-/// SHA-256 it holds.
+/// One file of a closure listing: its bundle path, its length in bytes and
+/// the SHA-256 of its bytes. A raw leaf needs nothing else, so a listing of
+/// these is enough to name a bundle of single-block files. A file over one
+/// leaf is not: its file root needs each leaf's SHA-256, so it is named from
+/// its bytes by [`encode_entries`].
 ///
-/// Each entry is a raw leaf: a file over [`CHUNK_SIZE`] bytes is refused,
-/// and its CID is CIDv1, raw codec, sha2-256 of its bytes, with its length as
-/// Tsize. The entry paths make the directories: a path with an empty, `.` or
-/// `..` part, two entries with one path, and one path that is both a file and
-/// a directory are refused. Then each directory, deepest first, becomes one
-/// dag-pb block whose links are sorted by name bytes, a block over
-/// [`DIRECTORY_BLOCK_LIMIT`] bytes is refused, and the root block's SHA-256
-/// is the lab CID.
+/// A listed file names bytes only if its `sha256` and `size` are those of
+/// the bytes: the caller's walk owns that. The encoder reads no file and
+/// checks no manifest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListedFile {
+    pub path: String,
+    pub size: u64,
+    pub sha256: [u8; 32],
+}
+
+/// One file of a closure listing for a file of any size: its bundle path,
+/// its length in bytes and the SHA-256 of each of its raw leaves, in
+/// file-byte order. The leaves are [`CHUNK_SIZE`]-byte chunks of the file,
+/// the last one shorter, so `size` gives each leaf's length; an empty file
+/// has one leaf, the empty raw leaf.
+///
+/// The caller supplies `size` and the digests from the same observed bytes
+/// and owns reading and hashing them. [`encode_chunked_files`] reads no
+/// payload and checks no manifest: it checks the listing's shape, that each
+/// file's digest count is the count its size gives, and names it with the
+/// one CID rule. Byte verification stays the caller's job.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChunkedFile {
+    pub path: String,
+    pub size: u64,
+    pub chunk_sha256: Vec<[u8; 32]>,
+}
+
+/// The lab CID of `entries`, given in any order: each entry's node made from
+/// its bytes by `file_node` (one raw leaf, or the balanced file tree over its
+/// leaves, at any depth), then `encode_tree`, the one
+/// tree builder, which [`encode_listed_files`] and
+/// [`encode_chunked_files`] share. Leaves, file roots and directory blocks
+/// all hash with the one naming hash, `naming_hash`.
 pub fn encode_entries(entries: &[BundleEntry]) -> Result<LabCid, Refusal> {
-    let sha256 = |block: &[u8]| -> [u8; 32] {
-        let mut hasher = Sha256::new();
-        hasher.update(block);
-        hasher.finalize().into()
-    };
-    let mut root = Directory::default();
-    for entry in entries {
-        if entry.content.len() > CHUNK_SIZE {
+    let files = entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), file_node(entry)))
+        .collect();
+    encode_tree(files)
+}
+
+/// The lab CID of a closure listing, given in any order. It reads no file
+/// and checks no manifest. The lab CID names the bytes only if each file's
+/// `sha256` and `size` are those of its bytes; the caller's walk owns that,
+/// as [`checked_bundle`]'s walk does for [`encode_entries`].
+///
+/// Each file is one raw leaf, made by the leaf rule [`encode_entries`] uses:
+/// a `size` over [`CHUNK_SIZE`] bytes is refused, because one SHA-256 names
+/// a single raw leaf and a file root needs each leaf's; its CID is CIDv1,
+/// raw codec, its `sha256`, with its `size` as Tsize. Then `encode_tree`, the
+/// one tree builder: the paths make the directories, and a path with an
+/// empty, `.` or `..` part, a path with a part that starts with `.`, two
+/// files with one path, and one path that is both a file and a directory
+/// are refused. Each directory, deepest first,
+/// becomes one dag-pb block whose links are sorted by name bytes, a directory
+/// over [`DIRECTORY_LINKS_LIMIT`]'s links estimate is a HAMT shard, and the
+/// root block's SHA-256 is the lab CID.
+pub fn encode_listed_files(files: &[ListedFile]) -> Result<LabCid, Refusal> {
+    let mut leaves = Vec::new();
+    for file in files {
+        if file.size > CHUNK_SIZE as u64 {
             return Err(Refusal::FileOverChunkLimit {
-                path: entry.path.clone(),
-                length: entry.content.len(),
+                path: file.path.clone(),
+                length: usize::try_from(file.size).unwrap_or(usize::MAX),
             });
         }
-        let leaf = Child::File {
-            cid: cid_bytes(RAW_CODEC, &sha256(&entry.content)),
-            tsize: entry.content.len() as u64,
-        };
-        root.insert(&entry.path, leaf)?;
+        let (cid, tsize) = raw_leaf(&file.sha256, file.size);
+        leaves.push((file.path.as_str(), Child::File { cid, tsize }));
     }
-    let (digest, _) = encode_directory(&root, "", &sha256)?;
+    encode_tree(leaves)
+}
+
+/// The lab CID of a closure listing whose files are given as the SHA-256 of
+/// each raw leaf, given in any order. It reads no file and checks no
+/// manifest, and it parses no manifest.
+///
+/// Each file's digests make its raw leaves with the leaf rule
+/// [`encode_entries`] uses, then the balanced file tree over them, at any
+/// depth: one leaf is that leaf, more are grouped as the encoding describes.
+/// The leaves' lengths come from `size`: each is [`CHUNK_SIZE`] bytes and the
+/// last is shorter, and an empty file is one empty leaf. A count the size
+/// does not give is refused with [`Refusal::ChunkCountMismatch`]. Then
+/// `encode_tree`, the one tree builder, with the same path refusals
+/// [`encode_entries`] gives.
+///
+/// The caller supplies `size` and the digests from the same observed bytes
+/// and owns reading and hashing them; this call checks the listing's shape
+/// and names it, and byte verification stays the caller's job.
+///
+/// # Example
+///
+/// A multi-leaf listing named by this call, then its name in the existing
+/// package record:
+///
+/// ```
+/// # use capsule_identity::{encode_chunked_files, sign_cid_record, ChunkedFile};
+/// # fn main() -> Result<(), capsule_identity::Refusal> {
+/// # let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+/// let listing = vec![ChunkedFile {
+///     path: "images/a.raw".to_owned(),
+///     size: 262_145,
+///     chunk_sha256: vec![[1; 32], [2; 32]],
+/// }];
+/// let cid = encode_chunked_files(&listing)?;
+/// let record = sign_cid_record(&key, cid);
+/// # Ok(())
+/// # }
+/// ```
+pub fn encode_chunked_files(files: &[ChunkedFile]) -> Result<LabCid, Refusal> {
+    let mut nodes = Vec::new();
+    for file in files {
+        let expected = chunk_count(file.size);
+        let supplied = file.chunk_sha256.len();
+        if supplied as u64 != expected {
+            return Err(Refusal::ChunkCountMismatch {
+                path: file.path.clone(),
+                size: file.size,
+                expected: usize::try_from(expected).unwrap_or(usize::MAX),
+                supplied,
+            });
+        }
+        let leaves: Vec<FileLeaf> = file
+            .chunk_sha256
+            .iter()
+            .enumerate()
+            .map(|(index, sha256)| FileLeaf {
+                sha256: *sha256,
+                size: chunk_length(file.size, index),
+            })
+            .collect();
+        let (cid, tsize) = file_root_leaves(&leaves);
+        nodes.push((file.path.as_str(), Child::File { cid, tsize }));
+    }
+    encode_tree(nodes)
+}
+
+/// How many [`CHUNK_SIZE`]-byte leaves a file of `size` bytes has: one for
+/// an empty file, else the whole chunks plus one when the last is short. The
+/// division and the remainder cannot overflow.
+fn chunk_count(size: u64) -> u64 {
+    let chunk = CHUNK_SIZE as u64;
+    if size % chunk == 0 {
+        (size / chunk).max(1)
+    } else {
+        size / chunk + 1
+    }
+}
+
+/// The length of chunk `index` of a file of `size` bytes: [`CHUNK_SIZE`],
+/// except that the last one is short.
+fn chunk_length(size: u64, index: usize) -> u64 {
+    let chunk = CHUNK_SIZE as u64;
+    size.saturating_sub(chunk.saturating_mul(index as u64))
+        .min(chunk)
+}
+
+/// The one tree builder every naming call feeds: it puts each file's node at
+/// its bundle path with `Directory::insert`, then encodes the root with
+/// `encode_directory`. The root block's SHA-256 is the lab CID.
+fn encode_tree(files: Vec<(&str, Child)>) -> Result<LabCid, Refusal> {
+    let mut root = Directory::default();
+    for (path, file) in files {
+        root.insert(path, file)?;
+    }
+    let (digest, _) = encode_directory(&root, "", &naming_hash)?;
     Ok(LabCid(digest))
+}
+
+/// The node a directory links for `entry`, made from its bytes: one raw leaf
+/// for at most [`CHUNK_SIZE`] bytes (an empty file is an empty leaf), else
+/// the balanced file root over its leaves.
+fn file_node(entry: &BundleEntry) -> Child {
+    let content = &entry.content;
+    let (cid, tsize) = if content.len() <= CHUNK_SIZE {
+        raw_leaf(&naming_hash(content), content.len() as u64)
+    } else {
+        file_root(content)
+    };
+    Child::File { cid, tsize }
+}
+
+/// A raw leaf's CID bytes and Tsize: CIDv1, raw codec and `sha256`, the
+/// SHA-256 of its block, and its length `size`. Every leaf is made here: a
+/// listed file's, a one-leaf file's and each leaf under a file root.
+fn raw_leaf(sha256: &[u8; 32], size: u64) -> (Vec<u8>, u64) {
+    (cid_bytes(RAW_CODEC, sha256), size)
+}
+
+/// One node of a file's tree, as its parent links it: its CID bytes, its
+/// Tsize (its block and everything under it) and its filesize (the file's
+/// bytes under it). A raw leaf's Tsize and filesize are both its length.
+struct FileTreeNode {
+    cid: Vec<u8>,
+    tsize: u64,
+    filesize: u64,
+}
+
+/// One raw leaf of a file, as the tree builder takes it: the SHA-256 of its
+/// block and its length. [`encode_chunked_files`] gets these from a caller's
+/// digests and size; [`file_root`] gets them from the file's bytes.
+struct FileLeaf {
+    sha256: [u8; 32],
+    size: u64,
+}
+
+/// The CID bytes and Tsize of the balanced file root of `content`, a file
+/// over one leaf (trickle off). The bytes are split into [`CHUNK_SIZE`]-byte
+/// raw leaves, the last one shorter, and the tree is
+/// [`file_root_leaves`]`'s.
+fn file_root(content: &[u8]) -> (Vec<u8>, u64) {
+    let leaves: Vec<FileLeaf> = content
+        .chunks(CHUNK_SIZE)
+        .map(|chunk| FileLeaf {
+            sha256: naming_hash(chunk),
+            size: chunk.len() as u64,
+        })
+        .collect();
+    file_root_leaves(&leaves)
+}
+
+/// The CID bytes and Tsize of the balanced file root over `leaves`, a file's
+/// raw leaves in byte order (trickle off), at any depth. One leaf is that
+/// leaf. More are grouped left to right: the nodes, left to right, in groups
+/// of [`MAX_FILE_LINKS`], each group one dag-pb node, so only a level's last
+/// node can be short, and a last group of one node is still a node of one
+/// link. The pass that makes one node made the root. A node's links have
+/// empty names, each child's CID and Tsize; its data has the bytes under it
+/// as filesize and each child's filesize as one blocksize; its Tsize is its
+/// block's length plus its children's Tsizes.
+fn file_root_leaves(leaves: &[FileLeaf]) -> (Vec<u8>, u64) {
+    let mut level: Vec<FileTreeNode> = leaves
+        .iter()
+        .map(|leaf| {
+            let (cid, tsize) = raw_leaf(&leaf.sha256, leaf.size);
+            FileTreeNode {
+                cid,
+                tsize,
+                filesize: tsize,
+            }
+        })
+        .collect();
+    while level.len() > 1 {
+        level = level
+            .chunks(MAX_FILE_LINKS)
+            .map(|children| {
+                let links: Vec<Link<'_>> = children
+                    .iter()
+                    .map(|child| Link {
+                        name: Cow::Borrowed(""),
+                        cid: child.cid.clone(),
+                        tsize: child.tsize,
+                    })
+                    .collect();
+                let blocksizes: Vec<u64> = children.iter().map(|child| child.filesize).collect();
+                let filesize = children.iter().map(|child| child.filesize).sum();
+                let block = file_root_block(&links, &blocksizes, filesize);
+                let tsize = dag_pb_tsize(&block, children.iter().map(|child| child.tsize));
+                FileTreeNode {
+                    cid: cid_bytes(DAG_PB_CODEC, &naming_hash(&block)),
+                    tsize,
+                    filesize,
+                }
+            })
+            .collect();
+    }
+    let root = level.pop().expect("a file over one leaf has a root");
+    (root.cid, root.tsize)
+}
+
+/// The one naming hash: the SHA-256 of a leaf, of a file root block or of a
+/// directory block.
+fn naming_hash(block: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(block);
+    hasher.finalize().into()
 }
 
 /// A directory as the encoder builds it: each child with its name, in the
@@ -839,21 +1218,28 @@ struct Directory {
 
 /// One child of a [`Directory`].
 enum Child {
-    /// A raw leaf: its CID bytes and its Tsize, the file's length.
+    /// A file's node, a raw leaf or a file root: its CID bytes and its Tsize.
     File { cid: Vec<u8>, tsize: u64 },
     /// A directory below this one.
     Directory(Directory),
 }
 
 impl Directory {
-    /// Put the leaf `file` at the bundle path `path`, making each directory
-    /// on the way. A path with an empty, `.` or `..` part is refused; so is
-    /// a path already given, and a path that is a file and a directory, in
-    /// either order.
+    /// Put the file node `file` at the bundle path `path`, making each directory
+    /// on the way. A path with an empty, `.` or `..` part is refused; then a
+    /// path with any other part that starts with `.`, which Kubo without
+    /// `--hidden` leaves out of the CID; so is a path already given, and a
+    /// path that is a file and a directory, in either order. Every naming
+    /// call reaches this one path check.
     fn insert(&mut self, path: &str, file: Child) -> Result<(), Refusal> {
         let parts: Vec<&str> = path.split('/').collect();
         if parts.iter().any(|part| matches!(*part, "" | "." | "..")) {
             return Err(Refusal::BadPathPart {
+                path: path.to_owned(),
+            });
+        }
+        if parts.iter().any(|part| part.starts_with('.')) {
+            return Err(Refusal::HiddenName {
                 path: path.to_owned(),
             });
         }
@@ -864,7 +1250,7 @@ impl Directory {
                 Some(at) => at,
                 None => {
                     let made = Child::Directory(Directory::default());
-                    directory.children.push(((*part).to_owned(), made));
+                    directory.children.push((owned_path_part(part), made));
                     directory.children.len() - 1
                 }
             };
@@ -879,7 +1265,7 @@ impl Directory {
         }
         match directory.position(name).map(|at| &directory.children[at].1) {
             None => {
-                directory.children.push(((*name).to_owned(), file));
+                directory.children.push((owned_path_part(name), file));
                 Ok(())
             }
             Some(Child::File { .. }) => Err(Refusal::DuplicatePath {
@@ -897,18 +1283,40 @@ impl Directory {
     }
 }
 
-/// One link of a directory block: the child's name, CID bytes and Tsize.
+/// Store one path part as the UTF-8 bytes the walk gives it, so a name that
+/// holds a combining mark keeps that mark: U+0301 stays in the name, and the
+/// links estimate and the HAMT bucket hash read the same bytes. No
+/// normalization runs, so two names that a normalizer would fold stay two
+/// names.
+fn owned_path_part(part: &str) -> String {
+    part.to_owned()
+}
+
+/// One link of a directory block or a file root: the child's name (empty
+/// under a file root), CID bytes and Tsize. A HAMT leaf link's name also
+/// carries its bucket's two uppercase hex digits, and a link to a child
+/// shard is named only those two digits.
 struct Link<'a> {
-    name: &'a str,
+    name: Cow<'a, str>,
     cid: Vec<u8>,
     tsize: u64,
+}
+
+/// One level of a HAMT: its links in bucket order and the bitmap of the
+/// buckets it holds.
+struct Shard<'a> {
+    links: Vec<Link<'a>>,
+    bitmap: [u8; HAMT_BITMAP_BYTES],
 }
 
 /// The sha2-256 digest and the Tsize of `directory`'s block, at the bundle
 /// path `path` (empty for the root). Each child directory is encoded first,
 /// and its link's Tsize is its block's length plus its links' Tsizes. The
-/// links are sorted by name bytes. A block over [`DIRECTORY_BLOCK_LIMIT`]
-/// bytes is refused with its path. `sha256` is the encoder's one hash.
+/// links are sorted by name bytes. A directory is a basic directory when the
+/// sum over its direct children of each name's byte length and
+/// [`CIDV1_SHA256_LENGTH`] is at most [`DIRECTORY_LINKS_LIMIT`], whatever the
+/// block's length; a greater estimate is a HAMT shard ([`encode_hamt`]).
+/// `sha256` is the one naming hash.
 fn encode_directory(
     directory: &Directory,
     path: &str,
@@ -928,36 +1336,242 @@ fn encode_directory(
                 (cid_bytes(DAG_PB_CODEC, &digest), tsize)
             }
         };
-        links.push(Link { name, cid, tsize });
-    }
-    links.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
-    let block = directory_block(&links);
-    if block.len() > DIRECTORY_BLOCK_LIMIT {
-        return Err(Refusal::DirectoryOverBlockLimit {
-            path: shown(path),
-            length: block.len(),
+        links.push(Link {
+            name: Cow::Borrowed(name),
+            cid,
+            tsize,
         });
     }
-    let tsize = block.len() as u64 + links.iter().map(|link| link.tsize).sum::<u64>();
+    links.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+    let estimate: usize = links
+        .iter()
+        .map(|link| link.name.len() + CIDV1_SHA256_LENGTH)
+        .sum();
+    if estimate > DIRECTORY_LINKS_LIMIT {
+        return encode_hamt(&links, path, sha256);
+    }
+    let block = directory_block(&links);
+    let tsize = dag_pb_tsize(&block, links.iter().map(|link| link.tsize));
     Ok((sha256(&block), tsize))
 }
 
-/// A directory's dag-pb block: each link in the order given, as protobuf
-/// field 2 holding the child's CID (field 1), its name (field 2) and its
-/// Tsize (field 3, a varint); then the UnixFS data as field 1, which is only
-/// its type (field 1, a varint): `08 01`, a directory.
+/// The first 64 bits of murmur3 x64-128 with seed 0, big-endian: the digest
+/// spaolacci's `New64` gives and its `Sum(nil)` writes. It is the marked lab
+/// copy of Kubo's HAMT bucket hash and hashes a child's name, never its path.
+fn hamt_digest(bytes: &[u8]) -> [u8; HAMT_DIGEST_BYTES] {
+    const C1: u64 = 0x87c3_7b91_1142_53d5;
+    const C2: u64 = 0x4cf5_ad43_2745_937f;
+    let mut h1 = 0u64;
+    let mut h2 = 0u64;
+    let mut blocks = bytes.chunks_exact(16);
+    for block in &mut blocks {
+        let mut k1 = u64::from_le_bytes(block[0..8].try_into().expect("8 bytes"));
+        let mut k2 = u64::from_le_bytes(block[8..16].try_into().expect("8 bytes"));
+        k1 = k1.wrapping_mul(C1).rotate_left(31).wrapping_mul(C2);
+        h1 ^= k1;
+        h1 = h1
+            .rotate_left(27)
+            .wrapping_add(h2)
+            .wrapping_mul(5)
+            .wrapping_add(0x52dc_e729);
+        k2 = k2.wrapping_mul(C2).rotate_left(33).wrapping_mul(C1);
+        h2 ^= k2;
+        h2 = h2
+            .rotate_left(31)
+            .wrapping_add(h1)
+            .wrapping_mul(5)
+            .wrapping_add(0x3849_5ab5);
+    }
+    let tail = blocks.remainder();
+    let mut k1 = 0u64;
+    let mut k2 = 0u64;
+    for (at, byte) in tail.iter().enumerate() {
+        if at < 8 {
+            k1 |= u64::from(*byte) << (8 * at);
+        } else {
+            k2 |= u64::from(*byte) << (8 * (at - 8));
+        }
+    }
+    if tail.len() > 8 {
+        h2 ^= k2.wrapping_mul(C2).rotate_left(33).wrapping_mul(C1);
+    }
+    if !tail.is_empty() {
+        h1 ^= k1.wrapping_mul(C1).rotate_left(31).wrapping_mul(C2);
+    }
+    h1 ^= bytes.len() as u64;
+    h2 ^= bytes.len() as u64;
+    h1 = h1.wrapping_add(h2);
+    h2 = h2.wrapping_add(h1);
+    h1 = fmix64(h1);
+    h2 = fmix64(h2);
+    h1.wrapping_add(h2).to_be_bytes()
+}
+
+/// The murmur3 final mix of one 64-bit word.
+fn fmix64(mut value: u64) -> u64 {
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    value ^= value >> 33;
+    value
+}
+
+/// The sha2-256 digest and Tsize of the HAMT shard of `links`, whose links
+/// estimate is over [`DIRECTORY_LINKS_LIMIT`], at the bundle path `path`.
+/// Each child's name is hashed once with [`hamt_digest`]; [`hamt_shard`]
+/// takes one digest byte per level. `sha256` hashes every shard block.
+fn encode_hamt(
+    links: &[Link<'_>],
+    path: &str,
+    sha256: &dyn Fn(&[u8]) -> [u8; 32],
+) -> Result<([u8; 32], u64), Refusal> {
+    let digests: Vec<[u8; HAMT_DIGEST_BYTES]> = links
+        .iter()
+        .map(|link| hamt_digest(link.name.as_bytes()))
+        .collect();
+    let indices: Vec<usize> = (0..links.len()).collect();
+    let shard = hamt_shard(links, &indices, &digests, 0, path, sha256)?;
+    let block = hamt_block(&shard.links, &shard.bitmap);
+    let tsize = dag_pb_tsize(&block, shard.links.iter().map(|link| link.tsize));
+    Ok((sha256(&block), tsize))
+}
+
+/// One level of a HAMT over `indices`, the chosen positions in `links`, with
+/// their `digests`, at `depth`, the digest byte this level takes. Buckets go
+/// out in byte order. A bucket of one child is one leaf link named its two
+/// uppercase hex digits and the child's name; a bucket of two or more is one
+/// link named only the digits, pointing at the child shard from the next
+/// digest byte. A shard of one link is allowed when the children share this
+/// byte: only a bucket of one child is a leaf. A ninth byte is
+/// [`Refusal::HamtTooDeep`].
+fn hamt_shard<'a>(
+    links: &[Link<'a>],
+    indices: &[usize],
+    digests: &[[u8; HAMT_DIGEST_BYTES]],
+    depth: usize,
+    path: &str,
+    sha256: &dyn Fn(&[u8]) -> [u8; 32],
+) -> Result<Shard<'a>, Refusal> {
+    if depth == HAMT_DIGEST_BYTES {
+        return Err(Refusal::HamtTooDeep { path: shown(path) });
+    }
+    let mut buckets: Vec<(u8, Vec<usize>)> = Vec::new();
+    for &at in indices {
+        let bucket = digests[at][depth];
+        match buckets.iter_mut().find(|(seen, _)| *seen == bucket) {
+            Some((_, bucket_indices)) => bucket_indices.push(at),
+            None => buckets.push((bucket, vec![at])),
+        }
+    }
+    buckets.sort_by_key(|(bucket, _)| *bucket);
+    let mut shard = Shard {
+        links: Vec::new(),
+        bitmap: [0; HAMT_BITMAP_BYTES],
+    };
+    for (bucket, bucket_indices) in buckets {
+        shard.bitmap[HAMT_BITMAP_BYTES - 1 - bucket as usize / 8] |= 1 << (bucket % 8);
+        if bucket_indices.len() == 1 {
+            let link = &links[bucket_indices[0]];
+            shard.links.push(Link {
+                name: Cow::Owned(format!("{bucket:02X}{}", link.name)),
+                cid: link.cid.clone(),
+                tsize: link.tsize,
+            });
+        } else {
+            let child = hamt_shard(links, &bucket_indices, digests, depth + 1, path, sha256)?;
+            let block = hamt_block(&child.links, &child.bitmap);
+            let tsize = dag_pb_tsize(&block, child.links.iter().map(|link| link.tsize));
+            shard.links.push(Link {
+                name: Cow::Owned(format!("{bucket:02X}")),
+                cid: cid_bytes(DAG_PB_CODEC, &sha256(&block)),
+                tsize,
+            });
+        }
+    }
+    Ok(shard)
+}
+
+/// The UnixFS data of a HAMT shard with `bitmap`: type 5 (`08 05`), field 2
+/// the bitmap's bytes after its leading zero bytes, `28 22` (hash type) and
+/// `30 80 02` (fanout 256). The bitmap sets bucket `i` in byte `31 - i / 8`
+/// at `1 << (i % 8)`, so bucket 0 is the last byte's low bit.
+fn hamt_data(bitmap: &[u8; HAMT_BITMAP_BYTES]) -> Vec<u8> {
+    let first = bitmap
+        .iter()
+        .position(|byte| *byte != 0)
+        .expect("a shard holds at least one bucket");
+    let mut data = vec![1 << 3, HAMT_SHARD_TYPE];
+    put_length_delimited(&mut data, 2, &bitmap[first..]);
+    data.push(5 << 3);
+    put_varint(&mut data, HAMT_HASH_TYPE);
+    data.push(6 << 3);
+    put_varint(&mut data, u64::from(HAMT_FANOUT));
+    data
+}
+
+/// A HAMT shard's dag-pb block: its links (`put_links`, in bucket order),
+/// then the UnixFS data of [`hamt_data`] as field 1.
+fn hamt_block(links: &[Link<'_>], bitmap: &[u8; HAMT_BITMAP_BYTES]) -> Vec<u8> {
+    let mut block = Vec::new();
+    put_links(&mut block, links);
+    put_length_delimited(&mut block, 1, &hamt_data(bitmap));
+    block
+}
+
+/// A directory's dag-pb block: its links (`put_links`), then the UnixFS data
+/// as field 1, which is only its type (field 1, a varint): `08 01`, a
+/// directory.
 fn directory_block(links: &[Link<'_>]) -> Vec<u8> {
     let mut block = Vec::new();
+    put_links(&mut block, links);
+    put_length_delimited(&mut block, 1, &[1 << 3, DIRECTORY_TYPE]);
+    block
+}
+
+/// The dag-pb block of one node of a file's tree, the root or one below it:
+/// its children as links (`put_links`, each name empty), then the UnixFS
+/// data as field 1: its type `08 02`, a file, the `length` of the bytes under
+/// it as filesize (field 3, `0x18`), and each child's filesize, from
+/// `blocksizes`, as one blocksize (field 4, `0x20`, one tag per value, not
+/// packed). A blocksize is never a child's Tsize. The data has no Data field
+/// (field 2): the bytes are in the leaves.
+fn file_root_block(children: &[Link<'_>], blocksizes: &[u64], length: u64) -> Vec<u8> {
+    let mut block = Vec::new();
+    put_links(&mut block, children);
+    let mut data = vec![1 << 3, FILE_TYPE];
+    data.push(3 << 3);
+    put_varint(&mut data, length);
+    for blocksize in blocksizes {
+        data.push(4 << 3);
+        put_varint(&mut data, *blocksize);
+    }
+    put_length_delimited(&mut block, 1, &data);
+    block
+}
+
+/// The links of a dag-pb block, each in the order given, as protobuf field 2
+/// holding the child's CID (field 1), its name (field 2, so an empty name is
+/// `12 00`) and its Tsize (field 3, a varint). Directory blocks and file
+/// roots write their links here alone.
+fn put_links(block: &mut Vec<u8>, links: &[Link<'_>]) {
     for link in links {
         let mut pb_link = Vec::new();
         put_length_delimited(&mut pb_link, 1, &link.cid);
         put_length_delimited(&mut pb_link, 2, link.name.as_bytes());
         pb_link.push(3 << 3);
         put_varint(&mut pb_link, link.tsize);
-        put_length_delimited(&mut block, 2, &pb_link);
+        put_length_delimited(block, 2, &pb_link);
     }
-    put_length_delimited(&mut block, 1, &[1 << 3, DIRECTORY_TYPE]);
-    block
+}
+
+/// The Tsize of a dag-pb node: its block's length plus its children's
+/// Tsizes. A basic directory, a HAMT shard, a child shard and every file
+/// node take their Tsize here, so one sum names them all.
+fn dag_pb_tsize(block: &[u8], child_tsizes: impl IntoIterator<Item = u64>) -> u64 {
+    let block_len = block.len() as u64;
+    let children = child_tsizes.into_iter().sum::<u64>();
+    block_len + children
 }
 
 /// Protobuf field `field` of wire type 2: its tag, the length of `bytes` as a
@@ -1019,10 +1633,14 @@ struct Listed {
     file_type: FileType,
 }
 
-/// A folder the walk is in: its checked handle and the rest of its listing.
+/// A folder the walk is in: its checked handle, the rest of its listing, its
+/// bundle path (empty for the root) and how many files the walk had read
+/// when it opened the folder.
 struct Folder {
     handle: OwnedFd,
     listing: std::vec::IntoIter<Listed>,
+    path: String,
+    first_entry: usize,
 }
 
 /// Every regular file under `bundle`, each with its bundle-relative path.
@@ -1030,8 +1648,11 @@ struct Folder {
 /// The walk opens `bundle` once, as a folder. After that it reaches each
 /// entry through its folder's handle: it checks the listed type, opens the
 /// entry, checks the open handle, and only then reads or lists that handle.
-/// It goes depth first, so it holds one handle per folder level. The first
-/// refusal stops the walk. Listing order does not matter: the encoder sorts.
+/// It goes depth first, so it holds one handle per folder level. When a
+/// folder below the root is done and the walk read no file since it opened
+/// that folder, the folder holds no file at any depth and is refused. The
+/// first refusal stops the walk. Listing order does not matter: the encoder
+/// sorts.
 fn collect_entries(
     bundle: &Path,
     observe: &mut dyn FnMut(Moment, &str),
@@ -1041,6 +1662,8 @@ fn collect_entries(
     let mut folders = vec![Folder {
         handle: root,
         listing,
+        path: String::new(),
+        first_entry: 0,
     }];
     let mut entries = Vec::new();
     while let Some(folder) = folders.last_mut() {
@@ -1050,7 +1673,10 @@ fn collect_entries(
             file_type,
         }) = folder.listing.next()
         else {
-            folders.pop();
+            let done = folders.pop().expect("the loop holds a folder");
+            if !done.path.is_empty() && entries.len() == done.first_entry {
+                return Err(Refusal::EmptyFolder { path: done.path });
+            }
             continue;
         };
         let kind = match entry_kind(file_type) {
@@ -1062,7 +1688,12 @@ fn collect_entries(
         observe(Moment::AfterCheck, &path);
         if kind == EntryKind::Directory {
             let listing = list_folder(handle.as_fd(), &path)?;
-            folders.push(Folder { handle, listing });
+            folders.push(Folder {
+                handle,
+                listing,
+                path,
+                first_entry: entries.len(),
+            });
         } else {
             let content = read_file(handle, &path)?;
             entries.push(BundleEntry { path, content });
@@ -1210,7 +1841,8 @@ fn unreadable(path: &str, reason: impl Into<io::Error>) -> Refusal {
 /// Runtime server, which this lab does not link, so the lab keeps this one
 /// marked copy and calls it a lab proposal. It is the one message hash: the
 /// name signature and the package record both call it, each with its own
-/// domain. [`encode_entries`] remains the one naming hash.
+/// domain. [`naming_hash`], which the encoder calls, remains the one naming
+/// hash.
 pub fn domain_separated_digest(domain: &str, payload: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(domain.as_bytes());
@@ -1363,15 +1995,19 @@ fn package_record_message(record: &PackageRecord) -> [u8; 32] {
     domain_separated_digest(PACKAGE_RECORD_DOMAIN, &record.package_record_payload())
 }
 
-/// Sign a package record for `bundle` with `key`.
+/// Sign a package record for the lab CID `cid` with `key`.
 ///
-/// The CID is [`lab_cid`]'s printed form; a bundle [`lab_cid`] refuses gets no
-/// record, and the refusal is [`lab_cid`]'s own. `signer_did` is
+/// This is the one place a record is built and signed. The record's CID is
+/// `cid`'s printed form, and `signer_did` is
 /// `elastos_identity::encode_signing_key_did` of `key`. The signature is
 /// Ed25519 over [`domain_separated_digest`] of [`PACKAGE_RECORD_DOMAIN`] and
-/// the record's payload. It writes no file and changes no bundle byte.
-pub fn sign_package_record(key: &SigningKey, bundle: &Path) -> Result<PackageRecord, Refusal> {
-    let cid = lab_cid(bundle)?.to_string();
+/// the record's payload. It writes no file and reads none.
+///
+/// It signs a name, not bytes: `cid` must come from [`encode_listed_files`],
+/// [`encode_entries`], [`lab_cid`] or [`checked_bundle`], so it names the
+/// bytes that call read or was given. It grants nothing.
+pub fn sign_cid_record(key: &SigningKey, cid: LabCid) -> PackageRecord {
+    let cid = cid.to_string();
     let signer_did = signer_did_of(key);
     let mut record = PackageRecord {
         cid,
@@ -1379,32 +2015,45 @@ pub fn sign_package_record(key: &SigningKey, bundle: &Path) -> Result<PackageRec
         signature: [0; 64],
     };
     record.signature = key.sign(&package_record_message(&record)).to_bytes();
-    Ok(record)
+    record
 }
 
-/// Check `record` against the bytes `checked` holds.
+/// Sign a package record for `bundle` with `key`.
 ///
-/// The checks run in this order, and the first refusal is the answer:
+/// This is [`lab_cid`] and then [`sign_cid_record`]; it builds and signs
+/// nothing itself. A bundle [`lab_cid`] refuses gets no record, and the
+/// refusal is [`lab_cid`]'s own. It writes no file and changes no bundle byte.
+pub fn sign_package_record(key: &SigningKey, bundle: &Path) -> Result<PackageRecord, Refusal> {
+    let cid = lab_cid(bundle)?;
+    Ok(sign_cid_record(key, cid))
+}
+
+/// Check `record` against the lab CID `cid`.
+///
+/// This is the one place a record is checked. The checks run in this order,
+/// and the first refusal is the answer:
 ///
 /// 1. `elastos_identity::decode_did_key` on `record.signer_did`, with the name
 ///    signature's reason.
 /// 2. `record.signer_did` is an exact member of `accepted`, with the name
 ///    signature's reason. An empty list refuses every signer.
-/// 3. `record.cid` is `checked.cid()`'s printed form. Otherwise it is refused
-///    naming both. This reads nothing from disk.
+/// 3. `record.cid` is `cid`'s printed form. Otherwise it is refused naming
+///    both. This reads nothing from disk.
 /// 4. Ed25519 verification of `record.signature` over the record's digest,
 ///    with the key from step 1 and the name signature's reason.
 ///
-/// `Ok(())` means all four passed. It is not a trust, admission or launch
-/// value, and it grants nothing.
-pub fn verify_checked_package_record(
-    checked: &CheckedBundle,
+/// It checks a signature over a name, not bytes: `cid` must come from
+/// [`encode_listed_files`], [`encode_entries`], [`lab_cid`] or
+/// [`checked_bundle`]. `Ok(())` means all four passed. It is not a trust,
+/// admission or launch value, and it grants nothing.
+pub fn verify_cid_record(
+    cid: LabCid,
     record: &PackageRecord,
     accepted: &[String],
 ) -> Result<(), Refusal> {
     let key = decode_signer(&record.signer_did)?;
     require_accepted(&record.signer_did, accepted)?;
-    require_record_cid(checked, record)?;
+    require_record_cid(cid, record)?;
     let message = package_record_message(record);
     verify_ed25519(
         &key,
@@ -1414,6 +2063,18 @@ pub fn verify_checked_package_record(
         &record.cid,
     )?;
     Ok(())
+}
+
+/// Check `record` against the bytes `checked` holds.
+///
+/// This is [`verify_cid_record`] over `checked.cid()`, so it holds no check
+/// of its own and reads nothing from disk. `Ok(())` grants nothing.
+pub fn verify_checked_package_record(
+    checked: &CheckedBundle,
+    record: &PackageRecord,
+    accepted: &[String],
+) -> Result<(), Refusal> {
+    verify_cid_record(checked.cid(), record, accepted)
 }
 
 /// Check `record` against the bundle at `bundle`.
@@ -1430,12 +2091,12 @@ pub fn verify_package_record(
     verify_checked_package_record(&held, record, accepted)
 }
 
-/// Check (c) of a package record: it binds the checked bundle's printed CID.
-fn require_record_cid(checked: &CheckedBundle, record: &PackageRecord) -> Result<(), Refusal> {
-    if record.cid != checked.cid().to_string() {
+/// Check (c) of a package record: it binds `cid`'s printed form.
+fn require_record_cid(cid: LabCid, record: &PackageRecord) -> Result<(), Refusal> {
+    if record.cid != cid.to_string() {
         return Err(Refusal::RecordNamesAnotherCid {
             record: record.cid.clone(),
-            bundle: checked.cid(),
+            bundle: cid,
         });
     }
     Ok(())
@@ -1481,9 +2142,9 @@ fn variant_binding_message(payload: &[u8]) -> [u8; 32] {
     domain_separated_digest(VARIANT_BINDING_DOMAIN, payload)
 }
 
-/// The lab CID of a variant recipe: [`encode_entries`], the one encoder, of
-/// one entry at [`VARIANT_RECIPE_ENTRY`] holding `recipe`. Nothing here reads
-/// the recipe from disk; the caller gives its bytes.
+/// The lab CID of a variant recipe: [`encode_entries`], which calls the one
+/// encoder, of one entry at [`VARIANT_RECIPE_ENTRY`] holding `recipe`.
+/// Nothing here reads the recipe from disk; the caller gives its bytes.
 fn recipe_cid(recipe: &[u8]) -> Result<LabCid, Refusal> {
     encode_entries(&[BundleEntry {
         path: VARIANT_RECIPE_ENTRY.to_owned(),
@@ -1741,4 +2402,398 @@ fn require_recipe_cid(binding: &VariantBinding, recipe: &[u8]) -> Result<(), Ref
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hamt_digest_is_the_marked_murmur3_copy() {
+        // spaolacci's murmur3 x64-128 `New64` with seed 0 prints `hello`'s
+        // first 64 bits big-endian as these eight bytes; the first bucket is
+        // 0xCB, the first byte, not the last.
+        assert_eq!(
+            hamt_digest(b"hello"),
+            [0xcb, 0xd8, 0xa7, 0xb3, 0x41, 0xbd, 0x9b, 0x02]
+        );
+        assert_eq!(hamt_digest(b""), [0; HAMT_DIGEST_BYTES]);
+    }
+
+    #[test]
+    fn fifteen_byte_name_mixes_the_last_tail_byte() {
+        // Task 065: `photo-tail.jpeg` is 15 bytes, so its murmur3 tail holds
+        // tail indexes 0 to 14 and its last byte `g` is tail index 14, mixed
+        // into the hash's second word. README's `murmur64` prints these eight
+        // big-endian bytes for that name.
+        let name = "photo-tail.jpeg";
+        assert_eq!(name.len(), 15, "the name's bytes");
+        assert_eq!(name.as_bytes().last(), Some(&b'g'), "the last byte");
+        assert_eq!(
+            hamt_digest(name.as_bytes()),
+            [0x19, 0x64, 0x8b, 0xa3, 0x83, 0x36, 0xe8, 0xe4]
+        );
+    }
+
+    #[test]
+    fn sixteen_byte_name_mixes_its_last_block_once() {
+        // Task 066: `photo-block.jpeg` is 16 bytes, one whole murmur3 block,
+        // so its tail is empty and that block is mixed once. A tail that took
+        // the last 16 bytes again would mix the same block twice and print
+        // another name. README's `murmur64` prints these eight big-endian
+        // bytes for that name.
+        let name = "photo-block.jpeg";
+        assert_eq!(name.len(), 16, "the name's bytes");
+        assert_eq!(name.len() % 16, 0, "one whole block");
+        assert_eq!(
+            hamt_digest(name.as_bytes()),
+            [0xfe, 0x17, 0x69, 0x64, 0xde, 0x66, 0x1a, 0x32]
+        );
+    }
+
+    #[test]
+    fn nine_byte_name_mixes_the_second_words_first_byte() {
+        // Task 067: `photo.jpg` is 9 bytes, so its murmur3 tail is 9 bytes and
+        // tail index 8, the first byte of the hash's second word, enters that
+        // word. A tail of 8 never reaches it. README's `murmur64` prints
+        // these eight big-endian bytes for that name.
+        let name = "photo.jpg";
+        assert_eq!(name.len(), 9, "the name's bytes");
+        assert_eq!(name.as_bytes().last(), Some(&b'g'), "the last byte");
+        assert_eq!(name.len() % 16, 9, "the tail's bytes");
+        assert_eq!(
+            hamt_digest(name.as_bytes()),
+            [0xc8, 0x93, 0x6b, 0xcd, 0xf7, 0x98, 0x4c, 0x4c]
+        );
+    }
+
+    #[test]
+    fn one_byte_name_mixes_its_only_tail_byte() {
+        // Task 068: `a` is 1 byte, so its murmur3 tail is 1 byte and its
+        // only byte is the tail's first, mixed into the hash's first word.
+        // A tail that mixes nothing (an empty tail) would leave it out.
+        // README's `murmur64` prints these eight big-endian bytes for that
+        // name.
+        let name = "a";
+        assert_eq!(name.len(), 1, "the name's byte");
+        assert_eq!(name.as_bytes(), b"a", "the only byte");
+        assert_eq!(name.len() % 16, 1, "the tail's bytes");
+        assert_eq!(
+            hamt_digest(name.as_bytes()),
+            [0x85, 0x55, 0x55, 0x65, 0xf6, 0x59, 0x78, 0x89]
+        );
+    }
+
+    #[test]
+    fn hamt_data_trims_leading_zero_bitmap_bytes() {
+        // Bucket 0 is the last byte's low bit, so its bitmap is one byte.
+        let mut low = [0u8; HAMT_BITMAP_BYTES];
+        low[HAMT_BITMAP_BYTES - 1] = 1;
+        assert_eq!(
+            hamt_data(&low),
+            [0x08, 0x05, 0x12, 0x01, 0x01, 0x28, 0x22, 0x30, 0x80, 0x02]
+        );
+        // Bucket 255 is the first byte's high bit, so all 32 bytes stay.
+        let mut high = [0u8; HAMT_BITMAP_BYTES];
+        high[0] = 0x80;
+        let data = hamt_data(&high);
+        assert_eq!(&data[..4], &[0x08, 0x05, 0x12, 0x20]);
+        assert_eq!(data[4], 0x80);
+    }
+
+    #[test]
+    fn two_names_in_one_bucket_get_a_child_shard() {
+        // Task 061: two 200-byte names whose digest bytes 0 and 1 are both
+        // `FE 57` and whose byte 2 differs (`79` and `37`). The same pair
+        // replaces two fillers in
+        // `directory_with_a_one_link_hamt_shard_bundle`, where no other name
+        // has digest byte 0 `FE`. Sharing two bytes makes the child shard
+        // hold one link, but a bucket of two or more children is still one
+        // link named only the first byte's two uppercase hex digits,
+        // pointing at that child shard: the collision level is necessary
+        // even when the child shard holds one link.
+        let names = [format!("one-{:0>196}", 62), format!("two-{:0>196}", 35_399)];
+        for name in &names {
+            assert_eq!(name.len(), 200, "a bundle name fits in a folder");
+        }
+        let digests: Vec<[u8; HAMT_DIGEST_BYTES]> = names
+            .iter()
+            .map(|name| hamt_digest(name.as_bytes()))
+            .collect();
+        assert_eq!(
+            digests[0][..2],
+            digests[1][..2],
+            "the two names share digest bytes 0 and 1"
+        );
+        assert_eq!(digests[0][..2], [0xFE, 0x57], "the shared two-byte prefix");
+        assert_ne!(
+            digests[0][2], digests[1][2],
+            "the two names differ at digest byte 2"
+        );
+        let links = [
+            Link {
+                name: Cow::Owned(names[0].clone()),
+                cid: vec![0x01, 0xaa],
+                tsize: 1,
+            },
+            Link {
+                name: Cow::Owned(names[1].clone()),
+                cid: vec![0x01, 0xbb],
+                tsize: 2,
+            },
+        ];
+        let shard = hamt_shard(&links, &[0, 1], &digests, 0, "", &naming_hash)
+            .expect("two names sharing two bytes are a shard");
+        let bucket = digests[0][0];
+        assert_eq!(shard.links.len(), 1, "one bucket is one link");
+        assert_eq!(
+            shard.links[0].name,
+            format!("{bucket:02X}"),
+            "a bucket of two children is named only its first digest byte"
+        );
+        assert!(
+            !shard.links[0].name.contains(names[0].as_str())
+                && !shard.links[0].name.contains(names[1].as_str()),
+            "a shard link name holds no child's leaf name"
+        );
+        assert_eq!(
+            shard.bitmap[HAMT_BITMAP_BYTES - 1 - bucket as usize / 8],
+            1 << (bucket % 8),
+            "the bitmap sets the bucket's own bit"
+        );
+        assert_eq!(
+            shard.bitmap.iter().filter(|byte| **byte != 0).count(),
+            1,
+            "only one bucket is set"
+        );
+        assert_ne!(shard.links[0].cid, vec![0x01, 0xaa]);
+        assert_ne!(shard.links[0].cid, vec![0x01, 0xbb]);
+    }
+
+    #[test]
+    fn two_names_sharing_three_digest_bytes_get_the_next_shard() {
+        // Task 069: two 200-byte names whose digest bytes 0, 1 and 2 are
+        // equal (`10 0F 9C`) and whose byte 3 differs (`DD` and `28`). At
+        // depth 2 both names fall in one bucket, so that bucket is still one
+        // link named only byte 2's two uppercase hex digits, pointing at the
+        // child shard from byte 3: sharing three digest bytes keeps the next
+        // shard level.
+        let names = [
+            format!("c3-{:0>197}", 24_530),
+            format!("c3-{:0>197}", 47_365),
+        ];
+        for name in &names {
+            assert_eq!(name.len(), 200, "a bundle name fits in a folder");
+        }
+        let digests: Vec<[u8; HAMT_DIGEST_BYTES]> = names
+            .iter()
+            .map(|name| hamt_digest(name.as_bytes()))
+            .collect();
+        assert_eq!(
+            digests[0],
+            [0x10, 0x0F, 0x9C, 0xDD, 0x9B, 0xA1, 0xD9, 0x36],
+            "the first name's digest"
+        );
+        assert_eq!(
+            digests[1],
+            [0x10, 0x0F, 0x9C, 0x28, 0x1F, 0xB2, 0xF3, 0x59],
+            "the second name's digest"
+        );
+        assert_eq!(
+            digests[0][..3],
+            digests[1][..3],
+            "the two names share digest bytes 0, 1 and 2"
+        );
+        assert_eq!(digests[0][..3], [0x10, 0x0F, 0x9C], "the shared prefix");
+        assert_ne!(
+            digests[0][3], digests[1][3],
+            "the two names differ at digest byte 3"
+        );
+        let links = [
+            Link {
+                name: Cow::Owned(names[0].clone()),
+                cid: vec![0x01, 0xaa],
+                tsize: 1,
+            },
+            Link {
+                name: Cow::Owned(names[1].clone()),
+                cid: vec![0x01, 0xbb],
+                tsize: 2,
+            },
+        ];
+        let shard = hamt_shard(&links, &[0, 1], &digests, 2, "", &naming_hash)
+            .expect("two names sharing three bytes are a shard");
+        let bucket = digests[0][2];
+        assert_eq!(shard.links.len(), 1, "one bucket is one link");
+        assert_eq!(
+            shard.links[0].name,
+            format!("{bucket:02X}"),
+            "a bucket of two children is named only its third digest byte"
+        );
+        assert_eq!(
+            shard.links[0].name, "9C",
+            "byte 2's two uppercase hex digits"
+        );
+        assert!(
+            !shard.links[0].name.contains(names[0].as_str())
+                && !shard.links[0].name.contains(names[1].as_str()),
+            "a shard link name holds no child's leaf name"
+        );
+        assert_ne!(shard.links[0].cid, vec![0x01, 0xaa]);
+        assert_ne!(shard.links[0].cid, vec![0x01, 0xbb]);
+    }
+
+    #[test]
+    fn two_names_sharing_four_digest_bytes_get_the_next_shard() {
+        // Task 070: two 200-byte names whose digest bytes 0 to 3 are equal
+        // (`89 C8 26 A6`) and whose byte 4 differs (`03` and `94`). At
+        // depth 3 both names fall in one bucket, so that bucket is still one
+        // link named only byte 3's two uppercase hex digits, pointing at the
+        // child shard from byte 4: sharing four digest bytes keeps the next
+        // shard level.
+        let names = [
+            format!("f4-{:0>197}", 30_408),
+            format!("f4-{:0>197}", 702_843),
+        ];
+        for name in &names {
+            assert_eq!(name.len(), 200, "a bundle name fits in a folder");
+        }
+        let digests: Vec<[u8; HAMT_DIGEST_BYTES]> = names
+            .iter()
+            .map(|name| hamt_digest(name.as_bytes()))
+            .collect();
+        assert_eq!(
+            digests[0],
+            [0x89, 0xC8, 0x26, 0xA6, 0x03, 0xE8, 0x2D, 0x2B],
+            "the first name's digest"
+        );
+        assert_eq!(
+            digests[1],
+            [0x89, 0xC8, 0x26, 0xA6, 0x94, 0x34, 0x1E, 0xAB],
+            "the second name's digest"
+        );
+        assert_eq!(
+            digests[0][..4],
+            digests[1][..4],
+            "the two names share digest bytes 0 to 3"
+        );
+        assert_eq!(
+            digests[0][..4],
+            [0x89, 0xC8, 0x26, 0xA6],
+            "the shared four-byte prefix"
+        );
+        assert_ne!(
+            digests[0][4], digests[1][4],
+            "the two names differ at digest byte 4"
+        );
+        let links = [
+            Link {
+                name: Cow::Owned(names[0].clone()),
+                cid: vec![0x01, 0xaa],
+                tsize: 1,
+            },
+            Link {
+                name: Cow::Owned(names[1].clone()),
+                cid: vec![0x01, 0xbb],
+                tsize: 2,
+            },
+        ];
+        let shard = hamt_shard(&links, &[0, 1], &digests, 3, "", &naming_hash)
+            .expect("two names sharing four bytes are a shard");
+        let bucket = digests[0][3];
+        assert_eq!(shard.links.len(), 1, "one bucket is one link");
+        assert_eq!(
+            shard.links[0].name,
+            format!("{bucket:02X}"),
+            "a bucket of two children is named only its fourth digest byte"
+        );
+        assert_eq!(
+            shard.links[0].name, "A6",
+            "byte 3's two uppercase hex digits"
+        );
+        assert!(
+            !shard.links[0].name.contains(names[0].as_str())
+                && !shard.links[0].name.contains(names[1].as_str()),
+            "a shard link name holds no child's leaf name"
+        );
+        assert_ne!(shard.links[0].cid, vec![0x01, 0xaa]);
+        assert_ne!(shard.links[0].cid, vec![0x01, 0xbb]);
+    }
+
+    #[test]
+    fn two_names_sharing_five_digest_bytes_get_the_next_shard() {
+        // Task 070: two 200-byte names whose digest bytes 0 to 4 are equal
+        // (`B0 97 BA 5C DC`) and whose byte 5 differs (`99` and `A3`). At
+        // depth 4 both names fall in one bucket, so that bucket is still one
+        // link named only byte 4's two uppercase hex digits, pointing at the
+        // child shard from byte 5: sharing five digest bytes keeps the next
+        // shard level.
+        let names = [
+            format!("f5-{:0>197}", 6_279_238),
+            format!("f5-{:0>197}", 7_983_145),
+        ];
+        for name in &names {
+            assert_eq!(name.len(), 200, "a bundle name fits in a folder");
+        }
+        let digests: Vec<[u8; HAMT_DIGEST_BYTES]> = names
+            .iter()
+            .map(|name| hamt_digest(name.as_bytes()))
+            .collect();
+        assert_eq!(
+            digests[0],
+            [0xB0, 0x97, 0xBA, 0x5C, 0xDC, 0x99, 0x5F, 0x14],
+            "the first name's digest"
+        );
+        assert_eq!(
+            digests[1],
+            [0xB0, 0x97, 0xBA, 0x5C, 0xDC, 0xA3, 0x15, 0xA2],
+            "the second name's digest"
+        );
+        assert_eq!(
+            digests[0][..5],
+            digests[1][..5],
+            "the two names share digest bytes 0 to 4"
+        );
+        assert_eq!(
+            digests[0][..5],
+            [0xB0, 0x97, 0xBA, 0x5C, 0xDC],
+            "the shared five-byte prefix"
+        );
+        assert_ne!(
+            digests[0][5], digests[1][5],
+            "the two names differ at digest byte 5"
+        );
+        let links = [
+            Link {
+                name: Cow::Owned(names[0].clone()),
+                cid: vec![0x01, 0xaa],
+                tsize: 1,
+            },
+            Link {
+                name: Cow::Owned(names[1].clone()),
+                cid: vec![0x01, 0xbb],
+                tsize: 2,
+            },
+        ];
+        let shard = hamt_shard(&links, &[0, 1], &digests, 4, "", &naming_hash)
+            .expect("two names sharing five bytes are a shard");
+        let bucket = digests[0][4];
+        assert_eq!(shard.links.len(), 1, "one bucket is one link");
+        assert_eq!(
+            shard.links[0].name,
+            format!("{bucket:02X}"),
+            "a bucket of two children is named only its fifth digest byte"
+        );
+        assert_eq!(
+            shard.links[0].name, "DC",
+            "byte 4's two uppercase hex digits"
+        );
+        assert!(
+            !shard.links[0].name.contains(names[0].as_str())
+                && !shard.links[0].name.contains(names[1].as_str()),
+            "a shard link name holds no child's leaf name"
+        );
+        assert_ne!(shard.links[0].cid, vec![0x01, 0xaa]);
+        assert_ne!(shard.links[0].cid, vec![0x01, 0xbb]);
+    }
 }

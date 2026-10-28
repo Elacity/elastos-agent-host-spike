@@ -3,7 +3,8 @@
 //! that change a bundle while it is named, a driver for wc-001's own build,
 //! the library's code for tests that read it, the refusal asserts both
 //! signature checks share, the one key-material scan, the run of README's
-//! Python rule, the scan for lab crates that use this one, read through
+//! Python rule, the photo stand-in consumer copy and its pin, the scan for
+//! lab crates that use this one, read through
 //! `cargo metadata`, the scan of the lane's docs and code for what they
 //! claim about the lab CID, the check of the falsifier list's inventory, and
 //! the lab stand-in launcher (all six kept here, a file the falsifier runner
@@ -26,10 +27,11 @@ use rand::rngs::OsRng;
 
 use capsule_identity::{
     check_name, checked_bundle, checked_bundle_observed, lab_cid, lab_cid_observed,
-    verify_checked_package_record, BundleEntry, CheckedBundle, LabCid, Moment, PackageRecord,
-    Refusal,
+    verify_checked_package_record, BundleEntry, CheckedBundle, ChunkedFile, LabCid, Moment,
+    PackageRecord, Refusal,
 };
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 /// The lab CIDs pinned for the committed fixtures. README.md lists the same
@@ -61,6 +63,887 @@ pub const EMPTY_FILE_LAB_CID: &str = "bafybeic2y3c3met6txd62reatxwqjnodhfejchfml
 /// protobuf lengths take two varint bytes.
 pub const LONG_UTF8_NAME_LAB_CID: &str =
     "bafybeih6g5cy7asndjexb7bazovwryqyj4faxvababcjrbe4jxayhzvgmy";
+
+/// content-sample with `sample.example` as 262145 zero bytes, one over the
+/// chunk limit: a balanced file root over two raw leaves, 262144 and 1
+/// bytes. Built in a temp dir and never committed.
+pub const TWO_LEAF_FILE_LAB_CID: &str =
+    "bafybeidbd7gfhommypeks66twpnbbb3lwovdqe6iwtmdxptgcq5jqbaaby";
+/// content-sample with one more file, `core/big.bin`, holding
+/// [`big_bin_bytes`]: a file root over three raw leaves (262144, 262144 and
+/// 75712 bytes) one directory down, so its Tsize reaches the root through
+/// `core/`. Built in a temp dir and never committed.
+pub const THREE_LEAF_NESTED_LAB_CID: &str =
+    "bafybeidpgwbsi22cbsmthqupvn37xphujhs6fnzyuy64uc6nsauc6bftqe";
+/// The path of the three-leaf file.
+pub const BIG_BIN: &str = "core/big.bin";
+
+/// The 600000 bytes of [`BIG_BIN`]: byte `i` is `i % 251`, so no two leaves
+/// hold the same bytes.
+pub fn big_bin_bytes() -> Vec<u8> {
+    (0..600_000u32).map(|i| (i % 251) as u8).collect()
+}
+
+/// The raw-leaf digests of `content`, in file-byte order, as
+/// `encode_chunked_files` takes them: the SHA-256 of each 262144-byte chunk,
+/// the last one shorter, and one digest of the empty block for an empty
+/// file. Computed here from the bytes with `sha2`, not by the library.
+pub fn chunk_digests(content: &[u8]) -> Vec<[u8; 32]> {
+    let mut digests: Vec<[u8; 32]> = content
+        .chunks(262_144)
+        .map(|chunk| Sha256::digest(chunk).into())
+        .collect();
+    if digests.is_empty() {
+        digests.push(Sha256::digest(b"").into());
+    }
+    digests
+}
+
+/// One entry as a chunked listing: its path, its length and the digests of
+/// its bytes from [`chunk_digests`].
+pub fn chunked_file(path: &str, content: &[u8]) -> ChunkedFile {
+    ChunkedFile {
+        path: path.to_owned(),
+        size: content.len() as u64,
+        chunk_sha256: chunk_digests(content),
+    }
+}
+
+/// content-sample with `sample.example` as [`two_level_bytes`]: 175 raw
+/// leaves, one more than one file node links, so a root over a node of 174
+/// leaves and a node of one leaf. Built in memory and never committed.
+pub const TWO_LEVEL_FILE_LAB_CID: &str =
+    "bafybeia6jmw5u4ns4zxsglupvm25hkmxy6tr5m2a6irt5kapton6vgduee";
+
+/// The 45613057 bytes of the two-level file, 174 leaves of 262144 bytes and
+/// one byte more: byte `i` is `i % 251`, so no two leaves hold the same
+/// bytes.
+pub fn two_level_bytes() -> Vec<u8> {
+    (0..45_613_057u32).map(|i| (i % 251) as u8).collect()
+}
+
+/// content-sample with the empty files of [`directory_at_limit_files`]`(0)`
+/// added: its root block is exactly 262144 bytes, the largest directory block
+/// the lab names. Built in a temp dir and in memory and never committed.
+pub const DIRECTORY_AT_LIMIT_LAB_CID: &str =
+    "bafybeifv7ypq27zanvn46j4q5jnm5akr55flfzne3zszdbbolt2dtgevc4";
+
+/// content-sample plus the measured empty files of
+/// [`directory_at_hamt_threshold_bundle`]`(0)`: its links estimate is exactly
+/// 262144, so it is a basic directory even though its block is larger.
+/// Built in a temp dir and in memory and never committed.
+pub const DIRECTORY_AT_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeicqo67qvp3orvh33xcxh5eugdsqb2x2fqqzvqk423qpqwnjgodrfe";
+/// The same flat bundle with an estimate of 262145: a HAMT shard. Built in a
+/// temp dir and in memory and never committed.
+pub const DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeian4wlj6o5y4nbogpkeyauitvmxsrrc55fsfe2pcwcp4ki7hagbqq";
+/// content-sample at the root with the 262145-estimate flat bundle under
+/// `photos/`: the root stays basic and `photos` is a HAMT shard. Built in a
+/// temp dir and in memory and never committed.
+pub const CHILD_DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeibvx4eqxqix2zsu3yufv7bbpq4gochl22mpfjznfxp43vtrvh33du";
+/// Task 061: the 262145-estimate flat bundle with two 200-byte fillers
+/// replaced by [`shared_two_byte_names`], so one bucket holds only those two
+/// names, which share two digest bytes, and its child shard holds one link.
+/// Built in a temp dir and in memory and never committed.
+pub const DIRECTORY_WITH_A_ONE_LINK_HAMT_SHARD_LAB_CID: &str =
+    "bafybeiap7fmepwaka7go2lxcfkxuhpi3ifs3rhpy7u6oolxtrtb77v5maq";
+/// Task 062: the 262145-estimate flat bundle with one 200-byte filler holding
+/// 262145 bytes, byte `i` being `i % 251`: a file root over two raw leaves
+/// inside the HAMT shard, so its leaf link stores the file root's Tsize
+/// (262249), which is more than the file's byte length. Built in a temp dir
+/// and in memory and never committed.
+pub const FILE_ROOT_INSIDE_A_HAMT_LAB_CID: &str =
+    "bafybeifpzyxcurfmvho4qwltsy5wtgyiwt7qvviwzcj5oqzgejmqyajdqa";
+/// Task 063: the 262145-estimate flat bundle with its first 200-byte filler
+/// replaced by a 200-byte name of 68 Unicode scalars (66 `名` and `aa`), so
+/// the byte estimate stays 262145 and a Unicode scalar count (262013) stays
+/// basic. Built in a temp dir and in memory and never committed.
+pub const MULTIBYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeif7njjvh2l3tb7qp643e4p2q4qry77ukedkjhy2qrumxcr5wvawau";
+/// Task 064: the 262145-estimate flat bundle with its second 200-byte filler
+/// replaced by 66 `e` and U+0301 (a combining acute accent) and `aa`: 200
+/// UTF-8 bytes in 134 Unicode scalars, 66 of them marks, so the byte estimate
+/// stays 262145 and the directory is a HAMT shard. The same name with its
+/// marks stripped is 68 bytes, an estimate of 262013 that would stay a basic
+/// directory. Built in a temp dir and in memory and never committed.
+pub const COMBINING_MARK_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeifmsz5xc6qpfifs2uutit6v3cs27gdjv4kogrniosezwfpeeft4eq";
+/// Task 065: the 262145-estimate flat bundle with its first 200-byte filler
+/// replaced by `photo-tail.jpeg` (15 bytes, its last byte `g`, empty content)
+/// and its 51-byte measured name lengthened by 185 bytes to 236, so the
+/// links estimate stays 262145 and the directory is a HAMT shard. The
+/// 15-byte name leaves a 15-byte murmur3 tail, so tail index 14, its last
+/// byte, enters the hash's second word. Built in a temp dir and in memory
+/// and never committed.
+pub const FIFTEEN_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeihjth7idik23jjnvdaiy4ciznq3x4bggs3vc76jwfpinfif7eauk4";
+/// Task 066: the 262145-estimate flat bundle with its third 200-byte filler
+/// replaced by `photo-block.jpeg` (16 bytes, empty content) and its 51-byte
+/// measured name lengthened by 184 bytes to 235, so the links estimate stays
+/// 262145 and the directory is a HAMT shard. The 16-byte name is one whole
+/// murmur3 block, so its tail is empty and that block is mixed once. Built in
+/// a temp dir and in memory and never committed.
+pub const SIXTEEN_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeigopgfjx3ab3pdtczsq463dzeug5p4wp7k22v465oem7lcjbzj44i";
+/// Task 067: the 262145-estimate flat bundle with its fourth 200-byte filler
+/// replaced by `photo.jpg` (9 bytes, its last byte `g`, empty content) and
+/// its 51-byte measured name lengthened by 191 bytes to 242, so the links
+/// estimate stays 262145 and the directory is a HAMT shard. The 9-byte name
+/// leaves a 9-byte murmur3 tail, so tail index 8, the first byte of the
+/// hash's second word, is mixed. Built in a temp dir and in memory and never
+/// committed.
+pub const NINE_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeih3re3nvbzap3xfhns7g7o2m64qiwsqsy6voo4ahuuzc3ww2mfkfe";
+/// Task 068: the 262145-estimate flat bundle with its fifth 200-byte filler
+/// replaced by `a` (1 byte, its only byte `a`, empty content) and its
+/// 51-byte measured name lengthened by 199 bytes to 250, so the links
+/// estimate stays 262145 and the directory is a HAMT shard. The 1-byte name
+/// leaves a 1-byte murmur3 tail, so its only byte is mixed into the hash's
+/// first word. A tail of 0 never takes the first-word mix; a longer tail
+/// does. Built in a temp dir and in memory and never committed.
+pub const ONE_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeickofbvelg2sn63rs5bzkuis4p53hwpcukvfho3ucmua4jbq6gadm";
+/// Task 069: the 262145-estimate flat bundle with its first two 200-byte
+/// fillers replaced by [`shared_three_byte_names`]. Each name has 200 bytes,
+/// so the links estimate stays 262145 and the directory is a HAMT shard. The
+/// two names share three digest bytes (`10 0F 9C`) and differ at byte 3, so
+/// the third byte's bucket holds both and still gets a child shard from the
+/// fourth byte. Built in a temp dir and in memory and never committed.
+pub const THREE_SHARED_DIGEST_BYTES_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeigu7u5n3b2mlwwhktsq3qzgt54c7lii5y5kboe4ykmpzjryofvw24";
+/// Task 070: the 262145-estimate flat bundle with the sixth and seventh
+/// 200-byte fillers (the 200-digit names of 5 and 6) replaced by
+/// [`shared_four_byte_names`]. Each name has 200 bytes, so the links estimate
+/// stays 262145 and the directory is a HAMT shard. The two names share four
+/// digest bytes (`89 C8 26 A6`) and differ at byte 4, so the fourth byte's
+/// bucket holds both and still gets a child shard from the fifth byte. Built
+/// in a temp dir and in memory and never committed.
+pub const FOUR_SHARED_DIGEST_BYTES_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeieeqipx4qubqfikokr6wqjiexnlyciu5w67x6kie2ns46b7f45pdq";
+/// Task 070: the 262145-estimate flat bundle with the eighth and ninth
+/// 200-byte fillers (the 200-digit names of 7 and 8) replaced by
+/// [`shared_five_byte_names`]. Each name has 200 bytes, so the links estimate
+/// stays 262145 and the directory is a HAMT shard. The two names share five
+/// digest bytes (`B0 97 BA 5C DC`) and differ at byte 5, so the fifth byte's
+/// bucket holds both and still gets a child shard from the sixth byte. Built
+/// in a temp dir and in memory and never committed.
+pub const FIVE_SHARED_DIGEST_BYTES_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeibexh47ziqxupjywrr6vbloojzoecoyc5nfj4y6jef7the756mwdu";
+
+/// The empty files that bring content-sample's root block to 262144 bytes
+/// and `longer` more: 1064 named by 200 digits and one by 235 + `longer`
+/// digits. An empty file's link is 46 bytes and its name (its 36-byte CID, the
+/// name and Tsize 0, each with its tag and length, all inside field 2);
+/// content-sample's two links and the UnixFS data `0a 02 08 01` are 119
+/// bytes. So 1064 x 246 + (46 + 235) + 119 = 262144.
+pub fn directory_at_limit_files(longer: usize) -> Vec<BundleEntry> {
+    let empty = |path: String| BundleEntry {
+        path,
+        content: Vec::new(),
+    };
+    let mut files: Vec<BundleEntry> = (0..1064)
+        .map(|number| empty(format!("{number:0>200}")))
+        .collect();
+    files.push(empty(format!("{:0>width$}", 1064, width = 235 + longer)));
+    files
+}
+
+/// The links estimate Kubo shards past: the sum over a directory's direct
+/// children of each name's byte length and [`LINKED_CID_LENGTH`]. An estimate
+/// of exactly this value is a basic directory; a greater one is a HAMT.
+pub const HAMT_LINKS_LIMIT: usize = 262_144;
+
+/// The bytes a directory link's estimate counts for its child's CID: a CIDv1
+/// SHA-256 multihash.
+pub const LINKED_CID_LENGTH: usize = 36;
+
+/// The bundle whose flat links estimate is exactly `HAMT_LINKS_LIMIT +
+/// longer`: content-sample's two files plus empty files. The helper starts
+/// with 1110 names of 200 digits and lengthens one name by the measured
+/// difference between that estimate and the target, so it hardcodes no
+/// measured length. A filesystem name holds at most 255 bytes; the helper
+/// asserts the name it measured fits. Built in a temp dir and in memory and
+/// never committed.
+pub fn directory_at_hamt_threshold_bundle(longer: usize) -> Vec<BundleEntry> {
+    let mut names: Vec<String> = (0..1110).map(|number| format!("{number:0>200}")).collect();
+    names.push("1110".to_owned());
+    let estimate = |names: &[String]| {
+        CONTENT_SAMPLE
+            .files
+            .iter()
+            .map(|file| file.len() + LINKED_CID_LENGTH)
+            .sum::<usize>()
+            + names
+                .iter()
+                .map(|name| name.len() + LINKED_CID_LENGTH)
+                .sum::<usize>()
+    };
+    let target = HAMT_LINKS_LIMIT + longer;
+    let width = names.last().expect("one placeholder").len() + target - estimate(&names);
+    assert!(
+        width <= 255,
+        "a measured name of {width} bytes does not fit in a folder"
+    );
+    names.pop();
+    names.push(format!("{:0>width$}", 1110, width = width));
+    let mut entries: Vec<BundleEntry> = CONTENT_SAMPLE
+        .files
+        .iter()
+        .map(|file| BundleEntry {
+            path: (*file).to_owned(),
+            content: read_fixture(&CONTENT_SAMPLE, file),
+        })
+        .collect();
+    entries.extend(names.into_iter().map(|path| BundleEntry {
+        path,
+        content: Vec::new(),
+    }));
+    let measured: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(measured, target, "the helper measured {measured} bytes");
+    entries
+}
+
+/// Task 063: [`directory_at_hamt_threshold_bundle`]`(1)` with its first
+/// 200-byte filler (a name of digits only) replaced by 66 `名` (U+540D) and
+/// `aa`: 200 UTF-8 bytes in 68 Unicode scalars, with empty content. The name
+/// keeps its 200 bytes, so the byte estimate stays 262145 and the directory
+/// is a HAMT shard; a Unicode scalar count would be 262013 and stay a basic
+/// directory. The measured 51-byte name is left as it is. The
+/// name has no NFD decomposition, so a folder walk reads the bytes the helper
+/// wrote. Built in a temp dir and in memory and never committed.
+pub fn multibyte_name_over_the_hamt_threshold_bundle() -> Vec<BundleEntry> {
+    let multibyte = format!("{}aa", "\u{540d}".repeat(66));
+    assert_eq!(
+        (multibyte.len(), multibyte.chars().count()),
+        (200, 68),
+        "the multibyte name's bytes and scalars"
+    );
+    let mut replaced = 0;
+    let entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(1)
+        .into_iter()
+        .map(|entry| {
+            if replaced == 0 && entry.path.len() == 200 {
+                replaced += 1;
+                BundleEntry {
+                    path: multibyte.clone(),
+                    content: entry.content,
+                }
+            } else {
+                entry
+            }
+        })
+        .collect();
+    assert_eq!(replaced, 1, "one 200-byte filler is replaced");
+    let bytes: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(bytes, HAMT_LINKS_LIMIT + 1, "the byte estimate");
+    let scalars: usize = entries
+        .iter()
+        .map(|entry| entry.path.chars().count() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(scalars, 262_013, "the scalar estimate");
+    entries
+}
+
+/// Task 064: [`directory_at_hamt_threshold_bundle`]`(1)` with its second
+/// 200-byte filler (a name of digits only) replaced by 66 `e` and U+0301 (a
+/// combining acute accent) and `aa`: 200 UTF-8 bytes in 134 Unicode scalars,
+/// 66 of them marks, with empty content. A path part is stored as those
+/// bytes, so the mark stays in the name and no normalization runs. The byte
+/// estimate stays 262145 and the directory is a HAMT shard; the same name
+/// with its marks stripped is 68 bytes, an estimate of 262013 that would
+/// stay a basic directory. The first 200-byte filler and the 51-byte
+/// measured name are left as they are. Built in a temp dir and in memory and
+/// never committed.
+pub fn combining_mark_over_the_hamt_threshold_bundle() -> Vec<BundleEntry> {
+    let combining = format!("{}aa", "e\u{0301}".repeat(66));
+    assert_eq!(
+        (
+            combining.len(),
+            combining.chars().count(),
+            combining.matches('\u{0301}').count(),
+            combining.replace('\u{0301}', "").len(),
+        ),
+        (200, 134, 66, 68),
+        "the combining-mark name's bytes, scalars, marks and stripped bytes"
+    );
+    let mut seen = 0;
+    let mut replaced = 0;
+    let entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(1)
+        .into_iter()
+        .map(|entry| {
+            if entry.path.len() == 200 {
+                seen += 1;
+                if seen == 2 {
+                    replaced += 1;
+                    return BundleEntry {
+                        path: combining.clone(),
+                        content: entry.content,
+                    };
+                }
+            }
+            entry
+        })
+        .collect();
+    assert_eq!(
+        (seen, replaced),
+        (1110, 1),
+        "the 200-byte fillers and the one replacement"
+    );
+    let bytes: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(bytes, HAMT_LINKS_LIMIT + 1, "the byte estimate");
+    let stripped: usize = entries
+        .iter()
+        .map(|entry| entry.path.replace('\u{0301}', "").len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(bytes - 132, stripped, "the stripped bytes");
+    assert_eq!(stripped, 262_013, "the stripped estimate");
+    entries
+}
+
+/// Task 065: [`directory_at_hamt_threshold_bundle`]`(1)` with its first
+/// 200-byte filler replaced by `photo-tail.jpeg` (15 bytes, its last byte
+/// `g`, empty content) and its 51-byte measured name lengthened by 185 bytes
+/// to 236. The links estimate stays 262145, so the directory is a HAMT
+/// shard, and exactly one path leaves a 15-byte murmur3 tail, so tail index
+/// 14 enters the bucket hash. Built in a temp dir and in memory and never
+/// committed.
+pub fn fifteen_byte_name_over_the_hamt_threshold_bundle() -> Vec<BundleEntry> {
+    let photo = "photo-tail.jpeg";
+    assert_eq!(photo.len(), 15, "the photo name's bytes");
+    assert_eq!(photo.as_bytes().last(), Some(&b'g'), "the last byte");
+    let mut replaced = 0;
+    let mut lengthened = 0;
+    let entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(1)
+        .into_iter()
+        .map(|entry| {
+            if replaced == 0 && entry.path.len() == 200 {
+                replaced += 1;
+                return BundleEntry {
+                    path: photo.to_owned(),
+                    content: Vec::new(),
+                };
+            }
+            if entry.path.len() == 51 {
+                lengthened += 1;
+                return BundleEntry {
+                    path: format!("{}{}", entry.path, "0".repeat(185)),
+                    content: entry.content,
+                };
+            }
+            entry
+        })
+        .collect();
+    assert_eq!(
+        (replaced, lengthened),
+        (1, 1),
+        "one 200-byte filler replaced and the measured name lengthened"
+    );
+    let photo_len = entries
+        .iter()
+        .find(|entry| entry.path == photo)
+        .map(|entry| entry.path.len())
+        .expect("the photo name is in the bundle");
+    assert_eq!(photo_len, 15, "the replaced name's bytes");
+    let measured_len = entries
+        .iter()
+        .find(|entry| entry.path.len() == 236)
+        .map(|entry| entry.path.len())
+        .expect("the lengthened measured name is in the bundle");
+    assert_eq!(measured_len, 236, "the measured name's bytes");
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    let fifteen_tails = entries
+        .iter()
+        .filter(|entry| entry.path.len() % 16 == 15)
+        .count();
+    assert_eq!(fifteen_tails, 1, "one name leaves a 15-byte tail");
+    entries
+}
+
+/// Task 066: [`directory_at_hamt_threshold_bundle`]`(1)` with its third
+/// 200-byte filler replaced by `photo-block.jpeg` (16 bytes, empty content)
+/// and its 51-byte measured name lengthened by 184 bytes to 235. The links
+/// estimate stays 262145, so the directory is a HAMT shard, and exactly one
+/// path's length is a multiple of 16, so that name's last 16-byte block is
+/// its only block and its murmur3 tail is empty. Built in a temp dir and in
+/// memory and never committed.
+pub fn sixteen_byte_name_over_the_hamt_threshold_bundle() -> Vec<BundleEntry> {
+    let photo = "photo-block.jpeg";
+    assert_eq!(photo.len(), 16, "the photo name's bytes");
+    assert_eq!(photo.len() % 16, 0, "one whole block");
+    let mut seen = 0;
+    let mut replaced = 0;
+    let mut lengthened = 0;
+    let entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(1)
+        .into_iter()
+        .map(|entry| {
+            if entry.path.len() == 200 {
+                seen += 1;
+                if seen == 3 {
+                    replaced += 1;
+                    return BundleEntry {
+                        path: photo.to_owned(),
+                        content: Vec::new(),
+                    };
+                }
+            }
+            if entry.path.len() == 51 {
+                lengthened += 1;
+                return BundleEntry {
+                    path: format!("{}{}", entry.path, "0".repeat(184)),
+                    content: entry.content,
+                };
+            }
+            entry
+        })
+        .collect();
+    assert_eq!(
+        (seen, replaced, lengthened),
+        (1110, 1, 1),
+        "the 200-byte fillers, the one replacement and the measured name lengthened"
+    );
+    let photo_len = entries
+        .iter()
+        .find(|entry| entry.path == photo)
+        .map(|entry| entry.path.len())
+        .expect("the photo name is in the bundle");
+    assert_eq!(photo_len, 16, "the replaced name's bytes");
+    let measured_len = entries
+        .iter()
+        .find(|entry| entry.path.len() == 235)
+        .map(|entry| entry.path.len())
+        .expect("the lengthened measured name is in the bundle");
+    assert_eq!(measured_len, 235, "the measured name's bytes");
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    let whole_blocks = entries
+        .iter()
+        .filter(|entry| entry.path.len() % 16 == 0)
+        .count();
+    assert_eq!(whole_blocks, 1, "one name is a whole number of blocks");
+    entries
+}
+
+/// Task 067: [`directory_at_hamt_threshold_bundle`]`(1)` with its fourth
+/// 200-byte filler replaced by `photo.jpg` (9 bytes, its last byte `g`,
+/// empty content) and its 51-byte measured name lengthened by 191 bytes to
+/// 242. The links estimate stays 262145, so the directory is a HAMT shard,
+/// and exactly one path leaves a 9-byte murmur3 tail, so tail index 8, the
+/// first byte of the hash's second word, enters the bucket hash. Built in a
+/// temp dir and in memory and never committed.
+pub fn nine_byte_name_over_the_hamt_threshold_bundle() -> Vec<BundleEntry> {
+    let photo = "photo.jpg";
+    assert_eq!(photo.len(), 9, "the photo name's bytes");
+    assert_eq!(photo.as_bytes().last(), Some(&b'g'), "the last byte");
+    let mut seen = 0;
+    let mut replaced = 0;
+    let mut lengthened = 0;
+    let entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(1)
+        .into_iter()
+        .map(|entry| {
+            if entry.path.len() == 200 {
+                seen += 1;
+                if seen == 4 {
+                    replaced += 1;
+                    return BundleEntry {
+                        path: photo.to_owned(),
+                        content: Vec::new(),
+                    };
+                }
+            }
+            if entry.path.len() == 51 {
+                lengthened += 1;
+                return BundleEntry {
+                    path: format!("{}{}", entry.path, "0".repeat(191)),
+                    content: entry.content,
+                };
+            }
+            entry
+        })
+        .collect();
+    assert_eq!(
+        (seen, replaced, lengthened),
+        (1110, 1, 1),
+        "the 200-byte fillers, the one replacement and the measured name lengthened"
+    );
+    let photo_len = entries
+        .iter()
+        .find(|entry| entry.path == photo)
+        .map(|entry| entry.path.len())
+        .expect("the photo name is in the bundle");
+    assert_eq!(photo_len, 9, "the replaced name's bytes");
+    let measured_len = entries
+        .iter()
+        .find(|entry| entry.path.len() == 242)
+        .map(|entry| entry.path.len())
+        .expect("the lengthened measured name is in the bundle");
+    assert_eq!(measured_len, 242, "the measured name's bytes");
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    let nine_tails = entries
+        .iter()
+        .filter(|entry| entry.path.len() % 16 == 9)
+        .count();
+    assert_eq!(nine_tails, 1, "one name leaves a 9-byte tail");
+    entries
+}
+
+/// Task 068: [`directory_at_hamt_threshold_bundle`]`(1)` with its fifth
+/// 200-byte filler replaced by `a` (1 byte, its only byte `a`, empty
+/// content) and its 51-byte measured name lengthened by 199 bytes to 250.
+/// The links estimate stays 262145, so the directory is a HAMT shard, and
+/// exactly one path leaves a 1-byte murmur3 tail, so the name's only byte
+/// is mixed into the bucket hash's first word. Built in a temp dir and in
+/// memory and never committed.
+pub fn one_byte_name_over_the_hamt_threshold_bundle() -> Vec<BundleEntry> {
+    let name = "a";
+    assert_eq!(name.len(), 1, "the name's byte");
+    assert_eq!(name.as_bytes(), b"a", "the only byte");
+    let mut seen = 0;
+    let mut replaced = 0;
+    let mut lengthened = 0;
+    let entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(1)
+        .into_iter()
+        .map(|entry| {
+            if entry.path.len() == 200 {
+                seen += 1;
+                if seen == 5 {
+                    replaced += 1;
+                    return BundleEntry {
+                        path: name.to_owned(),
+                        content: Vec::new(),
+                    };
+                }
+            }
+            if entry.path.len() == 51 {
+                lengthened += 1;
+                return BundleEntry {
+                    path: format!("{}{}", entry.path, "0".repeat(199)),
+                    content: entry.content,
+                };
+            }
+            entry
+        })
+        .collect();
+    assert_eq!(
+        (seen, replaced, lengthened),
+        (1110, 1, 1),
+        "the 200-byte fillers, the one replacement and the measured name lengthened"
+    );
+    let name_len = entries
+        .iter()
+        .find(|entry| entry.path == name)
+        .map(|entry| entry.path.len())
+        .expect("the 1-byte name is in the bundle");
+    assert_eq!(name_len, 1, "the replaced name's bytes");
+    let measured_len = entries
+        .iter()
+        .find(|entry| entry.path.len() == 250)
+        .map(|entry| entry.path.len())
+        .expect("the lengthened measured name is in the bundle");
+    assert_eq!(measured_len, 250, "the measured name's bytes");
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    let one_byte_tails = entries
+        .iter()
+        .filter(|entry| entry.path.len() % 16 == 1)
+        .count();
+    assert_eq!(one_byte_tails, 1, "one name leaves a 1-byte tail");
+    entries
+}
+
+/// Task 061's pair: two 200-byte names whose `hamt_digest` values share
+/// bytes 0 and 1 (`FE 57`) and differ at byte 2 (`79` and `37`), and whose
+/// first digest byte `FE` no other name in
+/// [`directory_with_a_one_link_hamt_shard_bundle`] has. The names are `one-`
+/// and `two-` and 196 zero-padded digits. The unit test
+/// `two_names_in_one_bucket_get_a_child_shard` builds the same pair.
+pub fn shared_two_byte_names() -> [String; 2] {
+    [format!("one-{:0>196}", 62), format!("two-{:0>196}", 35_399)]
+}
+
+/// Task 069's pair: two 200-byte names whose `hamt_digest` values share
+/// bytes 0, 1 and 2 (`10 0F 9C`) and differ at byte 3 (`DD` and `28`), and
+/// whose first digest byte `10` no other name in
+/// [`directory_with_three_shared_digest_bytes_bundle`] has. The names are
+/// `c3-` and 197 zero-padded digits (numbers 24530 and 47365). The unit test
+/// `two_names_sharing_three_digest_bytes_get_the_next_shard` builds the same
+/// pair.
+pub fn shared_three_byte_names() -> [String; 2] {
+    [
+        format!("c3-{:0>197}", 24_530),
+        format!("c3-{:0>197}", 47_365),
+    ]
+}
+
+/// Task 070's four-byte pair: two 200-byte names whose `hamt_digest` values
+/// share bytes 0 to 3 (`89 C8 26 A6`) and differ at byte 4 (`03` and `94`),
+/// and whose first digest byte `89` no other name in
+/// [`directory_with_four_shared_digest_bytes_bundle`] has. The names are `f4-`
+/// and 197 zero-padded digits (numbers 30408 and 702843). The unit test
+/// `two_names_sharing_four_digest_bytes_get_the_next_shard` builds the same
+/// pair.
+pub fn shared_four_byte_names() -> [String; 2] {
+    [
+        format!("f4-{:0>197}", 30_408),
+        format!("f4-{:0>197}", 702_843),
+    ]
+}
+
+/// Task 070's five-byte pair: two 200-byte names whose `hamt_digest` values
+/// share bytes 0 to 4 (`B0 97 BA 5C DC`) and differ at byte 5 (`99` and `A3`),
+/// and whose first digest byte `B0` no other name in
+/// [`directory_with_five_shared_digest_bytes_bundle`] has. The names are `f5-`
+/// and 197 zero-padded digits (numbers 6279238 and 7983145). The unit test
+/// `two_names_sharing_five_digest_bytes_get_the_next_shard` builds the same
+/// pair.
+pub fn shared_five_byte_names() -> [String; 2] {
+    [
+        format!("f5-{:0>197}", 6_279_238),
+        format!("f5-{:0>197}", 7_983_145),
+    ]
+}
+
+/// [`directory_at_hamt_threshold_bundle`]`(1)` with its first two 200-byte
+/// fillers replaced by [`shared_two_byte_names`]. Each name has 200 bytes, so
+/// the links estimate stays 262145: a HAMT shard whose first digest byte's
+/// bucket holds both names, and whose child shard from the next digest byte
+/// holds one link. Built in a temp dir and in memory and never committed.
+pub fn directory_with_a_one_link_hamt_shard_bundle() -> Vec<BundleEntry> {
+    let pair = shared_two_byte_names();
+    let mut replaced = 0;
+    let entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(1)
+        .into_iter()
+        .map(|entry| {
+            if replaced < pair.len() && entry.path.len() == 200 {
+                let path = pair[replaced].clone();
+                replaced += 1;
+                BundleEntry {
+                    path,
+                    content: entry.content,
+                }
+            } else {
+                entry
+            }
+        })
+        .collect();
+    assert_eq!(replaced, pair.len(), "two 200-byte fillers are replaced");
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    entries
+}
+
+/// Task 069: [`directory_at_hamt_threshold_bundle`]`(1)` with its first two
+/// 200-byte fillers replaced by [`shared_three_byte_names`]. Each name has
+/// 200 bytes, so the links estimate stays 262145: a HAMT shard whose two
+/// names share digest bytes 0, 1 and 2, so byte 2's bucket holds both and
+/// still gets a child shard from byte 3. Built in a temp dir and in memory
+/// and never committed.
+pub fn directory_with_three_shared_digest_bytes_bundle() -> Vec<BundleEntry> {
+    let pair = shared_three_byte_names();
+    for name in &pair {
+        assert_eq!(name.len(), 200, "a bundle name fits in a folder");
+    }
+    let mut replaced = 0;
+    let entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(1)
+        .into_iter()
+        .map(|entry| {
+            if replaced < pair.len() && entry.path.len() == 200 {
+                let path = pair[replaced].clone();
+                replaced += 1;
+                BundleEntry {
+                    path,
+                    content: entry.content,
+                }
+            } else {
+                entry
+            }
+        })
+        .collect();
+    assert_eq!(replaced, pair.len(), "two 200-byte fillers are replaced");
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    entries
+}
+
+/// Task 070: [`directory_at_hamt_threshold_bundle`]`(1)` with its first `skip`
+/// 200-byte digit fillers left as they are and the next two replaced by
+/// `pair`. Each of `pair`'s names has 200 bytes, so the links estimate stays
+/// 262145: a HAMT shard whose bucket at the depth before the pair's first
+/// differing byte holds both names and still gets a child shard from the next
+/// digest byte. The helper asserts two replacements, the source names it
+/// replaced, both new lengths and the estimate. Built in a temp dir and in
+/// memory and never committed.
+fn bundle_with_a_shared_digest_byte_pair(pair: [String; 2], skip: usize) -> Vec<BundleEntry> {
+    for name in &pair {
+        assert_eq!(name.len(), 200, "a bundle name fits in a folder");
+    }
+    let mut skipped = 0;
+    let mut replaced = 0;
+    let entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(1)
+        .into_iter()
+        .map(|entry| {
+            if replaced == pair.len() || entry.path.len() != 200 {
+                return entry;
+            }
+            let source = format!("{skipped:0>200}");
+            assert_eq!(entry.path, source, "the source name of the pair");
+            skipped += 1;
+            if skipped <= skip {
+                return entry;
+            }
+            let path = pair[replaced].clone();
+            replaced += 1;
+            BundleEntry {
+                path,
+                content: entry.content,
+            }
+        })
+        .collect();
+    assert_eq!(replaced, pair.len(), "two 200-byte fillers are replaced");
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    entries
+}
+
+/// Task 070: [`directory_at_hamt_threshold_bundle`]`(1)` with its first five
+/// 200-byte fillers left as they are and the sixth and seventh (the 200-digit
+/// names of 5 and 6) replaced by [`shared_four_byte_names`]. Each name has
+/// 200 bytes, so the links estimate stays 262145: a HAMT shard whose two
+/// names share digest bytes 0 to 3, so byte 3's bucket holds both and still
+/// gets a child shard from byte 4. Built in a temp dir and in memory and
+/// never committed.
+pub fn directory_with_four_shared_digest_bytes_bundle() -> Vec<BundleEntry> {
+    bundle_with_a_shared_digest_byte_pair(shared_four_byte_names(), 5)
+}
+
+/// Task 070: [`directory_at_hamt_threshold_bundle`]`(1)` with its first seven
+/// 200-byte fillers left as they are and the eighth and ninth (the 200-digit
+/// names of 7 and 8) replaced by [`shared_five_byte_names`]. Each name has
+/// 200 bytes, so the links estimate stays 262145: a HAMT shard whose two
+/// names share digest bytes 0 to 4, so byte 4's bucket holds both and still
+/// gets a child shard from byte 5. Built in a temp dir and in memory and
+/// never committed.
+pub fn directory_with_five_shared_digest_bytes_bundle() -> Vec<BundleEntry> {
+    bundle_with_a_shared_digest_byte_pair(shared_five_byte_names(), 7)
+}
+
+/// Task 062: [`directory_at_hamt_threshold_bundle`]`(1)` with its first
+/// 200-byte filler (a name of digits only) holding 262145 bytes, byte `i`
+/// being `i % 251`, instead of empty bytes. The name keeps its 200 bytes, so
+/// the links estimate stays 262145 and the directory is still a shard. The
+/// file is a file root over two raw leaves, whose Tsize is its block and its
+/// leaves (262249), so a HAMT leaf link that stored its byte length would
+/// print another name. Built in a temp dir and in memory and never committed.
+pub fn file_root_inside_a_hamt_bundle() -> Vec<BundleEntry> {
+    let mut replaced = 0;
+    let entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(1)
+        .into_iter()
+        .map(|entry| {
+            if replaced == 0 && entry.path.len() == 200 {
+                replaced += 1;
+                BundleEntry {
+                    path: entry.path,
+                    content: (0..262_145u32).map(|i| (i % 251) as u8).collect(),
+                }
+            } else {
+                entry
+            }
+        })
+        .collect();
+    assert_eq!(replaced, 1, "one 200-byte filler is replaced");
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    entries
+}
+
+/// The child-shard bundle: content-sample's two files at the root, and the
+/// flat threshold bundle under `photos/`, so `photos/capsule.json` is not the
+/// root `capsule.json`. The root's direct children are `capsule.json`,
+/// `sample.example` and `photos`; `photos`' own estimate is the flat one.
+/// Built in a temp dir and in memory and never committed.
+pub fn child_directory_at_hamt_threshold_bundle(longer: usize) -> Vec<BundleEntry> {
+    let mut entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(longer)
+        .into_iter()
+        .map(|entry| BundleEntry {
+            path: format!("photos/{}", entry.path),
+            content: entry.content,
+        })
+        .collect();
+    entries.extend(CONTENT_SAMPLE.files.iter().map(|file| BundleEntry {
+        path: (*file).to_owned(),
+        content: read_fixture(&CONTENT_SAMPLE, file),
+    }));
+    entries
+}
+
+/// The photo lane's PH6 stand-in photo set, a consumer copy and not a
+/// fixture: its five files, copied byte for byte from
+/// `examples/photo-viewer/host-test/fixtures/stand-in-photo-set/` at
+/// `d047a069a`. It sits outside `fixtures/` because its `capsule.json` has a
+/// `viewer` object, which the Runtime's manifest type refuses.
+pub const PHOTO_STAND_IN: &str = "consumer-fixtures/photo-stand-in-photo-set";
+pub const PHOTO_STAND_IN_FILES: [&str; 5] = [
+    "README.md",
+    "capsule.json",
+    "images/01.png",
+    "images/02.jpg",
+    "images/03.webp",
+];
+/// The lab CID of those five files. README pins the same value.
+pub const PHOTO_STAND_IN_LAB_CID: &str =
+    "bafybeiepelczjykxjbhpwaqjnmxx346l52alcxfzgg52ip2ejf5yijiuna";
+
+/// The committed bytes of the photo stand-in copy, one entry per file.
+pub fn photo_stand_in_entries() -> Vec<BundleEntry> {
+    PHOTO_STAND_IN_FILES
+        .iter()
+        .map(|file| {
+            let path = lane_dir().join(PHOTO_STAND_IN).join(file);
+            let content =
+                fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            BundleEntry {
+                path: (*file).to_owned(),
+                content,
+            }
+        })
+        .collect()
+}
 
 /// SHA-256 of `domain || 0x00 || content-sample's printed lab CID`. README
 /// pins the same digest.
@@ -597,6 +1480,10 @@ pub const NAME_SIGNATURE_HEADING: &str = "## Test-key publisher signature (lab p
 /// payload and digest, `record_payload` and `record_digest`.
 pub const PACKAGE_RECORD_HEADING: &str = "## Lab package record (outside the bundle)\n";
 
+/// The heading of README's section that holds the cross-implementation
+/// check: the Python pin test's count and the Kubo cross-check.
+pub const CROSS_IMPLEMENTATION_HEADING: &str = "### The cross-implementation check\n";
+
 /// The ```python block of README's "The encoding" section: the one Python
 /// copy of the naming rule, as committed.
 pub fn readme_python_block() -> Result<String, String> {
@@ -694,6 +1581,61 @@ print(name_digest(sys.stdin.read()))
 pub fn readme_python_name_digests(names: &[&str]) -> Result<Vec<String>, String> {
     let block = python_block_under(README, NAME_SIGNATURE_HEADING)?;
     python_name_digests(&block, names)
+}
+
+/// The five counts README states for the pinned bundles, from its
+/// cross-implementation section: the Python test's "For each of the N pins",
+/// its "A missing block is no pass: exactly N bundles are checked" table
+/// cell, Kubo's "writes each of the N pinned bundles", the same test's
+/// "checked exactly N bundles" and its "The N are" list of rows (task 064).
+/// Read word by word, so README may wrap a sentence anywhere. A missing
+/// count, two counts in one place, or digits that are not a number are
+/// refused with their reason.
+pub fn readme_pinned_bundle_counts() -> Result<[usize; 5], String> {
+    let section = section_under(README, CROSS_IMPLEMENTATION_HEADING)?;
+    let words: Vec<&str> = section.split_whitespace().collect();
+    Ok([
+        count_after(&words, &["For", "each", "of", "the"], "pins,")?,
+        count_after(
+            &words,
+            &["A", "missing", "block", "is", "no", "pass:", "exactly"],
+            "bundles",
+        )?,
+        count_after(&words, &["writes", "each", "of", "the"], "pinned")?,
+        count_after(&words, &["checked", "exactly"], "bundles")?,
+        count_after(&words, &["The"], "are")?,
+    ])
+}
+
+/// The number in the one place `words` holds `before`, then digits, then
+/// `after`. A place with no digits, no such place, or two of them is
+/// refused.
+fn count_after(words: &[&str], before: &[&str], after: &str) -> Result<usize, String> {
+    let mut found = Vec::new();
+    for at in 0..words.len().saturating_sub(before.len() + 1) {
+        if &words[at..at + before.len()] != before || words[at + before.len() + 1] != after {
+            continue;
+        }
+        let number = words[at + before.len()];
+        found.push(number.parse::<usize>().map_err(|_| {
+            format!(
+                "README's {:?} count {number:?} is not a number",
+                before.join(" ")
+            )
+        })?);
+    }
+    match found[..] {
+        [count] => Ok(count),
+        [] => Err(format!(
+            "README has no {:?} ... {after:?} count",
+            before.join(" ")
+        )),
+        _ => Err(format!(
+            "README has {} {:?} ... {after:?} counts, not one",
+            found.len(),
+            before.join(" ")
+        )),
+    }
 }
 
 /// `block` and [`NAME_DIGEST_DRIVER`] run once per name, through
@@ -1022,10 +1964,12 @@ pub const COMPUTED_BY_THE_LAB: &str = "Kubo v0.40.1 profile, computed by the lab
 pub const CLAIM_SCOPE_HEADING: &str = "## Claim scope\n";
 
 /// The gate README's "Claim scope" states, as written (white space aside):
-/// what must happen before the lab CID may be called anything more.
-pub const KUBO_GATE: &str = "No offline Kubo cross-check has been run (Kubo v0.40.1, the same \
-     profile flags, hash-only import, no network). Until one prints the same value as a \
-     committed pin, the lab CID is not called equal to the Runtime's CID or to Kubo's output.";
+/// what Kubo has checked (task 050), and that the claim words do not change
+/// until Rong or Flint changes them.
+pub const KUBO_GATE: &str = "One offline Kubo v0.40.1 hash-only cross-check with the Runtime's \
+     profile flags was run by hand on this Mac (task 050) and printed every committed pin, and \
+     the claim words stay \"Kubo v0.40.1 profile, computed by the lab\" until Rong or Flint \
+     changes them.";
 
 /// Words that would claim the lab CID equals the Runtime's CID or Kubo's
 /// output, in lowercase. No lane doc and no file under `src/` holds one, in
@@ -1366,33 +2310,42 @@ pub fn published(folder: &Path) -> (String, PathBuf) {
 /// Lab stand-in for the Runtime's launch route, not the Runtime. It lives in
 /// test code and runs nothing: a launched instance is a record.
 ///
-/// Its two methods are named for the two routes of draft PR #309's RA-6 at
-/// `513988ebd`, `POST /api/capsules` ([`StandInRuntime::post_capsules`],
-/// RI-2) and `GET /api/capsules` ([`StandInRuntime::get_capsules`], RI-3),
-/// and take and return JSON bodies. It holds a store (printed lab CID ->
-/// bundle folder, filled at publish time by [`published`]), the publishers'
-/// package records and an explicit list of accepted publisher DIDs. A launch
-/// ends in one of two states: "launched", with one new instance, or
-/// "refused", status 400 with the reason and no instance. The one request
-/// field, `cid`, is a lab field, not in #309: today's route takes `path`.
+/// [`StandInRuntime::new`] builds it. Each other public method is named for a
+/// route of draft PR #309 at `513988ebd`, or is a lab test seam, not a route:
+/// - [`StandInRuntime::post_capsules`]: RA-6's `POST /api/capsules` (RI-2);
+/// - [`StandInRuntime::get_capsules`]: RA-6's `GET /api/capsules` (RI-3);
+/// - [`StandInRuntime::get_capability_list_all_sessions_live`]: RA-1's
+///   `GET /api/capability/list?scope=all_sessions_live`, the grant view;
+/// - [`StandInRuntime::seed_grant`]: Lab test seam, not a route;
+/// - [`StandInRuntime::asks_of`]: Lab test seam, not a route;
+/// - [`StandInRuntime::set_after_walk`]: Lab test seam, not a route.
 ///
-/// Its grant view is named for #309 RA-1's
-/// `GET /api/capability/list?scope=all_sessions_live`
-/// ([`StandInRuntime::get_capability_list_all_sessions_live`]). A launch adds
-/// no grant: a valid publisher signature alone yields none. No shell approval
-/// is modelled; a grant exists only through the test seam
+/// The route methods take and return JSON bodies. It holds a store (printed
+/// lab CID -> bundle folder, filled at publish time by [`published`]), the
+/// publishers' package records and an explicit list of accepted publisher
+/// DIDs. A launch ends in one of two states: "launched", with one new
+/// instance, or "refused", status 400 with the reason and no instance. The
+/// one request field, `cid`, is a lab field, not in #309: today's route takes
+/// `path`.
+///
+/// The grant view lists every held grant of every session. A launch adds no
+/// grant: a valid publisher signature alone yields none. No shell approval is
+/// modelled; a grant exists only through the test seam
 /// [`StandInRuntime::seed_grant`].
 ///
 /// A launched instance is handed its asks only as the `asks.json` bytes of
 /// the checked bundle it was launched from, read through the test seam
 /// [`StandInRuntime::asks_of`]: a change on disk after launch does not reach
-/// it. The bytes are never parsed, and #309 has no asks field.
+/// it. The bytes are never parsed, and #309 has no asks field. A change on
+/// disk between the walk and the launch does not reach it either, shown
+/// through the test seam [`StandInRuntime::set_after_walk`].
 pub struct StandInRuntime {
     store: BTreeMap<String, PathBuf>,
     records: Vec<PackageRecord>,
     accepted: Vec<String>,
     instances: Vec<Instance>,
     grants: Vec<Grant>,
+    after_walk: Option<fn(&Path)>,
 }
 
 /// One launched instance: a record, never a running program.
@@ -1445,6 +2398,7 @@ impl StandInRuntime {
             accepted,
             instances: Vec::new(),
             grants: Vec::new(),
+            after_walk: None,
         }
     }
 
@@ -1518,6 +2472,15 @@ impl StandInRuntime {
             .and_then(|instance| instance.asks.clone())
     }
 
+    /// Lab test seam, not a route: every later launch calls `hook` once, on
+    /// the stored bundle folder, right after the one walk and before the name
+    /// compare (e). A test uses it to change the bytes on disk between the
+    /// walk and the launch, and shows that the instance is still handed the
+    /// bytes the walk read. With no hook set, nothing is called.
+    pub fn set_after_walk(&mut self, hook: fn(&Path)) {
+        self.after_walk = Some(hook);
+    }
+
     /// The checks of a launch, in this order, each library refusal as its own
     /// text: (a) the body, (b) the one parse of a printed lab CID, (c) the
     /// store, (d) the one walk, (e) the one name compare against the stored
@@ -1525,7 +2488,9 @@ impl StandInRuntime {
     /// (a), (b) and (c) come before the CID check. The answer is the stored
     /// manifest's `name`, from [`CheckedBundle::manifest_name`], and the
     /// bundle's `asks.json` bytes, both from the one checked bundle that
-    /// passed every check.
+    /// passed every check. The hook of [`StandInRuntime::set_after_walk`], if
+    /// set, runs on the stored folder right after (d); no check after (d)
+    /// and no part of the answer reads the folder.
     fn checked_launch(&self, body: &Value) -> Result<(String, Option<Vec<u8>>), String> {
         let cid = self.launch_cid(body)?;
         cid.parse::<LabCid>().map_err(said)?;
@@ -1534,6 +2499,9 @@ impl StandInRuntime {
             .get(&cid)
             .ok_or_else(|| format!("no bundle is stored under {cid}"))?;
         let checked = checked_bundle(folder).map_err(said)?;
+        if let Some(hook) = self.after_walk {
+            hook(folder);
+        }
         checked.check_name(&cid).map_err(said)?;
         self.check_records(&checked, &cid)?;
         Ok((checked.manifest_name().to_owned(), signed_asks(&checked)))
