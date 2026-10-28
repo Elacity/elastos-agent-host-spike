@@ -1,0 +1,24 @@
+id: F-GB-hashbasic
+file: src/link.rs
+test: link::model_hash_inside_a_string_is_still_a_link
+--- old
+        while index < bytes.len() && bytes[index] != b'"' {
+            if bytes[index] == b'\\' {
+                index = copy_escape(bytes, index, decoded);
+            } else {
+                decoded.push(bytes[index]);
+                index += 1;
+            }
+        }
+--- new
+        while index < bytes.len() && bytes[index] != b'"' {
+            if bytes[index] == b'#' {
+                return index;
+            } else if bytes[index] == b'\\' {
+                index = copy_escape(bytes, index, decoded);
+            } else {
+                decoded.push(bytes[index]);
+                index += 1;
+            }
+        }
+--- end
