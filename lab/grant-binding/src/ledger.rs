@@ -1410,6 +1410,35 @@ fn model_release_after_unknown_is_refused() {
 }
 
 #[test]
+fn model_reported_usage_does_not_release_an_uncertain_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    let unknown = verifier
+        .settle(&call, &reserved, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(handle)
+    };
+    assert!(request.reported_usage > 0);
+    let blocked = verifier
+        .release(&call, &request, reservation)
+        .expect_err("uncertain hold is not released");
+    assert_eq!(blocked, ReleaseRefuse::Uncertain);
+    assert_eq!(blocked.to_string(), "uncertain hold is not released");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
 fn model_timeout_ends_an_uncertain_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
