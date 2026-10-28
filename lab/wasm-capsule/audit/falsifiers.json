@@ -286,8 +286,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "if !right_encoding || Validator::new().validate_all(wasm).is_err() {",
-          "new": "if !right_encoding || (encoding == Encoding::Module && Validator::new().validate_all(wasm).is_err()) {"
+          "old": "if !right_encoding || validator.validate_all(wasm).is_err() {",
+          "new": "if !right_encoding || (encoding == Encoding::Module && validator.validate_all(wasm).is_err()) {"
         }
       ],
       "tests": [
@@ -318,7 +318,7 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "                let range = section.range();\n                let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;\n                let start = start.checked_sub(1).ok_or_else(|| invalid.clone())?;\n                let end = usize::try_from(range.end).map_err(|_| invalid.clone())?;\n                let content = wasm.get(start..end).ok_or_else(|| invalid.clone())?;\n                if content.windows(4).any(|bytes| bytes == b\"\\0asm\") {",
+          "old": "                    let range = section.range();\n                    let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;\n                    let start = start.checked_sub(1).ok_or_else(|| invalid.clone())?;\n                    let end = usize::try_from(range.end).map_err(|_| invalid.clone())?;\n                    let content = wasm.get(start..end).ok_or_else(|| invalid.clone())?;\n                    if content.windows(4).any(|bytes| bytes == b\"\\0asm\") {",
           "new": "                if section.data().windows(4).any(|bytes| bytes == b\"\\0asm\") {"
         }
       ],
@@ -335,7 +335,7 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "                let range = section.range();\n                let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;\n                let start = start.checked_sub(1).ok_or_else(|| invalid.clone())?;\n                let end = usize::try_from(range.end).map_err(|_| invalid.clone())?;\n                let content = wasm.get(start..end).ok_or_else(|| invalid.clone())?;\n                if content.windows(4).any(|bytes| bytes == b\"\\0asm\") {",
+          "old": "                    let range = section.range();\n                    let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;\n                    let start = start.checked_sub(1).ok_or_else(|| invalid.clone())?;\n                    let end = usize::try_from(range.end).map_err(|_| invalid.clone())?;\n                    let content = wasm.get(start..end).ok_or_else(|| invalid.clone())?;\n                    if content.windows(4).any(|bytes| bytes == b\"\\0asm\") {",
           "new": "                if section.name().as_bytes().windows(4).any(|bytes| bytes == b\"\\0asm\")\n                    || section.data().windows(4).any(|bytes| bytes == b\"\\0asm\")\n                {"
         }
       ],
@@ -443,13 +443,13 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "    if !right_encoding || Validator::new().validate_all(wasm).is_err() {",
+          "old": "    if !right_encoding || validator.validate_all(wasm).is_err() {",
           "new": "    if !right_encoding {"
         },
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
           "old": "            _ => {}\n        }\n    }\n    Ok(())\n}",
-          "new": "            _ => {}\n        }\n    }\n    if Validator::new().validate_all(wasm).is_err() {\n        return Err(invalid);\n    }\n    Ok(())\n}"
+          "new": "            _ => {}\n        }\n    }\n    if validator.validate_all(wasm).is_err() {\n        return Err(invalid);\n    }\n    Ok(())\n}"
         }
       ],
       "tests": [
@@ -530,7 +530,7 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "                let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;\n                let start = start.checked_sub(1).ok_or_else(|| invalid.clone())?;",
+          "old": "                    let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;\n                    let start = start.checked_sub(1).ok_or_else(|| invalid.clone())?;",
           "new": "                let start = usize::try_from(range.start).map_err(|_| invalid.clone())?;"
         }
       ],
@@ -564,8 +564,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "    if !right_encoding || Validator::new().validate_all(wasm).is_err() {",
-          "new": "    if Validator::new().validate_all(wasm).is_err() {"
+          "old": "    if !right_encoding || validator.validate_all(wasm).is_err() {",
+          "new": "    if validator.validate_all(wasm).is_err() {"
         },
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
@@ -852,6 +852,72 @@
       ],
       "tests": [
         "a_different_version_of_a_declared_interface_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA23a",
+      "title": "The component-type branch never runs, so the magic window decides",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if component_type {",
+          "new": "if false && component_type {"
+        }
+      ],
+      "tests": [
+        "wit_bindgen_component_type_section_is_accepted",
+        "component_type_section_that_does_not_parse_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA23b",
+      "title": "Any data under a component-type name is accepted",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "fn type_only_component(data: &[u8], validator: &mut Validator) -> Result<(), Refusal> {",
+          "new": "fn type_only_component(data: &[u8], validator: &mut Validator) -> Result<(), Refusal> {\n    let _ = (data, validator);\n    return Ok(());"
+        }
+      ],
+      "tests": [
+        "component_type_section_that_does_not_parse_is_refused",
+        "component_type_section_with_a_core_module_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA23c",
+      "title": "A component that parses is accepted whatever its payloads are",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "fn type_only_payload(payload: Payload<'_>) -> Result<(), Refusal> {",
+          "new": "fn type_only_payload(payload: Payload<'_>) -> Result<(), Refusal> {\n    let _ = payload;\n    return Ok(());"
+        }
+      ],
+      "tests": [
+        "component_type_section_with_a_core_module_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA23d",
+      "title": "Nested component-type sections keep recursing",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if nested && component_type {",
+          "new": "if false && nested && component_type {"
+        }
+      ],
+      "tests": [
+        "component_type_section_inside_component_type_data_is_refused"
       ]
     }
   ]
