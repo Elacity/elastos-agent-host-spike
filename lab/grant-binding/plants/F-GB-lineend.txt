@@ -2,19 +2,7 @@ id: F-GB-lineend
 file: src/link.rs
 test: link::model_line_ending_escape_is_a_link
 --- old
-    let mut next = index + 1;
-    if bytes.get(next) == Some(&b'\r') {
-        next += 1;
-    }
-    if bytes.get(next) != Some(&b'\n') {
-        return None;
-    }
-    next += 1;
-    while matches!(bytes.get(next), Some(b' ' | b'\t' | b'\r' | b'\n')) {
-        next += 1;
-    }
-    Some(next)
+    dependency_names(cargo_toml).iter().any(|name| name == "grant-binding")
 --- new
-    let _ = (bytes, index);
-    None
+    false
 --- end

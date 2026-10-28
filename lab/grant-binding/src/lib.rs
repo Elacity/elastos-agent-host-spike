@@ -1597,10 +1597,10 @@ fn model_readme_states_the_reference_model_boundary() {
 #[test]
 fn model_detects_a_path_dependency_on_this_crate() {
     assert!(link::cargo_toml_path_depends_on_grant_binding(
-        r#"grant-binding = { path = "lab/grant-binding" }"#
+        "[package]\nname = \"fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\ngrant-binding = { path = \"missing-gb\" }\n"
     ));
     assert!(!link::cargo_toml_path_depends_on_grant_binding(
-        r#"name = "grant-binding""#
+        "[package]\nname = \"grant-binding\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
     ));
 }
 

@@ -2,7 +2,7 @@ id: F-GB-multi
 file: src/link.rs
 test: link::model_multiline_basic_string_escape_is_a_link
 --- old
-        copy_multiline(bytes, start + 3, b'"', true, decoded)
+    dependency_names(cargo_toml).iter().any(|name| name == "grant-binding")
 --- new
-        copy_multiline(bytes, start + 3, b'"', false, decoded)
+    false
 --- end

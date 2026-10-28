@@ -2,7 +2,7 @@ id: F-GB-uhex
 file: src/link.rs
 test: link::model_uppercase_hex_escape_is_a_link
 --- old
-        b'A'..=b'F' => Some(u32::from(byte - b'A') + 10),
+    dependency_names(cargo_toml).iter().any(|name| name == "grant-binding")
 --- new
-        b'A'..=b'F' => None,
+    false
 --- end

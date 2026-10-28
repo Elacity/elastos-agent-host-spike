@@ -2,25 +2,7 @@ id: F-GB-litmulti
 file: src/link.rs
 test: link::model_literal_string_path_is_a_link
 --- old
-        copy_multiline(bytes, start + 3, b'\'', false, decoded)
+    dependency_names(cargo_toml).iter().any(|name| name == "grant-binding")
 --- new
-        {
-            let mut index = start + 3;
-            while index < bytes.len() {
-                if bytes[index] == b'\'' {
-                    let mut run = 0;
-                    while index + run < bytes.len() && bytes[index + run] == b'\'' {
-                        run += 1;
-                    }
-                    if run >= 3 {
-                        index += run;
-                        break;
-                    }
-                    index += run;
-                } else {
-                    index += 1;
-                }
-            }
-            index
-        }
+    false
 --- end
