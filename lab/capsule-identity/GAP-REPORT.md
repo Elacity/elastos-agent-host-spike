@@ -851,6 +851,11 @@ not run the tests.
   "Asks come only from the signed bytes (M1 check B2, no-schema part)"); not shown: no ask schema, no parse of
   `asks.json`, no mapping of an ask to an operation (`lab/bus-v2-proposal/`), no grant from an ask (033), and the
   Runtime hands no asks to anything and did nothing here.
+  28 Oct, task 044: until task 044, only the call-time re-read (F-CI35a, a stub in which `asks_of` reads the
+  folder) was caught; a stub that reads `asks.json` from the folder at launch, after the walk, passed both tests
+  above, as the 041 second review's FOLLOWUP found (`SECOND-REVIEW.md`, the #730 section). That stub now fails too
+  (`standin_takes_the_asks_from_the_walk_not_the_folder`, F-CI44a), through a lab test seam, not a route, that
+  changes the stored bytes between the walk and the launch.
 
 ### B1 through a lab stand-in (27 Oct, tasks 032 and 033)
 

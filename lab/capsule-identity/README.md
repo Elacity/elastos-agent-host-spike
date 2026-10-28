@@ -1440,7 +1440,11 @@ checked bundle that passed every check above. `checked_launch` takes the
 manifest's `name` (`CheckedBundle::manifest_name()`) and the content of the
 `asks.json` entry (`CheckedBundle::entries()`) from the same `CheckedBundle`,
 the one walk (P10), and the launch keeps that content in the instance, once: `Some(bytes)`, or `None` when
-the bundle has no `asks.json`. Nothing reads the folder again.
+the bundle has no `asks.json`. Nothing reads the folder again. Task 044 shows
+that for the launch itself: `set_after_walk`, a lab test seam, not a route,
+gives `checked_launch` a hook that it calls once on the stored folder, right
+after the one walk and before (e), so a test can change the bytes on disk
+between the walk and the launch. With no hook set, nothing is called.
 `asks_of(session_id)`, a lab test seam, not a route (#309 has no asks field on
 any route), answers that instance's bytes, and `None` for an unknown session.
 The launch answer, the `get_capsules` entry and the grant view keep exactly
@@ -1456,12 +1460,20 @@ no new instance and an empty grant view.
 (which has no `asks.json`), each signed by a fresh test key, in both orders:
 the `agent-host` session answers its bytes, the `web-app` session answers
 `None`, and so does an unknown session.
+`standin_takes_the_asks_from_the_walk_not_the_folder` launches the same signed
+bundle with a hook that changes one byte of the stored `asks.json`: the launch
+answers `launched`, the stored `asks.json` no longer equals the committed
+fixture bytes (so the hook ran), and the session answers the committed fixture
+bytes, which the test reads itself. Before task 044, a launch that read
+`asks.json` from the folder after the walk passed both tests above, because
+neither changes the folder between the walk and the launch.
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
 | The instance keeps the signed bytes from launch; a change on disk after launch does not reach it | `standin_hands_an_instance_only_its_signed_asks_bytes` | F-CI35a (the planted accept-anything stub: `asks_of` reads `asks.json` from the stored folder at call time) |
 | Each session answers its own asks | `standin_gives_each_session_its_own_asks` | F-CI35b (`asks_of` ignores the session and answers the first instance's asks) |
 | A bundle with no `asks.json` is handed `None`, not empty bytes | `standin_gives_each_session_its_own_asks` | F-CI35c (`Some(Vec::new())` for a bundle with no `asks.json`) |
+| A change on disk between the walk and the launch does not reach the instance | `standin_takes_the_asks_from_the_walk_not_the_folder` | F-CI44a (the 041 review's stub: `checked_launch` reads `asks.json` from the stored folder at launch), F-CI44b (the hook is never called), F-CI44c (the hook runs before the walk, so (e) refuses) |
 
 Not shown:
 
@@ -1625,7 +1637,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 262 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 265 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1664,7 +1676,9 @@ and task 032's F-CI32a to F-CI32g, task 033's F-CI33a to F-CI33c and task
 F-CI36a (see [the checked bundle](#checked-bundle-the-name-and-the-bytes-it-covers))
 and F-CI36b (see [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)),
 and task 037's F-CI37a to F-CI37c (see
-[the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)).
+[the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)), and task 044's
+F-CI44a to F-CI44c (see
+[asks come only from the signed bytes](#asks-come-only-from-the-signed-bytes-m1-check-b2-no-schema-part)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -1760,6 +1774,11 @@ F-CI37a and F-CI37b in `get_capability_list_all_sessions_live`, on F-CI33b's
 anchor line (found exactly once; entries may share an anchor), and F-CI37c in
 `seed_grant`, its anchor a line task 033 added, found exactly once. Task 037
 changed no older edit's text.
+Task 044's entries also edit `tests/common/mod.rs`, in `checked_launch`:
+F-CI44a on the answer line, F-CI44b on the hook call, and F-CI44c on the walk
+line and the hook call together. Each anchor is found exactly once (F-CI44b's
+line is part of F-CI44c's anchor). Task 044 changed no older edit's text, and
+F-CI35a to F-CI35c's anchor lines stay byte for byte.
 
 ### The inventory check
 
@@ -1897,7 +1916,10 @@ At task 036 it reported `summary: 259 CAUGHT of 259` (`baseline: 136 named
 tests pass without an edit, 0 do not`; with the id prefix `F-CI36`: 2 of 2,
 and the seventeen moved edits each CAUGHT). At task 037 it reported
 `summary: 262 CAUGHT of 262` (`baseline: 137 named tests pass without an
-edit, 0 do not`; with the id prefix `F-CI37`: 3 of 3).
+edit, 0 do not`; with the id prefix `F-CI37`: 3 of 3). At task 044 it
+reported `summary: 265 CAUGHT of 265` (`baseline: 138 named tests pass
+without an edit, 0 do not`; with the id prefix `F-CI44`: 3 of 3, and with
+`F-CI35`: 3 of 3).
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029,
 030, 031 and 032 prove each of their falsifiers by break, named test fails, revert.
