@@ -1190,6 +1190,90 @@ HOSTED_READ_ORDER = (
 )
 
 
+def _walk_rows(start, lines):
+    """Return NUMBER -> text for a walk that starts at line START."""
+    return {start + offset: text for offset, text in enumerate(lines, 0)}
+
+
+# Every lib.rs block a fixture can quote, pinned at its source line numbers.
+LIB_BLOCK_LINES = {}
+LIB_BLOCK_LINES.update(_walk_rows(OBSERVE_NUMBER - 4, OBSERVE_LINES))
+LIB_BLOCK_LINES.update(_walk_rows(EDIT_START_NUMBER - 4, EDIT_LINES))
+LIB_BLOCK_LINES.update(_walk_rows(REQUEST_WALK_NUMBER, REQUEST_WALK_LINES))
+LIB_BLOCK_LINES.update(_walk_rows(REVISION_NUMBER - 7, REQUEST_LINES))
+LIB_BLOCK_LINES.update(_walk_rows(IS_WRITE_NUMBER - 2, IS_WRITE_LINES))
+LIB_BLOCK_LINES.update(_walk_rows(NO_PROCESS_NUMBER - 1, RUN_LINES))
+LIB_BLOCK_LINES.update(_walk_rows(NO_WRITE_NUMBER - 4, NO_WRITE_LINES))
+LIB_BLOCK_LINES.update(_walk_rows(DENY_NUMBER, DENY_LINES))
+LIB_BLOCK_LINES.update(
+    _walk_rows(
+        MINT_NUMBER - 1,
+        (MINT_FIRST, MINT_SECOND, MINT_THIRD, MINT_FOURTH, MINT_LAST),
+    )
+)
+LIB_BLOCK_LINES[OWNED_NUMBER] = OWNED_QUOTE
+LIB_BLOCK_LINES[NEXT_NUMBER] = NEXT_QUOTE
+LIB_BLOCK_LINES.update(_walk_rows(JOURNAL_NUMBER - 1, (JOURNAL_CFG, JOURNAL_CONST)))
+LIB_BLOCK_LINES.update(_walk_rows(GRANT_NUMBER, GRANT_LINES))
+LIB_BLOCK_LINES.update(_walk_rows(ASK_BLOCK_START, ASK_LINES))
+LIB_BLOCK_LINES.update(_walk_rows(BODY_DOC_NUMBER, WRITE_BODY_LINES))
+LIB_BLOCK_LINES.update(_walk_rows(APPEND_CONDITION_NUMBER - 7, APPEND_WALK_LINES))
+LIB_BLOCK_LINES.update(_walk_rows(APPEND_CAP_NUMBER - 1, DOC_WALK_LINES))
+LIB_BLOCK_LINES.update(_walk_rows(WRITE_INVOKE_NUMBER - 13, DOC_WALK_LINES))
+LIB_BLOCK_LINES.update(
+    _walk_rows(
+        ASKS_NUMBER - 2,
+        (
+            ASKS_FIRST,
+            ASKS_SECOND,
+            ASKS_THIRD,
+            ASKS_FOURTH,
+            ASKS_FIFTH,
+            ASKS_SIXTH,
+            ASKS_CFG,
+            ASKS_CONST,
+        ),
+    )
+)
+LIB_BLOCK_LINES.update(
+    _walk_rows(
+        MARKER_NUMBER - 3,
+        (MARKER_HEAD, MARKER_TAIL, MARKER_CFG, MARKER_CONST),
+    )
+)
+LIB_BLOCK_LINES.update(_walk_rows(KIND_BLOCK_START, KIND_LINES))
+LIB_BLOCK_LINES.update(
+    _walk_rows(
+        LAUNCHING_NUMBER - 4,
+        (
+            LAUNCHING_HEAD,
+            LAUNCHING_SECOND,
+            LAUNCHING_THIRD,
+            LAUNCHING_CFG,
+            LAUNCHING_CONST,
+        ),
+    )
+)
+LIB_BLOCK_LINES.update(_walk_rows(COVER_NUMBER - 5, COVER_LINES))
+LIB_BLOCK_LINES.update(_walk_rows(NO_PROVIDER_NUMBER - 1, NO_PROVIDER_LINES))
+LIB_BLOCK_LINES.update(_walk_rows(CHILD_NUMBER - 1, CHILD_LINES))
+LIB_BLOCK_LINES.update(_walk_rows(PROJECT_NUMBER - 1, PROJECT_LINES))
+LIB_BLOCK_LINES.update(_walk_rows(AUTHORIZE_NUMBER - 17, AUTHORIZE_LINES))
+LIB_BLOCK_LINES.update(_walk_rows(CHILD_HOST_DOC_NUMBER, CHILD_HOST_WALK))
+LIB_BLOCK_LINES.update(_walk_rows(INHERITED_ERR_NUMBER - 1, INHERITED_ERR_WALK))
+LIB_BLOCK_LINES.update(_walk_rows(GRANT_PARENT_NUMBER - 3, GRANT_PARENT_WALK))
+
+# Every provider_resource.rs block a fixture can quote.
+PROVIDER_BLOCK_LINES = {}
+PROVIDER_BLOCK_LINES.update(_walk_rows(SCHEME_NUMBER - 8, SCHEME_LINES))
+PROVIDER_BLOCK_LINES.update(_walk_rows(WRITE_ACTION_NUMBER - 3, WRITE_ACTION_LINES))
+
+# The last pinned line of each fixture file.
+LIB_COUNT = COVER_NUMBER + 1
+PROVIDER_COUNT = WRITE_ACTION_NUMBER - 3 + len(WRITE_ACTION_LINES) - 1
+APPEND_COUNT = WRITE_INVOKE_NUMBER
+
+
 class CitationCheckTests(unittest.TestCase):
     def _temp_root(self):
         tmp = tempfile.TemporaryDirectory()
@@ -1257,6 +1341,14 @@ class CitationCheckTests(unittest.TestCase):
         got = check.problems(self._draft(body, files))
         assert got == [expected], expected
 
+    def _rows(self, count, lines):
+        """A committed file: filler to COUNT, and LINES at their own numbers."""
+        rows = ["// filler"] * count
+        for number, text in lines.items():
+            if 1 <= number <= count:
+                rows[number - 1] = text
+        return ("\n".join(rows) + "\n").encode("utf-8")
+
     def _source(self, quote, following=NEXT_QUOTE):
         """A committed file whose line 3754 is QUOTE and line 3755 is FOLLOWING."""
         rows = ["// filler"] * (OWNED_NUMBER - 1) + [quote]
@@ -1264,13 +1356,15 @@ class CitationCheckTests(unittest.TestCase):
             rows.append(following)
         return ("\n".join(rows) + "\n").encode("utf-8")
 
-    def _quote_body(self, quote, following=None):
+    def _quote_body(self, quote, following=None, cited=None):
         """A draft that cites the owned span and indents QUOTE below it."""
-        body = (
-            "`" + OWNED_SPAN + "` states that the guest names only `Users/self`.\n"
-            "\n"
-            "    " + quote + "\n"
-        )
+        spans = [OWNED_SPAN]
+        if following is not None:
+            spans.append(NEXT_SPAN)
+        if cited is not None:
+            spans.append(cited)
+        prose = " ".join("`" + span + "` is cited." for span in spans)
+        body = prose + "\n\n    " + quote + "\n"
         if following is not None:
             body += "    " + following + "\n"
         return body + "\n"
@@ -1371,31 +1465,16 @@ class CitationCheckTests(unittest.TestCase):
         marker_last=MARKER_CONST,
         launching_last=LAUNCHING_CONST,
     ):
-        """A committed file with line 3526, the owned lines, asks, marker and launching."""
-        rows = ["// filler"] * (DENY_NUMBER - 1) + [first]
-        rows += ["// filler"] * (OWNED_NUMBER - 1 - len(rows)) + [owned, NEXT_QUOTE]
-        rows += ["// filler"] * (ASKS_NUMBER - 3 - len(rows))
-        rows += [
-            ASKS_FIRST,
-            ASKS_SECOND,
-            third,
-            ASKS_FOURTH,
-            ASKS_FIFTH,
-            ASKS_SIXTH,
-            ASKS_CFG,
-            ASKS_CONST,
-        ]
-        rows += ["// filler"] * (MARKER_NUMBER - 4 - len(rows))
-        rows += [MARKER_HEAD, MARKER_TAIL, MARKER_CFG, marker_last]
-        rows += ["// filler"] * (LAUNCHING_NUMBER - len(rows) - 5)
-        rows += [
-            LAUNCHING_HEAD,
-            LAUNCHING_SECOND,
-            LAUNCHING_THIRD,
-            LAUNCHING_CFG,
-            launching_last,
-        ]
-        return ("\n".join(rows) + "\n").encode("utf-8")
+        """A committed file with every lib quote block at its pinned lines."""
+        lines = {
+            **LIB_BLOCK_LINES,
+            DENY_NUMBER: first,
+            OWNED_NUMBER: owned,
+            ASKS_NUMBER: third,
+            MARKER_NUMBER: marker_last,
+            LAUNCHING_NUMBER: launching_last,
+        }
+        return self._rows(LAUNCHING_NUMBER, lines)
 
     def _deny_block(self, first=DENY_QUOTE, second=DENY_SECOND, last=DENY_LAST):
         """A draft that cites the deny span and indents its 21 lines below it."""
@@ -1405,32 +1484,13 @@ class CitationCheckTests(unittest.TestCase):
         return body + "\n"
 
     def _mint_source(self, first=MINT_FIRST, second=MINT_SECOND):
-        """A committed file with line 3526, line 3548, line 3549, then the other blocks."""
-        rows = ["// filler"] * (DENY_NUMBER - 1) + [DENY_QUOTE]
-        rows += ["// filler"] * (MINT_NUMBER - 2 - len(rows)) + [first, second]
-        rows += ["// filler"] * (OWNED_NUMBER - 1 - len(rows)) + [OWNED_QUOTE, NEXT_QUOTE]
-        rows += ["// filler"] * (ASKS_NUMBER - 3 - len(rows))
-        rows += [
-            ASKS_FIRST,
-            ASKS_SECOND,
-            ASKS_THIRD,
-            ASKS_FOURTH,
-            ASKS_FIFTH,
-            ASKS_SIXTH,
-            ASKS_CFG,
-            ASKS_CONST,
-        ]
-        rows += ["// filler"] * (MARKER_NUMBER - 4 - len(rows))
-        rows += [MARKER_HEAD, MARKER_TAIL, MARKER_CFG, MARKER_CONST]
-        rows += ["// filler"] * (LAUNCHING_NUMBER - len(rows) - 5)
-        rows += [
-            LAUNCHING_HEAD,
-            LAUNCHING_SECOND,
-            LAUNCHING_THIRD,
-            LAUNCHING_CFG,
-            LAUNCHING_CONST,
-        ]
-        return ("\n".join(rows) + "\n").encode("utf-8")
+        """A committed file with every lib quote block at its pinned lines."""
+        lines = {
+            **LIB_BLOCK_LINES,
+            MINT_NUMBER - 1: first,
+            MINT_NUMBER: second,
+        }
+        return self._rows(LAUNCHING_NUMBER, lines)
 
     def _mint_block(self, first=MINT_FIRST, second=MINT_SECOND, last=MINT_LAST, count=5):
         """A draft that cites the mint span and indents its five lines below it."""
@@ -1451,33 +1511,20 @@ class CitationCheckTests(unittest.TestCase):
         grant_first=GRANT_QUOTE,
         grant_last=GRANT_LINES[-1],
     ):
-        """A committed file with line 3757 below 3755, line 3767 below 3757, and the asks block."""
-        rows = ["// filler"] * (OWNED_NUMBER - 1) + [owned, following]
-        rows += [first, second]
-        rows += ["// filler"] * (GRANT_NUMBER - 1 - len(rows))
-        rows += [grant_first] + list(GRANT_LINES[1:-1]) + [grant_last]
-        rows += ["// filler"] * (ASKS_NUMBER - 3 - len(rows))
-        rows += [
-            ASKS_FIRST,
-            ASKS_SECOND,
-            third,
-            ASKS_FOURTH,
-            ASKS_FIFTH,
-            ASKS_SIXTH,
-            ASKS_CFG,
-            ASKS_CONST,
-        ]
-        rows += ["// filler"] * (MARKER_NUMBER - 4 - len(rows))
-        rows += [MARKER_HEAD, MARKER_TAIL, MARKER_CFG, marker_last]
-        rows += ["// filler"] * (LAUNCHING_NUMBER - len(rows) - 5)
-        rows += [
-            LAUNCHING_HEAD,
-            LAUNCHING_SECOND,
-            LAUNCHING_THIRD,
-            LAUNCHING_CFG,
-            launching_last,
-        ]
-        return ("\n".join(rows) + "\n").encode("utf-8")
+        """A committed file with every lib quote block at its pinned lines."""
+        lines = {
+            **LIB_BLOCK_LINES,
+            JOURNAL_NUMBER - 1: first,
+            JOURNAL_NUMBER: second,
+            OWNED_NUMBER: owned,
+            NEXT_NUMBER: following,
+            ASKS_NUMBER: third,
+            MARKER_NUMBER: marker_last,
+            LAUNCHING_NUMBER: launching_last,
+            GRANT_NUMBER: grant_first,
+            GRANT_NUMBER + len(GRANT_LINES) - 1: grant_last,
+        }
+        return self._rows(LAUNCHING_NUMBER, lines)
 
     def _journal_block(self, first=JOURNAL_CFG, second=JOURNAL_CONST, count=2):
         """A draft that cites the journal span and indents its two lines below it."""
@@ -1515,38 +1562,23 @@ class CitationCheckTests(unittest.TestCase):
         marker_last=MARKER_CONST,
         launching_last=LAUNCHING_CONST,
     ):
-        """A committed file with the ask block at 3833-3852 and the later blocks."""
-        rows = ["// filler"] * (OWNED_NUMBER - 1) + [OWNED_QUOTE, NEXT_QUOTE]
-        rows += [JOURNAL_CFG, JOURNAL_CONST]
-        rows += ["// filler"] * (GRANT_NUMBER - 1 - len(rows))
-        rows += [GRANT_QUOTE] + list(GRANT_LINES[1:-1]) + [GRANT_LINES[-1]]
+        """A committed file with the ask block and every other lib quote block."""
         block = list(ASK_LINES)
         block[16] = write
         block[17] = read
-        rows += ["// filler"] * (ASK_BLOCK_START - 1 - len(rows))
-        rows += block[:ask_count]
-        rows += ["// filler"] * (ASKS_NUMBER - 3 - len(rows))
-        rows += [
-            ASKS_FIRST,
-            ASKS_SECOND,
-            asks_third,
-            ASKS_FOURTH,
-            ASKS_FIFTH,
-            ASKS_SIXTH,
-            ASKS_CFG,
-            ASKS_CONST,
-        ]
-        rows += ["// filler"] * (MARKER_NUMBER - 4 - len(rows))
-        rows += [MARKER_HEAD, MARKER_TAIL, MARKER_CFG, marker_last]
-        rows += ["// filler"] * (LAUNCHING_NUMBER - len(rows) - 5)
-        rows += [
-            LAUNCHING_HEAD,
-            LAUNCHING_SECOND,
-            LAUNCHING_THIRD,
-            LAUNCHING_CFG,
-            launching_last,
-        ]
-        return ("\n".join(rows) + "\n").encode("utf-8")
+        lines = {
+            **LIB_BLOCK_LINES,
+            **{
+                ASK_BLOCK_START + offset: text
+                for offset, text in enumerate(block[:ask_count])
+            },
+            ASKS_NUMBER: asks_third,
+            MARKER_NUMBER: marker_last,
+            LAUNCHING_NUMBER: launching_last,
+        }
+        for offset in range(ask_count, len(ASK_LINES)):
+            lines.pop(ASK_BLOCK_START + offset, None)
+        return self._rows(LAUNCHING_NUMBER, lines)
 
     def _ask_block(
         self,
@@ -1588,34 +1620,7 @@ class CitationCheckTests(unittest.TestCase):
         ask_count=20,
         kind_count=len(KIND_LINES),
     ):
-        """A committed file with the ask block, the later blocks, then the kind arms."""
-        rows = ["// filler"] * (OWNED_NUMBER - 1) + [OWNED_QUOTE, NEXT_QUOTE]
-        rows += [JOURNAL_CFG, JOURNAL_CONST]
-        rows += ["// filler"] * (GRANT_NUMBER - 1 - len(rows))
-        rows += [GRANT_QUOTE] + list(GRANT_LINES[1:-1]) + [GRANT_LINES[-1]]
-        rows += ["// filler"] * (ASK_BLOCK_START - 1 - len(rows))
-        rows += list(ASK_LINES)[:ask_count]
-        rows += ["// filler"] * (ASKS_NUMBER - 3 - len(rows))
-        rows += [
-            ASKS_FIRST,
-            ASKS_SECOND,
-            asks_third,
-            ASKS_FOURTH,
-            ASKS_FIFTH,
-            ASKS_SIXTH,
-            ASKS_CFG,
-            ASKS_CONST,
-        ]
-        rows += ["// filler"] * (MARKER_NUMBER - 4 - len(rows))
-        rows += [MARKER_HEAD, MARKER_TAIL, MARKER_CFG, MARKER_CONST]
-        rows += ["// filler"] * (LAUNCHING_NUMBER - len(rows) - 5)
-        rows += [
-            LAUNCHING_HEAD,
-            LAUNCHING_SECOND,
-            LAUNCHING_THIRD,
-            LAUNCHING_CFG,
-            launching_last,
-        ]
+        """A committed file with every lib quote block and the kind arms."""
         kind = list(KIND_LINES)
         kind[8] = read
         kind[9] = edit
@@ -1625,9 +1630,24 @@ class CitationCheckTests(unittest.TestCase):
         kind[13] = child
         kind[14] = init
         kind[15] = append
-        rows += ["// filler"] * (KIND_BLOCK_START - 1 - len(rows))
-        rows += kind[:kind_count]
-        return ("\n".join(rows) + "\n").encode("utf-8")
+        lines = {
+            **LIB_BLOCK_LINES,
+            **{
+                KIND_BLOCK_START + offset: text
+                for offset, text in enumerate(kind[:kind_count])
+            },
+            ASKS_NUMBER: asks_third,
+            LAUNCHING_NUMBER: launching_last,
+            **{
+                ASK_BLOCK_START + offset: text
+                for offset, text in enumerate(ASK_LINES[:ask_count])
+            },
+        }
+        for offset in range(ask_count, len(ASK_LINES)):
+            lines.pop(ASK_BLOCK_START + offset, None)
+        for offset in range(kind_count, len(KIND_LINES)):
+            lines.pop(KIND_BLOCK_START + offset, None)
+        return self._rows(KIND_BLOCK_START + kind_count - 1, lines)
 
     def _kind_block(
         self,
@@ -1682,7 +1702,7 @@ class CitationCheckTests(unittest.TestCase):
         repeats=None,
         indented=True,
     ):
-        """A draft whose one-line arms each sit below their own cited span."""
+        """A draft whose arms each quote the kind block below their own span."""
         body = self._kind_block() if block is None else block
         quotes = {
             KIND_RUN_SPAN: run,
@@ -1690,6 +1710,13 @@ class CitationCheckTests(unittest.TestCase):
             KIND_CHILD_SPAN: child,
             KIND_INIT_SPAN: init,
             KIND_APPEND_SPAN: append,
+        }
+        positions = {
+            KIND_RUN_SPAN: 10,
+            KIND_HOSTED_SPAN: 12,
+            KIND_CHILD_SPAN: 13,
+            KIND_INIT_SPAN: 14,
+            KIND_APPEND_SPAN: 15,
         }
         repeats = repeats or {}
         for span in spans if spans is not None else list(quotes):
@@ -1699,23 +1726,19 @@ class CitationCheckTests(unittest.TestCase):
                 prose += " Again " + marker + "."
             body += prose + "\n"
             if indented:
-                body += "\n    " + quotes[span] + "\n"
+                lines = list(KIND_LINES)
+                lines[positions[span]] = quotes[span]
+                body += "".join("    " + line + "\n" for line in lines)
             body += "\n"
         return body
 
-    def _file_ask_source(self, count=COVER_NUMBER, lines=None):
+    def _file_ask_source(self, count=LIB_COUNT, lines=None):
         """A committed file with one correct line for every cited quote decision."""
-        rows = ["// filler"] * COVER_NUMBER
-        for number, text in (lines or FILE_ASK_LINES).items():
-            rows[number - 1] = text
-        return ("\n".join(rows[:count]) + "\n").encode("utf-8")
+        return self._rows(count, {**LIB_BLOCK_LINES, **(lines or {})})
 
-    def _provider_source(self, count=DEFAULT_ACTION_NUMBER, lines=None):
-        """A committed provider file with one correct line per provider decision."""
-        rows = ["// filler"] * DEFAULT_ACTION_NUMBER
-        for number, text in (lines or PROVIDER_LINES).items():
-            rows[number - 1] = text
-        return ("\n".join(rows[:count]) + "\n").encode("utf-8")
+    def _provider_source(self, count=PROVIDER_COUNT, lines=None):
+        """A committed provider file with every quoted block at its pinned lines."""
+        return self._rows(count, {**PROVIDER_BLOCK_LINES, **(lines or {})})
 
     def _changed(self, lines, index):
         """Return LINES with the one line at INDEX altered by one character."""
@@ -1821,16 +1844,18 @@ class CitationCheckTests(unittest.TestCase):
             parts.append("\n")
         if "arms" in chosen:
             arms = (
-                (KIND_RUN_SPAN, KIND_RUN_QUOTE),
-                (KIND_HOSTED_SPAN, KIND_HOSTED_QUOTE),
-                (KIND_CHILD_SPAN, KIND_CHILD_QUOTE),
-                (KIND_INIT_SPAN, KIND_INIT_QUOTE),
-                (KIND_APPEND_SPAN, append),
+                (KIND_RUN_SPAN, KIND_RUN_QUOTE, 10),
+                (KIND_HOSTED_SPAN, KIND_HOSTED_QUOTE, 12),
+                (KIND_CHILD_SPAN, KIND_CHILD_QUOTE, 13),
+                (KIND_INIT_SPAN, KIND_INIT_QUOTE, 14),
+                (KIND_APPEND_SPAN, append, 15),
             )
-            for span, quote in arms:
+            for span, quote, index in arms:
+                lines = list(KIND_LINES)
+                lines[index] = quote
                 parts.append(self._cited(span, copies.get("arms", 1)) + "\n")
                 if indented:
-                    parts.append("    " + quote + "\n")
+                    parts.append("".join("    " + line + "\n" for line in lines))
                 parts.append("\n")
         return "".join(parts)
 
@@ -1877,7 +1902,7 @@ class CitationCheckTests(unittest.TestCase):
     def _provider_body(
         self,
         scheme=SCHEME_LINES,
-        read_action=READ_ACTION_LINES,
+        read_action=WRITE_ACTION_LINES,
         write_action=WRITE_ACTION_LINES,
         default_action=WRITE_ACTION_LINES,
         groups=None,
@@ -1906,12 +1931,15 @@ class CitationCheckTests(unittest.TestCase):
             parts.append("\n")
         return "".join(parts)
 
-    def _append_source(self, count=WRITE_INVOKE_NUMBER, lines=None):
-        """A committed file with one correct line for every append quote."""
-        rows = ["// filler"] * WRITE_INVOKE_NUMBER
-        for number, text in (lines or APPEND_LINES).items():
-            rows[number - 1] = text
-        return ("\n".join(rows[:count]) + "\n").encode("utf-8")
+    def _append_source(self, count=APPEND_COUNT, lines=None, first=True, second=True):
+        """A committed file with the selected append blocks at pinned lines."""
+        placed = {}
+        placed.update(_walk_rows(APPEND_CONDITION_NUMBER - 7, APPEND_WALK_LINES))
+        if first:
+            placed.update(_walk_rows(APPEND_CAP_NUMBER - 1, DOC_WALK_LINES))
+        if second:
+            placed.update(_walk_rows(WRITE_INVOKE_NUMBER - 13, DOC_WALK_LINES))
+        return self._rows(count, {**placed, **(lines or {})})
 
     def _append_body(
         self,
@@ -1967,6 +1995,28 @@ class CitationCheckTests(unittest.TestCase):
         finally:
             setattr(check, global_name, original)
         print(label)
+
+    def _quote_targets(self, span):
+        """Return the target strings one line or range span produces."""
+        rel, _, tail = span.rpartition(":")
+        start, _, end = tail.partition("-")
+        if not end:
+            return {span}
+        return {rel + ":" + start, rel + ":" + end}
+
+    def _planted_quote(self, span, index):
+        """A quote_for that misread Sspan as REMAINDERS[INDEX]."""
+        original = check.quote_for
+        targets = self._quote_targets(span)
+
+        def planted(remainders, target, pinned_lines):
+            if target not in targets:
+                return original(remainders, target, pinned_lines)
+            if len(remainders) <= index:
+                return None
+            return remainders[index]
+
+        return planted
 
     def _pinned_reads(self, body, files, restore=None):
         """Return the problems and the numbers read from the pinned commit."""
@@ -2087,7 +2137,7 @@ class CitationCheckTests(unittest.TestCase):
     def test_quoted_line_mismatch_is_refused(self):
         expected = "refuse: quoted line does not match " + OWNED_SPAN
         root = self._draft(
-            self._quote_body(OWNED_QUOTE + "x"),
+            self._quote_body(OWNED_QUOTE + "x", NEXT_QUOTE),
             {OWNED_REL: self._source(OWNED_QUOTE)},
         )
         self.assertEqual(check.problems(root), [expected])
@@ -2135,11 +2185,13 @@ class CitationCheckTests(unittest.TestCase):
 
     def test_next_quoted_line_absent_from_the_pinned_commit_is_refused(self):
         expected = "refuse: quoted line is not in the pinned commit: " + NEXT_SPAN
-        root = self._draft(
+        got, reads = self._pinned_reads(
             self._quote_body(OWNED_QUOTE, NEXT_QUOTE),
             {OWNED_REL: self._source(OWNED_QUOTE, following=None)},
+            {OWNED_REL: self._source(OWNED_QUOTE)},
         )
-        self.assertEqual(check.problems(root), [expected])
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [OWNED_NUMBER, NEXT_NUMBER])
 
     def test_marker_quoted_line_mismatch_is_refused(self):
         expected = "refuse: quoted line does not match " + MARKER_SPAN
@@ -2347,7 +2399,7 @@ class CitationCheckTests(unittest.TestCase):
     def test_owned_line_mismatch_adds_no_next_refusal(self):
         expected = "refuse: quoted line does not match " + OWNED_SPAN
         root = self._draft(
-            self._quote_body(OWNED_QUOTE + "x", NEXT_QUOTE + "y"),
+            self._quote_body(OWNED_QUOTE + "x", NEXT_QUOTE),
             {OWNED_REL: self._source(OWNED_QUOTE)},
         )
         self.assertEqual(check.problems(root), [expected])
@@ -2543,12 +2595,12 @@ class CitationCheckTests(unittest.TestCase):
         )
         self.assertEqual(check.problems(root), [])
 
-    def test_two_asks_lines_are_not_read(self):
+    def test_two_asks_lines_do_not_stand_for_the_asks_line(self):
         got, reads = self._pinned_reads(
             self._asks_block(count=2), {ASKS_REL: self._asks_source()}
         )
         self.assertEqual(got, [])
-        self.assertEqual(reads, [])
+        self.assertEqual(reads, [ASKS_NUMBER])
 
     def test_asks_quoted_line_absent_from_the_pinned_commit_is_refused(self):
         expected = "refuse: quoted line is not in the pinned commit: " + ASKS_SPAN
@@ -2827,7 +2879,7 @@ class CitationCheckTests(unittest.TestCase):
             self._mint_block(count=1), {MINT_REL: self._mint_source()}
         )
         self.assertEqual(got, [])
-        self.assertEqual(reads, [])
+        self.assertEqual(reads, [MINT_NUMBER])
 
     def test_mint_quoted_line_absent_from_the_pinned_commit_is_refused(self):
         expected = "refuse: quoted line is not in the pinned commit: " + MINT_SPAN
@@ -2994,7 +3046,7 @@ class CitationCheckTests(unittest.TestCase):
             self._journal_block(count=1), {JOURNAL_REL: self._journal_source()}
         )
         self.assertEqual(got, [])
-        self.assertEqual(reads, [])
+        self.assertEqual(reads, [JOURNAL_NUMBER])
 
     def test_journal_quoted_line_absent_from_the_pinned_commit_is_refused(self):
         expected = "refuse: quoted line is not in the pinned commit: " + JOURNAL_SPAN
@@ -3652,15 +3704,9 @@ class CitationCheckTests(unittest.TestCase):
         )
 
     def test_falsifier_journal_first_line_is_caught(self):
-        def planted(text):
-            remainders = check._remainders(text, check.JOURNAL_MARKER)
-            if len(remainders) < 2:
-                return None
-            return remainders[0]
-
         self._caught(
-            "journal_quote",
-            planted,
+            "quote_for",
+            self._planted_quote(check.JOURNAL_SPAN, 0),
             self.test_journal_first_line_does_not_stand_for_line_3757,
             "refuse: quoted line does not match",
             "CAUGHT journal-first-line",
@@ -3676,15 +3722,9 @@ class CitationCheckTests(unittest.TestCase):
         )
 
     def test_falsifier_grant_second_line_is_caught(self):
-        def planted(text):
-            remainders = check._remainders(text, check.GRANT_MARKER)
-            if len(remainders) < 2:
-                return None
-            return remainders[1]
-
         self._caught(
-            "grant_quote",
-            planted,
+            "quote_for",
+            self._planted_quote(check.GRANT_SPAN, 1),
             self.test_grant_second_line_does_not_stand_for_line_3767,
             "refuse: quoted line does not match",
             "CAUGHT grant-second-line",
@@ -3700,15 +3740,9 @@ class CitationCheckTests(unittest.TestCase):
         )
 
     def test_falsifier_write_doc_line_is_caught(self):
-        def planted(text):
-            remainders = check._remainders(text, check.WRITE_MARKER)
-            if not remainders:
-                return None
-            return remainders[0]
-
         self._caught(
-            "write_quote",
-            planted,
+            "quote_for",
+            self._planted_quote(check.WRITE_SPAN, 0),
             self.test_write_doc_line_does_not_stand_for_line_3849,
             "refuse: quoted line does not match",
             "CAUGHT write-doc-line",
@@ -3724,15 +3758,9 @@ class CitationCheckTests(unittest.TestCase):
         )
 
     def test_falsifier_read_write_line_is_caught(self):
-        def planted(text):
-            remainders = check._remainders(text, check.READ_MARKER)
-            if len(remainders) < 17:
-                return None
-            return remainders[16]
-
         self._caught(
-            "read_quote",
-            planted,
+            "quote_for",
+            self._planted_quote(check.READ_SPAN, 16),
             self.test_read_ask_line_matches_the_pinned_read,
             "refuse: quoted line does not match",
             "CAUGHT read-write-line",
@@ -4147,15 +4175,9 @@ class CitationCheckTests(unittest.TestCase):
         )
 
     def test_falsifier_kind_read_doc_line_is_caught(self):
-        def planted(text):
-            remainders = check._remainders(text, check.KIND_READ_MARKER)
-            if not remainders:
-                return None
-            return remainders[0]
-
         self._caught(
-            "kind_read_quote",
-            planted,
+            "quote_for",
+            self._planted_quote(check.KIND_READ_SPAN, 0),
             self.test_kind_read_doc_line_does_not_stand_for_line_8187,
             "refuse: quoted line does not match",
             "CAUGHT kind-read-doc-line",
@@ -4171,15 +4193,9 @@ class CitationCheckTests(unittest.TestCase):
         )
 
     def test_falsifier_kind_edit_read_line_is_caught(self):
-        def planted(text):
-            remainders = check._remainders(text, check.KIND_EDIT_MARKER)
-            if len(remainders) < 9:
-                return None
-            return remainders[8]
-
         self._caught(
-            "kind_edit_quote",
-            planted,
+            "quote_for",
+            self._planted_quote(check.KIND_EDIT_SPAN, 8),
             self.test_kind_edit_read_line_does_not_stand_for_line_8188,
             "refuse: quoted line does not match",
             "CAUGHT kind-edit-read-line",
@@ -4195,15 +4211,9 @@ class CitationCheckTests(unittest.TestCase):
         )
 
     def test_falsifier_kind_restore_run_line_is_caught(self):
-        def planted(text):
-            remainders = check._remainders(text, check.KIND_RESTORE_MARKER)
-            if len(remainders) < 11:
-                return None
-            return remainders[10]
-
         self._caught(
-            "kind_restore_quote",
-            planted,
+            "quote_for",
+            self._planted_quote(check.KIND_RESTORE_SPAN, 10),
             self.test_kind_restore_run_line_does_not_stand_for_line_8190,
             "refuse: quoted line does not match",
             "CAUGHT kind-restore-run-line",
@@ -4216,13 +4226,15 @@ class CitationCheckTests(unittest.TestCase):
         raise AssertionError(name)
 
     def _assert_arm_mismatch(self, name, quoted):
-        _, number, span, _, _ = self._arm(name)
+        _, number, span, _, index = self._arm(name)
         expected = "refuse: quoted line does not match " + span
-        body = self._kind_line_body(**{name: quoted})
+        lines = list(KIND_LINES)
+        lines[index] = quoted
+        body = "`" + span + "` is the match arm.\n\n"
+        body += "".join("    " + line + "\n" for line in lines) + "\n"
         got, reads = self._pinned_reads(body, {KIND_REL: self._kind_source()})
         self.assertEqual(got, [expected])
-        position = KIND_DECISION_ORDER.index(number)
-        self.assertEqual(reads, list(KIND_DECISION_ORDER[: position + 1]))
+        self.assertEqual(reads, [number])
         root = self._draft(body, {KIND_REL: self._kind_source()})
         (root / KIND_REL).write_bytes(
             self._kind_source(**{name: "// edited in the worktree"})
@@ -4497,16 +4509,10 @@ class CitationCheckTests(unittest.TestCase):
             ["refuse: pinned commit is not a commit: " + "f" * 40],
         )
 
-    def _caught_block_arm(self, selector, index, named_test, label):
-        def planted(text):
-            remainders = check._remainders(text, check.KIND_READ_MARKER)
-            if len(remainders) <= index:
-                return None
-            return remainders[index]
-
+    def _caught_block_arm(self, _selector, index, named_test, label):
         self._caught(
-            selector,
-            planted,
+            "quote_for",
+            self._planted_quote(check.KIND_READ_SPAN, index),
             named_test,
             "refuse: quoted line does not match",
             label,
@@ -4821,21 +4827,14 @@ class CitationCheckTests(unittest.TestCase):
     def test_file_ask_quoted_line_absent_from_the_pinned_commit_is_refused(self):
         for name, number, span, lines, index in FILE_ASK_CASES:
             expected = "refuse: quoted line is not in the pinned commit: " + span
+            short = ("// filler\n" * (number - 1)).encode("utf-8")
             got, reads = self._pinned_reads(
-                self._file_ask_body(),
-                {OWNED_REL: self._file_ask_source(count=number - 1)},
+                self._file_ask_body(groups=[name]),
+                {OWNED_REL: short},
                 {OWNED_REL: self._file_ask_source()},
             )
             self.assertEqual(got, [expected], span)
-            self.assertEqual(
-                reads,
-                list(
-                    QUOTE_DECISION_ORDER[
-                        : QUOTE_DECISION_ORDER.index(number) + 1
-                    ]
-                ),
-                span,
-            )
+            self.assertEqual(reads, [number], span)
 
     def test_observe_mismatch_stops_every_later_decision(self):
         got, reads = self._pinned_reads(
@@ -4950,18 +4949,10 @@ class CitationCheckTests(unittest.TestCase):
         )
 
     def _caught_file_ask_line(self, name, index, named_test, label):
-        _, number, span, lines, _ = self._file_ask_case(name)
-        marker = "`" + span + "`"
-
-        def planted(text):
-            remainders = check._remainders(text, marker)
-            if len(remainders) <= index:
-                return None
-            return remainders[index]
-
+        _, _, span, _, _ = self._file_ask_case(name)
         self._caught(
-            name + "_quote",
-            planted,
+            "quote_for",
+            self._planted_quote(span, index),
             named_test,
             "refuse: quoted line does not match",
             label,
@@ -5263,7 +5254,7 @@ class CitationCheckTests(unittest.TestCase):
             self.assertEqual(reads, expected_reads, span)
 
     def test_two_edit_range_spans_are_refused(self):
-        expected = "refuse: quoted line is not one line: " + EDIT_RANGE_SPAN
+        expected = "refuse: quoted line is not one line: " + EDIT_START_SPAN
         body = self._edit_walk_body(groups=["range"], copies={"range": 2})
         got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
         self.assertEqual(got, [expected])
@@ -5465,15 +5456,9 @@ class CitationCheckTests(unittest.TestCase):
         )
 
     def _caught_walk_index(self, global_name, index, marker, named_test, label):
-        def planted(text):
-            remainders = check._remainders(text, marker)
-            if len(remainders) <= index:
-                return None
-            return remainders[index]
-
         self._caught(
-            global_name,
-            planted,
+            "quote_for",
+            self._planted_quote(marker.strip("`"), index),
             named_test,
             "refuse: quoted line does not match",
             label,
@@ -5610,7 +5595,12 @@ class CitationCheckTests(unittest.TestCase):
         _, number, span, lines, index = self._provider_case(name)
         expected = "refuse: quoted line does not match " + span
         changed = self._changed(lines, index)
-        if name == "default_action":
+        if name == "read_action":
+            body = self._provider_body(
+                groups=["read_action"],
+                read_action=self._changed(WRITE_ACTION_LINES, 2),
+            )
+        elif name == "default_action":
             body = self._provider_body(
                 groups=["write_action", "default_action"],
                 write_action=changed,
@@ -5811,7 +5801,7 @@ class CitationCheckTests(unittest.TestCase):
         body = self._provider_body(
             groups=["scheme", "read_action"],
             scheme=self._changed(SCHEME_LINES, 8),
-            read_action=self._changed(READ_ACTION_LINES, 0),
+            read_action=self._changed(WRITE_ACTION_LINES, 2),
         )
         got, reads = self._pinned_reads(
             body, {PROVIDER_REL: self._provider_source()}
@@ -5824,7 +5814,7 @@ class CitationCheckTests(unittest.TestCase):
     def test_read_action_mismatch_stops_the_write_action_decision(self):
         body = self._provider_body(
             groups=["scheme", "read_action", "write_action"],
-            read_action=self._changed(READ_ACTION_LINES, 0),
+            read_action=self._changed(WRITE_ACTION_LINES, 2),
         )
         got, reads = self._pinned_reads(
             body, {PROVIDER_REL: self._provider_source()}
@@ -6393,16 +6383,10 @@ class CitationCheckTests(unittest.TestCase):
             ["refuse: pinned commit is not a commit: " + "f" * 40],
         )
 
-    def _caught_run_body_index(self, global_name, index, span, named_test, label):
-        def planted(text):
-            remainders = check._remainders(text, "`" + span + "`")
-            if len(remainders) <= index:
-                return None
-            return remainders[index]
-
+    def _caught_run_body_index(self, _selector, index, span, named_test, label):
         self._caught(
-            global_name,
-            planted,
+            "quote_for",
+            self._planted_quote(span, index),
             named_test,
             "refuse: quoted line does not match",
             label,
@@ -6680,7 +6664,7 @@ class CitationCheckTests(unittest.TestCase):
         lines = {**APPEND_LINES, APPEND_CAP_NUMBER: DOC_WALK_LINES[0]}
         body = self._append_body(groups=["doc"])
         got, reads = self._pinned_reads(
-            body, {OWNED_REL: self._append_source(lines=lines)}
+            body, {OWNED_REL: self._append_source(lines=lines, second=False)}
         )
         self.assertEqual(got, ["refuse: quoted line does not match " + APPEND_CAP_SPAN])
         self.assertEqual(reads, [APPEND_CAP_NUMBER])
@@ -6697,7 +6681,7 @@ class CitationCheckTests(unittest.TestCase):
         }
         body = self._append_body(groups=["doc"])
         got, reads = self._pinned_reads(
-            body, {OWNED_REL: self._append_source(lines=lines)}
+            body, {OWNED_REL: self._append_source(lines=lines, second=False)}
         )
         self.assertEqual(got, ["refuse: quoted line does not match " + APPEND_CALL_SPAN])
         self.assertEqual(reads, [APPEND_CAP_NUMBER, APPEND_CALL_NUMBER])
@@ -6706,7 +6690,7 @@ class CitationCheckTests(unittest.TestCase):
         lines = {**APPEND_LINES, OUTCOME_HELD_NUMBER: APPEND_CALL_QUOTE}
         body = self._append_body(groups=["doc"])
         got, reads = self._pinned_reads(
-            body, {OWNED_REL: self._append_source(lines=lines)}
+            body, {OWNED_REL: self._append_source(lines=lines, second=False)}
         )
         self.assertEqual(
             got, ["refuse: quoted line does not match " + OUTCOME_HELD_SPAN]
@@ -6720,7 +6704,7 @@ class CitationCheckTests(unittest.TestCase):
         lines = {**APPEND_LINES, WRITE_INVOKE_NUMBER: OUTCOME_HELD_QUOTE}
         body = self._append_body(groups=["doc"])
         got, reads = self._pinned_reads(
-            body, {OWNED_REL: self._append_source(lines=lines)}
+            body, {OWNED_REL: self._append_source(lines=lines, first=False)}
         )
         self.assertEqual(
             got, ["refuse: quoted line does not match " + WRITE_INVOKE_SPAN]
@@ -6771,7 +6755,7 @@ class CitationCheckTests(unittest.TestCase):
             (
                 "doc",
                 {APPEND_RANGE_SPAN: 2},
-                APPEND_RANGE_SPAN,
+                APPEND_CALL_SPAN,
                 [APPEND_CAP_NUMBER],
             ),
             (
@@ -7249,12 +7233,9 @@ class CitationCheckTests(unittest.TestCase):
             + "\n"
         )
 
-    def _hosted_source(self, count=COVER_NUMBER, lines=None):
-        """A committed file with one correct line for every hosted quote."""
-        rows = ["// filler"] * max(count, COVER_NUMBER)
-        for number, text in (lines or HOSTED_LINES).items():
-            rows[number - 1] = text
-        return ("\n".join(rows[:count]) + "\n").encode("utf-8")
+    def _hosted_source(self, count=LIB_COUNT, lines=None):
+        """A committed file with every hosted quote block at its pinned lines."""
+        return self._rows(count, {**LIB_BLOCK_LINES, **(lines or {})})
 
     def _hosted_files(self):
         return {
@@ -7769,7 +7750,7 @@ class CitationCheckTests(unittest.TestCase):
             ],
         )
 
-    def test_unchecked_exec_vm_line_is_not_compared(self):
+    def test_unchecked_exec_vm_line_is_read_but_not_compared(self):
         body = self._hosted_body() + (
             "`" + EXEC_SPAN + "` says `A ready decision still does not boot.`\n"
             "\n"
@@ -7779,7 +7760,9 @@ class CitationCheckTests(unittest.TestCase):
         files[EXEC_REL] = ("// filler\n" * EXEC_NUMBER).encode("utf-8")
         got, reads = self._pinned_reads(body, files)
         self.assertEqual(got, [])
-        self.assertEqual(reads, list(HOSTED_READ_ORDER))
+        self.assertEqual(
+            reads, list(HOSTED_READ_ORDER[:-1]) + [EXEC_NUMBER, SCHEME_NUMBER]
+        )
 
     def test_cover_mismatch_stops_the_provider_decision(self):
         got, reads = self._pinned_reads(

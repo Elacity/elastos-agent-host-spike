@@ -256,6 +256,9 @@ DEFAULT_ACTION_MARKER = "`" + DEFAULT_ACTION_SPAN + "`"
 # The draft indents a quotation by exactly four spaces.
 DRAFT_INDENT = "    "
 
+# Quote refusals check this path's targets first, by line number.
+LIB_REL = "examples/agent-host/src/lib.rs"
+
 
 def read_file(root, rel):
     """Return file bytes, or None when ``rel`` is not a file under ``root``."""
@@ -351,8 +354,8 @@ def _spans(text):
         cursor = closed + 1
 
 
-def pinned_line(root, sha, rel, number):
-    """Return line NUMBER of REL at commit SHA, or None when it is absent."""
+def _pinned_lines(root, sha, rel):
+    """Return every line of REL at commit SHA, or None when it is absent."""
     if sha is None:
         return None
     try:
@@ -369,8 +372,13 @@ def pinned_line(root, sha, rel, number):
         text = decode_text(result.stdout)
     except UnicodeDecodeError:
         return None
-    lines = text.splitlines()
-    if number < 1 or number > len(lines):
+    return text.splitlines()
+
+
+def pinned_line(root, sha, rel, number):
+    """Return line NUMBER of REL at commit SHA, or None when it is absent."""
+    lines = _pinned_lines(root, sha, rel)
+    if lines is None or number < 1 or number > len(lines):
         return None
     return lines[number - 1]
 
@@ -379,6 +387,26 @@ def _span_target(span):
     """Return the path and line number of SPAN."""
     rel, _, number = span.rpartition(":")
     return rel, int(number)
+
+
+def _line_targets(text):
+    """Return one target per cited line, in walk order.
+
+    A line span yields one target. A range span yields its start and end from
+    the same marker, so both endpoints share one remainder walk.
+    """
+    targets = []
+    for span in _spans(text):
+        match = CITATION.fullmatch(span)
+        if match is None or match.group("func") is not None:
+            continue
+        rel = match.group("path")
+        marker = "`" + span + "`"
+        targets.append((rel, int(match.group("start")), marker))
+        end = match.group("end")
+        if end is not None:
+            targets.append((rel, int(end), marker))
+    return targets
 
 
 def _remainders(text, marker):
@@ -396,6 +424,61 @@ def _remainders(text, marker):
             remainders.append(following[len(DRAFT_INDENT):])
         return remainders
     return []
+
+
+def _quote_window(remainders, pinned_lines, number):
+    """Return the remainder index that stands for line NUMBER, or None.
+
+    A window is ``len(remainders)`` consecutive non-empty pinned lines. The
+    highest score is the quotation's strongest pin alignment, and a zero score
+    means the quotation stands for no run. When several windows share that
+    score, the one that contains NUMBER is the alignment; a tie keeps the
+    earliest start. A quotation with no such window stands for another run and
+    no remainder is selected.
+    """
+    nonempty = [(line, text) for line, text in enumerate(pinned_lines, 1) if text]
+    width = len(remainders)
+    if not width or width > len(nonempty):
+        return None
+    best = None
+    for start in range(len(nonempty) - width + 1):
+        window = nonempty[start:start + width]
+        score = sum(
+            1
+            for offset, (_, text) in enumerate(window)
+            if quoted_line_matches(remainders[offset], text)
+        )
+        if best is None or score > best:
+            best = score
+    if not best:
+        return None
+    chosen = None
+    for start in range(len(nonempty) - width + 1):
+        window = nonempty[start:start + width]
+        if not any(line == number for line, _ in window):
+            continue
+        score = sum(
+            1
+            for offset, (_, text) in enumerate(window)
+            if quoted_line_matches(remainders[offset], text)
+        )
+        if score == best:
+            chosen = window
+            break
+    if chosen is None:
+        return None
+    return sum(1 for line, _ in chosen if line < number)
+
+
+def quote_for(remainders, span, pinned_lines):
+    """Return the quotation that stands for SPAN, or None when none stands."""
+    if not remainders or pinned_lines is None:
+        return None
+    _, number = _span_target(span)
+    index = _quote_window(remainders, pinned_lines, number)
+    if index is None:
+        return None
+    return remainders[index]
 
 
 def owned_quote(text):
@@ -1726,183 +1809,38 @@ def _default_action_quote_refusal(root, text, sha):
 
 
 def _quote_refusals(root, text, sha):
-    """Return the quote refusals in source order: 2067, 2421, 2422, 2720, 2741, 2749, 2958, 2981, 3290, 3308, 3339, 3360, 3370, 3382, 3387, 3403, 3449, 3455, 3470, 3471, 3474, 3482, 3526, 3549, 3754, 3755, 3757, 3767, 3849, 3850, 3935, 3936, 3947, 3961, 3966, 3967, 4023, 4032, 4033, 4061, 8149, 8162, 8168, 8187, 8188, 8189, 8190, 8191, 8192, 8193, 8194, 8488, then 123, 189, 190, 192."""
-    observe = _observe_quote_refusal(root, text, sha)
-    if observe is not None:
-        return [observe]
-    edit_start = _edit_start_quote_refusal(root, text, sha)
-    if edit_start is not None:
-        return [edit_start]
-    edit_end = _edit_end_quote_refusal(root, text, sha)
-    if edit_end is not None:
-        return [edit_end]
-    request = _request_quote_refusal(root, text, sha)
-    if request is not None:
-        return [request]
-    revision = _revision_quote_refusal(root, text, sha)
-    if revision is not None:
-        return [revision]
-    op = _op_quote_refusal(root, text, sha)
-    if op is not None:
-        return [op]
-    no_process = _no_process_quote_refusal(root, text, sha)
-    if no_process is not None:
-        return [no_process]
-    seat = _seat_quote_refusal(root, text, sha)
-    if seat is not None:
-        return [seat]
-    is_write = _is_write_quote_refusal(root, text, sha)
-    if is_write is not None:
-        return [is_write]
-    no_write = _no_write_quote_refusal(root, text, sha)
-    if no_write is not None:
-        return [no_write]
-    no_provider = _no_provider_quote_refusal(root, text, sha)
-    if no_provider is not None:
-        return [no_provider]
-    parent_grant_doc = _parent_grant_doc_quote_refusal(root, text, sha)
-    if parent_grant_doc is not None:
-        return [parent_grant_doc]
-    narrower = _narrower_quote_refusal(root, text, sha)
-    if narrower is not None:
-        return [narrower]
-    child_grant_none = _child_grant_none_quote_refusal(root, text, sha)
-    if child_grant_none is not None:
-        return [child_grant_none]
-    init_guard = _init_guard_quote_refusal(root, text, sha)
-    if init_guard is not None:
-        return [init_guard]
-    project_resource = _project_resource_quote_refusal(root, text, sha)
-    if project_resource is not None:
-        return [project_resource]
-    parent_compare = _parent_compare_quote_refusal(root, text, sha)
-    if parent_compare is not None:
-        return [parent_compare]
-    child_host_doc = _child_host_doc_quote_refusal(root, text, sha)
-    if child_host_doc is not None:
-        return [child_host_doc]
-    empty_journal = _empty_journal_quote_refusal(root, text, sha)
-    if empty_journal is not None:
-        return [empty_journal]
-    admit_system = _admit_system_quote_refusal(root, text, sha)
-    if admit_system is not None:
-        return [admit_system]
-    inherited_err = _inherited_err_quote_refusal(root, text, sha)
-    if inherited_err is not None:
-        return [inherited_err]
-    grant_parent = _grant_parent_quote_refusal(root, text, sha)
-    if grant_parent is not None:
-        return [grant_parent]
-    deny = _deny_quote_refusal(root, text, sha)
-    if deny is not None:
-        return [deny]
-    mint = _mint_quote_refusal(root, text, sha)
-    if mint is not None:
-        return [mint]
-    if text.count(OWNED_MARKER) > 1:
-        return ["refuse: quoted line is not one line: " + OWNED_SPAN]
-    quoted = owned_quote(text)
-    if quoted is not None:
-        rel, number = _span_target(OWNED_SPAN)
+    """Return at most one quote refusal: lib targets first, then path order."""
+    targets = _line_targets(text)
+    ordered = [target for target in targets if target[0] == LIB_REL]
+    ordered.sort(key=lambda target: target[1])
+    ordered.extend(
+        sorted(
+            (target for target in targets if target[0] != LIB_REL),
+            key=lambda target: (target[0], target[1]),
+        )
+    )
+    walks = {}
+    pinned = {}
+    for rel, number, marker in ordered:
+        span = "%s:%s" % (rel, number)
+        if text.count(marker) > 1:
+            return ["refuse: quoted line is not one line: " + span]
+        if marker not in walks:
+            walks[marker] = _remainders(text, marker)
+        remainders = walks[marker]
+        if not remainders:
+            continue
         source = pinned_line(root, sha, rel, number)
         if source is None:
-            return ["refuse: quoted line is not in the pinned commit: " + OWNED_SPAN]
+            return ["refuse: quoted line is not in the pinned commit: " + span]
+        if rel not in pinned:
+            pinned[rel] = _pinned_lines(root, sha, rel)
+        quoted = quote_for(remainders, span, pinned[rel])
+        if quoted is None:
+            continue
         if not quoted_line_matches(quoted, source):
-            return ["refuse: quoted line does not match " + OWNED_SPAN]
-        following = _next_quote_refusal(root, text, sha)
-        if following is not None:
-            return [following]
-    journal = _journal_quote_refusal(root, text, sha)
-    if journal is not None:
-        return [journal]
-    grant = _grant_quote_refusal(root, text, sha)
-    if grant is not None:
-        return [grant]
-    write = _write_quote_refusal(root, text, sha)
-    if write is not None:
-        return [write]
-    read = _read_quote_refusal(root, text, sha)
-    if read is not None:
-        return [read]
-    condition = _append_condition_quote_refusal(root, text, sha)
-    if condition is not None:
-        return [condition]
-    host_path = _host_path_err_quote_refusal(root, text, sha)
-    if host_path is not None:
-        return [host_path]
-    held_err = _held_err_quote_refusal(root, text, sha)
-    if held_err is not None:
-        return [held_err]
-    body_doc = _body_doc_quote_refusal(root, text, sha)
-    if body_doc is not None:
-        return [body_doc]
-    create_only = _create_only_quote_refusal(root, text, sha)
-    if create_only is not None:
-        return [create_only]
-    present_revision = _present_revision_quote_refusal(root, text, sha)
-    if present_revision is not None:
-        return [present_revision]
-    append_cap = _append_cap_quote_refusal(root, text, sha)
-    if append_cap is not None:
-        return [append_cap]
-    append_call = _append_call_quote_refusal(root, text, sha)
-    if append_call is not None:
-        return [append_call]
-    outcome_held = _outcome_held_quote_refusal(root, text, sha)
-    if outcome_held is not None:
-        return [outcome_held]
-    write_invoke = _write_invoke_quote_refusal(root, text, sha)
-    if write_invoke is not None:
-        return [write_invoke]
-    asks = _asks_quote_refusal(root, text, sha)
-    if asks is not None:
-        return [asks]
-    marker = _marker_quote_refusal(root, text, sha)
-    if marker is not None:
-        return [marker]
-    launching = _launching_quote_refusal(root, text, sha)
-    if launching is not None:
-        return [launching]
-    kind_read = _kind_read_quote_refusal(root, text, sha)
-    if kind_read is not None:
-        return [kind_read]
-    kind_edit = _kind_edit_quote_refusal(root, text, sha)
-    if kind_edit is not None:
-        return [kind_edit]
-    kind_run = _kind_run_quote_refusal(root, text, sha)
-    if kind_run is not None:
-        return [kind_run]
-    kind_restore = _kind_restore_quote_refusal(root, text, sha)
-    if kind_restore is not None:
-        return [kind_restore]
-    kind_hosted = _kind_hosted_quote_refusal(root, text, sha)
-    if kind_hosted is not None:
-        return [kind_hosted]
-    kind_child = _kind_child_quote_refusal(root, text, sha)
-    if kind_child is not None:
-        return [kind_child]
-    kind_init = _kind_init_quote_refusal(root, text, sha)
-    if kind_init is not None:
-        return [kind_init]
-    kind_append = _kind_append_quote_refusal(root, text, sha)
-    if kind_append is not None:
-        return [kind_append]
-    cover = _cover_quote_refusal(root, text, sha)
-    if cover is not None:
-        return [cover]
-    scheme = _scheme_quote_refusal(root, text, sha)
-    if scheme is not None:
-        return [scheme]
-    read_action = _read_action_quote_refusal(root, text, sha)
-    if read_action is not None:
-        return [read_action]
-    write_action = _write_action_quote_refusal(root, text, sha)
-    if write_action is not None:
-        return [write_action]
-    default_action = _default_action_quote_refusal(root, text, sha)
-    if default_action is None:
-        return []
-    return [default_action]
+            return ["refuse: quoted line does not match " + span]
+    return []
 
 
 def _past_end(number, rel, count):
