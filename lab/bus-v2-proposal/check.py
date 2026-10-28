@@ -475,19 +475,34 @@ def quote_for(remainders, pinned_lines, number):
     return remainders[sum(1 for row in window if row[0] < number)]
 
 
-def _draft_lines(rel):
-    """Return the pinned (number, line) of REL at this worktree's draft pin.
+# The root and pin of the draft under check, or None when no check is running.
+_QUOTE_SOURCE = None
 
-    The helper functions keep the one-argument signature the tests call and
-    read the pin of the draft in this worktree, so a fixture draft is compared
-    against the same worktree commit the checker reads. The draft pin can
-    change between two checks, so this reads the pin each time. Only
-    ``_pinned_lines`` caches, and its key holds the commit.
+
+def _quote_source():
+    """Return the one (root, sha) pair the quote checks read.
+
+    ``_quote_refusals`` sets the pair of the draft it checks, so the window
+    that selects a remainder and the line that remainder is compared with come
+    from one root and one pin. A caller that reads a helper by itself, as the
+    tests do, reads this worktree's draft and pin instead.
     """
-    text = load_draft(worktree_root())
-    if text is None:
-        return ()
-    return _pinned_lines(str(worktree_root()), pin_sha(text), rel)
+    if _QUOTE_SOURCE is not None:
+        return _QUOTE_SOURCE
+    root = str(worktree_root())
+    text = load_draft(root)
+    return root, None if text is None else pin_sha(text)
+
+
+def _draft_lines(rel):
+    """Return the pinned (number, line) of REL at the current quote source.
+
+    The helper functions keep the one-argument signature the tests call. The
+    draft pin can change between two checks, so the pin is read each time.
+    Only ``_pinned_lines`` caches, and its key holds the commit.
+    """
+    root, sha = _quote_source()
+    return _pinned_lines(root, sha, rel)
 
 
 def _quote_for_span(text, marker, span):
@@ -975,18 +990,24 @@ def _quote_of(target, text):
 
 def _quote_refusals(root, text, sha):
     """Return the quote refusals in source order: 2067, 2421, 2422, 2720, 2741, 2749, 2958, 2981, 3290, 3308, 3339, 3360, 3370, 3382, 3387, 3403, 3449, 3455, 3470, 3471, 3474, 3482, 3526, 3549, 3754, 3755, 3757, 3767, 3849, 3850, 3935, 3936, 3947, 3961, 3966, 3967, 4023, 4032, 4033, 4061, 8149, 8162, 8168, 8187, 8188, 8189, 8190, 8191, 8192, 8193, 8194, 8488, then 123, 189, 190, 192."""
-    for target in QUOTE_TARGETS:
-        if text.count(target.marker) > 1:
-            return ["refuse: quoted line is not one line: " + _span_text(target.marker)]
-        if not _remainders(text, target.marker):
-            continue
-        quoted = _quote_of(target, text)
-        source = pinned_line(root, sha, target.path, target.number)
-        if quoted is None or source is None:
-            return ["refuse: quoted line is not in the pinned commit: " + target.span]
-        if not quoted_line_matches(quoted, source):
-            return ["refuse: quoted line does not match " + target.span]
-    return []
+    global _QUOTE_SOURCE
+    previous = _QUOTE_SOURCE
+    _QUOTE_SOURCE = (str(root), sha)
+    try:
+        for target in QUOTE_TARGETS:
+            if text.count(target.marker) > 1:
+                return ["refuse: quoted line is not one line: " + _span_text(target.marker)]
+            if not _remainders(text, target.marker):
+                continue
+            quoted = _quote_of(target, text)
+            source = pinned_line(root, sha, target.path, target.number)
+            if quoted is None or source is None:
+                return ["refuse: quoted line is not in the pinned commit: " + target.span]
+            if not quoted_line_matches(quoted, source):
+                return ["refuse: quoted line does not match " + target.span]
+        return []
+    finally:
+        _QUOTE_SOURCE = previous
 
 
 def _past_end(number, rel, count):
