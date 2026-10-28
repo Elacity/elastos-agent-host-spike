@@ -261,3 +261,27 @@ fn model_newline_escape_is_not_a_link() {
     assert!(escaped.contains("\\n"));
     assert!(!cargo_toml_path_depends_on_grant_binding(escaped));
 }
+
+#[test]
+fn model_backspace_escape_is_not_a_link() {
+    let escaped = "gb = { path = \"../grant-\\binding\", package = \"grant-\\binding\" }\n";
+    assert!(!escaped.contains("grant-binding"));
+    assert!(escaped.contains("\\b"));
+    assert!(!cargo_toml_path_depends_on_grant_binding(escaped));
+}
+
+#[test]
+fn model_tab_escape_is_not_a_link() {
+    let escaped = "gb = { path = \"../gran\\t-binding\", package = \"gran\\t-binding\" }\n";
+    assert!(!escaped.contains("grant-binding"));
+    assert!(escaped.contains("\\t"));
+    assert!(!cargo_toml_path_depends_on_grant_binding(escaped));
+}
+
+#[test]
+fn model_carriage_return_escape_is_not_a_link() {
+    let escaped = "gb = { path = \"../g\\rant-binding\", package = \"g\\rant-binding\" }\n";
+    assert!(!escaped.contains("grant-binding"));
+    assert!(escaped.contains("\\r"));
+    assert!(!cargo_toml_path_depends_on_grant_binding(escaped));
+}
