@@ -20,11 +20,28 @@ pub fn cargo_toml_path_depends_on_grant_binding(cargo_toml: &str) -> bool {
 /// Writes one manifest and a dummy source file, then checks that file.
 ///
 /// Cargo is spawned by `metadata_names`, once, from the check below.
-/// A manifest cargo cannot parse is not a link.
+/// Cargo's own manifest rejection is not a link. Every other metadata
+/// failure still stops this check with that failure's reason.
 fn dependency_names(cargo_toml: &str) -> bool {
     with_manifest_dir(&std::env::temp_dir(), |dir| {
         stage_manifest(dir, cargo_toml)?;
-        Ok(manifest_depends_on_grant_binding(&dir.join("Cargo.toml")))
+        let manifest = dir.join("Cargo.toml");
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            manifest_depends_on_grant_binding(&manifest)
+        })) {
+            Ok(is_link) => Ok(is_link),
+            Err(panic) => {
+                let reason = panic
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| panic.downcast_ref::<&str>().copied());
+                if reason == Some("dependency check failed: cargo metadata rejected the manifest") {
+                    Ok(false)
+                } else {
+                    std::panic::resume_unwind(panic)
+                }
+            }
+        }
     })
     .unwrap_or_else(|error| panic!("dependency check failed: {error}"))
 }
@@ -43,6 +60,8 @@ enum MetadataRefuse {
     WriteManifest,
     WriteSource,
     LaunchCargo,
+    CargoRejected,
+    CargoFailed,
     DecodeOutput,
     ResolveManifest,
     ManifestParent,
@@ -62,6 +81,8 @@ impl fmt::Display for MetadataRefuse {
             Self::WriteManifest => "cannot write temporary Cargo.toml",
             Self::WriteSource => "cannot write temporary src/lib.rs",
             Self::LaunchCargo => "cannot launch cargo metadata",
+            Self::CargoRejected => "cargo metadata rejected the manifest",
+            Self::CargoFailed => "cargo metadata failed",
             Self::DecodeOutput => "cargo metadata output is not UTF-8",
             Self::ResolveManifest => "cannot resolve input manifest path",
             Self::ManifestParent => "input manifest path has no parent directory",
@@ -149,9 +170,10 @@ fn metadata_dependency_names(dir: &Path, cargo_toml: &str) -> Result<Vec<String>
 
 /// One `cargo metadata --offline --no-deps` parse.
 ///
-/// A non-zero exit is an empty list. Launch and decode failures stop the check.
-/// The list is dependency names, plus member names when this directory is the
-/// workspace root.
+/// Cargo status 101 stops the check: cargo rejected the manifest. Any other
+/// unsuccessful status stops the check because cargo failed. Launch and decode
+/// failures stop the check with their own reasons. The list is dependency
+/// names, plus member names when this directory is the workspace root.
 fn metadata_names(manifest: &Path) -> Vec<String> {
     let manifest = fs::canonicalize(manifest).unwrap_or_else(|_| {
         panic!(
@@ -183,8 +205,10 @@ fn metadata_names(manifest: &Path) -> Vec<String> {
         Ok(output) => output,
         Err(_) => panic!("dependency check failed: {}", MetadataRefuse::LaunchCargo),
     };
-    if !output.status.success() {
-        return Vec::new();
+    match output.status.code() {
+        Some(0) => {}
+        Some(101) => panic!("dependency check failed: {}", MetadataRefuse::CargoRejected),
+        _ => panic!("dependency check failed: {}", MetadataRefuse::CargoFailed),
     }
     let json = match String::from_utf8(output.stdout) {
         Ok(json) => json,
@@ -200,7 +224,11 @@ fn metadata_names(manifest: &Path) -> Vec<String> {
 /// The package object's own `name` is not a dependency.
 #[cfg(test)]
 fn names_in_dependency_arrays(json: &str) -> Vec<String> {
-    read_metadata(json).dependencies
+    read_metadata(json)
+        .packages
+        .into_iter()
+        .flat_map(|package| package.dependencies)
+        .collect()
 }
 
 struct SeenPackage {
@@ -211,7 +239,6 @@ struct SeenPackage {
 }
 
 struct MetadataSeen {
-    dependencies: Vec<String>,
     open_deps: Vec<String>,
     workspace_root: Option<String>,
     member_ids: Vec<String>,
@@ -220,7 +247,6 @@ struct MetadataSeen {
 
 fn read_metadata(json: &str) -> MetadataSeen {
     let mut seen = MetadataSeen {
-        dependencies: Vec::new(),
         open_deps: Vec::new(),
         workspace_root: None,
         member_ids: Vec::new(),
@@ -354,9 +380,7 @@ impl JsonScan<'_> {
                     }
                     self.skip_ws();
                     if in_dependency && key == "name" && self.bytes.get(self.index) == Some(&b'"') {
-                        let name = self.parse_string();
-                        seen.open_deps.push(name.clone());
-                        seen.dependencies.push(name);
+                        seen.open_deps.push(self.parse_string());
                     } else if is_package
                         && key == "dependencies"
                         && self.bytes.get(self.index) == Some(&b'[')
@@ -670,9 +694,20 @@ fn model_metadata_output_failure_and_nonzero_exit_stay_distinct() {
     use std::os::unix::fs::PermissionsExt;
 
     if std::env::var_os("GRANT_BINDING_METADATA_TEST_CHILD").is_some() {
-        assert!(!cargo_toml_path_depends_on_grant_binding(
-            &dependency_manifest("grant-binding = { path = 'missing-gb' }\n")
-        ));
+        let root = std::env::temp_dir().join("ws");
+        fs::create_dir_all(root.join("gb/src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"gb\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("gb/Cargo.toml"),
+            "[package]\nname = \"grant-binding\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("gb/src/lib.rs"), "").unwrap();
+        let _ = manifest_depends_on_grant_binding(&root.join("Cargo.toml"));
         return;
     }
     with_manifest_dir(&std::env::temp_dir(), |dir| {
@@ -688,13 +723,9 @@ fn model_metadata_output_failure_and_nonzero_exit_stay_distinct() {
             if status == 0 {
                 assert_metadata_child_failure(output, "cargo metadata output is not UTF-8");
             } else {
-                assert!(
-                    output.status.success(),
-                    "{}{}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
+                assert_metadata_child_failure(output, "cargo metadata failed");
             }
+            let _ = fs::remove_dir_all(dir.join("ws"));
             assert_eq!(
                 fs::read_dir(dir).unwrap().count(),
                 1,
@@ -704,6 +735,29 @@ fn model_metadata_output_failure_and_nonzero_exit_stay_distinct() {
         Ok(())
     })
     .unwrap();
+}
+
+#[test]
+fn model_metadata_rejection_stops_with_a_reason() {
+    let root = std::env::temp_dir().join(format!("gb-reject-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"missing\"]\n",
+    )
+    .unwrap();
+    let panic =
+        std::panic::catch_unwind(|| manifest_depends_on_grant_binding(&root.join("Cargo.toml")))
+            .unwrap_err();
+    assert_eq!(
+        panic.downcast_ref::<String>().map(String::as_str),
+        Some("dependency check failed: cargo metadata rejected the manifest")
+    );
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        "[workspace]\nmembers = [\"missing\"]\n"
+    ));
+    fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]
