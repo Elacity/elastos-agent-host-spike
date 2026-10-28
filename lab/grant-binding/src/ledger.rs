@@ -1667,6 +1667,195 @@ fn model_forged_instance_does_not_move_the_settle() {
 }
 
 #[test]
+fn model_forged_append_does_not_move_the_settle() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged append does not move the settle");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_overwrite_does_not_move_the_settle() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_overwrite);
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged overwrite does not move the settle");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_child_journal_does_not_move_the_settle() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged child journal does not move the settle");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_identity_does_not_move_the_settle() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged identity does not move the settle");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_session_does_not_move_the_settle() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged session does not move the settle");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_ceiling_does_not_move_the_settle() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_ceiling: 1,
+        ..guest(handle)
+    };
+    assert!(request.forged_ceiling > 0);
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged ceiling does not move the settle");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_reported_usage_does_not_move_the_settle() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(handle)
+    };
+    assert!(request.reported_usage > 0);
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("reported usage does not move the settle");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
 fn model_timeout_twice_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
