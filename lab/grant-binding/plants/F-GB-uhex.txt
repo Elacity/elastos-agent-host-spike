@@ -1,0 +1,8 @@
+id: F-GB-uhex
+file: src/link.rs
+test: link::model_uppercase_hex_escape_is_a_link
+--- old
+        b'A'..=b'F' => Some(u32::from(byte - b'A') + 10),
+--- new
+        b'A'..=b'F' => None,
+--- end

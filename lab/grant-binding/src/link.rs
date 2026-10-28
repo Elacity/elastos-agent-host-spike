@@ -237,3 +237,11 @@ fn model_unknown_hex_escape_is_not_a_link() {
     assert!(hex.contains("\\x69"));
     assert!(!cargo_toml_path_depends_on_grant_binding(hex));
 }
+
+#[test]
+fn model_uppercase_hex_escape_is_a_link() {
+    let upper = "gb = { path = \"../grant-bindi\\u006Eg\", package = \"grant-bindi\\u006Eg\" }\n";
+    assert!(!upper.contains("grant-binding"));
+    assert!(upper.contains("\\u006E"));
+    assert!(cargo_toml_path_depends_on_grant_binding(upper));
+}
