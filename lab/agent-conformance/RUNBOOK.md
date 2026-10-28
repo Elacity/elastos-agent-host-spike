@@ -764,4 +764,6 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 
 `standin_stop_revoke_joins_the_audit_list` is this stand-in, and a PASS there gives the Runtime no A15 credit and no A6 credit.
 
+`standin_provider_launch_starts_under_caller_profile` is this stand-in, and a PASS there gives the Runtime no C0 credit.
+
 `standin_storage_refuses_a_raw_dot_home` is this stand-in, and a PASS there gives the Runtime no A9 credit.

@@ -2,10 +2,10 @@
 
 use std::cell::{Cell, RefCell};
 use std::fs::{self, File, Metadata};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -32,12 +32,19 @@ fn inside(path: &Path, root: &Path) -> bool {
             .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
 }
 
-// Examine each in-root component before going further. In particular, never
-// canonicalize an outside path or follow a symlink to learn where it leads.
+// Examine each in-root component before going further. A `.` or `..` component
+// is refused before any stat, so a missing prefix cannot hide a later escape.
+// Never canonicalize an outside path or follow a symlink to learn where it leads.
 pub(crate) fn directories_only(path: &Path, root: &Path) -> bool {
     let Ok(relative) = path.strip_prefix(root) else {
         return false;
     };
+    if relative
+        .components()
+        .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return false;
+    }
     let mut cursor = root.to_path_buf();
     for part in relative.components() {
         cursor.push(part);
@@ -61,6 +68,16 @@ fn same_directory(first: &Metadata, second: &Metadata) -> bool {
         let _ = (first, second);
         false
     }
+}
+
+/// Stdin for one child of the single spawn site.
+///
+/// `Null` is the default for every existing launch. `Bounded` is a pipe whose
+/// writes stop at `limit` bytes.
+#[derive(Clone, Copy, Debug)]
+pub enum ChildInput {
+    Null,
+    Bounded { limit: usize },
 }
 
 /// Call `finish` only after all test assertions pass. Every other drop keeps
@@ -195,11 +212,15 @@ impl ThrowawayHome {
     }
 
     /// The only spawn site, shared by bounded launches and managed operators.
+    ///
+    /// `input` is `ChildInput::Null` for every existing launch. A bounded pipe
+    /// is the same spawn with a stdin the caller can write, up to its limit.
     fn spawn(
         &self,
         program: &Path,
         args: &[&str],
         operator: Option<&ThrowawayHome>,
+        input: ChildInput,
     ) -> Result<CapturedChild> {
         self.guard(&self.home, &self.data)?;
         if let Some(operator) = operator {
@@ -208,11 +229,20 @@ impl ThrowawayHome {
         // Files avoid pipe backpressure and inherited-pipe EOF hangs. They are
         // created exclusively inside the guarded root and retained on failure.
         let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
-        let stdout = File::create_new(self.root.join(format!("stdout-{serial}")))
-            .map_err(|_| "could not create child stdout capture")?;
+        let stdout_path = self.root.join(format!("stdout-{serial}"));
+        let stdout =
+            File::create_new(&stdout_path).map_err(|_| "could not create child stdout capture")?;
+        // A second open has its own offset, so a response read does not move
+        // the descriptor the child writes.
+        let stdout_read =
+            File::open(&stdout_path).map_err(|_| "could not open child stdout capture")?;
         let stderr = File::create_new(self.root.join(format!("stderr-{serial}")))
             .map_err(|_| "could not create child stderr capture")?;
         self.captures.borrow_mut().push(serial);
+        let (stdin_stdio, stdin_limit) = match input {
+            ChildInput::Null => (Stdio::null(), 0),
+            ChildInput::Bounded { limit } => (Stdio::piped(), limit),
+        };
         let mut command = Command::new(program);
         command
             .args(args)
@@ -223,7 +253,7 @@ impl ThrowawayHome {
             .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
             .env("ELASTOS_CARRIER_MDNS", "0")
             .process_group(0)
-            .stdin(Stdio::null())
+            .stdin(stdin_stdio)
             .stdout(
                 stdout
                     .try_clone()
@@ -241,22 +271,34 @@ impl ThrowawayHome {
                 operator.data().join("runtime-coords.json"),
             );
         }
-        let child = command
+        let mut child = command
             .spawn()
             .map_err(|_| "could not start child process")?;
+        let stdin = match input {
+            ChildInput::Null => None,
+            ChildInput::Bounded { .. } => {
+                Some(child.stdin.take().ok_or("could not attach child stdin")?)
+            }
+        };
         if args.first() == Some(&"run") {
             self.run_starts.set(self.run_starts.get() + 1);
         }
         Ok(CapturedChild {
             child,
+            stdin,
+            stdin_limit,
+            stdin_used: 0,
             stdout,
+            stdout_read,
+            stdout_pos: 0,
+            pending: Vec::new(),
             stderr,
         })
     }
 
     pub fn launch(&self, program: &Path, args: &[&str], bound: Duration) -> Result<Output> {
         let started = Instant::now();
-        let mut spawned = self.spawn(program, args, None)?;
+        let mut spawned = self.spawn(program, args, None, ChildInput::Null)?;
         let child = &mut spawned.child;
         let status = loop {
             match child.try_wait() {
@@ -291,9 +333,19 @@ impl ThrowawayHome {
     }
 
     pub fn start(&self, program: &Path, args: &[&str]) -> Result<RunningChild<'_>> {
+        self.start_with_input(program, args, ChildInput::Null)
+    }
+
+    /// The same spawn as `start`, with the caller's stdin choice.
+    pub fn start_with_input(
+        &self,
+        program: &Path,
+        args: &[&str],
+        input: ChildInput,
+    ) -> Result<RunningChild<'_>> {
         Ok(RunningChild {
             home: self,
-            spawned: self.spawn(program, args, None)?,
+            spawned: self.spawn(program, args, None, input)?,
             stopped: false,
         })
     }
@@ -384,7 +436,13 @@ impl ThrowawayHome {
 
 struct CapturedChild {
     child: Child,
+    stdin: Option<ChildStdin>,
+    stdin_limit: usize,
+    stdin_used: usize,
     stdout: File,
+    stdout_read: File,
+    stdout_pos: u64,
+    pending: Vec<u8>,
     stderr: File,
 }
 
@@ -407,6 +465,134 @@ impl RunningChild<'_> {
             .try_wait()
             .map(|status| status.is_none())
             .map_err(|_| "could not inspect managed child")
+    }
+
+    /// Write `bytes` to the bounded pipe. A write that would pass the limit is
+    /// refused and is not sent. A null stdin has no pipe.
+    pub fn write_bounded(&mut self, bytes: &[u8]) -> Result<()> {
+        let Some(stdin) = self.spawned.stdin.as_mut() else {
+            return Err("child has no stdin");
+        };
+        let next = self.spawned.stdin_used.saturating_add(bytes.len());
+        if next > self.spawned.stdin_limit {
+            return Err("stdin exceeds its byte limit");
+        }
+        stdin
+            .write_all(bytes)
+            .map_err(|_| "could not write child stdin")?;
+        stdin.flush().map_err(|_| "could not flush child stdin")?;
+        self.spawned.stdin_used = next;
+        Ok(())
+    }
+
+    /// Read one stdout line. The deadline and a closed stream are different
+    /// refusals. A line that is already waiting is returned as it is. A capture
+    /// past its byte limit stops this child and returns that limit.
+    pub fn read_line_within(&mut self, deadline: Duration) -> std::result::Result<String, String> {
+        let started = Instant::now();
+        let mut exited = false;
+        loop {
+            match self.pull_stdout() {
+                Ok(()) => {}
+                Err(reason) if reason == "provider response exceeds its byte limit" => {
+                    return Err(match self.stop() {
+                        Ok(()) => reason.to_owned(),
+                        Err(cleanup) => format!("{reason}; cleanup failed: {cleanup}"),
+                    });
+                }
+                Err(reason) => return Err(reason.to_owned()),
+            }
+            if let Some(line) = take_line(&mut self.spawned.pending)? {
+                return Ok(line);
+            }
+            if exited {
+                return Err("provider response stream ended".to_owned());
+            }
+            exited = self
+                .spawned
+                .child
+                .try_wait()
+                .map_err(|_| "could not inspect managed child".to_owned())?
+                .is_some();
+            if exited {
+                continue;
+            }
+            if started.elapsed() >= deadline {
+                return Err("provider response exceeded its deadline".to_owned());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Reap the child, or refuse when it is still running at `deadline`.
+    /// The deadline refusal is not the response refusal.
+    pub fn wait_for_exit_within(&mut self, deadline: Duration) -> Result<ExitStatus> {
+        let started = Instant::now();
+        loop {
+            match self
+                .spawned
+                .child
+                .try_wait()
+                .map_err(|_| "could not collect managed child status")?
+            {
+                Some(status) => {
+                    if self.home.group_is_alive(self.pgid())? {
+                        return Err("completed child left a live process group");
+                    }
+                    self.stopped = true;
+                    return Ok(status);
+                }
+                None => {
+                    if started.elapsed() >= deadline {
+                        self.kill_group(self.home)?;
+                        self.stopped = true;
+                        return Err("provider exit exceeded its deadline");
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+    }
+
+    fn pull_stdout(&mut self) -> Result<()> {
+        // One cap beside this read. A logical length past it is refused
+        // before any buffer is sized from that length.
+        const RESPONSE_BYTE_LIMIT: usize = 65536;
+        const CHUNK: usize = 4096;
+        let len = self
+            .spawned
+            .stdout_read
+            .metadata()
+            .map_err(|_| "could not inspect child stdout")?
+            .len();
+        if len < self.spawned.stdout_pos {
+            return Err("could not inspect child stdout");
+        }
+        let unread = len - self.spawned.stdout_pos;
+        if unread == 0 {
+            return Ok(());
+        }
+        let pending_len = u64::try_from(self.spawned.pending.len()).unwrap_or(u64::MAX);
+        if pending_len.saturating_add(unread) > RESPONSE_BYTE_LIMIT as u64 {
+            return Err("provider response exceeds its byte limit");
+        }
+        let mut left = usize::try_from(unread).map_err(|_| "could not read child stdout")?;
+        let mut buf = [0_u8; CHUNK];
+        while left > 0 {
+            let want = left.min(CHUNK);
+            let got = self
+                .spawned
+                .stdout_read
+                .read(&mut buf[..want])
+                .map_err(|_| "could not read child stdout")?;
+            if got == 0 {
+                return Err("could not read child stdout");
+            }
+            self.spawned.pending.extend_from_slice(&buf[..got]);
+            self.spawned.stdout_pos += got as u64;
+            left -= got;
+        }
+        Ok(())
     }
 
     /// Observe exit without signalling the child. Preserve its OS status so
@@ -432,13 +618,13 @@ impl RunningChild<'_> {
         Ok(Some(output))
     }
 
-    fn signal(&self, signal: &str, group: bool) -> Result<()> {
+    fn signal(&self, helper_home: &ThrowawayHome, signal: &str, group: bool) -> Result<()> {
         let target = if group {
             format!("-{}", self.pgid())
         } else {
             self.pgid().to_string()
         };
-        let output = self.home.launch(
+        let output = helper_home.launch(
             Path::new("/bin/kill"),
             &[signal, &target],
             Duration::from_secs(1),
@@ -449,17 +635,25 @@ impl RunningChild<'_> {
         Ok(())
     }
 
-    fn kill_group(&mut self) -> Result<()> {
+    fn kill_group(&mut self, helper_home: &ThrowawayHome) -> Result<()> {
         // Signal first even if the leader exited: its children can still live.
-        let _ = self.signal("-KILL", true);
+        let _ = self.signal(helper_home, "-KILL", true);
         let bound = Instant::now();
         while bound.elapsed() < Duration::from_secs(2) {
-            if !self.is_alive()? && !self.home.group_is_alive(self.pgid())? {
+            if !self.is_alive()? && !helper_home.group_is_alive(self.pgid())? {
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(20));
         }
         Err("managed process group remains after SIGKILL")
+    }
+
+    // The owned process group survives a damaged Home. Run the same cleanup
+    // through a fresh guarded Home so signalling and inspection can complete.
+    fn cleanup_group(&mut self) -> Result<()> {
+        let helper_home = ThrowawayHome::new()?;
+        self.kill_group(&helper_home)?;
+        helper_home.finish()
     }
 
     pub fn stop(&mut self) -> Result<()> {
@@ -469,7 +663,7 @@ impl RunningChild<'_> {
         let result = self.stop_within_bound();
         if result.is_err() {
             self.home.keep.set(true);
-            self.kill_group()?;
+            self.cleanup_group()?;
         }
         self.stopped = true;
         result
@@ -478,7 +672,7 @@ impl RunningChild<'_> {
     fn stop_within_bound(&mut self) -> Result<()> {
         let started = Instant::now();
         if self.is_alive()? {
-            self.signal("-TERM", false)?;
+            self.signal(self.home, "-TERM", false)?;
         }
         while started.elapsed() < Duration::from_secs(10) {
             if !self.is_alive()? && !self.home.group_is_alive(self.pgid())? {
@@ -521,7 +715,12 @@ impl<'a> RunningInstances<'a> {
         for launch in launches {
             group.children.push(RunningChild {
                 home: launch.home,
-                spawned: launch.home.spawn(launch.program, &launch.args, operator)?,
+                spawned: launch.home.spawn(
+                    launch.program,
+                    &launch.args,
+                    operator,
+                    ChildInput::Null,
+                )?,
                 stopped: false,
             });
         }
@@ -611,11 +810,21 @@ impl Drop for RunningChild<'_> {
     fn drop(&mut self) {
         if !self.stopped {
             self.home.keep.set(true);
-            if let Err(reason) = self.kill_group() {
+            if let Err(reason) = self.cleanup_group() {
                 eprintln!("managed child cleanup failed: {reason}");
             }
         }
     }
+}
+
+fn take_line(pending: &mut Vec<u8>) -> Result<Option<String>> {
+    let Some(split) = pending.iter().position(|byte| *byte == b'\n') else {
+        return Ok(None);
+    };
+    let line: Vec<u8> = pending.drain(..=split).collect();
+    let line = &line[..line.len() - 1];
+    let text = std::str::from_utf8(line).map_err(|_| "provider response is not UTF-8")?;
+    Ok(Some(text.to_owned()))
 }
 
 fn capture(file: &mut File) -> Result<Vec<u8>> {

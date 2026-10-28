@@ -13861,6 +13861,579 @@ New:
 - `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 247.84 seconds, inside the 600-second bound. Targets: lib 80 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0.
 - Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_stop_revoke_joins_the_audit_list -- --exact`: exit 0, 1 passed, real 1.54 seconds.
 
+## 089
+
+089: `start_provider` is the one lab launch seam. A caller passes the confinement profile path it already wrote. Started means that binary answered `init` with `status` `ok`, and the return owns the live child. Refused leaves no child. `ThrowawayHome::spawn` stays the only spawn; bounded stdin is an argument, and null stdin stays the default for every existing launch. A PASS gives the Runtime no C0 credit and no B3 credit.
+
+### Quote from the contract (read only)
+
+`docs/AGENT_ARCHITECTURE.md`, Runtime and provider architecture: "Runtime verifies the principal and session, enforces capabilities, owns lifecycle and audit, and routes the operation." Effect providers "do not decide that an unverified caller is authorized."
+
+This task is the lab launch under a profile the caller already wrote. It does not mint a grant. `#309 at 513988ebd names no provider-launch ask; routed to Flint`.
+
+### Plants
+
+Each plant was applied alone, then restored before the next. The planted crate compiled. The named test failed on its assertion. Restored, it passes. No `falsifiers.json` id. `git diff -- lab/agent-conformance/standin-runtime/mod.rs` after restore shows no plant.
+
+The four required plants used `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test provider_launch -- --nocapture`. The extra plants used that command with the named test before `--`.
+
+F-shared-launch-drop-profile: the spawn arguments omit `-f` and the profile path. Named test `standin_provider_launch_starts_under_caller_profile` panicked at `tests/provider_launch.rs:164:10`, `.expect("the caller profile starts the provider")`. Real 2.32 seconds. The same plant also failed `standin_provider_launch_refuses_stdin_past_its_limit` at `tests/provider_launch.rs:513:10` and `standin_provider_launch_uses_supplied_profile` at `tests/provider_launch.rs:431:5`.
+
+Old:
+
+```text
+    arguments.push("-f".to_string());
+    arguments.push(profile_text.to_string());
+```
+
+New: those two lines deleted.
+
+F-shared-launch-wrong-profile: the restrictive profile is replaced by the committed oracle path. Named test `standin_provider_launch_uses_supplied_profile` panicked at `tests/provider_launch.rs:132:18`, `Ok(_) => panic!("the launch must be refused")`. Real 2.91 seconds.
+
+Old:
+
+```text
+    arguments.push(profile_text.to_string());
+```
+
+New:
+
+```text
+    arguments.push(concat!(env!("CARGO_MANIFEST_DIR"), "/../../capsules/wallet-provider/confine.sb").to_string());
+```
+
+F-shared-launch-bare: the binary is started with no confinement tool. Named tests: `standin_provider_launch_starts_under_caller_profile` panicked at `tests/provider_launch.rs:213:5`, `assert_eq!(denied["status"], "error", "outside init: {denied}")`, left `String("ok")`, right `"error"`. `standin_provider_launch_uses_supplied_profile` panicked at `tests/provider_launch.rs:132:18`, `Ok(_) => panic!("the launch must be refused")`. Real 2.73 seconds. A later capture of the same plant confirmed the outside-init left/right values, then restored the file.
+
+Old:
+
+```text
+    let program = tool_path;
+    let arg_refs: Vec<&str> = arguments.iter().map(String::as_str).collect();
+```
+
+New:
+
+```text
+    let program = binary.as_path();
+    let arg_refs: Vec<&str> = Vec::new();
+```
+
+F-shared-launch-stub: the seam returns Started before `init` has answered `ok`. Named test `standin_provider_launch_starts_under_caller_profile` panicked at `tests/provider_launch.rs:188:5`, `wallet.is_dir() && status["data"]["storage_configured"] == true`. Real 2.52 seconds. The same plant also failed `standin_provider_launch_uses_supplied_profile` at `tests/provider_launch.rs:132:18`. Round 3 refreshed the old bytes to the current init exchange and re-ran the plant. See Round 3 below.
+
+Old:
+
+```text
+    let init = exchange(&mut child, &init_request)
+        .and_then(|init| {
+            if init.get("status").and_then(Value::as_str) == Some("ok") {
+                Ok(init)
+            } else {
+                Err(format!("init answered {init}"))
+            }
+        })
+        .map_err(|reason| {
+            provider_refusal(&mut child, format!("{name} start is refused: {reason}"))
+        })?;
+```
+
+New:
+
+```text
+    let init = json!({"status": "ok", "data": {"storage_configured": true}});
+```
+
+F-shared-launch-primitive: the missing-primitive arm of `host_refusal` is deleted. Named test `standin_provider_launch_refuses_unconfined_host` panicked at `tests/provider_launch.rs:330:9`, `assert_eq!(reason, expected)`. Real 1.23 seconds.
+
+Old:
+
+```text
+    if let Some(primitive) = host.unavailable {
+        let reason = primitive.design_refusal();
+        return Err(format!("{name} start on {} is refused: {reason}", host.os));
+    }
+```
+
+New: that block deleted.
+
+F-shared-launch-linux-lab: the Linux sentence says the lab enforces Linux. Same test, same assertion, `tests/provider_launch.rs:330:9`. Real 1.40 seconds.
+
+Old:
+
+```text
+linux is designed, not enforced, in this lab
+```
+
+New:
+
+```text
+linux is designed and enforced, in this lab
+```
+
+F-shared-launch-unnamed-os: the unsupported-OS reason drops the reported OS name. Same test, same assertion, `tests/provider_launch.rs:330:9`. Real 1.39 seconds.
+
+Old:
+
+```text
+        format!(
+            "{} has no confinement design, and the lab stand-in applies confinement only on \
+             {confined_os}",
+            host.os
+        )
+```
+
+New:
+
+```text
+        format!(
+            "a host has no confinement design, and the lab stand-in applies confinement only on \
+             {confined_os}"
+        )
+```
+
+F-shared-launch-absent-tool: the absent-tool check is deleted. Same test panicked at `tests/provider_launch.rs:334:5`, the absent-tool `assert_eq!`. Real 1.54 seconds.
+
+Old:
+
+```text
+    if !tool_path.is_file() {
+        return Err(format!(
+            "{name} start on {os} is refused: the confinement tool {} is absent",
+            tool_path.display()
+        ));
+    }
+```
+
+New: that block deleted.
+
+F-shared-launch-wrong-tool: the not-that-tool check is deleted. Same test panicked at `tests/provider_launch.rs:350:5`, the `/bin/echo` `assert_eq!`. Real 1.51 seconds.
+
+Old:
+
+```text
+    if tool_path != Path::new(SANDBOX_EXEC) {
+        return Err(format!(
+            "{name} start on {os} is refused: the confinement tool {} is not {SANDBOX_EXEC}, \
+             which is the one the stand-in runs",
+            tool_path.display()
+        ));
+    }
+```
+
+New: that block deleted.
+
+F-shared-launch-binary-file: the binary-is-a-file check is deleted. Same test panicked at `tests/provider_launch.rs:356:5`, the missing-binary `assert_eq!`. Real 1.65 seconds.
+
+Old:
+
+```text
+    if !binary_path.is_file() {
+        return Err(format!(
+            "{name} start is refused: the provider binary {} is not a file",
+            binary_path.display()
+        ));
+    }
+```
+
+New: that block deleted.
+
+F-shared-launch-profile-file: the profile-is-a-file check is deleted. Named test `standin_provider_launch_uses_supplied_profile` panicked at `tests/provider_launch.rs:410:5`, `missing_reason.contains("is not a file")`. Real 1.83 seconds.
+
+Old:
+
+```text
+    if !profile_path.is_file() {
+        return Err(format!(
+            "{name} start is refused: the confinement profile {} is not a file",
+            profile_path.display()
+        ));
+    }
+```
+
+New: that block deleted.
+
+F-shared-launch-unknown-name: an unknown name uses the wallet storage layout. Named test `standin_provider_launch_refuses_an_unknown_provider_name` panicked at `tests/provider_launch.rs:487:5`, the layout-sentence `assert_eq!`. Real 1.54 seconds.
+
+Old:
+
+```text
+        other => Err(format!(
+            "the stand-in serves only {DID_PROVIDER} and {WALLET_PROVIDER}, so {other} has no \
+             storage root layout"
+        )),
+```
+
+New:
+
+```text
+        other => Ok(base.join("ElastOS").join("SystemServices").join("Wallet")),
+```
+
+F-shared-launch-stdin: `write_bounded` no longer refuses a write past the limit. Named test `standin_provider_launch_refuses_stdin_past_its_limit` panicked at `tests/provider_launch.rs:517:10`, `.expect_err("a request past the stdin limit is refused")`. Real 2.31 seconds.
+
+Old:
+
+```text
+        if next > self.spawned.stdin_limit {
+            return Err("stdin exceeds its byte limit");
+        }
+```
+
+New: that block deleted.
+
+F-shared-launch-response-deadline: `read_line_within` no longer refuses at the deadline. Named test `standin_provider_launch_refuses_a_response_past_its_deadline` panicked at `tests/provider_launch.rs:547:5`, `assert_eq!(err, "provider response exceeded its deadline")`. Real 3.77 seconds.
+
+Old:
+
+```text
+            if started.elapsed() >= deadline {
+                return Err("provider response exceeded its deadline");
+            }
+```
+
+New: that block deleted.
+
+F-shared-launch-exit-deadline: `wait_for_exit_within` no longer refuses at the deadline. Named test `standin_provider_launch_refuses_an_exit_past_its_deadline` panicked at `tests/provider_launch.rs:572:10`, `.expect_err("a child that stays up is refused at the exit deadline")`. Real 3.44 seconds. Round 3 refreshed the old bytes to the current `kill_group(self.home)?` check and re-ran the plant. See Round 3 below.
+
+Old:
+
+```text
+                    if started.elapsed() >= deadline {
+                        self.kill_group(self.home)?;
+                        self.stopped = true;
+                        return Err("provider exit exceeded its deadline");
+                    }
+```
+
+New: that block deleted.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. The wallet-provider binary was built once under `lab/agent-conformance/target/wallet-provider`, under the shared heavy-build lease. No `Cargo.toml` or `Cargo.lock` change. No census leftover, so no rerun.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.16 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 266.23 seconds, inside the 600-second bound. Targets: lib 80 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; provider_launch 7 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0.
+- Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test provider_launch -- --nocapture`: exit 0, 7 passed, finished in 2.50 seconds, real 2.57 seconds.
+
+### Ownership repair checks
+
+`start_provider` resolves the binary and profile through one `launch_file` check.
+Hashing and execution use those absolute paths. The exit deadline propagates
+`kill_group` failure and retains the child for a later cleanup attempt.
+
+Two added tests use the existing launch and child APIs. The relative-path test
+runs in an isolated process through `ThrowawayHome::launch`; its restrictive
+caller profile refuses wallet initialization despite a permissive profile in
+the child's working directory. It also exercises a relative binary path.
+The cleanup test blocks the kill helper with a temporary directory symlink,
+checks the cleanup error, restores the directory, and proves cleanup through
+both explicit `stop` and Drop with the existing physical census.
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test provider_launch --test harness -- --nocapture`
+first stopped in the harness tests because the execution sandbox prevented
+`pgrep` from reading the process list (exit 101, 6.27 seconds). With process
+inspection available, the same command completed with exit 0 in 9.37 seconds:
+9 harness tests and 9 provider-launch tests passed. Both runs held the shared
+heavy-build lease and used the lane's existing build directories. The retained
+Homes from the sandbox run were removed after `lsof` found zero open handles.
+`cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` completed
+with exit 0 in 0.16 seconds after the repair.
+The supervisor owns the full-suite check and fresh review; this repair ran
+the focused tests and kept Git untouched.
+
+### Round 2 ownership
+
+`start_provider` calls `directories_only` on the storage root before `create_dir_all` and before the `STORAGE_ROOT` binding. That one check refuses an outside base, a `..` or `.` component, and a symlink. The reason is `wallet-provider start is refused: the storage root <path> stays under this home`. A PASS gives the Runtime no C0 credit and no B3 credit.
+
+Plants were applied alone, then restored before the next. Each planted crate compiled. No `falsifiers.json` id. After restore, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows the ownership check and no plant.
+
+F-shared-launch-unowned: the `directories_only` call is deleted. Named tests: `standin_provider_launch_refuses_storage_outside_its_home` panicked at `tests/provider_launch.rs:132:18`, `Ok(_) => panic!("the launch must be refused")`. `standin_provider_launch_refuses_storage_through_a_symlink` panicked at `tests/provider_launch.rs:791:5`, `assert_eq!(reason, storage_stays_home(&link))`, left the init `storage_error` (`Operation not permitted`), right the ownership reason. `standin_provider_launch_refuses_storage_with_a_parent_segment` panicked at `tests/provider_launch.rs:747:5`, `assert_eq!(reason, storage_stays_home(&base))`, left the init `storage_error` for the escaped `SystemServices` directory, right the ownership reason. Real 2.76 seconds. The restored file has those two `assert_eq!` lines at 793 and 748 after the doc comments gained lines.
+
+Old:
+
+```text
+    // One check for the base, the parent `create_dir_all` would make, and the
+    // `STORAGE_ROOT` binding. The layout path contains that base, and the
+    // parent is its prefix. Refuse before creating a directory or binding it.
+    if !crate::harness::directories_only(&root, home.root()) {
+        return Err(format!(
+            "{name} start is refused: the storage root {} stays under this home",
+            root.display()
+        ));
+    }
+```
+
+New: that block deleted.
+
+F-shared-launch-dotdot: the non-normal component refusal in `directories_only` is deleted. Named test `standin_provider_launch_refuses_storage_with_a_parent_segment` panicked at `tests/provider_launch.rs:747:5`, `assert_eq!(reason, storage_stays_home(&base))`. Left was the init `storage_error` (`Operation not permitted`) for the escaped `SystemServices` directory. Right was the ownership reason. `standin_provider_launch_refuses_storage_outside_its_home` and `standin_provider_launch_refuses_storage_through_a_symlink` passed. Real 1.92 seconds.
+
+Old:
+
+```text
+    if relative
+        .components()
+        .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return false;
+    }
+```
+
+New: that block deleted.
+
+F-shared-launch-binary-file: `launch_file` is not used for the provider binary. Named test `standin_provider_launch_refuses_unconfined_host` panicked at `tests/provider_launch.rs:356:5`, the missing-binary `assert_eq!`. Left was the unused profile's `is not a file` reason. Right was `wallet-provider start is refused: the provider binary <path> is not a file`. Real 1.47 seconds.
+
+Old:
+
+```text
+    let binary = launch_file(binary_path, name, "provider binary")?;
+```
+
+New:
+
+```text
+    let binary = binary_path.to_path_buf();
+```
+
+F-shared-launch-profile-file: `launch_file` is not used for the confinement profile. Named test `standin_provider_launch_uses_supplied_profile` panicked at `tests/provider_launch.rs:410:5`, `missing_reason.contains("is not a file")`. The reason was `wallet-provider start is refused: the confinement profile <path> could not be read: No such file or directory (os error 2)`. Real 2.00 seconds.
+
+Old:
+
+```text
+    let profile = launch_file(profile_path, name, "confinement profile")?;
+```
+
+New:
+
+```text
+    let profile = profile_path.to_path_buf();
+```
+
+### Round 2 gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. The wallet-provider binary stayed the one already built under `lab/agent-conformance/target/wallet-provider`. The shared heavy-build lease was held. No `Cargo.toml` or `Cargo.lock` change. No census leftover, so no rerun.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.17 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 265.63 seconds, inside the 600-second bound. Targets: lib 80 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; provider_launch 12 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0.
+- Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test provider_launch -- --nocapture`: exit 0, 12 passed, finished in 4.97 seconds, real 5.08 seconds.
+
+### Root identity and refusal cleanup repair
+
+`start_provider` calls the existing Home guard before inspecting or creating
+provider storage. Both initialization response failures use `provider_refusal`,
+which stops the owned child and includes a cleanup error in the refusal reason.
+Shutdown uses that same handler. `RunningChild` runs its existing group cleanup
+from a fresh guarded helper Home after a failed stop and on Drop; the helper
+uses the existing spawn site and is removed after cleanup.
+
+The new root test replaces the borrowed root with both a symlink and a different
+directory. It checks the exact refusal, unchanged unrelated contents and empty
+child inventory. The initialization and shutdown tests swap the temporary
+directory before returning either an error response or invalid JSON. They check
+that the group has ended before restoring the directory, preserve both refusal
+and cleanup reasons, and use `census::cleanup` for physical evidence. Existing
+tests and assertions remain in place.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test provider_launch --test harness -- --nocapture`: exit 0 in 12.37 seconds; 15 provider-launch tests and 9 harness tests passed.
+
+The focused test command held the shared heavy-build lease, used the existing
+lane build directories and ran with macOS process inspection and local loopback
+access. Free space was 116.2 GiB before the run. Test fixtures removed their
+Homes after physical cleanup. Git commands were unused. The supervisor owns
+the complete checks and fresh review for this edit.
+
+### Round 3
+
+A response deadline stops and reaps the child through `end_dialogue`, which calls `provider_refusal`. `request` and `shutdown` then return `provider dialogue ended: provider response exceeded its deadline` and do not read the unread line. A PASS gives the Runtime no C0 credit and no B3 credit.
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. The shared heavy-build lease was held. Free space was 116 GiB. No `Cargo.toml` or `Cargo.lock` change. HEAD stayed `115948858cdd0a25265ade5cf5c8625994bc6c2c`.
+
+F-shared-launch-deadline-cleanup: `end_dialogue` returns the deadline reason and does not stop the child or mark the dialogue ended. Named test `standin_provider_launch_refuses_the_next_request_after_a_response_deadline`. The planted crate compiled. Planted exit 101, real 6.66 seconds, test finished in 5.48 seconds. Assertion: `tests/provider_launch.rs:617:5` `assertion left == right failed`, left `Ok` with `answered` `A` and `status` `ok`, right `Err("provider dialogue ended: provider response exceeded its deadline")`. Restored, the named test passed, exit 0, real 6.52 seconds, finished in 5.59 seconds. No `falsifiers.json` id.
+
+Old:
+
+```text
+    fn end_dialogue(&mut self, reason: String) -> String {
+        let settled = provider_refusal(&mut self.child, reason);
+        self.ended = Some(format!("provider dialogue ended: {settled}"));
+        settled
+    }
+```
+
+New:
+
+```text
+    fn end_dialogue(&mut self, reason: String) -> String {
+        reason
+    }
+```
+
+F-shared-launch-stub, re-run on the current init exchange. The planted crate compiled with unused-variable warnings. Named test `standin_provider_launch_starts_under_caller_profile` panicked at `tests/provider_launch.rs:188:5`. Left was `status` `ok` with `storage_configured` false and the wallet root absent. Real 2.12 seconds. Restored with the other plants. The old bytes are the current `exchange`/`provider_refusal` init block recorded above. The new bytes stay `json!({"status": "ok", "data": {"storage_configured": true}})`.
+
+F-shared-launch-exit-deadline, re-run on the current `kill_group(self.home)?` check. The planted crate compiled with unused-variable warnings. Named test `standin_provider_launch_refuses_an_exit_past_its_deadline` panicked at `tests/provider_launch.rs:572:10`: `a child that stays up is refused at the exit deadline: ExitStatus(unix_wait_status(0))`. Real 3.38 seconds. Restored with the other plants. The old bytes are the current deadline block recorded above. New: that block deleted.
+
+After the plants were restored, `standin-runtime/mod.rs` and `src/harness.rs` matched the pre-plant bytes. The three retained plant homes were removed. No plant remains.
+
+### Round 3 gates
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.20 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, real 237.90 seconds. Lib 80 passed. bin/report 1 passed. artifact 7 passed. build 1 passed. effects failed `ungranted_network_is_refused` at `tests/effects.rs:497:5`. Census: `process leftover` path `home/Library/Application Support/elastos/host-process.lock` under `target/home-1229-1793221835929271000-264`. That path stops the task on the first run. No rerun. Census and the operator were not edited.
+
+089 round 3: a response deadline reaps the provider child and refuses the next request, so a late line cannot be read as the next answer.
+
+### Response parsing and startup repair
+
+`StartedProvider::request` settles every failed exchange through the existing
+`end_dialogue` and `provider_refusal` path, except a stdin byte-limit refusal
+that sends nothing. Later requests and shutdown retain the first failure and
+any cleanup failure. `start_provider` checks the owned child's liveness after
+an `init` success; an exited child is refused with
+`wallet-provider start is refused: provider exited after init response`.
+
+The framing regression sends an invalid JSON or invalid UTF-8 line followed by
+A's valid answer. It asserts the exact first error, the retained error on B and
+shutdown, and the physical census while the failed dialogue is still owned.
+The transport cases assert `provider response stream ended`,
+`could not write child stdin`, and `could not inspect child stdout`. The
+startup cases cover an immediate exit with status 0 or 7, invalid UTF-8, a
+`null` response, and a partial final line. The replaced-temp request case
+checks that the response reason and cleanup reason both survive. Existing
+deadline, byte-limit recovery, initialization, shutdown and cleanup assertions
+remain in place.
+
+The first focused run exited 101 in 16.33 seconds: 18 tests passed and the new
+stdout-damage fixture reached the response deadline. Opening `/dev/stdout`
+did not truncate the capture on this Mac. The fixture now truncates its own
+capture path; its exact error assertion is unchanged. The next focused run
+exited 0 in 14.84 seconds with all 20 tests passing. The replaced-temp request
+case was added after that run and is included in the final checks below.
+
+The following plants ran one at a time with
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test provider_launch -- --nocapture`.
+Each crate compiled. Each named test failed at its assertion. Each source edit
+was restored before the next plant. The runs held the shared heavy-build lease
+and used the existing lane build directories with `RUST_TEST_THREADS=2`,
+`CARGO_INCREMENTAL=0`, and `CARGO_NET_OFFLINE=true`. Free space was 116 GiB.
+These are hand-run plants; `falsifiers.json` is unchanged.
+
+F-shared-launch-json-cleanup: exit 101 in 18.70 seconds.
+`standin_provider_launch_refuses_the_next_request_after_a_framing_failure`
+failed at `tests/provider_launch.rs:708:5`: B returned A's queued success
+instead of `provider dialogue ended: provider answered with invalid JSON: invalid`.
+`standin_provider_request_refusal_cleans_a_replaced_temp` also failed at
+`tests/provider_launch.rs:1120:9`: the second request reached its deadline
+instead of retaining the first response refusal. The other 19 tests passed.
+
+Old:
+
+```text
+            Err(reason) => Err(self.end_dialogue(reason)),
+```
+
+New:
+
+```text
+            Err(reason) if reason.starts_with("provider answered with invalid JSON:") => Err(reason),
+            Err(reason) => Err(self.end_dialogue(reason)),
+```
+
+F-shared-launch-utf8-cleanup: exit 101 in 15.46 seconds.
+`standin_provider_launch_refuses_the_next_request_after_a_framing_failure`
+failed at `tests/provider_launch.rs:708:5`: B returned A's queued success
+instead of `provider dialogue ended: provider response is not UTF-8`.
+The other 20 tests passed.
+
+Old:
+
+```text
+            Err(reason) => Err(self.end_dialogue(reason)),
+```
+
+New:
+
+```text
+            Err(reason) if reason == "provider response is not UTF-8" => Err(reason),
+            Err(reason) => Err(self.end_dialogue(reason)),
+```
+
+F-shared-launch-exited-init: exit 101 in 13.78 seconds.
+`standin_provider_launch_refuses_an_exited_child_after_init` failed at
+`tests/provider_launch.rs:749:26`, `an exited child cannot be Started`.
+The same run also had capture-only census failures in
+`standin_provider_launch_resolves_relative_profile_once` (`stderr-2`) and
+`standin_provider_launch_uses_supplied_profile` (`stderr-116`); 18 tests passed.
+Those census failures are separate from the named early-exit assertion.
+The census implementation and its assertions remain unchanged.
+
+Old:
+
+```text
+                if child.is_alive().map_err(str::to_owned)? {
+```
+
+New:
+
+```text
+                if true {
+```
+
+F-shared-launch-linux-admitted: exit 101 in 15.00 seconds.
+This plant removes the Linux rejection while retaining the missing-primitive
+rule. `standin_provider_launch_refuses_unconfined_host` failed at
+`tests/provider_launch.rs:329:9`: the returned reason concerned the absent
+fixture binary instead of the exact Linux host refusal. The other 20 tests
+passed. This exercises removal of enforcement, in addition to the earlier
+Linux wording mutation.
+
+Old:
+
+```text
+    if DECLARED_CONFINED_OS.contains(&host.os) {
+```
+
+New:
+
+```text
+    if DECLARED_CONFINED_OS.contains(&host.os) || host.os == "linux" {
+```
+
+F-shared-launch-unsupported-admitted: exit 101 in 13.81 seconds.
+This plant removes rejection for every unsupported OS while retaining the
+Linux and missing-primitive rules. `standin_provider_launch_refuses_unconfined_host`
+failed at `tests/provider_launch.rs:329:9`: the returned reason concerned the
+absent fixture binary instead of the exact `plan9` host refusal. The other
+20 tests passed. This exercises removal of enforcement, in addition to the
+earlier OS-name wording mutation.
+
+Old:
+
+```text
+    if DECLARED_CONFINED_OS.contains(&host.os) {
+```
+
+New:
+
+```text
+    if DECLARED_CONFINED_OS.contains(&host.os) || host.os != "linux" {
+```
+
+After all five restores, `standin-runtime/mod.rs` matched the pre-plant bytes:
+SHA-256 `06ae2fbeecee974053baa4ec6a0ba71ad9db73bba587668967feb6e8b451aa40`.
+
+Final restored checks under the same lease and environment:
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0 in 0.17 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test provider_launch -- --nocapture`: exit 0 in 14.24 seconds; 21 passed, 0 failed, 0 ignored. Test execution took 12.46 seconds. This includes all 16 existing tests and the five added tests.
+
+The final run passed on its first attempt. The eleven retained fixture Homes
+from the fixture correction and mutation runs had zero matching processes and
+zero open files under `ps` and `lsof`; they were removed after those checks.
+Successful tests removed their own Homes. The repair edits are confined to
+`standin-runtime/mod.rs`, `tests/provider_launch.rs`, and this `LOG.md`.
+Git commands were unused. The supervisor owns the complete checks and fresh
+review of this edit.
+
+
+
 ## 090
 
 090: `slash_pieces` is the one storage segment check, so a raw `.` in the Home text or in an entry is refused, and an absolute entry stays refused. A PASS gives the Runtime no A9 credit.
@@ -13992,3 +14565,39 @@ point to the lane's existing `target/`; `CARGO_BUILD_BUILD_DIR` points to
 - The supervisor owns the full gate rerun and fresh review for this repair.
 
 
+
+## 092
+
+092: `pull_stdout` refuses a capture whose logical length would make `pending` longer than 65536 bytes, before it allocates that length, and `read_line_within` calls `stop` before it returns `provider response exceeds its byte limit`. A short line and the silent-child deadline stay on their current paths. A PASS gives the Runtime no C0 credit and no B3 credit.
+
+The checkout already had `slash_pieces`. `pull_stdout` and `start_provider` were absent. The launch seam from `492d9d485` was added in `src/harness.rs`, `tests/provider_launch.rs`, and `standin-runtime/mod.rs`. The raw-dot storage check stayed. HEAD stayed `f3e8e9dae8049337a98427398919bcaa02e57d32`.
+
+Runtime verifies the principal and session, enforces capabilities, owns lifecycle and audit, and routes the operation. Effect providers do not decide that an unverified caller is authorized.
+
+### Plant
+
+F-shared-launch-stdout-cap. No `falsifiers.json` id. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test provider_launch standin_provider_launch_refuses_a_sparse_stdout -- --nocapture` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. The planted crate compiled. The test failed on the byte-limit assertion. Real 1.64 seconds. Restored, that test passed. Real 1.53 seconds.
+
+Failed at `tests/provider_launch.rs:1314:5`: `the stand-in did the work: a sparse stdout past the byte cap is refused`, left `provider response exceeded its deadline`, right `provider response exceeds its byte limit`.
+
+Old:
+
+```text
+            return Err("provider response exceeds its byte limit");
+```
+
+New:
+
+```text
+            return Ok(());
+```
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. `CARGO_TARGET_DIR` and `CARGO_BUILD_TARGET_DIR` were `lab/agent-conformance/target`. `CARGO_BUILD_BUILD_DIR` was `lab/agent-conformance/target/host`. The shared heavy-build lease wait was 0.000 seconds.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.16 seconds.
+- First `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, real 276.09 seconds. `standin_provider_launch_refuses_invalid_init_responses` returned `provider response exceeded its deadline` where the test expects `init answered null`. That capture file was empty. The same test alone then passed, exit 0, real 2.28 seconds.
+- Rerun `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 270.09 seconds, inside the 600-second bound. Targets: lib 85 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; provider_launch 22 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0.
+- Proof after the plant was restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test provider_launch standin_provider_launch_refuses_a_sparse_stdout -- --nocapture`: exit 0, 1 passed, real 1.53 seconds.
+- `Cargo.toml` and `Cargo.lock` are unchanged. The wallet binary was built once under `lab/agent-conformance/target/wallet-provider` by the launch tests.
