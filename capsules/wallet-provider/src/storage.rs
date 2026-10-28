@@ -580,3 +580,209 @@ mod tests {
         assert!(wallet_dir.is_dir());
     }
 }
+
+#[cfg(test)]
+mod uf_tests {
+    use super::*;
+
+    fn sample_request(id: u64, principal: &str, now: u64) -> WalletApprovalRequest {
+        WalletApprovalRequest {
+            schema: "elastos.wallet.approval_request/v1".to_string(),
+            request_id: format!("req-{id}"),
+            wallet_request_sha256: format!("sha-{id}"),
+            authority_binding: format!("binding-{id}"),
+            kind: "signature".to_string(),
+            status: ApprovalStatus::Pending,
+            principal_id: principal.to_string(),
+            account_id: format!("account-{id}"),
+            proof_binding_id: format!("proof-{id}"),
+            chain_namespace: "eip155:20".to_string(),
+            address: "0xabc".to_string(),
+            proof_type: MANAGED_EVM_PROOF_TYPE.to_string(),
+            connector_id: None,
+            intent: "browser_personal_sign".to_string(),
+            session_id: format!("session-{id}"),
+            launch_id: format!("launch-{id}"),
+            requested_by_actor: "wallet".to_string(),
+            resource: "elastos://wallet/eip155:20/sign/browser_personal_sign".to_string(),
+            reason: "reason".to_string(),
+            payload: json!({}),
+            payload_hash: format!("hash-{id}"),
+            created_at: now,
+            expires_at: now + 1000,
+            resolved_at: None,
+            rejection_reason: None,
+            approved_at: None,
+            approval_reason: None,
+            completed_at: None,
+            signature_receipt: None,
+            signed_result: None,
+            validated_chain_outcome: None,
+        }
+    }
+
+    fn validated_outcome() -> ValidatedChainOutcomeV1 {
+        ValidatedChainOutcomeV1 {
+            schema: elastos_wallet_contract::VALIDATED_CHAIN_OUTCOME_SCHEMA.to_string(),
+            approval_request_id: "req-1".to_string(),
+            account_id: "account-1".to_string(),
+            chain_namespace: "eip155:20".to_string(),
+            network: elastos_wallet_contract::PublicNetwork::new("esc-mainnet")
+                .expect("public network"),
+            binding: ValidatedChainOutcomeBindingV1::ManagedSigned {
+                signed_transaction_sha256: "sha256:00".to_string(),
+            },
+            transaction_hash: "0x00".to_string(),
+            chain_observation: json!({ "schema": "elastos.chain.broadcast_receipt/v1" }),
+            confirmed_at: 1,
+        }
+    }
+
+    #[test]
+    fn load_store_if_present_returns_none_for_missing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.json");
+        assert!(load_store_if_present(&path).unwrap().is_none());
+        assert_eq!(load_store(&path).unwrap().default_accounts.len(), 0);
+    }
+
+    #[test]
+    fn load_store_if_present_rejects_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet-state.json");
+        fs::write(&path, b"{ not valid json").unwrap();
+        let err = load_store(&path).unwrap_err();
+        assert!(!err.is_empty());
+        assert!(load_store_if_present(&path).is_err());
+    }
+
+    #[test]
+    fn save_store_then_load_round_trips_approval_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet-state.json");
+        let mut store = WalletStore::default();
+        store
+            .approval_requests
+            .push(sample_request(1, "person:local:alice", 10));
+        save_store(&path, &store).unwrap();
+        let loaded = load_store(&path).unwrap();
+        assert_eq!(loaded.approval_requests.len(), 1);
+        assert_eq!(loaded.approval_requests[0].request_id, "req-1");
+    }
+
+    #[test]
+    fn save_store_refuses_when_parent_directory_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing").join("wallet-state.json");
+        assert!(save_store(&path, &WalletStore::default())
+            .unwrap_err()
+            .contains("failed to inspect wallet store parent directory"));
+    }
+
+    #[test]
+    fn storage_key_rejects_a_key_of_the_wrong_length() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(WALLET_KEY_FILE), b"00ff\n").unwrap();
+        assert_eq!(
+            load_or_create_storage_key(dir.path()).unwrap_err(),
+            "wallet storage key must be 32 bytes"
+        );
+    }
+
+    #[test]
+    fn ensure_size_within_limit_boundaries() {
+        assert!(ensure_size_within_limit("wallet store", 10, 10).is_ok());
+        assert!(ensure_size_within_limit("wallet store", 0, 10).is_ok());
+        let err = ensure_size_within_limit("wallet store", 11, 10).unwrap_err();
+        assert!(err.contains("10-byte size limit"));
+    }
+
+    #[test]
+    fn load_store_rejects_directory_leaf() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet-state.json");
+        fs::create_dir(&path).unwrap();
+        assert!(load_store(&path)
+            .unwrap_err()
+            .contains("regular non-symlink file"));
+    }
+
+    #[test]
+    fn ensure_regular_file_or_absent_allows_absent_and_regular() {
+        let dir = tempfile::tempdir().unwrap();
+        let absent = dir.path().join("absent.json");
+        assert!(ensure_regular_file_or_absent(&absent, "wallet store").is_ok());
+        let regular = dir.path().join("regular.json");
+        fs::write(&regular, b"{}").unwrap();
+        assert!(ensure_regular_file_or_absent(&regular, "wallet store").is_ok());
+        let dir_leaf = dir.path().join("dir-leaf");
+        fs::create_dir(&dir_leaf).unwrap();
+        assert!(ensure_regular_file_or_absent(&dir_leaf, "wallet store")
+            .unwrap_err()
+            .contains("regular non-symlink file"));
+    }
+
+    #[test]
+    fn ensure_directory_rejects_regular_file_and_accepts_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real-dir");
+        fs::create_dir(&real).unwrap();
+        assert!(ensure_directory(&real, "wallet storage directory").is_ok());
+        let file = dir.path().join("file");
+        fs::write(&file, b"x").unwrap();
+        assert!(ensure_directory(&file, "wallet storage directory")
+            .unwrap_err()
+            .contains("non-symlink directory"));
+    }
+
+    #[test]
+    fn create_wallet_dir_durable_refuses_file_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("blocker");
+        fs::write(&file, b"x").unwrap();
+        assert!(create_wallet_dir_durable(&file)
+            .unwrap_err()
+            .contains("non-symlink directory"));
+    }
+
+    #[test]
+    fn expire_approval_if_elapsed_sets_expired_once() {
+        let mut request = sample_request(1, "person:local:alice", 0);
+        request.expires_at = 5;
+        expire_approval_if_elapsed(&mut request, 10);
+        assert_eq!(request.status, ApprovalStatus::Expired);
+        assert_eq!(request.resolved_at, Some(10));
+
+        let mut fresh = sample_request(2, "person:local:alice", 0);
+        fresh.expires_at = 100;
+        expire_approval_if_elapsed(&mut fresh, 10);
+        assert_eq!(fresh.status, ApprovalStatus::Pending);
+        assert!(fresh.resolved_at.is_none());
+    }
+
+    #[test]
+    fn approval_authority_is_active_matches_status_rules() {
+        let now = 1_000;
+        let mut pending = sample_request(1, "person:local:alice", now);
+        pending.expires_at = now + 1;
+        assert!(approval_authority_is_active(&pending, now));
+
+        let mut expired_pending = sample_request(2, "person:local:alice", now);
+        expired_pending.expires_at = now;
+        assert!(!approval_authority_is_active(&expired_pending, now));
+
+        let mut completed = sample_request(3, "person:local:alice", now);
+        completed.status = ApprovalStatus::Completed;
+        completed.intent = "transaction_intent".to_string();
+        completed.signed_result = Some(json!("signed"));
+        assert!(approval_authority_is_active(&completed, now));
+
+        completed.validated_chain_outcome = Some(validated_outcome());
+        assert!(!approval_authority_is_active(&completed, now));
+
+        let mut no_sign = sample_request(4, "person:local:alice", now);
+        no_sign.status = ApprovalStatus::Completed;
+        no_sign.intent = "transaction_intent".to_string();
+        assert!(!approval_authority_is_active(&no_sign, now));
+    }
+}
