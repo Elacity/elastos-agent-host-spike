@@ -939,6 +939,10 @@ under the single-block, non-sharded subset of the model package profile
 A file or a directory block over 262144 bytes is refused, not named another way
 (`lab/capsule-identity/src/lib.rs:224` `const CHUNK_SIZE: usize = 262_144;`
 and `lab/capsule-identity/src/lib.rs:230` `const DIRECTORY_BLOCK_LIMIT: usize = 262_144;`).
+Added by task 048, on 2026-10-28: since task 048, a file of 2 to 174 raw leaves (262145 to 45613056 bytes) is named
+by its balanced file root (`fn file_root(` and `const MAX_FILE_LINKS: usize = 174;` in
+`lab/capsule-identity/src/lib.rs`), and only a larger file or a directory block over 262144 bytes is refused; the
+listing call `encode_listed_files` still refuses a listed file over 262144 bytes.
 At `c641bcff2` the value was a framed SHA-256 stream printed `lab-cid:sha256:`
 (`lab/capsule-identity/src/lib.rs:73` `pub const LAB_CID_PREFIX: &str = "lab-cid:sha256:";` at that commit).
 It is not the Runtime's CID: the Runtime names a release archive, and that archive's hash and CID stay delivery

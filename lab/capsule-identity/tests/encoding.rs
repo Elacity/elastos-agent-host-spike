@@ -146,21 +146,77 @@ fn single_block_at_the_chunk_limit_has_the_pinned_cid() {
 }
 
 #[test]
-fn file_over_the_chunk_limit_is_refused() {
-    // One byte more would need a chunked file DAG, which the lab never makes.
-    let bundle = assemble(&CONTENT_SAMPLE);
-    write_file(bundle.path(), "sample.example", &vec![0; 262_145]);
-    let refusal = lab_cid(bundle.path()).expect_err("a file over one chunk must be refused");
+fn file_over_one_leaf_has_the_pinned_cid() {
+    // One byte over the chunk limit: a balanced file root over two raw
+    // leaves (262144 and 1 bytes), with empty link names, filesize and
+    // blocksizes. Then a 600000-byte file one directory down: three leaves,
+    // and the file root's Tsize reaches the root through `core/`. Both are
+    // named through the walk and through the encoder, and both pins are
+    // recomputed by README's Python rule. The big files are made here and
+    // never committed.
+    let manifest = entry(
+        "capsule.json",
+        &read_fixture(&CONTENT_SAMPLE, "capsule.json"),
+    );
+    let sample = read_fixture(&CONTENT_SAMPLE, "sample.example");
+    let zeros = vec![0; 262_145];
+    let big = big_bin_bytes();
+    let two_leaves = assemble(&CONTENT_SAMPLE);
+    write_file(two_leaves.path(), "sample.example", &zeros);
+    let three_leaves = content_sample_with(&[(BIG_BIN, &big)]);
+    for (bundle, entries, pin) in [
+        (
+            &two_leaves,
+            vec![manifest.clone(), entry("sample.example", &zeros)],
+            TWO_LEAF_FILE_LAB_CID,
+        ),
+        (
+            &three_leaves,
+            vec![
+                manifest,
+                entry("sample.example", &sample),
+                entry(BIG_BIN, &big),
+            ],
+            THREE_LEAF_NESTED_LAB_CID,
+        ),
+    ] {
+        let encoded = encode_entries(&entries)
+            .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+            .to_string();
+        assert_eq!(
+            (name(bundle), encoded.as_str()),
+            (pin.to_owned(), pin),
+            "(lab_cid, encode_entries) against the pin"
+        );
+        assert!(pin.starts_with("bafybei"), "{pin}");
+    }
+}
+
+#[test]
+fn file_of_174_leaves_is_named_and_one_byte_more_is_refused() {
+    // 174 leaves of 262144 bytes (45613056 bytes) is the most one file root
+    // links (`max-file-links`). One byte more needs a 175th leaf and so a
+    // second tree level, which the lab refuses. In memory: no folder.
+    let limit = 174 * 262_144;
+    assert_eq!(limit, 45_613_056);
+    let mut file = vec![0; limit];
+    let named = encode_entries(&[entry("full.bin", &file)])
+        .unwrap_or_else(|refusal| panic!("174 leaves: {refusal}"));
+    assert!(named.to_string().starts_with("bafybei"), "{named}");
+
+    file.push(0);
+    let refusal = encode_entries(&[entry("full.bin", &file)])
+        .expect_err("a file of 175 leaves must be refused");
     assert_eq!(
         refusal,
-        Refusal::FileOverChunkLimit {
-            path: "sample.example".into(),
-            length: 262_145
+        Refusal::FileOverLeafLimit {
+            path: "full.bin".into(),
+            length: 45_613_057
         }
     );
     assert_eq!(
         refusal.to_string(),
-        "sample.example is 262145 bytes, over the 262144-byte limit of one raw leaf: the lab names no chunked file"
+        "full.bin is 45613057 bytes, over the 174-leaf limit of one file root (45613056 bytes): the lab names no deeper file tree"
     );
 }
 
