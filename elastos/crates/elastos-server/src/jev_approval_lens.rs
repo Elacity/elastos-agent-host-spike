@@ -232,7 +232,7 @@ pub fn inbox_card_copy(record: &JevShadowRecord) -> (String, String) {
 Connection: {}\n\
 Prompt recipient: {}\n\
 Payer: this Home\n\
-Approve gives Assistant access to this connection for later prompts until you end approval in System > Models. This pending prompt stays in Assistant. Return there and choose Continue request after your decision.\n\
+Approve records your choice next to Jev's advice. It does not open the connection: Runtime still asks for its own approval in Inbox before any prompt is sent. This pending prompt stays in Assistant.\n\
 Jev advice: {} · risk: {} · reported confidence: {}\n\
 Advice reason: {}\n\
 You decide. End access later in System > Models.",

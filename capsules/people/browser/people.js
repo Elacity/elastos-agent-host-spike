@@ -548,13 +548,28 @@ function isValidContact(contact) {
   return Boolean(readText(contact?.contact_id) && readText(contact?.display_name));
 }
 
+// Runtime stamps each visible person with their relationship; only someone
+// with none yet (`visible`) can be added.
+const DISCOVERY_RELATIONSHIP_TEXT = {
+  contact: "Contact",
+  requested: "Contact request sent",
+  pending: "Wants to add you as a contact",
+};
+
 function discoveryPeerMarkup(person) {
   const name = readText(person.display_name);
   const handle = readText(person.handle);
+  const status = readText(person.status);
+  const addable = status === "visible";
+  const detail = addable
+    ? (handle && handle !== name ? handle : "Visible now")
+    : (Object.hasOwn(DISCOVERY_RELATIONSHIP_TEXT, status) ? DISCOVERY_RELATIONSHIP_TEXT[status] : "Visible now");
   return personCard({
     name,
-    details: `<span>${escapeHtml(handle && handle !== name ? handle : "Visible now")}</span>`,
-    actions: `<button type="button" data-action="discovery-request" data-advertisement-id="${escapeHtml(readText(person.advertisement_id))}">Add contact</button>`,
+    details: `<span>${escapeHtml(detail)}</span>`,
+    actions: addable
+      ? `<button type="button" data-action="discovery-request" data-advertisement-id="${escapeHtml(readText(person.advertisement_id))}">Add contact</button>`
+      : "",
   });
 }
 

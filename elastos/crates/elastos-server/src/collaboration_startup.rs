@@ -539,7 +539,12 @@ async fn run_collaboration_worker(
                 }
             }
         ),
-        run_community_link_watchdog(shutdown, membership.subscribe(), driver.community_link()),
+        run_community_link_watchdog(
+            shutdown,
+            membership.subscribe(),
+            driver.community_link(),
+            |exhausted| product_port.set_community_recovery_exhausted(exhausted),
+        ),
     );
 }
 
@@ -550,6 +555,7 @@ async fn run_community_link_watchdog<L: CommunityLink>(
     shutdown: watch::Receiver<bool>,
     joined: watch::Receiver<bool>,
     link: &L,
+    recovery_status: impl Fn(bool),
 ) {
     let watchdog = std::sync::Mutex::new(CommunityLinkWatchdog::new(COMMUNITY_LINK_SILENCE));
     let recovers = tokio::sync::OnceCell::<bool>::new();
@@ -584,10 +590,15 @@ async fn run_community_link_watchdog<L: CommunityLink>(
                 .and_then(Result::ok);
             // Frames that trickle in without a peer are shown, never trusted.
             let received_frames = health.map(|health| health.received_frames);
-            let step = watchdog
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .observe(health, tokio::time::Instant::now());
+            let (step, exhausted) = {
+                let mut watchdog = watchdog
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let step =
+                    watchdog.observe(health, link.host_addresses(), tokio::time::Instant::now());
+                (step, watchdog.recovery_exhausted())
+            };
+            recovery_status(exhausted);
             let Some(step) = step else {
                 return;
             };
@@ -618,7 +629,7 @@ async fn run_community_link_watchdog<L: CommunityLink>(
                         reason,
                         received_frames,
                         silence_secs,
-                        "Community link still dead after a rejoin; rebuilding Carrier gossip"
+                        "Community link has no peer; rebuilding Carrier gossip"
                     );
                     match tokio::time::timeout(COMMUNITY_LINK_STEP_TIMEOUT, link.rebuild_gossip())
                         .await
@@ -3430,7 +3441,16 @@ mod tests {
         stall_from: Option<Duration>,
         /// A gossip rebuild ends the stall.
         rebuild_heals: bool,
+        /// Peer loss ends at each range boundary, independently of repair results.
+        outages: Vec<std::ops::Range<u64>>,
+        /// Carrier can retain a neighbour while delivery has stalled.
+        retain_stalled_peer: bool,
+        failed_rebuild: bool,
         pending_rebuild: bool,
+        /// Models Carrier ownership: this job finishes after its caller stops waiting.
+        detached_rebuild: bool,
+        /// Host address samples; None represents an enumeration failure.
+        address_changes: Vec<(u64, Option<Vec<std::net::IpAddr>>)>,
     }
 
     #[derive(Default)]
@@ -3440,6 +3460,25 @@ mod tests {
         rebuilt: bool,
         steps: Vec<(CommunityLinkStep, u64)>,
         health_reads: usize,
+        last_had_peer: Option<bool>,
+        peer_returns: Vec<u64>,
+        failed_rebuilds: usize,
+        pending_rebuilds: usize,
+        cancelled_rebuilds: usize,
+        recovery_exhausted: bool,
+        completed_rebuilds: usize,
+    }
+
+    // Owns only the scripted provider future. Endpoint lookup tasks are outside
+    // this fixture and require installed resource evidence.
+    struct PendingLinkRebuild<'a>(&'a Mutex<FakeLinkState>);
+
+    impl Drop for PendingLinkRebuild<'_> {
+        fn drop(&mut self) {
+            let mut state = self.0.lock().unwrap();
+            state.pending_rebuilds -= 1;
+            state.cancelled_rebuilds += 1;
+        }
     }
 
     /// A Community link whose gossip can stall; a topic rejoin does not
@@ -3447,7 +3486,7 @@ mod tests {
     struct FakeCommunityLink {
         script: FakeLinkScript,
         started: tokio::time::Instant,
-        state: Mutex<FakeLinkState>,
+        state: Arc<Mutex<FakeLinkState>>,
     }
 
     impl FakeCommunityLink {
@@ -3455,7 +3494,7 @@ mod tests {
             Self {
                 script,
                 started: tokio::time::Instant::now(),
-                state: Mutex::new(FakeLinkState::default()),
+                state: Arc::new(Mutex::new(FakeLinkState::default())),
             }
         }
 
@@ -3468,8 +3507,13 @@ mod tests {
         }
 
         fn stalled(&self, state: &FakeLinkState, at: Duration) -> bool {
-            self.script.stall_from.is_some_and(|from| at >= from)
-                && !(self.script.rebuild_heals && state.rebuilt)
+            (self.script.stall_from.is_some_and(|from| at >= from)
+                && !(self.script.rebuild_heals && state.rebuilt))
+                || self
+                    .script
+                    .outages
+                    .iter()
+                    .any(|outage| outage.contains(&at.as_secs()))
         }
     }
 
@@ -3494,11 +3538,26 @@ mod tests {
                     state.frames += 1;
                 }
             }
-            let listed = self.script.peers && !self.stalled(&state, now);
+            let listed = self.script.peers
+                && (self.script.retain_stalled_peer || !self.stalled(&state, now));
+            if state.last_had_peer == Some(false) && listed {
+                state.peer_returns.push(now.as_secs());
+            }
+            state.last_had_peer = Some(listed);
             Ok(CommunityLinkHealth {
                 peer_count: usize::from(listed),
                 received_frames: state.frames,
             })
+        }
+
+        fn host_addresses(&self) -> Option<crate::collaboration_carrier::CommunityHostAddresses> {
+            self.script
+                .address_changes
+                .iter()
+                .rev()
+                .find(|(at, _)| *at <= self.started.elapsed().as_secs())
+                .and_then(|(_, addresses)| addresses.clone())
+                .map(|addresses| addresses.into_iter().collect())
         }
 
         async fn rejoin(&self) -> anyhow::Result<()> {
@@ -3513,11 +3572,32 @@ mod tests {
             {
                 let mut state = self.state.lock().unwrap();
                 state.steps.push((CommunityLinkStep::Rebuild, at));
-                state.rebuilt = true;
+            }
+            if self.script.detached_rebuild {
+                self.state.lock().unwrap().pending_rebuilds += 1;
+                let state = self.state.clone();
+                let job = tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(35)).await;
+                    let mut state = state.lock().unwrap();
+                    state.pending_rebuilds -= 1;
+                    state.completed_rebuilds += 1;
+                });
+                // Dropping this JoinHandle detaches the provider-owned job,
+                // just as the production recover_gossip path does.
+                job.await
+                    .context("scripted Carrier recovery task stopped")?;
+                return Ok(1);
             }
             if self.script.pending_rebuild {
+                self.state.lock().unwrap().pending_rebuilds += 1;
+                let _owned_wait = PendingLinkRebuild(&self.state);
                 std::future::pending::<()>().await;
             }
+            if self.script.failed_rebuild {
+                self.state.lock().unwrap().failed_rebuilds += 1;
+                anyhow::bail!("scripted provider rebuild failure");
+            }
+            self.state.lock().unwrap().rebuilt = true;
             Ok(1)
         }
     }
@@ -3526,7 +3606,9 @@ mod tests {
         let (_membership, joined) = watch::channel(true);
         let (_shutdown, shutdown_rx) = watch::channel(false);
         tokio::select! {
-            _ = run_community_link_watchdog(shutdown_rx, joined, link) => {
+            _ = run_community_link_watchdog(shutdown_rx, joined, link, |exhausted| {
+                link.state.lock().unwrap().recovery_exhausted = exhausted;
+            }) => {
                 panic!("the watchdog stopped before shutdown");
             }
             _ = tokio::time::sleep(Duration::from_secs(run)) => {}
@@ -3556,6 +3638,261 @@ mod tests {
         // The peer is back and every presence after the rebuild arrives (the
         // one at 15 s plus 50 from 165 s to 900 s); that flow causes no step.
         assert_eq!(link.frames(), 51);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn community_link_watchdog_bounds_rebuilds_across_repeated_peer_loss_and_return() {
+        let outages = (0..62)
+            .map(|n| (n * 600 + 30)..(n * 600 + 300))
+            .collect::<Vec<_>>();
+        let link = FakeCommunityLink::new(FakeLinkScript {
+            peers: true,
+            presence: true,
+            outages: outages.clone(),
+            ..FakeLinkScript::default()
+        });
+        run_link_watchdog_for(&link, 37_202).await;
+        let state = link.state.lock().unwrap();
+        assert_eq!(
+            state.peer_returns,
+            (0..62).map(|n| n * 600 + 300).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            state
+                .steps
+                .iter()
+                .filter(|(step, _)| *step == CommunityLinkStep::Rebuild)
+                .count(),
+            crate::collaboration_carrier::MAX_COMMUNITY_GOSSIP_REBUILDS as usize,
+            "peer recovery preserves the process resource bound"
+        );
+        assert!(state
+            .steps
+            .iter()
+            .any(|(step, at)| *step == CommunityLinkStep::Rejoin && *at >= 2400));
+        assert!(state
+            .steps
+            .iter()
+            .all(|(_, at)| outages.iter().any(|outage| outage.contains(at))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn community_link_watchdog_samples_the_host_hint_and_consumes_it_once() {
+        let link = FakeCommunityLink::new(FakeLinkScript {
+            peers: true,
+            stall_from: Some(Duration::from_secs(30)),
+            rebuild_heals: true,
+            address_changes: vec![
+                (0, Some(vec!["192.0.2.1".parse().unwrap()])),
+                (30, Some(vec!["192.0.2.2".parse().unwrap()])),
+            ],
+            ..FakeLinkScript::default()
+        });
+        run_link_watchdog_for(&link, 302).await;
+        assert_eq!(link.steps(), [(CommunityLinkStep::Rebuild, 40)]);
+        assert_eq!(link.state.lock().unwrap().peer_returns, [45]);
+        assert!(!link.state.lock().unwrap().recovery_exhausted);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn community_link_watchdog_keeps_detached_request_slots_across_leave_and_timeouts() {
+        let link = FakeCommunityLink::new(FakeLinkScript {
+            detached_rebuild: true,
+            ..FakeLinkScript::default()
+        });
+        let (membership, joined) = watch::channel(true);
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let watchdog = run_community_link_watchdog(shutdown_rx, joined, &link, |exhausted| {
+            link.state.lock().unwrap().recovery_exhausted = exhausted;
+        });
+        tokio::pin!(watchdog);
+        tokio::select! {
+            _ = &mut watchdog => panic!("the watchdog stopped before leave"),
+            _ = tokio::time::sleep(Duration::from_secs(125)) => {}
+        }
+        assert_eq!(link.state.lock().unwrap().pending_rebuilds, 1);
+        membership.send(false).unwrap();
+        tokio::select! {
+            _ = &mut watchdog => panic!("leaving keeps the worker alive"),
+            _ = tokio::time::sleep(Duration::from_secs(41)) => {}
+        }
+        {
+            let state = link.state.lock().unwrap();
+            assert_eq!(state.pending_rebuilds, 0);
+            assert_eq!(
+                state.completed_rebuilds, 1,
+                "Carrier finished after leave cancelled its caller"
+            );
+            assert_eq!(state.steps.len(), 2);
+        }
+        membership.send(true).unwrap();
+        tokio::select! {
+            _ = &mut watchdog => panic!("the watchdog stopped before shutdown"),
+            _ = tokio::time::sleep(Duration::from_secs(111_000)) => {}
+        }
+        {
+            let state = link.state.lock().unwrap();
+            assert_eq!(
+                state.pending_rebuilds, 0,
+                "every owned fixture job has finished"
+            );
+            assert_eq!(
+                state.completed_rebuilds,
+                crate::collaboration_carrier::MAX_COMMUNITY_GOSSIP_REBUILDS as usize
+            );
+            assert!(state.recovery_exhausted);
+            assert_eq!(
+                state
+                    .steps
+                    .iter()
+                    .filter(|(step, _)| *step == CommunityLinkStep::Rebuild)
+                    .count(),
+                state.completed_rebuilds
+            );
+        }
+        shutdown.send(true).unwrap();
+        tokio::time::timeout(Duration::from_millis(1), watchdog)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn community_link_watchdog_exhaustion_updates_product_status_and_peer_return_clears_it() {
+        let (temp, _) = configured_root(true);
+        let configuration =
+            load_and_accept_collaboration_startup_configuration(temp.path()).unwrap();
+        let CollaborationNetworkConfiguration::Configured {
+            profile,
+            grant: Some(grant),
+        } = configuration.configuration
+        else {
+            panic!("expected configured default conversation");
+        };
+        let (device_key, _) = generate_keypair();
+        let core = Arc::new(
+            CollaborationCore::new(
+                temp.path(),
+                device_key,
+                (*profile).clone(),
+                grant,
+                CHAT_ROOM_CAPSULE,
+            )
+            .unwrap(),
+        );
+        let product = CollaborationChatProductPort::new(core).unwrap();
+        let link = FakeCommunityLink::new(FakeLinkScript {
+            peers: true,
+            outages: std::iter::once(0..105_000).collect(),
+            ..FakeLinkScript::default()
+        });
+        let statuses = Mutex::new(Vec::<String>::new());
+        let (_membership, joined) = watch::channel(true);
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let watchdog = run_community_link_watchdog(shutdown_rx, joined, &link, |exhausted| {
+            product.set_community_recovery_exhausted(exhausted);
+            let status = product.conversation_transport_view().status.unwrap();
+            let mut statuses = statuses.lock().unwrap();
+            if statuses.last() != Some(&status) {
+                statuses.push(status);
+            }
+        });
+        tokio::pin!(watchdog);
+        tokio::select! {
+            _ = &mut watchdog => panic!("the watchdog stopped before recovery"),
+            _ = tokio::time::sleep(Duration::from_secs(105_002)) => {}
+        }
+        assert_eq!(
+            *statuses.lock().unwrap(),
+            [
+                "Community is unreachable. Retained messages stay available.",
+                "Community can't connect. Restart Home to reconnect.",
+                "Community is unreachable. Retained messages stay available.",
+            ]
+        );
+        assert_eq!(link.state.lock().unwrap().peer_returns, [105_000]);
+        shutdown.send(true).unwrap();
+        tokio::time::timeout(Duration::from_millis(1), watchdog)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn community_link_watchdog_requires_peer_loss_even_when_scripted_delivery_stalls() {
+        let link = FakeCommunityLink::new(FakeLinkScript {
+            peers: true,
+            presence: true,
+            stall_from: Some(Duration::from_secs(30)),
+            retain_stalled_peer: true,
+            ..FakeLinkScript::default()
+        });
+        run_link_watchdog_for(&link, 1802).await;
+        assert_eq!(link.frames(), 1, "scripted delivery stops after 15 s");
+        assert!(
+            link.steps().is_empty(),
+            "the retained neighbour suppresses repair"
+        );
+        assert_eq!(link.state.lock().unwrap().last_had_peer, Some(true));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn community_link_watchdog_bounds_failed_rebuild_attempts_without_scripted_recovery() {
+        let link = FakeCommunityLink::new(FakeLinkScript {
+            peers: true,
+            presence: true,
+            stall_from: Some(Duration::from_secs(30)),
+            rebuild_heals: true,
+            failed_rebuild: true,
+            ..FakeLinkScript::default()
+        });
+        run_link_watchdog_for(&link, 110_002).await;
+        let state = link.state.lock().unwrap();
+        assert_eq!(
+            state.failed_rebuilds,
+            crate::collaboration_carrier::MAX_COMMUNITY_GOSSIP_REBUILDS as usize
+        );
+        assert!(
+            !state.rebuilt,
+            "a failed provider result cannot heal the fixture"
+        );
+        assert!(state.peer_returns.is_empty());
+        assert!(state.recovery_exhausted);
+        assert_eq!(state.frames, 1);
+        assert!(state
+            .steps
+            .iter()
+            .any(|(step, at)| *step == CommunityLinkStep::Rejoin && *at >= 3000));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn community_link_watchdog_timeout_drops_the_owned_wait_without_scripted_recovery() {
+        let link = FakeCommunityLink::new(FakeLinkScript {
+            peers: true,
+            presence: true,
+            stall_from: Some(Duration::from_secs(30)),
+            rebuild_heals: true,
+            pending_rebuild: true,
+            ..FakeLinkScript::default()
+        });
+        run_link_watchdog_for(&link, 292).await;
+        let state = link.state.lock().unwrap();
+        assert_eq!(state.pending_rebuilds, 0);
+        assert_eq!(state.cancelled_rebuilds, 1);
+        assert!(
+            state.health_reads > 31,
+            "health checks resume after the wait times out at 180 s"
+        );
+        assert!(
+            !state.rebuilt,
+            "a pending provider result cannot heal the fixture"
+        );
+        assert_eq!(state.frames, 1);
+        assert_eq!(
+            state.steps,
+            [
+                (CommunityLinkStep::Rejoin, 90),
+                (CommunityLinkStep::Rebuild, 150)
+            ]
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -3615,7 +3952,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn community_link_watchdog_paces_a_home_without_peers_and_caps_rebuilds() {
         let link = FakeCommunityLink::new(FakeLinkScript::default());
-        run_link_watchdog_for(&link, 3600).await;
+        run_link_watchdog_for(&link, 3602).await;
         use CommunityLinkStep::{Rebuild, Rejoin};
         assert_eq!(
             link.steps(),
@@ -3627,16 +3964,10 @@ mod tests {
                 (Rebuild, 780),
                 (Rebuild, 1080),
                 (Rebuild, 1380),
-                (Rejoin, 1680),
-                (Rejoin, 1980),
-                (Rejoin, 2280),
-                (Rejoin, 2580),
-                (Rejoin, 2880),
-                (Rejoin, 3180),
-                (Rejoin, 3480),
+                (Rebuild, 2280),
+                (Rebuild, 3180),
             ],
-            "{} rebuilds, then only rejoins every 5 minutes",
-            crate::collaboration_carrier::MAX_COMMUNITY_GOSSIP_REBUILDS
+            "after six rebuild requests in one outage, scheduled repairs wait fifteen minutes"
         );
 
         let seed = FakeCommunityLink::new(FakeLinkScript {
@@ -3657,7 +3988,7 @@ mod tests {
         let mut rejoins = 0;
         // A peer shows up every ten minutes, so each outage alone would use
         // three rebuilds; the process cap still holds across all of them.
-        for second in (0..40_000).step_by(5) {
+        for second in (0..60_000).step_by(5) {
             let now = start + Duration::from_secs(second);
             if (20_000..20_600).contains(&second) {
                 continue; // Community left for ten minutes
@@ -3666,7 +3997,7 @@ mod tests {
                 peer_count: 1,
                 received_frames: 0,
             });
-            let step = watchdog.observe(health, now);
+            let step = watchdog.observe(health, None, now);
             match step {
                 Some(CommunityLinkStep::Rebuild) => rebuilds += 1,
                 Some(CommunityLinkStep::Rejoin) => rejoins += 1,
@@ -3686,7 +4017,7 @@ mod tests {
         });
         let (_membership, joined) = watch::channel(true);
         let (shutdown, shutdown_rx) = watch::channel(false);
-        let watchdog = run_community_link_watchdog(shutdown_rx, joined, &link);
+        let watchdog = run_community_link_watchdog(shutdown_rx, joined, &link, |_| {});
         tokio::pin!(watchdog);
         tokio::select! {
             _ = &mut watchdog => panic!("the watchdog stopped before shutdown"),
@@ -3699,9 +4030,62 @@ mod tests {
                 (CommunityLinkStep::Rebuild, 120)
             ]
         );
+        assert_eq!(link.state.lock().unwrap().pending_rebuilds, 1);
         shutdown.send(true).unwrap();
         tokio::time::timeout(Duration::from_millis(1), watchdog)
             .await
             .expect("shutdown cancels the pending rebuild wait");
+        let state = link.state.lock().unwrap();
+        assert_eq!(state.pending_rebuilds, 0);
+        assert_eq!(state.cancelled_rebuilds, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn community_link_watchdog_leave_drops_the_owned_wait_and_gates_further_repairs() {
+        let link = FakeCommunityLink::new(FakeLinkScript {
+            pending_rebuild: true,
+            ..FakeLinkScript::default()
+        });
+        let (membership, joined) = watch::channel(true);
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let watchdog = run_community_link_watchdog(shutdown_rx, joined, &link, |_| {});
+        tokio::pin!(watchdog);
+        tokio::select! {
+            _ = &mut watchdog => panic!("the watchdog stopped before shutdown"),
+            _ = tokio::time::sleep(Duration::from_secs(125)) => {}
+        }
+        assert_eq!(link.state.lock().unwrap().pending_rebuilds, 1);
+        membership.send(false).unwrap();
+        tokio::select! {
+            _ = &mut watchdog => panic!("leaving Community keeps the worker alive"),
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+        }
+        let (pending, cancelled) = {
+            let state = link.state.lock().unwrap();
+            (state.pending_rebuilds, state.cancelled_rebuilds)
+        };
+        assert_eq!(
+            (pending, cancelled),
+            (0, 1),
+            "leaving drops the wait before its 30 s step timeout at 150 s"
+        );
+        tokio::select! {
+            _ = &mut watchdog => panic!("leaving Community keeps the worker alive"),
+            _ = tokio::time::sleep(Duration::from_secs(600)) => {}
+        }
+        {
+            let state = link.state.lock().unwrap();
+            assert_eq!(state.pending_rebuilds, 0);
+            assert_eq!(state.cancelled_rebuilds, 1);
+            assert_eq!(
+                state.steps.len(),
+                2,
+                "the left Home starts no further repair"
+            );
+        }
+        shutdown.send(true).unwrap();
+        tokio::time::timeout(Duration::from_millis(1), watchdog)
+            .await
+            .expect("shutdown completes the left worker");
     }
 }

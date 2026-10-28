@@ -555,6 +555,9 @@ class PlatformInputTest(unittest.TestCase):
         for name in ("release-platform-input.py", "components-release-integrity-check.py", "release-platforms.json", "release-signer.py",
                      "publish-release.sh", "check-versioning.sh", "install.sh", "browser-host-release.py"):
             shutil.copyfile(Path(__file__).with_name(name), source / "scripts" / name)
+        common = "elastos/crates/elastos-common/src/lib.rs"
+        (source / common).parent.mkdir(parents=True)
+        shutil.copyfile(Path(__file__).resolve().parent.parent / common, source / common)
         for args in (("init", "-q"), ("add", "."),
                      ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                       "commit", "-qm", "controlled publisher fixture")):
@@ -984,6 +987,21 @@ printf '%s\n' "$PLATFORMS_JSON" > "$TMPDIR/platforms.json"
         self.refresh(root)
         with self.assertRaisesRegex(ValueError, "expected executable"):
             inputs.verify(root)
+
+    def test_artifact_over_the_whole_content_ceiling_rejects(self):
+        root = self.bundles["aarch64-darwin"]
+        largest = max((path for path in (root / "artifacts").rglob("*") if path.is_file()),
+                      key=lambda path: path.stat().st_size)
+        size = largest.stat().st_size
+        with patch.object(inputs, "WHOLE_CONTENT_CEILING", size):
+            inputs.verify(root)
+        with patch.object(inputs, "WHOLE_CONTENT_CEILING", size - 1):
+            with self.assertRaisesRegex(ValueError, f"{re.escape(largest.name)}: {size} bytes exceed"):
+                inputs.verify(root)
+
+    def test_whole_content_ceiling_admits_the_largest_published_artifact(self):
+        # elastos-x86_64-linux in the 0.8.0-alpha.24 signed set.
+        self.assertGreaterEqual(inputs.WHOLE_CONTENT_CEILING, 115_118_616)
 
     def test_home_cli_requires_a_delivered_native_renderer(self):
         platform = "aarch64-darwin"

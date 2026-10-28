@@ -951,6 +951,60 @@ assert(
   shellCore.shellState.currentSummary = summary;
 }
 
+{
+  // Every Inbox request that waits for an answer raises Home's notification
+  // once, when it first appears, not only wallet approvals. The toast shows
+  // fixed words for the kind, never the request's own text, which apps,
+  // pages and other people choose parts of; Inbox shows the details.
+  const toast = elementForSelector("#home-notification-toast");
+  const title = elementForSelector("#home-notification-title");
+  const body = elementForSelector("#home-notification-body");
+  const targets = [{ target: "inbox", title: "Inbox", route: "/apps/inbox/" }];
+  const request = (kind, id, action, extra = {}) => ({
+    id, kind, title: "Approve wallet payment", body: `Morgan asks you to approve a ${kind} payment now.`,
+    severity: "attention", read: false, action_ref: { app: "inbox", action_id: action }, ...extra,
+  });
+  const withEntries = (entries) => ({ notifications: { entries }, targets });
+  const fixedBody = "A request waits for your answer in Inbox.";
+  const kinds = [
+    ["hosted_route_decision", "external-http-request:model-egress-1", "model-egress-approve:model-egress-1", "Hosted model access request"],
+    ["capability_request", "capability-request:1", "capability-approve-request:1", "Capability request"],
+    ["inspect_action_request", "inspect-action-request:1", "inspect-approve-request:1", "Runtime action request"],
+    ["external_http_request", "external-http-request:price-1", "wallet-price-http-approve:price-1", "Internet access request"],
+    ["contact_request", "contact-request:1", "contact-accept-request:1", "Contact request"],
+    ["room_access_request", "room-access-request:1", "room-approve-request:1", "Room access request"],
+    ["service_access_request", "service-access-request:1", "service-approve-request:1", "Service access request"],
+    ["community_presence_request", "community-presence-request:1", "community-presence-always:1", "Community presence request"],
+    ["wallet_approval_request", "wallet-approval-request:1", "wallet-approve-request:1", "Wallet approval request"],
+  ];
+  const before = withEntries([]);
+  for (const [kind, id, action, fixedTitle] of kinds) {
+    toast.hidden = true;
+    title.textContent = "";
+    body.textContent = "";
+    const after = withEntries([request(kind, id, action)]);
+    shellSurface.maybeShowInboxRequestToast(before, after);
+    assert(toast.hidden === false && title.textContent === fixedTitle && body.textContent === fixedBody,
+      `Home did not raise its fixed notification for a new ${kind}`,
+      { kind, hidden: toast.hidden, title: title.textContent, body: body.textContent, fixedTitle });
+    toast.hidden = true;
+    shellSurface.maybeShowInboxRequestToast(after, after);
+    assert(toast.hidden === true, `Home raised its notification again for the same ${kind}`, { kind });
+  }
+  // Nothing new, an already read entry, a message or the first summary stay quiet.
+  const quiet = [
+    [null, withEntries([request("capability_request", "capability-request:2", "capability-approve-request:2")])],
+    [before, withEntries([request("contact_request", "contact-request:2", "contact-accept-request:2", { read: true })])],
+    [before, withEntries([request("direct_message", "direct-message:1", "open-conversation:1")])],
+  ];
+  for (const [previous, next] of quiet) {
+    toast.hidden = true;
+    shellSurface.maybeShowInboxRequestToast(previous, next);
+    assert(toast.hidden === true, "Home raised its notification for an entry that needs no answer",
+      { entries: next.notifications.entries });
+  }
+}
+
 assert(
   peopleStyle.includes("padding: var(--window-chrome-safe-top, 52px) 12px 16px;"),
   "People unified-sidebar must reserve the Home safe-top inset in its sidebar column",
@@ -1697,7 +1751,11 @@ assert(
       .disabled === true &&
     restoredBrowserEntry.node
       .querySelector("[data-action='close']")
-      .getAttribute("aria-label") === "Close",
+      .getAttribute("aria-label") === "Close" &&
+    restoredBrowserEntry.browserClosingStatus?.textContent === "Closing…" &&
+    restoredBrowserEntry.browserClosingStatus.getAttribute("role") === "status" &&
+    restoredBrowserEntry.browserClosingStatus.parentElement ===
+      restoredBrowserEntry.node.querySelector(".window-body"),
   "nonterminal Browser cleanup ended the close handshake before Runtime settled",
   {
     state: restoredBrowserEntry.node.dataset.browserCloseState,

@@ -138,6 +138,9 @@ let runtimeUpdateReconnects = 0;
 // to observe the restart itself: after this, the update finishing or Home refusing this page's old
 // session reloads the page once. A reloaded page starts with it false, so it reloads at most once.
 let runtimeUpdateInProgressSeen = false;
+// Why this page's last Update did not start (cancelled, refused). It stays in place of the offer
+// text until the person selects Update again, so a refresh cannot replace it before it is read.
+let runtimeUpdateFeedback = "";
 const RUNTIME_UPDATE_RESTART_TEXT = "Restarting to finish the update. Home is usually back within two minutes.";
 // Polls are 2 s apart while Home restarts: 150 polls outlast the controller's 120 s restart budget with margin.
 const RUNTIME_UPDATE_RESTART_POLLS = 150;
@@ -876,7 +879,6 @@ function configureAiProvider() {
   const validateButton = document.querySelector("#ai-provider-validate");
   const saveButton = document.querySelector("#ai-provider-save");
   const cancelButton = document.querySelector("#ai-provider-cancel");
-  const veniceFact = document.querySelector("[data-ai-provider-venice-fact]");
   if (!instancesNode || !addButton || !formNode || !nameInput || !providerSelect || !keyInput || !modelSelect || !validateButton || !saveButton || !cancelButton) {
     return;
   }
@@ -889,10 +891,25 @@ function configureAiProvider() {
   const selectedProvider = () => (providerSelect.value === "venice" ? "venice" : "openrouter");
   let editingId = "";
   let latestStatus = null;
+  // Inbox decisions change hosted access while System is open; Home reports them as
+  // `inbox.changed`. Refresh then and when System is shown again, but never under the
+  // person's open form or while one of this page's own requests is in flight.
+  let hostedRequests = 0;
+  let statusReads = 0;
+  let liveRefreshWanted = false;
+  let liveRefreshTimer = 0;
+  const hostedFetch = async (url, init) => {
+    hostedRequests += 1;
+    try {
+      return await fetchJson(url, init);
+    } finally {
+      hostedRequests -= 1;
+      if (!hostedRequests && liveRefreshWanted) scheduleLiveRefresh();
+    }
+  };
   const updateValidationEnd = () => {
     const state = latestStatus?.validation_egress_approval_state?.[selectedProvider()];
-    validationEndButton.hidden = latestStatus?.hosted_external_https !== "operator_ready" && state !== "pending" && state !== "approved";
-    validationEndButton.textContent = latestStatus?.hosted_external_https === "operator_ready" ? "End hosted HTTPS" : "End key-check access";
+    validationEndButton.hidden = state !== "pending" && state !== "approved";
   };
   const setBusy = (busy) => {
     addButton.disabled = busy || !hasShellAccess();
@@ -905,12 +922,14 @@ function configureAiProvider() {
     saveButton.disabled = busy || !hasShellAccess();
     cancelButton.disabled = busy;
     cancelButton.textContent = latestStatus?.staged_connections?.some((entry) => entry.id === editingId)
-      ? "Close; keep staged key" : "Cancel";
+      ? "Close" : "Cancel";
     instancesNode.querySelectorAll("button").forEach((button) => {
       button.disabled = busy || !hasShellAccess() || button.dataset.egressPaused === "true";
     });
   };
+  let stateTone = "";
   const showState = (message, tone) => {
+    stateTone = message ? tone || "" : "";
     setTextFields("ai-provider-state", message);
     for (const node of document.querySelectorAll('[data-field="ai-provider-state"]')) {
       node.hidden = !message;
@@ -923,10 +942,6 @@ function configureAiProvider() {
     for (const node of document.querySelectorAll('[data-field="ai-provider-privacy"]')) {
       node.hidden = !text;
     }
-  };
-  const applyProviderChrome = () => {
-    if (veniceFact) veniceFact.hidden = selectedProvider() !== "venice";
-    updateValidationEnd();
   };
   const fillModels = (models, selected) => {
     const values = [];
@@ -963,8 +978,9 @@ function configureAiProvider() {
     keyInput.value = "";
     providerSelect.value = "openrouter";
     fillModels([], "");
-    applyProviderChrome();
+    updateValidationEnd();
     setBusy(false);
+    if (liveRefreshWanted) scheduleLiveRefresh();
   };
   const showForm = (instance) => {
     formNode.hidden = false;
@@ -977,20 +993,27 @@ function configureAiProvider() {
     providerSelect.value = instance && instance.provider === "venice" ? "venice" : "openrouter";
     keyInput.value = "";
     fillModels([], instance && instance.selected_model ? instance.selected_model : "");
-    applyProviderChrome();
+    updateValidationEnd();
+    keyInput.placeholder = editingId ? "Leave blank to keep the stored key" : "";
+    showState("", "");
     document.querySelector("#ai-provider-form-title").textContent = editingId ? "Edit hosted model" : "Add hosted model";
     saveButton.textContent = "Save";
     keyInput.focus();
     setBusy(false);
   };
+  // Rebuilding the list keeps the disclosures the person opened and the control they focused.
+  const controlKey = (node) => [node.closest(".ai-provider-instance")?.dataset.offerId, node.tagName, node.textContent].join("\n");
   const renderInstances = (status) => {
     const connections = status && Array.isArray(status.connections) ? status.connections : [];
+    const opened = new Set([...instancesNode.querySelectorAll("details[open]")].map((node) => node.parentElement?.dataset.offerId));
+    const focused = instancesNode.contains(document.activeElement) ? controlKey(document.activeElement) : "";
     instancesNode.replaceChildren();
     for (const connection of connections) {
       if (!connection || connection.connected !== true) continue;
       if (connection.operation === "decision.evaluate") continue;
       const card = document.createElement("div");
       card.className = "ai-provider-instance";
+      card.dataset.offerId = connection.id;
       const title = document.createElement("p");
       title.className = "pc2-card-label";
       title.textContent = readText(connection.name) || "Hosted model";
@@ -1017,7 +1040,6 @@ function configureAiProvider() {
       replaceButton.textContent = "Edit";
       replaceButton.addEventListener("click", () => {
         showForm(connection);
-        showState(`Edit ${readText(connection.name)}. Leave the API key blank to keep the stored key.`, "");
       });
       const disconnectButton = document.createElement("button");
       disconnectButton.className = "pc2-btn pc2-btn-secondary";
@@ -1028,7 +1050,7 @@ function configureAiProvider() {
         setBusy(true);
         showState("", "");
         try {
-          latestStatus = await fetchJson("/api/apps/system/ai-provider", {
+          latestStatus = await hostedFetch("/api/apps/system/ai-provider", {
             method: "DELETE",
             headers: shellHeaders({ "content-type": "application/json" }),
             body: JSON.stringify({ id: connection.id }),
@@ -1044,39 +1066,34 @@ function configureAiProvider() {
       });
       const state = document.createElement("span");
       state.className = "ai-provider-state";
-      state.textContent = connection.egress_state === "operator_ready" ? "Hosted HTTPS active"
-        : connection.egress_state === "ready" ? "Hosted connection approved"
-        : connection.egress_state === "paused" && connection.egress_approval_state === "approved" ? "Route approval recorded · external HTTPS paused"
-        : connection.egress_approval_state === "pending" ? "Hosted connection needs Inbox review"
+      state.textContent = connection.egress_approval_state === "ended" ? "Hosted approval ended"
+        : connection.egress_state === "consent_required" || connection.egress_approval_state === "pending" ? "Needs Inbox review"
         : connection.egress_state === "paused" ? "External HTTPS paused"
-        : connection.approval_state === "approved" ? "Assistant access approved"
-        : connection.share_enabled ? "Shared" : "Private";
-      title.append(state);
+        : "";
+      if (state.textContent) title.append(state);
       const more = document.createElement("details");
       more.className = "ai-provider-details";
+      more.open = opened.has(connection.id);
       const summary = document.createElement("summary");
       summary.textContent = "Details and access";
-      const identity = document.createElement("p");
-      identity.className = "pc2-card-sublabel";
-      identity.textContent = `Instance: ${connection.id}`;
       const secondary = document.createElement("div");
       secondary.className = "system-inline-row";
       secondary.append(shareButton);
-      if (connection.egress_state === "operator_ready" || connection.approval_state === "approved" || ["pending", "approved"].includes(connection.egress_approval_state)) {
+      if (connection.approval_state === "approved" || ["pending", "approved"].includes(connection.egress_approval_state)) {
         const endApproval = document.createElement("button");
         endApproval.className = "pc2-btn pc2-btn-secondary";
         endApproval.type = "button";
-        endApproval.textContent = connection.egress_state === "operator_ready" ? "End hosted HTTPS" : "End hosted approval";
+        endApproval.textContent = "End hosted approval";
         endApproval.addEventListener("click", async () => {
           if (!hasShellAccess()) return;
           endApproval.disabled = true;
           try {
-            await fetchJson("/api/apps/system/approval-lens/revoke", {
+            await hostedFetch("/api/apps/system/approval-lens/revoke", {
               method: "POST", headers: shellHeaders({ "content-type": "application/json" }),
               body: JSON.stringify({ id: connection.id }),
             });
             await refreshStatus();
-            showState(connection.egress_state === "operator_ready" ? "Hosted HTTPS ended for this Home." : "Hosted approval ended. A later request needs Inbox review again.", "");
+            showState("Hosted approval ended. A later request needs Inbox review again.", "");
           } catch (error) {
             showState(publicSystemError(error, "Approval could not be ended."), "error");
             endApproval.disabled = false;
@@ -1085,7 +1102,7 @@ function configureAiProvider() {
         secondary.append(endApproval);
       }
       secondary.append(disconnectButton);
-      more.append(summary, identity, secondary);
+      more.append(summary, secondary);
       actions.append(useButton, replaceButton);
       card.append(title, detail, actions, more);
       instancesNode.append(card);
@@ -1094,6 +1111,7 @@ function configureAiProvider() {
       if (!staged || !/^model:hosted-[0-9a-f]{32}$/i.test(staged.id || "")) continue;
       const card = document.createElement("div");
       card.className = "ai-provider-instance";
+      card.dataset.offerId = staged.id;
       const detail = document.createElement("p");
       detail.className = "pc2-card-sublabel";
       detail.textContent = `${staged.provider} · ${staged.has_saved_model ? "Staged key change" : "Key check needed"}`;
@@ -1104,7 +1122,6 @@ function configureAiProvider() {
       resume.addEventListener("click", () => {
         const saved = connections.find((entry) => entry.id === staged.id);
         showForm(saved || { id: staged.id, provider: String(staged.provider).toLowerCase() });
-        showState("This Home kept the staged key. Check it again, approve the connection in Inbox if asked, then choose a model.", "");
       });
       const discard = document.createElement("button");
       discard.className = "pc2-btn pc2-btn-secondary";
@@ -1115,14 +1132,12 @@ function configureAiProvider() {
         discard.disabled = true;
         showState("Finishing any current key check, then removing the staged key.", "");
         try {
-          await fetchJson("/api/apps/system/ai-provider/staged", {
+          await hostedFetch("/api/apps/system/ai-provider/staged", {
             method: "DELETE", headers: shellHeaders({ "content-type": "application/json" }),
             body: JSON.stringify({ id: staged.id }),
           });
           await refreshStatus();
-          showState(staged.has_saved_model
-            ? "Staged key removed. The saved model key remains. Check Inbox before its next request."
-            : "Staged key removed.", "success");
+          showState("Staged key removed.", "success");
         } catch (error) {
           showState(publicSystemError(error, "This Home could not discard the staged key."), "error");
           discard.disabled = false;
@@ -1131,12 +1146,16 @@ function configureAiProvider() {
       card.append(detail, resume, discard);
       instancesNode.append(card);
     }
+    if (focused) {
+      [...instancesNode.querySelectorAll("button, summary")].find((node) => controlKey(node) === focused)?.focus({ preventScroll: true });
+    }
   };
   const lensModel = document.querySelector("#approval-lens-model");
   const lensStatus = document.querySelector("#approval-lens-status");
   const lensSelect = document.querySelector("#approval-lens-select");
   const lensEdit = document.querySelector("#approval-lens-edit");
   const lensDisconnect = document.querySelector("#approval-lens-disconnect");
+  let lensChoice = ""; // an evaluator picked here and not yet saved
   const lensEnd = document.createElement("button");
   lensEnd.className = "pc2-btn pc2-btn-secondary";
   lensEnd.type = "button";
@@ -1145,8 +1164,7 @@ function configureAiProvider() {
   lensDisconnect.after(lensEnd);
   const updateLensEnd = () => {
     const connection = (latestStatus?.connections || []).find(c => c.id === lensModel.value && c.operation === "decision.evaluate");
-    lensEnd.hidden = !connection || (connection.egress_state !== "operator_ready" && connection.approval_state !== "approved" && !["pending", "approved"].includes(connection.egress_approval_state));
-    lensEnd.textContent = connection?.egress_state === "operator_ready" ? "End hosted HTTPS" : "End hosted approval";
+    lensEnd.hidden = !connection || (connection.approval_state !== "approved" && !["pending", "approved"].includes(connection.egress_approval_state));
     lensEnd.disabled = !hasShellAccess();
   };
   const renderLens = (status) => {
@@ -1158,7 +1176,8 @@ function configureAiProvider() {
       option.textContent = `${connection.name} · ${connection.processor_label} · ${connection.selected_model}`;
       lensModel.append(option);
     }
-    if (current) lensModel.value = current.id;
+    if (!decisions.some((connection) => connection.id === lensChoice)) lensChoice = "";
+    if (lensChoice || current) lensModel.value = lensChoice || current.id;
     lensStatus.textContent = current && status.hosted_external_https === "paused"
       ? `${current.name} selected · external HTTPS paused`
       : current ? `Using ${current.name} · ${current.processor_label}`
@@ -1167,18 +1186,21 @@ function configureAiProvider() {
     lensModel.disabled = lensSelect.disabled = lensEdit.disabled = lensDisconnect.disabled = !decisions.length;
     updateLensEnd();
   };
-  lensModel.addEventListener("change", updateLensEnd);
+  lensModel.addEventListener("change", () => {
+    lensChoice = lensModel.value;
+    updateLensEnd();
+  });
   lensEnd.addEventListener("click", async () => {
     const connection = (latestStatus?.connections || []).find(c => c.id === lensModel.value && c.operation === "decision.evaluate");
     if (!connection || !hasShellAccess()) return;
     lensEnd.disabled = true;
     try {
-      await fetchJson("/api/apps/system/approval-lens/revoke", {
+      await hostedFetch("/api/apps/system/approval-lens/revoke", {
         method: "POST", headers: shellHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ id: connection.id }),
       });
       await refreshStatus();
-      showState(connection.egress_state === "operator_ready" ? "Hosted HTTPS ended for this Home." : "Hosted approval ended.", "");
+      showState("Hosted approval ended.", "");
     } catch (error) {
       showState(publicSystemError(error, "Approval could not be ended."), "error");
       lensEnd.disabled = false;
@@ -1188,14 +1210,13 @@ function configureAiProvider() {
     const connection = (latestStatus?.connections || []).find(c => c.id === lensModel.value && c.operation === "decision.evaluate");
     if (!connection) return;
     showForm(connection);
-    showState(`Edit ${readText(connection.name)}. Leave the API key blank to keep the stored key.`, "");
   });
   lensDisconnect.addEventListener("click", async () => {
     const connection = (latestStatus?.connections || []).find(c => c.id === lensModel.value && c.operation === "decision.evaluate");
     if (!connection || !hasShellAccess()) return;
     lensDisconnect.disabled = true;
     try {
-      await fetchJson("/api/apps/system/ai-provider", {
+      await hostedFetch("/api/apps/system/ai-provider", {
         method: "DELETE", headers: shellHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ id: connection.id }),
       });
@@ -1210,28 +1231,57 @@ function configureAiProvider() {
   lensSelect.addEventListener("click", async () => {
     lensSelect.disabled = true;
     try {
-      await fetchJson("/api/apps/system/approval-lens", { method: "POST", headers: shellHeaders({ "content-type": "application/json" }), body: JSON.stringify({ id: lensModel.value }) });
+      await hostedFetch("/api/apps/system/approval-lens", { method: "POST", headers: shellHeaders({ "content-type": "application/json" }), body: JSON.stringify({ id: lensModel.value }) });
+      lensChoice = "";
       await refreshStatus();
     } catch (error) { lensStatus.textContent = publicSystemError(error, "Evaluator selection could not be saved."); }
     finally { lensSelect.disabled = false; }
   });
-  const refreshStatus = async () => {
-    latestStatus = await fetchJson("/api/apps/system/ai-provider", { headers: shellHeaders() });
-    document.querySelector("#ai-provider-egress-note").textContent = latestStatus.hosted_external_https === "operator_ready"
-      ? "Owner-authorized HTTPS is active for configured hosted models. This Home stores keys and pays for requests. End hosted HTTPS here at any time."
-      : latestStatus.hosted_external_https === "consent_required"
-        ? "This Home keeps provider keys. Approve each hosted connection in Inbox before its key check or model request."
-        : "External HTTPS is paused. Saved keys, models, and past results stay here.";
+  const applyStatus = (status) => {
+    latestStatus = status;
+    const egressNote = document.querySelector("#ai-provider-egress-note");
+    egressNote.hidden = latestStatus.hosted_external_https !== "paused";
+    egressNote.textContent = egressNote.hidden ? "" : "External HTTPS is paused on this Home.";
     renderInstances(latestStatus);
     renderLens(latestStatus);
     updateValidationEnd();
+  };
+  const readStatus = () => {
+    statusReads += 1;
+    return hostedFetch("/api/apps/system/ai-provider", { headers: shellHeaders() });
+  };
+  const refreshStatus = async () => {
+    applyStatus(await readStatus());
     return latestStatus;
+  };
+  const liveRefreshBlocked = () => document.hidden || hostedRequests > 0 || !formNode.hidden;
+  const runLiveRefresh = async () => {
+    liveRefreshTimer = 0;
+    if (!liveRefreshWanted || !latestStatus || liveRefreshBlocked()) return;
+    liveRefreshWanted = false;
+    const read = statusReads + 1;
+    const status = await readStatus().catch(() => null);
+    // A read the page started since then is newer; it renders instead.
+    if (!status || read !== statusReads) return;
+    if (liveRefreshBlocked()) {
+      scheduleLiveRefresh();
+      return;
+    }
+    const cardsChanged = JSON.stringify(status) !== JSON.stringify(latestStatus);
+    applyStatus(status);
+    // An earlier action's success no longer describes cards a decision elsewhere changed.
+    if (cardsChanged && stateTone === "success") showState("", "");
+    setBusy(false);
+  };
+  const scheduleLiveRefresh = () => {
+    liveRefreshWanted = true;
+    if (!liveRefreshTimer) liveRefreshTimer = window.setTimeout(runLiveRefresh, 250);
   };
   validationEndButton.addEventListener("click", async () => {
     if (!hasShellAccess()) return;
     setBusy(true);
     try {
-      await fetchJson("/api/apps/system/approval-lens/revoke", {
+      await hostedFetch("/api/apps/system/approval-lens/revoke", {
         method: "POST", headers: shellHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ id: `validation:${selectedProvider()}` }),
       });
@@ -1245,14 +1295,13 @@ function configureAiProvider() {
   });
   addButton.addEventListener("click", () => {
     showForm(null);
-    showState("Choose a host, enter its key, then check and choose a model. The name is optional.", "");
   });
   cancelButton.addEventListener("click", () => {
     hideForm();
     addButton.focus();
     showState("", "");
   });
-  providerSelect.addEventListener("change", applyProviderChrome);
+  providerSelect.addEventListener("change", updateValidationEnd);
   modelSelect.addEventListener("change", () => {
     const selectedOption = modelSelect.selectedOptions[0];
     showPrivacy(selectedOption ? selectedOption.dataset.privacy : "");
@@ -1261,20 +1310,46 @@ function configureAiProvider() {
     if (!hasShellAccess()) return;
     setBusy(true);
     showState("", "");
+    // The check sends the typed key, or with a blank field a key staged by an earlier check.
+    const checksStagedKey = Boolean(keyInput.value.trim())
+      || Boolean(latestStatus?.staged_connections?.some((entry) => entry.id === editingId));
+    let removalFailed = false;
     try {
       // Validation and Save use the same Runtime connection identity.
       if (!editingId) editingId = `model:hosted-${crypto.randomUUID().replaceAll("-", "")}`;
-      const result = await fetchJson("/api/apps/system/ai-provider/validate", {
+      const result = await hostedFetch("/api/apps/system/ai-provider/validate", {
         method: "POST",
         headers: shellHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ provider: selectedProvider(), api_key: keyInput.value, id: editingId }),
       });
       fillModels(Array.isArray(result.models) ? result.models : [], modelSelect.value);
-      showState("This key is valid.", "success");
     } catch (error) {
-      showState(hostedProviderValidationError(error), "error");
+      const message = hostedProviderValidationError(error);
+      showState(message, message === HOSTED_KEY_CHECK_PENDING ? "" : "error");
+      // Runtime stages the checked key before the provider answers. Remove a refused key
+      // the way Discard does, so a later Save with a blank field cannot send it; this also
+      // ends the connection's approval, so a saved connection needs Inbox review again.
+      if (message === HOSTED_KEY_REJECTED && checksStagedKey) {
+        try {
+          await hostedFetch("/api/apps/system/ai-provider/staged", {
+            method: "DELETE", headers: shellHeaders({ "content-type": "application/json" }),
+            body: JSON.stringify({ id: editingId }),
+          });
+          // An unsaved connection starts its next check as a new one.
+          if (!latestStatus?.connections?.some((entry) => entry.id === editingId)) editingId = "";
+        } catch {
+          removalFailed = true;
+        }
+      }
     } finally {
-      await refreshStatus().catch(() => {});
+      const refreshed = await refreshStatus().then(() => true, () => false);
+      // The form's button reads Close and the list has the key's Discard card exactly when
+      // the shown status stages this connection; otherwise only a fresh status can show it.
+      if (removalFailed && latestStatus?.staged_connections?.some((entry) => entry.id === editingId)) {
+        showState("The rejected key could not be removed. Select Close, then Discard staged key on its card.", "error");
+      } else if (removalFailed && !refreshed) {
+        showState("The rejected key could not be removed. Reload Home, then select Discard staged key on its card.", "error");
+      }
       setBusy(false);
     }
   });
@@ -1293,7 +1368,7 @@ function configureAiProvider() {
         api_key: keyInput.value,
         model: modelSelect.value,
       };
-      latestStatus = await fetchJson("/api/apps/system/ai-provider", {
+      latestStatus = await hostedFetch("/api/apps/system/ai-provider", {
         method: "POST",
         headers: shellHeaders({ "content-type": "application/json" }),
         body: JSON.stringify(body),
@@ -1307,10 +1382,18 @@ function configureAiProvider() {
       const consentPending = String(error.message || error).includes("Approve this hosted connection in Inbox");
       showState(activationPending
         ? "This model is saved. Activation is waiting for current model work to finish. Select Save to try again."
-        : consentPending ? "The key is stored on this Home. Approve this connection in Inbox, then select Save again."
-        : publicSystemError(error, "This Home could not save that hosted model."), "error");
+        : consentPending ? "Approve this connection in Inbox, then select Save again."
+        : publicSystemError(error, "This Home could not save that hosted model."), consentPending ? "" : "error");
     } finally {
       setBusy(false);
+    }
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) scheduleLiveRefresh();
+  });
+  window.addEventListener("message", (event) => {
+    if (homeRuntimeEventsFrom(event)?.some((item) => item?.scope === "inbox" || item?.kind === "inbox.changed")) {
+      scheduleLiveRefresh();
     }
   });
   hideForm();
@@ -4009,13 +4092,18 @@ function configureRuntimeUpdate() {
     if (!document.hidden) scheduleRuntimeUpdateRefresh(0);
   });
   window.addEventListener("message", (event) => {
-    if (event.source !== window.top || event.origin !== homeParentOrigin
-      || event.data?.type !== "elastos:runtime-events"
-      || event.data?.schema !== "elastos.home.runtime-events/v1"
-      || !Array.isArray(event.data.events)) return;
-    scheduleRuntimeUpdateRefresh(0);
+    if (homeRuntimeEventsFrom(event)) scheduleRuntimeUpdateRefresh(0);
   });
   scheduleRuntimeUpdateRefresh();
+}
+
+// Events Home forwards from its Runtime event stream; null for any other message.
+function homeRuntimeEventsFrom(event) {
+  const message = event.data;
+  return event.source === window.top && event.origin === homeParentOrigin
+    && message?.type === "elastos:runtime-events"
+    && message?.schema === "elastos.home.runtime-events/v1"
+    && Array.isArray(message.events) ? message.events : null;
 }
 
 function renderRuntimeUpdate(update) {
@@ -4034,7 +4122,11 @@ function renderRuntimeUpdate(update) {
     runtimeUpdatePending = null;
     runtimeUpdateReconnects = 0;
   }
-  if (["staging", "downloading", "verifying", "restarting"].includes(phase)) markRuntimeUpdateInProgress();
+  if (["staging", "downloading", "verifying", "restarting"].includes(phase)) {
+    // An update running now (from any page) replaces this page's older result.
+    runtimeUpdateFeedback = "";
+    markRuntimeUpdateInProgress();
+  }
   // A failed update keeps the current Home and its assets: never reload for it.
   if (phase === "failed") runtimeUpdateInProgressSeen = false;
   if (runtimeUpdateInProgressSeen && finishes) {
@@ -4076,6 +4168,10 @@ function renderRuntimeUpdate(update) {
   } else if (["staging", "downloading", "verifying", "restarting"].includes(phase)) {
     showRuntimeUpdateStatus(phase === "restarting"
       ? RUNTIME_UPDATE_RESTART_TEXT : readText(controller?.message) || "Checking the signed update. Keep Home open.");
+  } else if (runtimeUpdateFeedback) {
+    showRuntimeUpdateStatus(runtimeUpdateFeedback);
+  } else if (phase === "updated" && systemReloadedForUpdate() && readText(controller.new_version)) {
+    showRuntimeUpdateStatus(`Updated to ${readText(controller.new_version)}. Reload Home to finish.`);
   } else if (["updated", "restored", "failed"].includes(phase)) {
     showRuntimeUpdateStatus(readText(controller.message) || "Check the update status again.");
   } else {
@@ -4103,6 +4199,15 @@ function markRuntimeUpdateInProgress() {
   runtimeUpdateInProgressSeen = true;
   runtimeUpdateReconnects = 0;
   if (runtimeUpdatePending) runtimeUpdatePending.polls = 0;
+}
+
+// Only an update reloads this frame (reloadForRuntimeUpdate), so a reloaded System has just loaded
+// the updated code; opening System again is a new navigation. The Home page and the windows above
+// still run the code from before the update, and System cannot reload them: it sits inside the
+// Home shell frame, whose sandbox allows no top navigation, and a nested frame inherits that. So
+// System asks the person to reload Home.
+function systemReloadedForUpdate() {
+  return globalThis.performance?.getEntriesByType?.("navigation")?.[0]?.type === "reload";
 }
 
 function reloadForRuntimeUpdate() {
@@ -4199,6 +4304,7 @@ async function fetchRuntimeUpdateJson(init, url = "/api/apps/system/summary") {
 
 async function onRuntimeUpdateApply() {
   if (runtimeUpdateBusy || runtimeUpdatePending || !runtimeUpdateCanApply()) return;
+  runtimeUpdateFeedback = "";
   const intent = { action: "apply", request_id: window.crypto.randomUUID().replaceAll("-", "") };
   for (const field of ["source_name", "channel", "publisher_did", "current_version", "new_version", "head_cid", "release_cid"]) {
     intent[field] = runtimeUpdate[field];
@@ -4242,6 +4348,7 @@ async function onRuntimeUpdateApply() {
         : error.status === 401 || error.status === 403
           ? "Sign in as the Home owner to start the update."
           : "The update could not start: the release was refused or verification failed. Select Update again.";
+      runtimeUpdateFeedback = feedback;
     } else {
       feedback = runtimeUpdateProgressPhase() === "restarting"
         ? RUNTIME_UPDATE_RESTART_TEXT
@@ -4353,31 +4460,28 @@ function publicSystemError(value, fallback) {
   return message;
 }
 
+const HOSTED_KEY_CHECK_PENDING = "Approve this connection in Inbox, then check the key again.";
+const HOSTED_KEY_REJECTED = "The provider rejected this key.";
+const HOSTED_KEY_CHECK_OUTCOMES = [
+  // Runtime copy: api/gateway_home_system_ai_provider.rs and gateway.rs system_error_response.
+  [/Approve this hosted connection in Inbox/, HOSTED_KEY_CHECK_PENDING],
+  [/The hosted connection request was denied\./, "This connection was denied in Inbox. Try again later."],
+  [/Hosted access was denied or ended\./, "This connection was denied or ended. Review Inbox."],
+  [/Hosted HTTPS was ended on this Home\./, "Hosted access was ended. Check the key again to ask in Inbox."],
+  [/Runtime blocked this hosted route\./, "This Home blocked the route to the host."],
+  [/Hosted HTTPS could not reach the host\./, "Could not reach the host. Check the network and try again."],
+  [/Hosted external HTTPS is paused/, "External HTTPS is paused on this Home."],
+  [/^request failed: 400 invalid (OpenRouter|Venice) key$/i, HOSTED_KEY_REJECTED],
+  [/^request failed: 500 (OpenRouter|Venice) validation unavailable$/i, "The provider sent an unexpected response. Try again later."],
+  [/^request failed: 403 (admin passkey required|proof-bound passkey session required|.*fresh passkey|.*passkey step-up)/i, "Sign in with the Home admin passkey to check keys."],
+];
+
 function hostedProviderValidationError(value) {
   const message = readText(value && value.message ? value.message : value);
-  if (message.includes("Approve this hosted connection in Inbox")) {
-    return "The key is stored on this Home. Approve this connection in Inbox, then select Check key and load models again.";
+  for (const [pattern, text] of HOSTED_KEY_CHECK_OUTCOMES) {
+    if (pattern.test(message)) return text;
   }
-  for (const detail of [
-    "The hosted connection request was denied. Try again after the decision window.",
-    "Hosted access was denied or ended. Review Inbox.",
-    "Hosted HTTPS was ended on this Home. Start a new connection check in Inbox.",
-    "Runtime blocked this hosted route. Review the connection configuration.",
-    "Hosted HTTPS could not reach the host. Check the network and try again.",
-    "This Home could not check the hosted connection. Try again.",
-  ]) {
-    if (message.includes(detail)) return detail;
-  }
-  if (message.includes("Hosted external HTTPS is paused until Runtime network authority is available.")) {
-    return "External HTTPS is paused on this Home. The key has not been checked.";
-  }
-  if (/invalid (OpenRouter|Venice) key/i.test(message)) {
-    return "The provider could not validate this key.";
-  }
-  if (/^request failed: 403 admin passkey required$/i.test(message)) {
-    return "Sign in as the Home admin to check provider keys.";
-  }
-  return publicSystemError(value, "This Home could not check the key. Try again.");
+  return "This Home could not check the key. Try again.";
 }
 
 function showError(error) {

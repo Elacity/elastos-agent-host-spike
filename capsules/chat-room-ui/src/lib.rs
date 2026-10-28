@@ -12,8 +12,9 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
-    window, Blob, Document, Element, Event, HtmlButtonElement, HtmlElement, HtmlFormElement,
-    HtmlInputElement, HtmlTextAreaElement, MessageEvent, Node, RequestCredentials, Storage,
+    window, AbortSignal, Blob, Document, Element, Event, HtmlButtonElement, HtmlElement,
+    HtmlFormElement, HtmlInputElement, HtmlTextAreaElement, MessageEvent, Node, RequestCredentials,
+    Storage,
 };
 
 mod direct;
@@ -34,6 +35,11 @@ const CHAT_ROOM_API_BASE: &str = "/api/apps/chat-room";
 const ROOM_ACCESS_CAPABILITIES: [&str; 1] = ["room.access"];
 const SHELL_ROOM_POLL_INTERVAL_MS: u32 = 1_000;
 const GATEWAY_POLL_INTERVAL_MS: u32 = 3_000;
+/// How long Chat waits for Home to answer a read or a poll-loop request.
+const REQUEST_DEADLINE_MS: u32 = 10_000;
+/// Attachments are up to 8 MiB, so their reads get longer.
+const ATTACHMENT_DEADLINE_MS: u32 = 60_000;
+const REQUEST_DEADLINE_ERROR: &str = "Home is not answering. Chat keeps trying.";
 const AUTO_SCROLL_THRESHOLD_PX: i32 = 48;
 const HOME_TOKEN_HEADER: &str = "x-elastos-home-token";
 const DISPLAY_NAME_REQUIRED_ERROR: &str = "Enter your name.";
@@ -72,6 +78,7 @@ enum CommunityState {
     NotJoined,
     Left,
     JoinedUnreachable,
+    RecoveryExhausted,
     Live,
 }
 
@@ -81,6 +88,7 @@ impl CommunityState {
             Self::NotJoined => "not_joined",
             Self::Left => "left",
             Self::JoinedUnreachable => "joined_unreachable",
+            Self::RecoveryExhausted => "recovery_exhausted",
             Self::Live => "live",
         }
     }
@@ -90,6 +98,7 @@ impl CommunityState {
             Self::NotJoined => "Not joined",
             Self::Left => "Left Community",
             Self::JoinedUnreachable => "Community unreachable",
+            Self::RecoveryExhausted => "Community can't connect. Restart Home to reconnect.",
             Self::Live => "Live",
         }
     }
@@ -134,6 +143,9 @@ struct AppState {
     active_sessions: Vec<ActiveSessionView>,
     room_control: SummaryRoomControlView,
     attachment_urls: BTreeMap<String, String>,
+    /// Attachments whose download failed, keyed by attachment id.
+    attachment_retry: BTreeMap<String, AttachmentRetry>,
+    attachment_downloads_running: bool,
     join_invite_url: Option<String>,
     direct: DirectUiState,
     /// The conversation whose text the composer shows: `None` is the shared
@@ -513,6 +525,11 @@ impl RoomTransportView {
     fn community_state(&self) -> CommunityState {
         match (self.configured, self.community_joined, self.available) {
             (true, Some(false), _) => CommunityState::Left,
+            (true, Some(true), false)
+                if self.status.as_deref() == Some(CommunityState::RecoveryExhausted.label()) =>
+            {
+                CommunityState::RecoveryExhausted
+            }
             (true, Some(true), false) => CommunityState::JoinedUnreachable,
             (true, Some(true), true) => CommunityState::Live,
             _ => CommunityState::NotJoined,
@@ -824,6 +841,7 @@ impl App {
             loop {
                 let was_active = poll_app.state.borrow().session_active;
                 poll_app.poll_and_render_once().await;
+                poll_app.schedule_attachment_downloads();
                 // A session that just became active loads its history at
                 // once instead of after one more poll interval.
                 if !was_active && poll_app.state.borrow().session_active {
@@ -862,6 +880,7 @@ impl App {
             &self.room_api_url("/presence"),
             &serde_json::json!({}),
             &self.home_token_headers(),
+            Some(REQUEST_DEADLINE_MS),
         )
         .await;
     }
@@ -2080,6 +2099,7 @@ impl App {
                     mark_read: app.can_mark_read(None),
                 },
                 &headers,
+                Some(REQUEST_DEADLINE_MS),
             )
             .await;
             if request_token != app.home_token()
@@ -2089,16 +2109,10 @@ impl App {
             }
             match result {
                 Ok(poll) => {
-                    let Some((attachments, _changed)) = app.apply_active_poll(&poll_guard, poll)
-                    else {
+                    if app.apply_active_poll(&poll_guard, poll).is_none() {
                         return;
-                    };
-                    for attachment in attachments {
-                        if let Err(err) = app.cache_attachment_data_url(&attachment).await {
-                            app.set_error(Some(err));
-                            break;
-                        }
                     }
+                    app.schedule_attachment_downloads();
                     let _ = app.render();
                 }
                 Err(err) if is_session_error(&err) => {}
@@ -2110,12 +2124,52 @@ impl App {
         });
     }
 
-    fn apply_active_poll(
-        &self,
-        guard: &PollRequestGuard,
-        poll: RoomPollView,
-    ) -> Option<(Vec<AttachmentView>, bool)> {
+    fn apply_active_poll(&self, guard: &PollRequestGuard, poll: RoomPollView) -> Option<bool> {
         apply_active_poll_if_current(&mut self.state.borrow_mut(), guard, poll)
+    }
+
+    /// Downloads the attachments Chat shows but has not cached, one at a
+    /// time and apart from the poll loop, so a stalled attachment (60 s
+    /// deadline) holds back neither messages nor the start of polling. The
+    /// work list is every shown attachment, not the latest poll's rows, so a
+    /// failed download is retried with backoff after the message cursor has
+    /// moved past it. The poll loop calls this on every tick.
+    fn schedule_attachment_downloads(self: &Rc<Self>) {
+        {
+            let mut state = self.state.borrow_mut();
+            if state.attachment_downloads_running {
+                return;
+            }
+            state.attachment_downloads_running = true;
+        }
+        let app = Rc::clone(self);
+        spawn_local(async move {
+            loop {
+                let next = {
+                    let state = app.state.borrow();
+                    let shared_view = state.session_active
+                        && !state.reconnect_needed
+                        && state.direct.selected_conversation_id.is_none();
+                    shared_view
+                        .then(|| next_attachment_to_cache(&state, js_sys::Date::now()))
+                        .flatten()
+                };
+                let Some(attachment) = next else {
+                    break;
+                };
+                let result = app.cache_attachment_data_url(&attachment).await;
+                record_attachment_attempt(
+                    &mut app.state.borrow_mut(),
+                    &attachment.attachment_id,
+                    js_sys::Date::now(),
+                );
+                if let Err(error) = result {
+                    app.set_transient_error(Some(error));
+                }
+                let _ = app.render();
+            }
+            app.state.borrow_mut().attachment_downloads_running = false;
+        });
     }
 
     fn clear_browser_session_request_storage(&self) {
@@ -2154,6 +2208,7 @@ impl App {
         state.participants.clear();
         state.active_sessions.clear();
         state.attachment_urls.clear();
+        state.attachment_retry.clear();
         state.status_badge = self.default_status_badge();
         state.status_detail = self.default_status_detail();
         state.error_text = None;
@@ -2532,21 +2587,18 @@ impl App {
         if !self.selection_guard_is_current(guard) {
             return Ok(false);
         }
-        let (attachments_to_cache, changed) = {
+        // Attachments download apart from the session start
+        // (`schedule_attachment_downloads`), so one that fails cannot stop
+        // the poll loop from starting.
+        let changed = {
             let mut state = self.state.borrow_mut();
-            let Some(result) = apply_active_poll_if_current(&mut state, &poll_guard, start.poll)
+            let Some(changed) = apply_active_poll_if_current(&mut state, &poll_guard, start.poll)
             else {
                 return Ok(false);
             };
-            result
+            changed
         };
         self.publish_home_navigation(guard);
-        for attachment in attachments_to_cache {
-            if !self.selection_guard_is_current(guard) {
-                return Ok(changed);
-            }
-            self.cache_attachment_data_url(&attachment).await?;
-        }
         Ok(changed)
     }
 
@@ -2636,6 +2688,7 @@ impl App {
             &self.room_api_url("/access-policy"),
             &payload,
             &self.home_token_headers(),
+            None,
         )
         .await?;
         let selection_guard = {
@@ -2656,6 +2709,7 @@ impl App {
             &self.room_api_url("/invites/create-link"),
             &ConversationJoinInviteCreateInput {},
             &self.home_token_headers(),
+            None,
         )
         .await?;
         {
@@ -2691,6 +2745,7 @@ impl App {
             &self.room_api_url("/invites/revoke"),
             &RoomInviteRevokeInput { invite_id },
             &self.home_token_headers(),
+            None,
         )
         .await?;
         let selection_guard = {
@@ -3038,6 +3093,7 @@ impl App {
                 size_bytes: bytes.len() as u64,
             },
             &headers,
+            None,
         )
         .await?;
         let chunk_size = usize::try_from(start.chunk_size_bytes)
@@ -3088,8 +3144,13 @@ impl App {
         let payload = SendMessageInput { request_id, body };
         let request_token = self.home_token();
         let headers = self.room_request_headers();
-        let result =
-            api_post_session_json(&self.room_api_url("/objects/send"), &payload, &headers).await;
+        let result = api_post_session_json(
+            &self.room_api_url("/objects/send"),
+            &payload,
+            &headers,
+            None,
+        )
+        .await;
         if self.home_token() != request_token || self.state.borrow().reconnect_needed {
             return Ok(false);
         }
@@ -3520,6 +3581,7 @@ impl App {
             &self.room_api_url("/contacts/request"),
             &serde_json::json!({ "participant_ref": participant_ref }),
             &self.home_token_headers(),
+            None,
         )
         .await?;
         Ok(())
@@ -3535,6 +3597,7 @@ impl App {
                 &app.room_api_url("/community-presence/request"),
                 &serde_json::json!({}),
                 &app.home_token_headers(),
+                None,
             )
             .await;
             match result {
@@ -3690,6 +3753,7 @@ impl App {
                     mark_read: self.can_mark_read(None),
                 },
                 &headers,
+                Some(REQUEST_DEADLINE_MS),
             )
             .await;
             if self.home_token() != request_token
@@ -3711,18 +3775,9 @@ impl App {
             {
                 return Ok(false);
             }
-            let Some((attachments_to_cache, changed)) = self.apply_active_poll(&poll_guard, poll)
-            else {
+            let Some(changed) = self.apply_active_poll(&poll_guard, poll) else {
                 return Ok(false);
             };
-            for attachment in attachments_to_cache {
-                if guard.is_some_and(|selection_guard| {
-                    !self.selection_guard_is_current(selection_guard)
-                }) {
-                    return Ok(changed);
-                }
-                self.cache_attachment_data_url(&attachment).await?;
-            }
             return Ok(changed);
         }
 
@@ -5468,6 +5523,7 @@ fn apply_session_loss(state: &mut AppState, shell_mode: bool, detail: &str) {
     state.participants.clear();
     state.active_sessions.clear();
     state.attachment_urls.clear();
+    state.attachment_retry.clear();
     state.status_badge = if shell_mode { "Reconnect" } else { "Join" }.to_string();
     state.status_detail = detail.to_string();
     state.error_text = shell_mode.then(|| detail.to_string());
@@ -5475,16 +5531,8 @@ fn apply_session_loss(state: &mut AppState, shell_mode: bool, detail: &str) {
     state.reconnect_needed = shell_mode;
 }
 
-fn apply_active_poll_state(
-    state: &mut AppState,
-    mut poll: RoomPollView,
-) -> (Vec<AttachmentView>, bool) {
+fn apply_active_poll_state(state: &mut AppState, mut poll: RoomPollView) -> bool {
     filter_configured_shared_poll(&mut poll);
-    let attachments_to_cache = poll
-        .objects
-        .iter()
-        .filter_map(|object| object.attachment.clone())
-        .collect::<Vec<_>>();
 
     let transport_summary = live_status_detail(&poll.transport);
     let was_session_active = state.session_active;
@@ -5569,11 +5617,78 @@ fn apply_active_poll_state(
         || previous_participants != state.participants
         || previous_status_badge != state.status_badge
         || previous_status_detail != state.status_detail;
-    let changed = changed
+    changed
         || previous_history != state.history
         || previous_community_presence != state.community_presence
-        || delivery_changed;
-    (attachments_to_cache, changed)
+        || delivery_changed
+}
+
+/// When a failed attachment download may be tried again.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AttachmentRetry {
+    failures: u32,
+    /// When the last attempt ended; orders retries fairly.
+    last_attempt_ms: f64,
+    next_attempt_ms: f64,
+}
+
+const ATTACHMENT_RETRY_FIRST_MS: f64 = 2_000.0;
+const ATTACHMENT_RETRY_MAX_MS: f64 = 30_000.0;
+
+/// Wait before retry number `failures`: 2 s, doubling, at most 30 s.
+fn attachment_retry_delay_ms(failures: u32) -> f64 {
+    let doublings = failures.saturating_sub(1).min(16) as i32;
+    (ATTACHMENT_RETRY_FIRST_MS * 2f64.powi(doublings)).min(ATTACHMENT_RETRY_MAX_MS)
+}
+
+/// The shown attachment that is not cached, is due a download and was
+/// tried least recently (never-tried first, then in message order),
+/// wherever its message sits relative to the poll cursor. Taking turns
+/// keeps attachments that keep failing from starving the others.
+fn next_attachment_to_cache(state: &AppState, now_ms: f64) -> Option<AttachmentView> {
+    let last_attempt = |attachment: &AttachmentView| {
+        state
+            .attachment_retry
+            .get(&attachment.attachment_id)
+            .map_or(f64::NEG_INFINITY, |retry| retry.last_attempt_ms)
+    };
+    state
+        .objects
+        .iter()
+        .filter_map(|object| object.attachment.as_ref())
+        .filter(|attachment| {
+            !state
+                .attachment_urls
+                .contains_key(&attachment.attachment_id)
+                && state
+                    .attachment_retry
+                    .get(&attachment.attachment_id)
+                    .is_none_or(|retry| retry.next_attempt_ms <= now_ms)
+        })
+        .min_by(|left, right| last_attempt(left).total_cmp(&last_attempt(right)))
+        .cloned()
+}
+
+/// After a download attempt: a cached attachment needs no retry; one that
+/// is still missing (failed, abandoned or dropped for a stale selection)
+/// waits longer each time before the next try.
+fn record_attachment_attempt(state: &mut AppState, attachment_id: &str, now_ms: f64) {
+    if state.attachment_urls.contains_key(attachment_id) {
+        state.attachment_retry.remove(attachment_id);
+        return;
+    }
+    let failures = state
+        .attachment_retry
+        .get(attachment_id)
+        .map_or(1, |retry| retry.failures.saturating_add(1));
+    state.attachment_retry.insert(
+        attachment_id.to_string(),
+        AttachmentRetry {
+            failures,
+            last_attempt_ms: now_ms,
+            next_attempt_ms: now_ms + attachment_retry_delay_ms(failures),
+        },
+    );
 }
 
 fn community_delivery_label(state: Option<CommunityDeliveryState>) -> Option<&'static str> {
@@ -5589,7 +5704,7 @@ fn apply_active_poll_if_current(
     state: &mut AppState,
     guard: &PollRequestGuard,
     mut poll: RoomPollView,
-) -> Option<(Vec<AttachmentView>, bool)> {
+) -> Option<bool> {
     if !selection_guard_matches(state, &guard.selection) {
         return None;
     }
@@ -5786,6 +5901,8 @@ fn load_state(session_storage: Option<&Storage>, config: &AppConfig) -> AppState
         active_sessions: Vec::new(),
         room_control: SummaryRoomControlView::default(),
         attachment_urls: BTreeMap::new(),
+        attachment_retry: BTreeMap::new(),
+        attachment_downloads_running: false,
         join_invite_url: None,
         direct: DirectUiState::default(),
         composer_conversation: None,
@@ -6061,11 +6178,17 @@ mod tests {
             community_presence: Some(choice.to_string()),
             ..shared_poll(1)
         };
-        assert!(apply_active_poll_state(&mut state, with_choice("requested")).1);
+        assert!(apply_active_poll_state(
+            &mut state,
+            with_choice("requested")
+        ));
         assert_eq!(state.community_presence.as_deref(), Some("requested"));
-        assert!(apply_active_poll_state(&mut state, with_choice("deferred")).1);
+        assert!(apply_active_poll_state(&mut state, with_choice("deferred")));
         assert_eq!(state.community_presence.as_deref(), Some("deferred"));
-        assert!(!apply_active_poll_state(&mut state, with_choice("deferred")).1);
+        assert!(!apply_active_poll_state(
+            &mut state,
+            with_choice("deferred")
+        ));
     }
 
     #[test]
@@ -6173,7 +6296,7 @@ mod tests {
             (Sending, Accepted, None, false),
         ] {
             assert_eq!(
-                apply_active_poll_state(&mut state, poll(delivery, vec![])).1,
+                apply_active_poll_state(&mut state, poll(delivery, vec![])),
                 changed
             );
             assert_eq!(state.latest_seq, 2);
@@ -6187,11 +6310,11 @@ mod tests {
             assert_eq!(state.objects[1].delivery_state, None);
             assert_eq!(state.direct, direct);
             assert_eq!(state.drafts, drafts);
-            assert!(!apply_active_poll_state(&mut state, poll(delivery, vec![])).1);
+            assert!(!apply_active_poll_state(&mut state, poll(delivery, vec![])));
         }
         let mut no_evidence = poll(Sending, vec![]);
         no_evidence.own_delivery.clear();
-        assert!(!apply_active_poll_state(&mut state, no_evidence).1);
+        assert!(!apply_active_poll_state(&mut state, no_evidence));
         assert_eq!(state.objects[0].delivery_state, Some(Accepted));
         assert_eq!(super::community_delivery_label(None), None);
     }
@@ -6364,11 +6487,7 @@ mod tests {
         }))
         .unwrap();
         super::record_own_shared_send(&mut state, sent);
-        assert!(
-            !apply_active_poll_if_current(&mut state, &older_guard, older_snapshot)
-                .unwrap()
-                .1
-        );
+        assert!(!apply_active_poll_if_current(&mut state, &older_guard, older_snapshot).unwrap());
         assert_eq!(state.last_applied_delivery_poll, newer_guard.request_number);
         assert_eq!(state.latest_seq, 1);
         assert_eq!(state.objects.len(), 2);
@@ -6384,9 +6503,7 @@ mod tests {
         // Nonterminal evidence remains reversible when the request is newer.
         let current_guard = begin_poll_request(&mut state);
         assert!(
-            apply_active_poll_if_current(&mut state, &current_guard, poll(older, vec![]))
-                .unwrap()
-                .1
+            apply_active_poll_if_current(&mut state, &current_guard, poll(older, vec![])).unwrap()
         );
         assert_eq!(state.objects[0].delivery_state, Some(older));
         assert_eq!(state.objects[1].delivery_state, Some(Sending));
@@ -6402,6 +6519,111 @@ mod tests {
     fn older_event_poll_cannot_replace_newer_nonterminal_delivery() {
         use super::CommunityDeliveryState::{Sending, Unknown};
         assert_nonterminal_poll_order(Unknown, Sending);
+    }
+
+    fn attachment_object(seq: u64, attachment_id: Option<&str>) -> ConversationObjectView {
+        ConversationObjectView {
+            delivery_state: None,
+            seq,
+            created_at: 100 + seq,
+            sender: "Peer".into(),
+            sender_ref: None,
+            sender_profile_verified: Some(true),
+            from_current_session: false,
+            kind: if attachment_id.is_some() {
+                ConversationObjectKind::Attachment
+            } else {
+                ConversationObjectKind::Text
+            },
+            body: None,
+            emoji: None,
+            link: None,
+            attachment: attachment_id.map(|attachment_id| super::AttachmentView {
+                attachment_id: attachment_id.into(),
+                file_name: "photo.png".into(),
+                mime_type: "image/png".into(),
+                size_bytes: 3,
+                is_image: true,
+                is_audio: false,
+                is_video: false,
+            }),
+        }
+    }
+
+    #[test]
+    fn attachments_that_keep_failing_cannot_starve_a_later_one() {
+        let mut state = AppState::default();
+        let mut poll = shared_poll(3);
+        poll.transport.configured = true;
+        poll.objects = vec![
+            attachment_object(1, Some("att-a")),
+            attachment_object(2, Some("att-b")),
+            attachment_object(3, Some("att-c")),
+        ];
+        apply_active_poll_state(&mut state, poll);
+        // Each attempt on A and B runs into the 60 s deadline, longer than
+        // the 30 s backoff cap, so one is always due again when the other
+        // ends. C downloads on its first attempt.
+        let mut now = 0.0;
+        let mut attempts = Vec::new();
+        while !state.attachment_urls.contains_key("att-c") && attempts.len() < 10 {
+            let attachment = super::next_attachment_to_cache(&state, now).expect("one is due");
+            now += 60_000.0;
+            if attachment.attachment_id == "att-c" {
+                state
+                    .attachment_urls
+                    .insert("att-c".into(), "data:image/png;base64,AAAA".into());
+            }
+            super::record_attachment_attempt(&mut state, &attachment.attachment_id, now);
+            attempts.push(attachment.attachment_id);
+        }
+        assert_eq!(attempts, ["att-a", "att-b", "att-c"]);
+        // Afterwards A and B take turns, least recently tried first.
+        let next = super::next_attachment_to_cache(&state, now).unwrap();
+        assert_eq!(next.attachment_id, "att-a");
+        super::record_attachment_attempt(&mut state, "att-a", now + 60_000.0);
+        let next = super::next_attachment_to_cache(&state, now + 60_000.0).unwrap();
+        assert_eq!(next.attachment_id, "att-b");
+    }
+
+    #[test]
+    fn failed_attachment_is_retried_with_backoff_after_the_cursor_moves_past_it() {
+        let object = attachment_object;
+        let mut state = AppState::default();
+        let mut first = shared_poll(1);
+        first.transport.configured = true;
+        first.objects = vec![object(1, Some("att-1"))];
+        apply_active_poll_state(&mut state, first);
+        let next = |state: &AppState, now| {
+            super::next_attachment_to_cache(state, now).map(|attachment| attachment.attachment_id)
+        };
+        assert_eq!(next(&state, 0.0).as_deref(), Some("att-1"));
+
+        // The download fails; later polls carry only newer rows.
+        super::record_attachment_attempt(&mut state, "att-1", 1_000.0);
+        let mut later = shared_poll(2);
+        later.transport.configured = true;
+        later.objects = vec![object(2, None)];
+        apply_active_poll_state(&mut state, later);
+        assert_eq!(state.latest_seq, 2);
+        assert_eq!(next(&state, 2_999.0), None, "retry waits for its backoff");
+        assert_eq!(next(&state, 3_000.0).as_deref(), Some("att-1"));
+        super::record_attachment_attempt(&mut state, "att-1", 3_000.0);
+        assert_eq!(next(&state, 6_999.0), None, "the second wait is longer");
+        assert_eq!(next(&state, 7_000.0).as_deref(), Some("att-1"));
+
+        // Home answers: the attachment is cached and leaves the retry list.
+        state
+            .attachment_urls
+            .insert("att-1".into(), "data:image/png;base64,AAAA".into());
+        super::record_attachment_attempt(&mut state, "att-1", 7_000.0);
+        assert!(state.attachment_retry.is_empty());
+        assert_eq!(next(&state, 7_000.0), None);
+
+        assert_eq!(super::attachment_retry_delay_ms(1), 2_000.0);
+        assert_eq!(super::attachment_retry_delay_ms(4), 16_000.0);
+        assert_eq!(super::attachment_retry_delay_ms(5), 30_000.0);
+        assert_eq!(super::attachment_retry_delay_ms(u32::MAX), 30_000.0);
     }
 
     #[test]
@@ -6443,10 +6665,10 @@ mod tests {
         let mut late = shared_poll(8);
         late.transport.configured = true;
         late.objects = vec![object(2, 150)];
-        assert!(apply_active_poll_state(&mut state, late.clone()).1);
+        assert!(apply_active_poll_state(&mut state, late.clone()));
         assert_eq!(state.latest_seq, 11);
         assert_eq!(order(&state), vec![10, 11, 2, 1, 9]);
-        assert!(!apply_active_poll_state(&mut state, late).1);
+        assert!(!apply_active_poll_state(&mut state, late));
         assert_eq!(state.objects.len(), 5);
     }
 
@@ -6462,7 +6684,7 @@ mod tests {
                 status: status.into(),
                 detail: format!("History {status}."),
             });
-            assert!(apply_active_poll_state(&mut state, poll).1);
+            assert!(apply_active_poll_state(&mut state, poll));
             assert_eq!(state.history.as_ref().unwrap().status, status);
             assert!(state.session_active);
             assert!(!state.reconnect_needed);
@@ -6533,6 +6755,64 @@ mod tests {
     }
 
     #[test]
+    fn exhausted_runtime_poll_and_summary_show_restart_guidance_in_home() {
+        let mut state = two_direct_conversations();
+        state.session_active = true;
+        state
+            .drafts
+            .insert(None, ("Keep my Community draft".into(), 1));
+        state.direct.selected_conversation_id = Some("direct:sha256:a".into());
+        let direct = state.direct.clone();
+        let drafts = state.drafts.clone();
+        let detail = "Community can't connect. Restart Home to reconnect.";
+        let mut poll = shared_poll(0);
+        poll.transport = serde_json::from_value(serde_json::json!({
+            "configured": true,
+            "available": false,
+            "community_joined": true,
+            "status": detail
+        }))
+        .unwrap();
+        let mut transport = poll.transport.clone();
+        apply_active_poll_state(&mut state, poll);
+        assert_eq!(state.community_state, CommunityState::RecoveryExhausted);
+        assert_eq!(state.community_state.as_str(), "recovery_exhausted");
+        assert_eq!(state.community_state.label(), detail);
+        assert_eq!(state.status_badge, detail);
+        assert_eq!(state.status_detail, detail);
+        assert!(!state.community_send_enabled());
+        assert_eq!(state.direct, direct);
+        assert_eq!(state.drafts, drafts);
+        assert!(render_projection(&state, true).direct_mode);
+
+        // Runtime membership and availability keep priority over status copy.
+        for (configured, available, joined, expected) in [
+            (true, true, Some(true), CommunityState::Live),
+            (true, false, Some(false), CommunityState::Left),
+            (false, false, None, CommunityState::NotJoined),
+            (true, false, Some(true), CommunityState::RecoveryExhausted),
+        ] {
+            transport.configured = configured;
+            transport.available = available;
+            transport.community_joined = joined;
+            let mut summary: SummaryView = serde_json::from_value(serde_json::json!({
+                "room_slug": "chat-room", "pending_count": 0, "active_session_count": 1
+            }))
+            .unwrap();
+            summary.transport = transport.clone();
+            super::apply_summary_state(&mut state, &summary, AccessMode::Shell);
+            assert_eq!(state.community_state, expected);
+            assert_eq!(state.status_badge, expected.label());
+            assert_eq!(
+                state.community_send_enabled(),
+                expected == CommunityState::Live
+            );
+            assert_eq!(state.direct, direct);
+            assert_eq!(state.drafts, drafts);
+        }
+    }
+
+    #[test]
     fn community_leave_gates_only_shared_controls_and_keeps_drafts_and_direct_selection() {
         let mut state = two_direct_conversations();
         state.drafts.insert(None, ("saved Shared draft".into(), 1));
@@ -6541,7 +6821,7 @@ mod tests {
         let mut left = shared_poll(0);
         left.transport.configured = true;
         left.transport.community_joined = Some(false);
-        assert!(apply_active_poll_state(&mut state, left).1);
+        assert!(apply_active_poll_state(&mut state, left));
         assert_eq!(state.community_state, CommunityState::Left);
         assert!(!state.show_participants);
         assert_eq!(
@@ -6572,7 +6852,7 @@ mod tests {
         joined.transport.configured = true;
         joined.transport.available = true;
         joined.transport.community_joined = Some(true);
-        assert!(apply_active_poll_state(&mut state, joined).1);
+        assert!(apply_active_poll_state(&mut state, joined));
         assert_eq!(state.community_state, CommunityState::Live);
         assert!(
             chat_control_policy(
@@ -7506,8 +7786,7 @@ mod tests {
 
         // This is display defense only: configured shared Chat refuses to
         // render rows not already marked verified by the server projection.
-        let (_attachments, changed) = apply_active_poll_state(&mut state, poll);
-        assert!(changed);
+        assert!(apply_active_poll_state(&mut state, poll));
         assert!(state.collaboration_configured);
         assert_eq!(state.participants.len(), 1);
         assert_eq!(state.participants[0].display_name, "Owner");
@@ -7688,9 +7967,7 @@ mod tests {
         }))
         .unwrap();
 
-        let (attachments, changed) = apply_active_poll_state(&mut state, start.poll);
-        assert!(attachments.is_empty());
-        assert!(changed);
+        assert!(apply_active_poll_state(&mut state, start.poll));
         assert!(state.session_active);
 
         assert_eq!(
@@ -8422,18 +8699,36 @@ async fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A request Home has not answered by its deadline is abandoned: the caller
+/// reports it and the next poll tick asks again, so one stalled connection
+/// can neither freeze Chat nor hold a browser connection slot.
+fn request_deadline(milliseconds: u32) -> AbortSignal {
+    AbortSignal::timeout_with_u32(milliseconds)
+}
+
+fn request_error(error: gloo_net::Error, deadline: Option<&AbortSignal>) -> String {
+    if deadline.is_some_and(AbortSignal::aborted) {
+        REQUEST_DEADLINE_ERROR.to_string()
+    } else {
+        error.to_string()
+    }
+}
+
 async fn api_post_json<TReq: Serialize, TResp: DeserializeOwned>(
     path: &str,
     body: &TReq,
 ) -> Result<TResp, String> {
-    api_post_json_with_headers(path, body, &[]).await
+    api_post_json_with_headers(path, body, &[], None).await
 }
 
 async fn direct_get_json<T: DeserializeOwned>(
     path: &str,
     extra_headers: &[(&str, String)],
 ) -> Result<T, u16> {
-    let mut request = Request::get(path).credentials(RequestCredentials::SameOrigin);
+    let deadline = request_deadline(REQUEST_DEADLINE_MS);
+    let mut request = Request::get(path)
+        .credentials(RequestCredentials::SameOrigin)
+        .abort_signal(Some(&deadline));
     for (name, value) in extra_headers {
         request = request.header(name, value);
     }
@@ -8476,12 +8771,18 @@ async fn direct_post_json<TReq: Serialize, TResp: DeserializeOwned>(
         .map_err(|_| failure(500))
 }
 
+/// `deadline_ms` bounds only requests a later tick repeats (the poll); a
+/// send is never abandoned, because Home may still deliver it.
 async fn api_post_session_json<TReq: Serialize, TResp: DeserializeOwned>(
     path: &str,
     body: &TReq,
     extra_headers: &[(&str, String)],
+    deadline_ms: Option<u32>,
 ) -> Result<TResp, String> {
-    let mut request = Request::post(path).credentials(RequestCredentials::SameOrigin);
+    let deadline = deadline_ms.map(request_deadline);
+    let mut request = Request::post(path)
+        .credentials(RequestCredentials::SameOrigin)
+        .abort_signal(deadline.as_ref());
     for (name, value) in extra_headers {
         request = request.header(name, value);
     }
@@ -8490,7 +8791,7 @@ async fn api_post_session_json<TReq: Serialize, TResp: DeserializeOwned>(
         .map_err(|err| err.to_string())?
         .send()
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| request_error(err, deadline.as_ref()))?;
     if !response.ok() {
         let body = response.text().await.unwrap_or_default();
         return Err(format!("request failed: {} {}", response.status(), body));
@@ -8498,23 +8799,32 @@ async fn api_post_session_json<TReq: Serialize, TResp: DeserializeOwned>(
     response
         .json::<TResp>()
         .await
-        .map_err(|err| err.to_string())
+        .map_err(|err| request_error(err, deadline.as_ref()))
 }
 
 async fn api_get_session_bytes(
     path: &str,
     extra_headers: &[(&str, String)],
 ) -> Result<Vec<u8>, String> {
-    let mut request = Request::get(path).credentials(RequestCredentials::SameOrigin);
+    let deadline = request_deadline(ATTACHMENT_DEADLINE_MS);
+    let mut request = Request::get(path)
+        .credentials(RequestCredentials::SameOrigin)
+        .abort_signal(Some(&deadline));
     for (name, value) in extra_headers {
         request = request.header(name, value);
     }
-    let response = request.send().await.map_err(|err| err.to_string())?;
+    let response = request
+        .send()
+        .await
+        .map_err(|err| request_error(err, Some(&deadline)))?;
     if !response.ok() {
         let body = response.text().await.unwrap_or_default();
         return Err(format!("request failed: {} {}", response.status(), body));
     }
-    response.binary().await.map_err(|err| err.to_string())
+    response
+        .binary()
+        .await
+        .map_err(|err| request_error(err, Some(&deadline)))
 }
 
 async fn api_post_session_bytes<TResp: DeserializeOwned>(
@@ -8549,24 +8859,38 @@ async fn api_get_json_with_headers<T: DeserializeOwned>(
     path: &str,
     extra_headers: &[(&str, String)],
 ) -> Result<T, String> {
-    let mut request = Request::get(path).credentials(RequestCredentials::SameOrigin);
+    let deadline = request_deadline(REQUEST_DEADLINE_MS);
+    let mut request = Request::get(path)
+        .credentials(RequestCredentials::SameOrigin)
+        .abort_signal(Some(&deadline));
     for (name, value) in extra_headers {
         request = request.header(name, value);
     }
-    let response = request.send().await.map_err(|err| err.to_string())?;
+    let response = request
+        .send()
+        .await
+        .map_err(|err| request_error(err, Some(&deadline)))?;
     if !response.ok() {
         let body = response.text().await.unwrap_or_default();
         return Err(format!("request failed: {} {}", response.status(), body));
     }
-    response.json::<T>().await.map_err(|err| err.to_string())
+    response
+        .json::<T>()
+        .await
+        .map_err(|err| request_error(err, Some(&deadline)))
 }
 
+/// `deadline_ms` as for [`api_post_session_json`].
 async fn api_post_json_with_headers<TReq: Serialize, TResp: DeserializeOwned>(
     path: &str,
     body: &TReq,
     extra_headers: &[(&str, String)],
+    deadline_ms: Option<u32>,
 ) -> Result<TResp, String> {
-    let mut request = Request::post(path).credentials(RequestCredentials::SameOrigin);
+    let deadline = deadline_ms.map(request_deadline);
+    let mut request = Request::post(path)
+        .credentials(RequestCredentials::SameOrigin)
+        .abort_signal(deadline.as_ref());
     for (name, value) in extra_headers {
         request = request.header(name, value);
     }
@@ -8575,7 +8899,7 @@ async fn api_post_json_with_headers<TReq: Serialize, TResp: DeserializeOwned>(
         .map_err(|err| err.to_string())?
         .send()
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| request_error(err, deadline.as_ref()))?;
     if !response.ok() {
         let body = response.text().await.unwrap_or_default();
         return Err(format!("request failed: {} {}", response.status(), body));
@@ -8583,7 +8907,7 @@ async fn api_post_json_with_headers<TReq: Serialize, TResp: DeserializeOwned>(
     response
         .json::<TResp>()
         .await
-        .map_err(|err| err.to_string())
+        .map_err(|err| request_error(err, deadline.as_ref()))
 }
 
 async fn api_post_empty_json_with_headers<TResp: DeserializeOwned>(

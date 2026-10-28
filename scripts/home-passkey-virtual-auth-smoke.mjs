@@ -43,10 +43,12 @@ const CHECK_SHELL_SWITCH = process.env.HOME_VIRTUAL_AUTH_SHELL_SWITCH !== "0";
 const CHECK_SYSTEM = process.env.HOME_VIRTUAL_AUTH_SYSTEM !== "0";
 // The installed-release CI journey (scripts/update-hop-compare.py): the published release's
 // System installs a release whose support changed and Home reconnects; on the new release
-// System refuses a tampered offer and applies the next one; the runner undoes it.
+// System refuses a tampered offer, shows the install command for a release with a component
+// kind it does not know, and applies the next one; the runner undoes it.
 const SYSTEM_UPDATE_DIR = process.env.HOME_VIRTUAL_AUTH_UPDATE_DIR || "";
 const [SYSTEM_UPDATE_CURRENT = "", SYSTEM_UPDATE_NEW = "", SYSTEM_UPDATE_NEXT = ""] =
   (process.env.HOME_VIRTUAL_AUTH_UPDATE_VERSIONS || "").split(" ");
+const SYSTEM_UPDATE_INSTALL_COMMAND = process.env.HOME_VIRTUAL_AUTH_UPDATE_INSTALL_COMMAND || "";
 const CHECK_BROWSER_SUMMARY =
   process.env.HOME_VIRTUAL_AUTH_BROWSER_SUMMARY === "1" ||
   process.env.HOME_VIRTUAL_AUTH_BROWSER_OPEN === "1";
@@ -4388,8 +4390,8 @@ async function launchSystem(page, homeToken, passkey) {
 }
 
 async function checkSystemUpdate(page, passkey) {
-  assert(SYSTEM_UPDATE_CURRENT && SYSTEM_UPDATE_NEW && SYSTEM_UPDATE_NEXT,
-    "System update check needs the published, new and next version");
+  assert(SYSTEM_UPDATE_CURRENT && SYSTEM_UPDATE_NEW && SYSTEM_UPDATE_NEXT && SYSTEM_UPDATE_INSTALL_COMMAND,
+    "System update check needs the published, new and next version and the publisher's install command");
   let shownFrame = null;
   // Home may remount System after a restart; always read the live System window.
   const read = async () => {
@@ -4447,6 +4449,9 @@ async function checkSystemUpdate(page, passkey) {
     && state.changes === `Fixture ${publication}`;
   const upToDate = (version) => (state) => state.shown && !state.offer
     && state.status === "Home is up to date." && state.installed_version === version;
+  // System reloaded by its own update says the Home page above it still runs the old code.
+  const updatedTo = (version) => (state) => state.shown && !state.offer
+    && state.status === `Updated to ${version}. Reload Home to finish.` && state.installed_version === version;
   const approve = async () => {
     const frame = capsuleFrameForTarget(page, "system");
     await frame.evaluate(() => { window.__elastosUpdateWindowMarker = true; });
@@ -4480,7 +4485,7 @@ async function checkSystemUpdate(page, passkey) {
   await reach("new-offer", offered("new", SYSTEM_UPDATE_CURRENT, SYSTEM_UPDATE_NEW),
     "System did not offer the new release");
   await approve();
-  const updated = await reach("updated", upToDate(SYSTEM_UPDATE_NEW),
+  const updated = await reach("updated", updatedTo(SYSTEM_UPDATE_NEW),
     "System did not reconnect on the new release", 300);
   await waitForSignedHome(page, 60_000);
   await sameAccount("Home session did not survive the System update to the new release");
@@ -4494,10 +4499,20 @@ async function checkSystemUpdate(page, passkey) {
     && state.installed_version === SYSTEM_UPDATE_NEW && state.can_apply
     && state.status !== "" && state.status !== tampered.status,
   "System did not show the refusal on the current version in the same window");
+  // A signed release with a component kind this Runtime does not know (#89): the same window
+  // shows the publisher's install command on the current version, never "not valid", and
+  // Update stays usable. update-hop-compare.py checks the controller and the installed files.
+  await reach("installer-offer", offered("unknown-kind", SYSTEM_UPDATE_NEW, SYSTEM_UPDATE_NEXT),
+    "System did not offer the release with an unknown component kind");
+  await approve();
+  const installerRequired = await reach("installer-required", (state) => state.shown && state.same_window
+    && state.current_version === SYSTEM_UPDATE_NEW && state.installed_version === SYSTEM_UPDATE_NEW && state.can_apply
+    && state.status.includes(SYSTEM_UPDATE_INSTALL_COMMAND) && !state.status.includes("not valid"),
+  "System did not show the install command on the current version in the same window", 300);
   const nextOffer = await reach("next-offer", offered("next", SYSTEM_UPDATE_NEW, SYSTEM_UPDATE_NEXT),
     "System did not offer the next signed version");
   await approve();
-  const nextUpdated = await reach("next-updated", upToDate(SYSTEM_UPDATE_NEXT), "System did not reconnect on the next version");
+  const nextUpdated = await reach("next-updated", updatedTo(SYSTEM_UPDATE_NEXT), "System did not reconnect on the next version");
   // Home reconnected by itself: no navigation, and the same account is signed in.
   await waitForSignedHome(page, 60_000);
   const token = await sameAccount("Home session did not survive the System update");
@@ -4512,8 +4527,8 @@ async function checkSystemUpdate(page, passkey) {
   assert(after.ok && after.body?.appearance?.theme === "light", "Undo lost the account preference", after);
   const undone = { theme: after.body.appearance.theme, revision: after.body.appearance.revision, same_account: true };
   record("undone", undone);
-  return { up_to_date: upToDateCurrent, updated, tampered, refused, next_offer: nextOffer, next_updated: nextUpdated,
-    undone, same_account: true };
+  return { up_to_date: upToDateCurrent, updated, tampered, refused, installer_required: installerRequired,
+    next_offer: nextOffer, next_updated: nextUpdated, undone, same_account: true };
 }
 
 async function readRecoveryExportDownload(download, expected) {
