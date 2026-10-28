@@ -1684,7 +1684,16 @@ fn operations_section_cites_existing_tests() {
                     if stack.len() == 1 {
                         let token_len = cursor.len() - after.len();
                         let content = &cursor[1..token_len - 1];
-                        if after.trim_start().starts_with(':') {
+                        let mut after_key = after.trim_start();
+                        while let Some((
+                            after_comment,
+                            Opaque::LineComment | Opaque::BlockComment,
+                        )) =
+                            skip_opaque(after_key).map_err(|reason| format!("{label}: {reason}"))?
+                        {
+                            after_key = after_comment.trim_start();
+                        }
+                        if after_key.starts_with(':') {
                             if !is_json_key(content) {
                                 return Err(format!(
                                     "{label}: unsupported key `{content}` in the `json!({{` body"
@@ -2695,6 +2704,50 @@ fn operations_section_cites_existing_tests() {
         ),
         "ok_response: has a second `json!({` literal"
     );
+
+    // Comments between a key and its colon keep the key in the comparison.
+    for comment in [
+        "/* comment */",
+        "// comment\n",
+        "/* outer /* inner */ comment */",
+        "/* first */ // second\n /* third */",
+    ] {
+        let arm = format!(
+            "ProviderOperation::Shutdown => Ok(ok_response(json!({{\"shutdown\": true, \"extra\" {comment} : true}}))),\n"
+        );
+        assert_eq!(
+            outputs_failure(
+                &outputs_row("shutdown", shutdown_outputs),
+                answers_contract,
+                answers_state,
+                &arm,
+            ),
+            "operation `shutdown` ok keys after `data` are [\"shutdown\"]; the `Shutdown` keys are [\"shutdown\", \"extra\"]",
+            "an extra key followed by {comment:?} must reach the Outputs comparison"
+        );
+        let matching_arm =
+            answers_execution.replace("\"shutdown\":", &format!("\"shutdown\" {comment} :"));
+        assert_eq!(
+            operations_outputs_match_the_answers(
+                &outputs_row("shutdown", shutdown_outputs),
+                answers_contract,
+                answers_state,
+                &matching_arm,
+            ),
+            Ok(()),
+            "a documented key followed by {comment:?} must still match"
+        );
+        assert_eq!(
+            outputs_failure(
+                &outputs_row("shutdown", shutdown_outputs),
+                answers_contract,
+                answers_state,
+                &arm.replace("\"extra\"", "\"extra-key\""),
+            ),
+            "Shutdown: unsupported key `extra-key` in the `json!({` body",
+            "an unsupported key followed by {comment:?} must still be refused"
+        );
+    }
 
     // An unsupported key is refused, not dropped, so an extra name fails.
     let extra_key_arm =
