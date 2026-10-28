@@ -1,0 +1,11 @@
+[package]
+name = "redteam-audit-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dev-dependencies]
+wasm-capsule-audit = { path = "../wasm-capsule/audit" }
+wat = "=1.258.0"
