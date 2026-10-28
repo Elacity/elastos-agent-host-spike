@@ -5,6 +5,7 @@
 - PR #247 (task 021), merge 6fe61d88e: Verdict: FOLLOWUP (citations: 69 checked, 69 match)
 - FOLLOWUP: lab/capsule-identity/GAP-REPORT.md:848 says the lab "sits in no admission or launch path", but since task 032 (PR #587, merge 58fe29b8a) README says only "no Runtime admission or launch path" and that the lab's stand-in launcher, in test code, calls it; hand check: `sed -n 845,849p lab/capsule-identity/GAP-REPORT.md` against `sed -n 14,17p lab/capsule-identity/README.md`, and `git show 58fe29b8a^1:lab/capsule-identity/README.md | sed -n 16p` (the old wording) against `git show 58fe29b8a:lab/capsule-identity/README.md | sed -n 16p`. Closed by task 038.
 - PR #657 (task 033), merge f94d89ac6: Verdict: PASS (added by task 039; runner at c6e2d58d5: `summary: 3 CAUGHT of 3`; citations: 13 checked, 13 match)
+- PR #730 (task 035), merge 1503ac6f4: Verdict: FOLLOWUP, and PR #757 (task 036), merge b7c613a10: Verdict: PASS (added by task 041; runner at 9bd839491: F-CI35 `summary: 3 CAUGHT of 3`, F-CI36 `summary: 2 CAUGHT of 2`)
 
 Why: Flint's 27 Oct 12:06 note (Sasha's "nothing idle", to reopen and close S1 after
 Rong's review rong-20261027-1010) asks the claude and cursor pair to re-read three merges
@@ -484,3 +485,279 @@ test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 #657 now has two reviews, Cursor's merge review and this record, so both B1 stand-in merges,
 #587 and #657, have two; the Runtime did nothing here: no Runtime code ran, launched, checked,
 refused or granted anything.
+
+## PR #730 (task 035), merge 1503ac6f4
+
+Added by task 041, on 2026-10-27. Flint's URGENT M1 note of 27 Oct 11:10 sets one bar for
+each M1 check through the lab stand-in: a full journey, a refusal with a reason plus a CAUGHT
+falsifier, a planted stub that returns Ok without doing the work must FAIL, and two
+independent reviews. #730 had one reviewer only: Cursor, PASS in round 3 (round 2 failed the
+test gate because of an orphaned runner, not a review). #757 (next section) had one reviewer
+only too: Cursor, PASS in round 1. Task 039 covered #657; this task covers these two.
+
+Base commit of this section and the next: `9bd83949183e18ee4f343ef830af0e7467e78b3c`
+(`9bd839491`). Each merge is judged as merged, with `git show <merge>:<path>` (written
+"M:line" below). Then each promise says "still true at 9bd839491" (written "B:line"), or
+which later change moved it, from `git log --oneline --first-parent <merge>..HEAD -- <file>`:
+036 (PR #757, `b7c613a10`), 037 (`dd84ef2fe`, PR #782, done in the batch and still open),
+038 (`c6e2d58d5`, `GAP-REPORT.md` only) and 039 (`9bd839491`, this file only). This section
+fixes nothing.
+
+Verdict: FOLLOWUP
+
+Lane diff: `git diff 1503ac6f4^1 1503ac6f4 -- lab/capsule-identity/` (6 files, +283 -20):
+`GAP-REPORT.md`, `LOG.md`, `README.md`, `falsifiers.json`, `tests/common/mod.rs` and
+`tests/stand_in.rs`.
+
+- Promise 1 (`Instance.asks`, set once at launch from the checked bundle; `asks_of`; keys
+  kept). At the merge, `tests/common/mod.rs` has `asks: Option<Vec<u8>>` in `Instance`
+  (M:1407), set only in `launch` (M:1572, M:1578) from `post_capsules`'s
+  `let (name, asks) = self.checked_launch(body)...` (M:1458-1459). `checked_launch` answers
+  `signed_asks(&checked)` (M:1544) on the `CheckedBundle` of the one walk (M:1536), after
+  every check; `signed_asks` (M:1614-1620) takes the content of the `asks.json` entry from
+  `entries()`, or `None`. Checked: no `fs::read` in `StandInRuntime` (M:1391-1620; the
+  file's `fs::read` lines all come before M:1100), so nothing reads the folder again.
+  `asks_of` (M:1515-1519) has the doc "Lab test seam, not a route" (M:1510) and answers
+  `None` for an unknown session (`find` then `and_then`). The answer keys are asserted in
+  `tests/stand_in.rs` M:468; the body stays `{"cid"}` (`launch_body`, M:65). Still true at
+  9bd839491: B:1411, B:1591, B:1597, B:1461-1463, B:1544, B:1541, B:1620-1625, B:1519-1523
+  and the doc B:1514; 036 changed only the name half of the answer (B:1544), and 037 only
+  the `StandInRuntime` doc, which now lists `asks_of` as a lab test seam (B:1376).
+- Promise 2 (`standin_hands_an_instance_only_its_signed_asks_bytes`). At the merge
+  (`tests/stand_in.rs` M:392), it compares `asks_of` with the committed
+  `fixtures/agent-host/asks.json`, changes one byte on disk (`change_stored_asks`, M:383),
+  asserts `asks_of` still answers the signed bytes (M:411), a second launch refused with
+  the name compare's own text, built from `check_name` and naming both CIDs (M:426), one
+  listed instance (M:428) and an empty grant view (M:429). Still true at 9bd839491: the
+  test and its helper are the same text at B:513-561 (`diff` of the two ranges prints
+  nothing). The run below gives `ok` for it. This review's FOLLOWUP is on what the test can
+  catch: see the GAP-REPORT bullet below.
+- Promise 3 (`standin_gives_each_session_its_own_asks`). At the merge (M:433), `agent-host`
+  and a signed `web-app` with no `asks.json` (asserted by its entries) are launched in both
+  orders with fresh keys; `agent-host`'s session answers its bytes, `web-app`'s `None`
+  (M:487), an unknown session `None` (M:492), two instances, an empty view (M:495). Still
+  true at 9bd839491 (B:563, same text).
+- Promise 4 (F-CI35a, F-CI35b, F-CI35c, each CAUGHT). At the merge, each edits only
+  `../../lab/capsule-identity/tests/common/mod.rs`: F-CI35a turns `asks_of` into a read of
+  `asks.json` from the stored folder at call time (anchor M:1519), F-CI35b answers the first
+  instance (M:1518), F-CI35c answers `Some(Vec::new())` (M:1619). The three entries are the
+  same at b7c613a10 and at 9bd839491, and their anchors are B:1523, B:1522 and B:1625.
+  Runner result at 9bd839491: `summary: 3 CAUGHT of 3` (raw lines below).
+- Promise 5 (README part "Asks come only from the signed bytes (M1 check B2, no-schema
+  part)"). At the merge, the heading is README M:1408, the rule M:1410-1419 ("Nothing reads
+  the folder again", M:1415), the three rule rows M:1434-1436 and "Not shown" M:1438-1445;
+  the interface row "asks read `asks_of`" is M:1377. Its outside claim, "#309 has no asks
+  field on any route (RA-1 to RA-7)", was checked with `git grep -i` at `513988ebd` over
+  `lab/runtime-asks/`: no `asks.json`, no `"asks"` key and no asks field in any of the
+  seven files. The text 035 added holds no `path:line` citation (0 checked). Still true at
+  9bd839491: heading B:1436, row B:1404, rules B:1462-1464, "Not shown" B:1466-1473; 036
+  (b7c613a10) changed one sentence of the rule to name `CheckedBundle::manifest_name()` for
+  the name (B:1439-1442), with no change to what it says about the asks.
+- Promise 6 (one dated B2 sentence in GAP-REPORT's B1 and B2 section). At the merge, it is
+  `GAP-REPORT.md` M:837-843, the last paragraph of "B1 and B2 (Anders, 26 Oct)" (M:778),
+  with its "not shown". Its references, each checked with `git show 1503ac6f4`: the stand-in
+  is the next section (M:845, "B1 through a lab stand-in"); both tests exist
+  (`tests/stand_in.rs` M:392, M:433); README's section heading is M:1408 word for word;
+  `lab/bus-v2-proposal/` exists (`git ls-tree`); "no grant from an ask" holds (M:429,
+  M:495); "a stub that reads the folder again fails" does not hold in general: 7 checked,
+  6 match. By hand at 9bd839491: with `checked_launch` answering
+  `fs::read(folder.join(ASKS_FILE)).ok()` in place of `signed_asks(&checked)` (a second read
+  of the folder, made at launch), both named tests still pass (`test result: ok. 2 passed`),
+  and the file was put back (same sha256, `git status --short` empty). Only a re-read at
+  call time, F-CI35a, fails. Still true at 9bd839491: B:837-843, word for word.
+- Promise 7 (`about`, count, no `src/lib.rs`, `Cargo.toml` or `Cargo.lock` change). At the
+  merge, `about` ends "032, 033 and 035)", the list holds 257 entries
+  (`grep -c '"id": "F-CI'`), README M:1600 says 257, and `git diff --stat 1503ac6f4^1
+  1503ac6f4 -- lab/capsule-identity/src lab/capsule-identity/Cargo.toml
+  lab/capsule-identity/Cargo.lock` prints nothing. The LOG line is M:29 (B:29, unchanged).
+  At 9bd839491 `about` ends "036 and 037)", the list holds 262 and README B:1628 says 262;
+  `tests/inventory.rs` passes in the full run below. The LOG line's whole-list result (257
+  of 257) was not rerun here, only F-CI35.
+
+FOLLOWUP: lab/capsule-identity/GAP-REPORT.md:839 says "a stub that reads the folder again fails", but only a re-read when `asks_of` is called (F-CI35a) fails; a stub that reads `asks.json` from the stored folder again at launch passes both named tests, because no test changes the folder between the walk and the launch; hand check: in `lab/capsule-identity/tests/common/mod.rs:1544` replace `signed_asks(&checked)` with `fs::read(folder.join(ASKS_FILE)).ok()`, run `RUST_TEST_THREADS=2 cargo test --locked --offline --manifest-path lab/capsule-identity/Cargo.toml --test stand_in -- standin_hands_an_instance_only_its_signed_asks_bytes standin_gives_each_session_its_own_asks` (`test result: ok. 2 passed`), then put the file back.
+
+Principles check:
+
+1. Named by hash: yes. The asks come from the bundle whose lab CID was recomputed and
+   compared with the requested CID before the record check (`tests/common/mod.rs:1536-1544`
+   at 1503ac6f4).
+2. No ambient authority: yes. Asks are bytes in a record and give no grant; the view stays
+   empty after the launch (`tests/stand_in.rs:429`, `:495` at 1503ac6f4); no capsule, Home
+   or UI code changes.
+3. One path: yes. The asks come from `entries()` of the one walk, with no second read
+   (`tests/common/mod.rs:1614-1620` at 1503ac6f4); the limit of the tests on this rule is
+   the FOLLOWUP above, not a second path in the code.
+4. Trusted core: not affected. No `elastos/`, `src/lib.rs`, `Cargo.toml` or `Cargo.lock`
+   change (`git diff --stat 1503ac6f4^1 1503ac6f4`); the code is test code
+   (`tests/common/mod.rs:1391` at 1503ac6f4).
+5. Fails closed: not affected. 035 adds no refusal; an unknown session or a bundle with no
+   `asks.json` answers `None` (`tests/common/mod.rs:1515-1519` at 1503ac6f4).
+6. Self-contained: not affected. No capsule code; the stand-in runs nothing
+   (`tests/common/mod.rs:1391` at 1503ac6f4).
+7. Tests prove it: yes. Two named tests (`tests/stand_in.rs:392`, `:433` at 1503ac6f4) and
+   three falsifiers, run at the base: `summary: 3 CAUGHT of 3`; one stub they cannot catch
+   is the FOLLOWUP above.
+8. Separate decisions: yes. What the bundle asks for (identity data in the signed bytes) is
+   kept apart from a grant (allowance): a launch with asks leaves the grant view empty
+   (`tests/stand_in.rs:429` at 1503ac6f4).
+
+Commands and raw results for this section and the next, all at 9bd839491 on this Mac
+(Python 3.9.6, rustc 1.91.0), holding the build lease (`.git/local-ai-heavy-build.lock`,
+free: its recorded holder had exited; taken after 0 s), with `RUST_TEST_THREADS=2
+CARGO_INCREMENTAL=0`. After the runner and the hand check, `git status --short` printed
+nothing.
+
+`python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json F-CI35`
+(exit 0):
+
+```
+baseline: 2 named tests pass without an edit, 0 do not
+F-CI35a CAUGHT                            11s  the planted accept-anything stub: asks_of reads asks.json from the stored folder at call time, so a change on disk after launch reaches the instance
+F-CI35b CAUGHT                            14s  asks_of ignores the session and answers the first instance's asks
+F-CI35c CAUGHT                            27s  a bundle with no asks.json is handed Some(Vec::new()), not None
+summary: 3 CAUGHT of 3
+```
+
+`RUST_TEST_THREADS=2 cargo test --locked --offline --manifest-path lab/capsule-identity/Cargo.toml --test stand_in --test checked_bundle --test not_admission`
+(exit 0):
+
+```
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+```
+
+(in that order: `checked_bundle`, `not_admission`, `stand_in`).
+
+#730 now has two reviews, Cursor's merge review and this record, with one FOLLOWUP for a
+later task; the Runtime did nothing here: no Runtime code ran, launched, checked, refused,
+granted or handed out any asks.
+
+## PR #757 (task 036), merge b7c613a10
+
+Added by task 041, on 2026-10-27, under the bar, base and form of the section above.
+`src/lib.rs`, `tests/checked_bundle.rs`, `tests/not_admission.rs` and
+`tests/variant_binding.rs` have no change after the merge, so for them M:line is also
+B:line. `tests/common/mod.rs`, `tests/stand_in.rs`, README, LOG and `falsifiers.json` were
+changed after it by 037 (`dd84ef2fe`) only.
+
+Verdict: PASS
+
+Lane diff: `git diff b7c613a10^1 b7c613a10 -- lab/capsule-identity/` (9 files, +273 -86):
+`LOG.md`, `README.md`, `falsifiers.json`, `src/lib.rs`, `tests/checked_bundle.rs`,
+`tests/common/mod.rs`, `tests/not_admission.rs`, `tests/stand_in.rs` and
+`tests/variant_binding.rs`.
+
+New FOLLOWUP lines: none.
+
+- Promise 1 (`check_manifest` hands back the `name`; `manifest_name()`; nothing else
+  changes; the export inventory allows only this accessor). At the merge, `check_manifest`
+  (`src/lib.rs` M:1163) makes the one `CapsuleManifest` parse (M:1164) and returns
+  `Ok((wasm, manifest.name))` (M:1168); the seam reads `let (wasm, name) =
+  check_manifest(...)` (M:637) and builds `CheckedBundle` with `name` (M:640-645), a
+  private field (M:295); `manifest_name` (M:679-681) answers `&self.name`. The library's
+  diff has four hunks only (the doc and struct, the seam, the accessor, `check_manifest`):
+  `lab_cid` (M:592), `LabCid` (M:240), `encode_entries` (M:809) and every `Refusal` text
+  are untouched. `git grep CapsuleManifest` at the merge finds one parse in `src/` (M:1164);
+  the tests' other parses read committed fixtures as their own expectations. 007's
+  inventory (`tests/not_admission.rs` M:111) is 25 names with `manifest_name` added, and
+  `the_harness_exports_only_identity_checks` (M:317) reports any extra `pub fn` not in that
+  list (M:324-331), so an admit, grant or launch export is still refused; the forms
+  `pub async fn admit`, `pub const fn grant`, `pub unsafe fn launch` are read as exports
+  (M:249-251). Still true at 9bd839491 (no later change). The run below gives
+  `test result: ok. 4 passed` for `not_admission`.
+- Promise 2 (the stand-in reads the name only through `manifest_name()`). At the merge,
+  `tests/common/mod.rs` no longer imports `CapsuleManifest` or `MANIFEST_FILE` (M:27-31),
+  the helper `manifest_name` is gone, and `checked_launch` answers
+  `checked.manifest_name().to_owned()` (M:1539). Still true at 9bd839491 (B:1544; 037
+  changed only the doc above `StandInRuntime` and added a `BTreeSet` import to
+  `tests/stand_in.rs`).
+- Promise 3 (`checked_bundle_hands_out_the_manifest_name` uses names the test states). At
+  the merge (`tests/checked_bundle.rs` M:315), the eight names are literals, the test
+  asserts the list covers `FIXTURES` once, and compares each with `manifest_name()`
+  (M:336). Each literal was checked against `"name"` in the committed
+  `fixtures/<name>/capsule.json`: 8 checked, 8 match. Still true at 9bd839491.
+- Promise 4 (the record rule and `standin_launch_does_not_depend_on_record_order`). At the
+  merge, `check_records` (`tests/common/mod.rs` M:1547-1559) runs
+  `verify_checked_package_record` on every record whose `cid` is the requested CID
+  (M:1549), returns `Ok(())` at the first pass, else keeps the first refusal (M:1552) and
+  answers it, else "unsigned:" (M:1555-1558). The test (`tests/stand_in.rs` M:272)
+  launches from `[unaccepted, accepted]` and the reverse, each with one listed instance
+  (M:299), then refuses two unaccepted signers with the first one's exact "not in the
+  accepted list" text (M:314) and no instance (`assert_refused`, M:80-87, M:318-323).
+  Still true at 9bd839491: `check_records` B:1552-1563, the test B:273, same text.
+- Promise 5 (F-CI36a and F-CI36b, each CAUGHT). At the merge, F-CI36a makes
+  `manifest_name` answer `""` (`src/lib.rs` M:680) and names
+  `checked_bundle_hands_out_the_manifest_name` and
+  `standin_launches_a_signed_bundle_by_its_cid`; F-CI36b adds `.take(1)` to the record
+  filter (`tests/common/mod.rs` M:1549, B:1554). Both entries are the same at 9bd839491.
+  The 17 older entries 036 changed (F-CI1f, 1g, 1k, 1l, 3a, 3b, 3i, 9a, 9b, 9c, 9d, 9e,
+  9j, 12a, 32c, 32d and 33a, compared entry by entry between `b7c613a10^1` and the merge)
+  keep their titles and tests, and no entry is gone, as LOG says. Runner result at
+  9bd839491: `summary: 2 CAUGHT of 2` (raw lines below).
+- Promise 6 (README: the accessor, the record rule, the rewrap, count and `about`). At the
+  merge, README M:498-502 and the API row M:524 name the accessor, the rule row M:543
+  names its test and F-CI36a, the export list M:844 and the stand-in note M:1317 name it;
+  the record rule is the (g) row M:1340, the paragraph "Several records for one CID"
+  M:1342-1352, the answer's `name` M:1356 and the rule row M:1412. The rewrap: the words of
+  `b7c613a10^1` README `:16-19` and of the merge's `:16-20` are the same list (compared
+  word by word), and the new lines are 74, 78, 76, 77 and 46 columns. The count is M:1628
+  (259, and the list holds 259) and `about` ends "033, 035 and 036)". The text 036 added
+  to README holds no `path:line` citation (0 checked); its LOG line (M:30) holds five,
+  each checked with `git show`: `tests/checked_bundle.rs:336` and `tests/stand_in.rs:114`
+  and `:296` at the merge are the asserts LOG says fail, and README `:16-19` at
+  `b7c613a10^1` and `:16-20` at the merge are the sentence it says was rewrapped: 5
+  checked, 5 match. Still true at 9bd839491: all of these lines are at the same numbers;
+  037 changed the count (B:1628, 262) and `about`, and the "Task 036's" note is B:1744.
+  The LOG line's whole-list result (259 of 259) was not rerun here, only F-CI36.
+- Promise 7 (no `Cargo.toml`/`Cargo.lock` change; no assertion weakened). `git diff --stat
+  b7c613a10^1 b7c613a10 -- lab/capsule-identity/Cargo.toml lab/capsule-identity/Cargo.lock`
+  prints nothing. The changed assertions: `IDENTITY_FUNCTIONS` grows from 24 to 25
+  (`tests/not_admission.rs` M:111), and `wasm_type_comes_from_the_one_manifest_check`
+  (`tests/variant_binding.rs` M:1168) still asserts each seam text once (M:1204), now
+  `let (wasm, name) = check_manifest(` (M:1201) and the struct literal with `name`. No
+  assertion was removed, and no expected value was loosened. Still true at 9bd839491.
+
+Principles check:
+
+1. Named by hash: yes. A launch still finds its bundle and its records by the lab CID only;
+   records are filtered by `record.cid == cid` (`tests/common/mod.rs:1549` at b7c613a10),
+   and the manifest `name` is only the answer's display field (`:1539`).
+2. No ambient authority: yes. The accessor answers a `&str` and grants nothing, and the
+   export inventory still allows identity checks only (`tests/not_admission.rs:111`,
+   `:317` at b7c613a10); no capsule, Home or UI code changes.
+3. One path: yes. One manifest parse gives both the WASM flag and the name
+   (`src/lib.rs:1163-1168` at b7c613a10), and the stand-in's second parse is gone
+   (`tests/common/mod.rs:27-31`, `:1539`).
+4. Trusted core: not affected. `src/lib.rs` is the lab library, not the Runtime; no
+   `elastos/`, `capsules/`, `examples/`, `Cargo.toml` or `Cargo.lock` change
+   (`git diff --stat b7c613a10^1 b7c613a10`).
+5. Fails closed: yes. When no record for the CID passes, the launch is refused with the
+   first record's own reason, or "unsigned:" when none binds it, and nothing is listed
+   (`tests/common/mod.rs:1555-1558` at b7c613a10; `tests/stand_in.rs:318-323`).
+6. Self-contained: not affected. No capsule code; the stand-in runs nothing
+   (`tests/common/mod.rs:1390` at b7c613a10).
+7. Tests prove it: yes. Two new named tests (`tests/checked_bundle.rs:315`,
+   `tests/stand_in.rs:272` at b7c613a10) and two falsifiers, run at the base:
+   `summary: 2 CAUGHT of 2`.
+8. Separate decisions: yes. The name is identity data, "never a decision: it is no trust,
+   admission or launch value" (`src/lib.rs:286-289` at b7c613a10); the record check
+   decides the stand-in's launch, and the grant view is still separate (no change to it).
+
+`python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json F-CI36`
+(exit 0; the same lease and base as above):
+
+```
+baseline: 3 named tests pass without an edit, 0 do not
+F-CI36a CAUGHT                            20s  manifest_name() answers an empty string, not the name the one manifest check read
+F-CI36b CAUGHT                            14s  the stand-in checks only the first package record for the CID, so the launch depends on the records' order
+summary: 2 CAUGHT of 2
+```
+
+The three `test result:` lines of `--test stand_in --test checked_bundle --test
+not_admission` are in the section above (one run for both sections).
+
+#757 now has two reviews, Cursor's merge review and this record. With task 039, every merged
+B1 stand-in change has two: #587 (Claude and Cursor), #657 (Cursor and task 039's record)
+and #757 (Cursor and this record). The Runtime did nothing here: no Runtime code ran,
+launched, checked, refused or granted anything.
