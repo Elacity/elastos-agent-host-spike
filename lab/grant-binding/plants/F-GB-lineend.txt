@@ -2,7 +2,7 @@ id: F-GB-lineend
 file: src/link.rs
 test: link::model_line_ending_escape_is_a_link
 --- old
-    dependency_names(cargo_toml).iter().any(|name| name == "grant-binding")
+    metadata_names(manifest).iter().any(|name| name == "grant-binding")
 --- new
     false
 --- end

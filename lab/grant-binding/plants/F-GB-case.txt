@@ -5,7 +5,7 @@ test: link::model_git_or_registry_dependency_is_a_link
 test: link::model_table_or_dotted_dependency_is_a_link
 test: link::model_workspace_member_is_a_link
 --- old
-    dependency_names(cargo_toml).iter().any(|name| name == "grant-binding")
+    metadata_names(manifest).iter().any(|name| name == "grant-binding")
 --- new
     true
 --- end

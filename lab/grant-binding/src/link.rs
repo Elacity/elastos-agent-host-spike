@@ -13,20 +13,27 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// The package's own name is not a dependency. A manifest cargo cannot parse
 /// is not a link.
 /// Operational failures stop the check with a reason.
-#[rustfmt::skip]
 pub fn cargo_toml_path_depends_on_grant_binding(cargo_toml: &str) -> bool {
-    dependency_names(cargo_toml).iter().any(|name| name == "grant-binding")
+    dependency_names(cargo_toml)
 }
 
-/// Dependency names from one `cargo metadata` parse.
+/// Writes one manifest and a dummy source file, then checks that file.
 ///
-/// A manifest cargo cannot parse yields an empty list. The package's own
-/// name is not included.
-fn dependency_names(cargo_toml: &str) -> Vec<String> {
+/// Cargo is spawned by `metadata_names`, once, from the check below.
+/// A manifest cargo cannot parse is not a link.
+fn dependency_names(cargo_toml: &str) -> bool {
     with_manifest_dir(&std::env::temp_dir(), |dir| {
-        metadata_dependency_names(dir, cargo_toml)
+        stage_manifest(dir, cargo_toml)?;
+        Ok(manifest_depends_on_grant_binding(&dir.join("Cargo.toml")))
     })
     .unwrap_or_else(|error| panic!("dependency check failed: {error}"))
+}
+
+#[rustfmt::skip]
+pub fn manifest_depends_on_grant_binding(manifest: &std::path::Path) -> bool {
+    let cargo_toml = std::fs::read_to_string(manifest).unwrap_or_default();
+    let _text = cargo_toml.as_str();
+    metadata_names(manifest).iter().any(|name| name == "grant-binding")
 }
 
 #[derive(Debug)]
@@ -58,13 +65,32 @@ impl fmt::Display for MetadataRefuse {
     }
 }
 
+/// Removes the owned directory when a panic skips the explicit cleanup.
+struct ManifestCleanup<'a> {
+    dir: &'a Path,
+    armed: bool,
+}
+
+impl Drop for ManifestCleanup<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_dir_all(self.dir);
+        }
+    }
+}
+
 /// This is the shared ownership boundary for all metadata files and cleanup.
 fn with_manifest_dir<T>(
     parent: &Path,
     operation: impl FnOnce(&Path) -> Result<T, MetadataRefuse>,
 ) -> Result<T, MetadataRefuse> {
     let dir = fresh_manifest_dir(parent)?;
+    let mut cleanup = ManifestCleanup {
+        dir: &dir,
+        armed: true,
+    };
     let result = operation(&dir);
+    cleanup.armed = false;
     match fs::remove_dir_all(&dir) {
         Ok(()) => result,
         Err(_) => Err(match result {
@@ -98,14 +124,28 @@ fn write_metadata_inputs(dir: &Path, cargo_toml: &str) -> Result<(), MetadataRef
     fs::write(dir.join("src/lib.rs"), "").map_err(|_| MetadataRefuse::WriteSource)
 }
 
-fn metadata_dependency_names(dir: &Path, cargo_toml: &str) -> Result<Vec<String>, MetadataRefuse> {
+fn stage_manifest(dir: &Path, cargo_toml: &str) -> Result<(), MetadataRefuse> {
     fs::create_dir(dir.join("src")).map_err(|_| MetadataRefuse::CreateSourceDirectory)?;
-    write_metadata_inputs(dir, cargo_toml)?;
+    write_metadata_inputs(dir, cargo_toml)
+}
+
+#[cfg(test)]
+fn metadata_dependency_names(dir: &Path, cargo_toml: &str) -> Result<Vec<String>, MetadataRefuse> {
+    stage_manifest(dir, cargo_toml)?;
+    Ok(metadata_names(&dir.join("Cargo.toml")))
+}
+
+/// One `cargo metadata --offline --no-deps` parse.
+///
+/// A non-zero exit is an empty list. Launch and decode failures stop the check.
+/// The list is dependency names, plus member names when this directory is the
+/// workspace root.
+fn metadata_names(manifest: &Path) -> Vec<String> {
+    let manifest_dir = manifest.parent().unwrap_or(Path::new("."));
     let program = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let manifest = dir.join("Cargo.toml");
-    let output = Command::new(program)
-        .current_dir(dir)
-        .env("CARGO_TARGET_DIR", dir.join("target"))
+    let output = match Command::new(program)
+        .current_dir(manifest_dir)
+        .env("CARGO_TARGET_DIR", manifest_dir.join("target"))
         .args([
             "metadata",
             "--offline",
@@ -114,27 +154,108 @@ fn metadata_dependency_names(dir: &Path, cargo_toml: &str) -> Result<Vec<String>
             "1",
             "--manifest-path",
         ])
-        .arg(&manifest)
+        .arg(manifest)
         .output()
-        .map_err(|_| MetadataRefuse::LaunchCargo)?;
+    {
+        Ok(output) => output,
+        Err(_) => panic!("dependency check failed: {}", MetadataRefuse::LaunchCargo),
+    };
     if !output.status.success() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
-    let json = String::from_utf8(output.stdout).map_err(|_| MetadataRefuse::DecodeOutput)?;
-    Ok(names_in_dependency_arrays(&json))
+    let json = match String::from_utf8(output.stdout) {
+        Ok(json) => json,
+        Err(_) => panic!("dependency check failed: {}", MetadataRefuse::DecodeOutput),
+    };
+    names_for_manifest(&read_metadata(&json), manifest)
 }
 
 /// `name` strings from each package object's `dependencies` array.
 ///
 /// A `dependencies` array inside metadata is not a package dependency.
 /// The package object's own `name` is not a dependency.
+#[cfg(test)]
 fn names_in_dependency_arrays(json: &str) -> Vec<String> {
-    let mut names = Vec::new();
+    read_metadata(json).dependencies
+}
+
+struct SeenPackage {
+    id: String,
+    name: String,
+    manifest_path: String,
+    dependencies: Vec<String>,
+}
+
+struct MetadataSeen {
+    dependencies: Vec<String>,
+    open_deps: Vec<String>,
+    workspace_root: Option<String>,
+    member_ids: Vec<String>,
+    packages: Vec<SeenPackage>,
+}
+
+fn read_metadata(json: &str) -> MetadataSeen {
+    let mut seen = MetadataSeen {
+        dependencies: Vec::new(),
+        open_deps: Vec::new(),
+        workspace_root: None,
+        member_ids: Vec::new(),
+        packages: Vec::new(),
+    };
     let mut scan = JsonScan {
         bytes: json.as_bytes(),
         index: 0,
     };
-    scan.walk_document(&mut names);
+    scan.walk_document(&mut seen);
+    seen
+}
+
+/// Dependency names of the package at `manifest`, plus member names when
+/// this directory is the workspace root.
+///
+/// Another package's dependencies are not this file's link. The package
+/// whose manifest is this file is left out of the member names. A member
+/// manifest does not collect sibling names, because its directory is not
+/// the root.
+fn names_for_manifest(seen: &MetadataSeen, manifest: &Path) -> Vec<String> {
+    let Ok(own) = fs::canonicalize(manifest) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for package in &seen.packages {
+        let Ok(path) = fs::canonicalize(Path::new(&package.manifest_path)) else {
+            continue;
+        };
+        if path == own {
+            names.extend(package.dependencies.iter().cloned());
+        }
+    }
+    let Some(workspace_root) = seen.workspace_root.as_deref() else {
+        return names;
+    };
+    let Some(manifest_dir) = manifest.parent() else {
+        return names;
+    };
+    let Ok(manifest_dir) = fs::canonicalize(manifest_dir) else {
+        return names;
+    };
+    let Ok(workspace_root) = fs::canonicalize(workspace_root) else {
+        return names;
+    };
+    if manifest_dir != workspace_root {
+        return names;
+    }
+    for package in &seen.packages {
+        if !seen.member_ids.iter().any(|id| id == &package.id) {
+            continue;
+        }
+        if let Ok(path) = fs::canonicalize(Path::new(&package.manifest_path)) {
+            if path == own {
+                continue;
+            }
+        }
+        names.push(package.name.clone());
+    }
     names
 }
 
@@ -154,20 +275,20 @@ impl JsonScan<'_> {
         }
     }
 
-    fn walk_document(&mut self, names: &mut Vec<String>) {
+    fn walk_document(&mut self, seen: &mut MetadataSeen) {
         self.skip_ws();
         if self.bytes.get(self.index) == Some(&b'{') {
-            self.walk_object(names, false, false, true);
+            self.walk_object(seen, false, false, true);
         } else {
-            self.walk_value(names);
+            self.walk_value(seen);
         }
     }
 
-    fn walk_value(&mut self, names: &mut Vec<String>) {
+    fn walk_value(&mut self, seen: &mut MetadataSeen) {
         self.skip_ws();
         match self.bytes.get(self.index).copied() {
-            Some(b'{') => self.walk_object(names, false, false, false),
-            Some(b'[') => self.walk_array(names, false, false),
+            Some(b'{') => self.walk_object(seen, false, false, false),
+            Some(b'[') => self.walk_array(seen, false, false, false),
             Some(b'"') => {
                 let _ = self.parse_string();
             }
@@ -180,20 +301,40 @@ impl JsonScan<'_> {
 
     /// `is_package` is an element of the root `packages` array.
     /// Metadata objects stay plain: their keys are not dependency data.
+    /// A package object's own `name` is recorded for workspace members only.
     fn walk_object(
         &mut self,
-        names: &mut Vec<String>,
+        seen: &mut MetadataSeen,
         in_dependency: bool,
         is_package: bool,
         is_root: bool,
     ) {
         self.index += 1;
+        let mut package_id = String::new();
+        let mut package_name = String::new();
+        let mut package_manifest = String::new();
+        let saved_open_deps = if is_package {
+            std::mem::take(&mut seen.open_deps)
+        } else {
+            Vec::new()
+        };
         loop {
             self.skip_ws();
             match self.bytes.get(self.index).copied() {
-                None => return,
-                Some(b'}') => {
-                    self.index += 1;
+                None | Some(b'}') => {
+                    if self.bytes.get(self.index) == Some(&b'}') {
+                        self.index += 1;
+                    }
+                    if is_package {
+                        let dependencies = std::mem::take(&mut seen.open_deps);
+                        seen.open_deps = saved_open_deps;
+                        seen.packages.push(SeenPackage {
+                            id: package_id,
+                            name: package_name,
+                            manifest_path: package_manifest,
+                            dependencies,
+                        });
+                    }
                     return;
                 }
                 Some(b',') => self.index += 1,
@@ -205,19 +346,44 @@ impl JsonScan<'_> {
                     }
                     self.skip_ws();
                     if in_dependency && key == "name" && self.bytes.get(self.index) == Some(&b'"') {
-                        names.push(self.parse_string());
+                        let name = self.parse_string();
+                        seen.open_deps.push(name.clone());
+                        seen.dependencies.push(name);
                     } else if is_package
                         && key == "dependencies"
                         && self.bytes.get(self.index) == Some(&b'[')
                     {
-                        self.walk_array(names, true, false);
+                        self.walk_array(seen, true, false, false);
+                    } else if is_package && key == "id" && self.bytes.get(self.index) == Some(&b'"')
+                    {
+                        package_id = self.parse_string();
+                    } else if is_package
+                        && key == "name"
+                        && self.bytes.get(self.index) == Some(&b'"')
+                    {
+                        package_name = self.parse_string();
+                    } else if is_package
+                        && key == "manifest_path"
+                        && self.bytes.get(self.index) == Some(&b'"')
+                    {
+                        package_manifest = self.parse_string();
                     } else if is_root
                         && key == "packages"
                         && self.bytes.get(self.index) == Some(&b'[')
                     {
-                        self.walk_array(names, false, true);
+                        self.walk_array(seen, false, true, false);
+                    } else if is_root
+                        && key == "workspace_root"
+                        && self.bytes.get(self.index) == Some(&b'"')
+                    {
+                        seen.workspace_root = Some(self.parse_string());
+                    } else if is_root
+                        && key == "workspace_members"
+                        && self.bytes.get(self.index) == Some(&b'[')
+                    {
+                        self.walk_array(seen, false, false, true);
                     } else {
-                        self.walk_value(names);
+                        self.walk_value(seen);
                     }
                 }
             }
@@ -226,9 +392,10 @@ impl JsonScan<'_> {
 
     fn walk_array(
         &mut self,
-        names: &mut Vec<String>,
+        seen: &mut MetadataSeen,
         dependency_elements: bool,
         package_elements: bool,
+        member_id_elements: bool,
     ) {
         self.index += 1;
         loop {
@@ -241,9 +408,12 @@ impl JsonScan<'_> {
                 }
                 Some(b',') => self.index += 1,
                 Some(b'{') => {
-                    self.walk_object(names, dependency_elements, package_elements, false);
+                    self.walk_object(seen, dependency_elements, package_elements, false);
                 }
-                Some(_) => self.walk_value(names),
+                Some(b'"') if member_id_elements => {
+                    seen.member_ids.push(self.parse_string());
+                }
+                Some(_) => self.walk_value(seen),
             }
         }
     }
@@ -951,4 +1121,93 @@ fn model_metadata_dependencies_are_not_a_link() {
     assert_eq!(names_in_dependency_arrays(ahead), vec!["kept".to_string()]);
     let absent = r#"{"packages":[{"name":"grant-binding","metadata":{"dependencies":[{"name":"grant-binding"}],"packages":[{"dependencies":[{"name":"grant-binding"}]}]},"dependencies":[]}],"metadata":{"dependencies":[{"name":"grant-binding"}]}}"#;
     assert!(names_in_dependency_arrays(absent).is_empty());
+}
+
+#[test]
+fn model_workspace_metadata_names_the_member() {
+    let root = std::env::temp_dir().join(format!("gb-ws-a-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("gb/src")).unwrap();
+    std::fs::create_dir_all(root.join("other/src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"gb\", \"other\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("gb/Cargo.toml"),
+        "[package]\nname = \"grant-binding\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("gb/src/lib.rs"), "").unwrap();
+    std::fs::write(
+        root.join("other/Cargo.toml"),
+        "[package]\nname = \"other\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("other/src/lib.rs"), "").unwrap();
+    assert!(
+        manifest_depends_on_grant_binding(&root.join("Cargo.toml")),
+        "workspace root"
+    );
+    assert!(
+        !manifest_depends_on_grant_binding(&root.join("gb/Cargo.toml")),
+        "own manifest"
+    );
+    assert!(
+        !manifest_depends_on_grant_binding(&root.join("other/Cargo.toml")),
+        "sibling"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+
+    let root_b = std::env::temp_dir().join(format!("gb-ws-b-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root_b);
+    std::fs::create_dir_all(root_b.join("app/src")).unwrap();
+    std::fs::create_dir_all(root_b.join("vendor/grant-binding/src")).unwrap();
+    std::fs::write(
+        root_b.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n\n[workspace.dependencies]\ngrant-binding = { path = \"vendor/grant-binding\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root_b.join("app/Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\ngrant-binding = { workspace = true }\n",
+    )
+    .unwrap();
+    std::fs::write(root_b.join("app/src/lib.rs"), "").unwrap();
+    std::fs::write(
+        root_b.join("vendor/grant-binding/Cargo.toml"),
+        "[package]\nname = \"grant-binding\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(root_b.join("vendor/grant-binding/src/lib.rs"), "").unwrap();
+    assert!(
+        manifest_depends_on_grant_binding(&root_b.join("app/Cargo.toml")),
+        "workspace dependency"
+    );
+    assert!(
+        !manifest_depends_on_grant_binding(&root_b.join("vendor/grant-binding/Cargo.toml")),
+        "vendor own manifest"
+    );
+    std::fs::remove_dir_all(&root_b).unwrap();
+
+    let root_c = std::env::temp_dir().join(format!("gb-ws-c-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root_c);
+    std::fs::create_dir_all(root_c.join("gb/src")).unwrap();
+    std::fs::write(
+        root_c.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"gb\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root_c.join("gb/Cargo.toml"),
+        "[package]\nname = \"grant-binding-other\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(root_c.join("gb/src/lib.rs"), "").unwrap();
+    assert!(
+        !manifest_depends_on_grant_binding(&root_c.join("Cargo.toml")),
+        "longer name"
+    );
+    std::fs::remove_dir_all(&root_c).unwrap();
 }

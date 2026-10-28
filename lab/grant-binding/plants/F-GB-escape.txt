@@ -1,8 +1,9 @@
 id: F-GB-escape
 file: src/link.rs
 test: link::model_escaped_unicode_path_is_a_link
+test: link::model_workspace_metadata_names_the_member
 --- old
-    dependency_names(cargo_toml).iter().any(|name| name == "grant-binding")
+    metadata_names(manifest).iter().any(|name| name == "grant-binding")
 --- new
-    false
+    cargo_toml.contains("grant-binding") && cargo_toml.contains("path")
 --- end

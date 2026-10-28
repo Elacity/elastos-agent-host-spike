@@ -2,7 +2,7 @@ id: F-GB-hashlit
 file: src/link.rs
 test: link::model_hash_inside_a_string_is_still_a_link
 --- old
-    dependency_names(cargo_toml).iter().any(|name| name == "grant-binding")
+    metadata_names(manifest).iter().any(|name| name == "grant-binding")
 --- new
     false
 --- end

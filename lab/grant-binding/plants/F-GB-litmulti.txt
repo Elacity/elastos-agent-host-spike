@@ -2,7 +2,7 @@ id: F-GB-litmulti
 file: src/link.rs
 test: link::model_literal_string_path_is_a_link
 --- old
-    dependency_names(cargo_toml).iter().any(|name| name == "grant-binding")
+    metadata_names(manifest).iter().any(|name| name == "grant-binding")
 --- new
     false
 --- end
