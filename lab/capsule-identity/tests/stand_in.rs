@@ -8,6 +8,7 @@
 //! and these tests say nothing about what the Runtime does.
 mod common;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -434,6 +435,80 @@ fn standin_grant_view_lists_a_seeded_grant() {
     assert_eq!(listed_instances(&stand_in).len(), 1);
 }
 
+#[test]
+fn standin_grant_view_lists_every_held_grant_of_every_session() {
+    let published = publish_agent_host();
+    let (mut stand_in, _) = signed_stand_in(&published);
+    let first = launched(&mut stand_in);
+    let second = launched(&mut stand_in);
+    let a = first["session_id"].as_str().expect("a session id");
+    let b = second["session_id"].as_str().expect("a session id");
+    assert_ne!(a, b, "two launches give two sessions");
+
+    // One grant for A, then two for B, each a different (resource, action).
+    let seeded = [
+        (
+            a,
+            "localhost://Users/self/.AppData/Agents/agent-host/journal",
+            "write",
+            "session",
+        ),
+        (
+            b,
+            "localhost://Users/self/Documents/notes.md",
+            "read",
+            "once",
+        ),
+        (
+            b,
+            "localhost://Users/self/.AppData/Agents/agent-host/cache",
+            "delete",
+            "session",
+        ),
+    ];
+    for (session, resource, action, duration) in seeded {
+        stand_in.seed_grant(session, resource, action, duration);
+    }
+
+    let held = grant_view(&stand_in);
+    assert_eq!(held.len(), 3, "every held grant is listed: {held:?}");
+    let mut listed: Vec<(&str, &str, &str, &str)> = held
+        .iter()
+        .map(|entry| {
+            let text = |key: &str| entry[key].as_str().expect("a string");
+            (
+                text("session_id"),
+                text("resource"),
+                text("action"),
+                text("duration"),
+            )
+        })
+        .collect();
+    listed.sort();
+    let mut expected = seeded.to_vec();
+    expected.sort();
+    assert_eq!(listed, expected, "each entry is a seeded grant, as seeded");
+
+    for session in [a, b] {
+        assert!(
+            held.iter().any(|entry| entry["session_id"] == session),
+            "the grants of session {session} are listed: {held:?}"
+        );
+    }
+    let request_ids: BTreeSet<&str> = held
+        .iter()
+        .map(|entry| entry["request_id"].as_str().expect("a request id"))
+        .collect();
+    assert_eq!(
+        request_ids.len(),
+        3,
+        "three different request ids: {held:?}"
+    );
+
+    // Seeding is not a launch: the instance list is unchanged.
+    assert_eq!(listed_instances(&stand_in).len(), 2);
+}
+
 /// Change one byte of the stored `asks.json` in `folder`; the changed bytes.
 fn change_stored_asks(folder: &Path) -> Vec<u8> {
     let asks = folder.join("asks.json");
@@ -481,6 +556,42 @@ fn standin_hands_an_instance_only_its_signed_asks_bytes() {
         "(e) after the change"
     );
     assert_eq!(listed_instances(&stand_in).len(), 1, "no new instance");
+    assert_eq!(grant_view(&stand_in), Vec::<Value>::new(), "no grant");
+}
+
+/// The stand-in's after-walk hook: change one byte of the stored `asks.json`.
+fn change_stored_asks_after_the_walk(folder: &Path) {
+    change_stored_asks(folder);
+}
+
+#[test]
+fn standin_takes_the_asks_from_the_walk_not_the_folder() {
+    let published = publish_agent_host();
+    let (mut stand_in, _) = signed_stand_in(&published);
+    let signed = read_fixture(&AGENT_HOST, "asks.json");
+    stand_in.set_after_walk(change_stored_asks_after_the_walk);
+
+    // The walk read the signed bytes, so the name compare and the record
+    // check pass, and the launch goes on.
+    let answer = launched(&mut stand_in);
+    assert_eq!(answer["status"], "launched");
+    let session = answer["session_id"].as_str().expect("a session id");
+
+    // The hook ran: the stored asks.json changed between the walk and the
+    // launch.
+    let on_disk = fs::read(published.folder.join("asks.json")).expect("read asks.json");
+    assert_ne!(
+        on_disk, signed,
+        "the hook must have changed the stored asks.json"
+    );
+
+    // The instance is handed the bytes the walk read, not the folder's.
+    assert_eq!(
+        stand_in.asks_of(session),
+        Some(signed),
+        "a change on disk between the walk and the launch must not reach the instance"
+    );
+    assert_eq!(listed_instances(&stand_in).len(), 1);
     assert_eq!(grant_view(&stand_in), Vec::<Value>::new(), "no grant");
 }
 

@@ -1,8 +1,8 @@
 //! The lane makes one claim about the lab CID, and it stays narrow (P12):
-//! "Kubo v0.40.1 profile, computed by the lab". No Kubo is installed on this
-//! Mac and no Kubo has computed a pin, so until an offline Kubo cross-check
-//! prints the same value as a committed pin, no lane doc or code calls the
-//! lab CID equal to the Runtime's CID or to Kubo's output. The scan reads the
+//! "Kubo v0.40.1 profile, computed by the lab". One offline Kubo cross-check,
+//! run by hand on this Mac (task 050), printed every committed pin, and the
+//! words stay until Rong or Flint changes them, so no lane doc or code calls
+//! the lab CID equal to the Runtime's CID or to Kubo's output. The scan reads the
 //! files themselves, so it never passes on an empty read and never skips.
 mod common;
 
