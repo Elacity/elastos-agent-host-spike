@@ -749,3 +749,5 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 `standin_system_and_wallet_requests_never_become_pending` is this stand-in, and a PASS there gives the Runtime no A6 credit for this denial.
 
 `standin_bridge_envelope_records_the_capsule_request` is this stand-in, two-capsule-run owns the real-bytes run, and a PASS here gives the Runtime no A3 credit.
+
+`standin_protected_storage_uses_the_launch_principal` is this stand-in, and a PASS there gives the Runtime no A15 credit.

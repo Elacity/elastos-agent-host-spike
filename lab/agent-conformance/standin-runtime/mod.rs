@@ -30,8 +30,14 @@
 //! `post_capability_request` for the given capsule id. An invoke line calls
 //! `authorise` for that capsule id. The principal argument does not choose
 //! the caller.
+//!
+//! `bind_verified_principal` stores the principal the launch verified.
+//! `post_capsules` copies that principal onto the new instance.
+//! `protected_write` and `protected_read` resolve `Users/self` and
+//! `UsersAI/self` from it, then call `authorise`. One map holds the bytes.
 
 use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 const LIVE_SCOPE: &str = "all_sessions_live";
@@ -92,6 +98,7 @@ struct Admitted {
     name: String,
     start: Start,
     world: &'static str,
+    principal: Option<String>,
 }
 
 struct Instance {
@@ -101,6 +108,7 @@ struct Instance {
     phase: ResidentStatus,
     cause: String,
     ended_at: Option<u64>,
+    principal: Option<String>,
 }
 
 /// Four request statuses this slice stores.
@@ -129,6 +137,7 @@ pub struct StandIn {
     requests: Vec<Request>,
     admitted: Vec<Admitted>,
     instances: Vec<Instance>,
+    protected_objects: BTreeMap<String, Vec<u8>>,
     next_id: u64,
     next_request: u64,
     instant: u64,
@@ -141,6 +150,7 @@ impl StandIn {
             requests: Vec::new(),
             admitted: Vec::new(),
             instances: Vec::new(),
+            protected_objects: BTreeMap::new(),
             next_id: 1,
             next_request: 1,
             instant: 0,
@@ -751,6 +761,115 @@ impl StandIn {
 
     /// Lab test seam, not a route.
     ///
+    /// Resolves the uri from the principal copied at launch, then `authorise`.
+    /// On `Ok` the bytes replace any previous value at that exact uri.
+    pub fn protected_write(
+        &mut self,
+        instance_id: &str,
+        request_id: &str,
+        uri: &str,
+        bytes: &[u8],
+    ) -> Result<String, (u16, String)> {
+        let resolved = self.resolve_protected_uri(instance_id, uri)?;
+        self.authorise(
+            Caller::Client {
+                session_id: instance_id,
+            },
+            request_id,
+        )?;
+        self.protected_objects
+            .insert(resolved.clone(), bytes.to_vec());
+        Ok(resolved)
+    }
+
+    /// Lab test seam, not a route.
+    ///
+    /// Resolves the uri from the principal copied at launch, then `authorise`,
+    /// then returns the stored bytes.
+    pub fn protected_read(
+        &mut self,
+        instance_id: &str,
+        request_id: &str,
+        uri: &str,
+    ) -> Result<Vec<u8>, (u16, String)> {
+        let resolved = self.resolve_protected_uri(instance_id, uri)?;
+        self.authorise(
+            Caller::Client {
+                session_id: instance_id,
+            },
+            request_id,
+        )?;
+        self.protected_objects
+            .get(&resolved)
+            .cloned()
+            .ok_or_else(|| (404, "protected object is absent".to_owned()))
+    }
+
+    /// The one resolver for `Users/self` and `UsersAI/self`.
+    ///
+    /// The root is the first 24 characters of `identity::sha256` of the
+    /// instance principal. The principal text is not part of the root.
+    fn resolve_protected_uri(&self, instance_id: &str, uri: &str) -> Result<String, (u16, String)> {
+        let Some(instance) = self
+            .instances
+            .iter()
+            .find(|instance| instance.id == instance_id)
+        else {
+            return Err(unknown_instance(instance_id));
+        };
+        if !matches!(
+            instance.phase,
+            ResidentStatus::Starting | ResidentStatus::Running
+        ) {
+            return Err(not_live(instance.phase));
+        }
+        if uri.split('/').any(|segment| segment == "..") {
+            return Err((400, "protected path rejects ..".to_owned()));
+        }
+        let Some(principal) = instance
+            .principal
+            .as_deref()
+            .filter(|principal| !principal.is_empty())
+        else {
+            return Err((
+                400,
+                "requires the principal from the verified launch".to_owned(),
+            ));
+        };
+        let digest = &crate::identity::sha256(principal.as_bytes())[..24];
+        if let Some(suffix) = uri.strip_prefix("localhost://Users/self") {
+            if suffix.is_empty() || suffix.starts_with('/') {
+                return Ok(format!("localhost://Users/{digest}{suffix}"));
+            }
+        }
+        if let Some(suffix) = uri.strip_prefix("localhost://UsersAI/self") {
+            if suffix.is_empty() || suffix.starts_with('/') {
+                return Ok(format!("localhost://UsersAI/{digest}{suffix}"));
+            }
+        }
+        let users_root = format!("localhost://Users/{digest}");
+        let users_child = format!("{users_root}/");
+        if uri == users_root || uri.starts_with(&users_child) {
+            return Ok(uri.to_owned());
+        }
+        if uri.starts_with("localhost://UsersAI/") {
+            return Err((400, "UsersAI roots must use UsersAI/self".to_owned()));
+        }
+        if uri.starts_with("localhost://Users/") {
+            return Err((
+                400,
+                "localhost://Users roots must use Users/self or the active principal root"
+                    .to_owned(),
+            ));
+        }
+        Err((
+            400,
+            "protected storage needs a Users/self or UsersAI/self resource".to_owned(),
+        ))
+    }
+
+    /// Lab test seam, not a route.
+    ///
     /// Stores one resident guest for `path`. This method reads no directory.
     pub fn admit_resident(
         &mut self,
@@ -769,7 +888,31 @@ impl StandIn {
             name: name.to_owned(),
             start,
             world: RESIDENT_WORLD,
+            principal: None,
         });
+        Ok(())
+    }
+
+    /// Lab test seam, not a route.
+    ///
+    /// Stores the principal the launch verified on one admitted path. It mints
+    /// no instance id, and a later call does not change an instance already
+    /// created.
+    pub fn bind_verified_principal(
+        &mut self,
+        path: &str,
+        principal: &str,
+    ) -> Result<(), (u16, String)> {
+        if principal.is_empty() {
+            return Err((400, "verified launch needs a principal".to_owned()));
+        }
+        let Some(row) = self.admitted.iter_mut().find(|row| row.path == path) else {
+            return Err((400, format!("unknown resident path: {path}")));
+        };
+        if row.principal.is_some() {
+            return Err((400, "verified principal already bound".to_owned()));
+        }
+        row.principal = Some(principal.to_owned());
         Ok(())
     }
 
@@ -822,7 +965,7 @@ impl StandIn {
     ) -> Result<Value, (u16, String)> {
         require_shell(caller)?;
         let path = launch_path(body)?;
-        let (name, start) = self.admitted_start(path)?;
+        let (name, start, principal) = self.admitted_start(path)?;
         let id = self.mint_id();
         let phase = ResidentStatus::Starting;
         self.instances.push(Instance {
@@ -832,6 +975,7 @@ impl StandIn {
             phase,
             cause: String::new(),
             ended_at: None,
+            principal,
         });
         Ok(launch_body(&id, &name, phase))
     }
@@ -982,9 +1126,9 @@ impl StandIn {
         id
     }
 
-    fn admitted_start(&self, path: &str) -> Result<(String, Start), (u16, String)> {
+    fn admitted_start(&self, path: &str) -> Result<(String, Start, Option<String>), (u16, String)> {
         if let Some(row) = self.admitted.iter().find(|row| row.path == path) {
-            return Ok((row.name.clone(), row.start.clone()));
+            return Ok((row.name.clone(), row.start.clone(), row.principal.clone()));
         }
         Err(self.not_resident(path))
     }
@@ -8591,5 +8735,844 @@ mod tests {
             "the stand-in did the work: component-2 stays running",
         );
         assert_live_request_ids_empty(&standin, "the shell live-grant request_id set is empty");
+    }
+
+    fn assert_named_capsule(
+        standin: &StandIn,
+        id: &str,
+        name: &str,
+        status: &str,
+        cause: &str,
+        message: &str,
+    ) {
+        let listed = shell_list(standin);
+        let entry = listed["capsules"]
+            .as_array()
+            .expect("the stand-in returns capsules")
+            .iter()
+            .find(|entry| entry["id"] == id);
+        let expected = json!({
+            "id": id,
+            "name": name,
+            "status": status,
+            "session_id": id,
+            "cause": cause,
+        });
+        assert_eq!(
+            entry,
+            Some(&expected),
+            "the stand-in did the work: {message}"
+        );
+    }
+
+    fn shape_refused(standin: &mut StandIn, uri: &str, bytes: &[u8], reason: &str, message: &str) {
+        assert_eq!(
+            standin.protected_write("component-1", "req-shape", uri, bytes),
+            Err((400, reason.to_owned())),
+            "the stand-in did the work: {message}"
+        );
+        assert_eq!(
+            grant_record(standin, "req-shape"),
+            (Life::Live, false),
+            "the stand-in did the work: {message} spends nothing"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            Ok(b"journal-v1".to_vec()),
+            "the stand-in did the work: {message} leaves the stored journal"
+        );
+    }
+
+    #[test]
+    fn standin_protected_storage_uses_the_launch_principal() {
+        let digest_a_hex = crate::identity::sha256(b"agent-ada");
+        let digest_b_hex = crate::identity::sha256(b"agent-bob");
+        let digest_a = &digest_a_hex[..24];
+        let digest_b = &digest_b_hex[..24];
+        assert_ne!(
+            digest_a, digest_b,
+            "the stand-in did the work: the two principals differ"
+        );
+        for digest in [digest_a, digest_b] {
+            assert!(
+                !digest.contains("agent-ada") && !digest.contains("agent-bob"),
+                "the stand-in did the work: the digest is not the principal text: {digest}"
+            );
+        }
+        let users_a = format!("localhost://Users/{digest_a}");
+        let usersai_a = format!("localhost://UsersAI/{digest_a}");
+        let journal_a = format!("localhost://UsersAI/{digest_a}/journal");
+        let journal_b = format!("localhost://UsersAI/{digest_b}/journal");
+        let person_a = format!("localhost://Users/{digest_a}/journal");
+        let once_a = format!("localhost://UsersAI/{digest_a}/once");
+        let users_reason =
+            "localhost://Users roots must use Users/self or the active principal root";
+        let usersai_reason = "UsersAI roots must use UsersAI/self";
+        let needs_reason = "protected storage needs a Users/self or UsersAI/self resource";
+
+        let mut open = StandIn::new();
+        open.admit_resident("/capsules/journal-open", "journal-open", Start::Ok)
+            .expect("the stand-in admits journal-open");
+        let launched = open
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/journal-open"}))
+            .expect("the stand-in launches journal-open");
+        assert_eq!(
+            launched,
+            json!({
+                "id": "component-1",
+                "name": "journal-open",
+                "status": "starting",
+                "session_id": "component-1",
+            }),
+            "the stand-in did the work: the launch session_id equals its id"
+        );
+        open.finish_start("component-1")
+            .expect("the stand-in finishes journal-open");
+        assert_eq!(
+            open.protected_write(
+                "component-1",
+                "req-none",
+                "localhost://UsersAI/self/journal",
+                b"journal-v1",
+            ),
+            Err((
+                400,
+                "requires the principal from the verified launch".to_owned(),
+            )),
+            "the stand-in did the work: an unbound launch requires the verified principal"
+        );
+        assert_eq!(
+            open.protected_write(
+                "component-1",
+                "req-none",
+                "localhost://UsersAI/self/../journal",
+                b"dot-v1",
+            ),
+            Err((400, "protected path rejects ..".to_owned())),
+            "the stand-in did the work: .. is refused before the principal check"
+        );
+        assert!(
+            open.protected_objects.is_empty(),
+            "the stand-in did the work: a resolver error stores nothing"
+        );
+        assert_eq!(
+            open.bind_verified_principal("/capsules/journal-open", ""),
+            Err((400, "verified launch needs a principal".to_owned())),
+            "the stand-in did the work: an empty principal is refused"
+        );
+        assert_eq!(
+            open.bind_verified_principal("/capsules/missing", "agent-ada"),
+            Err((400, "unknown resident path: /capsules/missing".to_owned())),
+            "the stand-in did the work: an unknown path is refused"
+        );
+        assert_eq!(
+            shell_list(&open)["capsules"].as_array().map(Vec::len),
+            Some(1),
+            "the stand-in did the work: a refused bind mints no instance"
+        );
+        open.bind_verified_principal("/capsules/journal-open", "agent-ada")
+            .expect("the stand-in binds agent-ada after launch");
+        open.seed_grant(
+            "req-old",
+            "component-1",
+            "localhost://UsersAI/self/journal",
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        assert_eq!(
+            open.protected_write(
+                "component-1",
+                "req-old",
+                "localhost://UsersAI/self/journal",
+                b"retro-v1",
+            ),
+            Err((
+                400,
+                "requires the principal from the verified launch".to_owned(),
+            )),
+            "the stand-in did the work: a later bind leaves the instance already created"
+        );
+        assert!(
+            open.protected_objects.is_empty(),
+            "the stand-in did the work: the later bind stores nothing on that instance"
+        );
+        assert_eq!(
+            grant_record(&open, "req-old"),
+            (Life::Live, false),
+            "the stand-in did the work: the later bind spends nothing"
+        );
+        let started = open
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/journal-open"}))
+            .expect("the stand-in launches the bound path");
+        assert_eq!(
+            started,
+            json!({
+                "id": "component-2",
+                "name": "journal-open",
+                "status": "starting",
+                "session_id": "component-2",
+            }),
+            "the stand-in did the work: the bound launch session_id equals its id"
+        );
+        open.seed_grant(
+            "req-start",
+            "component-2",
+            "localhost://UsersAI/self/journal",
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        assert_eq!(
+            open.protected_write(
+                "component-2",
+                "req-start",
+                "localhost://UsersAI/self/journal",
+                b"start-v1",
+            ),
+            Ok(journal_a.clone()),
+            "the stand-in did the work: a Starting instance stores the approved write"
+        );
+        assert_eq!(
+            open.protected_read(
+                "component-2",
+                "req-start",
+                "localhost://UsersAI/self/journal"
+            ),
+            Ok(b"start-v1".to_vec()),
+            "the stand-in did the work: a Starting instance reads the approved write"
+        );
+        assert_named_capsule(
+            &open,
+            "component-2",
+            "journal-open",
+            "starting",
+            "",
+            "component-2 is still starting",
+        );
+
+        let mut standin = StandIn::new();
+        standin
+            .admit_resident("/capsules/journal-a", "journal-a", Start::Ok)
+            .expect("the stand-in admits journal-a");
+        standin
+            .admit_resident("/capsules/journal-b", "journal-b", Start::Ok)
+            .expect("the stand-in admits journal-b");
+        standin
+            .bind_verified_principal("/capsules/journal-a", "agent-ada")
+            .expect("the stand-in binds agent-ada");
+        assert_eq!(
+            standin.bind_verified_principal("/capsules/journal-a", "agent-other"),
+            Err((400, "verified principal already bound".to_owned())),
+            "the stand-in did the work: a second principal is refused"
+        );
+        assert_eq!(
+            standin.bind_verified_principal("/capsules/journal-a", ""),
+            Err((400, "verified launch needs a principal".to_owned())),
+            "the stand-in did the work: an empty principal stays refused after a bind"
+        );
+        standin
+            .bind_verified_principal("/capsules/journal-b", "agent-bob")
+            .expect("the stand-in binds agent-bob");
+        assert_eq!(
+            shell_list(&standin)["capsules"].as_array().map(Vec::len),
+            Some(0),
+            "the stand-in did the work: bind mints no instance"
+        );
+        let launch_a = standin
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/journal-a"}))
+            .expect("the stand-in launches journal-a");
+        assert_eq!(
+            launch_a,
+            json!({
+                "id": "component-1",
+                "name": "journal-a",
+                "status": "starting",
+                "session_id": "component-1",
+            }),
+            "the stand-in did the work: component-1 session_id equals its id"
+        );
+        let launch_b = standin
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/journal-b"}))
+            .expect("the stand-in launches journal-b");
+        assert_eq!(
+            launch_b,
+            json!({
+                "id": "component-2",
+                "name": "journal-b",
+                "status": "starting",
+                "session_id": "component-2",
+            }),
+            "the stand-in did the work: component-2 session_id equals its id"
+        );
+        standin
+            .finish_start("component-1")
+            .expect("the stand-in finishes component-1");
+        standin
+            .finish_start("component-2")
+            .expect("the stand-in finishes component-2");
+        assert_named_capsule(
+            &standin,
+            "component-1",
+            "journal-a",
+            "running",
+            "",
+            "component-1 is running",
+        );
+        assert_named_capsule(
+            &standin,
+            "component-2",
+            "journal-b",
+            "running",
+            "",
+            "component-2 is running",
+        );
+        let named = standin.post_capsules(
+            Caller::Shell,
+            &json!({"path": "/capsules/journal-a", "principal_id": "agent-ada"}),
+        );
+        match &named {
+            Err((400, reason)) if reason.contains("principal_id") => {}
+            other => {
+                panic!("the stand-in did the work: the launch body rejects principal_id: {other:?}")
+            }
+        }
+        assert_eq!(
+            shell_list(&standin)["capsules"].as_array().map(Vec::len),
+            Some(2),
+            "the stand-in did the work: a rejected principal_id stores no instance"
+        );
+        standin.seed_grant(
+            "req-a",
+            "component-1",
+            "localhost://UsersAI/self/journal",
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-b",
+            "component-2",
+            "localhost://UsersAI/self/journal",
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-a",
+                "localhost://UsersAI/self/journal",
+                b"journal-v1",
+            ),
+            Ok(journal_a.clone()),
+            "the stand-in did the work: the approved write is stored under the launch principal"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-a"),
+            (Life::Live, false),
+            "the stand-in did the work: a session grant stays live"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            Ok(b"journal-v1".to_vec()),
+            "the stand-in did the work: the owner reads the stored journal"
+        );
+        assert_eq!(
+            standin.protected_read(
+                "component-1",
+                "req-missing",
+                "localhost://UsersAI/self/journal"
+            ),
+            Err((400, "unknown grant: req-missing".to_owned())),
+            "the stand-in did the work: an unknown grant cannot read"
+        );
+        assert_eq!(
+            standin.protected_read("component-2", "req-b", "localhost://UsersAI/self/journal"),
+            Err((404, "protected object is absent".to_owned())),
+            "the stand-in did the work: the sibling root has no journal"
+        );
+        let sibling_read =
+            standin.protected_read("component-2", "req-a", "localhost://UsersAI/self/journal");
+        match &sibling_read {
+            Err((403, reason)) if reason.contains("wrong capsule") => {}
+            other => {
+                panic!("the stand-in did the work: a sibling read is wrong capsule: {other:?}")
+            }
+        }
+        assert_eq!(
+            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            Ok(b"journal-v1".to_vec()),
+            "the stand-in did the work: a refused sibling read leaves the journal"
+        );
+        let sibling_write = standin.protected_write(
+            "component-2",
+            "req-a",
+            "localhost://UsersAI/self/journal",
+            b"other",
+        );
+        match &sibling_write {
+            Err((403, reason)) if reason.contains("wrong capsule") => {}
+            other => {
+                panic!("the stand-in did the work: a sibling write is wrong capsule: {other:?}")
+            }
+        }
+        assert_eq!(
+            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            Ok(b"journal-v1".to_vec()),
+            "the stand-in did the work: a sibling write leaves the journal"
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-2",
+                "req-b",
+                "localhost://UsersAI/self/journal",
+                b"bob-v1",
+            ),
+            Ok(journal_b.clone()),
+            "the stand-in did the work: component-2 stores under its own principal"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            Ok(b"journal-v1".to_vec()),
+            "the stand-in did the work: component-1 keeps its own journal"
+        );
+        assert_eq!(
+            standin.protected_write("component-1", "req-a", &journal_a, b"other",),
+            Err((400, usersai_reason.to_owned())),
+            "the stand-in did the work: an explicit UsersAI root is refused"
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-a",
+                "localhost://Users/self/journal",
+                b"person-v1",
+            ),
+            Ok(person_a.clone()),
+            "the stand-in did the work: Users/self stores under the same principal"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-a", "localhost://Users/self/journal"),
+            Ok(b"person-v1".to_vec()),
+            "the stand-in did the work: the owner reads the Users journal"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            Ok(b"journal-v1".to_vec()),
+            "the stand-in did the work: the Users write leaves the UsersAI journal"
+        );
+        assert_eq!(
+            standin.protected_read("component-2", "req-b", "localhost://Users/self/journal"),
+            Err((404, "protected object is absent".to_owned())),
+            "the stand-in did the work: component-2 does not see the Users journal"
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-a",
+                "localhost://Users/someone/journal",
+                b"other",
+            ),
+            Err((400, users_reason.to_owned())),
+            "the stand-in did the work: another Users root is refused"
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-a",
+                "localhost://UsersAI/self/../journal",
+                b"other",
+            ),
+            Err((400, "protected path rejects ..".to_owned())),
+            "the stand-in did the work: a parent segment is refused"
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-missing",
+                "localhost://UsersAI/self/journal",
+                b"missing-v1",
+            ),
+            Err((400, "unknown grant: req-missing".to_owned())),
+            "the stand-in did the work: an unknown grant cannot write"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            Ok(b"journal-v1".to_vec()),
+            "the stand-in did the work: a missing grant stores nothing"
+        );
+        standin.seed_grant(
+            "req-shape",
+            "component-1",
+            "localhost://UsersAI/self/journal",
+            "write",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        shape_refused(
+            &mut standin,
+            "localhost://UsersAI/self/../secret",
+            b"shape-dot",
+            "protected path rejects ..",
+            "a once grant does not pass ..",
+        );
+        shape_refused(
+            &mut standin,
+            &journal_a,
+            b"shape-ai",
+            usersai_reason,
+            "a once grant does not pass another UsersAI root",
+        );
+        shape_refused(
+            &mut standin,
+            &usersai_a,
+            b"shape-ai-root",
+            usersai_reason,
+            "a once grant does not pass a bare UsersAI root",
+        );
+        shape_refused(
+            &mut standin,
+            "localhost://Users/someone/journal",
+            b"shape-someone",
+            users_reason,
+            "a once grant does not pass another Users root",
+        );
+        shape_refused(
+            &mut standin,
+            "localhost://Users/selfish/journal",
+            b"shape-selfish",
+            users_reason,
+            "a Users/self prefix lookalike is refused",
+        );
+        shape_refused(
+            &mut standin,
+            "localhost://UsersAI/selfish/journal",
+            b"shape-ai-selfish",
+            usersai_reason,
+            "a UsersAI/self prefix lookalike is refused",
+        );
+        shape_refused(
+            &mut standin,
+            &format!("localhost://Users/{digest_a}x"),
+            b"shape-prefix",
+            users_reason,
+            "a Users root prefix lookalike is refused",
+        );
+        shape_refused(
+            &mut standin,
+            &format!("localhost://Users/{digest_b}/journal"),
+            b"shape-bob",
+            users_reason,
+            "the other principal's Users root is refused",
+        );
+        shape_refused(
+            &mut standin,
+            "elastos://content/journal",
+            b"shape-scheme",
+            needs_reason,
+            "an elastos uri is refused",
+        );
+        shape_refused(
+            &mut standin,
+            "localhost://Public/self",
+            b"shape-public",
+            needs_reason,
+            "another localhost root is refused",
+        );
+        shape_refused(
+            &mut standin,
+            "localhost://Users",
+            b"shape-users",
+            needs_reason,
+            "a Users uri without a slash is refused",
+        );
+        shape_refused(
+            &mut standin,
+            "localhost://UsersAI",
+            b"shape-usersai",
+            needs_reason,
+            "a UsersAI uri without a slash is refused",
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-a",
+                "localhost://UsersAI/self",
+                b"bare-ai"
+            ),
+            Ok(usersai_a.clone()),
+            "the stand-in did the work: bare UsersAI/self resolves to the principal root"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self"),
+            Ok(b"bare-ai".to_vec()),
+            "the stand-in did the work: the owner reads the bare UsersAI root"
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-a",
+                "localhost://Users/self",
+                b"bare-users"
+            ),
+            Ok(users_a.clone()),
+            "the stand-in did the work: bare Users/self resolves to the principal root"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-a", "localhost://Users/self"),
+            Ok(b"bare-users".to_vec()),
+            "the stand-in did the work: the owner reads the bare Users root"
+        );
+        assert_eq!(
+            standin.protected_write("component-1", "req-a", &users_a, b"root-v2"),
+            Ok(users_a.clone()),
+            "the stand-in did the work: the active Users root replaces the stored bytes"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-a", "localhost://Users/self"),
+            Ok(b"root-v2".to_vec()),
+            "the stand-in did the work: the bare Users read sees the replacement"
+        );
+        let notes_a = format!("localhost://Users/{digest_a}/notes");
+        assert_eq!(
+            standin.protected_write("component-1", "req-a", &notes_a, b"notes-v1"),
+            Ok(notes_a.clone()),
+            "the stand-in did the work: a path under the active Users root stays itself"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-a", &notes_a),
+            Ok(b"notes-v1".to_vec()),
+            "the stand-in did the work: the owner reads the active Users path"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            Ok(b"journal-v1".to_vec()),
+            "the stand-in did the work: the Users root writes leave the journal"
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-a",
+                "localhost://UsersAI/self/journal",
+                b"journal-v2",
+            ),
+            Ok(journal_a.clone()),
+            "the stand-in did the work: a second write replaces the stored journal"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            Ok(b"journal-v2".to_vec()),
+            "the stand-in did the work: the owner reads the replacement"
+        );
+        assert_eq!(
+            standin.protected_read("component-2", "req-b", "localhost://UsersAI/self/journal"),
+            Ok(b"bob-v1".to_vec()),
+            "the stand-in did the work: the replacement leaves the sibling journal"
+        );
+        standin.seed_grant(
+            "req-once",
+            "component-1",
+            "localhost://UsersAI/self/once",
+            "write",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-once",
+                "localhost://UsersAI/self/once",
+                b"once-v1",
+            ),
+            Ok(once_a.clone()),
+            "the stand-in did the work: one once write stores the bytes"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: the once grant is exhausted"
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-1",
+                "req-once",
+                "localhost://UsersAI/self/once",
+                b"once-v2",
+            ),
+            Err((400, "grant is not live: Exhausted".to_owned())),
+            "the stand-in did the work: a second once write is refused"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/once"),
+            Ok(b"once-v1".to_vec()),
+            "the stand-in did the work: the exhausted write leaves the stored bytes"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-once", "localhost://UsersAI/self/once"),
+            Err((400, "grant is not live: Exhausted".to_owned())),
+            "the stand-in did the work: an exhausted grant cannot read"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/once"),
+            Ok(b"once-v1".to_vec()),
+            "the stand-in did the work: the refused read leaves the stored bytes"
+        );
+        assert_eq!(
+            standin.protected_write(
+                "component-missing",
+                "req-a",
+                "localhost://UsersAI/self/journal",
+                b"missing-instance",
+            ),
+            Err((400, "unknown instance: component-missing".to_owned())),
+            "the stand-in did the work: an unknown instance cannot write"
+        );
+        assert_eq!(
+            standin.protected_read(
+                "component-missing",
+                "req-a",
+                "localhost://UsersAI/self/../journal",
+            ),
+            Err((400, "unknown instance: component-missing".to_owned())),
+            "the stand-in did the work: an unknown instance cannot read"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            Ok(b"journal-v2".to_vec()),
+            "the stand-in did the work: an unknown instance stores nothing"
+        );
+
+        standin
+            .admit_resident("/capsules/journal-stop", "journal-stop", Start::Ok)
+            .expect("the stand-in admits journal-stop");
+        standin
+            .bind_verified_principal("/capsules/journal-stop", "agent-stop")
+            .expect("the stand-in binds agent-stop");
+        let stopped = standin
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/journal-stop"}))
+            .expect("the stand-in launches journal-stop");
+        assert_eq!(
+            stopped["id"], "component-3",
+            "the stand-in did the work: journal-stop is component-3"
+        );
+        standin
+            .finish_start("component-3")
+            .expect("the stand-in finishes journal-stop");
+        standin.seed_grant(
+            "req-stop",
+            "component-3",
+            "localhost://UsersAI/self/journal",
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin
+            .delete_capsule(Caller::Shell, "component-3", &json!({"reason": "end"}))
+            .expect("the stand-in stops journal-stop");
+        assert_eq!(
+            standin.protected_write(
+                "component-3",
+                "req-stop",
+                "localhost://UsersAI/self/journal",
+                b"stop-v1",
+            ),
+            Err((400, "instance is not live: stopped".to_owned())),
+            "the stand-in did the work: a stopped instance cannot write"
+        );
+        assert_eq!(
+            standin.protected_read(
+                "component-3",
+                "req-stop",
+                "localhost://UsersAI/self/journal"
+            ),
+            Err((400, "instance is not live: stopped".to_owned())),
+            "the stand-in did the work: a stopped instance cannot read"
+        );
+
+        standin
+            .admit_resident(
+                "/capsules/journal-fail",
+                "journal-fail",
+                Start::Error("boom".to_owned()),
+            )
+            .expect("the stand-in admits journal-fail");
+        standin
+            .bind_verified_principal("/capsules/journal-fail", "agent-fail")
+            .expect("the stand-in binds agent-fail");
+        let failed = standin
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/journal-fail"}))
+            .expect("the stand-in launches journal-fail");
+        assert_eq!(
+            failed["id"], "component-4",
+            "the stand-in did the work: journal-fail is component-4"
+        );
+        standin.seed_grant(
+            "req-fail",
+            "component-4",
+            "localhost://UsersAI/self/journal",
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin
+            .finish_start("component-4")
+            .expect("the stand-in finishes journal-fail");
+        assert_eq!(
+            standin.protected_write(
+                "component-4",
+                "req-fail",
+                "localhost://UsersAI/self/journal",
+                b"fail-v1",
+            ),
+            Err((400, "instance is not live: failed".to_owned())),
+            "the stand-in did the work: a failed instance cannot write"
+        );
+        assert_eq!(
+            standin.protected_read(
+                "component-4",
+                "req-fail",
+                "localhost://UsersAI/self/journal"
+            ),
+            Err((400, "instance is not live: failed".to_owned())),
+            "the stand-in did the work: a failed instance cannot read"
+        );
+        assert_eq!(
+            standin.protected_read("component-1", "req-a", "localhost://UsersAI/self/journal"),
+            Ok(b"journal-v2".to_vec()),
+            "the stand-in did the work: an ended instance leaves the stored journal"
+        );
+        assert_named_capsule(
+            &standin,
+            "component-1",
+            "journal-a",
+            "running",
+            "",
+            "component-1 stays running",
+        );
+        assert_named_capsule(
+            &standin,
+            "component-2",
+            "journal-b",
+            "running",
+            "",
+            "component-2 stays running",
+        );
     }
 }

@@ -11615,3 +11615,436 @@ fn capability_fields(request: &Value) -> Value {
 | 8. Identity, admission and allowance stay separate? | Yes | The capsule id is only the caller session at `:418` and `:428`; `post_capability_request` still admits the instance, and `authorise` still decides the grant. |
 
 A passing row gives the real Runtime no A3 credit. two-capsule-run owns the real-bytes run.
+
+## 076 — Launch principal protects the stored write
+
+076: `bind_verified_principal` stores the principal the launch verified. `post_capsules` copies it onto the new instance. `protected_write` and `protected_read` resolve `Users/self` and `UsersAI/self` from that principal, then `authorise`, and one map stores the bytes. `standin_protected_storage_uses_the_launch_principal` fails on each of the sixteen hand-run plants and passes when they are restored. A PASS gives the Runtime no A15 credit. The UsersAI binding rows stay blocked.
+
+### Quotes from the contract (read only)
+
+`docs/AGENT_ARCHITECTURE.md`, "State ownership":
+
+```text
+- Agent state is rooted under the agent principal's `UsersAI/...` space.
+```
+
+```text
+This document does not freeze the exact path layout below `Users/...` or
+`UsersAI/...`.
+```
+
+`docs/AGENT_ARCHITECTURE.md`, "Request flow", step 2:
+
+```text
+2. Runtime resolves and binds the human principal, agent principal, proof,
+   Agent Host capsule identity, session, and launch authority.
+```
+
+`git show 513988ebd:lab/runtime-asks/04-protected-storage-bridge-entry.md`, "The ask":
+
+```text
+The A15 host can send an approved journal write through the Runtime's own
+protected storage path, so the write is stored under the person's protected
+root.
+```
+
+`git show 513988ebd:lab/runtime-asks/05-usersai-principal-root-alias.md`, "The ask":
+
+```text
+A guest that names `UsersAI/self` reaches the root of the agent principal that
+the Runtime verified for the launch.
+```
+
+`examples/agent-host/handoff/USERSAI-JOURNAL.md`:
+
+```text
+The guest only ever names `UsersAI/self`. The Runtime rewrites `self` to the active agent principal's root, the same way it rewrites `Users/self` today (`resource_bridge.rs` `scope_current_user_alias`). Any other `UsersAI/<root>` from the guest is refused.
+```
+
+Form A and Form B stay in that ask. This lane does not edit `elastos/`.
+
+### Plants
+
+Each plant was applied alone, the crate compiled, and `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_protected_storage_uses_the_launch_principal -- --exact` failed on an assertion. The file was restored before the next plant. Restored, that test passes. No `falsifiers.json` id.
+
+F-standin-principal-constant: the `UsersAI/self` arm returns `localhost://UsersAI/ada` plus the suffix. Failed at `standin-runtime/mod.rs:8930:9`: `a Starting instance stores the approved write`, left `Ok("localhost://UsersAI/ada/journal")`, right `Ok("localhost://UsersAI/763281cf1e57227a6b99d89d/journal")`.
+
+Old:
+
+```text
+                return Ok(format!("localhost://UsersAI/{digest}{suffix}"));
+```
+
+New:
+
+```text
+                return Ok(format!("localhost://UsersAI/ada{suffix}"));
+```
+
+F-standin-principal-copy: `post_capsules` stores `ada` in place of the bound principal. Failed at `standin-runtime/mod.rs:8930:9`: `a Starting instance stores the approved write`, left `Ok("localhost://UsersAI/fdee430d40bd57deeac186cd/journal")`, right `Ok("localhost://UsersAI/763281cf1e57227a6b99d89d/journal")`.
+
+Old:
+
+```text
+            principal,
+```
+
+New:
+
+```text
+            principal: principal.map(|_| "ada".to_owned()),
+```
+
+F-standin-protected-stub: the start of `protected_write` returns `Ok` of the guest uri. Failed at planted `standin-runtime/mod.rs:8832:9` (restored `:8831`): `an unbound launch requires the verified principal`, left `Ok("localhost://UsersAI/self/journal")`, right `Err((400, "requires the principal from the verified launch"))`.
+
+Old:
+
+```text
+        let resolved = self.resolve_protected_uri(instance_id, uri)?;
+```
+
+New:
+
+```text
+        return Ok(uri.to_owned());
+        let resolved = self.resolve_protected_uri(instance_id, uri)?;
+```
+
+F-standin-protected-guest-key: the write stores under the guest uri. The read still looks up the resolved uri. Failed at `standin-runtime/mod.rs:8940:9`: `a Starting instance reads the approved write`, left `Err((404, "protected object is absent"))`, right `Ok` of `start-v1`.
+
+Old:
+
+```text
+            .insert(resolved.clone(), bytes.to_vec());
+```
+
+New:
+
+```text
+            .insert(uri.to_owned(), bytes.to_vec());
+```
+
+F-standin-read-skip-auth: `protected_read` skips `authorise`. Failed at planted `standin-runtime/mod.rs:9084:9` (restored `:9089`): `an unknown grant cannot read`, left `Ok` of `journal-v1`, right `Err((400, "unknown grant: req-missing"))`.
+
+Old:
+
+```text
+        self.authorise(
+            Caller::Client {
+                session_id: instance_id,
+            },
+            request_id,
+        )?;
+        self.protected_objects
+            .get(&resolved)
+```
+
+New:
+
+```text
+        let _ = request_id;
+        self.protected_objects
+            .get(&resolved)
+```
+
+F-standin-auth-before-resolve: `protected_write` calls `authorise` before `resolve_protected_uri`. Failed at `standin-runtime/mod.rs:8831:9`: `an unbound launch requires the verified principal`, left `Err((400, "unknown grant: req-none"))`, right `Err((400, "requires the principal from the verified launch"))`.
+
+Old:
+
+```text
+        let resolved = self.resolve_protected_uri(instance_id, uri)?;
+        self.authorise(
+            Caller::Client {
+                session_id: instance_id,
+            },
+            request_id,
+        )?;
+```
+
+New:
+
+```text
+        self.authorise(
+            Caller::Client {
+                session_id: instance_id,
+            },
+            request_id,
+        )?;
+        let resolved = self.resolve_protected_uri(instance_id, uri)?;
+```
+
+F-standin-auth-before-uri: a resolver error other than the instance, `..`, or missing-principal refusal still calls `authorise` before the error returns. Failed at planted `standin-runtime/mod.rs:8785:9` (restored `:8774`): `a once grant does not pass another UsersAI root spends nothing`, left `(Exhausted, false)`, right `(Live, false)`.
+
+Old:
+
+```text
+        let resolved = self.resolve_protected_uri(instance_id, uri)?;
+        self.authorise(
+            Caller::Client {
+                session_id: instance_id,
+            },
+            request_id,
+        )?;
+        self.protected_objects
+            .insert(resolved.clone(), bytes.to_vec());
+        Ok(resolved)
+```
+
+New:
+
+```text
+        let resolved = self.resolve_protected_uri(instance_id, uri);
+        let early = matches!(
+            &resolved,
+            Err((400, reason))
+                if reason == "requires the principal from the verified launch"
+                    || reason == "protected path rejects .."
+                    || reason.starts_with("unknown instance")
+                    || reason.starts_with("instance is not live")
+        );
+        if !early {
+            self.authorise(
+                Caller::Client {
+                    session_id: instance_id,
+                },
+                request_id,
+            )?;
+        }
+        let resolved = resolved?;
+        self.protected_objects
+            .insert(resolved.clone(), bytes.to_vec());
+        Ok(resolved)
+```
+
+F-standin-bind-skip-validation: `bind_verified_principal` stores any principal on a known path and returns `Ok` otherwise. Failed at planted `standin-runtime/mod.rs:8851:9` (restored `:8858`): `an empty principal is refused`, left `Ok(())`, right `Err((400, "verified launch needs a principal"))`.
+
+Old:
+
+```text
+        if principal.is_empty() {
+            return Err((400, "verified launch needs a principal".to_owned()));
+        }
+        let Some(row) = self.admitted.iter_mut().find(|row| row.path == path) else {
+            return Err((400, format!("unknown resident path: {path}")));
+        };
+        if row.principal.is_some() {
+            return Err((400, "verified principal already bound".to_owned()));
+        }
+        row.principal = Some(principal.to_owned());
+        Ok(())
+```
+
+New:
+
+```text
+        if let Some(row) = self.admitted.iter_mut().find(|row| row.path == path) {
+            row.principal = Some(principal.to_owned());
+        }
+        Ok(())
+```
+
+F-standin-bind-retroactive: a later bind copies the principal onto an instance that already exists. Failed at planted `standin-runtime/mod.rs:8892:9` (restored `:8885`): `a later bind leaves the instance already created`, left `Ok("localhost://UsersAI/763281cf1e57227a6b99d89d/journal")`, right `Err((400, "requires the principal from the verified launch"))`.
+
+Old:
+
+```text
+        row.principal = Some(principal.to_owned());
+        Ok(())
+```
+
+New:
+
+```text
+        let name = row.name.clone();
+        let bound = principal.to_owned();
+        row.principal = Some(bound.clone());
+        for instance in &mut self.instances {
+            if instance.name == name && instance.principal.is_none() {
+                instance.principal = Some(bound.clone());
+            }
+        }
+        Ok(())
+```
+
+F-standin-skip-instance-checks: a missing instance continues into the resolver. Failed at planted `standin-runtime/mod.rs:9424:9` (restored `:9433`): `an unknown instance cannot write`, left `Err((400, "requires the principal from the verified launch"))`, right `Err((400, "unknown instance: component-missing"))`.
+
+Old:
+
+```text
+        let Some(instance) = self
+            .instances
+            .iter()
+            .find(|instance| instance.id == instance_id)
+        else {
+            return Err(unknown_instance(instance_id));
+        };
+        if !matches!(
+            instance.phase,
+            ResidentStatus::Starting | ResidentStatus::Running
+        ) {
+            return Err(not_live(instance.phase));
+        }
+```
+
+New:
+
+```text
+        let principal_owned = self
+            .instances
+            .iter()
+            .find(|instance| instance.id == instance_id)
+            .and_then(|instance| instance.principal.clone());
+```
+
+The `..` check and the principal read stay, and the principal read uses `principal_owned`.
+
+F-standin-running-only: only `Running` is admitted. Failed at planted `standin-runtime/mod.rs:8927:9` (restored `:8930`): `a Starting instance stores the approved write`, left `Err((400, "instance is not live: starting"))`, right `Ok("localhost://UsersAI/763281cf1e57227a6b99d89d/journal")`.
+
+Old:
+
+```text
+        if !matches!(
+            instance.phase,
+            ResidentStatus::Starting | ResidentStatus::Running
+        ) {
+            return Err(not_live(instance.phase));
+        }
+```
+
+New:
+
+```text
+        if instance.phase != ResidentStatus::Running {
+            return Err(not_live(instance.phase));
+        }
+```
+
+F-standin-resolver-lookalike: `Users/self` accepts any suffix. Failed at planted `standin-runtime/mod.rs:8767:9` (restored `:8769`): `a Users/self prefix lookalike is refused`, left `Ok("localhost://Users/763281cf1e57227a6b99d89dish/journal")`, right the Users-root refusal.
+
+Old:
+
+```text
+        if let Some(suffix) = uri.strip_prefix("localhost://Users/self") {
+            if suffix.is_empty() || suffix.starts_with('/') {
+                return Ok(format!("localhost://Users/{digest}{suffix}"));
+            }
+        }
+```
+
+New:
+
+```text
+        if let Some(suffix) = uri.strip_prefix("localhost://Users/self") {
+            return Ok(format!("localhost://Users/{digest}{suffix}"));
+        }
+```
+
+F-standin-resolver-users-root: the active `Users` root is refused. Failed at planted `standin-runtime/mod.rs:9332:9` (restored `:9337`): `the active Users root replaces the stored bytes`, left the Users-root refusal, right `Ok("localhost://Users/763281cf1e57227a6b99d89d")`.
+
+Old:
+
+```text
+        let users_root = format!("localhost://Users/{digest}");
+        let users_child = format!("{users_root}/");
+        if uri == users_root || uri.starts_with(&users_child) {
+            return Ok(uri.to_owned());
+        }
+```
+
+New: that block is removed.
+
+F-standin-resolver-unsupported: any other uri is stored as itself. Failed at planted `standin-runtime/mod.rs:8766:9` (restored `:8769`): `an elastos uri is refused`, left `Ok("elastos://content/journal")`, right `Err((400, "protected storage needs a Users/self or UsersAI/self resource"))`.
+
+Old:
+
+```text
+        Err((
+            400,
+            "protected storage needs a Users/self or UsersAI/self resource".to_owned(),
+        ))
+```
+
+New:
+
+```text
+        Ok(uri.to_owned())
+```
+
+F-standin-ignore-replacement: a second write leaves the first bytes. Failed at planted `standin-runtime/mod.rs:9344:9` (restored `:9342`): `the bare Users read sees the replacement`, left `Ok` of `bare-users`, right `Ok` of `root-v2`.
+
+Old:
+
+```text
+        self.protected_objects
+            .insert(resolved.clone(), bytes.to_vec());
+        Ok(resolved)
+```
+
+New:
+
+```text
+        if !self.protected_objects.contains_key(&resolved) {
+            self.protected_objects
+                .insert(resolved.clone(), bytes.to_vec());
+        }
+        Ok(resolved)
+```
+
+F-standin-store-before-auth: `protected_write` stores before `authorise`. Failed at `standin-runtime/mod.rs:9208:9`: `a missing grant stores nothing`, left `Ok` of `missing-v1`, right `Ok` of `journal-v1`.
+
+Old:
+
+```text
+        let resolved = self.resolve_protected_uri(instance_id, uri)?;
+        self.authorise(
+            Caller::Client {
+                session_id: instance_id,
+            },
+            request_id,
+        )?;
+        self.protected_objects
+            .insert(resolved.clone(), bytes.to_vec());
+```
+
+New:
+
+```text
+        let resolved = self.resolve_protected_uri(instance_id, uri)?;
+        self.protected_objects
+            .insert(resolved.clone(), bytes.to_vec());
+        self.authorise(
+            Caller::Client {
+                session_id: instance_id,
+            },
+            request_id,
+        )?;
+```
+
+### Docs
+
+`standin-runtime/README.md` adds one paragraph immediately before `## Callers`. `bind_verified_principal` stores the principal the launch verified. The launch body still rejects `principal_id`. `protected_write` stores under `Users/self` or `UsersAI/self` resolved from that principal. The digest is `identity::sha256`. A constant principal is not the root. Another `UsersAI` root is refused. A PASS gives the Runtime no A15 credit, and the UsersAI binding rows stay blocked. `session_id` still equals the instance id. The hostcall paragraph stays. The launch, list, and settlement paragraphs stay. There is no heading named RI-1 to RI-4.
+
+`RUNBOOK.md` gains one paragraph after the last stand-in paragraph: `standin_protected_storage_uses_the_launch_principal` is this stand-in, and a PASS there gives the Runtime no A15 credit. Every other RUNBOOK paragraph stays.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged. `git diff` for `src/harness.rs`, `src/census.rs`, `src/identity.rs`, `tests/effects.rs`, `tests/common/grants.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. The changed files are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`. After the plants were restored, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` has no plant.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.20 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 271.93 seconds, inside the 600-second bound. Targets in order: lib 71 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.20 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_protected_storage_uses_the_launch_principal -- --exact` exit 0, 1 passed and 0 failed, real 0.13 seconds.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The root is the first 24 characters of `identity::sha256` at `standin-runtime/mod.rs:839`. The principal text is not copied into the root. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `protected_write` calls `authorise` at `:774` before the map insert at `:780`. A refusal stores nothing. |
+| 3. A second path or a second copy of one rule? | No | `resolve_protected_uri` at `:812` is the one resolver. `post_capsules` copies the principal at `:978`. `bind_verified_principal` is the one store at `:915`. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`. `elastos/` is untouched. |
+| 5. Refusals deny by default with a clear reason? | Yes | `resolve_protected_uri` at `:816-858` returns the instance, `..`, principal, `UsersAI`, `Users`, and other-uri reasons before `authorise`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The stand-in keeps one in-memory map. It opens no file and adds no `wasi` import. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_protected_storage_uses_the_launch_principal` at `:8787`. The sixteen plants each fail it, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | `bind_verified_principal` at `:901` stores the verified principal. `admit_resident` at `:864` still only admits the path. `authorise` at `:741` still spends the grant. |
+
+A passing row gives the real Runtime no A15 credit. The UsersAI binding rows stay blocked.
