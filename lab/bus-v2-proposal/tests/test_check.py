@@ -344,6 +344,98 @@ COVER_LINES = (
 )
 COVER_QUOTE = COVER_LINES[5]
 
+EDIT_RANGE_SPAN = "examples/agent-host/src/lib.rs:2421-2422"
+EDIT_START_NUMBER = 2421
+EDIT_START_SPAN = "examples/agent-host/src/lib.rs:2421"
+EDIT_END_NUMBER = 2422
+EDIT_END_SPAN = "examples/agent-host/src/lib.rs:2422"
+EDIT_LINES = (
+    "/// Record an edit proposal. An unread target, a stale version, empty old",
+    "/// text, old text that is not exactly once in what that version has shown",
+    "/// (a read that showed a window covers only that window), or a no-op edit",
+    "/// repeated past the limit creates no step. A path that is not canonical or",
+    "/// not NFC is refused. Every refusal writes one refusal record. This does not",
+    "/// write.",
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    "fn propose_edit(",
+    "    journal: &mut Journal,",
+    "    resource: &str,",
+    "    old: &str,",
+    "    new: &str,",
+    "    seen: Option<u64>,",
+    ") -> Result<u64, &'static str> {",
+    "    let result = propose_edit_checked(journal, resource, old, new, seen);",
+    "    result.map_err(|refusal| {",
+    "        record_refusal(journal, refusal, &refused_path(resource));",
+    "        refusal.reason()",
+    "    })",
+    "}",
+)
+EDIT_START_QUOTE = EDIT_LINES[4]
+EDIT_END_QUOTE = EDIT_LINES[5]
+
+REQUEST_WALK_NUMBER = 2720
+REQUEST_WALK_SPAN = "examples/agent-host/src/lib.rs:2720"
+REQUEST_WALK_LINES = (
+    "/// The one provider request for a change or a restore: every file, each with",
+    "/// the Runtime revision it was read at (`if_revision`), the lines it may",
+    "/// touch, and the text to replace there. The provider applies all files or",
+    "/// none. A change that does not bind sends nothing and writes one refusal",
+    "/// record.",
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    "fn edit_request(journal: &mut Journal, effect_id: u64) -> Result<Vec<u8>, &'static str> {",
+    "    let result = bind_change(journal, effect_id);",
+    "    result.map(|bound| request_body(&bound)).map_err(|refusal| {",
+    '        record_refusal(journal, refusal, &format!("change {effect_id}"));',
+    "        refusal.reason()",
+    "    })",
+    "}",
+)
+REQUEST_QUOTE = REQUEST_WALK_LINES[0]
+
+IS_WRITE_NUMBER = 3290
+IS_WRITE_SPAN = "examples/agent-host/src/lib.rs:3290"
+IS_WRITE_LINES = (
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    "fn is_write(kind: ProposalKind) -> bool {",
+    "    matches!(kind, ProposalKind::Edit | ProposalKind::Restore)",
+    "}",
+)
+IS_WRITE_QUOTE = IS_WRITE_LINES[2]
+
+# The four edit-walk quotes, their pinned lines, their walk and their index.
+EDIT_CASES = (
+    ("edit_start", EDIT_START_NUMBER, EDIT_START_SPAN, EDIT_LINES, 4),
+    ("edit_end", EDIT_END_NUMBER, EDIT_END_SPAN, EDIT_LINES, 5),
+    ("request", REQUEST_WALK_NUMBER, REQUEST_WALK_SPAN, REQUEST_WALK_LINES, 0),
+    ("is_write", IS_WRITE_NUMBER, IS_WRITE_SPAN, IS_WRITE_LINES, 2),
+)
+
+# The groups one combined edit body cites, in the order it emits them.
+EDIT_GROUPS = (
+    "observe",
+    "range",
+    "request_walk",
+    "revision",
+    "op",
+    "is_write",
+    "no_write",
+    "deny",
+)
+
+# The order in which the edit-walk quote decisions read their pinned lines.
+EDIT_DECISION_ORDER = (
+    OBSERVE_NUMBER,
+    EDIT_START_NUMBER,
+    EDIT_END_NUMBER,
+    REQUEST_WALK_NUMBER,
+    REVISION_NUMBER,
+    OP_NUMBER,
+    IS_WRITE_NUMBER,
+    NO_WRITE_NUMBER,
+    DENY_NUMBER,
+)
+
 # The five file-ask quotes, their pinned lines, their walk and their index.
 FILE_ASK_CASES = (
     ("observe", OBSERVE_NUMBER, OBSERVE_SPAN, OBSERVE_LINES, 4),
@@ -427,6 +519,10 @@ FILE_ASK_LINES = {
     KIND_INIT_NUMBER: KIND_INIT_QUOTE,
     KIND_APPEND_NUMBER: KIND_APPEND_QUOTE,
     COVER_NUMBER: COVER_QUOTE,
+    EDIT_START_NUMBER: EDIT_START_QUOTE,
+    EDIT_END_NUMBER: EDIT_END_QUOTE,
+    REQUEST_WALK_NUMBER: REQUEST_QUOTE,
+    IS_WRITE_NUMBER: IS_WRITE_QUOTE,
 }
 
 
@@ -1049,6 +1145,46 @@ class CitationCheckTests(unittest.TestCase):
                 if indented:
                     parts.append("    " + quote + "\n")
                 parts.append("\n")
+        return "".join(parts)
+
+    def _edit_walk_body(
+        self,
+        observe=OBSERVE_LINES,
+        edit=EDIT_LINES,
+        request_walk=REQUEST_WALK_LINES,
+        revision=REQUEST_LINES,
+        op=REQUEST_LINES,
+        is_write=IS_WRITE_LINES,
+        no_write=NO_WRITE_LINES,
+        deny=DENY_QUOTE,
+        groups=None,
+        copies=None,
+        indented=True,
+    ):
+        """A draft that cites the edit range, request and is-write walks."""
+        copies = copies or {}
+        chosen = EDIT_GROUPS if groups is None else tuple(groups)
+        blocks = (
+            ("observe", [OBSERVE_SPAN], list(observe)),
+            ("range", [EDIT_RANGE_SPAN], list(edit)),
+            ("request_walk", [REQUEST_WALK_SPAN], list(request_walk)),
+            ("revision", [REVISION_SPAN], list(revision)),
+            ("op", [OP_SPAN], list(op)),
+            ("is_write", [IS_WRITE_SPAN], list(is_write)),
+            ("no_write", [NO_WRITE_SPAN], list(no_write)),
+            ("deny", [DENY_SPAN], [deny] + list(DENY_LINES[1:])),
+        )
+        parts = []
+        for name, spans, lines in blocks:
+            if name not in chosen:
+                continue
+            prose = " ".join(
+                self._cited(span, copies.get(name, 1)) for span in spans
+            )
+            parts.append(prose + "\n")
+            if indented:
+                parts.append("".join("    " + line + "\n" for line in lines))
+            parts.append("\n")
         return "".join(parts)
 
     def _caught(self, global_name, planted, named_test, prefix, label):
@@ -4145,4 +4281,503 @@ class CitationCheckTests(unittest.TestCase):
             4,
             self.test_cover_iter_line_does_not_stand_for_line_8488,
             "CAUGHT cover-iter-line",
+        )
+
+    def _edit_case(self, name):
+        for case in EDIT_CASES:
+            if case[0] == name:
+                return case
+        raise AssertionError(name)
+
+    def _edit_group(self, name):
+        return {
+            "edit_start": "range",
+            "edit_end": "range",
+            "request": "request_walk",
+            "is_write": "is_write",
+        }[name]
+
+    def _edit_lines_arg(self, name):
+        return {
+            "edit_start": "edit",
+            "edit_end": "edit",
+            "request": "request_walk",
+            "is_write": "is_write",
+        }[name]
+
+    def test_live_draft_edit_walk_quotes_match_their_pinned_lines(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        self.assertEqual(check.edit_start_quote(text), EDIT_START_QUOTE)
+        self.assertEqual(check.edit_end_quote(text), EDIT_END_QUOTE)
+        self.assertEqual(check.request_quote(text), REQUEST_QUOTE)
+        self.assertEqual(check.is_write_quote(text), IS_WRITE_QUOTE)
+        for span, lines in (
+            (EDIT_RANGE_SPAN, EDIT_LINES),
+            (REQUEST_WALK_SPAN, REQUEST_WALK_LINES),
+            (IS_WRITE_SPAN, IS_WRITE_LINES),
+        ):
+            self.assertEqual(
+                len(check._remainders(text, "`" + span + "`")), len(lines), span
+            )
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        for name, number, span, lines, index in EDIT_CASES:
+            self.assertEqual(
+                check.pinned_line(root, sha, OWNED_REL, number), lines[index], span
+            )
+        self.assertEqual(check.problems(root), [])
+
+    def test_edit_walks_are_absent_below_their_index(self):
+        for name, number, span, lines, index in EDIT_CASES:
+            selector = getattr(check, name + "_quote")
+            group = self._edit_group(name)
+            self.assertIsNone(
+                selector(self._edit_walk_body(groups=[group], indented=False)), span
+            )
+            self.assertIsNone(selector("No edit span here.\n"), span)
+            self.assertIsNone(
+                selector(
+                    self._edit_walk_body(
+                        groups=[group],
+                        **{self._edit_lines_arg(name): lines[:index]}
+                    )
+                ),
+                span,
+            )
+
+    def test_edit_walk_fixture_keeps_every_decision_on_its_pinned_line(self):
+        got, reads = self._pinned_reads(
+            self._edit_walk_body(), {OWNED_REL: self._file_ask_source()}
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, list(EDIT_DECISION_ORDER))
+
+    def _assert_edit_quote_mismatch(self, name):
+        _, number, span, lines, index = self._edit_case(name)
+        group = self._edit_group(name)
+        expected = "refuse: quoted line does not match " + span
+        body = self._edit_walk_body(
+            groups=[group],
+            **{self._edit_lines_arg(name): self._changed(lines, index)}
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(got, [expected])
+        if name == "edit_end":
+            self.assertEqual(reads, [EDIT_START_NUMBER, EDIT_END_NUMBER])
+        else:
+            self.assertEqual(reads, [number])
+        root = self._draft(body, {OWNED_REL: self._file_ask_source()})
+        (root / OWNED_REL).write_bytes(
+            self._file_ask_source(
+                lines={**FILE_ASK_LINES, number: "// edited in the worktree"}
+            )
+        )
+        self.assertEqual(check.problems(root), [expected])
+        root = self._draft(
+            self._edit_walk_body(groups=[group]),
+            {OWNED_REL: self._file_ask_source()},
+        )
+        (root / OWNED_REL).write_bytes(
+            self._file_ask_source(
+                lines={**FILE_ASK_LINES, number: "// edited in the worktree"}
+            )
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_edit_start_quoted_line_mismatch_is_refused(self):
+        self._assert_edit_quote_mismatch("edit_start")
+
+    def test_edit_end_quoted_line_mismatch_is_refused(self):
+        self._assert_edit_quote_mismatch("edit_end")
+
+    def test_request_quoted_line_mismatch_is_refused(self):
+        self._assert_edit_quote_mismatch("request")
+
+    def test_is_write_quoted_line_mismatch_is_refused(self):
+        self._assert_edit_quote_mismatch("is_write")
+
+    def test_edit_limit_line_does_not_stand_for_line_2421(self):
+        body = self._edit_walk_body(
+            groups=["range"], edit=self._changed(EDIT_LINES, 3)
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [EDIT_START_NUMBER, EDIT_END_NUMBER])
+
+    def test_edit_start_line_does_not_stand_for_line_2422(self):
+        lines = {
+            **FILE_ASK_LINES,
+            EDIT_START_NUMBER: EDIT_START_QUOTE,
+            EDIT_END_NUMBER: EDIT_START_QUOTE,
+        }
+        got, reads = self._pinned_reads(
+            self._edit_walk_body(groups=["range"]),
+            {OWNED_REL: self._file_ask_source(lines=lines)},
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + EDIT_END_SPAN]
+        )
+        self.assertEqual(reads, [EDIT_START_NUMBER, EDIT_END_NUMBER])
+
+    def test_request_revision_line_does_not_stand_for_line_2720(self):
+        body = self._edit_walk_body(
+            groups=["request_walk"],
+            request_walk=self._changed(REQUEST_WALK_LINES, 1),
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [REQUEST_WALK_NUMBER])
+
+    def test_is_write_fn_line_does_not_stand_for_line_3290(self):
+        body = self._edit_walk_body(
+            groups=["is_write"], is_write=self._changed(IS_WRITE_LINES, 1)
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [IS_WRITE_NUMBER])
+
+    def test_edit_walk_other_lines_do_not_stand_for_the_edit_lines(self):
+        for index in (0, 3, 6, 19):
+            body = self._edit_walk_body(
+                groups=["range"], edit=self._changed(EDIT_LINES, index)
+            )
+            got, reads = self._pinned_reads(
+                body, {OWNED_REL: self._file_ask_source()}
+            )
+            self.assertEqual(got, [], index)
+            self.assertEqual(reads, [EDIT_START_NUMBER, EDIT_END_NUMBER], index)
+
+    def test_request_record_line_does_not_stand_for_line_2720(self):
+        body = self._edit_walk_body(
+            groups=["request_walk"],
+            request_walk=self._changed(REQUEST_WALK_LINES, 12),
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [REQUEST_WALK_NUMBER])
+
+    def test_is_write_walk_other_lines_do_not_stand_for_line_3290(self):
+        for index in (0, 3):
+            body = self._edit_walk_body(
+                groups=["is_write"], is_write=self._changed(IS_WRITE_LINES, index)
+            )
+            got, reads = self._pinned_reads(
+                body, {OWNED_REL: self._file_ask_source()}
+            )
+            self.assertEqual(got, [], index)
+            self.assertEqual(reads, [IS_WRITE_NUMBER], index)
+
+    def test_edit_walks_without_an_indented_line_add_no_refusal(self):
+        got, reads = self._pinned_reads(
+            self._edit_walk_body(indented=False),
+            {OWNED_REL: self._file_ask_source()},
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [])
+
+    def test_edit_walk_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        for name, number, span, lines, index in EDIT_CASES:
+            group = self._edit_group(name)
+            expected = "refuse: quoted line is not in the pinned commit: " + span
+            expected_reads = [number]
+            if name == "edit_end":
+                expected_reads = [EDIT_START_NUMBER, EDIT_END_NUMBER]
+            got, reads = self._pinned_reads(
+                self._edit_walk_body(groups=[group]),
+                {OWNED_REL: self._file_ask_source(count=number - 1)},
+                {OWNED_REL: self._file_ask_source()},
+            )
+            self.assertEqual(got, [expected], span)
+            self.assertEqual(reads, expected_reads, span)
+
+    def test_two_edit_range_spans_are_refused(self):
+        expected = "refuse: quoted line is not one line: " + EDIT_RANGE_SPAN
+        body = self._edit_walk_body(groups=["range"], copies={"range": 2})
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [])
+
+    def test_two_request_spans_are_refused(self):
+        expected = "refuse: quoted line is not one line: " + REQUEST_WALK_SPAN
+        body = self._edit_walk_body(
+            groups=["request_walk"], copies={"request_walk": 2}
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [])
+
+    def test_two_is_write_spans_are_refused(self):
+        expected = "refuse: quoted line is not one line: " + IS_WRITE_SPAN
+        body = self._edit_walk_body(groups=["is_write"], copies={"is_write": 2})
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [])
+
+    def test_draft_without_the_edit_range_span_adds_no_edit_refusal(self):
+        groups = [group for group in EDIT_GROUPS if group != "range"]
+        got, reads = self._pinned_reads(
+            self._edit_walk_body(groups=groups),
+            {OWNED_REL: self._file_ask_source()},
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(
+            reads,
+            [
+                number
+                for number in EDIT_DECISION_ORDER
+                if number not in (EDIT_START_NUMBER, EDIT_END_NUMBER)
+            ],
+        )
+
+    def test_draft_without_the_request_span_adds_no_request_refusal(self):
+        groups = [group for group in EDIT_GROUPS if group != "request_walk"]
+        got, reads = self._pinned_reads(
+            self._edit_walk_body(groups=groups),
+            {OWNED_REL: self._file_ask_source()},
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(
+            reads,
+            [number for number in EDIT_DECISION_ORDER if number != REQUEST_WALK_NUMBER],
+        )
+
+    def test_draft_without_the_is_write_span_adds_no_is_write_refusal(self):
+        groups = [group for group in EDIT_GROUPS if group != "is_write"]
+        got, reads = self._pinned_reads(
+            self._edit_walk_body(groups=groups),
+            {OWNED_REL: self._file_ask_source()},
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(
+            reads,
+            [number for number in EDIT_DECISION_ORDER if number != IS_WRITE_NUMBER],
+        )
+
+    def test_observe_mismatch_wins_over_the_edit_range_mismatch(self):
+        body = self._edit_walk_body(
+            observe=self._changed(OBSERVE_LINES, 4),
+            edit=self._changed(EDIT_LINES, 4),
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + OBSERVE_SPAN]
+        )
+        self.assertEqual(reads, [OBSERVE_NUMBER])
+
+    def test_draft_without_the_observe_span_still_refuses_the_edit_start(self):
+        groups = [group for group in EDIT_GROUPS if group != "observe"]
+        body = self._edit_walk_body(
+            groups=groups, edit=self._changed(EDIT_LINES, 4)
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + EDIT_START_SPAN]
+        )
+        self.assertEqual(reads, [EDIT_START_NUMBER])
+
+    def test_edit_start_mismatch_stops_the_edit_end_decision(self):
+        body = self._edit_walk_body(
+            groups=["range", "request_walk", "revision"],
+            edit=self._changed(EDIT_LINES, 4),
+            request_walk=self._changed(REQUEST_WALK_LINES, 0),
+            revision=self._changed(REQUEST_LINES, 7),
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + EDIT_START_SPAN]
+        )
+        self.assertEqual(reads, [EDIT_START_NUMBER])
+
+    def test_edit_end_mismatch_stops_the_request_decision(self):
+        body = self._edit_walk_body(
+            groups=["range", "request_walk"],
+            edit=self._changed(EDIT_LINES, 5),
+            request_walk=self._changed(REQUEST_WALK_LINES, 0),
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + EDIT_END_SPAN]
+        )
+        self.assertEqual(reads, [EDIT_START_NUMBER, EDIT_END_NUMBER])
+
+    def test_request_mismatch_stops_the_revision_decision(self):
+        body = self._edit_walk_body(
+            groups=["range", "request_walk", "revision"],
+            request_walk=self._changed(REQUEST_WALK_LINES, 0),
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + REQUEST_WALK_SPAN]
+        )
+        self.assertEqual(
+            reads, [EDIT_START_NUMBER, EDIT_END_NUMBER, REQUEST_WALK_NUMBER]
+        )
+
+    def test_request_mismatch_without_the_edit_range_span_stays_the_request_refusal(self):
+        groups = [group for group in EDIT_GROUPS if group != "range"]
+        body = self._edit_walk_body(
+            groups=groups, request_walk=self._changed(REQUEST_WALK_LINES, 0)
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + REQUEST_WALK_SPAN]
+        )
+        self.assertEqual(reads, [OBSERVE_NUMBER, REQUEST_WALK_NUMBER])
+
+    def test_revision_mismatch_without_the_edit_spans_stays_the_revision_refusal(self):
+        body = self._edit_walk_body(
+            groups=["revision"], revision=self._changed(REQUEST_LINES, 7)
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + REVISION_SPAN]
+        )
+        self.assertEqual(reads, [REVISION_NUMBER])
+
+    def test_op_mismatch_stops_the_is_write_and_no_write_decisions(self):
+        body = self._edit_walk_body(
+            groups=["range", "request_walk", "op", "is_write", "no_write"],
+            op=self._changed(REQUEST_LINES, 15),
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(got, ["refuse: quoted line does not match " + OP_SPAN])
+        self.assertEqual(
+            reads,
+            [
+                EDIT_START_NUMBER,
+                EDIT_END_NUMBER,
+                REQUEST_WALK_NUMBER,
+                OP_NUMBER,
+            ],
+        )
+
+    def test_is_write_mismatch_stops_the_no_write_decision(self):
+        body = self._edit_walk_body(
+            groups=["range", "request_walk", "is_write", "no_write"],
+            is_write=self._changed(IS_WRITE_LINES, 2),
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._file_ask_source()})
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + IS_WRITE_SPAN]
+        )
+        self.assertEqual(
+            reads,
+            [
+                EDIT_START_NUMBER,
+                EDIT_END_NUMBER,
+                REQUEST_WALK_NUMBER,
+                IS_WRITE_NUMBER,
+            ],
+        )
+
+    def test_edit_quote_refusal_waits_for_a_known_pin(self):
+        body = self._edit_walk_body(edit=self._changed(EDIT_LINES, 4))
+        files = {OWNED_REL: self._file_ask_source()}
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+        self.assertEqual(
+            check.problems(
+                self._raw_draft("Pinned commit: HEAD\n" + body, files)
+            ),
+            ["refuse: pinned commit is not one 40-hex commit"],
+        )
+        self.assertEqual(
+            check.problems(
+                self._raw_draft(
+                    "Pinned commit: " + "f" * 40 + "\n" + body, files, commit=True
+                )
+            ),
+            ["refuse: pinned commit is not a commit: " + "f" * 40],
+        )
+
+    def _caught_walk_index(self, global_name, index, marker, named_test, label):
+        def planted(text):
+            remainders = check._remainders(text, marker)
+            if len(remainders) <= index:
+                return None
+            return remainders[index]
+
+        self._caught(
+            global_name,
+            planted,
+            named_test,
+            "refuse: quoted line does not match",
+            label,
+        )
+
+    def test_falsifier_edit_start_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_edit_start_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT edit-start-quoted-line",
+        )
+
+    def test_falsifier_edit_limit_line_is_caught(self):
+        self._caught_walk_index(
+            "edit_start_quote",
+            3,
+            "`" + EDIT_RANGE_SPAN + "`",
+            self.test_edit_limit_line_does_not_stand_for_line_2421,
+            "CAUGHT edit-limit-line",
+        )
+
+    def test_falsifier_edit_end_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_edit_end_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT edit-end-quoted-line",
+        )
+
+    def test_falsifier_edit_start_as_end_is_caught(self):
+        self._caught_walk_index(
+            "edit_end_quote",
+            4,
+            "`" + EDIT_RANGE_SPAN + "`",
+            self.test_edit_start_line_does_not_stand_for_line_2422,
+            "CAUGHT edit-start-as-end",
+        )
+
+    def test_falsifier_request_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_request_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT request-quoted-line",
+        )
+
+    def test_falsifier_request_revision_line_is_caught(self):
+        self._caught_walk_index(
+            "request_quote",
+            1,
+            "`" + REQUEST_WALK_SPAN + "`",
+            self.test_request_revision_line_does_not_stand_for_line_2720,
+            "CAUGHT request-revision-line",
+        )
+
+    def test_falsifier_is_write_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_is_write_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT is-write-quoted-line",
+        )
+
+    def test_falsifier_is_write_fn_line_is_caught(self):
+        self._caught_walk_index(
+            "is_write_quote",
+            1,
+            "`" + IS_WRITE_SPAN + "`",
+            self.test_is_write_fn_line_does_not_stand_for_line_3290,
+            "CAUGHT is-write-fn-line",
         )
