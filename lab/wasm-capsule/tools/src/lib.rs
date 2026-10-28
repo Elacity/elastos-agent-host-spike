@@ -32,6 +32,9 @@ pub mod bundle;
 pub mod receipt;
 pub mod run;
 pub mod verify;
+pub mod bus_reply_route;
+pub mod version_monotonic;
+pub mod icon_check;
 
 pub use capsule_identity::lab_cid as bundle_identity;
 
