@@ -6,6 +6,7 @@
 - FOLLOWUP: lab/capsule-identity/GAP-REPORT.md:848 says the lab "sits in no admission or launch path", but since task 032 (PR #587, merge 58fe29b8a) README says only "no Runtime admission or launch path" and that the lab's stand-in launcher, in test code, calls it; hand check: `sed -n 845,849p lab/capsule-identity/GAP-REPORT.md` against `sed -n 14,17p lab/capsule-identity/README.md`, and `git show 58fe29b8a^1:lab/capsule-identity/README.md | sed -n 16p` (the old wording) against `git show 58fe29b8a:lab/capsule-identity/README.md | sed -n 16p`. Closed by task 038.
 - PR #657 (task 033), merge f94d89ac6: Verdict: PASS (added by task 039; runner at c6e2d58d5: `summary: 3 CAUGHT of 3`; citations: 13 checked, 13 match)
 - PR #730 (task 035), merge 1503ac6f4: Verdict: FOLLOWUP, and PR #757 (task 036), merge b7c613a10: Verdict: PASS (added by task 041; runner at 9bd839491: F-CI35 `summary: 3 CAUGHT of 3`, F-CI36 `summary: 2 CAUGHT of 2`)
+- PR #782 (task 037), head dd84ef2fe: Verdict: PASS, and PR #842 (task 044), head 1421a5ec6: Verdict: FOLLOWUP (added by task 046; runner at c59703a06: F-CI37 `summary: 3 CAUGHT of 3`, F-CI44 `summary: 3 CAUGHT of 3`, F-CI35 `summary: 3 CAUGHT of 3`)
 
 Why: Flint's 27 Oct 12:06 note (Sasha's "nothing idle", to reopen and close S1 after
 Rong's review rong-20261027-1010) asks the claude and cursor pair to re-read three merges
@@ -780,3 +781,279 @@ not_admission` are in the section above (one run for both sections).
 B1 stand-in change has two: #587 (Claude and Cursor), #657 (Cursor and task 039's record)
 and #757 (Cursor and this record). The Runtime did nothing here: no Runtime code ran,
 launched, checked, refused or granted anything.
+
+## PR #782 (task 037), head dd84ef2fe
+
+Added by task 046, on 2026-10-28. Flint's URGENT M1 note of 27 Oct 11:10 sets one bar for
+each M1 check through the lab stand-in: a full journey, a refusal with a reason plus a CAUGHT
+falsifier, a planted stub that returns Ok without doing the work must FAIL, and two
+independent reviews. #782 and #842 (next section) each had one reviewer only: the lane's
+review step ran Cursor alone on them (both PASS in round 1), as on #730 and #757, so neither
+had the second review the bar asks for; this record is that review. Both PRs were still open
+in the batch (not merged) when this was written, so each is judged at its head, with
+`git show <head>:<path>` (written "H:line" below).
+
+Base commit of this section and the next: `c59703a06144ebeafd599d0b9c3d99616d804b3f`
+(`c59703a06`), the lane tip, which holds both heads (`git merge-base --is-ancestor` passes
+for each). Each promise then says "still true at c59703a06" (written "B:line"), or which
+later commit changed it, from `git log --oneline <head>..HEAD -- <file>`. After dd84ef2fe,
+`tests/common/mod.rs`, `tests/stand_in.rs`, README, LOG and `falsifiers.json` were changed
+by 044 (`1421a5ec6`) only, and `src/lib.rs`, `Cargo.toml` and `Cargo.lock` by nothing. This
+section fixes nothing.
+
+Verdict: PASS
+
+Lane diff: `git diff dd84ef2fe^1 dd84ef2fe -- lab/capsule-identity/` (5 files, +157 -19):
+`LOG.md`, `README.md`, `falsifiers.json`, `tests/common/mod.rs` and `tests/stand_in.rs`. The
+parent is `b7c613a10` (#757's merge).
+
+New FOLLOWUP lines: none.
+
+- Promise 1 (`standin_grant_view_lists_every_held_grant_of_every_session`). At the head
+  (`tests/stand_in.rs` H:439), the signed `agent-host` bundle is launched twice (H:442-443)
+  and the two session ids must differ (H:446); three grants are seeded, one for A and two
+  for B, with three different `(resource, action)` pairs (H:449-468, seeded at H:470); the
+  view must hold exactly 3 entries ("every held grant is listed", H:474); the sorted
+  `(session_id, resource, action, duration)` tuples must equal the sorted seeded list
+  (H:490); each session must appear (H:492); the three `request_id` values must differ
+  ("three different request ids", H:503-505); the instance list stays at 2 (H:509).
+  Resource, action and duration are the test's literals; the two session ids are the launch
+  answers' values, which the test holds before it seeds and never reads from the view.
+  033's two tests (`standin_valid_signature_alone_yields_no_grant` H:367,
+  `standin_grant_view_lists_a_seeded_grant` H:403) are unchanged: the diff removes no line
+  of `tests/stand_in.rs` (`grep -c '^-[^-]'` prints 0). Still true at c59703a06: the test is
+  the same text at B:438-511 (`diff` of the two ranges prints nothing); 044 added its own
+  test after it. The run below gives `ok` for it.
+- Promise 2 (F-CI37a, F-CI37b, F-CI37c, each CAUGHT). At the head, each edits only
+  `../../lab/capsule-identity/tests/common/mod.rs` and names only the new test. F-CI37a
+  adds `.take(1)` and F-CI37b a filter to the first held grant's session, both on the view's
+  line `self.grants.iter().map(Grant::entry).collect();` (H:1493), which is F-CI33b's anchor
+  too (same `old` text); F-CI37c makes `seed_grant` give every grant `grant-1`, on
+  `request_id: format!("grant-{number}"),` (H:1505), a line task 033 added (`git log -S`
+  finds `f767631f1`). Each anchor is found once at the head (`grep -c -F` prints 1 each).
+  F-CI37b leaves session A's one grant, so it fails at "every held grant is listed"; F-CI37c
+  fails only at "three different request ids", the reason its title names. Still true at
+  c59703a06: the three entries are unchanged (`git diff dd84ef2fe HEAD --
+  lab/capsule-identity/falsifiers.json` has no F-CI37 line, F-CI37a at B:4306), and the
+  anchors are B:1498 and B:1510, each found once. Runner result at c59703a06:
+  `summary: 3 CAUGHT of 3` (raw lines below).
+- Promise 3 (the `StandInRuntime` doc names every public method, no count word, no code
+  change). At the head, the doc (`tests/common/mod.rs` H:1366-1394) names `new` (H:1369),
+  `post_capsules` and `get_capsules` by RA-6's routes, the grant view by RA-1's route, and
+  `seed_grant` and `asks_of` as "Lab test seam, not a route" (H:1375-1376). The impl block
+  (H:1439-1608) has 6 `pub fn` (`new` H:1442, `post_capsules` H:1461, `get_capsules`
+  H:1469, the view H:1492, `seed_grant` H:1502, `asks_of` H:1519): 6 checked, 6 named. The
+  doc's number words ("one of two states", "one new instance", "one request field") count
+  launch states and fields, not methods; "Its two methods" is gone. With `///` lines
+  removed, `diff` of the parent's and the head's `tests/common/mod.rs` prints nothing, so
+  no code line changed. Changed by 044 (`1421a5ec6`), and still true at c59703a06: 044
+  added `set_after_walk` (B:1536) and its doc line (B:1377); the impl block (B:1443-1627)
+  has 7 `pub fn`, each named in B:1366-1397.
+- Promise 4 (README row, count, `about`). At the head, the row (README H:1417) says "lists
+  every held grant of every session" and names both tests, F-CI33b and F-CI37a-c; the
+  count is H:1628 (262, and `grep -c '"id": "F-CI'` on the list prints 262); the
+  Falsifiers list names F-CI37a to F-CI37c (H:1666-1667), the anchor note is H:1758-1762
+  and the runner record H:1898-1900; `about` ends "036 and 037)", 037 last, in list order.
+  The LOG line is H:31. The text 037 added to README and LOG holds no `path:line` citation
+  (0 checked); its two anchor claims were checked instead (Promise 2): 2 checked, 2 match.
+  Still true at c59703a06: the row is B:1417, same text; 044 changed the count (B:1640,
+  265, and the list holds 265) and `about` (ends "037 and 044)"); the note is B:1772 and
+  the record B:1917-1919. The `--test inventory` run below checks count and `about` at
+  c59703a06. The LOG line's whole-list result (262 of 262) was not rerun here, only F-CI37.
+- Promise 5 (no `src/lib.rs`, `Cargo.toml` or `Cargo.lock` change; no assertion weakened).
+  `git diff --stat dd84ef2fe^1 dd84ef2fe -- lab/capsule-identity/src
+  lab/capsule-identity/Cargo.toml lab/capsule-identity/Cargo.lock` prints nothing; the diff
+  removes no test line, and in `tests/common/mod.rs` only `///` lines. Still true at
+  c59703a06: `git log dd84ef2fe..HEAD` on those three paths prints nothing.
+
+Principles check:
+
+1. Named by hash: not affected. 037 changes no launch or lookup; both sessions come from
+   launches of the signed bundle by its lab CID (`tests/stand_in.rs:442-443` at dd84ef2fe).
+2. No ambient authority: yes. A grant exists only through the test seam `seed_grant`
+   (`tests/common/mod.rs:1497-1502` at dd84ef2fe), and the view lists only held grants
+   (`:1493`); no capsule, Home or UI code changes.
+3. One path: yes. One view method (`tests/common/mod.rs:1492-1494` at dd84ef2fe), now
+   tested past one grant; no second view or second grant store.
+4. Trusted core: not affected. Test code only; no `elastos/`, `src/lib.rs`, `Cargo.toml` or
+   `Cargo.lock` change (`git diff --stat dd84ef2fe^1 dd84ef2fe`).
+5. Fails closed: not affected. 037 adds no refusal; its `tests/common/mod.rs` change is doc
+   only (`:1366-1394` at dd84ef2fe).
+6. Self-contained: not affected. No capsule code; the stand-in runs nothing
+   (`tests/common/mod.rs:1367` at dd84ef2fe).
+7. Tests prove it: yes. One named test (`tests/stand_in.rs:439` at dd84ef2fe) and three
+   falsifiers, run at the base: `summary: 3 CAUGHT of 3`.
+8. Separate decisions: yes. Launching (admission) adds no grant (allowance): seeding is not
+   a launch and launching is not a grant (`tests/stand_in.rs:509` at dd84ef2fe; 033's
+   `standin_valid_signature_alone_yields_no_grant`, `:367`, unchanged).
+
+Commands and raw results for this section and the next, all at c59703a06 on this Mac
+(Python 3.9.6, rustc 1.91.0), with the build lease free (`.git/local-ai-heavy-build.lock`
+had no holder in `lsof`), with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. The three runner
+calls ran one after another, then the cargo run; after them `git status --short` printed
+nothing.
+
+`python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json F-CI37`
+(exit 0):
+
+```
+baseline: 1 named tests pass without an edit, 0 do not
+F-CI37a CAUGHT                             7s  the grant view lists only the first held grant
+F-CI37b CAUGHT                             8s  the grant view lists only the grants of the first held grant's session, the caller's-own-session shape
+F-CI37c CAUGHT                             7s  seed_grant gives every grant the same request_id
+summary: 3 CAUGHT of 3
+```
+
+`RUST_TEST_THREADS=2 cargo test --locked --offline --manifest-path lab/capsule-identity/Cargo.toml --test stand_in --test inventory`
+(exit 0):
+
+```
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+```
+
+(in that order: `inventory`, with `the_falsifier_inventory_matches_the_list` among its 3;
+`stand_in`, with `standin_grant_view_lists_every_held_grant_of_every_session` and
+`standin_takes_the_asks_from_the_walk_not_the_folder` among its 10).
+
+#782 now has two reviews, Cursor's review and this record, with no FOLLOWUP. The Runtime did
+nothing here: no Runtime code ran, launched, checked, refused or granted anything.
+
+## PR #842 (task 044), head 1421a5ec6
+
+Added by task 046, on 2026-10-28, under the bar, base and form of the section above.
+Nothing in `lab/capsule-identity/` changed after 1421a5ec6 except `SECOND-REVIEW.md` (045,
+`c59703a06`, which added lines above 044's line in the #730 section), so for every other
+file H:line is also B:line.
+
+Verdict: FOLLOWUP
+
+Lane diff: `git diff 1421a5ec6^1 1421a5ec6 -- lab/capsule-identity/` (7 files, +140 -8):
+`GAP-REPORT.md`, `LOG.md`, `README.md`, `SECOND-REVIEW.md`, `falsifiers.json`,
+`tests/common/mod.rs` and `tests/stand_in.rs`. The parent is `6664cc655` (043).
+
+- Promise 1 (one hook, one public seam, called once right after the walk and before (e);
+  no hook, no change; `post_capsules` the one launch path; the struct doc). At the head,
+  `StandInRuntime` holds `after_walk: Option<fn(&Path)>` (`tests/common/mod.rs` H:1404),
+  `None` in `new` (H:1457); `set_after_walk` (H:1536-1538) is the one public method that
+  sets it, documented "Lab test seam, not a route" (H:1531). `checked_launch` calls the
+  hook once, on the stored `folder`, at H:1558-1560, right after
+  `let checked = checked_bundle(folder)` (H:1557) and before `checked.check_name(&cid)`
+  (H:1561, check (e)); with `None`, the `if let` calls nothing. `checked_launch` has one
+  caller, `post_capsules` (H:1467), so the launch path is still one. The struct doc names
+  the method (H:1377, H:1395-1397) with no count word. Still true at c59703a06 (same
+  lines). The 9 older `stand_in` tests run with no hook and give `ok` below.
+- Promise 2 (`standin_takes_the_asks_from_the_walk_not_the_folder`). At the head
+  (`tests/stand_in.rs` H:568), the hook is `change_stored_asks_after_the_walk` (H:563,
+  one byte of the stored `asks.json`); the launch must answer `launched` (H:576-577); the
+  stored file must differ from the fixture bytes the test reads itself (H:571, H:582-586,
+  "the hook must have changed the stored asks.json"); `asks_of` must equal those fixture
+  bytes (H:589-593, "a change on disk between the walk and the launch must not reach the
+  instance"); one instance and an empty grant view (H:594-595). 035's two tests
+  (H:522, H:599) are unchanged: the diff removes no line of `tests/stand_in.rs`. Not a
+  finding: the hook is the statement right after the walk (H:1557-1558), so only a folder
+  read written in between those two lines would escape it; the stub the M1 bar names, a
+  read of the folder in place of the walk's bytes at launch, is F-CI44a and is CAUGHT.
+  Still true at c59703a06 (same lines). The run below gives `ok` for it.
+- Promise 3 (F-CI44a, F-CI44b, F-CI44c, each CAUGHT; F-CI35a still CAUGHT). At the head,
+  each edits only `../../lab/capsule-identity/tests/common/mod.rs` and names only the new
+  test: F-CI44a puts `fs::read(folder.join(ASKS_FILE)).ok()` in place of
+  `signed_asks(&checked)` on the answer line (H:1563), F-CI44b deletes `hook(folder);`
+  (H:1559), F-CI44c moves the hook above the walk (anchor H:1557-1560). Each anchor is found
+  once (`grep -c -F` prints 1 for the answer line and for the hook call). The F-CI35
+  entries are unchanged by 044 (the `falsifiers.json` diff only adds F-CI44 and 044 in
+  `about`). Still true at c59703a06 (same lines; F-CI44a starts at B:4354). Runner results
+  at c59703a06: F-CI44 `summary: 3 CAUGHT of 3`, F-CI35 `summary: 3 CAUGHT of 3` (raw lines
+  below).
+- Promise 4 (README: how "Nothing reads the folder again" is shown, the row, count 265,
+  `about`). At the head, README H:1443-1447 says the hook is called once on the stored
+  folder, right after the one walk and before (e); H:1463-1469 describes the new test;
+  the row H:1476 names it and F-CI44a-c; the count is H:1640 (265, and the list holds 265);
+  the Falsifiers list H:1679-1681, the anchor note H:1777-1781 and the runner record
+  H:1919-1922 name 044; `about` ends "037 and 044)", 044 last. Still true at c59703a06
+  (same lines); the `--test inventory` run below checks count and `about`. The LOG line's
+  whole-list result (265 of 265) was not rerun here, only F-CI44 and F-CI35.
+- Promise 5 (one dated GAP-REPORT sentence after 035's B2 paragraph; that paragraph
+  unchanged). At the head, it is `GAP-REPORT.md` H:854-858, dated "28 Oct, task 044", right
+  after the 035 paragraph (H:847-853); the diff adds 5 lines and removes none. What it says
+  holds: before 044 only F-CI35a was caught for B2 re-reads (041's FOLLOWUP, the #730
+  section), and F-CI44a is now CAUGHT by the named test. Still true at c59703a06 (same
+  lines). Its date disagrees with the LOG line: the FOLLOWUP below.
+- Promise 6 (one "Answered by task 044" line after the #730 `FOLLOWUP:`, nothing else in
+  this file). At the head, the diff of `SECOND-REVIEW.md` is one added line (H:590, right
+  after the `FOLLOWUP:` at H:589). Changed by 045 (`c59703a06`) in place only: 045 added
+  lines above it, so the line is B:596, same text (`git diff 1421a5ec6 HEAD` has no line
+  with "Answered by task 044").
+- Promise 7 (no `src/lib.rs`, `Cargo.toml` or `Cargo.lock` change; no assertion weakened).
+  `git diff --stat 1421a5ec6^1 1421a5ec6` on those three paths prints nothing; the diff
+  removes no test line, and in `tests/common/mod.rs` only three doc lines, each rewritten
+  with more text (H:1377, H:1395, H:1547). Still true at c59703a06 (no later change).
+
+Citations: the text 044 added to README, LOG, GAP-REPORT and SECOND-REVIEW holds 4
+`path:line` citations, each checked with `git show`: `GAP-REPORT.md:839` at `9bd839491`
+and `:849` at `6664cc655`, in the `SECOND-REVIEW.md` line (H:590) and again in the LOG line
+(H:32); `sed -n` on each prints "does not reach it and a stub that reads the folder again
+fails". 4 checked, 4 match.
+
+Cursor's LOG date finding, checked by its reproduction command at c59703a06, `grep -n
+"task 044" lab/capsule-identity/LOG.md lab/capsule-identity/GAP-REPORT.md`: it prints two
+lines, `LOG.md:32` (which says GAP-REPORT got 'one dated "27 Oct, task 044" sentence') and
+`GAP-REPORT.md:854` (which starts "28 Oct, task 044:"). 044's commit `1421a5ec6` is dated
+28 Oct 01:18 +0700. The finding holds; it is not fixed here.
+
+FOLLOWUP: lab/capsule-identity/LOG.md:32 says GAP-REPORT gained one dated "27 Oct, task 044" sentence, but that sentence (lab/capsule-identity/GAP-REPORT.md:854) is dated "28 Oct, task 044", as is 044's commit 1421a5ec6 (28 Oct 01:18 +0700); hand check: `grep -n "task 044" lab/capsule-identity/LOG.md lab/capsule-identity/GAP-REPORT.md | grep -o '[0-9][0-9] Oct, task 044'` prints `27 Oct, task 044` then `28 Oct, task 044`.
+
+Principles check:
+
+1. Named by hash: yes. The instance is handed the bytes of the one walk whose lab CID was
+   compared with the requested CID (`tests/common/mod.rs:1557`, `:1561`, `:1563` at
+   1421a5ec6).
+2. No ambient authority: not affected. The hook is a test-only seam that grants nothing;
+   the grant view stays empty after the launch (`tests/stand_in.rs:595` at 1421a5ec6); no
+   capsule, Home or UI code changes.
+3. One path: yes. `post_capsules` stays the one caller of `checked_launch`
+   (`tests/common/mod.rs:1467` at 1421a5ec6), and the hook runs inside it (`:1558-1560`);
+   the asks still come only from `signed_asks(&checked)` (`:1563`).
+4. Trusted core: not affected. Test code only; no `elastos/`, `src/lib.rs`, `Cargo.toml` or
+   `Cargo.lock` change (`git diff --stat 1421a5ec6^1 1421a5ec6`).
+5. Fails closed: not affected. 044 adds no refusal; with the hook before the walk
+   (F-CI44c), the existing check (e) refuses (`tests/common/mod.rs:1561` at 1421a5ec6).
+6. Self-contained: not affected. No capsule code; the stand-in runs nothing
+   (`tests/common/mod.rs:1367` at 1421a5ec6).
+7. Tests prove it: yes. One named test (`tests/stand_in.rs:568` at 1421a5ec6) and three
+   falsifiers, run at the base: `summary: 3 CAUGHT of 3`; F-CI35 still 3 of 3.
+8. Separate decisions: yes. The asks are identity data from the signed bytes and give no
+   grant: after the launch the grant view is empty (`tests/stand_in.rs:595` at 1421a5ec6).
+
+`python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json F-CI44`
+(exit 0; the same lease and base as above):
+
+```
+baseline: 1 named tests pass without an edit, 0 do not
+F-CI44a CAUGHT                             7s  the 041 review's stub: checked_launch reads asks.json from the stored folder at launch, after the walk, instead of taking it from the checked entries
+F-CI44b CAUGHT                             8s  the after-walk hook is never called, so the test's change on disk never happens
+F-CI44c CAUGHT                             6s  the after-walk hook runs before the walk, so the changed bytes are walked and the name compare (e) refuses the launch
+summary: 3 CAUGHT of 3
+```
+
+`python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json F-CI35`
+(exit 0):
+
+```
+baseline: 2 named tests pass without an edit, 0 do not
+F-CI35a CAUGHT                             4s  the planted accept-anything stub: asks_of reads asks.json from the stored folder at call time, so a change on disk after launch reaches the instance
+F-CI35b CAUGHT                             4s  asks_of ignores the session and answers the first instance's asks
+F-CI35c CAUGHT                             4s  a bundle with no asks.json is handed Some(Vec::new()), not None
+summary: 3 CAUGHT of 3
+```
+
+The two `test result:` lines of `--test stand_in --test inventory` are in the section above
+(one run for both sections).
+
+#842 now has two reviews, Cursor's review and this record, with one FOLLOWUP for a later
+task (the LOG date). Every stand-in change the B1 and B2 evidence rests on now has two:
+#587 (Claude and Cursor at merge; no section here), #657 (Cursor and "PR #657 (task 033),
+merge f94d89ac6"), #730 (Cursor and "PR #730 (task 035), merge 1503ac6f4"), #757 (Cursor
+and "PR #757 (task 036), merge b7c613a10"), #782 (Cursor and "PR #782 (task 037), head
+dd84ef2fe") and #842 (Cursor and this section). The Runtime did nothing here: no Runtime
+code ran, launched, checked, refused, granted or handed out any asks.
