@@ -500,12 +500,12 @@ after `init`. A snapshot cannot see a read or a write that restores the
 original bytes, and it counts no syscalls. The profile still grants
 `file-read*` on the literal `STORAGE_PARENT`, so the parent directory can be
 stat'ed. Each Linux cell must be `designed, not enforced`.
+`operations_section_cites_existing_tests` requires each Outputs cell's ok keys to equal `ok_response` and that row's struct or `json!`, and its error keys to equal `error_response`.
 `operations_section_cites_existing_tests` also requires the Operation cells, in
 order, to equal the `parse_request` arms, and the `other` arm is the
 `unsupported` row. `operations_section_cites_existing_tests` requires each Inputs
 cell's backtick names, in order, to equal the fields of that operation's request
 struct in `src/contract.rs`, and a row with no such struct names `op` alone.
-`operations_section_cites_existing_tests` requires each Outputs cell's ok keys to equal `ok_response` and that row's struct or `json!`, and its error keys to equal `error_response`.
 
 | Operation | Inputs | Outputs | Right | Effect | macOS rule and test | Linux |
 | --- | --- | --- | --- | --- | --- | --- |
