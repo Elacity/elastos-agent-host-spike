@@ -365,3 +365,15 @@ fn model_case_different_manifest_is_not_a_link() {
     assert!(!key.contains("path"));
     assert!(!cargo_toml_path_depends_on_grant_binding(key));
 }
+
+#[test]
+fn model_hash_inside_a_string_is_still_a_link() {
+    let basic = "note = \"uses # syntax\"; gb = { path = \"../grant-binding\" }\n";
+    assert!(basic.contains("grant-binding"));
+    assert!(basic.contains("path"));
+    assert!(cargo_toml_path_depends_on_grant_binding(basic));
+    let literal = "note = 'uses # syntax'; gb = { path = '../grant-binding' }\n";
+    assert!(literal.contains("grant-binding"));
+    assert!(literal.contains("path"));
+    assert!(cargo_toml_path_depends_on_grant_binding(literal));
+}
