@@ -4,25 +4,70 @@
 ///
 /// A manifest that only names the crate, including its own `version` field, is not a link.
 /// A workspace `exclude` list, and a key that only ends in `members`, are not links.
+/// Workspace keys can be quoted; array boundaries come from syntax outside strings.
 #[rustfmt::skip]
 pub fn cargo_toml_path_depends_on_grant_binding(cargo_toml: &str) -> bool {
+    let manifest = cargo_toml;
     let cargo_toml = decode_toml_basic_strings(cargo_toml);
     let packed: String = cargo_toml.chars().filter(|ch| !ch.is_whitespace()).collect();
     let unquoted = packed.replace(['"', '\''], "");
-    let member = cargo_toml.match_indices("members").any(|(index, _)| {
-        let before = &cargo_toml[..index];
-        let stem = before.strip_suffix("default-").unwrap_or(before);
-        let key_ok = stem.is_empty()
-            || stem.ends_with(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-');
-        let value = cargo_toml[index + "members".len()..]
-            .trim_start()
-            .strip_prefix('=')
-            .unwrap_or("")
-            .split(']')
-            .next()
-            .unwrap_or("");
-        key_ok && value.contains("grant-binding")
-    });
+    let member = {
+        // Keep raw token boundaries: a decoded quote or bracket is still string content.
+        let bytes = manifest.as_bytes();
+        let mut index = 0;
+        let mut in_members = false;
+        let mut linked = false;
+        while index < bytes.len() {
+            let start = index;
+            let mut token = Vec::new();
+            match bytes[index] {
+                b'#' => {
+                    index = find_byte(bytes, index, b'\n').unwrap_or(bytes.len());
+                    continue;
+                }
+                b'"' => index = copy_basic(bytes, index, &mut token),
+                b'\'' => index = copy_literal(bytes, index, &mut token),
+                b']' => {
+                    in_members = false;
+                    index += 1;
+                    continue;
+                }
+                byte if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-') => {
+                    while index < bytes.len()
+                        && (bytes[index].is_ascii_alphanumeric() || matches!(bytes[index], b'_' | b'-'))
+                    {
+                        index += 1;
+                    }
+                    token.extend_from_slice(&bytes[start..index]);
+                }
+                _ => {
+                    index += 1;
+                    continue;
+                }
+            }
+            let token = String::from_utf8(token).expect("tokens preserve UTF-8");
+            if in_members {
+                if matches!(bytes[start], b'"' | b'\'') && token.contains("grant-binding") {
+                    linked = true;
+                    break;
+                }
+            } else {
+                let key = token.strip_prefix('"').and_then(|key| key.strip_suffix('"'))
+                    .or_else(|| token.strip_prefix('\'').and_then(|key| key.strip_suffix('\'')))
+                    .unwrap_or(&token);
+                if matches!(key, "members" | "default-members") {
+                    if let Some(value) = manifest[index..].trim_start().strip_prefix('=') {
+                        let value = value.trim_start();
+                        if value.starts_with('[') {
+                            index = manifest.len() - value.len() + 1;
+                            in_members = true;
+                        }
+                    }
+                }
+            }
+        }
+        linked
+    };
     cargo_toml.contains("grant-binding")
         && (cargo_toml.contains("path")
             || packed.split("grant-binding").skip(1).any(|suffix| {
@@ -566,6 +611,23 @@ fn model_workspace_member_is_a_link() {
         "workspace.members = [\"lab/grant-binding\"]\n",
         "[workspace]\nmembers = [\"lab/grant-bind\\u0069ng\"]\n",
         "[workspace]\nresolver = \"2\"\nmembers = [\"lab/grant-binding\"]\n",
+        "[workspace]\n\"members\" = [\"lab/grant-binding\"]\n",
+        "[workspace]\n'members' = ['lab/grant-binding']\n",
+        "[workspace]\n\"default-members\" = [\"lab/grant-binding\"]\n",
+        "[workspace]\n'default-members' = ['lab/grant-binding']\n",
+        "workspace.\"members\" = [\"lab/grant-binding\"]\n",
+        "'workspace'.'default-members' = ['lab/grant-binding']\n",
+        "[workspace]\n\"mem\\u0062ers\" = [\"lab/grant-binding\"]\n",
+        "[workspace]\n\"default-mem\\u0062ers\" = [\"lab/grant-binding\"]\n",
+        "[workspace]\nmembers = [\"crates/other]\", \"lab/grant-binding\"]\n",
+        "[workspace]\ndefault-members = ['crates/other]', 'lab/grant-binding']\n",
+        "[workspace]\nmembers = [\"crates/other\\\"]\", \"lab/grant-binding\"]\n",
+        "[workspace]\nmembers = [\"crates/other\\u0022]\", \"lab/grant-binding\"]\n",
+        "[workspace]\nmembers = ['crates/other\"]', \"lab/grant-binding\"]\n",
+        "[workspace]\nmembers = [\"\"\"crates/other\"]\"\"\", \"lab/grant-binding\"]\n",
+        "[workspace]\ndefault-members = ['''crates/other']''', 'lab/grant-binding']\n",
+        "[workspace]\nmembers = [\"crates/other\\\\\", \"lab/grant-binding\"]\n",
+        "[workspace]\nmembers = [\n# ]\n\"lab/grant-binding\",\n]\n",
     ] {
         assert!(
             cargo_toml_path_depends_on_grant_binding(manifest),
@@ -581,6 +643,16 @@ fn model_workspace_member_is_a_link() {
         "[workspace]\ndefault-members = [\"crates/other\"]\n",
         "[workspace]\nmembers = [\"crates/*\"]\n",
         "not-default-members = [\"lab/grant-binding\"]\n",
+        "\"not-members\" = [\"lab/grant-binding\"]\n",
+        "'not-default-members' = ['lab/grant-binding']\n",
+        "\"Members\" = [\"lab/grant-binding\"]\n",
+        "'Default-members' = ['lab/grant-binding']\n",
+        "[workspace]\n\"members\" = [\"lab/Grant-Binding\"]\n",
+        "[workspace]\n'default-members' = ['lab/Grant-Binding']\n",
+        "[workspace]\nmembers = [\"crates/other]\"]\nexclude = [\"lab/grant-binding\"]\n",
+        "[workspace]\ndefault-members = ['crates/other]']\nexclude = ['lab/grant-binding']\n",
+        "[workspace]\nmembers = [\n# lab/grant-binding\n\"crates/other\",\n]\n",
+        "[workspace]\nmembers = ['lab/grant-bind\\u0069ng']\n",
     ] {
         assert!(
             !cargo_toml_path_depends_on_grant_binding(manifest),
