@@ -622,8 +622,8 @@ mod uf_tests {
         .expect("the sample approval request must decode")
     }
 
-    /// Falsifier: return the raw `serde_json` error text, so the reason stops
-    /// naming the parse failure.
+    /// Falsifier: swallow the parse failure and answer `Ok(None)`, so a
+    /// corrupted store reads as a missing one and the reason is lost.
     #[test]
     fn load_store_if_present_rejects_invalid_json() {
         let dir = tempfile::tempdir().unwrap();
@@ -634,13 +634,16 @@ mod uf_tests {
         assert_eq!(load_store(&path).unwrap_err(), reason);
     }
 
-    /// Falsifier: stop writing `approval_requests`, or stop reading them back,
-    /// and the round trip loses the request.
+    /// The request record's untyped `payload` survives a save and a load
+    /// unchanged. Every other field the store reloads is already pinned by
+    /// `managed_approvals_persist_under_storage_root` (`tests/confine.rs`:2258,
+    /// :2269, :2275) and by `v2_contract.rs`:697 for `requested_by_actor`, so
+    /// this test does not assert them again. The `payload` is a `Value` that
+    /// no other test reloads from disk: the response-level payload checks read
+    /// the answer, not the file.
     ///
-    /// `wallet_store_is_atomic_private_and_size_bounded` reloads
-    /// `default_accounts`; this reloads the request record, where the `payload`
-    /// is an untyped `Value` and the status an enum, so a field dropped on the
-    /// way through JSON shows up here and not there.
+    /// Falsifier: stop writing `approval_requests`, or flatten the `payload`
+    /// into a string, and the reloaded value no longer compares equal.
     #[test]
     fn save_store_then_load_round_trips_approval_requests() {
         let dir = tempfile::tempdir().unwrap();
@@ -651,16 +654,15 @@ mod uf_tests {
             .push(sample_request(1, "person:local:alice", 10));
         save_store(&path, &store).unwrap();
         let loaded = load_store(&path).unwrap();
-        assert_eq!(loaded.approval_requests.len(), 1);
-        let request = &loaded.approval_requests[0];
-        assert_eq!(request.request_id, "req-1");
-        assert_eq!(request.status, ApprovalStatus::Pending);
+        let request = loaded
+            .approval_requests
+            .first()
+            .expect("the store must reload its approval request");
         assert_eq!(
             request.payload,
             serde_json::json!({ "message": "message-1" }),
             "the untyped payload must survive the round trip unchanged"
         );
-        assert_eq!(request.requested_by_actor, "browser");
     }
 
     /// Falsifier: create the missing parent inside `save_store`; the refusal
@@ -742,6 +744,49 @@ mod uf_tests {
             .map(|request| request.created_at)
             .collect::<Vec<_>>();
         assert_eq!(order, vec![1, 20, 50]);
+    }
+
+    /// `prune_store` drops a challenge once it has elapsed: a challenge whose
+    /// `expires_at` is `now` goes, and the fresh ones beside it stay.
+    ///
+    /// `src/tests/proofs.rs` :226 and :527 expire the only challenge they hold
+    /// and assert the list is empty, which stays true when the retain drops
+    /// every challenge; the fresh entries here are what that mutation loses.
+    ///
+    /// Falsifier: retain the elapsed challenge, or drop them all, or compare
+    /// with `>=` instead of `>`, so the challenge expiring exactly at `now`
+    /// stays, and the answer is no longer just the fresh one.
+    #[test]
+    fn prune_store_drops_expired_challenges_keeps_fresh() {
+        let stored_challenge = |expires_at: u64| {
+            let mut challenge = AuthChallengeV1::new(AuthChallengeInput {
+                challenge_id: format!("challenge-{expires_at}"),
+                domain: "http://elastos.local".to_string(),
+                uri: "http://elastos.local/apps/home/".to_string(),
+                address: "0x0000000000000000000000000000000000000000".to_string(),
+                chain_id: 20,
+                nonce: format!("nonce-{expires_at}"),
+                issued_at: 0,
+                ttl_secs: 0,
+                resources: Vec::new(),
+            });
+            challenge.expires_at = expires_at;
+            StoredWalletChallenge {
+                challenge,
+                consumed_at: None,
+            }
+        };
+
+        let mut store = WalletStore::default();
+        store.challenges.push(stored_challenge(0));
+        store.challenges.push(stored_challenge(50));
+        store.challenges.push(stored_challenge(100));
+        let retained = prune_store(store, 50)
+            .challenges
+            .iter()
+            .map(|stored| stored.challenge.expires_at)
+            .collect::<Vec<_>>();
+        assert_eq!(retained, vec![100]);
     }
 
     /// Falsifier: stamp `resolved_at` on every call instead of only when the
