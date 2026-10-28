@@ -491,6 +491,44 @@ impl StandIn {
         Ok(json!({ "success": true }))
     }
 
+    /// `GET /api/capability/request/:id`.
+    ///
+    /// `request_id` is the path, a method argument, not a JSON field. The
+    /// lookup runs before the caller check. A record that is missing is status
+    /// 404 with `Request not found: ` plus that id. A shell, or a client whose
+    /// session is not the record's, is status 403 with `Cannot access another
+    /// session's request`. Ok carries the stored status word, and a denied or
+    /// expired record also carries its decision reason. It carries no token
+    /// and stores nothing.
+    pub fn get_capability_request(
+        &self,
+        caller: Caller<'_>,
+        request_id: &str,
+    ) -> Result<Value, (u16, String)> {
+        let Some(request) = self
+            .requests
+            .iter()
+            .find(|request| request.request_id == request_id)
+        else {
+            return Err((404, format!("Request not found: {request_id}")));
+        };
+        let owns = matches!(
+            caller,
+            Caller::Client { session_id } if session_id == request.session_id
+        );
+        if !owns {
+            return Err((403, "Cannot access another session's request".to_owned()));
+        }
+        let status = request_status_text(request.status);
+        match request.status {
+            RequestStatus::Pending | RequestStatus::Granted => Ok(json!({ "status": status })),
+            RequestStatus::Denied | RequestStatus::Expired => Ok(json!({
+                "status": status,
+                "reason": request.decision_reason,
+            })),
+        }
+    }
+
     /// `GET /api/capability/list` for the plain route or `?scope=`.
     pub fn get_capability_list(
         &self,
@@ -5552,5 +5590,240 @@ mod tests {
             vec![pending_request("request-1", "component-1")],
             "the stand-in did the work: the valid body stores request-1"
         );
+    }
+
+    fn assert_other_session_refused(
+        result: &Result<Value, (u16, String)>,
+        caller: &str,
+        message: &str,
+    ) {
+        assert_eq!(
+            result,
+            &Err((403, "Cannot access another session's request".to_owned())),
+            "the stand-in did the work: it refuses {caller} on another session's request ({message})"
+        );
+    }
+
+    #[test]
+    fn standin_guest_reads_its_request_later() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        let first = standin
+            .post_capsules(Caller::Shell, &shared_body())
+            .expect("the stand-in launches the first read-shared instance");
+        let second = standin
+            .post_capsules(Caller::Shell, &shared_body())
+            .expect("the stand-in launches the second read-shared instance");
+        assert_eq!(
+            (first["id"].as_str(), second["id"].as_str()),
+            (Some("component-1"), Some("component-2")),
+            "the stand-in did the work: it numbers the launches component-1 and component-2"
+        );
+        assert_eq!(
+            (first["status"].as_str(), second["status"].as_str()),
+            (Some("starting"), Some("starting")),
+            "the stand-in did the work: it answers starting for both launches"
+        );
+        seed_shared_request(&mut standin, "req-1", "component-1");
+        seed_shared_request(&mut standin, "req-2", "component-2");
+        let owner = Caller::Client {
+            session_id: "component-1",
+        };
+        let sibling = Caller::Client {
+            session_id: "component-2",
+        };
+
+        assert_eq!(
+            standin.get_capability_request(owner, "req-1"),
+            Ok(json!({ "status": "pending" })),
+            "the stand-in did the work: the owning client reads req-1 pending before any decision"
+        );
+        assert_other_session_refused(
+            &standin.get_capability_request(Caller::Shell, "req-1"),
+            "the shell caller",
+            "req-1 is the client's record",
+        );
+        assert_other_session_refused(
+            &standin.get_capability_request(sibling, "req-1"),
+            "the component-2 client",
+            "req-1 belongs to component-1",
+        );
+        assert_eq!(
+            standin.get_capability_request(sibling, "missing"),
+            Err((404, "Request not found: missing".to_owned())),
+            "the stand-in did the work: it answers 404 for an id that matches no record"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![pending_request("req-1", "component-1")],
+            "the stand-in did the work: the refused reads leave req-1 pending"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-2"),
+            vec![pending_request("req-2", "component-2")],
+            "the stand-in did the work: the refused reads leave the sibling request pending"
+        );
+
+        standin.set_instant(4);
+        let granted = standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({
+                    "request_id": "req-1",
+                    "duration": "session",
+                    "rationale": "grant shared read",
+                }),
+            )
+            .expect("the stand-in grants the first instance's request");
+        assert_eq!(
+            granted,
+            json!({ "success": true }),
+            "the stand-in did the work: the shell grant answers success true"
+        );
+        assert_eq!(
+            standin.get_capability_request(owner, "req-1"),
+            Ok(json!({ "status": "granted" })),
+            "the stand-in did the work: the owning client reads req-1 granted on a later call"
+        );
+        assert_eq!(
+            standin.get_capability_request(owner, "req-1"),
+            Ok(json!({ "status": "granted" })),
+            "the stand-in did the work: a second read of req-1 is the same body"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![granted_request("req-1", "component-1", "grant shared read")],
+            "the stand-in did the work: the shell record for req-1 is granted with the rationale"
+        );
+        assert_eq!(
+            request_ids(
+                &standin
+                    .get_capability_list(Caller::Shell, None)
+                    .expect("the stand-in shell live-grant view")
+            ),
+            BTreeSet::from(["req-1".to_owned()]),
+            "the stand-in did the work: the live-grant set is exactly req-1 after the grant"
+        );
+
+        let denied = standin
+            .post_capability_deny(
+                Caller::Shell,
+                &json!({
+                    "request_id": "req-2",
+                    "reason": "sibling read denied",
+                }),
+            )
+            .expect("the stand-in denies the sibling's request");
+        assert_eq!(
+            denied,
+            json!({ "success": true }),
+            "the stand-in did the work: the shell deny answers success true"
+        );
+        assert_eq!(
+            standin.get_capability_request(sibling, "req-2"),
+            Ok(json!({ "status": "denied", "reason": "sibling read denied" })),
+            "the stand-in did the work: the sibling client reads its denial reason on a later call"
+        );
+        assert_other_session_refused(
+            &standin.get_capability_request(owner, "req-2"),
+            "the component-1 client",
+            "req-2 belongs to component-2",
+        );
+        let sibling_read = standin
+            .get_capability_request(sibling, "req-2")
+            .expect("the stand-in sibling denial read");
+        assert_keys(
+            &sibling_read,
+            &["status", "reason"],
+            "the stand-in did the work: a denied body has status and reason only",
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "starting",
+            "",
+            "the stand-in did the work: the deny leaves the granted instance starting",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "failed",
+            "sibling read denied",
+            "the stand-in did the work: the deny fails the starting sibling with its reason",
+        );
+        assert_eq!(
+            request_ids(
+                &standin
+                    .get_capability_list(Caller::Shell, None)
+                    .expect("the stand-in shell live-grant view")
+            ),
+            BTreeSet::from(["req-1".to_owned()]),
+            "the stand-in did the work: the reads leave the live-grant set exactly req-1"
+        );
+    }
+
+    #[test]
+    fn standin_guest_reads_a_runtime_denial() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        let first = launch_finished(&mut standin);
+        let second = launch_finished(&mut standin);
+        assert_eq!(
+            (first.as_str(), second.as_str()),
+            ("component-1", "component-2"),
+            "the stand-in did the work: it numbers the two launches component-1 and component-2"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: it lists component-1 running before the stop",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: it lists component-2 running before the stop",
+        );
+        seed_shared_request(&mut standin, "req-1", "component-1");
+        standin
+            .delete_capsule(Caller::Shell, "component-1", &stop_body())
+            .expect("the stand-in stops component-1 with the stop reason");
+        let owner = Caller::Client {
+            session_id: "component-1",
+        };
+        let sibling = Caller::Client {
+            session_id: "component-2",
+        };
+        let denial = json!({ "status": "denied", "reason": "stopped: stop one" });
+        assert_eq!(
+            standin.get_capability_request(owner, "req-1"),
+            Ok(denial.clone()),
+            "the stand-in did the work: the stopped owner reads its request denied by the runtime"
+        );
+        standin.set_instant(60);
+        assert_eq!(
+            standin.get_capability_request(owner, "req-1"),
+            Ok(denial),
+            "the stand-in did the work: the same read stays that denial at instant 60"
+        );
+        assert_other_session_refused(
+            &standin.get_capability_request(sibling, "req-1"),
+            "the component-2 client",
+            "req-1 belongs to component-1",
+        );
+        assert_other_session_refused(
+            &standin.get_capability_request(Caller::Shell, "req-1"),
+            "the shell caller",
+            "req-1 is the client's record",
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![denied_request("req-1", "component-1", "stopped: stop one")],
+            "the stand-in did the work: the reads leave the runtime denial record as it was"
+        );
+        assert_live_request_ids_empty(&standin, "the denial read leaves no live grant");
     }
 }

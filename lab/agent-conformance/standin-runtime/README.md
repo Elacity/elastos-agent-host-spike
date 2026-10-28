@@ -52,6 +52,8 @@ After one instance has ended, `post_capability_grant` of the survivor's pending 
 
 `StandIn::post_capability_request` answers `POST /api/capability/request`. It calls `seed_request` only for a `starting` or `running` instance, and a `stopped` or `failed` instance is `instance is not live` and stores nothing. The Ok body is `status` `pending` and `request_id`, with no token. `seed_request` can still store a record after the end. This value is the lab stand-in and the real route can replace it later because the JSON matches (M1-R). A PASS gives the Runtime no A10 credit for this refusal.
 
+`StandIn::get_capability_request` answers `GET /api/capability/request/:id`. The id is the path segment, a method argument, not a JSON field, and it reads the one request store. The owning client receives `pending` or `granted` as a body whose only key is `status`. A denied or expired record also carries `reason`, the record's decision reason. A shell, or a client of another session, is status 403 with the reason `Cannot access another session's request`; a missing record is status 404 with `Request not found: ` plus that id. The body carries no token, and the read stores nothing. A PASS gives the Runtime no A11 credit for this later call.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.

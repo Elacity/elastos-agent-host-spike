@@ -735,3 +735,5 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 `standin_once_grant_is_spent_by_one_use` is this stand-in, and a PASS there gives the Runtime no A6 credit for a once grant.
 
 `standin_ended_instance_request_is_refused` is this stand-in, and a PASS there gives the Runtime no A10 credit for a new request.
+
+`standin_guest_reads_its_request_later` is this stand-in, and a PASS there gives the Runtime no A11 credit for a later read.
