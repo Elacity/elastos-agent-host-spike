@@ -517,6 +517,9 @@ export function formatStreamError(err) {
   if (code === "approval_denied") {
     return "This hosted connection was denied in Inbox. Your prompt is saved here; choose another model to send it.";
   }
+  if (code === "hosted_access_ended_during_reply") {
+    return "Hosted access ended during this reply. Approve the new request in Inbox to use it again.";
+  }
   if (code === "aborted") {
     return "Run status unavailable.";
   }
@@ -1286,6 +1289,25 @@ function settleStreamedReply(row, session) {
   }
 }
 
+/** What a message's Copy writes: a reply's Markdown source (while it streams,
+    the source received so far), or the text a sent message shows (what the
+    person typed; attachment chips are not text). A reply whose source was never
+    recorded copies what it shows. */
+export function messageCopyText(row) {
+  const body = row?.querySelector(":scope > .agent-msg-body");
+  if (!body) {
+    return "";
+  }
+  if (row.dataset.role === "agent") {
+    const live = getLiveTurnCanonical();
+    if (row.classList.contains("is-streaming") && row.dataset.streamGeneration === String(live.generation)) {
+      return String(live.answer || "");
+    }
+    return String(body.dataset.mdSource || body.textContent || "");
+  }
+  return body.querySelector(".agent-msg-user-text")?.textContent || "";
+}
+
 export function appendMessage(
   role,
   text,
@@ -1652,7 +1674,7 @@ export function stopAgentStream({ keepPartial = true, drainQueue = false, cancel
 
 export const NO_MODEL_STATUS = "Get a model to start. Models run on this Home.";
 export const NO_MODEL_OFFER_STATUS =
-  "No model on this Home yet. Open Apps (Marketplace) → Models to get one.";
+  "No model on this Home yet. Open Marketplace → Models to get one.";
 export const STOPPED_STATUS = "Stopped.";
 
 export function canSubmitNewTurn() {
@@ -2222,6 +2244,7 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       return;
     }
     answerRow.dataset.streamPhase = state.phase;
+    answerRow.dataset.streamGeneration = String(generation);
     answerBody.textContent = "";
     delete answerBody.dataset.mdPainted;
     frozenEl = document.createElement("div");
@@ -2644,6 +2667,9 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       const partial = materializeCanonical();
       commitAgentReply(session, partial.answer, partial.reasoning, { partial: true, turn: result.turnManifest });
       answerRow?.classList.remove("is-streaming");
+      if (answerBody) {
+        answerBody.dataset.mdSource = partial.answer;
+      }
       settleStreamedReply(answerRow, session);
       if (result.stopRequested && result.settlementUnknown) {
         /* Local engines cannot confirm a stop; the turn keeps its unknown state. */
@@ -2672,6 +2698,9 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       const reasoning = String(partial.reasoning || "").trim();
       commitAgentReply(session, answer, reasoning, { turn: result.turnManifest });
       answerRow?.classList.remove("is-streaming");
+      if (answerBody) {
+        answerBody.dataset.mdSource = answer;
+      }
       if (!answer) {
         progressEl?.remove();
         answerRow?.remove();
@@ -2758,6 +2787,9 @@ async function startLiveTurnForPrompt(userText, { resumeTurn = null } = {}) {
       answerBody = answerRow?.querySelector(".agent-msg-body") || null;
     }
     answerRow?.classList.remove("is-streaming");
+    if (answerBody) {
+      answerBody.dataset.mdSource = answer;
+    }
     const answerBodyRef = answerBody;
     const answerTextRef = answer;
     const finalize = ({ abandonRich = false } = {}) => {

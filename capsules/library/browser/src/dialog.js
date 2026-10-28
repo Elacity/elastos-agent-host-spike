@@ -9,12 +9,12 @@ import {
   parentUri,
   protectionLabel,
   publishedCid,
-  shortUri,
   visibilityContract,
   viewerOptions,
 } from "./model.js";
 
 export function createLibraryDialog({
+  allVisible,
   copyText,
   dialog,
   hideMenu,
@@ -22,6 +22,8 @@ export function createLibraryDialog({
   onBeforeClose,
 }) {
   let pendingDialogResolve = null;
+  // Item URIs a decision dialog acts on; it never confirms once any is hidden (#441).
+  let decisionTargetUris = [];
   const propertyCopyResetTimers = new WeakMap();
 
   function showProperties(object) {
@@ -43,7 +45,6 @@ export function createLibraryDialog({
       ["Size", isDirectory(object) ? "-" : formatBytes(object.size)],
       ["Modified", formatTime(object.modified_at)],
       ["Created", formatTime(object.created_at)],
-      ["Published Link", copyableValue(identity.publishedLink, "published link")],
       ["Placement", badgeValue(placement.label, placement.tone)],
       ["Visibility", badgeValue(visibility.label, visibility.tone)],
       ["Access granted to", remoteAccess.status],
@@ -61,7 +62,7 @@ export function createLibraryDialog({
       ["Published CID", copyableValue(identity.publishedId, "published CID", "resource.identifier")],
       ["Service", identity.provider],
       ["Object URI", copyableValue(object.uri || "-", "object URI")],
-      ["Content URI", copyableValue(identity.contentUri, "content URI")],
+      ["Content URI", identity.contentUri],
       ["Head", copyableValue(identity.headId, "object head", "resource.identifier")],
       ["Revision", object.revision || "-"],
       ["Resolver", identity.resolver],
@@ -169,7 +170,10 @@ export function createLibraryDialog({
     return { title: text, html: escapeHtml(text) };
   }
 
+  // An elastos:// link stays plain text: Home cannot yet open one that someone
+  // sends, so Library offers no way to copy it (a resolver target can be one).
   function copyableValue(value, label, purpose = "resource.uri") {
+    if (String(value || "").startsWith("elastos://")) return value;
     return { kind: "copyable", value, label, purpose };
   }
 
@@ -221,7 +225,7 @@ export function createLibraryDialog({
     if (visibility.effective_access === "public_content_link") {
       return object.shared
         ? { label: "Published and shared", tone: "public" }
-        : { label: "Published link", tone: "public" };
+        : { label: "Published", tone: "public" };
     }
     if (visibility.effective_access === "recipient_scoped_link") {
       return { label: "Recipient scoped", tone: "shared" };
@@ -279,7 +283,7 @@ export function createLibraryDialog({
     return {
       label: visibility.placement_label || "Private folder",
       tone: "private",
-      policy: "Private until you publish it and create a shareable link.",
+      policy: "Private until you publish it.",
     };
   }
 
@@ -316,7 +320,6 @@ export function createLibraryDialog({
       contentId: localContentId || "-",
       publishedId: publicContentId || "-",
       contentUri,
-      publishedLink: publicContentId ? `elastos://${publicContentId}` : "-",
       objectId,
       headId: metadata.head_id || object.revision || "-",
       resolver: resolver || "-",
@@ -421,22 +424,6 @@ export function createLibraryDialog({
       checked_at: payload.checked_at ?? null,
       signer_did: receipt.signer_did || payload.signer_did || null,
       verified: receipt.verified === true || payload.verified === true,
-    };
-  }
-
-  function safeShareReceiptSummary(payload) {
-    if (!payload) return { status: "not_available" };
-    return {
-      schema: payload.schema || "elastos.library.share/v1",
-      policy: payload.policy || null,
-      uri: payload.uri || (payload.cid ? `elastos://${payload.cid}` : null),
-      object_uri: payload.object_uri || payload.object?.uri || null,
-      recipients: Array.isArray(payload.recipients) ? payload.recipients.length : 0,
-      grants: Array.isArray(payload.grants) ? payload.grants.length : 0,
-      availability: safeAvailabilitySummary(payload.availability || payload.object?.availability || null).details,
-      remote_access: safeRemoteAccessSummary(payload, payload.object || {}).details,
-      key_release_required: payload.key_release?.required === true,
-      shared_at: payload.shared_at || null,
     };
   }
 
@@ -666,70 +653,6 @@ export function createLibraryDialog({
     dialog.classList.remove("hidden");
   }
 
-  function showShareReceipt(payload) {
-    const object = payload?.object || {};
-    const uri = payload?.uri || (payload?.cid ? `elastos://${payload.cid}` : "");
-    const availability = payload?.availability || object.availability || "unknown";
-    const identity = smartWebIdentity(object, { cid: payload?.cid, availability });
-    const availabilitySummary = safeAvailabilitySummary(availability);
-    const policy = payload?.policy || "public_link";
-    const recipientCount = Array.isArray(payload?.recipients) ? payload.recipients.length : 0;
-    const grantCount = Array.isArray(payload?.grants) ? payload.grants.length : 0;
-    const keyRelease = payload?.key_release || payload?.grants?.find((grant) => grant?.key_release)?.key_release || null;
-    const contentSecurity = payload?.content_security || null;
-    const remoteAccess = safeRemoteAccessSummary(payload, object);
-    const protectedContent = payload?.protected_content || null;
-    dialog.innerHTML = `
-      <div class="dialog-card dialog-card-wide">
-        <div>
-          <p class="eyebrow">Share</p>
-          <h2>${escapeHtml(object.name || "Shared item")}</h2>
-          <p class="subtitle">Your share link is ready.</p>
-        </div>
-        <div class="details">
-          <div><strong>Link</strong><br>${escapeHtml(uri || identity.contentUri)}</div>
-          <div><strong>Recipients</strong><br>${escapeHtml(String(recipientCount))}</div>
-          <div><strong>Shared</strong><br>${escapeHtml(formatTime(payload?.shared_at))}</div>
-        </div>
-        <details class="details-json">
-          <summary>Technical details</summary>
-          <div class="details">
-            <div><strong>Policy</strong><br>${escapeHtml(policy)}</div>
-            <div><strong>Grants</strong><br>${escapeHtml(String(grantCount))}</div>
-            <div><strong>Content URI</strong><br>${escapeHtml(uri || identity.contentUri)}</div>
-            <div><strong>SmartWeb Object</strong><br>${escapeHtml(identity.kind)}</div>
-            <div><strong>Availability</strong><br>${escapeHtml(availabilitySummary.status)}</div>
-            <div><strong>Live Proof</strong><br>${escapeHtml(availabilitySummary.liveProof)}</div>
-            <div><strong>Storage Market</strong><br>${escapeHtml(availabilitySummary.storageMarket)}</div>
-            <div><strong>Payload</strong><br>${escapeHtml(contentSecurity?.published_payload || "-")}</div>
-            <div><strong>Remote Open</strong><br>${escapeHtml(remoteAccess.openStatus)}</div>
-            <div><strong>Provider Chain</strong><br>${escapeHtml(protectedContent?.encrypted_recipient_sharing?.status || "-")}</div>
-            <div><strong>Key Release</strong><br>${escapeHtml(remoteAccess.keyRelease || keyRelease?.status || "not required")}</div>
-            <div><strong>Object</strong><br>${escapeHtml(shortUri(payload?.object_uri || object.uri || ""))}</div>
-          </div>
-          <strong>Share Receipt Summary</strong>
-          <pre>${escapeHtml(JSON.stringify({
-            remote_access: remoteAccess.details,
-            protected_content: protectedContent,
-            availability: availabilitySummary.details,
-            policy,
-            grants: payload?.grants || [],
-            key_release: keyRelease,
-            content_security: contentSecurity,
-            receipt: safeShareReceiptSummary(payload),
-          }, null, 2))}</pre>
-        </details>
-        <div class="button-row">
-          <button class="btn" type="button" data-dialog-action="copy-share-link" data-share-uri="${escapeHtml(uri)}">Copy Link</button>
-          <button class="btn" type="button" data-dialog-action="properties">Properties</button>
-          <button class="btn btn-primary" type="button" data-dialog-close>Close</button>
-        </div>
-      </div>
-    `;
-    dialog.dataset.previewUri = object.uri || payload?.object_uri || "";
-    dialog.classList.remove("hidden");
-  }
-
   function showSharedAccessReceipt(payload) {
     const object = payload?.object || {};
     const access = payload?.access || {};
@@ -777,67 +700,10 @@ export function createLibraryDialog({
     dialog.classList.remove("hidden");
   }
 
-  function showShareDialog(object) {
-    hideMenu();
-    hideDialog();
-    return new Promise((resolve) => {
-      pendingDialogResolve = resolve;
-      dialog.innerHTML = `
-        <div class="dialog-card dialog-card-wide">
-          <form data-share-form>
-            <div>
-              <p class="eyebrow">Share</p>
-              <h2>${escapeHtml(object.name || "Share item")}</h2>
-              <p class="subtitle">Choose who can access this item.</p>
-            </div>
-            <div class="share-options" role="radiogroup" aria-label="Share policy">
-              <label class="share-option">
-                <input type="radio" name="sharePolicy" value="public_link" checked>
-                <span>
-                  <strong>Public link</strong>
-                  <small>Anyone with the link can open it.</small>
-                </span>
-              </label>
-              <label class="share-option">
-                <input type="radio" name="sharePolicy" value="recipient_scoped">
-                <span>
-                  <strong>Specific people</strong>
-                  <small>Limit access to the people you name.</small>
-                </span>
-              </label>
-              <label class="share-option">
-                <input type="radio" name="sharePolicy" value="encrypted_recipient" disabled>
-                <span>
-                  <strong>Protected sharing</strong>
-                  <small>Not available on this device.</small>
-                </span>
-              </label>
-            </div>
-            <label class="dialog-field">
-              <span>Recipients</span>
-              <textarea name="shareRecipients" rows="4" placeholder="Name, email, or identity"></textarea>
-            </label>
-            <p class="dialog-hint">Separate recipients with commas or new lines.</p>
-            <details class="details-json">
-              <summary>Technical details</summary>
-              <p>Specific-person sharing records recipient grants. Protected sharing requires rights, key-release, and decryption services.</p>
-            </details>
-            <p class="dialog-error hidden" data-share-error></p>
-            <div class="button-row">
-              <button class="btn" type="button" data-dialog-close>Cancel</button>
-              <button class="btn btn-primary" type="submit">Share</button>
-            </div>
-          </form>
-        </div>
-      `;
-      dialog.classList.remove("hidden");
-      dialog.querySelector("textarea")?.focus();
-    });
-  }
-
   function showProtectAndListDialog(object) {
     hideMenu();
     hideDialog();
+    decisionTargetUris = [object.uri];
     return new Promise((resolve) => {
       pendingDialogResolve = resolve;
       dialog.innerHTML = `
@@ -885,9 +751,10 @@ export function createLibraryDialog({
       : `Protect ${objectName}, then create one listing with the copies and price shown here.`;
   }
 
-  function confirmDestructive({ title, message, confirmLabel }) {
+  function confirmDestructive({ title, message, confirmLabel, targetUris = [] }) {
     hideMenu();
     hideDialog();
+    decisionTargetUris = targetUris;
     return new Promise((resolve) => {
       pendingDialogResolve = resolve;
       dialog.innerHTML = `
@@ -910,8 +777,10 @@ export function createLibraryDialog({
   function resolveDialogDecision(value) {
     if (!pendingDialogResolve) return;
     const resolve = pendingDialogResolve;
+    const targetsVisible = allVisible(decisionTargetUris);
     pendingDialogResolve = null;
-    resolve(value);
+    decisionTargetUris = [];
+    resolve(value && !targetsVisible ? false : value);
   }
 
   function hideDialog() {
@@ -922,33 +791,16 @@ export function createLibraryDialog({
     resolveDialogDecision(false);
   }
 
+  function hideDialogIfTargetsHidden() {
+    if (pendingDialogResolve && decisionTargetUris.length && !allVisible(decisionTargetUris)) hideDialog();
+  }
+
   function bindDialogEvents() {
     dialog.addEventListener("input", (event) => {
       const form = event.target.closest("[data-protect-and-list-form]");
       if (form) updateProtectAndListSummary(form);
     });
     dialog.addEventListener("submit", (event) => {
-      const form = event.target.closest("[data-share-form]");
-      if (form) {
-        event.preventDefault();
-        const formData = new FormData(form);
-        const policy = String(formData.get("sharePolicy") || "public_link");
-        const recipients = String(formData.get("shareRecipients") || "")
-          .split(/[\n,]+/)
-          .map((recipient) => recipient.trim())
-          .filter(Boolean);
-        const error = form.querySelector("[data-share-error]");
-        if (policy === "recipient_scoped" && !recipients.length) {
-          if (error) {
-            error.textContent = "Recipient-scoped sharing requires at least one recipient.";
-            error.classList.remove("hidden");
-          }
-          return;
-        }
-        resolveDialogDecision({ policy, recipients });
-        hideDialog();
-        return;
-      }
       const protectForm = event.target.closest("[data-protect-and-list-form]");
       if (!protectForm) return;
       event.preventDefault();
@@ -1018,12 +870,6 @@ export function createLibraryDialog({
         if (object) showProperties(object);
         return;
       }
-      const copyShare = event.target.closest('[data-dialog-action="copy-share-link"]');
-      if (copyShare) {
-        const uri = copyShare.getAttribute("data-share-uri") || "";
-        if (uri && copyText) copyText(uri, "published link").catch(() => {});
-        return;
-      }
       if (event.target === dialog || event.target.closest("[data-dialog-close]")) {
         hideDialog();
       }
@@ -1034,11 +880,10 @@ export function createLibraryDialog({
     bindDialogEvents,
     confirmDestructive,
     hideDialog,
+    hideDialogIfTargetsHidden,
     showProtectAndListDialog,
     showObjectStatus,
     showProperties,
-    showShareDialog,
-    showShareReceipt,
     showSharedAccessReceipt,
   };
 }

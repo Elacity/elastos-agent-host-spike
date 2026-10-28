@@ -861,19 +861,27 @@ class SignerTests(unittest.TestCase):
             backend.assert_not_called()
         self.assertTrue(S.confirmed(prepared.publisher_did, "approved release", io.StringIO(DID + "\n"), io.StringIO()))
 
-    def test_cli_cancellation_precedes_backend_and_preserves_output_absence(self):
+    def test_cli_names_approved_delivery_before_confirmation_and_cancellation_precedes_backend(self):
         policy_path = self.base / "operator-policy.json"
         policy_path.write_bytes(S.json_bytes(self.policy))
         output_path = self.base / "publication"
+        prompt = io.StringIO()
         with mock.patch.object(sys, "argv", [str(SOURCE), "--policy", str(policy_path), "--input-root", str(self.root), "--output-root", str(output_path)]), \
              mock.patch.object(S, "pinned_tools"), mock.patch.object(S, "github_json", side_effect=self.fetch), \
-             mock.patch.object(sys, "stdin", io.StringIO("\n")), mock.patch.object(sys, "stderr", io.StringIO()), \
+             mock.patch.object(sys, "stdin", io.StringIO("\n")), mock.patch.object(sys, "stderr", prompt), \
              mock.patch.object(S, "OpenSSLBackend") as backend:
             with self.assertRaisesRegex(ValueError, "cancelled"):
                 S.main()
             backend.assert_not_called()
         self.assertFalse(output_path.exists())
         self.assertFalse(any(path.name.startswith(".elastos-signing-") for path in self.base.iterdir()))
+        approved = S.parse_json(self.approval_path.read_bytes())["delivery"]
+        shown = prompt.getvalue()
+        delivery = f"Approved delivery: {approved['PUBLISHER_GATEWAY']} node {approved['PUBLISHER_NODE_ID']} IPNS {approved['IPNS_NAME']}\n"
+        confirmation = f"Sign approved release as {DID}.\n"
+        self.assertIn(delivery, shown)
+        self.assertIn(confirmation, shown)
+        self.assertLess(shown.index(delivery), shown.index(confirmation))
 
     def test_https_is_fixed_bounded_and_refuses_redirects(self):
         response = mock.Mock(status=301)

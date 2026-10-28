@@ -434,10 +434,10 @@ families must define a typed contract before becoming visible in Home. The
 
 For model inference, Runtime owns hosted credentials, exact HTTPS destinations,
 caller authority and selection policy. The confined provider owns backend
-adaptation, streaming, cancellation and error translation. The temporary Mac
-operator route bypasses normal Inbox decision and grant checks while enabled;
-the permanent SEC1 authority gate remains open. Model output can propose
-another typed effect but cannot authorize it. See
+adaptation, streaming, cancellation and error translation. Every hosted
+request, including one on a saved operator connection, needs the owner's exact
+Inbox approval and a matching Runtime grant; End stops its sends. Model output
+can propose another typed effect but cannot authorize it. See
 [MODEL_PROVIDER.md](MODEL_PROVIDER.md).
 
 ## Orchestration and Runtime communication

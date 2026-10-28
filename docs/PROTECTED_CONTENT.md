@@ -297,37 +297,7 @@ the resulting composition end to end.
 
 ## Remaining work
 
-The ordered release proof is in [GitHub issues](https://github.com/Elacity/elastos-runtime/issues). The protected-content
-part requires:
-
-1. final combined-source review and CI;
-2. matching localhost, seed and third-node installation receipts; a
-   simulation-only container harness proves the same node-provisioning,
-   peer-add, and restart-resurrection mechanics on one host, not distinct
-   installed hardware;
-3. one signed owner-only 2-of-3 custody composition across distinct
-   operators; the composition ceremony and its offline verify path are
-   proven over three real node descriptors and real Carrier transport
-   dials on the simulation-only harness, not yet across genuinely distinct
-   operators and failure domains;
-4. private multi-source Chain configuration and deployed Base evidence;
-5. bound-KID allow/deny/unbound reads, CentralStorage binding and the exact
-   funded `AuthorityGateway.buyAccess` receipt/event; proven headless on an
-   Anvil fork of Base by the installed e2e proof driver, not yet on the real
-   Base deployment;
-6. three replicas plus repair after one replica is lost; proven on the
-   simulation-only harness by the same driver, not yet on distinct hardware;
-7. the installed two-Runtime mint-list-deny-buy-open-play-close journey,
-   including restart, replay, tamper rejection, settlement and cleanup;
-   proven headless by the same driver (`finalize` reads `overall_ok: true`,
-   see its GitHub issue), not yet through Brave on the seed;
-8. the manual J5 UI acceptance in the [0.7.1 release plan](https://app.notion.com/p/3d6b682adcca81948f78d12abcd677b9); and
-9. one atomic cutover that removes the provisional authority surfaces.
-
-The cutover activates the Runtime-owned path and removes provisional startup,
-registration, resources, packaging, tests, and docs in the same reviewable
-change. It keeps one registry, supervisor, coordinator, journal, and
-protected-content path.
-
-Global listing discovery, public custody governance, and document or 3D typed
-viewers are separate later work.
+Protected content is off by default in 0.8.0. Home shows its surfaces only
+after `elastos config set protected_content true`.
+[#388](https://github.com/Elacity/elastos-runtime/issues/388) owns the rebuild
+after 0.8.0, its ordered proof and its acceptance.
