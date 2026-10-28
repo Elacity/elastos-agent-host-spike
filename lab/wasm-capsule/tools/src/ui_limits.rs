@@ -281,9 +281,8 @@ mod tests {
     #[test]
     fn tree_within_limits_is_accepted() {
         let limits = UiLimits::small_preset();
-        let tree = UiTree::measure(
-            &UiNode::new().with_children(vec![leaf("hello"), leaf("world")]),
-        );
+        let tree =
+            UiTree::measure(&UiNode::new().with_children(vec![leaf("hello"), leaf("world")]));
         assert_eq!(tree.node_count, 3);
         assert_eq!(tree.depth, 2);
         assert_eq!(tree.text_bytes, 10);
@@ -307,7 +306,9 @@ mod tests {
     fn node_limit_refuses_and_names_max_nodes() {
         let limits = UiLimits::new(2, 8, 4096);
         let tree = UiTree::measure(&UiNode::new().with_children(vec![leaf("a"), leaf("b")]));
-        let err = limits.check(&tree).expect_err("three nodes exceed a limit of two");
+        let err = limits
+            .check(&tree)
+            .expect_err("three nodes exceed a limit of two");
         assert_eq!(err.code(), "ui_tree_too_large");
         assert_eq!(err.which(), Some(LimitName::MaxNodes));
     }
@@ -317,11 +318,14 @@ mod tests {
     #[test]
     fn depth_limit_refuses_and_names_max_depth() {
         let limits = UiLimits::new(8, 2, 4096);
-        let tree = UiTree::measure(&UiNode::new().with_children(vec![UiNode::new()
-            .with_children(vec![leaf("deep")])]));
+        let tree = UiTree::measure(
+            &UiNode::new().with_children(vec![UiNode::new().with_children(vec![leaf("deep")])]),
+        );
         assert_eq!(tree.node_count, 3);
         assert_eq!(tree.depth, 3);
-        let err = limits.check(&tree).expect_err("depth three exceeds a limit of two");
+        let err = limits
+            .check(&tree)
+            .expect_err("depth three exceeds a limit of two");
         assert_eq!(err.code(), "ui_tree_too_large");
         assert_eq!(err.which(), Some(LimitName::MaxDepth));
     }
@@ -335,7 +339,9 @@ mod tests {
         assert_eq!(tree.node_count, 3);
         assert_eq!(tree.depth, 2);
         assert_eq!(tree.text_bytes, 7);
-        let err = limits.check(&tree).expect_err("seven text bytes exceed a limit of five");
+        let err = limits
+            .check(&tree)
+            .expect_err("seven text bytes exceed a limit of five");
         assert_eq!(err.code(), "ui_tree_too_large");
         assert_eq!(err.which(), Some(LimitName::MaxTextBytes));
     }
@@ -351,7 +357,9 @@ mod tests {
         assert_eq!(tree.text_bytes, 1);
 
         let all_zero = UiLimits::new(0, 0, 0);
-        let err = all_zero.check(&tree).expect_err("zero node limit refuses a one-node tree");
+        let err = all_zero
+            .check(&tree)
+            .expect_err("zero node limit refuses a one-node tree");
         assert_eq!(err.code(), "ui_tree_too_large");
         assert_eq!(err.which(), Some(LimitName::MaxNodes));
 
@@ -409,10 +417,15 @@ mod tests {
     #[test]
     fn display_is_code_then_explanation() {
         let err = UiLimits::new(1, 1, 1)
-            .check(&UiTree::measure(&UiNode::new().with_children(vec![leaf("ab")])))
+            .check(&UiTree::measure(
+                &UiNode::new().with_children(vec![leaf("ab")]),
+            ))
             .unwrap_err();
         let shown = err.to_string();
-        assert!(shown.starts_with("ui_tree_too_large: "), "shown was {shown}");
+        assert!(
+            shown.starts_with("ui_tree_too_large: "),
+            "shown was {shown}"
+        );
         assert!(shown.contains("max_nodes"), "shown was {shown}");
         assert!(!shown.contains('/'), "shown was {shown}");
     }

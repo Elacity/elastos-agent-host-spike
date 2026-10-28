@@ -174,7 +174,10 @@ mod tests {
     #[test]
     fn shows_99_plus_above_range() {
         assert_eq!(Badge::new(100).unwrap().label().as_deref(), Some("99+"));
-        assert_eq!(Badge::new(i64::MAX).unwrap().label().as_deref(), Some("99+"));
+        assert_eq!(
+            Badge::new(i64::MAX).unwrap().label().as_deref(),
+            Some("99+")
+        );
     }
 
     // P6: a badge is hidden at 0.

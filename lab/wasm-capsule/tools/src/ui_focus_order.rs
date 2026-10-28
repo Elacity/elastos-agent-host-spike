@@ -41,10 +41,20 @@ impl fmt::Display for FocusError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             FocusError::FocusIndexDuplicate(index) => {
-                write!(f, "{}: focus index {} is set by more than one node", self.code(), index)
+                write!(
+                    f,
+                    "{}: focus index {} is set by more than one node",
+                    self.code(),
+                    index
+                )
             }
             FocusError::FocusIndexOutOfRange(index) => {
-                write!(f, "{}: focus index {} is outside 1..=999", self.code(), index)
+                write!(
+                    f,
+                    "{}: focus index {} is outside 1..=999",
+                    self.code(),
+                    index
+                )
             }
         }
     }
@@ -164,10 +174,7 @@ mod tests {
         let tree = FocusNode::with_children(
             "root",
             None,
-            vec![
-                FocusNode::leaf("a", Some(2)),
-                FocusNode::leaf("b", Some(1)),
-            ],
+            vec![FocusNode::leaf("a", Some(2)), FocusNode::leaf("b", Some(1))],
         );
         let order = focus_order(&tree).expect("valid tree");
         assert_eq!(order, ids(&["b", "a", "root"]));
@@ -195,10 +202,7 @@ mod tests {
         let tree = FocusNode::with_children(
             "root",
             None,
-            vec![
-                FocusNode::leaf("a", Some(5)),
-                FocusNode::leaf("b", Some(5)),
-            ],
+            vec![FocusNode::leaf("a", Some(5)), FocusNode::leaf("b", Some(5))],
         );
         let err = focus_order(&tree).expect_err("duplicate index");
         assert_eq!(err.code(), "focus_index_duplicate");

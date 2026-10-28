@@ -79,9 +79,7 @@ impl fmt::Display for ScrollError {
             ScrollError::UnknownNode { id } => {
                 format!("child id {id} is not in the scroll view")
             }
-            ScrollError::NoScrollExtent => {
-                "scroll view has no scrollable extent".to_owned()
-            }
+            ScrollError::NoScrollExtent => "scroll view has no scrollable extent".to_owned(),
         };
         write!(f, "{}: {}", self.code(), explanation)
     }
@@ -192,7 +190,10 @@ mod tests {
         let mut view = view;
         assert_eq!(view.set_offset(123), 0);
         assert_eq!(view.scroll_by(500), 0);
-        assert_eq!(view.require_extent().unwrap_err().code(), "no_scroll_extent");
+        assert_eq!(
+            view.require_extent().unwrap_err().code(),
+            "no_scroll_extent"
+        );
         assert!(ScrollView::new(500, 300).require_extent().is_ok());
     }
 

@@ -152,11 +152,7 @@ impl TextArea {
 
     /// Replace the whole text and place the cursor, normalising line endings
     /// and checking limits. The cursor must be a char boundary.
-    pub fn replace(
-        &mut self,
-        input: &str,
-        cursor: usize,
-    ) -> Result<(), TextAreaError> {
+    pub fn replace(&mut self, input: &str, cursor: usize) -> Result<(), TextAreaError> {
         let normalised = normalise_line_endings(input);
         Self::check(&normalised)?;
         if !normalised.is_char_boundary(cursor) {

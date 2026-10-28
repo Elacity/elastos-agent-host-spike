@@ -16,7 +16,11 @@ pub enum StarRatingError {
     /// `max_stars` was outside the 3 to 10 range.
     BadStarCount { max_stars: u8 },
     /// A value was outside 0..=max, off a half step, or not finite.
-    BadRatingValue { value: f32, max_stars: u8, half_steps: bool },
+    BadRatingValue {
+        value: f32,
+        max_stars: u8,
+        half_steps: bool,
+    },
 }
 
 impl StarRatingError {

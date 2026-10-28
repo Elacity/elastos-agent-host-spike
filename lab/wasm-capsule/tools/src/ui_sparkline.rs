@@ -256,8 +256,7 @@ mod tests {
     // P6: every coordinate lies inside the box for an arbitrary series.
     #[test]
     fn all_coordinates_stay_inside_box() {
-        let spark = Sparkline::new(vec![-3, 100, 0, 42, -7, 8])
-            .expect("mixed series is accepted");
+        let spark = Sparkline::new(vec![-3, 100, 0, 42, -7, 8]).expect("mixed series is accepted");
         let (w, h) = (11, 4);
         let coords = spark.render(w, h).expect("non-zero size renders");
         assert_eq!(coords.len(), spark.len());

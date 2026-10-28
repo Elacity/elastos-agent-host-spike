@@ -53,9 +53,7 @@ impl ToastError {
 impl fmt::Display for ToastError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let explanation = match self {
-            ToastError::BadToastDuration => {
-                "toast duration must be between 1 and 10 whole seconds"
-            }
+            ToastError::BadToastDuration => "toast duration must be between 1 and 10 whole seconds",
             ToastError::ToastRateLimited => "capsule posted more than 5 toasts in one minute",
         };
         write!(f, "{}: {}", self.code(), explanation)

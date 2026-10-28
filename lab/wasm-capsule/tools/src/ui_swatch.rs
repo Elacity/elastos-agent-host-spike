@@ -50,9 +50,7 @@ impl fmt::Display for SwatchError {
                 "a raw colour value is not a palette token, name a host palette token instead"
             }
             SwatchError::UnknownSwatch => "that token is not one of this picker's swatches",
-            SwatchError::SwatchCountOutOfRange => {
-                "a picker holds one to thirty-two swatches"
-            }
+            SwatchError::SwatchCountOutOfRange => "a picker holds one to thirty-two swatches",
         };
         write!(f, "{}: {}", self.code(), explanation)
     }
@@ -175,7 +173,9 @@ mod tests {
     fn known_token_picks_and_resolves() {
         let mut picker =
             SwatchPicker::new(&["accent", "surface"]).expect("two tokens fit the bounds");
-        picker.pick("surface").expect("surface is one of the tokens");
+        picker
+            .pick("surface")
+            .expect("surface is one of the tokens");
         assert_eq!(picker.selected(), Some("surface"));
         assert_eq!(
             picker.capability_request().as_deref(),
