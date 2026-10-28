@@ -9,7 +9,7 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 
-use capsule_identity::{lab_cid, Moment, Refusal};
+use capsule_identity::{checked_bundle, lab_cid, Moment, Refusal};
 use common::*;
 use tempfile::TempDir;
 
@@ -231,6 +231,61 @@ fn dot_entries_are_skipped() {
     })
     .unwrap_or_else(|refusal| panic!("{refusal}"));
     assert_eq!(named.to_string(), WEB_APP_LAB_CID);
+}
+
+/// The exact text of a [`Refusal::EmptyFolder`] for `path`.
+fn empty_folder_text(path: &str) -> String {
+    format!(
+        "the folder {path:?} holds no file: Kubo's import with the Runtime's flags (--empty-dirs=false) leaves out an empty folder but keeps a folder that holds only empty folders, so the lab refuses any folder with no file rather than print a name Kubo may not give"
+    )
+}
+
+#[test]
+fn a_folder_with_no_file_is_refused_with_its_reason() {
+    // Kubo with `--empty-dirs=false` leaves out an empty folder but keeps a
+    // folder that holds only empty folders (task 052's hand run), so the
+    // walk refuses any folder that holds no file, at any depth, through
+    // lab_cid and the checked bundle alike: web-app plus an empty `e`, and
+    // web-app plus `f` holding only an empty `g` (the deepest folder is
+    // refused first). A folder whose files are deeper down is named.
+    for (made, refused) in [("e", "e"), ("f/g", "f/g")] {
+        let bundle = assemble(&WEB_APP);
+        fs::create_dir_all(bundle.path().join(made)).expect("make the folder");
+        assert!(bundle.path().join(made).is_dir(), "{made} was not made");
+        let expected = Refusal::EmptyFolder {
+            path: refused.into(),
+        };
+        let walked = lab_cid(bundle.path()).expect_err("a folder with no file gets no name");
+        assert_eq!(walked, expected, "lab_cid, {made}");
+        assert_eq!(walked.to_string(), empty_folder_text(refused), "{made}");
+        let value = checked_bundle(bundle.path())
+            .err()
+            .expect("a folder with no file gets no checked bundle");
+        assert_eq!(value, expected, "checked_bundle, {made}");
+    }
+
+    let bundle = assemble(&WEB_APP);
+    write_file(bundle.path(), "f/g/a.txt", b"a\n");
+    let walked = lab_cid(bundle.path())
+        .unwrap_or_else(|refusal| panic!("f holding only g/a.txt must be named: {refusal}"));
+    assert_ne!(walked.to_string(), WEB_APP_LAB_CID, "f/g/a.txt is named");
+    let value = checked_bundle(bundle.path())
+        .unwrap_or_else(|refusal| panic!("f holding only g/a.txt must be checked: {refusal}"));
+    assert_eq!(value.cid(), walked);
+
+    // P10: the rule is in the walk, once. The library names the refusal
+    // three times: its variant, its text and the one check that returns it.
+    let code = library_code();
+    assert_eq!(
+        code.matches("Err(Refusal::EmptyFolder").count(),
+        1,
+        "the empty-folder check is not in one place"
+    );
+    assert_eq!(
+        code.matches("EmptyFolder").count(),
+        3,
+        "EmptyFolder is used outside its variant, its text and the walk"
+    );
 }
 
 #[test]
