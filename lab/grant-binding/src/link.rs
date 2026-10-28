@@ -1,13 +1,28 @@
 //! The one detector for a path, git, or registry dependency on this crate.
 
-/// True when the decoded text is a path, git, registry, table, dotted, or workspace dependency on this crate.
+/// True when the decoded text is a path, git, registry, table, dotted, workspace, or workspace-member dependency on this crate.
 ///
 /// A manifest that only names the crate, including its own `version` field, is not a link.
+/// A workspace `exclude` list, and a key that only ends in `members`, are not links.
 #[rustfmt::skip]
 pub fn cargo_toml_path_depends_on_grant_binding(cargo_toml: &str) -> bool {
     let cargo_toml = decode_toml_basic_strings(cargo_toml);
     let packed: String = cargo_toml.chars().filter(|ch| !ch.is_whitespace()).collect();
     let unquoted = packed.replace(['"', '\''], "");
+    let member = cargo_toml.match_indices("members").any(|(index, _)| {
+        let before = &cargo_toml[..index];
+        let stem = before.strip_suffix("default-").unwrap_or(before);
+        let key_ok = stem.is_empty()
+            || stem.ends_with(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-');
+        let value = cargo_toml[index + "members".len()..]
+            .trim_start()
+            .strip_prefix('=')
+            .unwrap_or("")
+            .split(']')
+            .next()
+            .unwrap_or("");
+        key_ok && value.contains("grant-binding")
+    });
     cargo_toml.contains("grant-binding")
         && (cargo_toml.contains("path")
             || packed.split("grant-binding").skip(1).any(|suffix| {
@@ -24,7 +39,8 @@ pub fn cargo_toml_path_depends_on_grant_binding(cargo_toml: &str) -> bool {
                 && (unquoted.contains("git=")
                     || unquoted.contains("version=")
                     || unquoted.contains("registry=")
-                    || unquoted.contains("workspace="))))
+                    || unquoted.contains("workspace=")))
+            || member)
 }
 
 /// Decode escapes in TOML basic strings, so an escaped link stays visible.
@@ -536,4 +552,39 @@ fn model_table_or_dotted_dependency_is_a_link() {
     assert!(!cargo_toml_path_depends_on_grant_binding(
         "[dependencies.Grant-Binding]\nversion = \"1.2.3\"\n"
     ));
+}
+
+#[test]
+fn model_workspace_member_is_a_link() {
+    for manifest in [
+        "[workspace]\nmembers = [\"lab/grant-binding\"]\n",
+        "members = [\"grant-binding\"]\n",
+        "[workspace]\ndefault-members = [\"lab/grant-binding\"]\n",
+        "[workspace]\nmembers = [\n  \"lab/grant-binding\",\n]\n",
+        "[workspace]\nmembers = ['lab/grant-binding']\n",
+        "[workspace]\nmembers = [\"crates/other\", \"lab/grant-binding\"]\n",
+        "workspace.members = [\"lab/grant-binding\"]\n",
+        "[workspace]\nmembers = [\"lab/grant-bind\\u0069ng\"]\n",
+        "[workspace]\nresolver = \"2\"\nmembers = [\"lab/grant-binding\"]\n",
+    ] {
+        assert!(
+            cargo_toml_path_depends_on_grant_binding(manifest),
+            "{manifest}"
+        );
+    }
+    for manifest in [
+        "[package]\nname = \"grant-binding\"\nversion = \"0.1.0\"\n\n[workspace]\nmembers = [\"crates/other\"]\n",
+        "[workspace]\nexclude = [\"lab/grant-binding\"]\n",
+        "not-members = [\"lab/grant-binding\"]\n",
+        "Members = [\"lab/grant-binding\"]\n",
+        "[workspace]\nmembers = [\"lab/Grant-Binding\"]\n",
+        "[workspace]\ndefault-members = [\"crates/other\"]\n",
+        "[workspace]\nmembers = [\"crates/*\"]\n",
+        "not-default-members = [\"lab/grant-binding\"]\n",
+    ] {
+        assert!(
+            !cargo_toml_path_depends_on_grant_binding(manifest),
+            "{manifest}"
+        );
+    }
 }

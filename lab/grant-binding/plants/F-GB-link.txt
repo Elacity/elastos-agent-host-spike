@@ -3,9 +3,24 @@ file: src/link.rs
 test: model_detects_a_path_dependency_on_this_crate
 test: link::model_git_or_registry_dependency_is_a_link
 test: link::model_table_or_dotted_dependency_is_a_link
+test: link::model_workspace_member_is_a_link
 --- old
     let packed: String = cargo_toml.chars().filter(|ch| !ch.is_whitespace()).collect();
     let unquoted = packed.replace(['"', '\''], "");
+    let member = cargo_toml.match_indices("members").any(|(index, _)| {
+        let before = &cargo_toml[..index];
+        let stem = before.strip_suffix("default-").unwrap_or(before);
+        let key_ok = stem.is_empty()
+            || stem.ends_with(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-');
+        let value = cargo_toml[index + "members".len()..]
+            .trim_start()
+            .strip_prefix('=')
+            .unwrap_or("")
+            .split(']')
+            .next()
+            .unwrap_or("");
+        key_ok && value.contains("grant-binding")
+    });
     cargo_toml.contains("grant-binding")
         && (cargo_toml.contains("path")
             || packed.split("grant-binding").skip(1).any(|suffix| {
@@ -22,7 +37,8 @@ test: link::model_table_or_dotted_dependency_is_a_link
                 && (unquoted.contains("git=")
                     || unquoted.contains("version=")
                     || unquoted.contains("registry=")
-                    || unquoted.contains("workspace="))))
+                    || unquoted.contains("workspace=")))
+            || member)
 --- new
     let _ = cargo_toml;
     false
