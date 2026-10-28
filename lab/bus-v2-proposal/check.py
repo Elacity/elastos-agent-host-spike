@@ -166,6 +166,59 @@ SEAT_MARKER = "`" + SEAT_SPAN + "`"
 NO_WRITE_SPAN = "examples/agent-host/src/lib.rs:3308"
 NO_WRITE_MARKER = "`" + NO_WRITE_SPAN + "`"
 
+# Its quotation is remainder 1 after the hosted span, source line 3339.
+NO_PROVIDER_SPAN = "examples/agent-host/src/lib.rs:3339"
+NO_PROVIDER_MARKER = "`" + NO_PROVIDER_SPAN + "`"
+
+# Its quotation is remainder 1 after the child span, source line 3360.
+CHILD_SPAN = "examples/agent-host/src/lib.rs:3360"
+CHILD_MARKER = "`" + CHILD_SPAN + "`"
+
+# Its quotation is remainder 11 after the child span, source line 3370.
+NARROWER_SPAN = "examples/agent-host/src/lib.rs:3370"
+NARROWER_MARKER = "`" + NARROWER_SPAN + "`"
+
+# Its quotation is remainder 23 after the child span, source line 3382.
+CHILD_GRANT_NONE_SPAN = "examples/agent-host/src/lib.rs:3382"
+CHILD_GRANT_NONE_MARKER = "`" + CHILD_GRANT_NONE_SPAN + "`"
+
+# Its quotation is remainder 1 after the project span, source line 3387.
+PROJECT_SPAN = "examples/agent-host/src/lib.rs:3387"
+PROJECT_MARKER = "`" + PROJECT_SPAN + "`"
+
+# Its quotation is remainder 17 after the project span, source line 3403.
+PROJECT_RESOURCE_SPAN = "examples/agent-host/src/lib.rs:3403"
+PROJECT_RESOURCE_MARKER = "`" + PROJECT_RESOURCE_SPAN + "`"
+
+# Its quotation is remainder 17 after the authorize span, source line 3449.
+AUTHORIZE_SPAN = "examples/agent-host/src/lib.rs:3449"
+AUTHORIZE_MARKER = "`" + AUTHORIZE_SPAN + "`"
+
+# Its quotation is the child-host doc line, remainder 0 after the child host
+# span, source line 3455.
+CHILD_HOST_DOC_SPAN = "examples/agent-host/src/lib.rs:3455"
+CHILD_HOST_DOC_MARKER = "`" + CHILD_HOST_DOC_SPAN + "`"
+
+# Its quotation is the empty-journal line, remainder 15 after the empty-journal
+# span, source line 3470.
+EMPTY_JOURNAL_SPAN = "examples/agent-host/src/lib.rs:3470"
+EMPTY_JOURNAL_MARKER = "`" + EMPTY_JOURNAL_SPAN + "`"
+
+# Its quotation is the admit-system line, remainder 16 after the admit-system
+# span, source line 3471.
+ADMIT_SYSTEM_SPAN = "examples/agent-host/src/lib.rs:3471"
+ADMIT_SYSTEM_MARKER = "`" + ADMIT_SYSTEM_SPAN + "`"
+
+# Its quotation is the inherited arm, remainder 1 after the inherited span,
+# source line 3474.
+INHERITED_ERR_SPAN = "examples/agent-host/src/lib.rs:3474"
+INHERITED_ERR_MARKER = "`" + INHERITED_ERR_SPAN + "`"
+
+# Its quotation is the parent-grant arm, remainder 3 after the grant span,
+# source line 3482.
+GRANT_PARENT_SPAN = "examples/agent-host/src/lib.rs:3482"
+GRANT_PARENT_MARKER = "`" + GRANT_PARENT_SPAN + "`"
+
 # Its quotation is remainder 5 after the declaration span, source line 8488.
 COVER_SPAN = "examples/agent-host/src/lib.rs:8488"
 COVER_MARKER = "`" + COVER_SPAN + "`"
@@ -199,6 +252,23 @@ WRITE_ACTION_MARKER = "`" + WRITE_ACTION_SPAN + "`"
 # Its quotation is remainder 5 after the write-action walk, source line 192.
 DEFAULT_ACTION_SPAN = "elastos/crates/elastos-server/src/provider_resource.rs:192"
 DEFAULT_ACTION_MARKER = "`" + DEFAULT_ACTION_SPAN + "`"
+
+# Its quotation is the removal at the end of the activation, source line 218.
+RESIDENT_REL = "elastos/crates/elastos-compute/src/providers/component.rs"
+RESIDENT_RUN_SPAN = RESIDENT_REL + ":218"
+RESIDENT_RUN_MARKER = "`" + RESIDENT_RUN_SPAN + "`"
+
+# Its quotation is the contract error in the stop body, source line 232.
+RESIDENT_STOP_SPAN = RESIDENT_REL + ":232"
+RESIDENT_STOP_MARKER = "`" + RESIDENT_STOP_SPAN + "`"
+
+# Its quotation is the one export the capsule kernel provides, source line 87.
+RESIDENT_EXPORT_SPAN = "elastos/wit/elastos-bus-v1.wit:87"
+RESIDENT_EXPORT_MARKER = "`" + RESIDENT_EXPORT_SPAN + "`"
+
+# The two resident-A3 claims the draft never makes. Each has its own refusal.
+A3_MET_CLAIM = "A3 is met"
+A3_GRANT_CLAIM = "ComponentProvider grants resident A3 credit"
 
 # The draft indents a quotation by exactly four spaces.
 DRAFT_INDENT = "    "
@@ -298,8 +368,8 @@ def _spans(text):
         cursor = closed + 1
 
 
-def pinned_line(root, sha, rel, number):
-    """Return line NUMBER of REL at commit SHA, or None when it is absent."""
+def _pinned_lines(root, sha, rel):
+    """Return every line of REL at commit SHA, or None when it is absent."""
     if sha is None:
         return None
     try:
@@ -316,8 +386,13 @@ def pinned_line(root, sha, rel, number):
         text = decode_text(result.stdout)
     except UnicodeDecodeError:
         return None
-    lines = text.splitlines()
-    if number < 1 or number > len(lines):
+    return text.splitlines()
+
+
+def pinned_line(root, sha, rel, number):
+    """Return line NUMBER of REL at commit SHA, or None when it is absent."""
+    lines = _pinned_lines(root, sha, rel)
+    if lines is None or number < 1 or number > len(lines):
         return None
     return lines[number - 1]
 
@@ -345,356 +420,438 @@ def _remainders(text, marker):
     return []
 
 
-def owned_quote(text):
-    """Return the first quotation after the owned span, or None when absent."""
-    remainders = _remainders(text, OWNED_MARKER)
+def _quote_window(remainders, pinned_lines, number):
+    """Return the index inside the best window that holds NUMBER, or None.
+
+    A window is ``len(remainders)`` consecutive non-empty pinned lines. Only a
+    window that holds NUMBER is scored, so a match elsewhere in the file cannot
+    hide the cited line. The score is the count of remainders that equal their
+    pinned line, and it may be 0. A tie keeps the smallest start line. The
+    index is how many non-empty lines of the window stand before NUMBER.
+    """
+    nonempty = [(line, text) for line, text in enumerate(pinned_lines, 1) if text]
+    width = len(remainders)
+    if not width or width > len(nonempty):
+        return None
+    best = None
+    best_score = None
+    for start in range(len(nonempty) - width + 1):
+        window = nonempty[start:start + width]
+        if not any(line == number for line, _ in window):
+            continue
+        score = sum(
+            1
+            for offset, (_, text) in enumerate(window)
+            if quoted_line_matches(remainders[offset], text)
+        )
+        if best_score is None or score > best_score:
+            best = start
+            best_score = score
+    if best is None:
+        return None
+    return sum(1 for line, _ in nonempty[best:best + width] if line < number)
+
+
+def quote_for(remainders, pinned_lines, number):
+    """Return the remainder that stands for line NUMBER, or None when none does."""
+    if not remainders or pinned_lines is None:
+        return None
+    index = _quote_window(remainders, pinned_lines, number)
+    if index is None:
+        return None
+    return remainders[index]
+
+
+def _pin_of(text, root):
+    """Return the pin SHA for TEXT, or the worktree draft pin when it has none."""
+    sha = pin_sha(text)
+    if sha is not None:
+        return sha
+    draft = load_draft(root)
+    if draft is None:
+        return None
+    return pin_sha(draft)
+
+
+def _pinned_quote(text, span, marker, root=None, sha=None, pinned=None):
+    """Return the remainder that stands for SPAN, or None when none stands.
+
+    PINNED is the pinned file's lines when the caller already read them.
+    Otherwise this reads them through ``_pinned_lines`` at the draft pin, or at
+    the worktree draft pin when TEXT carries none.
+    """
+    remainders = _remainders(text, marker)
     if not remainders:
         return None
-    return remainders[0]
+    rel, number = _span_target(span)
+    if pinned is None:
+        if root is None:
+            root = worktree_root()
+        if sha is None:
+            sha = _pin_of(text, root)
+        pinned = _pinned_lines(root, sha, rel)
+    return quote_for(remainders, pinned, number)
 
 
-def next_owned_quote(text):
-    """Return the second quotation after the owned span, or None when absent."""
-    remainders = _remainders(text, OWNED_MARKER)
-    if len(remainders) < 2:
-        return None
-    return remainders[1]
+def owned_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the owned span, or None when absent."""
+    return _pinned_quote(text, OWNED_SPAN, OWNED_MARKER, root, sha, pinned)
 
 
-def marker_quote(text):
-    """Return the last quotation after the marker span, or None when absent."""
-    remainders = _remainders(text, MARKER_MARKER)
-    if not remainders:
-        return None
-    return remainders[-1]
+def next_owned_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the next owned span, or None."""
+    return _pinned_quote(text, NEXT_SPAN, OWNED_MARKER, root, sha, pinned)
 
 
-def launching_quote(text):
-    """Return the last quotation after the launching span, or None when absent."""
-    remainders = _remainders(text, LAUNCHING_MARKER)
-    if not remainders:
-        return None
-    return remainders[-1]
+def marker_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the marker span, or None."""
+    return _pinned_quote(text, MARKER_SPAN, MARKER_MARKER, root, sha, pinned)
 
 
-def asks_quote(text):
-    """Return the third quotation after the asks span, or None when absent."""
-    remainders = _remainders(text, ASKS_MARKER)
-    if len(remainders) < 3:
-        return None
-    return remainders[2]
+def launching_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the launching span, or None."""
+    return _pinned_quote(text, LAUNCHING_SPAN, LAUNCHING_MARKER, root, sha, pinned)
 
 
-def deny_quote(text):
-    """Return the first quotation after the deny span, or None when absent."""
-    remainders = _remainders(text, DENY_MARKER)
-    if not remainders:
-        return None
-    return remainders[0]
+def asks_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the asks span, or None."""
+    return _pinned_quote(text, ASKS_SPAN, ASKS_MARKER, root, sha, pinned)
 
 
-def mint_quote(text):
-    """Return the second quotation after the mint span, or None when absent."""
-    remainders = _remainders(text, MINT_MARKER)
-    if len(remainders) < 2:
-        return None
-    return remainders[1]
+def deny_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the deny span, or None."""
+    return _pinned_quote(text, DENY_SPAN, DENY_MARKER, root, sha, pinned)
 
 
-def journal_quote(text):
-    """Return the second quotation after the journal span, or None when absent."""
-    remainders = _remainders(text, JOURNAL_MARKER)
-    if len(remainders) < 2:
-        return None
-    return remainders[1]
+def mint_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the mint span, or None."""
+    return _pinned_quote(text, MINT_SPAN, MINT_MARKER, root, sha, pinned)
 
 
-def grant_quote(text):
-    """Return the first quotation after the grant span, or None when absent."""
-    remainders = _remainders(text, GRANT_MARKER)
-    if not remainders:
-        return None
-    return remainders[0]
+def journal_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the journal span, or None."""
+    return _pinned_quote(text, JOURNAL_SPAN, JOURNAL_MARKER, root, sha, pinned)
 
 
-def write_quote(text):
-    """Return the seventeenth quotation after the write span, or None when absent."""
-    remainders = _remainders(text, WRITE_MARKER)
-    if len(remainders) < 17:
-        return None
-    return remainders[16]
+def grant_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the grant span, or None."""
+    return _pinned_quote(text, GRANT_SPAN, GRANT_MARKER, root, sha, pinned)
 
 
-def read_quote(text):
-    """Return the eighteenth quotation after the read span, or None when absent."""
-    remainders = _remainders(text, READ_MARKER)
-    if len(remainders) < 18:
-        return None
-    return remainders[17]
+def write_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the write span, or None."""
+    return _pinned_quote(text, WRITE_SPAN, WRITE_MARKER, root, sha, pinned)
 
 
-def body_doc_quote(text):
-    """Return remainder 0 after the write-body span, or None when it is absent."""
-    remainders = _remainders(text, BODY_DOC_MARKER)
-    if not remainders:
-        return None
-    return remainders[0]
+def read_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the read span, or None."""
+    return _pinned_quote(text, READ_SPAN, READ_MARKER, root, sha, pinned)
 
 
-def create_only_quote(text):
-    """Return remainder 5 after the write-body span, or None when it is absent."""
-    remainders = _remainders(text, CREATE_ONLY_MARKER)
-    if len(remainders) <= 5:
-        return None
-    return remainders[5]
+def body_doc_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the body-doc span, or None."""
+    return _pinned_quote(text, BODY_DOC_SPAN, BODY_DOC_MARKER, root, sha, pinned)
 
 
-def present_revision_quote(text):
-    """Return remainder 6 after the write-body span, or None when it is absent."""
-    remainders = _remainders(text, PRESENT_REVISION_MARKER)
-    if len(remainders) <= 6:
-        return None
-    return remainders[6]
-
-
-def append_condition_quote(text):
-    """Return remainder 7 after the condition span, or None when absent."""
-    remainders = _remainders(text, APPEND_CONDITION_MARKER)
-    if len(remainders) <= 7:
-        return None
-    return remainders[7]
-
-
-def host_path_err_quote(text):
-    """Return remainder 8 after the condition span, or None when absent."""
-    remainders = _remainders(text, HOST_PATH_ERR_MARKER)
-    if len(remainders) <= 8:
-        return None
-    return remainders[8]
-
-
-def held_err_quote(text):
-    """Return remainder 19 after the condition span, or None when absent."""
-    remainders = _remainders(text, HELD_ERR_MARKER)
-    if len(remainders) <= 19:
-        return None
-    return remainders[19]
-
-
-def append_cap_quote(text):
-    """Return remainder 1 after the cap span, or None when it is absent."""
-    remainders = _remainders(text, APPEND_CAP_MARKER)
-    if len(remainders) <= 1:
-        return None
-    return remainders[1]
-
-
-def append_call_quote(text):
-    """Return remainder 10 after the range span, or None when it is absent."""
-    remainders = _remainders(text, APPEND_RANGE_MARKER)
-    if len(remainders) <= 10:
-        return None
-    return remainders[10]
-
-
-def outcome_held_quote(text):
-    """Return remainder 11 after the range span, or None when it is absent."""
-    remainders = _remainders(text, APPEND_RANGE_MARKER)
-    if len(remainders) <= 11:
-        return None
-    return remainders[11]
-
-
-def write_invoke_quote(text):
-    """Return remainder 13 after the invoke span, or None when it is absent."""
-    remainders = _remainders(text, WRITE_INVOKE_MARKER)
-    if len(remainders) <= 13:
-        return None
-    return remainders[13]
-
-
-def kind_read_quote(text):
-    """Return the ninth quotation after the read span, or None when absent."""
-    remainders = _remainders(text, KIND_READ_MARKER)
-    if len(remainders) < 9:
-        return None
-    return remainders[8]
-
-
-def kind_edit_quote(text):
-    """Return the tenth quotation after the edit span, or None when absent."""
-    remainders = _remainders(text, KIND_EDIT_MARKER)
-    if len(remainders) < 10:
-        return None
-    return remainders[9]
-
-
-def kind_restore_quote(text):
-    """Return the twelfth quotation after the restore span, or None when absent."""
-    remainders = _remainders(text, KIND_RESTORE_MARKER)
-    if len(remainders) < 12:
-        return None
-    return remainders[11]
-
-
-def kind_run_quote(text):
-    """Return the one quotation after the run span, or None when absent."""
-    remainders = _remainders(text, KIND_RUN_MARKER)
-    if not remainders:
-        return None
-    return remainders[0]
-
-
-def kind_hosted_quote(text):
-    """Return the one quotation after the hosted span, or None when absent."""
-    remainders = _remainders(text, KIND_HOSTED_MARKER)
-    if not remainders:
-        return None
-    return remainders[0]
-
-
-def kind_child_quote(text):
-    """Return the one quotation after the child span, or None when absent."""
-    remainders = _remainders(text, KIND_CHILD_MARKER)
-    if not remainders:
-        return None
-    return remainders[0]
-
-
-def kind_init_quote(text):
-    """Return the one quotation after the init span, or None when absent."""
-    remainders = _remainders(text, KIND_INIT_MARKER)
-    if not remainders:
-        return None
-    return remainders[0]
-
-
-def kind_append_quote(text):
-    """Return the one quotation after the append span, or None when absent."""
-    remainders = _remainders(text, KIND_APPEND_MARKER)
-    if not remainders:
-        return None
-    return remainders[0]
-
-
-def observe_quote(text):
-    """Return remainder 4 after the observe span, or None when it is absent."""
-    remainders = _remainders(text, OBSERVE_MARKER)
-    if len(remainders) <= 4:
-        return None
-    return remainders[4]
-
-
-def revision_quote(text):
-    """Return remainder 7 after the revision span, or None when it is absent."""
-    remainders = _remainders(text, REVISION_MARKER)
-    if len(remainders) <= 7:
-        return None
-    return remainders[7]
-
-
-def op_quote(text):
-    """Return remainder 15 after the op span, or None when it is absent."""
-    remainders = _remainders(text, OP_MARKER)
-    if len(remainders) <= 15:
-        return None
-    return remainders[15]
-
-
-def no_process_quote(text):
-    """Return remainder 1 after the run span, or None when it is absent."""
-    remainders = _remainders(text, NO_PROCESS_MARKER)
-    if len(remainders) <= 1:
-        return None
-    return remainders[1]
-
-
-def seat_quote(text):
-    """Return remainder 24 after the run span, or None when it is absent."""
-    remainders = _remainders(text, SEAT_MARKER)
-    if len(remainders) <= 24:
-        return None
-    return remainders[24]
-
-
-def no_write_quote(text):
-    """Return remainder 4 after the no-write span, or None when it is absent."""
-    remainders = _remainders(text, NO_WRITE_MARKER)
-    if len(remainders) <= 4:
-        return None
-    return remainders[4]
-
-
-def cover_quote(text):
-    """Return remainder 5 after the cover span, or None when it is absent."""
-    remainders = _remainders(text, COVER_MARKER)
-    if len(remainders) <= 5:
-        return None
-    return remainders[5]
-
-
-def edit_start_quote(text):
-    """Return remainder 4 after the edit range span, or None when it is absent."""
-    remainders = _remainders(text, EDIT_RANGE_MARKER)
-    if len(remainders) <= 4:
-        return None
-    return remainders[4]
-
-
-def edit_end_quote(text):
-    """Return remainder 5 after the edit range span, or None when it is absent."""
-    remainders = _remainders(text, EDIT_RANGE_MARKER)
-    if len(remainders) <= 5:
-        return None
-    return remainders[5]
-
-
-def request_quote(text):
-    """Return remainder 0 after the request span, or None when it is absent."""
-    remainders = _remainders(text, REQUEST_MARKER)
-    if not remainders:
-        return None
-    return remainders[0]
-
-
-def is_write_quote(text):
-    """Return remainder 2 after the is-write span, or None when it is absent."""
-    remainders = _remainders(text, IS_WRITE_MARKER)
-    if len(remainders) <= 2:
-        return None
-    return remainders[2]
-
-
-def scheme_quote(text):
-    """Return remainder 8 after the scheme span, or None when it is absent."""
-    remainders = _remainders(text, SCHEME_MARKER)
-    if len(remainders) <= 8:
-        return None
-    return remainders[8]
-
-
-def read_action_quote(text):
-    """Return remainder 0 after the read-action span, or None when absent."""
-    remainders = _remainders(text, READ_ACTION_MARKER)
-    if not remainders:
-        return None
-    return remainders[0]
-
-
-def write_action_quote(text):
-    """Return remainder 3 after the write-action span, or None when absent."""
-    remainders = _remainders(text, WRITE_ACTION_MARKER)
-    if len(remainders) <= 3:
-        return None
-    return remainders[3]
-
-
-def default_action_quote(text):
-    """Return remainder 5 after the default-action span, or None when absent."""
-    remainders = _remainders(text, DEFAULT_ACTION_MARKER)
-    if len(remainders) <= 5:
-        return None
-    return remainders[5]
+def create_only_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the create-only span, or None."""
+    return _pinned_quote(text, CREATE_ONLY_SPAN, CREATE_ONLY_MARKER, root, sha, pinned)
+
+
+def present_revision_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the present-revision span, or None."""
+    return _pinned_quote(text, PRESENT_REVISION_SPAN, PRESENT_REVISION_MARKER, root, sha, pinned)
+
+
+def append_condition_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the condition span, or None."""
+    return _pinned_quote(text, APPEND_CONDITION_SPAN, APPEND_CONDITION_MARKER, root, sha, pinned)
+
+
+def host_path_err_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the host-path span, or None."""
+    return _pinned_quote(text, HOST_PATH_ERR_SPAN, HOST_PATH_ERR_MARKER, root, sha, pinned)
+
+
+def held_err_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the held span, or None."""
+    return _pinned_quote(text, HELD_ERR_SPAN, HELD_ERR_MARKER, root, sha, pinned)
+
+
+def append_cap_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the cap span, or None."""
+    return _pinned_quote(text, APPEND_CAP_SPAN, APPEND_CAP_MARKER, root, sha, pinned)
+
+
+def append_call_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the call line, or None."""
+    return _pinned_quote(text, APPEND_CALL_SPAN, APPEND_RANGE_MARKER, root, sha, pinned)
+
+
+def outcome_held_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the held line, or None."""
+    return _pinned_quote(text, OUTCOME_HELD_SPAN, APPEND_RANGE_MARKER, root, sha, pinned)
+
+
+def write_invoke_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the invoke span, or None."""
+    return _pinned_quote(text, WRITE_INVOKE_SPAN, WRITE_INVOKE_MARKER, root, sha, pinned)
+
+
+def kind_read_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the Read arm, or None."""
+    return _pinned_quote(text, KIND_READ_SPAN, KIND_READ_MARKER, root, sha, pinned)
+
+
+def kind_edit_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the Edit arm, or None."""
+    return _pinned_quote(text, KIND_EDIT_SPAN, KIND_EDIT_MARKER, root, sha, pinned)
+
+
+def kind_restore_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the Restore arm, or None."""
+    return _pinned_quote(text, KIND_RESTORE_SPAN, KIND_RESTORE_MARKER, root, sha, pinned)
+
+
+def kind_run_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the Run arm, or None."""
+    return _pinned_quote(text, KIND_RUN_SPAN, KIND_RUN_MARKER, root, sha, pinned)
+
+
+def kind_hosted_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the Hosted arm, or None."""
+    return _pinned_quote(text, KIND_HOSTED_SPAN, KIND_HOSTED_MARKER, root, sha, pinned)
+
+
+def kind_child_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the Child arm, or None."""
+    return _pinned_quote(text, KIND_CHILD_SPAN, KIND_CHILD_MARKER, root, sha, pinned)
+
+
+def kind_init_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the Init arm, or None."""
+    return _pinned_quote(text, KIND_INIT_SPAN, KIND_INIT_MARKER, root, sha, pinned)
+
+
+def kind_append_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the JournalAppend arm, or None."""
+    return _pinned_quote(text, KIND_APPEND_SPAN, KIND_APPEND_MARKER, root, sha, pinned)
+
+
+def observe_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the observe span, or None."""
+    return _pinned_quote(text, OBSERVE_SPAN, OBSERVE_MARKER, root, sha, pinned)
+
+
+def revision_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the revision span, or None."""
+    return _pinned_quote(text, REVISION_SPAN, REVISION_MARKER, root, sha, pinned)
+
+
+def op_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the op span, or None."""
+    return _pinned_quote(text, OP_SPAN, OP_MARKER, root, sha, pinned)
+
+
+def no_process_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the no-process span, or None."""
+    return _pinned_quote(text, NO_PROCESS_SPAN, NO_PROCESS_MARKER, root, sha, pinned)
+
+
+def seat_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the seat span, or None."""
+    return _pinned_quote(text, SEAT_SPAN, SEAT_MARKER, root, sha, pinned)
+
+
+def no_write_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the no-write span, or None."""
+    return _pinned_quote(text, NO_WRITE_SPAN, NO_WRITE_MARKER, root, sha, pinned)
+
+
+def no_provider_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the no-provider span, or None."""
+    return _pinned_quote(text, NO_PROVIDER_SPAN, NO_PROVIDER_MARKER, root, sha, pinned)
+
+
+def parent_grant_doc_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the parent-grant doc, or None."""
+    return _pinned_quote(text, CHILD_SPAN, CHILD_MARKER, root, sha, pinned)
+
+
+def narrower_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the narrower call, or None."""
+    return _pinned_quote(text, NARROWER_SPAN, NARROWER_MARKER, root, sha, pinned)
+
+
+def child_grant_none_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the cleared grant, or None."""
+    return _pinned_quote(text, CHILD_GRANT_NONE_SPAN, CHILD_GRANT_NONE_MARKER, root, sha, pinned)
+
+
+def init_guard_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the host-path guard, or None."""
+    return _pinned_quote(text, PROJECT_SPAN, PROJECT_MARKER, root, sha, pinned)
+
+
+def project_resource_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the project resource, or None."""
+    return _pinned_quote(text, PROJECT_RESOURCE_SPAN, PROJECT_RESOURCE_MARKER, root, sha, pinned)
+
+
+def parent_compare_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the parent-grant compare, or None."""
+    return _pinned_quote(text, AUTHORIZE_SPAN, AUTHORIZE_MARKER, root, sha, pinned)
+
+
+def child_host_doc_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the child-host doc, or None."""
+    return _pinned_quote(text, CHILD_HOST_DOC_SPAN, CHILD_HOST_DOC_MARKER, root, sha, pinned)
+
+
+def empty_journal_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the empty-journal line, or None."""
+    return _pinned_quote(text, EMPTY_JOURNAL_SPAN, EMPTY_JOURNAL_MARKER, root, sha, pinned)
+
+
+def admit_system_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the admit-system line, or None."""
+    return _pinned_quote(text, ADMIT_SYSTEM_SPAN, ADMIT_SYSTEM_MARKER, root, sha, pinned)
+
+
+def inherited_err_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the inherited arm, or None."""
+    return _pinned_quote(text, INHERITED_ERR_SPAN, INHERITED_ERR_MARKER, root, sha, pinned)
+
+
+def grant_parent_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the grant-parent arm, or None."""
+    return _pinned_quote(text, GRANT_PARENT_SPAN, GRANT_PARENT_MARKER, root, sha, pinned)
+
+
+def cover_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the cover span, or None."""
+    return _pinned_quote(text, COVER_SPAN, COVER_MARKER, root, sha, pinned)
+
+
+def edit_start_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the range start, or None."""
+    return _pinned_quote(text, EDIT_START_SPAN, EDIT_RANGE_MARKER, root, sha, pinned)
+
+
+def edit_end_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the range end, or None."""
+    return _pinned_quote(text, EDIT_END_SPAN, EDIT_RANGE_MARKER, root, sha, pinned)
+
+
+def request_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the request span, or None."""
+    return _pinned_quote(text, REQUEST_SPAN, REQUEST_MARKER, root, sha, pinned)
+
+
+def is_write_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the is-write span, or None."""
+    return _pinned_quote(text, IS_WRITE_SPAN, IS_WRITE_MARKER, root, sha, pinned)
+
+
+def scheme_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the scheme span, or None."""
+    return _pinned_quote(text, SCHEME_SPAN, SCHEME_MARKER, root, sha, pinned)
+
+
+def read_action_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the read action, or None."""
+    return _pinned_quote(text, READ_ACTION_SPAN, READ_ACTION_MARKER, root, sha, pinned)
+
+
+def write_action_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the write action, or None."""
+    return _pinned_quote(text, WRITE_ACTION_SPAN, WRITE_ACTION_MARKER, root, sha, pinned)
+
+
+def default_action_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the default action, or None."""
+    return _pinned_quote(text, DEFAULT_ACTION_SPAN, DEFAULT_ACTION_MARKER, root, sha, pinned)
+
+
+def resident_run_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the activation removal, or None."""
+    return _pinned_quote(text, RESIDENT_RUN_SPAN, RESIDENT_RUN_MARKER, root, sha, pinned)
+
+
+def resident_stop_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the stop contract error, or None."""
+    return _pinned_quote(text, RESIDENT_STOP_SPAN, RESIDENT_STOP_MARKER, root, sha, pinned)
+
+
+def resident_export_quote(text, root=None, sha=None, pinned=None):
+    """Return the quotation that stands for the lifecycle export, or None."""
+    return _pinned_quote(text, RESIDENT_EXPORT_SPAN, RESIDENT_EXPORT_MARKER, root, sha, pinned)
+
+
+# The only target list: one entry per line decision, in source order. A range's
+# two endpoints share one marker. The quoter name is looked up at call time so a
+# test can plant a neighbouring remainder through the production path.
+QUOTE_TARGETS = (
+    (OBSERVE_SPAN, OBSERVE_MARKER, "observe_quote"),
+    (EDIT_START_SPAN, EDIT_RANGE_MARKER, "edit_start_quote"),
+    (EDIT_END_SPAN, EDIT_RANGE_MARKER, "edit_end_quote"),
+    (REQUEST_SPAN, REQUEST_MARKER, "request_quote"),
+    (REVISION_SPAN, REVISION_MARKER, "revision_quote"),
+    (OP_SPAN, OP_MARKER, "op_quote"),
+    (NO_PROCESS_SPAN, NO_PROCESS_MARKER, "no_process_quote"),
+    (SEAT_SPAN, SEAT_MARKER, "seat_quote"),
+    (IS_WRITE_SPAN, IS_WRITE_MARKER, "is_write_quote"),
+    (NO_WRITE_SPAN, NO_WRITE_MARKER, "no_write_quote"),
+    (NO_PROVIDER_SPAN, NO_PROVIDER_MARKER, "no_provider_quote"),
+    (CHILD_SPAN, CHILD_MARKER, "parent_grant_doc_quote"),
+    (NARROWER_SPAN, NARROWER_MARKER, "narrower_quote"),
+    (CHILD_GRANT_NONE_SPAN, CHILD_GRANT_NONE_MARKER, "child_grant_none_quote"),
+    (PROJECT_SPAN, PROJECT_MARKER, "init_guard_quote"),
+    (PROJECT_RESOURCE_SPAN, PROJECT_RESOURCE_MARKER, "project_resource_quote"),
+    (AUTHORIZE_SPAN, AUTHORIZE_MARKER, "parent_compare_quote"),
+    (CHILD_HOST_DOC_SPAN, CHILD_HOST_DOC_MARKER, "child_host_doc_quote"),
+    (EMPTY_JOURNAL_SPAN, EMPTY_JOURNAL_MARKER, "empty_journal_quote"),
+    (ADMIT_SYSTEM_SPAN, ADMIT_SYSTEM_MARKER, "admit_system_quote"),
+    (INHERITED_ERR_SPAN, INHERITED_ERR_MARKER, "inherited_err_quote"),
+    (GRANT_PARENT_SPAN, GRANT_PARENT_MARKER, "grant_parent_quote"),
+    (DENY_SPAN, DENY_MARKER, "deny_quote"),
+    (MINT_SPAN, MINT_MARKER, "mint_quote"),
+    (OWNED_SPAN, OWNED_MARKER, "owned_quote"),
+    (NEXT_SPAN, OWNED_MARKER, "next_owned_quote"),
+    (JOURNAL_SPAN, JOURNAL_MARKER, "journal_quote"),
+    (GRANT_SPAN, GRANT_MARKER, "grant_quote"),
+    (WRITE_SPAN, WRITE_MARKER, "write_quote"),
+    (READ_SPAN, READ_MARKER, "read_quote"),
+    (APPEND_CONDITION_SPAN, APPEND_CONDITION_MARKER, "append_condition_quote"),
+    (HOST_PATH_ERR_SPAN, HOST_PATH_ERR_MARKER, "host_path_err_quote"),
+    (HELD_ERR_SPAN, HELD_ERR_MARKER, "held_err_quote"),
+    (BODY_DOC_SPAN, BODY_DOC_MARKER, "body_doc_quote"),
+    (CREATE_ONLY_SPAN, CREATE_ONLY_MARKER, "create_only_quote"),
+    (PRESENT_REVISION_SPAN, PRESENT_REVISION_MARKER, "present_revision_quote"),
+    (APPEND_CAP_SPAN, APPEND_CAP_MARKER, "append_cap_quote"),
+    (APPEND_CALL_SPAN, APPEND_RANGE_MARKER, "append_call_quote"),
+    (OUTCOME_HELD_SPAN, APPEND_RANGE_MARKER, "outcome_held_quote"),
+    (WRITE_INVOKE_SPAN, WRITE_INVOKE_MARKER, "write_invoke_quote"),
+    (ASKS_SPAN, ASKS_MARKER, "asks_quote"),
+    (MARKER_SPAN, MARKER_MARKER, "marker_quote"),
+    (LAUNCHING_SPAN, LAUNCHING_MARKER, "launching_quote"),
+    (KIND_READ_SPAN, KIND_READ_MARKER, "kind_read_quote"),
+    (KIND_EDIT_SPAN, KIND_EDIT_MARKER, "kind_edit_quote"),
+    (KIND_RUN_SPAN, KIND_RUN_MARKER, "kind_run_quote"),
+    (KIND_RESTORE_SPAN, KIND_RESTORE_MARKER, "kind_restore_quote"),
+    (KIND_HOSTED_SPAN, KIND_HOSTED_MARKER, "kind_hosted_quote"),
+    (KIND_CHILD_SPAN, KIND_CHILD_MARKER, "kind_child_quote"),
+    (KIND_INIT_SPAN, KIND_INIT_MARKER, "kind_init_quote"),
+    (KIND_APPEND_SPAN, KIND_APPEND_MARKER, "kind_append_quote"),
+    (COVER_SPAN, COVER_MARKER, "cover_quote"),
+    (SCHEME_SPAN, SCHEME_MARKER, "scheme_quote"),
+    (READ_ACTION_SPAN, READ_ACTION_MARKER, "read_action_quote"),
+    (WRITE_ACTION_SPAN, WRITE_ACTION_MARKER, "write_action_quote"),
+    (DEFAULT_ACTION_SPAN, DEFAULT_ACTION_MARKER, "default_action_quote"),
+    (RESIDENT_RUN_SPAN, RESIDENT_RUN_MARKER, "resident_run_quote"),
+    (RESIDENT_STOP_SPAN, RESIDENT_STOP_MARKER, "resident_stop_quote"),
+    (RESIDENT_EXPORT_SPAN, RESIDENT_EXPORT_MARKER, "resident_export_quote"),
+)
 
 
 def quoted_line_matches(quoted, source):
@@ -702,830 +859,46 @@ def quoted_line_matches(quoted, source):
     return quoted == source
 
 
-def _next_quote_refusal(root, text, sha):
-    """Return the 3755 refusal, or None when that quote is absent or matches."""
-    quoted = next_owned_quote(text)
-    if quoted is None:
+def _quote_refusal(root, text, sha, target):
+    """Return the refusal for one target, or None when it matches or is absent.
+
+    The walk has no remainder for MARKER: no refusal, and the next target runs.
+    The marker is not one line: refused before the line read. The pinned line is
+    absent, or no window holds the cited line: the quotation is not in the pin.
+    The comparison fails, including a zero score: the quotation does not match.
+    """
+    span, marker, quoter = target
+    if text.count(marker) > 1:
+        return "refuse: quoted line is not one line: " + marker.strip("`")
+    if not _remainders(text, marker):
         return None
-    rel, number = _span_target(NEXT_SPAN)
+    rel, number = _span_target(span)
     source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + NEXT_SPAN
+    quoted = globals()[quoter](text, root, sha)
+    if quoted is None or source is None:
+        return "refuse: quoted line is not in the pinned commit: " + span
     if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + NEXT_SPAN
-    return None
-
-
-def _marker_quote_refusal(root, text, sha):
-    """Return the 8162 refusal, or None when that quote is absent or matches."""
-    if text.count(MARKER_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + MARKER_SPAN
-    quoted = marker_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(MARKER_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + MARKER_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + MARKER_SPAN
-    return None
-
-
-def _launching_quote_refusal(root, text, sha):
-    """Return the 8168 refusal, or None when that quote is absent or matches."""
-    if text.count(LAUNCHING_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + LAUNCHING_SPAN
-    quoted = launching_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(LAUNCHING_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + LAUNCHING_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + LAUNCHING_SPAN
-    return None
-
-
-def _asks_quote_refusal(root, text, sha):
-    """Return the 8149 refusal, or None when that quote is absent or matches."""
-    if text.count(ASKS_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + ASKS_SPAN
-    quoted = asks_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(ASKS_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + ASKS_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + ASKS_SPAN
-    return None
-
-
-def _observe_quote_refusal(root, text, sha):
-    """Return the 2067 refusal, or None when that quote is absent or matches."""
-    if text.count(OBSERVE_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + OBSERVE_SPAN
-    quoted = observe_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(OBSERVE_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + OBSERVE_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + OBSERVE_SPAN
-    return None
-
-
-def _edit_start_quote_refusal(root, text, sha):
-    """Return the 2421 refusal, or None when that quote is absent or matches."""
-    if text.count(EDIT_RANGE_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + EDIT_RANGE_SPAN
-    quoted = edit_start_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(EDIT_START_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + EDIT_START_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + EDIT_START_SPAN
-    return None
-
-
-def _edit_end_quote_refusal(root, text, sha):
-    """Return the 2422 refusal, or None when that quote is absent or matches."""
-    quoted = edit_end_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(EDIT_END_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + EDIT_END_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + EDIT_END_SPAN
-    return None
-
-
-def _request_quote_refusal(root, text, sha):
-    """Return the 2720 refusal, or None when that quote is absent or matches."""
-    if text.count(REQUEST_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + REQUEST_SPAN
-    quoted = request_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(REQUEST_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + REQUEST_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + REQUEST_SPAN
-    return None
-
-
-def _revision_quote_refusal(root, text, sha):
-    """Return the 2741 refusal, or None when that quote is absent or matches."""
-    if text.count(REVISION_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + REVISION_SPAN
-    quoted = revision_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(REVISION_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + REVISION_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + REVISION_SPAN
-    return None
-
-
-def _op_quote_refusal(root, text, sha):
-    """Return the 2749 refusal, or None when that quote is absent or matches."""
-    if text.count(OP_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + OP_SPAN
-    quoted = op_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(OP_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + OP_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + OP_SPAN
-    return None
-
-
-def _no_process_quote_refusal(root, text, sha):
-    """Return the 2958 refusal, or None when that quote is absent or matches."""
-    if text.count(NO_PROCESS_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + NO_PROCESS_SPAN
-    quoted = no_process_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(NO_PROCESS_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + NO_PROCESS_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + NO_PROCESS_SPAN
-    return None
-
-
-def _seat_quote_refusal(root, text, sha):
-    """Return the 2981 refusal, or None when that quote is absent or matches."""
-    if text.count(SEAT_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + SEAT_SPAN
-    quoted = seat_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(SEAT_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + SEAT_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + SEAT_SPAN
-    return None
-
-
-def _is_write_quote_refusal(root, text, sha):
-    """Return the 3290 refusal, or None when that quote is absent or matches."""
-    if text.count(IS_WRITE_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + IS_WRITE_SPAN
-    quoted = is_write_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(IS_WRITE_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + IS_WRITE_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + IS_WRITE_SPAN
-    return None
-
-
-def _no_write_quote_refusal(root, text, sha):
-    """Return the 3308 refusal, or None when that quote is absent or matches."""
-    if text.count(NO_WRITE_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + NO_WRITE_SPAN
-    quoted = no_write_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(NO_WRITE_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + NO_WRITE_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + NO_WRITE_SPAN
-    return None
-
-
-def _deny_quote_refusal(root, text, sha):
-    """Return the 3526 refusal, or None when that quote is absent or matches."""
-    if text.count(DENY_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + DENY_SPAN
-    quoted = deny_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(DENY_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + DENY_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + DENY_SPAN
-    return None
-
-
-def _mint_quote_refusal(root, text, sha):
-    """Return the 3549 refusal, or None when that quote is absent or matches."""
-    if text.count(MINT_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + MINT_SPAN
-    quoted = mint_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(MINT_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + MINT_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + MINT_SPAN
-    return None
-
-
-def _journal_quote_refusal(root, text, sha):
-    """Return the 3757 refusal, or None when that quote is absent or matches."""
-    if text.count(JOURNAL_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + JOURNAL_SPAN
-    quoted = journal_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(JOURNAL_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + JOURNAL_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + JOURNAL_SPAN
-    return None
-
-
-def _grant_quote_refusal(root, text, sha):
-    """Return the 3767 refusal, or None when that quote is absent or matches."""
-    if text.count(GRANT_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + GRANT_SPAN
-    quoted = grant_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(GRANT_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + GRANT_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + GRANT_SPAN
-    return None
-
-
-def _write_quote_refusal(root, text, sha):
-    """Return the 3849 refusal, or None when that quote is absent or matches."""
-    if text.count(WRITE_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + WRITE_SPAN
-    quoted = write_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(WRITE_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + WRITE_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + WRITE_SPAN
-    return None
-
-
-def _read_quote_refusal(root, text, sha):
-    """Return the 3850 refusal, or None when that quote is absent or matches."""
-    if text.count(READ_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + READ_SPAN
-    quoted = read_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(READ_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + READ_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + READ_SPAN
-    return None
-
-
-def _append_condition_quote_refusal(root, text, sha):
-    """Return the 3935 refusal, or None when that quote is absent or matches."""
-    if text.count(APPEND_CONDITION_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + APPEND_CONDITION_SPAN
-    quoted = append_condition_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(APPEND_CONDITION_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + APPEND_CONDITION_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + APPEND_CONDITION_SPAN
-    return None
-
-
-def _host_path_err_quote_refusal(root, text, sha):
-    """Return the 3936 refusal, or None when that quote is absent or matches."""
-    if text.count(HOST_PATH_ERR_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + HOST_PATH_ERR_SPAN
-    quoted = host_path_err_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(HOST_PATH_ERR_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + HOST_PATH_ERR_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + HOST_PATH_ERR_SPAN
-    return None
-
-
-def _held_err_quote_refusal(root, text, sha):
-    """Return the 3947 refusal, or None when that quote is absent or matches."""
-    if text.count(HELD_ERR_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + HELD_ERR_SPAN
-    quoted = held_err_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(HELD_ERR_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + HELD_ERR_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + HELD_ERR_SPAN
-    return None
-
-
-def _body_doc_quote_refusal(root, text, sha):
-    """Return the 3961 refusal, or None when that quote is absent or matches."""
-    if text.count(BODY_DOC_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + BODY_DOC_SPAN
-    quoted = body_doc_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(BODY_DOC_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + BODY_DOC_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + BODY_DOC_SPAN
-    return None
-
-
-def _create_only_quote_refusal(root, text, sha):
-    """Return the 3966 refusal, or None when that quote is absent or matches."""
-    if text.count(CREATE_ONLY_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + CREATE_ONLY_SPAN
-    quoted = create_only_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(CREATE_ONLY_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + CREATE_ONLY_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + CREATE_ONLY_SPAN
-    return None
-
-
-def _present_revision_quote_refusal(root, text, sha):
-    """Return the 3967 refusal, or None when that quote is absent or matches."""
-    if text.count(PRESENT_REVISION_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + PRESENT_REVISION_SPAN
-    quoted = present_revision_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(PRESENT_REVISION_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + PRESENT_REVISION_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + PRESENT_REVISION_SPAN
-    return None
-
-
-def _append_cap_quote_refusal(root, text, sha):
-    """Return the 4023 refusal, or None when that quote is absent or matches."""
-    if text.count(APPEND_CAP_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + APPEND_CAP_SPAN
-    quoted = append_cap_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(APPEND_CAP_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + APPEND_CAP_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + APPEND_CAP_SPAN
-    return None
-
-
-def _append_call_quote_refusal(root, text, sha):
-    """Return the 4032 refusal, or None when that quote is absent or matches."""
-    if text.count(APPEND_RANGE_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + APPEND_RANGE_SPAN
-    quoted = append_call_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(APPEND_CALL_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + APPEND_CALL_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + APPEND_CALL_SPAN
-    return None
-
-
-def _outcome_held_quote_refusal(root, text, sha):
-    """Return the 4033 refusal, or None when that quote is absent or matches."""
-    quoted = outcome_held_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(OUTCOME_HELD_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + OUTCOME_HELD_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + OUTCOME_HELD_SPAN
-    return None
-
-
-def _write_invoke_quote_refusal(root, text, sha):
-    """Return the 4061 refusal, or None when that quote is absent or matches."""
-    if text.count(WRITE_INVOKE_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + WRITE_INVOKE_SPAN
-    quoted = write_invoke_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(WRITE_INVOKE_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + WRITE_INVOKE_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + WRITE_INVOKE_SPAN
-    return None
-
-
-def _kind_read_quote_refusal(root, text, sha):
-    """Return the 8187 refusal, or None when that quote is absent or matches."""
-    if text.count(KIND_READ_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + KIND_READ_SPAN
-    quoted = kind_read_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(KIND_READ_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + KIND_READ_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + KIND_READ_SPAN
-    return None
-
-
-def _kind_edit_quote_refusal(root, text, sha):
-    """Return the 8188 refusal, or None when that quote is absent or matches."""
-    if text.count(KIND_EDIT_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + KIND_EDIT_SPAN
-    quoted = kind_edit_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(KIND_EDIT_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + KIND_EDIT_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + KIND_EDIT_SPAN
-    return None
-
-
-def _kind_restore_quote_refusal(root, text, sha):
-    """Return the 8190 refusal, or None when that quote is absent or matches."""
-    if text.count(KIND_RESTORE_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + KIND_RESTORE_SPAN
-    quoted = kind_restore_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(KIND_RESTORE_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + KIND_RESTORE_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + KIND_RESTORE_SPAN
-    return None
-
-
-def _kind_run_quote_refusal(root, text, sha):
-    """Return the 8189 refusal, or None when that quote is absent or matches."""
-    if text.count(KIND_RUN_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + KIND_RUN_SPAN
-    quoted = kind_run_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(KIND_RUN_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + KIND_RUN_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + KIND_RUN_SPAN
-    return None
-
-
-def _kind_hosted_quote_refusal(root, text, sha):
-    """Return the 8191 refusal, or None when that quote is absent or matches."""
-    if text.count(KIND_HOSTED_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + KIND_HOSTED_SPAN
-    quoted = kind_hosted_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(KIND_HOSTED_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + KIND_HOSTED_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + KIND_HOSTED_SPAN
-    return None
-
-
-def _kind_child_quote_refusal(root, text, sha):
-    """Return the 8192 refusal, or None when that quote is absent or matches."""
-    if text.count(KIND_CHILD_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + KIND_CHILD_SPAN
-    quoted = kind_child_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(KIND_CHILD_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + KIND_CHILD_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + KIND_CHILD_SPAN
-    return None
-
-
-def _kind_init_quote_refusal(root, text, sha):
-    """Return the 8193 refusal, or None when that quote is absent or matches."""
-    if text.count(KIND_INIT_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + KIND_INIT_SPAN
-    quoted = kind_init_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(KIND_INIT_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + KIND_INIT_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + KIND_INIT_SPAN
-    return None
-
-
-def _kind_append_quote_refusal(root, text, sha):
-    """Return the 8194 refusal, or None when that quote is absent or matches."""
-    if text.count(KIND_APPEND_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + KIND_APPEND_SPAN
-    quoted = kind_append_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(KIND_APPEND_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + KIND_APPEND_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + KIND_APPEND_SPAN
-    return None
-
-
-def _cover_quote_refusal(root, text, sha):
-    """Return the 8488 refusal, or None when that quote is absent or matches."""
-    if text.count(COVER_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + COVER_SPAN
-    quoted = cover_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(COVER_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + COVER_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + COVER_SPAN
-    return None
-
-
-def _scheme_quote_refusal(root, text, sha):
-    """Return the 123 refusal, or None when that quote is absent or matches."""
-    if text.count(SCHEME_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + SCHEME_SPAN
-    quoted = scheme_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(SCHEME_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + SCHEME_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + SCHEME_SPAN
-    return None
-
-
-def _read_action_quote_refusal(root, text, sha):
-    """Return the 189 refusal, or None when that quote is absent or matches."""
-    if text.count(READ_ACTION_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + READ_ACTION_SPAN
-    quoted = read_action_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(READ_ACTION_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + READ_ACTION_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + READ_ACTION_SPAN
-    return None
-
-
-def _write_action_quote_refusal(root, text, sha):
-    """Return the 190 refusal, or None when that quote is absent or matches."""
-    if text.count(WRITE_ACTION_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + WRITE_ACTION_SPAN
-    quoted = write_action_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(WRITE_ACTION_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + WRITE_ACTION_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + WRITE_ACTION_SPAN
-    return None
-
-
-def _default_action_quote_refusal(root, text, sha):
-    """Return the 192 refusal, or None when that quote is absent or matches."""
-    if text.count(DEFAULT_ACTION_MARKER) > 1:
-        return "refuse: quoted line is not one line: " + DEFAULT_ACTION_SPAN
-    quoted = default_action_quote(text)
-    if quoted is None:
-        return None
-    rel, number = _span_target(DEFAULT_ACTION_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return "refuse: quoted line is not in the pinned commit: " + DEFAULT_ACTION_SPAN
-    if not quoted_line_matches(quoted, source):
-        return "refuse: quoted line does not match " + DEFAULT_ACTION_SPAN
+        return "refuse: quoted line does not match " + span
     return None
 
 
 def _quote_refusals(root, text, sha):
-    """Return the quote refusals in source order: 2067, 2421, 2422, 2720, 2741, 2749, 2958, 2981, 3290, 3308, 3526, 3549, 3754, 3755, 3757, 3767, 3849, 3850, 3935, 3936, 3947, 3961, 3966, 3967, 4023, 4032, 4033, 4061, 8149, 8162, 8168, 8187, 8188, 8189, 8190, 8191, 8192, 8193, 8194, 8488, then 123, 189, 190, 192."""
-    observe = _observe_quote_refusal(root, text, sha)
-    if observe is not None:
-        return [observe]
-    edit_start = _edit_start_quote_refusal(root, text, sha)
-    if edit_start is not None:
-        return [edit_start]
-    edit_end = _edit_end_quote_refusal(root, text, sha)
-    if edit_end is not None:
-        return [edit_end]
-    request = _request_quote_refusal(root, text, sha)
-    if request is not None:
-        return [request]
-    revision = _revision_quote_refusal(root, text, sha)
-    if revision is not None:
-        return [revision]
-    op = _op_quote_refusal(root, text, sha)
-    if op is not None:
-        return [op]
-    no_process = _no_process_quote_refusal(root, text, sha)
-    if no_process is not None:
-        return [no_process]
-    seat = _seat_quote_refusal(root, text, sha)
-    if seat is not None:
-        return [seat]
-    is_write = _is_write_quote_refusal(root, text, sha)
-    if is_write is not None:
-        return [is_write]
-    no_write = _no_write_quote_refusal(root, text, sha)
-    if no_write is not None:
-        return [no_write]
-    deny = _deny_quote_refusal(root, text, sha)
-    if deny is not None:
-        return [deny]
-    mint = _mint_quote_refusal(root, text, sha)
-    if mint is not None:
-        return [mint]
-    if text.count(OWNED_MARKER) > 1:
-        return ["refuse: quoted line is not one line: " + OWNED_SPAN]
-    quoted = owned_quote(text)
-    if quoted is not None:
-        rel, number = _span_target(OWNED_SPAN)
-        source = pinned_line(root, sha, rel, number)
-        if source is None:
-            return ["refuse: quoted line is not in the pinned commit: " + OWNED_SPAN]
-        if not quoted_line_matches(quoted, source):
-            return ["refuse: quoted line does not match " + OWNED_SPAN]
-        following = _next_quote_refusal(root, text, sha)
-        if following is not None:
-            return [following]
-    journal = _journal_quote_refusal(root, text, sha)
-    if journal is not None:
-        return [journal]
-    grant = _grant_quote_refusal(root, text, sha)
-    if grant is not None:
-        return [grant]
-    write = _write_quote_refusal(root, text, sha)
-    if write is not None:
-        return [write]
-    read = _read_quote_refusal(root, text, sha)
-    if read is not None:
-        return [read]
-    condition = _append_condition_quote_refusal(root, text, sha)
-    if condition is not None:
-        return [condition]
-    host_path = _host_path_err_quote_refusal(root, text, sha)
-    if host_path is not None:
-        return [host_path]
-    held_err = _held_err_quote_refusal(root, text, sha)
-    if held_err is not None:
-        return [held_err]
-    body_doc = _body_doc_quote_refusal(root, text, sha)
-    if body_doc is not None:
-        return [body_doc]
-    create_only = _create_only_quote_refusal(root, text, sha)
-    if create_only is not None:
-        return [create_only]
-    present_revision = _present_revision_quote_refusal(root, text, sha)
-    if present_revision is not None:
-        return [present_revision]
-    append_cap = _append_cap_quote_refusal(root, text, sha)
-    if append_cap is not None:
-        return [append_cap]
-    append_call = _append_call_quote_refusal(root, text, sha)
-    if append_call is not None:
-        return [append_call]
-    outcome_held = _outcome_held_quote_refusal(root, text, sha)
-    if outcome_held is not None:
-        return [outcome_held]
-    write_invoke = _write_invoke_quote_refusal(root, text, sha)
-    if write_invoke is not None:
-        return [write_invoke]
-    asks = _asks_quote_refusal(root, text, sha)
-    if asks is not None:
-        return [asks]
-    marker = _marker_quote_refusal(root, text, sha)
-    if marker is not None:
-        return [marker]
-    launching = _launching_quote_refusal(root, text, sha)
-    if launching is not None:
-        return [launching]
-    kind_read = _kind_read_quote_refusal(root, text, sha)
-    if kind_read is not None:
-        return [kind_read]
-    kind_edit = _kind_edit_quote_refusal(root, text, sha)
-    if kind_edit is not None:
-        return [kind_edit]
-    kind_run = _kind_run_quote_refusal(root, text, sha)
-    if kind_run is not None:
-        return [kind_run]
-    kind_restore = _kind_restore_quote_refusal(root, text, sha)
-    if kind_restore is not None:
-        return [kind_restore]
-    kind_hosted = _kind_hosted_quote_refusal(root, text, sha)
-    if kind_hosted is not None:
-        return [kind_hosted]
-    kind_child = _kind_child_quote_refusal(root, text, sha)
-    if kind_child is not None:
-        return [kind_child]
-    kind_init = _kind_init_quote_refusal(root, text, sha)
-    if kind_init is not None:
-        return [kind_init]
-    kind_append = _kind_append_quote_refusal(root, text, sha)
-    if kind_append is not None:
-        return [kind_append]
-    cover = _cover_quote_refusal(root, text, sha)
-    if cover is not None:
-        return [cover]
-    scheme = _scheme_quote_refusal(root, text, sha)
-    if scheme is not None:
-        return [scheme]
-    read_action = _read_action_quote_refusal(root, text, sha)
-    if read_action is not None:
-        return [read_action]
-    write_action = _write_action_quote_refusal(root, text, sha)
-    if write_action is not None:
-        return [write_action]
-    default_action = _default_action_quote_refusal(root, text, sha)
-    if default_action is None:
-        return []
-    return [default_action]
+    """Return at most one quote refusal, walking QUOTE_TARGETS in source order."""
+    for target in QUOTE_TARGETS:
+        reason = _quote_refusal(root, text, sha, target)
+        if reason is not None:
+            return [reason]
+    return []
+
+
+def a3_claim_refusals(text):
+    """Return one refusal per claim that closes resident A3, each its own line."""
+    refusals = []
+    if A3_MET_CLAIM in text:
+        refusals.append("refuse: draft says " + A3_MET_CLAIM)
+    if A3_GRANT_CLAIM in text:
+        refusals.append("refuse: draft says " + A3_GRANT_CLAIM)
+    return refusals
 
 
 def _past_end(number, rel, count):
@@ -1588,6 +961,7 @@ def problems(root):
             refusals.append(reason)
     if pin_reason is None and pinned:
         refusals.extend(_quote_refusals(root, text, sha))
+        refusals.extend(a3_claim_refusals(text))
     return refusals
 
 
