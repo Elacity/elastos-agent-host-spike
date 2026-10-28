@@ -2190,31 +2190,29 @@ pub struct HostReport {
 /// The live child after `init` answered `status` `ok`.
 pub struct StartedProvider<'a> {
     child: RunningChild<'a>,
-    /// Set once a response deadline stops this child. Later calls return it
-    /// and do not read the unread line.
+    /// Set once a transport or framing failure stops this child. Later calls
+    /// return it and do not read the unread line.
     ended: Option<String>,
     pub init: Value,
     pub binary_sha256: String,
     pub profile_sha256: String,
 }
 
-const RESPONSE_DEADLINE_REASON: &str = "provider response exceeded its deadline";
-
 impl StartedProvider<'_> {
-    /// One later request on the same child. The stdin limit and the response
-    /// deadline are the refusals from the one spawn site. A response deadline
-    /// stops and reaps the child. A later request is refused and reads no line.
+    /// One later request on the same child. A byte-limit refusal sends nothing
+    /// and leaves the dialogue usable. Every other exchange failure stops and
+    /// reaps the child. A later request is refused and reads no line.
     pub fn request(&mut self, body: &Value) -> Result<Value, String> {
         self.refuse_ended()?;
         match exchange(&mut self.child, body) {
             Ok(value) => Ok(value),
-            Err(reason) if reason == RESPONSE_DEADLINE_REASON => Err(self.end_dialogue(reason)),
-            Err(reason) => Err(reason),
+            Err(reason) if reason == "stdin exceeds its byte limit" => Err(reason),
+            Err(reason) => Err(self.end_dialogue(reason)),
         }
     }
 
     /// `shutdown` answered `ok` and the child exited 0.
-    /// A dialogue that already ended on a response deadline is refused.
+    /// A dialogue that already ended on an exchange failure is refused.
     pub fn shutdown(mut self) -> Result<(), String> {
         self.refuse_ended()?;
         let answer = match exchange(&mut self.child, &json!({ "op": "shutdown" })) {
@@ -2246,7 +2244,7 @@ impl StartedProvider<'_> {
         Ok(())
     }
 
-    // One settlement for a response deadline: reap the child, then refuse
+    // One settlement for a failed exchange: reap the child, then refuse
     // every later call. The unread line must not become the next answer.
     fn end_dialogue(&mut self, reason: String) -> String {
         let settled = provider_refusal(&mut self.child, reason);
@@ -2351,7 +2349,13 @@ pub fn start_provider<'a>(
     let init = exchange(&mut child, &init_request)
         .and_then(|init| {
             if init.get("status").and_then(Value::as_str) == Some("ok") {
-                Ok(init)
+                // A buffered reply can outlive its writer. Started owns a
+                // live child, so inspect that owner after reading init.
+                if child.is_alive().map_err(str::to_owned)? {
+                    Ok(init)
+                } else {
+                    Err("provider exited after init response".to_string())
+                }
             } else {
                 Err(format!("init answered {init}"))
             }

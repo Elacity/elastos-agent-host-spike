@@ -238,10 +238,9 @@ fn standin_provider_launch_starts_under_caller_profile() {
 /// A host, tool, or binary the stand-in will not confine creates no child and
 /// no storage directory.
 ///
-/// Falsifier: drop the missing-primitive check, replace the Linux sentence,
-/// drop the unsupported OS's name, drop the absent-tool check, drop the
-/// wrong-tool check, or drop the binary-file check. Each of those leaves this
-/// test's matching reason false.
+/// Falsifier: drop the missing-primitive check, admit Linux or an unsupported
+/// OS, drop the absent-tool check, drop the wrong-tool check, or drop the
+/// binary-file check. Each of those leaves this test's matching reason false.
 #[test]
 fn standin_provider_launch_refuses_unconfined_host() {
     let tool = require_confinement_tool();
@@ -632,6 +631,170 @@ fn standin_provider_launch_refuses_the_next_request_after_a_response_deadline() 
     home.finish().expect("the passed home is removed");
 }
 
+/// Each malformed line is followed by A's valid reply. B must receive the
+/// retained refusal, and the physical census must pass before shutdown.
+#[test]
+fn standin_provider_launch_refuses_the_next_request_after_a_framing_failure() {
+    for (reply, expected) in [
+        (
+            "printf 'invalid\\n{\"status\":\"ok\",\"answered\":\"A\"}\\n'",
+            "provider answered with invalid JSON: invalid",
+        ),
+        (
+            "printf '\\377\\n{\"status\":\"ok\",\"answered\":\"A\"}\\n'",
+            "provider response is not UTF-8",
+        ),
+    ] {
+        assert_exchange_ends_dialogue(
+            "",
+            &format!("{reply}\nIFS= read -r _next\nIFS= read -r _hold\n"),
+            expected,
+        );
+    }
+}
+
+/// A partial line at exit, closed stdin, and damaged stdout each retain their
+/// own transport reason. Each failure settles the same child owner.
+#[test]
+fn standin_provider_launch_refuses_the_next_request_after_a_transport_failure() {
+    assert_exchange_ends_dialogue(
+        "",
+        "printf '{\"status\":\"ok\"}'\nexit 7\n",
+        "provider response stream ended",
+    );
+    assert_exchange_ends_dialogue("exec 0<&-\n", "", "could not write child stdin");
+    assert_exchange_ends_dialogue(
+        "",
+        "for capture in \"$HOME\"/../stdout-*; do : > \"$capture\"; done\nIFS= read -r _hold\n",
+        "could not inspect child stdout",
+    );
+}
+
+fn assert_exchange_ends_dialogue(before_init_reply: &str, after_request: &str, expected: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tool = require_confinement_tool();
+    let home = ThrowawayHome::new().expect("throwaway home");
+    let profile = write_profile(&home, "fixture.sb", b"(version 1)\n(allow default)\n");
+    let binary = home.root().join("broken-dialogue-provider");
+    let dialogue = if before_init_reply.is_empty() {
+        format!("IFS= read -r _request\n{after_request}")
+    } else {
+        // The fixture closed stdin before init's reply. Exec keeps the same
+        // owned process alive until the failed write stops it.
+        "exec /bin/sleep 60\n".to_string()
+    };
+    fs::write(
+        &binary,
+        format!(
+            "#!/bin/sh\n\
+             IFS= read -r _init\n\
+             {before_init_reply}\
+             printf '%s\\n' '{{\"status\":\"ok\"}}'\n\
+             {dialogue}"
+        ),
+    )
+    .expect("write the failed-exchange fixture");
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+        .expect("make the fixture executable");
+    let base = fresh_base(&home, "broken-dialogue-base");
+    let mut started = start(&home, &binary, &base, macos_host(), tool, &profile)
+        .expect("the fixture answers init and stays alive");
+    assert_eq!(
+        started.request(&json!({ "op": "status", "which": "A" })),
+        Err(expected.to_string()),
+        "the first refusal keeps its own reason"
+    );
+    assert_eq!(
+        started.request(&json!({ "op": "status", "which": "B" })),
+        Err(format!("provider dialogue ended: {expected}")),
+        "B cannot consume A's queued response"
+    );
+    let census = agent_conformance::census::cleanup(&home, closed_port())
+        .expect("census while the failed dialogue is still owned");
+    assert!(census.contains("root checks PASS"), "census: {census}");
+    assert_eq!(
+        started.shutdown(),
+        Err(format!("provider dialogue ended: {expected}"))
+    );
+    home.finish().expect("the passed home is removed");
+}
+
+/// A buffered init success from an exited child supplies no live owner.
+/// Check both normal exit and the reported status-7 reproduction.
+#[test]
+fn standin_provider_launch_refuses_an_exited_child_after_init() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tool = require_confinement_tool();
+    for status in [0, 7] {
+        let home = ThrowawayHome::new().expect("throwaway home");
+        let profile = write_profile(&home, "fixture.sb", b"(version 1)\n(allow default)\n");
+        let binary = home.root().join("exiting-provider");
+        fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\n\
+                 IFS= read -r _init\n\
+                 printf '%s\\n' '{{\"status\":\"ok\"}}'\n\
+                 exit {status}\n"
+            ),
+        )
+        .expect("write the early-exit fixture");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+            .expect("make the fixture executable");
+        let base = fresh_base(&home, "early-exit-base");
+        let result = start(&home, &binary, &base, macos_host(), tool, &profile);
+        assert_eq!(
+            result.err().expect("an exited child cannot be Started"),
+            "wallet-provider start is refused: provider exited after init response"
+        );
+        let census = agent_conformance::census::cleanup(&home, closed_port())
+            .expect("census after the early-exit refusal");
+        assert!(census.contains("root checks PASS"), "census: {census}");
+        home.finish().expect("the passed home is removed");
+    }
+}
+
+/// Initialization applies the same framing rule and stops a child that sends
+/// an invalid response. A partial final line remains a stream-ended refusal.
+#[test]
+fn standin_provider_launch_refuses_invalid_init_responses() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tool = require_confinement_tool();
+    for (reply, expected) in [
+        ("printf '\\377\\n'", "provider response is not UTF-8"),
+        ("printf 'null\\n'", "init answered null"),
+        (
+            "printf '{\"status\":\"ok\"}'\nexit 7",
+            "provider response stream ended",
+        ),
+    ] {
+        let home = ThrowawayHome::new().expect("throwaway home");
+        let profile = write_profile(&home, "fixture.sb", b"(version 1)\n(allow default)\n");
+        let binary = home.root().join("invalid-init-provider");
+        fs::write(
+            &binary,
+            format!("#!/bin/sh\nIFS= read -r _init\n{reply}\nIFS= read -r _hold\n"),
+        )
+        .expect("write the invalid-init fixture");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+            .expect("make the fixture executable");
+        let base = fresh_base(&home, "invalid-init-base");
+        assert_eq!(
+            start(&home, &binary, &base, macos_host(), tool, &profile)
+                .err()
+                .expect("invalid init is refused"),
+            format!("wallet-provider start is refused: {expected}")
+        );
+        let census = agent_conformance::census::cleanup(&home, closed_port())
+            .expect("census after the invalid-init refusal");
+        assert!(census.contains("root checks PASS"), "census: {census}");
+        home.finish().expect("the passed home is removed");
+    }
+}
+
 /// Run the cwd change in an isolated test process through the existing harness,
 /// so other tests keep their working directory. Reuse the parent's built binary.
 #[test]
@@ -911,7 +1074,7 @@ fn standin_provider_launch_refuses_a_replaced_home_root() {
 
 /// Exercise both response failures with a child and descendant that stay alive
 /// after the reply. Cleanup must finish while the temp guard still refuses.
-fn refusal_cleans_replaced_temp(shutdown: bool, invalid_json: bool) {
+fn refusal_cleans_replaced_temp(shutdown: bool, invalid_json: bool, request: bool) {
     use std::os::unix::fs::PermissionsExt;
 
     let tool = require_confinement_tool();
@@ -924,7 +1087,7 @@ fn refusal_cleans_replaced_temp(shutdown: bool, invalid_json: bool) {
     } else {
         json!({ "status": "error", "message": "fixture refuses" }).to_string()
     };
-    let first_reply = if shutdown {
+    let first_reply = if shutdown || request {
         "printf '%s\\n' '{\"status\":\"ok\"}'\nIFS= read -r request\n"
     } else {
         ""
@@ -949,7 +1112,21 @@ fn refusal_cleans_replaced_temp(shutdown: bool, invalid_json: bool) {
         .expect("make the fixture executable");
     let base = home.root().join("base");
     let result = start(&home, &binary, &base, macos_host(), tool, &profile);
-    let reason = if shutdown {
+    let reason = if request {
+        let mut started = result.expect("the fixture answers init ok");
+        let reason = started
+            .request(&json!({ "op": "status" }))
+            .expect_err("the request response is refused");
+        assert_eq!(
+            started.request(&json!({ "op": "status" })),
+            Err(format!("provider dialogue ended: {reason}"))
+        );
+        assert_eq!(
+            started.shutdown(),
+            Err(format!("provider dialogue ended: {reason}"))
+        );
+        reason
+    } else if shutdown {
         result
             .expect("the fixture answers init ok")
             .shutdown()
@@ -993,7 +1170,7 @@ fn refusal_cleans_replaced_temp(shutdown: bool, invalid_json: bool) {
     } else {
         format!("init answered {response}")
     };
-    let prefix = if shutdown {
+    let prefix = if shutdown || request {
         ""
     } else {
         "wallet-provider start is refused: "
@@ -1017,15 +1194,20 @@ fn refusal_cleans_replaced_temp(shutdown: bool, invalid_json: bool) {
 #[test]
 fn standin_provider_launch_refusal_cleans_a_replaced_temp() {
     for invalid_json in [false, true] {
-        refusal_cleans_replaced_temp(false, invalid_json);
+        refusal_cleans_replaced_temp(false, invalid_json, false);
     }
 }
 
 #[test]
 fn standin_provider_shutdown_refusal_cleans_a_replaced_temp() {
     for invalid_json in [false, true] {
-        refusal_cleans_replaced_temp(true, invalid_json);
+        refusal_cleans_replaced_temp(true, invalid_json, false);
     }
+}
+
+#[test]
+fn standin_provider_request_refusal_cleans_a_replaced_temp() {
+    refusal_cleans_replaced_temp(false, true, true);
 }
 
 /// A failed timeout cleanup leaves the same owner able to retry through either

@@ -14280,4 +14280,156 @@ After the plants were restored, `standin-runtime/mod.rs` and `src/harness.rs` ma
 
 089 round 3: a response deadline reaps the provider child and refuses the next request, so a late line cannot be read as the next answer.
 
+### Response parsing and startup repair
+
+`StartedProvider::request` settles every failed exchange through the existing
+`end_dialogue` and `provider_refusal` path, except a stdin byte-limit refusal
+that sends nothing. Later requests and shutdown retain the first failure and
+any cleanup failure. `start_provider` checks the owned child's liveness after
+an `init` success; an exited child is refused with
+`wallet-provider start is refused: provider exited after init response`.
+
+The framing regression sends an invalid JSON or invalid UTF-8 line followed by
+A's valid answer. It asserts the exact first error, the retained error on B and
+shutdown, and the physical census while the failed dialogue is still owned.
+The transport cases assert `provider response stream ended`,
+`could not write child stdin`, and `could not inspect child stdout`. The
+startup cases cover an immediate exit with status 0 or 7, invalid UTF-8, a
+`null` response, and a partial final line. The replaced-temp request case
+checks that the response reason and cleanup reason both survive. Existing
+deadline, byte-limit recovery, initialization, shutdown and cleanup assertions
+remain in place.
+
+The first focused run exited 101 in 16.33 seconds: 18 tests passed and the new
+stdout-damage fixture reached the response deadline. Opening `/dev/stdout`
+did not truncate the capture on this Mac. The fixture now truncates its own
+capture path; its exact error assertion is unchanged. The next focused run
+exited 0 in 14.84 seconds with all 20 tests passing. The replaced-temp request
+case was added after that run and is included in the final checks below.
+
+The following plants ran one at a time with
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test provider_launch -- --nocapture`.
+Each crate compiled. Each named test failed at its assertion. Each source edit
+was restored before the next plant. The runs held the shared heavy-build lease
+and used the existing lane build directories with `RUST_TEST_THREADS=2`,
+`CARGO_INCREMENTAL=0`, and `CARGO_NET_OFFLINE=true`. Free space was 116 GiB.
+These are hand-run plants; `falsifiers.json` is unchanged.
+
+F-shared-launch-json-cleanup: exit 101 in 18.70 seconds.
+`standin_provider_launch_refuses_the_next_request_after_a_framing_failure`
+failed at `tests/provider_launch.rs:708:5`: B returned A's queued success
+instead of `provider dialogue ended: provider answered with invalid JSON: invalid`.
+`standin_provider_request_refusal_cleans_a_replaced_temp` also failed at
+`tests/provider_launch.rs:1120:9`: the second request reached its deadline
+instead of retaining the first response refusal. The other 19 tests passed.
+
+Old:
+
+```text
+            Err(reason) => Err(self.end_dialogue(reason)),
+```
+
+New:
+
+```text
+            Err(reason) if reason.starts_with("provider answered with invalid JSON:") => Err(reason),
+            Err(reason) => Err(self.end_dialogue(reason)),
+```
+
+F-shared-launch-utf8-cleanup: exit 101 in 15.46 seconds.
+`standin_provider_launch_refuses_the_next_request_after_a_framing_failure`
+failed at `tests/provider_launch.rs:708:5`: B returned A's queued success
+instead of `provider dialogue ended: provider response is not UTF-8`.
+The other 20 tests passed.
+
+Old:
+
+```text
+            Err(reason) => Err(self.end_dialogue(reason)),
+```
+
+New:
+
+```text
+            Err(reason) if reason == "provider response is not UTF-8" => Err(reason),
+            Err(reason) => Err(self.end_dialogue(reason)),
+```
+
+F-shared-launch-exited-init: exit 101 in 13.78 seconds.
+`standin_provider_launch_refuses_an_exited_child_after_init` failed at
+`tests/provider_launch.rs:749:26`, `an exited child cannot be Started`.
+The same run also had capture-only census failures in
+`standin_provider_launch_resolves_relative_profile_once` (`stderr-2`) and
+`standin_provider_launch_uses_supplied_profile` (`stderr-116`); 18 tests passed.
+Those census failures are separate from the named early-exit assertion.
+The census implementation and its assertions remain unchanged.
+
+Old:
+
+```text
+                if child.is_alive().map_err(str::to_owned)? {
+```
+
+New:
+
+```text
+                if true {
+```
+
+F-shared-launch-linux-admitted: exit 101 in 15.00 seconds.
+This plant removes the Linux rejection while retaining the missing-primitive
+rule. `standin_provider_launch_refuses_unconfined_host` failed at
+`tests/provider_launch.rs:329:9`: the returned reason concerned the absent
+fixture binary instead of the exact Linux host refusal. The other 20 tests
+passed. This exercises removal of enforcement, in addition to the earlier
+Linux wording mutation.
+
+Old:
+
+```text
+    if DECLARED_CONFINED_OS.contains(&host.os) {
+```
+
+New:
+
+```text
+    if DECLARED_CONFINED_OS.contains(&host.os) || host.os == "linux" {
+```
+
+F-shared-launch-unsupported-admitted: exit 101 in 13.81 seconds.
+This plant removes rejection for every unsupported OS while retaining the
+Linux and missing-primitive rules. `standin_provider_launch_refuses_unconfined_host`
+failed at `tests/provider_launch.rs:329:9`: the returned reason concerned the
+absent fixture binary instead of the exact `plan9` host refusal. The other
+20 tests passed. This exercises removal of enforcement, in addition to the
+earlier OS-name wording mutation.
+
+Old:
+
+```text
+    if DECLARED_CONFINED_OS.contains(&host.os) {
+```
+
+New:
+
+```text
+    if DECLARED_CONFINED_OS.contains(&host.os) || host.os != "linux" {
+```
+
+After all five restores, `standin-runtime/mod.rs` matched the pre-plant bytes:
+SHA-256 `06ae2fbeecee974053baa4ec6a0ba71ad9db73bba587668967feb6e8b451aa40`.
+
+Final restored checks under the same lease and environment:
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0 in 0.17 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test provider_launch -- --nocapture`: exit 0 in 14.24 seconds; 21 passed, 0 failed, 0 ignored. Test execution took 12.46 seconds. This includes all 16 existing tests and the five added tests.
+
+The final run passed on its first attempt. The eleven retained fixture Homes
+from the fixture correction and mutation runs had zero matching processes and
+zero open files under `ps` and `lsof`; they were removed after those checks.
+Successful tests removed their own Homes. The repair edits are confined to
+`standin-runtime/mod.rs`, `tests/provider_launch.rs`, and this `LOG.md`.
+Git commands were unused. The supervisor owns the complete checks and fresh
+review of this edit.
+
 
