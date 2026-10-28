@@ -132,6 +132,38 @@ GRANT_LINES = (
 )
 
 
+ASK_REL = OWNED_REL
+WRITE_NUMBER = 3849
+WRITE_SPAN = "examples/agent-host/src/lib.rs:3849"
+WRITE_QUOTE = '    let write = ask("write");'
+READ_NUMBER = 3850
+READ_SPAN = "examples/agent-host/src/lib.rs:3850"
+READ_QUOTE = '    let read = ask("read");'
+ASK_LINES = (
+    "/// Ask the Runtime for exactly two grants on this agent's own journal: write,",
+    "/// then read. Nothing else is asked for. A refusal leaves that grant empty, so",
+    "/// nothing is sent with it.",
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    "fn request_journal_grants(bus: &mut impl ResourceBus, cursor: &JournalCursor) -> JournalGrants {",
+    "    if !cursor.resource.starts_with(JOURNAL_ROOT) || host_path(&cursor.resource) {",
+    "        return JournalGrants {",
+    "            write: None,",
+    "            read: None,",
+    "        };",
+    "    }",
+    "    let mut ask = |action: &str| {",
+    '        bus.request_grant(&cursor.resource, action, "Agent Host task journal")',
+    "            .ok()",
+    "            .and_then(|id| JournalGrant::new(&id))",
+    "    };",
+    WRITE_QUOTE,
+    READ_QUOTE,
+    "    JournalGrants { write, read }",
+    "}",
+)
+ASK_BLOCK_START = WRITE_NUMBER - 16
+
+
 class CitationCheckTests(unittest.TestCase):
     def _temp_root(self):
         tmp = tempfile.TemporaryDirectory()
@@ -448,6 +480,73 @@ class CitationCheckTests(unittest.TestCase):
         body += "".join("    " + line + "\n" for line in lines[:count])
         return body + "\n"
 
+    def _ask_source(
+        self,
+        write=WRITE_QUOTE,
+        read=READ_QUOTE,
+        ask_count=20,
+        asks_third=ASKS_THIRD,
+        marker_last=MARKER_CONST,
+        launching_last=LAUNCHING_CONST,
+    ):
+        """A committed file with the ask block at 3833-3852 and the later blocks."""
+        rows = ["// filler"] * (OWNED_NUMBER - 1) + [OWNED_QUOTE, NEXT_QUOTE]
+        rows += [JOURNAL_CFG, JOURNAL_CONST]
+        rows += ["// filler"] * (GRANT_NUMBER - 1 - len(rows))
+        rows += [GRANT_QUOTE] + list(GRANT_LINES[1:-1]) + [GRANT_LINES[-1]]
+        block = list(ASK_LINES)
+        block[16] = write
+        block[17] = read
+        rows += ["// filler"] * (ASK_BLOCK_START - 1 - len(rows))
+        rows += block[:ask_count]
+        rows += ["// filler"] * (ASKS_NUMBER - 3 - len(rows))
+        rows += [
+            ASKS_FIRST,
+            ASKS_SECOND,
+            asks_third,
+            ASKS_FOURTH,
+            ASKS_FIFTH,
+            ASKS_SIXTH,
+            ASKS_CFG,
+            ASKS_CONST,
+        ]
+        rows += ["// filler"] * (MARKER_NUMBER - 4 - len(rows))
+        rows += [MARKER_HEAD, MARKER_TAIL, MARKER_CFG, marker_last]
+        rows += ["// filler"] * (LAUNCHING_NUMBER - len(rows) - 5)
+        rows += [
+            LAUNCHING_HEAD,
+            LAUNCHING_SECOND,
+            LAUNCHING_THIRD,
+            LAUNCHING_CFG,
+            launching_last,
+        ]
+        return ("\n".join(rows) + "\n").encode("utf-8")
+
+    def _ask_block(
+        self,
+        write=WRITE_QUOTE,
+        read=READ_QUOTE,
+        first=ASK_LINES[0],
+        grants=ASK_LINES[18],
+        last=ASK_LINES[19],
+        count=20,
+        spans=None,
+    ):
+        """A draft that cites the ask spans and indents the block below them."""
+        lines = list(ASK_LINES)
+        lines[0] = first
+        lines[16] = write
+        lines[17] = read
+        lines[18] = grants
+        lines[19] = last
+        if spans is None:
+            prose = "`" + WRITE_SPAN + "` asks write. `" + READ_SPAN + "` asks read.\n"
+        else:
+            prose = "".join("`" + span + "` is cited.\n" for span in spans)
+        body = prose + "\n"
+        body += "".join("    " + line + "\n" for line in lines[:count])
+        return body + "\n"
+
     def _caught(self, global_name, planted, named_test, prefix, label):
         named_test()
         original = getattr(check, global_name)
@@ -460,7 +559,7 @@ class CitationCheckTests(unittest.TestCase):
             setattr(check, global_name, original)
         print(label)
 
-    def _pinned_reads(self, body, files):
+    def _pinned_reads(self, body, files, restore=None):
         """Return the problems and the numbers read from the pinned commit."""
         reads = []
         original = check.pinned_line
@@ -471,7 +570,10 @@ class CitationCheckTests(unittest.TestCase):
 
         try:
             check.pinned_line = record
-            got = check.problems(self._draft(body, files))
+            root = self._draft(body, files)
+            for rel, data in (restore or {}).items():
+                (root / rel).write_bytes(data)
+            got = check.problems(root)
         finally:
             check.pinned_line = original
         return got, reads
@@ -1754,6 +1856,239 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(got, [expected])
         self.assertEqual(reads, [JOURNAL_NUMBER])
 
+    def test_live_draft_write_quote_matches_its_pinned_line(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        self.assertEqual(check.write_quote(text), WRITE_QUOTE)
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        self.assertEqual(
+            check.pinned_line(root, sha, ASK_REL, WRITE_NUMBER), WRITE_QUOTE
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_live_draft_read_quote_matches_its_pinned_line(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        self.assertEqual(check.read_quote(text), READ_QUOTE)
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        self.assertEqual(check.pinned_line(root, sha, ASK_REL, READ_NUMBER), READ_QUOTE)
+        self.assertEqual(check.problems(root), [])
+
+    def test_live_draft_ask_walk_has_twenty_remainders(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        remainders = check._remainders(text, check.WRITE_MARKER)
+        self.assertEqual(len(remainders), 20)
+        self.assertEqual(remainders[16], WRITE_QUOTE)
+        self.assertEqual(remainders[17], READ_QUOTE)
+        self.assertEqual(check._remainders(text, check.READ_MARKER), remainders)
+
+    def test_write_quote_is_absent_below_seventeen_remainders(self):
+        self.assertIsNone(check.write_quote("No write span here.\n"))
+        self.assertIsNone(check.write_quote(self._ask_block(count=16)))
+        self.assertEqual(check.write_quote(self._ask_block(count=17)), WRITE_QUOTE)
+
+    def test_read_quote_is_absent_below_eighteen_remainders(self):
+        self.assertIsNone(check.read_quote("No read span here.\n"))
+        self.assertIsNone(check.read_quote(self._ask_block(count=17)))
+        self.assertEqual(check.read_quote(self._ask_block(count=18)), READ_QUOTE)
+
+    def test_ask_fixture_keeps_line_3849_between_3767_and_3850(self):
+        root = self._draft(self._ask_block(), {ASK_REL: self._ask_source()})
+        sha = check.pin_sha(check.load_draft(root))
+        self.assertIsNotNone(sha)
+        self.assertEqual(
+            check.pinned_line(root, sha, ASK_REL, GRANT_NUMBER), GRANT_QUOTE
+        )
+        self.assertEqual(
+            check.pinned_line(root, sha, ASK_REL, WRITE_NUMBER), WRITE_QUOTE
+        )
+        self.assertEqual(check.pinned_line(root, sha, ASK_REL, READ_NUMBER), READ_QUOTE)
+        self.assertEqual(check.pinned_line(root, sha, ASK_REL, ASKS_NUMBER), ASKS_THIRD)
+
+    def test_write_quoted_line_mismatch_is_refused(self):
+        expected = "refuse: quoted line does not match " + WRITE_SPAN
+        root = self._draft(
+            self._ask_block(write=WRITE_QUOTE + "x"), {ASK_REL: self._ask_source()}
+        )
+        self.assertEqual(check.problems(root), [expected])
+        (root / ASK_REL).write_bytes(
+            self._ask_source(write="// edited in the worktree")
+        )
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_write_quoted_line_match_ignores_the_worktree_file(self):
+        root = self._draft(self._ask_block(), {ASK_REL: self._ask_source()})
+        self.assertEqual(check.problems(root), [])
+        (root / ASK_REL).write_bytes(
+            self._ask_source(write="// edited in the worktree")
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_write_mismatch_skips_the_read_line_read(self):
+        expected = "refuse: quoted line does not match " + WRITE_SPAN
+        got, reads = self._pinned_reads(
+            self._ask_block(write=WRITE_QUOTE + "x"), {ASK_REL: self._ask_source()}
+        )
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [WRITE_NUMBER])
+
+    def test_read_quoted_line_mismatch_is_refused(self):
+        expected = "refuse: quoted line does not match " + READ_SPAN
+        root = self._draft(
+            self._ask_block(read=READ_QUOTE + "x"), {ASK_REL: self._ask_source()}
+        )
+        self.assertEqual(check.problems(root), [expected])
+        (root / ASK_REL).write_bytes(self._ask_source(read="// edited in the worktree"))
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_read_quoted_line_match_ignores_the_worktree_file(self):
+        root = self._draft(self._ask_block(), {ASK_REL: self._ask_source()})
+        self.assertEqual(check.problems(root), [])
+        (root / ASK_REL).write_bytes(self._ask_source(read="// edited in the worktree"))
+        self.assertEqual(check.problems(root), [])
+
+    def test_read_mismatch_skips_the_asks_line_read(self):
+        expected = "refuse: quoted line does not match " + READ_SPAN
+        body = self._ask_block(read=READ_QUOTE + "x") + self._asks_block(
+            third=ASKS_THIRD + "y"
+        )
+        got, reads = self._pinned_reads(body, {ASK_REL: self._ask_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [WRITE_NUMBER, READ_NUMBER])
+
+    def test_ask_match_follows_to_the_asks_refusal(self):
+        expected = "refuse: quoted line does not match " + ASKS_SPAN
+        body = self._ask_block() + self._asks_block(third=ASKS_THIRD + "x")
+        got, reads = self._pinned_reads(body, {ASK_REL: self._ask_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [WRITE_NUMBER, READ_NUMBER, ASKS_NUMBER])
+
+    def test_write_doc_line_does_not_stand_for_line_3849(self):
+        root = self._draft(
+            self._ask_block(first=ASK_LINES[0] + "x"), {ASK_REL: self._ask_source()}
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_read_ask_line_matches_the_pinned_read(self):
+        root = self._draft(self._ask_block(), {ASK_REL: self._ask_source()})
+        self.assertEqual(check.problems(root), [])
+
+    def test_ask_grants_line_does_not_stand_for_either_cited_line(self):
+        root = self._draft(
+            self._ask_block(grants=ASK_LINES[18] + "x"), {ASK_REL: self._ask_source()}
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_ask_close_line_does_not_stand_for_either_cited_line(self):
+        root = self._draft(
+            self._ask_block(last=ASK_LINES[19] + "x"), {ASK_REL: self._ask_source()}
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_write_span_without_an_indented_line_adds_no_write_refusal(self):
+        got, reads = self._pinned_reads(
+            self._ask_block(count=0, spans=(WRITE_SPAN,)),
+            {ASK_REL: self._ask_source()},
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [])
+
+    def test_write_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        expected = "refuse: quoted line is not in the pinned commit: " + WRITE_SPAN
+        short = ("// filler\n" * 10).encode("utf-8")
+        got, reads = self._pinned_reads(
+            self._ask_block(),
+            {ASK_REL: short},
+            {ASK_REL: self._ask_source()},
+        )
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [WRITE_NUMBER])
+
+    def test_read_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        expected = "refuse: quoted line is not in the pinned commit: " + READ_SPAN
+        short = (
+            "// filler\n" * (WRITE_NUMBER - 1) + WRITE_QUOTE + "\n"
+        ).encode("utf-8")
+        got, reads = self._pinned_reads(
+            self._ask_block(),
+            {ASK_REL: short},
+            {ASK_REL: self._ask_source()},
+        )
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [WRITE_NUMBER, READ_NUMBER])
+
+    def test_two_write_spans_are_refused(self):
+        expected = "refuse: quoted line is not one line: " + WRITE_SPAN
+        body = self._ask_block() + "\nAgain `" + WRITE_SPAN + "`.\n"
+        got, reads = self._pinned_reads(body, {ASK_REL: self._ask_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [])
+
+    def test_two_read_spans_are_refused(self):
+        expected = "refuse: quoted line is not one line: " + READ_SPAN
+        body = self._ask_block() + "\nAgain `" + READ_SPAN + "`.\n"
+        got, reads = self._pinned_reads(body, {ASK_REL: self._ask_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [WRITE_NUMBER])
+
+    def test_draft_without_the_write_span_adds_no_write_refusal(self):
+        got, reads = self._pinned_reads(
+            self._ask_block(spans=(READ_SPAN,)), {ASK_REL: self._ask_source()}
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [READ_NUMBER])
+
+    def test_draft_without_the_read_span_adds_no_read_refusal(self):
+        got, reads = self._pinned_reads(
+            self._ask_block(spans=(WRITE_SPAN,)), {ASK_REL: self._ask_source()}
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [WRITE_NUMBER])
+
+    def test_grant_line_mismatch_adds_no_write_refusal(self):
+        expected = "refuse: quoted line does not match " + GRANT_SPAN
+        body = self._grant_block(first=GRANT_QUOTE + "y") + self._ask_block(
+            write=WRITE_QUOTE + "x"
+        )
+        got, reads = self._pinned_reads(body, {ASK_REL: self._ask_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [GRANT_NUMBER])
+
+    def test_draft_without_the_grant_span_still_refuses_a_write_mismatch(self):
+        expected = "refuse: quoted line does not match " + WRITE_SPAN
+        got, reads = self._pinned_reads(
+            self._ask_block(write=WRITE_QUOTE + "x"), {ASK_REL: self._ask_source()}
+        )
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [WRITE_NUMBER])
+
+    def test_ask_quote_refusal_waits_for_a_known_pin(self):
+        body = self._ask_block(write=WRITE_QUOTE + "x")
+        files = {ASK_REL: self._ask_source()}
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+        bad_pin = "Pinned commit: HEAD\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(bad_pin, files)),
+            ["refuse: pinned commit is not one 40-hex commit"],
+        )
+        unknown = "Pinned commit: " + "f" * 40 + "\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(unknown, files, commit=True)),
+            ["refuse: pinned commit is not a commit: " + "f" * 40],
+        )
+
     def test_falsifier_missing_path_is_caught(self):
         self._caught(
             "read_file",
@@ -1944,6 +2279,54 @@ class CitationCheckTests(unittest.TestCase):
             self.test_grant_second_line_does_not_stand_for_line_3767,
             "refuse: quoted line does not match",
             "CAUGHT grant-second-line",
+        )
+
+    def test_falsifier_write_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_write_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT write-quoted-line",
+        )
+
+    def test_falsifier_write_doc_line_is_caught(self):
+        def planted(text):
+            remainders = check._remainders(text, check.WRITE_MARKER)
+            if not remainders:
+                return None
+            return remainders[0]
+
+        self._caught(
+            "write_quote",
+            planted,
+            self.test_write_doc_line_does_not_stand_for_line_3849,
+            "refuse: quoted line does not match",
+            "CAUGHT write-doc-line",
+        )
+
+    def test_falsifier_read_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_read_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT read-quoted-line",
+        )
+
+    def test_falsifier_read_write_line_is_caught(self):
+        def planted(text):
+            remainders = check._remainders(text, check.READ_MARKER)
+            if len(remainders) < 17:
+                return None
+            return remainders[16]
+
+        self._caught(
+            "read_quote",
+            planted,
+            self.test_read_ask_line_matches_the_pinned_read,
+            "refuse: quoted line does not match",
+            "CAUGHT read-write-line",
         )
 
     def test_worktree_root_contains_checker(self):
