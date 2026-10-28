@@ -897,8 +897,8 @@ fn wait_for_terminal(
 /// `json_literal_keys` reader. In-memory answers cover the matching cell, a
 /// missing and an extra struct field, a dropped error key, a changed wrapper
 /// key, reordered keys, a nested key, a dropped `json!` key, zero and two
-/// literals, a character literal, a prefix declaration name, a doubled
-/// declaration, the `unsupported` ok side and a row without `from`.
+/// literals, character and raw string literals, a prefix declaration name,
+/// a doubled declaration, the `unsupported` ok side and a row without `from`.
 ///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
 /// test no longer finds that function. F-cc49a drops the `generated_`
@@ -1424,7 +1424,9 @@ fn operations_section_cites_existing_tests() {
     /// Regions with `//` or `/*` are refused, including those markers inside
     /// strings. This check applies before the literal count and body scan. A
     /// character literal in the body is refused, because `'}'` can hide the
-    /// closing brace or a later key.
+    /// closing brace or a later key. Raw string literals (including raw byte
+    /// and C strings, with any number of hashes) are also refused: their
+    /// internal quotes and backslashes follow different rules.
     ///
     /// Honesty limit: this reads literal text, not a serialized answer. A key
     /// a helper adds at run time is not read. Nested values (`offers`,
@@ -1457,6 +1459,16 @@ fn operations_section_cites_existing_tests() {
         let mut index = 0;
         while index < bytes.len() {
             match bytes[index] {
+                b'r' => {
+                    let mut quote = index + 1;
+                    while bytes.get(quote) == Some(&b'#') {
+                        quote += 1;
+                    }
+                    if bytes.get(quote) == Some(&b'"') {
+                        return Err("json: a raw string literal is not supported".to_string());
+                    }
+                    index += 1;
+                }
                 b'"' => {
                     let mut end = index + 1;
                     let mut escaped = false;
@@ -2603,6 +2615,57 @@ pub fn error_response(code: &str, message: &str) -> Value {
     assert_eq!(
         json_literal_keys("json!({ \"shutdown\": '}' == '}', \"extra\": true })"),
         Err("json: a character literal is not supported".to_string())
+    );
+
+    // Raw string quotes and backslashes cannot hide an added answer key.
+    // Check the reported literal through both the reader and the shutdown
+    // compare, then cover raw keys, nested values and all raw string prefixes.
+    let raw_shutdown_literal = r##"json!({ "shutdown": r#""}"#, "extra": true })"##;
+    assert_eq!(
+        json_literal_keys(raw_shutdown_literal),
+        Err("json: a raw string literal is not supported".to_string())
+    );
+    let raw_shutdown_arm = shutdown_arm.replace(
+        "json!({\n                \"shutdown\": true\n            })",
+        raw_shutdown_literal,
+    );
+    assert_ne!(raw_shutdown_arm, shutdown_arm);
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            &answers,
+            "",
+            &raw_shutdown_arm
+        ),
+        "json: a raw string literal is not supported"
+    );
+    for prefix in ["r", "br", "cr"] {
+        for hash_count in [0, 1, 2, 255] {
+            let hashes = "#".repeat(hash_count);
+            // A trailing backslash is literal even with zero hashes. With
+            // hashes, an internal quote followed by `}` hides later keys
+            // from a scanner that treats it as a normal string's end.
+            let contents = if hash_count == 0 { "\\" } else { "\"}" };
+            let raw = format!("{prefix}{hashes}\"{contents}\"{hashes}");
+            for region in [
+                format!("json!({{ \"shutdown\": {raw}, \"extra\": true }})"),
+                format!("json!({{ \"shutdown\": {{ \"nested\": {raw} }}, \"extra\": true }})"),
+                format!("json!({{ \"shutdown\": [{raw}], \"extra\": true }})"),
+                format!("json!({{ {raw}: true, \"extra\": true }})"),
+            ] {
+                assert_eq!(
+                    json_literal_keys(&region),
+                    Err("json: a raw string literal is not supported".to_string()),
+                    "{region}"
+                );
+            }
+        }
+    }
+    // Normal strings can contain the same characters, and raw identifiers
+    // remain ordinary value expressions.
+    assert_eq!(
+        json_literal_keys(r##"json!({ "shutdown": "r#\"}\"#", "extra": r#value })"##),
+        Ok(vec!["shutdown".to_string(), "extra".to_string()])
     );
 
     // A function whose name merely starts with the marker's name is not that
