@@ -325,15 +325,8 @@ fn wallet_contract_requires_the_exact_runtime_local_json_envelope() {
 /// so the answer proves what `WalletProviderRequestV2::decode_at` reports at `src/main.rs:121`. The
 /// whole refusal `message` is returned for the caller to compare with `assert_eq!`, so a swapped,
 /// reworded or dropped reason fails the test.
-fn request_envelope_refusal(provider: &mut WalletProvider, request: Value) -> String {
-    let response = decode_and_handle_outer(
-        provider,
-        json!({
-            "op": "wallet_contract",
-            "request": request,
-            "_runtime_invocation": runtime_invocation_envelope(),
-        }),
-    );
+fn request_envelope_refusal(provider: &mut WalletProvider, outer: Value) -> String {
+    let response = decode_and_handle_outer(provider, outer);
     match response {
         Response::Error { code, message } => {
             assert_eq!(code, "invalid_wallet_contract");
@@ -359,10 +352,11 @@ fn request_envelope_refuses_a_missing_protocol_version() {
             create_new: true,
         },
     );
-    let mut value = serde_json::to_value(&request).unwrap();
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
     value.as_object_mut().unwrap().remove("protocol_version");
     assert_eq!(
-        request_envelope_refusal(&mut provider, value),
+        request_envelope_refusal(&mut provider, outer),
         "Wallet protocol_version is missing"
     );
     assert!(provider.store.accounts.is_empty());
@@ -387,10 +381,11 @@ fn request_envelope_refuses_an_unsupported_protocol_version() {
         },
     );
     for version in ["1.0", "2.0", "2.1", "2.2"] {
-        let mut value = serde_json::to_value(&request).unwrap();
+        let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+        let value = &mut outer["request"];
         value["protocol_version"] = json!(version);
         assert_eq!(
-            request_envelope_refusal(&mut provider, value),
+            request_envelope_refusal(&mut provider, outer),
             format!("unsupported Wallet protocol_version {version}"),
             "{version} must be refused by the version it carries"
         );
@@ -939,10 +934,11 @@ fn request_envelope_refuses_a_missing_schema() {
             include_revoked: false,
         },
     );
-    let mut value = serde_json::to_value(&request).unwrap();
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
     value.as_object_mut().unwrap().remove("schema");
     assert_eq!(
-        request_envelope_refusal(&mut provider, value),
+        request_envelope_refusal(&mut provider, outer),
         "Wallet contract schema is missing"
     );
 }
@@ -962,10 +958,11 @@ fn request_envelope_refuses_an_unsupported_schema() {
         },
     );
     let schema = "elastos.wallet.provider-request/v3";
-    let mut value = serde_json::to_value(&request).unwrap();
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
     value["schema"] = json!(schema);
     assert_eq!(
-        request_envelope_refusal(&mut provider, value),
+        request_envelope_refusal(&mut provider, outer),
         format!("unsupported Wallet contract schema {schema}")
     );
 }
@@ -984,11 +981,12 @@ fn request_envelope_refuses_an_invalid_lifetime() {
             include_revoked: false,
         },
     );
-    let mut value = serde_json::to_value(&request).unwrap();
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
     let issued_at = value["issued_at"].as_u64().unwrap();
     value["expires_at"] = json!(issued_at);
     assert_eq!(
-        request_envelope_refusal(&mut provider, value),
+        request_envelope_refusal(&mut provider, outer),
         "Wallet request lifetime is invalid"
     );
 }
@@ -1009,11 +1007,12 @@ fn request_envelope_refuses_a_lifetime_beyond_its_bound() {
             include_revoked: false,
         },
     );
-    let mut value = serde_json::to_value(&request).unwrap();
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
     let issued_at = value["issued_at"].as_u64().unwrap();
     value["expires_at"] = json!(issued_at.saturating_add(301));
     assert_eq!(
-        request_envelope_refusal(&mut provider, value),
+        request_envelope_refusal(&mut provider, outer),
         "Wallet request lifetime exceeds its bound"
     );
 }
@@ -1033,11 +1032,12 @@ fn request_envelope_refuses_a_request_issued_in_the_future() {
         },
     );
     let now = now_ts();
-    let mut value = serde_json::to_value(&request).unwrap();
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
     value["issued_at"] = json!(now.saturating_add(7200));
     value["expires_at"] = json!(now.saturating_add(7290));
     assert_eq!(
-        request_envelope_refusal(&mut provider, value),
+        request_envelope_refusal(&mut provider, outer),
         "Wallet request was issued in the future"
     );
 }
@@ -1057,11 +1057,12 @@ fn request_envelope_refuses_an_expired_request() {
         },
     );
     let now = now_ts();
-    let mut value = serde_json::to_value(&request).unwrap();
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
     value["issued_at"] = json!(now.saturating_sub(200));
     value["expires_at"] = json!(now.saturating_sub(100));
     assert_eq!(
-        request_envelope_refusal(&mut provider, value),
+        request_envelope_refusal(&mut provider, outer),
         "Wallet request expired"
     );
 }
@@ -1080,10 +1081,11 @@ fn request_envelope_refuses_a_request_id_with_an_invalid_prefix() {
             include_revoked: false,
         },
     );
-    let mut value = serde_json::to_value(&request).unwrap();
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
     value["request_id"] = json!("not-a-request-id");
     assert_eq!(
-        request_envelope_refusal(&mut provider, value),
+        request_envelope_refusal(&mut provider, outer),
         "Wallet request_id has an invalid prefix"
     );
 }
@@ -1102,10 +1104,11 @@ fn request_envelope_refuses_a_request_id_without_lowercase_hex_entropy() {
             include_revoked: false,
         },
     );
-    let mut value = serde_json::to_value(&request).unwrap();
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
     value["request_id"] = json!("wallet-request:XYZ");
     assert_eq!(
-        request_envelope_refusal(&mut provider, value),
+        request_envelope_refusal(&mut provider, outer),
         "Wallet request_id must contain 128 bits of lowercase hexadecimal entropy"
     );
 }
@@ -1124,10 +1127,11 @@ fn request_envelope_refuses_a_capability_its_operation_did_not_derive() {
             include_revoked: false,
         },
     );
-    let mut value = serde_json::to_value(&request).unwrap();
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
     value["authority"]["capability"] = json!("wallet:recovery:export-managed");
     assert_eq!(
-        request_envelope_refusal(&mut provider, value),
+        request_envelope_refusal(&mut provider, outer),
         "Wallet request capability or intent was not derived from its operation"
     );
 }
@@ -1148,10 +1152,11 @@ fn request_envelope_refuses_an_operation_hash_mismatch() {
             create_new: true,
         },
     );
-    let mut value = serde_json::to_value(&request).unwrap();
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
     value["operation"]["params"]["label"] = json!("Substituted");
     assert_eq!(
-        request_envelope_refusal(&mut provider, value),
+        request_envelope_refusal(&mut provider, outer),
         "Wallet request operation hash mismatch"
     );
 }
@@ -1170,10 +1175,11 @@ fn request_envelope_refuses_a_session_binding_mismatch() {
             include_revoked: false,
         },
     );
-    let mut value = serde_json::to_value(&request).unwrap();
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
     value["authority"]["session_id"] = json!("session:other");
     assert_eq!(
-        request_envelope_refusal(&mut provider, value),
+        request_envelope_refusal(&mut provider, outer),
         "Wallet request session binding mismatch"
     );
 }
@@ -1192,11 +1198,12 @@ fn request_envelope_refuses_an_account_binding_mismatch() {
             account_id: "wallet:eip155:20:0xabc".into(),
         },
     );
-    let mut value = serde_json::to_value(&request).unwrap();
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
     assert!(value["account_binding"].is_string());
     value["account_binding"] = json!("account:sha256:substituted");
     assert_eq!(
-        request_envelope_refusal(&mut provider, value),
+        request_envelope_refusal(&mut provider, outer),
         "Wallet request account binding mismatch"
     );
 }
@@ -1217,11 +1224,12 @@ fn request_envelope_refuses_an_approval_binding_mismatch() {
             reason: "Approved".into(),
         },
     );
-    let mut value = serde_json::to_value(&request).unwrap();
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
     assert!(value["approval_binding"].is_string());
     value["approval_binding"] = json!("approval:sha256:substituted");
     assert_eq!(
-        request_envelope_refusal(&mut provider, value),
+        request_envelope_refusal(&mut provider, outer),
         "Wallet request approval binding mismatch"
     );
 }
@@ -1240,10 +1248,11 @@ fn request_envelope_refuses_a_lifecycle_binding_mismatch() {
             include_revoked: false,
         },
     );
-    let mut value = serde_json::to_value(&request).unwrap();
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
     value["lifecycle_id"] = json!("lifecycle:sha256:substituted");
     assert_eq!(
-        request_envelope_refusal(&mut provider, value),
+        request_envelope_refusal(&mut provider, outer),
         "Wallet request lifecycle binding mismatch"
     );
 }
@@ -1263,10 +1272,11 @@ fn request_envelope_refuses_an_audit_binding_mismatch() {
             include_revoked: false,
         },
     );
-    let mut value = serde_json::to_value(&request).unwrap();
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
     value["audit_id"] = json!("audit:sha256:substituted");
     assert_eq!(
-        request_envelope_refusal(&mut provider, value),
+        request_envelope_refusal(&mut provider, outer),
         "Wallet request audit binding mismatch"
     );
 }
