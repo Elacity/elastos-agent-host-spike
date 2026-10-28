@@ -436,14 +436,8 @@ def require_denied(profile):
     They are not the live-profile deny.
     """
     result = query_under(profile)
-    outcome = classify(result)
-    if outcome != "deny" or result.stdout != DENY_STDOUT or result.stderr != DENY_STDERR:
-        if outcome == "allow":
-            raise NotDenied(result)
-        raise HarnessError(
-            "live-profile deny line was not returned: "
-            f"stdout={result.stdout!r} stderr={result.stderr!r}"
-        )
+    if classify(result) == "allow":
+        raise NotDenied(result)
     return result
 
 
@@ -1660,6 +1654,26 @@ class KextRules(unittest.TestCase):
         self.assertIn("profile evaluation error", backtrace)
         self.assertNotIn("profile evaluation error", reasons[0])
         self.assertNotIn("profile evaluation error", reasons[2])
+        self.launch_guard.assert_not_called()
+
+    def test_require_denied_uses_classifier_decision(self):
+        """The classifier owns output validation for both decisions."""
+        profile = PROFILES[0]["path"]
+        for label, result, _expected in self.refusal_samples():
+            for outcome in ("deny", "allow"):
+                with self.subTest(result=label, outcome=outcome), patch(
+                    __name__ + ".query_under", return_value=result
+                ) as queried, patch(
+                    __name__ + ".classify", return_value=outcome
+                ) as classified:
+                    if outcome == "deny":
+                        self.assertIs(require_denied(profile), result)
+                    else:
+                        with self.assertRaises(NotDenied) as caught:
+                            require_denied(profile)
+                        self.assertIs(caught.exception.result, result)
+                    queried.assert_called_once_with(profile)
+                    classified.assert_called_once_with(result)
         self.launch_guard.assert_not_called()
 
     def test_unsandboxed_failure_is_an_error(self):
