@@ -889,6 +889,17 @@ fn wait_for_terminal(
 /// an attribute without a field and unsupported attributes such as
 /// `#[serde(skip)]` or combined rename options.
 ///
+/// `operations_outputs_match_the_answers` reads each Outputs cell. Its ok keys
+/// equal `ok_response` and that row's struct through `struct_field_names`, or
+/// that operation's `json!` in `src/state.rs` or `src/execution.rs`. Its error
+/// keys equal `error_response`. `function_region` and `shutdown_arm_region`
+/// share one skip for strings, character literals, comments and raw strings.
+/// `shutdown_arm_region` ends at the first comma at nesting count zero.
+/// `json_literal_keys` reads the top-level keys of one `json!({` literal and
+/// refuses a raw string or character literal inside it. In-memory plants cover
+/// the region shapes, the skip forms, every refusal cause and each Outputs
+/// mismatch. The honesty limit is in that helper's doc comment.
+///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
 /// test no longer finds that function. F-cc49a drops the `generated_`
 /// acceptance, so the in-memory stand-in citation fails. F-cc50a drops the
@@ -1213,9 +1224,10 @@ fn operations_section_cites_existing_tests() {
     /// name the struct. The body runs from that `{` to the line whose trim is
     /// `}`. A blank line or a line whose trim starts with `//` is skipped. One
     /// attribute line above a field may be `#[serde(rename = "...")]`, which
-    /// gives the wire name, or `#[serde(default)]` or
-    /// `#[serde(default, skip_serializing_if = "...")]`, which keep the Rust
-    /// name. These are complete attribute forms with one non-empty, unescaped
+    /// gives the wire name, or `#[serde(default)]`,
+    /// `#[serde(default, skip_serializing_if = "...")]` or
+    /// `#[serde(skip_serializing_if = "...")]`, which keep the Rust name.
+    /// These are complete attribute forms with one non-empty, unescaped
     /// quoted value; extra options are rejected. A field line's trim starts
     /// with `pub `, then the name, then `:`.
     ///
@@ -1285,9 +1297,10 @@ fn operations_section_cites_existing_tests() {
                     match (
                         quoted_value("#[serde(rename = \""),
                         quoted_value("#[serde(default, skip_serializing_if = \""),
+                        quoted_value("#[serde(skip_serializing_if = \""),
                     ) {
-                        (Some(wire_name), _) => wire_name.to_string(),
-                        (_, Some(_)) => rust_name.trim().to_string(),
+                        (Some(wire_name), _, _) => wire_name.to_string(),
+                        (_, Some(_), _) | (_, _, Some(_)) => rust_name.trim().to_string(),
                         _ => {
                             return Err(format!(
                                 "struct {struct_name}: unsupported attribute line `{line}`"
@@ -1370,6 +1383,413 @@ fn operations_section_cites_existing_tests() {
             }
         }
         Ok(())
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Opaque {
+        OrdinaryString,
+        Character,
+        LineComment,
+        BlockComment,
+        RawString,
+    }
+    fn next_char(rest: &str) -> &str {
+        let mut chars = rest.char_indices();
+        chars.next();
+        &rest[chars.next().map(|(index, _)| index).unwrap_or(rest.len())..]
+    }
+    /// Step over one opaque token at the front of `rest`: an ordinary string,
+    /// a character literal, a line comment, a block comment, or a raw string
+    /// (`r`, `br` or `cr` with any number of `#`). `Ok(None)` means `rest`
+    /// starts none of them. `Err` means the token has no end.
+    fn skip_opaque(rest: &str) -> Result<Option<(&str, Opaque)>, String> {
+        for prefix in ["br", "cr", "r"] {
+            let Some(after_prefix) = rest.strip_prefix(prefix) else {
+                continue;
+            };
+            let hashes = after_prefix
+                .bytes()
+                .take_while(|byte| *byte == b'#')
+                .count();
+            if after_prefix.as_bytes().get(hashes) != Some(&b'"') {
+                continue;
+            }
+            let terminator = format!("\"{}", "#".repeat(hashes));
+            let body = &after_prefix[hashes + 1..];
+            let Some(end) = body.find(&terminator) else {
+                return Err("unfinished raw string".to_string());
+            };
+            return Ok(Some((&body[end + terminator.len()..], Opaque::RawString)));
+        }
+        if let Some(body) = rest.strip_prefix('"') {
+            let mut escaped = false;
+            for (index, byte) in body.bytes().enumerate() {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    return Ok(Some((&body[index + 1..], Opaque::OrdinaryString)));
+                }
+            }
+            return Err("unfinished string".to_string());
+        }
+        if let Some(body) = rest.strip_prefix('\'') {
+            let content = if let Some(inner) = body.strip_prefix('\\') {
+                if inner.starts_with("u{") {
+                    inner.find('}').map(|close| close + 2)
+                } else {
+                    inner.chars().next().map(|first| 1 + first.len_utf8())
+                }
+            } else {
+                body.chars().next().map(char::len_utf8)
+            };
+            if let Some(content) = content {
+                if body[content..].starts_with('\'') {
+                    return Ok(Some((&body[content + 1..], Opaque::Character)));
+                }
+            }
+            return Ok(None);
+        }
+        if let Some(body) = rest.strip_prefix("//") {
+            let end = body.find('\n').map(|index| index + 1).unwrap_or(body.len());
+            return Ok(Some((&body[end..], Opaque::LineComment)));
+        }
+        if let Some(body) = rest.strip_prefix("/*") {
+            let Some(end) = body.find("*/") else {
+                return Err("unfinished block comment".to_string());
+            };
+            return Ok(Some((&body[end + 2..], Opaque::BlockComment)));
+        }
+        Ok(None)
+    }
+    /// The text from the front of `rest` through the brace that closes the
+    /// first `{` after any skipped string, character literal, comment or raw
+    /// string.
+    fn braced_region<'a>(rest: &'a str, label: &str) -> Result<&'a str, String> {
+        let mut cursor = rest;
+        loop {
+            if cursor.is_empty() {
+                return Err(format!("{label}: no opening `{{`"));
+            }
+            match skip_opaque(cursor) {
+                Err(reason) => return Err(format!("{label}: {reason}")),
+                Ok(Some((after, _))) => {
+                    cursor = after;
+                    continue;
+                }
+                Ok(None) => {}
+            }
+            if cursor.starts_with('{') {
+                break;
+            }
+            cursor = next_char(cursor);
+        }
+        let mut depth = 0usize;
+        while !cursor.is_empty() {
+            match skip_opaque(cursor) {
+                Err(reason) => return Err(format!("{label}: {reason}")),
+                Ok(Some((after, _))) => {
+                    cursor = after;
+                    continue;
+                }
+                Ok(None) => {}
+            }
+            if let Some(after) = cursor.strip_prefix('{') {
+                depth += 1;
+                cursor = after;
+            } else if let Some(after) = cursor.strip_prefix('}') {
+                depth = depth.saturating_sub(1);
+                cursor = after;
+                if depth == 0 {
+                    return Ok(&rest[..rest.len() - cursor.len()]);
+                }
+            } else {
+                cursor = next_char(cursor);
+            }
+        }
+        Err(format!("{label}: the opening `{{` has no closing `}}`"))
+    }
+    /// The `fn {name}(` declaration line through the brace that closes it.
+    fn function_region<'a>(source: &'a str, name: &str) -> Result<&'a str, String> {
+        let signature = format!("fn {name}(");
+        let mut starts = Vec::new();
+        let mut offset = 0;
+        for line in source.split_inclusive('\n') {
+            if after_declaration_prefix(line).starts_with(&signature) {
+                starts.push(offset);
+            }
+            offset += line.len();
+        }
+        match starts.as_slice() {
+            [] => return Err(format!("{name}: missing fn {name}(")),
+            [_] => {}
+            _ => return Err(format!("{name}: has a second fn {name}(")),
+        }
+        let declaration = &source[starts[0]..];
+        let region = braced_region(declaration, name)?;
+        Ok(&source[starts[0]..starts[0] + region.len()])
+    }
+    /// The one `ProviderOperation::Shutdown =>` arm through the comma that
+    /// ends the expression at nesting count zero.
+    fn shutdown_arm_region(source: &str) -> Result<&str, String> {
+        const MARKER: &str = "ProviderOperation::Shutdown =>";
+        let arms = source.matches(MARKER).count();
+        if arms == 0 {
+            return Err("Shutdown: missing `ProviderOperation::Shutdown =>` arm".to_string());
+        }
+        if arms > 1 {
+            return Err("Shutdown: has a second `ProviderOperation::Shutdown =>` arm".to_string());
+        }
+        let start = source.find(MARKER).expect("the arm count found the marker");
+        let arm = &source[start..];
+        let after_arrow = arm.find("=>").expect("the marker holds `=>`") + 2;
+        let mut cursor = &arm[after_arrow..];
+        let mut depth = 0usize;
+        loop {
+            if cursor.is_empty() {
+                return Err(if depth == 0 {
+                    "Shutdown: the arm has no ending comma".to_string()
+                } else {
+                    "Shutdown: the arm walk reaches the end of the source with nesting open"
+                        .to_string()
+                });
+            }
+            match skip_opaque(cursor) {
+                Err(reason) => return Err(format!("Shutdown: {reason}")),
+                Ok(Some((after, _))) => {
+                    cursor = after;
+                    continue;
+                }
+                Ok(None) => {}
+            }
+            match cursor.as_bytes()[0] {
+                b'{' | b'[' | b'(' => {
+                    depth += 1;
+                    cursor = &cursor[1..];
+                }
+                b'}' | b']' | b')' => {
+                    if depth == 0 {
+                        return Err("Shutdown: a closing bracket has no opener".to_string());
+                    }
+                    depth -= 1;
+                    cursor = &cursor[1..];
+                }
+                b',' if depth == 0 => {
+                    return Ok(&arm[..arm.len() - cursor.len() + 1]);
+                }
+                _ => cursor = next_char(cursor),
+            }
+        }
+    }
+    fn is_json_key(name: &str) -> bool {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    }
+    /// The top-level `"key":` names of the one `json!({` literal in `region`,
+    /// in order. Zero or two literals, a raw string or a character literal
+    /// inside the body, and an unfinished body are errors. The reader does not
+    /// descend into a value.
+    fn json_literal_keys(region: &str, label: &str) -> Result<Vec<String>, String> {
+        const OPEN: &str = "json!({";
+        let literals = region.matches(OPEN).count();
+        if literals == 0 {
+            return Err(format!("{label}: no `json!({{` literal"));
+        }
+        if literals > 1 {
+            return Err(format!("{label}: has a second `json!({{` literal"));
+        }
+        let open_at = region.find(OPEN).expect("the literal count found it") + OPEN.len();
+        let mut cursor = &region[open_at..];
+        let mut depth = 1usize;
+        let mut keys = Vec::new();
+        loop {
+            if cursor.is_empty() {
+                return Err(format!("{label}: the `json!({{` body has no closing `}}`"));
+            }
+            match skip_opaque(cursor) {
+                Err(reason) => return Err(format!("{label}: {reason}")),
+                Ok(Some((after, Opaque::RawString))) => {
+                    return Err(format!("{label}: a raw string inside the `json!({{` body"));
+                }
+                Ok(Some((after, Opaque::Character))) => {
+                    return Err(format!(
+                        "{label}: a character literal inside the `json!({{` body"
+                    ));
+                }
+                Ok(Some((after, Opaque::OrdinaryString))) => {
+                    if depth == 1 {
+                        let token_len = cursor.len() - after.len();
+                        let content = &cursor[1..token_len - 1];
+                        if is_json_key(content) && after.trim_start().starts_with(':') {
+                            keys.push(content.to_string());
+                        }
+                    }
+                    cursor = after;
+                    continue;
+                }
+                Ok(Some((after, _))) => {
+                    cursor = after;
+                    continue;
+                }
+                Ok(None) => {}
+            }
+            match cursor.as_bytes()[0] {
+                b'{' | b'[' => {
+                    depth += 1;
+                    cursor = &cursor[1..];
+                }
+                b'}' | b']' => {
+                    depth -= 1;
+                    cursor = &cursor[1..];
+                    if depth == 0 {
+                        return Ok(keys);
+                    }
+                }
+                _ => cursor = next_char(cursor),
+            }
+        }
+    }
+    fn names_equal(spans: &[&str], names: &[String]) -> bool {
+        spans.len() == names.len()
+            && spans
+                .iter()
+                .zip(names)
+                .all(|(span, name)| *span == name.as_str())
+    }
+    /// Each Outputs cell's ok keys equal `ok_response` and that row's struct
+    /// or `json!`, and its error keys equal `error_response`.
+    ///
+    /// Honesty limit: this compare reads struct text and `json!` literals, not
+    /// serialized output. A key a helper adds at run time is not read. Nested
+    /// values (`offers`, `terminal`, `events`, `config`) stay one name.
+    /// `#[serde(skip)]` is rejected. The check does not read the keys inside
+    /// `result` or inside an event's `data`.
+    fn operations_outputs_match_the_answers(
+        section: &str,
+        contract: &str,
+        state: &str,
+        execution: &str,
+    ) -> Result<(), String> {
+        const OUTPUTS_PLACE: usize = 3;
+        let ok_wrapper =
+            json_literal_keys(&function_region(contract, "ok_response")?, "ok_response")?;
+        let error_keys = json_literal_keys(
+            &function_region(contract, "error_response")?,
+            "error_response",
+        )?;
+        for cells in section.lines().filter_map(operation_row_cells) {
+            let operation = cells[0];
+            let cell = cells.get(OUTPUTS_PLACE - 1).copied().unwrap_or("");
+            let Some((ok_side, error_side)) = cell.split_once("error:") else {
+                return Err(format!(
+                    "operation `{operation}` Outputs has no `error:` side"
+                ));
+            };
+            let error_spans = cell_backtick_names(error_side);
+            if !names_equal(&error_spans, &error_keys) {
+                return Err(format!(
+                    "operation `{operation}` error keys {error_spans:?} are not the `error_response` keys {error_keys:?}"
+                ));
+            }
+            let ok_cell = ok_side.trim();
+            if operation == "unsupported" {
+                if !ok_cell.is_empty() {
+                    return Err(format!(
+                        "operation `unsupported` has an ok side `{ok_cell}`"
+                    ));
+                }
+                continue;
+            }
+            if ok_cell.is_empty() {
+                return Err(format!("operation `{operation}` has no ok side"));
+            }
+            let spans = cell_backtick_names(ok_cell);
+            if spans.len() < ok_wrapper.len()
+                || !names_equal(&spans[..ok_wrapper.len()], &ok_wrapper)
+            {
+                return Err(format!(
+                    "operation `{operation}` ok keys {spans:?} do not begin with the `ok_response` keys {ok_wrapper:?}"
+                ));
+            }
+            let after_wrapper = &spans[ok_wrapper.len()..];
+            if ok_cell.contains("from") {
+                let Some(struct_name) = after_wrapper.last() else {
+                    return Err(format!(
+                        "operation `{operation}` names `from` and no struct"
+                    ));
+                };
+                let Some(fields) = struct_field_names(contract, struct_name)? else {
+                    return Err(format!(
+                        "operation `{operation}` names `{struct_name}` and no such struct is in src/contract.rs"
+                    ));
+                };
+                let between = &after_wrapper[..after_wrapper.len() - 1];
+                if !names_equal(between, &fields) {
+                    return Err(format!(
+                        "operation `{operation}` ok keys between `data` and `{struct_name}` are {between:?}; the fields there are {fields:?}"
+                    ));
+                }
+            } else {
+                let (literal_keys, label) = match operation {
+                    "offers_list" => (
+                        json_literal_keys(
+                            &function_region(state, "handle_offers_list")?,
+                            "handle_offers_list",
+                        )?,
+                        "handle_offers_list",
+                    ),
+                    "shutdown" => (
+                        json_literal_keys(&shutdown_arm_region(execution)?, "Shutdown")?,
+                        "Shutdown",
+                    ),
+                    _ => {
+                        return Err(format!(
+                            "operation `{operation}` has no `from` and is not `offers_list` or `shutdown`"
+                        ))
+                    }
+                };
+                if !names_equal(after_wrapper, &literal_keys) {
+                    return Err(format!(
+                        "operation `{operation}` ok keys after `data` are {after_wrapper:?}; the `{label}` keys are {literal_keys:?}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+    fn outputs_row(operation: &str, outputs: &str) -> String {
+        format!(
+            "| {operation} | `op` | {outputs} | none: needs no declared right | effect | rule | designed, not enforced |"
+        )
+    }
+    fn outputs_failure(section: &str, contract: &str, state: &str, execution: &str) -> String {
+        match operations_outputs_match_the_answers(section, contract, state, execution) {
+            Err(reason) => reason,
+            Ok(()) => panic!("the compare accepts: {section}"),
+        }
+    }
+    // The three answer sources the real Outputs call reads. An unreadable
+    // file is an error that names its path.
+    struct AnswerSources {
+        contract: String,
+        state: String,
+        execution: String,
+    }
+    impl AnswerSources {
+        fn read(root: &Path) -> Result<AnswerSources, String> {
+            fn read_one(root: &Path, name: &str) -> Result<String, String> {
+                let path = root.join(name);
+                fs::read_to_string(&path)
+                    .map_err(|err| format!("{name} must be readable ({}): {err}", path.display()))
+            }
+            Ok(AnswerSources {
+                contract: read_one(root, "src/contract.rs")?,
+                state: read_one(root, "src/state.rs")?,
+                execution: read_one(root, "src/execution.rs")?,
+            })
+        }
     }
     fn reader_failure(source: &str) -> String {
         match parse_request_operation_names(source) {
@@ -1897,6 +2317,316 @@ fn operations_section_cites_existing_tests() {
         "struct InitRequest: attribute line has no field `#[serde(default)]`"
     );
 
+    // In-memory answer sources mirror the real ones, so each plant isolates
+    // one refusal or one Outputs mismatch.
+    let answers_contract = "pub fn ok_response(data: Value) -> Value {\n    serde_json::json!({\"status\": \"ok\", \"data\": data})\n}\npub fn error_response(code: &str, message: &str) -> Value {\n    serde_json::json!({\"status\": \"error\", \"code\": code, \"message\": message})\n}\npub struct StatusResponse {\n    pub provider: String,\n    pub protocol_version: String,\n    pub offers_ready: usize,\n}\npub struct RunView {\n    pub schema: String,\n    pub run_id: String,\n    pub offer_id: String,\n    pub operation: String,\n    pub status: String,\n    pub sequence_cursor: u64,\n    #[serde(skip_serializing_if = \"Option::is_none\")]\n    pub terminal: Option<Value>,\n}\n";
+    let answers_state = "pub fn handle_offers_list(&self, request: OffersListRequest) -> Result<Value, ProviderFault> {\n    Ok(ok_response(json!({\"schema\": \"schema\", \"provider\": \"provider\", \"protocol_version\": \"v\", \"offers\": offers, \"offer_revisions\": revisions})))\n}\n";
+    let answers_execution = "            ProviderOperation::Shutdown => Ok(ok_response(serde_json::json!({\n                \"shutdown\": true\n            }))),\n            ProviderOperation::OffersList => {}\n";
+    let shutdown_outputs = "ok: `status`, `data` (`shutdown`). error: `status`, `code`, `message`.";
+    let struct_outputs = "ok: `status`, `data` (`provider`, `protocol_version`, `offers_ready` from `StatusResponse`). error: `status`, `code`, `message`.";
+    let run_outputs = "ok: `status`, `data` (`schema`, `run_id`, `offer_id`, `operation`, `status`, `sequence_cursor`, `terminal` from `RunView`). error: `status`, `code`, `message`.";
+    let offers_outputs = "ok: `status`, `data` (`schema`, `provider`, `protocol_version`, `offers`, `offer_revisions`). error: `status`, `code`, `message`.";
+
+    for (operation, outputs) in [
+        ("shutdown", shutdown_outputs),
+        ("init", struct_outputs),
+        ("runs_create", run_outputs),
+        ("offers_list", offers_outputs),
+    ] {
+        assert_eq!(
+            operations_outputs_match_the_answers(
+                &outputs_row(operation, outputs),
+                answers_contract,
+                answers_state,
+                answers_execution,
+            ),
+            Ok(()),
+            "the in-memory row `{operation}` must match the answers"
+        );
+    }
+
+    let unsupported_outputs = "error: `status`, `code`, `message`.";
+    assert_eq!(
+        operations_outputs_match_the_answers(
+            &outputs_row("unsupported", unsupported_outputs),
+            answers_contract,
+            answers_state,
+            answers_execution,
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        outputs_failure(
+            &outputs_row(
+                "unsupported",
+                "ok: `status`, `data` (`shutdown`). error: `status`, `code`, `message`.",
+            ),
+            answers_contract,
+            answers_state,
+            answers_execution,
+        ),
+        "operation `unsupported` has an ok side `ok: `status`, `data` (`shutdown`).`"
+    );
+    assert_eq!(
+        outputs_failure(
+            &outputs_row(
+                "mystery",
+                "ok: `status`, `data` (`alpha`). error: `status`, `code`, `message`.",
+            ),
+            answers_contract,
+            answers_state,
+            answers_execution,
+        ),
+        "operation `mystery` has no `from` and is not `offers_list` or `shutdown`"
+    );
+
+    // The compare must read equality, not only the presence of keys.
+    let wrapper_failure = outputs_failure(
+        &outputs_row(
+            "shutdown",
+            "ok: `status`, `result` (`shutdown`). error: `status`, `code`, `message`.",
+        ),
+        answers_contract,
+        answers_state,
+        answers_execution,
+    );
+    assert!(
+        wrapper_failure.contains("shutdown") && wrapper_failure.contains("ok_response"),
+        "{wrapper_failure}"
+    );
+    let error_failure = outputs_failure(
+        &outputs_row(
+            "shutdown",
+            "ok: `status`, `data` (`shutdown`). error: `status`, `code`.",
+        ),
+        answers_contract,
+        answers_state,
+        answers_execution,
+    );
+    assert!(
+        error_failure.contains("shutdown") && error_failure.contains("error_response"),
+        "{error_failure}"
+    );
+    let struct_failure = outputs_failure(
+        &outputs_row(
+            "init",
+            "ok: `status`, `data` (`provider`, `protocol` from `StatusResponse`). error: `status`, `code`, `message`.",
+        ),
+        answers_contract,
+        answers_state,
+        answers_execution,
+    );
+    assert!(
+        struct_failure.contains("init") && struct_failure.contains("StatusResponse"),
+        "{struct_failure}"
+    );
+    let literal_failure = outputs_failure(
+        &outputs_row(
+            "shutdown",
+            "ok: `status`, `data` (`shutdown`, `extra`). error: `status`, `code`, `message`.",
+        ),
+        answers_contract,
+        answers_state,
+        answers_execution,
+    );
+    assert!(
+        literal_failure.contains("shutdown") && literal_failure.contains("Shutdown"),
+        "{literal_failure}"
+    );
+    let order_failure = outputs_failure(
+        &outputs_row(
+            "offers_list",
+            "ok: `status`, `data` (`provider`, `schema`, `protocol_version`, `offers`, `offer_revisions`). error: `status`, `code`, `message`.",
+        ),
+        answers_contract,
+        answers_state,
+        answers_execution,
+    );
+    assert!(
+        order_failure.contains("offers_list") && order_failure.contains("handle_offers_list"),
+        "{order_failure}"
+    );
+
+    // A comma inside `ok_response(...)` is inside `(`, so the arm keeps going.
+    let two_literal_arm = "ProviderOperation::Shutdown => Ok(ok_response(json!({\"shutdown\": true}), json!({\"extra\": true}))),\n";
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            answers_contract,
+            answers_state,
+            two_literal_arm,
+        ),
+        "Shutdown: has a second `json!({` literal"
+    );
+    let mapped_arm = "ProviderOperation::Shutdown => Ok(ok_response(serde_json::json!({\"shutdown\": true}))).map(|_| ok_response(serde_json::json!({\"extra\": true}))),\n";
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            answers_contract,
+            answers_state,
+            mapped_arm,
+        ),
+        "Shutdown: has a second `json!({` literal"
+    );
+
+    // A raw string does not end a brace region, so both literals are seen.
+    let raw_contract = "fn ok_response(data: Value) -> Value {\n    json!({\"status\": \"ok\", \"data\": 1});\n    let _ = r#\"\"}\"#;\n    json!({\"status\": \"ok\", \"result\": 1})\n}\nfn error_response(code: &str, message: &str) -> Value {\n    json!({\"status\": \"error\", \"code\": code, \"message\": message})\n}\n";
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            raw_contract,
+            answers_state,
+            answers_execution,
+        ),
+        "ok_response: has a second `json!({` literal"
+    );
+
+    // The holes of 087 stay refused on this compare.
+    let char_contract = "fn ok_response(data: Value) -> Value {\n    json!({\"a\": '}', \"extra\": 1})\n}\nfn error_response(code: &str, message: &str) -> Value {\n    json!({\"status\": \"error\", \"code\": code, \"message\": message})\n}\n";
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            char_contract,
+            answers_state,
+            answers_execution,
+        ),
+        "ok_response: a character literal inside the `json!({` body"
+    );
+    let example_first = "fn ok_response_example() {\n    json!({\"wrong\": 1})\n}\nfn ok_response(data: Value) -> Value {\n    json!({\"status\": \"ok\", \"data\": data})\n}\nfn error_response(code: &str, message: &str) -> Value {\n    json!({\"status\": \"error\", \"code\": code, \"message\": message})\n}\n";
+    assert_eq!(
+        operations_outputs_match_the_answers(
+            &outputs_row("shutdown", shutdown_outputs),
+            example_first,
+            answers_state,
+            answers_execution,
+        ),
+        Ok(()),
+        "`fn ok_response_example(` must not supply the keys"
+    );
+    let empty_offers_state = "pub fn handle_offers_list(&self, request: OffersListRequest) -> Result<Value, ProviderFault> {\n}\n#[inline]\npub fn handle_runs_create(&mut self) -> Result<Value, ProviderFault> {\n    Ok(ok_response(json!({\"schema\": \"schema\", \"provider\": \"provider\", \"protocol_version\": \"v\", \"offers\": offers, \"offer_revisions\": revisions})))\n}\n";
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("offers_list", offers_outputs),
+            answers_contract,
+            empty_offers_state,
+            answers_execution,
+        ),
+        "handle_offers_list: no `json!({` literal"
+    );
+    let nested_fn_contract = "fn ok_response(data: Value) -> Value {\n    json!({\"status\": \"ok\", \"data\": 1});\n    fn unused() {}\n    json!({\"status\": \"ok\", \"result\": 1})\n}\nfn error_response(code: &str, message: &str) -> Value {\n    json!({\"status\": \"error\", \"code\": code, \"message\": message})\n}\n";
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            nested_fn_contract,
+            answers_state,
+            answers_execution,
+        ),
+        "ok_response: has a second `json!({` literal"
+    );
+    let block_arm = "ProviderOperation::Shutdown => { if false { json!({\"shutdown\": true}); } Ok(ok_response(json!({\"renamed\": true}))) },\n";
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            answers_contract,
+            answers_state,
+            block_arm,
+        ),
+        "Shutdown: has a second `json!({` literal"
+    );
+
+    // One skip feeds `braced_region` and `shutdown_arm_region`, so every
+    // opaque form must keep its braces or brackets out of the walk.
+    for body in [
+        r#"let text = "}";"#,
+        r#"let text = "a\"}b";"#,
+        "let character = '}';",
+        "let character = ')';",
+        "// )",
+        "/* ) } */",
+        r#"let text = r"}";"#,
+        r##"let text = r#""}"#;"##,
+        r###"let text = r##"}"##;"###,
+        r#"let text = br"}";"#,
+        r###"let text = br##"}"##;"###,
+        r#"let text = cr"}";"#,
+        r####"let text = cr###"}"###;"####,
+    ] {
+        let function_source = format!(
+            "fn ok_response() {{\n    {body}\n    json!({{\"status\": \"ok\", \"data\": 1}})\n}}\n"
+        );
+        assert_eq!(
+            json_literal_keys(
+                &function_region(&function_source, "ok_response").expect("the function is present"),
+                "ok_response",
+            ),
+            Ok(vec!["status".to_string(), "data".to_string()]),
+            "`braced_region` must step over `{body}`"
+        );
+        let arm_source = format!(
+            "ProviderOperation::Shutdown => {{\n    {body}\n    Ok(ok_response(json!({{\"shutdown\": true}})))\n}},\n"
+        );
+        assert_eq!(
+            json_literal_keys(
+                &shutdown_arm_region(&arm_source).expect("the arm is present"),
+                "Shutdown",
+            ),
+            Ok(vec!["shutdown".to_string()]),
+            "`shutdown_arm_region` must step over `{body}`"
+        );
+    }
+
+    // Each refusal names its own cause, so a keyword-only error cannot pass
+    // for another.
+    assert_eq!(
+        json_literal_keys("fn f() {}", "ok_response"),
+        Err("ok_response: no `json!({` literal".to_string())
+    );
+    assert_eq!(
+        json_literal_keys(r#"json!({"a": 1}); json!({"b": 2})"#, "ok_response"),
+        Err("ok_response: has a second `json!({` literal".to_string())
+    );
+    assert_eq!(
+        json_literal_keys(r##"json!({"a": r#"x"#})"##, "ok_response"),
+        Err("ok_response: a raw string inside the `json!({` body".to_string())
+    );
+    assert_eq!(
+        json_literal_keys(r#"json!({"a": '}'})"#, "ok_response"),
+        Err("ok_response: a character literal inside the `json!({` body".to_string())
+    );
+    assert_eq!(
+        json_literal_keys(r#"json!({"a": 1"#, "ok_response"),
+        Err("ok_response: the `json!({` body has no closing `}`".to_string())
+    );
+    assert_eq!(
+        shutdown_arm_region("fn unrelated() {}\n"),
+        Err("Shutdown: missing `ProviderOperation::Shutdown =>` arm".to_string())
+    );
+    assert_eq!(
+        shutdown_arm_region(
+            "ProviderOperation::Shutdown => 1,\nProviderOperation::Shutdown => 2,\n"
+        ),
+        Err("Shutdown: has a second `ProviderOperation::Shutdown =>` arm".to_string())
+    );
+    assert_eq!(
+        shutdown_arm_region("ProviderOperation::Shutdown => Ok(ok_response(json!({"),
+        Err("Shutdown: the arm walk reaches the end of the source with nesting open".to_string())
+    );
+    assert_eq!(
+        shutdown_arm_region("ProviderOperation::Shutdown => true"),
+        Err("Shutdown: the arm has no ending comma".to_string())
+    );
+
+    // A missing answer source is an error that names the file path.
+    let absent = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/confine/absent-answers");
+    let absent_failure = match AnswerSources::read(&absent) {
+        Err(reason) => reason,
+        Ok(_) => panic!("the absent answer directory must be refused"),
+    };
+    assert!(
+        absent_failure.contains("src/contract.rs") && absent_failure.contains("absent-answers"),
+        "{absent_failure}"
+    );
+
     let doc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("CONFINEMENT.md");
     let doc = fs::read_to_string(&doc_path).unwrap_or_else(|err| {
         panic!(
@@ -1949,6 +2679,15 @@ fn operations_section_cites_existing_tests() {
         .expect("the real Operation cells equal the parse_request arms");
     operations_inputs_match_the_request_structs(section, &contract_source)
         .expect("the real Inputs cells equal each operation's request struct fields");
+    let answers = AnswerSources::read(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .expect("the provider answer sources must be readable");
+    operations_outputs_match_the_answers(
+        section,
+        &answers.contract,
+        &answers.state,
+        &answers.execution,
+    )
+    .expect("the real Outputs cells equal the keys the answers write");
 }
 
 /// The Id cells in `section` are the same set as `ids`.
