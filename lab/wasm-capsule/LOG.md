@@ -1558,3 +1558,39 @@
   F-WC10-CAP-REJECTED-RETRY, whose planted `EngineRun` literal lacked the new field. Re-anchored (the same bug, its
   retry's peak 0): "summary: 1 CAUGHT of 1". F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT re-anchored to 191, both
   CAUGHT in the 95-entry run. README totals: 191 entries, 127 runner-caught, 69 hand-proven.
+- 064 (wc-009b, first half; M1 B4 and C0 lab half, P10). Flint's INBOX note (28 Oct 00:30) relays Rong's import
+  contract (C+): world `product-capsule-v1` of `elastos:bus@1.0.0` in `elastos/wit/elastos-bus-v1.wit`; WC-1 (High):
+  `env.f` is a core import the Runtime refuses. Base `a61c39e42bf558451de3202650612f34715bb853` (062's tip), cargo and
+  rustc 1.91.0. Measured first, from the repo root, with a 25-byte copy of `IMPORTING_MODULE` written under the
+  git-ignored `target/`: `CARGO_TARGET_DIR=$PWD/lab/wasm-capsule/target/componentize cargo run --quiet --locked
+  --offline --manifest-path elastos/tools/componentize/Cargo.toml -- <in> <out>` built offline and exited 1 with
+  stderr "Error: failed to decode world from module" / "Caused by:" / "    0: module was not valid" / "    1: failed
+  to resolve import `env::f`" / "    2: module requires an import interface named `env`"; the test holds the last
+  line exactly (`COMPONENTIZE_ENV_REFUSAL`). The same command on the `tools/build` capsule (180 bytes, sha256
+  `2002429e73ee1a5e983df008f5b53728882646f109d55a9d1a93e831690631e1`, the pin) exited 0 and wrote a 312-byte
+  component. `tools/src/verify.rs`: `pub const BUS_V1_INTERFACES: [&str; 5]` and `pub fn bus_imports`
+  (`audit_component(component, &BUS_V1_INTERFACES).map_err(VerifyRefusal::Audit)`, nothing else), module doc and the
+  `Audit` variant's doc. New `tests/common/componentize.rs` (`componentize`: the command above from the test process,
+  target `<lane>/target/componentize`, files in a `TempDir`, each input run at most once per test binary). Tests:
+  `bus_interfaces_are_the_runtime_admission_list`, `bus_imports_lists_the_bus_interfaces_a_component_imports`,
+  `bus_imports_refuses_an_interface_outside_bus_v1_by_name`, `bus_imports_refuses_a_core_module` (`tests/verify.rs`);
+  `runtime_componentize_wraps_the_built_capsule_with_no_bus_import`, `runtime_componentize_refuses_the_env_f_module`
+  (`tests/run.rs`). `Cargo.toml` dev-dependency `wat = "=1.258.0"`; `Cargo.lock` gains one line (`"wat"` in
+  `capsule`'s dependencies), no new package. Two existing tests had to change, against acceptance 7, because each
+  pinned the verifier without a component path that acceptance 2 requires: `verifier_has_one_check_path` held "the
+  tools crate never names `audit_component`" and now holds "calls it exactly once" (a second call still fails it);
+  `verified_bundle_is_sealed`'s exact list of public functions gains `bus_imports` (still an exact match). README's
+  line for the sealed test also said "eight" functions and "five" accessors, one behind the test since `memory_mb`;
+  it now says ten and six. Falsifier F-WC9B-BUS-LIST-WIDENED by hand, then restored (`cmp` clean):
+  `bus_interfaces_are_the_runtime_admission_list` panicked at `tests/verify.rs:1313` "BUS_V1_INTERFACES is not the
+  Runtime's ALLOWED_BUS_IMPORTS, in order" (right side ending `"wasi:cli/environment@0.2.0"`), and
+  `bus_imports_refuses_an_interface_outside_bus_v1_by_name` panicked at `tests/verify.rs:1347` (its `expect_err`, the
+  `wasi:cli` component no longer refused). Canonical runner from the repo root, `RUST_TEST_THREADS=2
+  CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json
+  F-WC9B-BUS-LIST-WIDENED F-WC4-SEALED F-WC4-SECOND F-WC-README-COUNT F-WC-README-OUTSIDE-COUNT`: "baseline: 5 named
+  tests pass without an edit, 0 do not", all CAUGHT, "summary: 8 CAUGHT of 8" (F-WC-README-COUNT and
+  F-WC-README-OUTSIDE-COUNT re-anchored to 192, the same bug). README totals: 192 entries, 128 runner-caught, 69
+  hand-proven.
+  Gate run after all edits: `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check` clean; `cargo test
+  --locked` 137 passed, 3 ignored, 0 failed (`tests/run.rs` 74 passed, 2 ignored; `tests/verify.rs` 29 passed); then
+  `git status --porcelain -- elastos/` printed nothing.

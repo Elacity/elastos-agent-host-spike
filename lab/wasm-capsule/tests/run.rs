@@ -31,6 +31,7 @@ mod common;
 use capsule::{FIXED_INPUT, FIXED_OUTPUT};
 use capsule_identity::{sign_bundle, LabCid, NameSignature};
 use common::build::{lane_dir, run_build, TempDir};
+use common::componentize::componentize;
 use common::grants::{env_f, grants_file, importing, importing_env, IMPORTING_MODULE};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
@@ -52,7 +53,9 @@ use wasm_capsule_tools::run::{
     Refusal, RunControl, RunInput, TwoEngineRefusal, TwoEngineRun, DIGEST_ARGUMENT, DIGEST_EXPORT,
     WASMER_VERSION, WASMTIME_VERSION,
 };
-use wasm_capsule_tools::verify::{read_grants, verify_bundle, VerifiedBundle, VerifyRefusal};
+use wasm_capsule_tools::verify::{
+    bus_imports, read_grants, verify_bundle, VerifiedBundle, VerifyRefusal,
+};
 use wasm_capsule_tools::{bundle_identity, CAPSULE_MANIFEST};
 
 /// The smallest core Wasm module: the magic and version 1, no sections.
@@ -5805,4 +5808,46 @@ fn host_secret_probe_imports_are_refused_before_any_engine_starts() {
         assert_engine_starts(&ran, 0, &case);
         eprintln!("PASS: {WASI_PREVIEW1}.{name} refused, granted or not, before any engine");
     }
+}
+
+/// Task 064: the line the Runtime's componentize tool prints on stderr when it
+/// refuses `IMPORTING_MODULE`, measured first (LOG.md, task 064).
+const COMPONENTIZE_ENV_REFUSAL: &str = "    2: module requires an import interface named `env`";
+
+/// Task 064: the built `capsule.wasm`, wrapped by the Runtime's own
+/// componentize tool, is a component that imports no Bus interface.
+#[test]
+fn runtime_componentize_wraps_the_built_capsule_with_no_bus_import() {
+    let tmp = TempDir::new("run64-wrap");
+    let root = canonical(&tmp);
+    let built = built_capsule(&root);
+    let wrapped = componentize(&built);
+    assert!(
+        wrapped.status.success(),
+        "componentize failed ({}): {}",
+        wrapped.status,
+        wrapped.stderr
+    );
+    let component = wrapped.component.expect("componentize wrote no component");
+    assert_eq!(bus_imports(&component), Ok(vec![]));
+}
+
+/// Task 064: the Runtime's own componentize tool refuses the `env.f` module
+/// (Rong's WC-1 import), with the measured line.
+#[test]
+fn runtime_componentize_refuses_the_env_f_module() {
+    let refused = componentize(IMPORTING_MODULE);
+    assert!(
+        !refused.status.success(),
+        "componentize wrapped the env.f module: {}",
+        refused.stderr
+    );
+    assert!(
+        refused
+            .stderr
+            .lines()
+            .any(|line| line == COMPONENTIZE_ENV_REFUSAL),
+        "componentize's stderr has no line {COMPONENTIZE_ENV_REFUSAL:?}: {}",
+        refused.stderr
+    );
 }
