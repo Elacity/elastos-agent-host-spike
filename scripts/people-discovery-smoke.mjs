@@ -368,9 +368,22 @@ async function runScenario(name) {
         advertisement_id: "ad-1",
         display_name: "ESPFix",
         handle: "espfix",
+        status: "visible",
         peer_id: "must-not-render",
         connect_ticket: "must-not-render",
         topic: "must-not-render",
+      }, {
+        advertisement_id: "ad-contact",
+        display_name: "Already Added",
+        status: "contact",
+      }, {
+        advertisement_id: "ad-requested",
+        display_name: "Asked Already",
+        status: "requested",
+      }, {
+        advertisement_id: "ad-pending",
+        display_name: "Asking Me",
+        status: "pending",
       }],
       pendingRequestCount: 1,
     });
@@ -460,7 +473,22 @@ async function runScenario(name) {
     assert.doesNotMatch(environment.nodes.get("people-list").innerHTML, /person-card/);
     assert.match(environment.nodes.get("people-list").innerHTML, /Accepted contacts appear here/);
     assert.match(environment.nodes.get("discovery-list").innerHTML, /ESPFix/);
-    assert.match(environment.nodes.get("discovery-list").innerHTML, /Add contact/);
+    // Only the person with no relationship yet is offered Add contact.
+    const discoveryCards = environment.nodes.get("discovery-list").innerHTML.split("<article").slice(1);
+    assert.equal(discoveryCards.length, 4);
+    assert.deepEqual(
+      discoveryCards.map((card) => [
+        card.match(/<h4>([^<]*)<\/h4>/)[1],
+        card.match(/<p class="person-details"><span>([^<]*)<\/span>/)[1],
+        /data-action="discovery-request"/.test(card),
+      ]),
+      [
+        ["ESPFix", "espfix", true],
+        ["Already Added", "Contact", false],
+        ["Asked Already", "Contact request sent", false],
+        ["Asking Me", "Wants to add you as a contact", false],
+      ],
+    );
     assert.doesNotMatch(environment.nodes.get("discovery-list").innerHTML, />Request</);
     assert.match(environment.nodes.get("discovery-requests-list").innerHTML, /Open Inbox/);
     assert.match(environment.nodes.get("discovery-requests-list").innerHTML, /for your Profile are decided in Inbox/);

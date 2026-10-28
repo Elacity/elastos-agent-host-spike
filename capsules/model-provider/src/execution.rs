@@ -827,7 +827,12 @@ mod tests {
 
     #[cfg(unix)]
     fn wait_for_fake_llama_event(path: &Path, expected: &str) {
-        let deadline = Instant::now() + FIXTURE_EVENT_TIMEOUT;
+        wait_for_fake_llama_event_with_timeout(path, expected, FIXTURE_EVENT_TIMEOUT);
+    }
+
+    #[cfg(unix)]
+    fn wait_for_fake_llama_event_with_timeout(path: &Path, expected: &str, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
         loop {
             let events = fake_llama_events(path);
             if events.iter().any(|line| line == expected) {
@@ -4203,19 +4208,21 @@ mod tests {
         let root = temp_root("local-llama-timeout-capacity");
         let (mut offer, events, root) = local_llama_offer(&root, "timeout_ignore_term");
         offer.policy.concurrency_limit = 1;
-        // The fake engine installs its SIGTERM handler before its heavy imports,
-        // so start-up up to that point is interpreter start plus one small file
-        // read. This 5 s deadline outlasts that under CPU load and still keeps
-        // the deliberate 3 s pre-handler delay of the falsifier inside the margin.
-        offer.policy.runtime_ms_limit = 5_000;
+        // The deadline must find the engine already ignoring termination. Its
+        // start is load-bound like every fixture event, so it gets the same
+        // bound; health keeps that bound too, so the run deadline comes first.
+        // The fake engine installs that handler before its heavy imports, so a
+        // deadline that lands during start-up still records term_ignored.
+        // A 1 s shutdown would reap the engine before this test writes the
+        // release file, so the shutdown wait uses the same load bound.
+        let runtime = FIXTURE_EVENT_TIMEOUT;
+        offer.policy.runtime_ms_limit = runtime.as_millis() as u64;
         let AdapterConfig::LocalLlamaCppText { settings, .. } = &mut offer.adapter else {
             unreachable!();
         };
-        // Keep the run deadline the trigger: the health wait is capped to it.
         settings.health_timeout_ms = FIXTURE_EVENT_TIMEOUT.as_millis() as u64;
-        // The engine ignores SIGTERM, so it stays alive this long after the
-        // deadline; the test reads the still-held slot inside that window.
-        settings.shutdown_timeout_ms = 1_000;
+        // No forced reap races the checks below: the engine leaves on release.
+        settings.shutdown_timeout_ms = FIXTURE_EVENT_TIMEOUT.as_millis() as u64;
         let mut provider = ProviderCoordinatorHandle::start();
         init_provider(&provider, &root, vec![offer.clone()]);
 
@@ -4223,7 +4230,11 @@ mod tests {
         let first_binding = create_binding("request:local-timeout-first", &offer, &first_input);
         let first = create_run(&provider, &offer, &first_binding, &first_input);
         let first_run_id = first["data"]["run_id"].as_str().unwrap();
-        wait_for_fake_llama_event(&events, "term_ignored");
+        wait_for_fake_llama_event_with_timeout(
+            &events,
+            "term_ignored",
+            runtime + FIXTURE_EVENT_TIMEOUT,
+        );
         assert_eq!(
             get_run(&provider, first_run_id, &access_binding(&first_binding))["data"]["status"],
             "running"
@@ -4235,6 +4246,8 @@ mod tests {
         let blocked = create_run(&provider, &offer, &blocked_binding, &blocked_input);
         assert_eq!(blocked["data"]["terminal"]["error"]["code"], "model_busy");
 
+        // The worker stops only once the engine that ignored termination exits.
+        std::fs::write(events.with_extension("release"), b"release").unwrap();
         assert_eq!(
             wait_for_terminal(&provider, first_run_id, &access_binding(&first_binding))["data"]
                 ["terminal"]["error"]["code"],

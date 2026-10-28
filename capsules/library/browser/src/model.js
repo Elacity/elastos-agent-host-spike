@@ -127,7 +127,6 @@ export function visibilityContract(object) {
     effective_access: object?.published ? "public_content_link" : "principal_private",
     published: !!object?.published,
     published_cid: publishedCid(object) || null,
-    published_link: publishedCid(object) ? `elastos://${publishedCid(object)}` : null,
     shared: !!object?.shared,
     share_policy: object?.shared ? "shared" : "not_shared",
     public_folder_policy: "placement_only",

@@ -212,12 +212,12 @@ impl ComputeProvider for ComponentProvider {
         let result = tokio::task::spawn_blocking(move || {
             Self::instantiate_component(&engine, &component, hostcall, capsule_id, principal_id)
         })
-        .await
-        .map_err(|err| ElastosError::Compute(format!("Component task join error: {err}")))?;
+        .await;
 
+        // Drop the activation entry when it finishes, including a failed or panicked host call.
         self.instances.write().await.remove(&handle.id);
 
-        result
+        result.map_err(|err| ElastosError::Compute(format!("Component task join error: {err}")))?
     }
 
     async fn stop(&self, handle: &CapsuleHandle) -> Result<()> {

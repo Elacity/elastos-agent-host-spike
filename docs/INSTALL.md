@@ -72,8 +72,9 @@ curl -fsSL https://elastos.elacitylabs.com/install.sh | bash -s -- --install-onl
 setting to own setup, launch, and cleanup; older installers ignore it and already
 stop after bootstrap.
 
-The current default Home exposes System, People, Services, Browser, Wallet,
-Documents, Library, Marketplace, Archive, and Inbox. People is installed as a
+The current default Home exposes Assistant, Chat (Community), System, People,
+Services, Wallet, Documents, Library, Marketplace, Archive, and Inbox. On Apple Silicon
+Macs it also exposes Browser; Linux Homes do not show Browser in 0.8.0. People is installed as a
 separate app capsule; Home presents it but does not own its state or authority.
 
 Native Windows is not an accepted install target today. The current product
@@ -141,16 +142,14 @@ contract.
 Runtime profile from a trusted release. It is not the product contract for a
 Home content catalog.
 
-Downloadable games, GGUF models, and similar data should be published as signed
-content capsules identified by the CID of their complete bundle. Home `Get`
-will request a typed Runtime operation that verifies, fetches, pins, and admits
-that exact capsule through the content and availability providers. A service
-offer is needed only for a running provider capability, not for the content
-package itself.
+Models already use Home `Get`. Open Marketplace → Models and choose Get: Runtime
+checks the model against its signed catalog entry, downloads it and keeps it on
+this device. Then open it in Assistant. Retry and Stop work on the same
+row, and an interrupted download resumes by itself a few times first.
 
-Until that Get contract is implemented and verified, raw `url` entries and
-setup-only model downloads remain operator provisioning details. They must not
-be projected as remotely installable Home catalog items. See
+Getting other apps, games and data this way is not available yet. Until it is,
+raw `url` entries and setup-only downloads remain operator provisioning
+details, not Home catalog items. See
 [Content capsule distribution](CONTENT_CAPSULE_DISTRIBUTION.md).
 
 ## Jetson
@@ -189,7 +188,7 @@ Refresh-only is not sufficient for package/dependency changes: rebuild the targe
 `scripts/browser-vm-artifact-preflight.sh`, including the complete
 PipeWire/WirePlumber/GStreamer dependency set, before installation.
 
-## Set up Home on a board without a screen or passkey
+## Set up Home on a board without a passkey
 
 Home is created with a passkey, and the board needs none of its own. From a Mac
 or Windows computer, open an SSH tunnel to the board and keep it open:
@@ -202,6 +201,15 @@ Open `http://localhost:8090/home/` on that computer and create the passkey there
 (Touch ID or Windows Hello), or on a phone or security key. The passkey belongs
 to this Home at `localhost`, so sign in later through a tunnel the same way;
 using the same tunnel and address, `http://localhost:8090/home/`, is simplest.
+
+To use Home in the board's own browser, add a security key (USB) to your
+account. It must be a FIDO2 key with a PIN or fingerprint. On the computer,
+sign in through the tunnel, open System, choose Accounts and select Add passkey
+(admins only). Confirm with your current passkey, then create the new passkey
+on the security key. Then plug the key into the board, open
+`http://localhost:8090/home/` in the board's browser and select Use passkey.
+Use `localhost` there too: the key does not work at `127.0.0.1` or at the
+board's network address.
 
 ## How updates reach your Home
 
@@ -302,9 +310,26 @@ key if you need to recover across that first update.
 
 ### Recover an interrupted update
 
-If Runtime reports an interrupted command-line update, run `elastos update`
-again before starting Home. Runtime owns the saved transaction and verifies its
-files before recovery. Keep the installation files and data in place.
+On 0.8.0 and its test release 0.8.0-alpha.25, an update that stops partway
+keeps Home closed until it is recovered. Keep the installation files and data
+in place, and stay connected to the network Home updates over.
+
+1. Run `elastos home --browser`. It finishes recovery of a System update. If it
+   says to run `elastos update` again, the update was started with
+   `elastos update`: run `elastos update`, then `elastos home --browser`. Use
+   this order also when System and a Home start name different commands; each
+   command names the other when the recovery is not its own.
+2. After a failed `elastos update`, the next `elastos update` or Home start
+   repairs this release's apps and providers from the publisher's seed. Without
+   a connection to it, Home may not start until the connection is back.
+3. Two cases are not repaired this way: an `elastos update` that stopped while
+   it was finishing, and a System update that stopped while it was replacing an
+   app. The command a message names then stops with the same message every
+   time. Do not delete or move any files. Ask for help in
+   [GitHub issues](https://github.com/Elacity/elastos-runtime/issues) and
+   include the output of `elastos --version` and the exact message. We are
+   fixing this in a later update
+   ([#108](https://github.com/Elacity/elastos-runtime/issues/108)).
 
 A Home with an installed update controller keeps its controller Runtime and
 private receipt in the data directory. The controller of the version that runs
@@ -502,11 +527,18 @@ Runtime validates and enforces capability tokens. The built-in shell evaluates
 the local approval policy for interactive and operator flows:
 
 - In `cli` mode, the terminal asks the operator to approve or deny each request.
-- In `agent` mode, the shell applies the policy file and built-in defaults.
+- In `agent` mode, the shell grants only what the policy file's `allow` list
+  matches. A missing, unreadable or malformed policy file denies every request.
 
 The default policy file is
 `~/.local/share/elastos/policy.json`. Set `ELASTOS_POLICY_FILE` to use a
-different operator-managed file.
+different operator-managed file. With neither `ELASTOS_POLICY_FILE` nor `HOME`
+set, agent mode denies every request.
+
+`elastos serve`, and `elastos run` or `elastos open` for a data capsule, start
+the shell in `agent` mode unless `ELASTOS_SHELL_MODE` is set (`cli` gives the
+shell the terminal). `ELASTOS_SHELL_MODE=auto` grants every request; use it
+only for local development.
 
 ## Trust model
 

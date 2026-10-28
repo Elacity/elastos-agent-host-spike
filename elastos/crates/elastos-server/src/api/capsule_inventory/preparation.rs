@@ -4287,7 +4287,7 @@ mod tests {
         Ok(elastos_common::host_memory::HostMemory {
             total: 16 * 1024 * 1024 * 1024,
             available: 16 * 1024 * 1024 * 1024,
-            pressure_normal: false,
+            pressure: elastos_common::host_memory::MemoryPressure::NotReported,
         })
     }
     fn test_owner() -> PreparationOwner {
@@ -4362,7 +4362,7 @@ mod tests {
             Ok(elastos_common::host_memory::HostMemory {
                 total: 4 * 1024 * 1024 * 1024,
                 available: 4 * 1024 * 1024 * 1024,
-                pressure_normal: false,
+                pressure: elastos_common::host_memory::MemoryPressure::NotReported,
             })
         }
         fn unavailable() -> std::io::Result<elastos_common::host_memory::HostMemory> {
@@ -4529,7 +4529,7 @@ mod tests {
             Ok(elastos_common::host_memory::HostMemory {
                 total: 4 * 1024 * 1024 * 1024,
                 available: 4 * 1024 * 1024 * 1024,
-                pressure_normal: false,
+                pressure: elastos_common::host_memory::MemoryPressure::NotReported,
             })
         }
         fn unavailable() -> std::io::Result<elastos_common::host_memory::HostMemory> {
