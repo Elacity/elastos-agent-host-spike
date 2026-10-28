@@ -396,6 +396,119 @@ fn three_shared_digest_bytes_over_the_hamt_threshold_is_a_shard() {
 }
 
 #[test]
+fn four_shared_digest_bytes_over_the_hamt_threshold_is_a_shard() {
+    // Task 070: the sixth and seventh 200-byte fillers of the
+    // 262145-estimate bundle (the 200-digit names of 5 and 6) are replaced by
+    // two 200-byte names. Their digest bytes 0 to 3 are equal (`89 C8 26 A6`)
+    // and byte 4 differs (`03` and `94`), and no other name has their first
+    // digest byte, so byte 3's bucket holds both names and still gets a child
+    // shard from byte 4. The links estimate stays 262145, so the directory is
+    // a HAMT shard. The pin was recomputed by README's Python rule and
+    // printed by Kubo v0.40.1 with the provider's HAMT config.
+    let entries = directory_with_four_shared_digest_bytes_bundle();
+    let pair = shared_four_byte_names();
+    for name in &pair {
+        let found: Vec<&BundleEntry> = entries.iter().filter(|entry| entry.path == *name).collect();
+        assert_eq!(found.len(), 1, "one name of the pair is in the bundle");
+        assert_eq!(found[0].path.len(), 200, "a pair name's bytes");
+    }
+    for source in [format!("{:0>200}", 5), format!("{:0>200}", 6)] {
+        assert!(
+            entries.iter().all(|entry| entry.path != source),
+            "the helper replaced the 200-digit names of 5 and 6"
+        );
+    }
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    let (_bundle, walked, encoded) = walk_and_encode(&entries);
+    assert_eq!(
+        (walked.as_str(), encoded.as_str()),
+        (
+            FOUR_SHARED_DIGEST_BYTES_OVER_HAMT_THRESHOLD_LAB_CID,
+            FOUR_SHARED_DIGEST_BYTES_OVER_HAMT_THRESHOLD_LAB_CID
+        ),
+        "(lab_cid, encode_entries) against the pin"
+    );
+    assert!(walked.starts_with("bafybei"), "{walked}");
+    assert_ne!(
+        walked, FIVE_SHARED_DIGEST_BYTES_OVER_HAMT_THRESHOLD_LAB_CID,
+        "four and five shared digest bytes got one name"
+    );
+    assert_ne!(
+        walked, DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID,
+        "four shared digest bytes got the plain shard's name"
+    );
+    assert_ne!(
+        walked, DIRECTORY_WITH_A_ONE_LINK_HAMT_SHARD_LAB_CID,
+        "four shared digest bytes got the one-link shard's name"
+    );
+    assert_ne!(
+        walked, THREE_SHARED_DIGEST_BYTES_OVER_HAMT_THRESHOLD_LAB_CID,
+        "four shared digest bytes got the three-shared-byte shard's name"
+    );
+}
+
+#[test]
+fn five_shared_digest_bytes_over_the_hamt_threshold_is_a_shard() {
+    // Task 070: the eighth and ninth 200-byte fillers of the
+    // 262145-estimate bundle (the 200-digit names of 7 and 8) are replaced by
+    // two 200-byte names. Their digest bytes 0 to 4 are equal
+    // (`B0 97 BA 5C DC`) and byte 5 differs (`99` and `A3`), and no other
+    // name has their first digest byte, so byte 4's bucket holds both names
+    // and still gets a child shard from byte 5. The links estimate stays
+    // 262145, so the directory is a HAMT shard. The pin was recomputed by
+    // README's Python rule and printed by Kubo v0.40.1 with the provider's
+    // HAMT config.
+    let entries = directory_with_five_shared_digest_bytes_bundle();
+    let pair = shared_five_byte_names();
+    for name in &pair {
+        let found: Vec<&BundleEntry> = entries.iter().filter(|entry| entry.path == *name).collect();
+        assert_eq!(found.len(), 1, "one name of the pair is in the bundle");
+        assert_eq!(found[0].path.len(), 200, "a pair name's bytes");
+    }
+    for source in [format!("{:0>200}", 7), format!("{:0>200}", 8)] {
+        assert!(
+            entries.iter().all(|entry| entry.path != source),
+            "the helper replaced the 200-digit names of 7 and 8"
+        );
+    }
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    let (_bundle, walked, encoded) = walk_and_encode(&entries);
+    assert_eq!(
+        (walked.as_str(), encoded.as_str()),
+        (
+            FIVE_SHARED_DIGEST_BYTES_OVER_HAMT_THRESHOLD_LAB_CID,
+            FIVE_SHARED_DIGEST_BYTES_OVER_HAMT_THRESHOLD_LAB_CID
+        ),
+        "(lab_cid, encode_entries) against the pin"
+    );
+    assert!(walked.starts_with("bafybei"), "{walked}");
+    assert_ne!(
+        walked, FOUR_SHARED_DIGEST_BYTES_OVER_HAMT_THRESHOLD_LAB_CID,
+        "five shared digest bytes got the four-shared-byte shard's name"
+    );
+    assert_ne!(
+        walked, DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID,
+        "five shared digest bytes got the plain shard's name"
+    );
+    assert_ne!(
+        walked, DIRECTORY_WITH_A_ONE_LINK_HAMT_SHARD_LAB_CID,
+        "five shared digest bytes got the one-link shard's name"
+    );
+    assert_ne!(
+        walked, THREE_SHARED_DIGEST_BYTES_OVER_HAMT_THRESHOLD_LAB_CID,
+        "five shared digest bytes got the three-shared-byte shard's name"
+    );
+}
+
+#[test]
 fn file_root_inside_a_hamt_has_the_pinned_cid() {
     // Task 062: one 200-byte filler of the 262145-estimate bundle holds a
     // file of 262145 bytes, a file root over two raw leaves. A HAMT leaf

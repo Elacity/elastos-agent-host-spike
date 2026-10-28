@@ -201,8 +201,8 @@ pub const NINE_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID: &str =
 /// 51-byte measured name lengthened by 199 bytes to 250, so the links
 /// estimate stays 262145 and the directory is a HAMT shard. The 1-byte name
 /// leaves a 1-byte murmur3 tail, so its only byte is mixed into the hash's
-/// first word; a tail of 0 or more than 1 byte never takes that branch.
-/// Built in a temp dir and in memory and never committed.
+/// first word. A tail of 0 never takes the first-word mix; a longer tail
+/// does. Built in a temp dir and in memory and never committed.
 pub const ONE_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID: &str =
     "bafybeickofbvelg2sn63rs5bzkuis4p53hwpcukvfho3ucmua4jbq6gadm";
 /// Task 069: the 262145-estimate flat bundle with its first two 200-byte
@@ -213,6 +213,24 @@ pub const ONE_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID: &str =
 /// fourth byte. Built in a temp dir and in memory and never committed.
 pub const THREE_SHARED_DIGEST_BYTES_OVER_HAMT_THRESHOLD_LAB_CID: &str =
     "bafybeigu7u5n3b2mlwwhktsq3qzgt54c7lii5y5kboe4ykmpzjryofvw24";
+/// Task 070: the 262145-estimate flat bundle with the sixth and seventh
+/// 200-byte fillers (the 200-digit names of 5 and 6) replaced by
+/// [`shared_four_byte_names`]. Each name has 200 bytes, so the links estimate
+/// stays 262145 and the directory is a HAMT shard. The two names share four
+/// digest bytes (`89 C8 26 A6`) and differ at byte 4, so the fourth byte's
+/// bucket holds both and still gets a child shard from the fifth byte. Built
+/// in a temp dir and in memory and never committed.
+pub const FOUR_SHARED_DIGEST_BYTES_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeieeqipx4qubqfikokr6wqjiexnlyciu5w67x6kie2ns46b7f45pdq";
+/// Task 070: the 262145-estimate flat bundle with the eighth and ninth
+/// 200-byte fillers (the 200-digit names of 7 and 8) replaced by
+/// [`shared_five_byte_names`]. Each name has 200 bytes, so the links estimate
+/// stays 262145 and the directory is a HAMT shard. The two names share five
+/// digest bytes (`B0 97 BA 5C DC`) and differ at byte 5, so the fifth byte's
+/// bucket holds both and still gets a child shard from the sixth byte. Built
+/// in a temp dir and in memory and never committed.
+pub const FIVE_SHARED_DIGEST_BYTES_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeibexh47ziqxupjywrr6vbloojzoecoyc5nfj4y6jef7the756mwdu";
 
 /// The empty files that bring content-sample's root block to 262144 bytes
 /// and `longer` more: 1064 named by 200 digits and one by 235 + `longer`
@@ -681,6 +699,34 @@ pub fn shared_three_byte_names() -> [String; 2] {
     ]
 }
 
+/// Task 070's four-byte pair: two 200-byte names whose `hamt_digest` values
+/// share bytes 0 to 3 (`89 C8 26 A6`) and differ at byte 4 (`03` and `94`),
+/// and whose first digest byte `89` no other name in
+/// [`directory_with_four_shared_digest_bytes_bundle`] has. The names are `f4-`
+/// and 197 zero-padded digits (numbers 30408 and 702843). The unit test
+/// `two_names_sharing_four_digest_bytes_get_the_next_shard` builds the same
+/// pair.
+pub fn shared_four_byte_names() -> [String; 2] {
+    [
+        format!("f4-{:0>197}", 30_408),
+        format!("f4-{:0>197}", 702_843),
+    ]
+}
+
+/// Task 070's five-byte pair: two 200-byte names whose `hamt_digest` values
+/// share bytes 0 to 4 (`B0 97 BA 5C DC`) and differ at byte 5 (`99` and `A3`),
+/// and whose first digest byte `B0` no other name in
+/// [`directory_with_five_shared_digest_bytes_bundle`] has. The names are `f5-`
+/// and 197 zero-padded digits (numbers 6279238 and 7983145). The unit test
+/// `two_names_sharing_five_digest_bytes_get_the_next_shard` builds the same
+/// pair.
+pub fn shared_five_byte_names() -> [String; 2] {
+    [
+        format!("f5-{:0>197}", 6_279_238),
+        format!("f5-{:0>197}", 7_983_145),
+    ]
+}
+
 /// [`directory_at_hamt_threshold_bundle`]`(1)` with its first two 200-byte
 /// fillers replaced by [`shared_two_byte_names`]. Each name has 200 bytes, so
 /// the links estimate stays 262145: a HAMT shard whose first digest byte's
@@ -747,6 +793,71 @@ pub fn directory_with_three_shared_digest_bytes_bundle() -> Vec<BundleEntry> {
         .sum();
     assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
     entries
+}
+
+/// Task 070: [`directory_at_hamt_threshold_bundle`]`(1)` with its first `skip`
+/// 200-byte digit fillers left as they are and the next two replaced by
+/// `pair`. Each of `pair`'s names has 200 bytes, so the links estimate stays
+/// 262145: a HAMT shard whose bucket at the depth before the pair's first
+/// differing byte holds both names and still gets a child shard from the next
+/// digest byte. The helper asserts two replacements, the source names it
+/// replaced, both new lengths and the estimate. Built in a temp dir and in
+/// memory and never committed.
+fn bundle_with_a_shared_digest_byte_pair(pair: [String; 2], skip: usize) -> Vec<BundleEntry> {
+    for name in &pair {
+        assert_eq!(name.len(), 200, "a bundle name fits in a folder");
+    }
+    let mut skipped = 0;
+    let mut replaced = 0;
+    let entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(1)
+        .into_iter()
+        .map(|entry| {
+            if replaced == pair.len() || entry.path.len() != 200 {
+                return entry;
+            }
+            let source = format!("{skipped:0>200}");
+            assert_eq!(entry.path, source, "the source name of the pair");
+            skipped += 1;
+            if skipped <= skip {
+                return entry;
+            }
+            let path = pair[replaced].clone();
+            replaced += 1;
+            BundleEntry {
+                path,
+                content: entry.content,
+            }
+        })
+        .collect();
+    assert_eq!(replaced, pair.len(), "two 200-byte fillers are replaced");
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    entries
+}
+
+/// Task 070: [`directory_at_hamt_threshold_bundle`]`(1)` with its first five
+/// 200-byte fillers left as they are and the sixth and seventh (the 200-digit
+/// names of 5 and 6) replaced by [`shared_four_byte_names`]. Each name has
+/// 200 bytes, so the links estimate stays 262145: a HAMT shard whose two
+/// names share digest bytes 0 to 3, so byte 3's bucket holds both and still
+/// gets a child shard from byte 4. Built in a temp dir and in memory and
+/// never committed.
+pub fn directory_with_four_shared_digest_bytes_bundle() -> Vec<BundleEntry> {
+    bundle_with_a_shared_digest_byte_pair(shared_four_byte_names(), 5)
+}
+
+/// Task 070: [`directory_at_hamt_threshold_bundle`]`(1)` with its first seven
+/// 200-byte fillers left as they are and the eighth and ninth (the 200-digit
+/// names of 7 and 8) replaced by [`shared_five_byte_names`]. Each name has
+/// 200 bytes, so the links estimate stays 262145: a HAMT shard whose two
+/// names share digest bytes 0 to 4, so byte 4's bucket holds both and still
+/// gets a child shard from byte 5. Built in a temp dir and in memory and
+/// never committed.
+pub fn directory_with_five_shared_digest_bytes_bundle() -> Vec<BundleEntry> {
+    bundle_with_a_shared_digest_byte_pair(shared_five_byte_names(), 7)
 }
 
 /// Task 062: [`directory_at_hamt_threshold_bundle`]`(1)` with its first
