@@ -1,9 +1,8 @@
 //! The one detector for a path, git, or registry dependency on this crate.
 
-/// True when the decoded text is a path, git, or registry dependency on this crate.
+/// True when the decoded text is a path, git, registry, table, dotted, or workspace dependency on this crate.
 ///
 /// A manifest that only names the crate, including its own `version` field, is not a link.
-/// Dependency fields may be reordered, quoted, dotted, or in an explicit table.
 #[rustfmt::skip]
 pub fn cargo_toml_path_depends_on_grant_binding(cargo_toml: &str) -> bool {
     let cargo_toml = decode_toml_basic_strings(cargo_toml);
@@ -16,10 +15,14 @@ pub fn cargo_toml_path_depends_on_grant_binding(cargo_toml: &str) -> bool {
                     .is_some_and(|value| value.starts_with(['"', '\'']))
             })
             || ((unquoted.contains("grant-binding={")
-                || unquoted.contains("grant-binding.")
+                || unquoted.contains("grant-binding.git=")
+                || unquoted.contains("grant-binding.version=")
+                || unquoted.contains("grant-binding.workspace=")
                 || unquoted.contains(".grant-binding]")
                 || unquoted.contains("package=grant-binding"))
-                && (unquoted.contains("git=") || unquoted.contains("version="))))
+                && (unquoted.contains("git=")
+                    || unquoted.contains("version=")
+                    || unquoted.contains("workspace="))))
 }
 
 /// Decode escapes in TOML basic strings, so an escaped link stays visible.
@@ -481,4 +484,48 @@ fn model_git_or_registry_dependency_is_a_link() {
             "{manifest}"
         );
     }
+}
+
+#[test]
+fn model_table_or_dotted_dependency_is_a_link() {
+    let branch_first =
+        "grant-binding = { branch = \"main\", git = \"https://example.com/gb.git\" }\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(branch_first));
+    let registry_first = "grant-binding = { registry = \"crates-io\", version = \"1.2.3\" }\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(registry_first));
+    let workspace = "grant-binding = { workspace = true }\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(workspace));
+    let table = "[dependencies.grant-binding]\nversion = \"1.2.3\"\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(table));
+    let dev_table = "[dev-dependencies.grant-binding]\ngit = \"https://example.com/gb.git\"\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(dev_table));
+    let patch_table = "[patch.crates-io.grant-binding]\ngit = \"https://example.com/gb.git\"\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(patch_table));
+    let dotted_version = "grant-binding.version = \"1.2.3\"\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(dotted_version));
+    let dotted_git = "grant-binding.git = \"https://example.com/gb.git\"\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(dotted_git));
+    let dotted_workspace = "grant-binding.workspace = true\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(dotted_workspace));
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        "name = \"grant-binding\"\nversion = \"0.1.0\"\n"
+    ));
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        "package = \"grant-binding\"\n"
+    ));
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        "serde = { workspace = true }\n"
+    ));
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        "other = { git = \"https://example.com/grant-binding.git\" }\n"
+    ));
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        "[dependencies.grant-binding]\n"
+    ));
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        "Grant-Binding.version = \"1.2.3\"\n"
+    ));
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        "[dependencies.Grant-Binding]\nversion = \"1.2.3\"\n"
+    ));
 }

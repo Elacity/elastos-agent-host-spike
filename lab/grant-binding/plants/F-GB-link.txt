@@ -2,6 +2,7 @@ id: F-GB-link
 file: src/link.rs
 test: model_detects_a_path_dependency_on_this_crate
 test: link::model_git_or_registry_dependency_is_a_link
+test: link::model_table_or_dotted_dependency_is_a_link
 --- old
     let packed: String = cargo_toml.chars().filter(|ch| !ch.is_whitespace()).collect();
     let unquoted = packed.replace(['"', '\''], "");
@@ -12,10 +13,14 @@ test: link::model_git_or_registry_dependency_is_a_link
                     .is_some_and(|value| value.starts_with(['"', '\'']))
             })
             || ((unquoted.contains("grant-binding={")
-                || unquoted.contains("grant-binding.")
+                || unquoted.contains("grant-binding.git=")
+                || unquoted.contains("grant-binding.version=")
+                || unquoted.contains("grant-binding.workspace=")
                 || unquoted.contains(".grant-binding]")
                 || unquoted.contains("package=grant-binding"))
-                && (unquoted.contains("git=") || unquoted.contains("version="))))
+                && (unquoted.contains("git=")
+                    || unquoted.contains("version=")
+                    || unquoted.contains("workspace="))))
 --- new
     let _ = cargo_toml;
     false
