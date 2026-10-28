@@ -121,8 +121,9 @@ To recompute a lab CID by hand:
    is equal. A bucket of one child is one link named the bucket's two
    uppercase hex digits and the child's name; a bucket of two or more is one
    link named only those two digits, pointing at a child shard built from the
-   next digest byte. A shard of one link is allowed when its children share
-   this byte; only a bucket of one child is a leaf. A ninth byte is refused
+   next digest byte, even when that child shard holds one link. A shard of
+   one link is allowed when its children share this byte; only a bucket of
+   one child is a leaf. A ninth byte is refused
    with `Refusal::HamtTooDeep`. Links go out in bucket order. The shard's
    block writes its links as in step 5, then field 1 holds its UnixFS data:
    `08 05` (type 5), `12` and the bitmap as field 2, `28 22` (hash type
@@ -131,9 +132,11 @@ To recompute a lab CID by hand:
    length is not always 32. The shard's CID is `01 70 12 20` and the SHA-256
    of its block, and its Tsize is its block's length plus its links' Tsizes.
    `directory_at_the_hamt_threshold_stays_basic`,
-   `directory_over_the_hamt_threshold_is_a_shard` and
-   `child_directory_over_the_hamt_threshold_is_a_shard` name this shape, with
-   falsifiers F-CI56a to F-CI56l, F-CI18h, F-CI53a and F-CI53b.
+   `directory_over_the_hamt_threshold_is_a_shard`,
+   `child_directory_over_the_hamt_threshold_is_a_shard` and
+   `directory_with_a_one_link_hamt_shard_has_the_pinned_cid` name this shape,
+   with falsifiers F-CI56a to F-CI56l, F-CI18h, F-CI53a, F-CI53b and
+   F-CI61a.
 7. A directory's CID is `01 70 12 20` and the SHA-256 of its block (the dag-pb
    codec `0x70`). The Tsize of a link to a directory is the length of its
    block plus the Tsizes of its own links. Every varint inside a CID here is
@@ -342,6 +345,7 @@ rules and not from the Rust code, in
 | A directory whose links estimate is at most 262144 is a basic directory, even when its block is larger; a greater estimate is a HAMT shard (task 056) | `directory_at_the_hamt_threshold_stays_basic`, `directory_over_the_hamt_threshold_is_a_shard` | F-CI18h (no shard), F-CI53a (`>=`), F-CI53b (the threshold becomes 262145), F-CI56a (digest bytes reversed), F-CI56d (a child's Tsize, not 36), F-CI56f (bitmap byte reversed), F-CI56h (type 1), F-CI56i (hash type), F-CI56j (fanout), F-CI56l (a two-name bucket is a leaf) |
 | A child directory is judged on its own links estimate: the 262145-estimate set under `photos/` shards while the root stays basic (task 056) | `child_directory_over_the_hamt_threshold_is_a_shard` | F-CI56e (only the root shards), F-CI56k (a shard's Tsize leaves out its block) |
 | A HAMT leaf link names its bucket in two uppercase hex digits and then the child's name; a bucket of two or more children is one link named only the prefix (task 056) | `directory_over_the_hamt_threshold_is_a_shard`, `child_directory_over_the_hamt_threshold_is_a_shard` | F-CI56b (a leaf has the prefix only), F-CI56c (a one-entry bucket is a child shard) |
+| A child shard of one link stays a shard link when its names share the next digest byte; a bucket of two or more children is never a leaf (task 061) | `directory_with_a_one_link_hamt_shard_has_the_pinned_cid`, `two_names_in_one_bucket_get_a_child_shard` | F-CI61a (a child shard of one link becomes a leaf) |
 | A HAMT bitmap sets bucket `i` in byte `31 - i / 8` at `1 << (i % 8)` and drops leading zero bytes; a collision bucket gets a child shard (task 056) | `hamt_data_trims_leading_zero_bitmap_bytes`, `two_names_in_one_bucket_get_a_child_shard` | F-CI56f (bitmap byte order), F-CI56g (no trimming) |
 | The largest basic root block task 053 named (262144 bytes) is still named, and one name byte more is named too; no block-length refusal remains (task 053, extended by task 056) | `directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused` | — |
 | No inline: no identity multihash | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18i (inline at most 32 bytes) |
@@ -409,6 +413,17 @@ whose block is larger than 262144 bytes, `bafybeicqo67qvp3orvh33xcxh5eugdsqb2x2f
 estimate 140, so the root stays basic. README's Python block gives all three
 from the rule in steps 5 and 6, and the hand-run Kubo printed them with the
 provider's HAMT config.
+Task 061 adds one more pin, built in a temp dir and in memory and never
+committed: the 262145-estimate bundle with two 200-byte names whose digest
+bytes 0 and 1 are equal (`FE 57`) and whose byte 2 differs, so the first
+byte's bucket holds only those two names and the child shard from the next
+digest byte holds one link. The parent still links that child shard, named
+only the first byte's two digits, so the bundle's shape is the one the rule
+in step 6 keeps. It is
+`bafybeiap7fmepwaka7go2lxcfkxuhpi3ifs3rhpy7u6oolxtrtb77v5maq`
+(`DIRECTORY_WITH_A_ONE_LINK_HAMT_SHARD_LAB_CID`) and its entries are
+`directory_with_a_one_link_hamt_shard_bundle`. README's Python block gave it
+first and `encode_entries` agrees; the hand-run Kubo printed it too.
 
 ### The cross-implementation check
 
@@ -2066,7 +2081,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 301 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 302 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -2118,7 +2133,8 @@ F-CI49a to F-CI49c (see
 [naming a closure listing](#naming-a-closure-listing)), and task 056's
 F-CI56a to F-CI56l (see [the encoding](#the-encoding); F-CI18h, F-CI53a and
 F-CI53b are retargeted by it), and task 054's F-CI54a to F-CI54e (see
-[the encoding](#the-encoding)).
+[the encoding](#the-encoding)), and task 061's F-CI61a (see
+[the encoding](#the-encoding); F-CI56j is retargeted by it).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its

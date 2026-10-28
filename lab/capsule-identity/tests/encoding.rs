@@ -302,6 +302,38 @@ fn directory_over_the_hamt_threshold_is_a_shard() {
 }
 
 #[test]
+fn directory_with_a_one_link_hamt_shard_has_the_pinned_cid() {
+    // Task 061: two 200-byte names replace two fillers of the 262145-estimate
+    // bundle. Their digest bytes 0 and 1 are equal and byte 2 differs, and no
+    // other name has their first digest byte, so the first byte's bucket
+    // holds only those two names and the child shard from the next digest
+    // byte holds one link. The parent still links that child shard, named
+    // only the first byte's two digits. The pin was recomputed by README's
+    // Python rule and printed by Kubo v0.40.1 with the provider's HAMT
+    // config.
+    let entries = directory_with_a_one_link_hamt_shard_bundle();
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    let (_bundle, walked, encoded) = walk_and_encode(&entries);
+    assert_eq!(
+        (walked.as_str(), encoded.as_str()),
+        (
+            DIRECTORY_WITH_A_ONE_LINK_HAMT_SHARD_LAB_CID,
+            DIRECTORY_WITH_A_ONE_LINK_HAMT_SHARD_LAB_CID
+        ),
+        "(lab_cid, encode_entries) against the pin"
+    );
+    assert!(walked.starts_with("bafybei"), "{walked}");
+    assert_ne!(
+        walked, DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID,
+        "a one-link child shard got the same name as a two-link one"
+    );
+}
+
+#[test]
 fn child_directory_over_the_hamt_threshold_is_a_shard() {
     // The 262145-estimate flat bundle sits under `photos/`, and
     // content-sample's own two files stay at the root, so `photos/capsule.json`

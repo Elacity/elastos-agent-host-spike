@@ -143,6 +143,12 @@ pub const DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID: &str =
 /// temp dir and in memory and never committed.
 pub const CHILD_DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID: &str =
     "bafybeibvx4eqxqix2zsu3yufv7bbpq4gochl22mpfjznfxp43vtrvh33du";
+/// Task 061: the 262145-estimate flat bundle with two 200-byte fillers
+/// replaced by [`shared_two_byte_names`], so one bucket holds only those two
+/// names, which share two digest bytes, and its child shard holds one link.
+/// Built in a temp dir and in memory and never committed.
+pub const DIRECTORY_WITH_A_ONE_LINK_HAMT_SHARD_LAB_CID: &str =
+    "bafybeiap7fmepwaka7go2lxcfkxuhpi3ifs3rhpy7u6oolxtrtb77v5maq";
 
 /// The empty files that bring content-sample's root block to 262144 bytes
 /// and `longer` more: 1064 named by 200 digits and one by 235 + `longer`
@@ -217,6 +223,48 @@ pub fn directory_at_hamt_threshold_bundle(longer: usize) -> Vec<BundleEntry> {
         .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
         .sum();
     assert_eq!(measured, target, "the helper measured {measured} bytes");
+    entries
+}
+
+/// Task 061's pair: two 200-byte names whose `hamt_digest` values share
+/// bytes 0 and 1 (`FE 57`) and differ at byte 2 (`79` and `37`), and whose
+/// first digest byte `FE` no other name in
+/// [`directory_with_a_one_link_hamt_shard_bundle`] has. The names are `one-`
+/// and `two-` and 196 zero-padded digits. The unit test
+/// `two_names_in_one_bucket_get_a_child_shard` builds the same pair.
+pub fn shared_two_byte_names() -> [String; 2] {
+    [format!("one-{:0>196}", 62), format!("two-{:0>196}", 35_399)]
+}
+
+/// [`directory_at_hamt_threshold_bundle`]`(1)` with its first two 200-byte
+/// fillers replaced by [`shared_two_byte_names`]. Each name has 200 bytes, so
+/// the links estimate stays 262145: a HAMT shard whose first digest byte's
+/// bucket holds both names, and whose child shard from the next digest byte
+/// holds one link. Built in a temp dir and in memory and never committed.
+pub fn directory_with_a_one_link_hamt_shard_bundle() -> Vec<BundleEntry> {
+    let pair = shared_two_byte_names();
+    let mut replaced = 0;
+    let entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(1)
+        .into_iter()
+        .map(|entry| {
+            if replaced < pair.len() && entry.path.len() == 200 {
+                let path = pair[replaced].clone();
+                replaced += 1;
+                BundleEntry {
+                    path,
+                    content: entry.content,
+                }
+            } else {
+                entry
+            }
+        })
+        .collect();
+    assert_eq!(replaced, pair.len(), "two 200-byte fillers are replaced");
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
     entries
 }
 

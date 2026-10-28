@@ -38,9 +38,9 @@ use tempfile::TempDir;
 /// the three bundles built for the profile tests, the photo stand-in
 /// consumer copy (task 047), the two bundles with a file over one leaf
 /// (task 048), the bundle with a file of two tree levels (task 051), the
-/// bundle whose root block is exactly 262144 bytes (task 053) and the three
-/// HAMT bundles (task 056): 19.
-const PINNED_BUNDLES: usize = 19;
+/// bundle whose root block is exactly 262144 bytes (task 053) and the four
+/// HAMT bundles (tasks 056 and 061): 20.
+const PINNED_BUNDLES: usize = 20;
 
 /// How many committed fixtures have a pin: all but wc001-core.
 const PINNED_FIXTURES: usize = 7;
@@ -187,6 +187,11 @@ fn pinned_bundles() -> Vec<Pinned> {
         what: "directory over the HAMT threshold".to_owned(),
         pin: DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID,
         entries: directory_at_hamt_threshold_bundle(1),
+    });
+    bundles.push(Pinned {
+        what: "directory with a one-link HAMT shard".to_owned(),
+        pin: DIRECTORY_WITH_A_ONE_LINK_HAMT_SHARD_LAB_CID,
+        entries: directory_with_a_one_link_hamt_shard_bundle(),
     });
     bundles.push(Pinned {
         what: "child directory over the HAMT threshold".to_owned(),

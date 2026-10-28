@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049, 051, 053, 055, 056 and 054). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049, 051, 053, 055, 056, 054 and 061). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -4868,19 +4868,21 @@
     },
     {
       "id": "F-CI56j",
-      "title": "the shard's fanout is 128: the UnixFS data names another width",
+      "title": "the shard's fanout field is 128: the UnixFS data names another width",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "const HAMT_FANOUT: u32 = 256;\n",
-          "new": "const HAMT_FANOUT: u32 = 128;\n"
+          "old": "    put_varint(&mut data, u64::from(HAMT_FANOUT));\n",
+          "new": "    put_varint(&mut data, 128);\n"
         }
       ],
       "tests": [
         "directory_over_the_hamt_threshold_is_a_shard",
-        "child_directory_over_the_hamt_threshold_is_a_shard"
+        "child_directory_over_the_hamt_threshold_is_a_shard",
+        "tests::hamt_data_trims_leading_zero_bitmap_bytes",
+        "directory_with_a_one_link_hamt_shard_has_the_pinned_cid"
       ]
     },
     {
@@ -4998,6 +5000,23 @@
       ],
       "tests": [
         "a_folder_with_no_file_is_refused_with_its_reason"
+      ]
+    },
+    {
+      "id": "F-CI61a",
+      "title": "a child shard of one link becomes a leaf: the first name in the bucket gets the link (anchor: the one multi-child push in hamt_shard)",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            let child = hamt_shard(links, &bucket_indices, digests, depth + 1, path, sha256)?;\n            let block = hamt_block(&child.links, &child.bitmap);\n            let tsize = dag_pb_tsize(&block, child.links.iter().map(|link| link.tsize));\n            shard.links.push(Link {\n                name: Cow::Owned(format!(\"{bucket:02X}\")),\n                cid: cid_bytes(DAG_PB_CODEC, &sha256(&block)),\n                tsize,\n            });\n",
+          "new": "            let child = hamt_shard(links, &bucket_indices, digests, depth + 1, path, sha256)?;\n            let block = hamt_block(&child.links, &child.bitmap);\n            let tsize = dag_pb_tsize(&block, child.links.iter().map(|link| link.tsize));\n            if child.links.len() == 1 {\n                let leaf = &links[bucket_indices[0]];\n                shard.links.push(Link {\n                    name: Cow::Owned(format!(\"{bucket:02X}{}\", leaf.name)),\n                    cid: leaf.cid.clone(),\n                    tsize: leaf.tsize,\n                });\n            } else {\n                shard.links.push(Link {\n                    name: Cow::Owned(format!(\"{bucket:02X}\")),\n                    cid: cid_bytes(DAG_PB_CODEC, &sha256(&block)),\n                    tsize,\n                });\n            }\n"
+        }
+      ],
+      "tests": [
+        "tests::two_names_in_one_bucket_get_a_child_shard",
+        "directory_with_a_one_link_hamt_shard_has_the_pinned_cid"
       ]
     }
   ]

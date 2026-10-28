@@ -2430,39 +2430,58 @@ mod tests {
 
     #[test]
     fn two_names_in_one_bucket_get_a_child_shard() {
-        // Two names whose first digest byte is equal share a bucket. A
-        // bucket of two children is one link named only the bucket's two
-        // uppercase hex digits, pointing at a child shard: the collision
-        // level is necessary even when the child shard holds one bucket.
-        let first = "collision-one".to_owned();
-        let bucket = hamt_digest(first.as_bytes())[0];
-        let second = (0..1_000)
-            .map(|number| format!("collision-two-{number}"))
-            .find(|name| hamt_digest(name.as_bytes())[0] == bucket)
-            .expect("a 256-bucket level has two names in one bucket");
+        // Task 061: two 200-byte names whose digest bytes 0 and 1 are both
+        // `FE 57` and whose byte 2 differs (`79` and `37`). The same pair
+        // replaces two fillers in
+        // `directory_with_a_one_link_hamt_shard_bundle`, where no other name
+        // has digest byte 0 `FE`. Sharing two bytes makes the child shard
+        // hold one link, but a bucket of two or more children is still one
+        // link named only the first byte's two uppercase hex digits,
+        // pointing at that child shard: the collision level is necessary
+        // even when the child shard holds one link.
+        let names = [format!("one-{:0>196}", 62), format!("two-{:0>196}", 35_399)];
+        for name in &names {
+            assert_eq!(name.len(), 200, "a bundle name fits in a folder");
+        }
+        let digests: Vec<[u8; HAMT_DIGEST_BYTES]> = names
+            .iter()
+            .map(|name| hamt_digest(name.as_bytes()))
+            .collect();
+        assert_eq!(
+            digests[0][..2],
+            digests[1][..2],
+            "the two names share digest bytes 0 and 1"
+        );
+        assert_eq!(digests[0][..2], [0xFE, 0x57], "the shared two-byte prefix");
+        assert_ne!(
+            digests[0][2], digests[1][2],
+            "the two names differ at digest byte 2"
+        );
         let links = [
             Link {
-                name: Cow::Borrowed(first.as_str()),
+                name: Cow::Owned(names[0].clone()),
                 cid: vec![0x01, 0xaa],
                 tsize: 1,
             },
             Link {
-                name: Cow::Borrowed(second.as_str()),
+                name: Cow::Owned(names[1].clone()),
                 cid: vec![0x01, 0xbb],
                 tsize: 2,
             },
         ];
-        let digests: Vec<[u8; HAMT_DIGEST_BYTES]> = links
-            .iter()
-            .map(|link| hamt_digest(link.name.as_bytes()))
-            .collect();
         let shard = hamt_shard(&links, &[0, 1], &digests, 0, "", &naming_hash)
-            .expect("two names with one level are a shard");
+            .expect("two names sharing two bytes are a shard");
+        let bucket = digests[0][0];
         assert_eq!(shard.links.len(), 1, "one bucket is one link");
         assert_eq!(
             shard.links[0].name,
             format!("{bucket:02X}"),
-            "a bucket of two children is named only its prefix"
+            "a bucket of two children is named only its first digest byte"
+        );
+        assert!(
+            !shard.links[0].name.contains(names[0].as_str())
+                && !shard.links[0].name.contains(names[1].as_str()),
+            "a shard link name holds no child's leaf name"
         );
         assert_eq!(
             shard.bitmap[HAMT_BITMAP_BYTES - 1 - bucket as usize / 8],
