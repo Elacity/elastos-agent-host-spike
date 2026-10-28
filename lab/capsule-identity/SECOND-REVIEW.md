@@ -415,10 +415,12 @@ New FOLLOWUP lines: none.
   holds 254 entries (`grep -c '"id": "F-CI'`) and README M:1559 says 254. `git diff --stat
   f94d89ac6^1 f94d89ac6 -- lab/capsule-identity/src lab/capsule-identity/Cargo.toml
   lab/capsule-identity/Cargo.lock` prints nothing. At c6e2d58d5 `about` names "032, 033,
-  035, 036 and 037", README B:1628 says 262, and `tests/inventory.rs` passes in the full
-  run below; `src/lib.rs` was changed later by 036 only. The LOG line (M:28, unchanged at
-  B:28) says the whole list gave 254 CAUGHT of 254 in two runs; this review did not rerun
-  the whole list, only F-CI33.
+  035, 036 and 037", README B:1628 says 262, and the list holds 262 entries (`git show
+  c6e2d58d5:lab/capsule-identity/falsifiers.json | grep -c '"id": "F-CI'` prints 262); this
+  review did not run `tests/inventory.rs` at c6e2d58d5; `src/lib.rs` was changed later by
+  036 only. The LOG line (M:28, unchanged at B:28) says the whole list gave 254 CAUGHT of
+  254 in two runs; this review did not rerun the whole list, only F-CI33.
+Corrected by task 042, on 2026-10-27: the earlier text said `tests/inventory.rs` passed in the run below; that run was `--test stand_in` only (Cursor's FOLLOWUP on 039).
 
 033's citations, each read with `git show` at its recorded commit: 13 checked, 13 match.
 README's view row: `lab/runtime-asks/01-live-grant-view.md:11` at `513988ebd` ("A shell
@@ -480,6 +482,16 @@ summary: 3 CAUGHT of 3
 
 ```
 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+```
+
+Added by task 042, at `c19e7cf06` (not c6e2d58d5; the list and README are the same there,
+`git diff --quiet c6e2d58d5 c19e7cf06 -- lab/capsule-identity/falsifiers.json
+lab/capsule-identity/README.md` exits 0):
+`RUST_TEST_THREADS=2 cargo test --locked --offline --manifest-path lab/capsule-identity/Cargo.toml --test inventory`
+(exit 0):
+
+```
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 ```
 
 #657 now has two reviews, Cursor's merge review and this record, so both B1 stand-in merges,
