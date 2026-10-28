@@ -7062,8 +7062,8 @@ fn inputs_match(observed: &[InputsItem], expected: &[InputsItem]) -> bool {
 }
 
 /// One item list with the items of every `PARAMS_ITEM` group dropped, so no
-/// compare sees the names inside `params`. This is the one place the rule reads
-/// `params`, and WP148 removes it.
+/// shape comparison sees the names inside `params`. `params_names_match`
+/// compares those names separately; WP148 removes that comparison.
 fn without_params_names(items: Vec<InputsItem>) -> Vec<InputsItem> {
     items
         .into_iter()
@@ -7226,9 +7226,9 @@ struct WireSources<'a> {
 ///
 /// Falsifiers: WP146 makes the field reader ignore `#[serde(rename = "...")]`,
 /// so a cell naming a renamed field's Rust name is accepted; WP147 makes the
-/// compare tolerate a cell that stops before a declared field; WP148 makes
-/// every `wallet_contract` row expect `params` (none), so a cell naming another
-/// `params` name is accepted. `operations_table_row_check_refuses_each_bad_table`
+/// compare tolerate a cell that stops before a declared field; WP148 removes
+/// the `params`-name comparison, so a cell naming another `params` name is
+/// accepted. `operations_table_row_check_refuses_each_bad_table`
 /// fails on each.
 fn inputs_cell_problems(
     document_name: &str,
@@ -7262,11 +7262,20 @@ fn inputs_cell_problems(
                 else {
                     continue;
                 };
-                let Some(envelope) = handle_arms
+                let Some(envelope_variant) = handle_arms
                     .iter()
                     .find(|arm| variant_snake_case(arm) == WALLET_CONTRACT_ARM)
-                    .and_then(|arm| wire_field_names(request_body, arm))
                 else {
+                    continue;
+                };
+                let Some(envelope) = wire_field_names(request_body, envelope_variant) else {
+                    problems.push(format!(
+                        "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the \
+                         Inputs cell {}, and {} declares no {envelope_variant} arm",
+                        row.operation,
+                        row.inputs,
+                        sources.declarations_path.display()
+                    ));
                     continue;
                 };
                 let params = match contract_body {
@@ -9583,7 +9592,9 @@ const FIXTURE_OPERATIONS: [&str; 4] = [
 /// name and no `op`; it refuses a `wallet_contract` row that omits an envelope
 /// name, names another kind, names another `params` name, omits `params`, and
 /// writes `params` (none) for an arm with fields or a name for an arm with
-/// none. A provider source that cannot be read, one with no `fn handle` and
+/// none. Missing Request and contract enums, ordinary and contract arms, and
+/// the wallet envelope declaration each keep their own reason. A provider
+/// source that cannot be read, one with no `fn handle` and
 /// one with no `fn dispatch_wallet_operation` each keep their own reason. The
 /// four `snake_case` names the contract already uses pin the helper. A missing
 /// or doubled heading stays with `section_under_one_heading`, which already
@@ -10259,6 +10270,82 @@ fn operations_table_row_check_refuses_each_bad_table() {
         )],
         "a `params` name on an arm with no fields must be refused"
     );
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
+    // Rule 5: every missing declaration keeps its own reason, even when the
+    // dispatch arms remain intact and the affected Inputs cell is arbitrary.
+    for (case, in_contract, anchor, replacement, operation, missing) in [
+        (
+            "a missing Request enum",
+            false,
+            "enum Request {",
+            "enum OtherRequest {",
+            None,
+            "enum Request",
+        ),
+        (
+            "a missing ordinary arm declaration",
+            false,
+            "    Init {\n        config: Value,\n        #[serde(rename = \"wire_name\")]\n        field_name: Option<Value>,\n    },\n",
+            "",
+            Some("init"),
+            "Init arm",
+        ),
+        (
+            "a missing wallet envelope declaration",
+            false,
+            "    WalletContract {\n        request: Value,\n        #[serde(rename = \"_runtime_invocation\")]\n        runtime_invocation: Box<RuntimeInvocationEnvelope>,\n    },\n",
+            "",
+            Some("wallet_contract list_accounts"),
+            "WalletContract arm",
+        ),
+        (
+            "a missing contract enum",
+            true,
+            "pub enum WalletProviderOperationV2 {",
+            "pub enum OtherOperation {",
+            Some("wallet_contract list_accounts"),
+            "enum WalletProviderOperationV2",
+        ),
+        (
+            "a missing contract arm declaration",
+            true,
+            "    ListAccounts {\n        include_revoked: bool,\n    },\n",
+            "",
+            Some("wallet_contract list_accounts"),
+            "ListAccounts arm",
+        ),
+    ] {
+        let (source, path) = if in_contract {
+            (ROW_FIXTURE_CONTRACT, &contract_source)
+        } else {
+            (ROW_FIXTURE_PROVIDER, &provider_source)
+        };
+        assert_eq!(source.matches(anchor).count(), 1, "{case} has one anchor");
+        fs::write(path, source.replacen(anchor, replacement, 1)).expect("missing declaration fixture");
+        let (document, reason) = match operation {
+            Some(operation) => {
+                let document = passing.replacen(&fixture_inputs(operation), "garbage", 1);
+                assert_ne!(document, passing, "{case} must change the Inputs cell");
+                (document, format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {operation} \
+                     holds the Inputs cell garbage, and {} declares no {missing}",
+                    path.display()
+                ))
+            }
+            None => (passing.clone(), format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} Inputs cells cannot be \
+                 checked because {} declares no {missing}",
+                path.display()
+            )),
+        };
+        assert_eq!(
+            row_problems("fixture-provider", &document, provider.path()),
+            vec![reason],
+            "{case} must keep its exact refusal"
+        );
+        fs::write(path, source).expect("fixture declaration source restore");
+    }
 
     // 117's two gaps: a provider source that cannot be read, and a source with
     // no dispatch signature. Both keep their own reason and stay one problem.
