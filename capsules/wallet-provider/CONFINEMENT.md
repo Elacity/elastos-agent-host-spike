@@ -486,7 +486,12 @@ citation is a backtick span that holds a file relative to this folder, two
 colons and a function name. The check
 `every_operations_table_cites_existing_tests` in `tests/confine.rs` finds
 `fn <fn>(` in that file and does not decide whether the function is a
-`#[test]`. A refusal under `(deny default)` is a denial, not a grant, and no
+`#[test]`. The check
+`every_operations_table_row_matches_its_provider_and_the_contract` holds every
+row to four rules: the row set follows the provider's own dispatch, a Right
+cell names a declared id or `none: needs no declared right`, a right row cites
+both sides, and every Linux cell stays `designed, not enforced`. A refusal
+under `(deny default)` is a denial, not a grant, and no
 row writes it as a right. A refusal from a `kind` comes back as an outer
 `status` `ok` whose `data.result` holds `status` `error`, `code` and `message`;
 the outer `status`/`code`/`message` error covers envelope failures only. A
@@ -1284,6 +1289,18 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   comparison in
   `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged`
   catches it, at that call.
+- Remove the row-set rule's call from `operations_table_row_problems` (WP141):
+  `operations_table_row_check_refuses_each_bad_table` fails on its four row-set
+  cases, because a table that omits a row, adds one, follows another order or
+  puts a contract row first is then accepted.
+- Make the Right-vocabulary refusal return early (WP142): the same test fails on
+  its two Right cases, because a Right cell of `bound-net` and one of `no named
+  test shows this` are then accepted.
+- Make the both-sides refusal return early (WP143): the same test fails on its
+  three side cases, because a right row with one side and a `none:` row citing a
+  side are then accepted.
+- Make the Linux-status refusal return early (WP144): the same test fails on its
+  Linux case, because a cell reading `enforced by Landlock` is then accepted.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:
