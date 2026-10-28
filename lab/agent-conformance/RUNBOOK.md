@@ -745,3 +745,5 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 `standin_shell_revoke_all_drops_every_live_grant` is this stand-in, and a PASS there gives the Runtime no A6 credit for a shell revoke of every grant.
 
 `standin_store_holds_at_most_1024_pending` is this stand-in, and a PASS there gives the Runtime no A11 credit for the store cap.
+
+`standin_system_and_wallet_requests_never_become_pending` is this stand-in, and a PASS there gives the Runtime no A6 credit for this denial.

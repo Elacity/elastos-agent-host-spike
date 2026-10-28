@@ -62,6 +62,8 @@ After one instance has ended, `post_capability_grant` of the survivor's pending 
 
 `seed_request` holds at most 1024 pending records in the store. The next pending record is status 400 with the reason `Too many pending requests`, and it stores nothing. A record whose status is `granted`, `denied` or `expired` does not count, and the check does not remove it. The per-session cap of 32 stays, and it is the reason when the store holds fewer than 1024 pending records. At 1024 pending records the store reason wins. `post_capability_request` returns that status and reason and does not count pending records. A PASS gives the Runtime no A11 credit for this cap.
 
+`StandIn::post_capability_request` denies a system-backend resource and a generic wallet resource before `seed_request`. A resource whose first segment after `elastos://` is `elacity`, `elacity-sdk`, `gateway`, `ipfs`, `ipfs-cluster`, `ipfs-provider` or `kubo` is denied, and so is a `wallet` resource other than `elastos://wallet/meta/status` with action `read`. The compare is case-sensitive on the text before the first `/`, `?` or `#`. The Ok body is `status` `denied` and the handler's reason, with no `request_id`, no token and no error key, and nothing is stored. `elastos://wallet/meta/status` with `read` and `elastos://content/...` still store one pending request. A stopped instance still answers `instance is not live`. This value is the lab stand-in and the real route can replace it later because the reason matches (M1-R). A PASS gives the Runtime no A6 credit for this denial.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.

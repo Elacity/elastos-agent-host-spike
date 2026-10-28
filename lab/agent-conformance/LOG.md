@@ -10823,3 +10823,376 @@ The required gate was rerun on the unchanged candidate with `RUST_TEST_THREADS=2
 - `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0.
 - `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 298.04 seconds, inside the 600-second bound. Targets in order: lib 68 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0. No census line and no listed flaky test failed.
 - `standin-runtime/mod.rs` SHA-256 stays `e4ff9689eeac33e8e608b945c074691997b4e76d9d8039a7f96d7bc4bffe013f`; only this log changed in round 2.
+
+## 074 — A6: system and wallet requests never become pending
+
+074: `post_capability_request` calls one private function, `prestore_denial(resource, action)`, after the live-instance refusal and before the request id is minted. `Some` returns Ok `{"status":"denied","reason":...}` and stores nothing; `None` falls through to the existing `seed_request` success. The system compare runs before the wallet compare. The segment is the text after `elastos://` before the first `/`, `?` or `#`, compared case-sensitively, and `action` is the lowercased action the route already validated. The shell, body, scheme, action, unknown-instance and `not_live` refusals keep their order, status and text. `seed_request` is still the only writer and keeps its body, including the 071 store-wide count. `standin_system_and_wallet_requests_never_become_pending` fails on each of the twelve hand-run plants and passes when they are restored.
+
+### Quotes from the contract (read only)
+
+`docs/AGENT_ARCHITECTURE.md:233-236`, "Request flow", steps 7 and 8:
+
+```text
+7. Runtime verifies the exact resource, action, operation, principal, session,
+   capsule, grant, expiry, and revocation state.
+8. If additional consent is required, Runtime records a pending request and
+   Home or Inbox presents it. The UI does not mint the grant itself.
+```
+
+This task is the gate in step 7 for the two resources the Runtime denies before the store in step 8. A standing mandate stays out.
+
+### Quotes from the Runtime (read only, not imported)
+
+`elastos/crates/elastos-server/src/api/handlers/capability.rs:90-115` shows the scheme refusal and the two `Ok` branches after the action check, before `create_request_with_reason` at `:122-125`:
+
+```text
+    if !is_supported_resource_scheme(&input.resource) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Unsupported resource scheme. Allowed: elastos://, localhost://".to_string(),
+        ));
+    }
+
+    if is_system_only_backend_resource(&input.resource) {
+        return Ok(Json(RequestCapabilityOutput {
+            status: "denied".to_string(),
+            request_id: None,
+            token: None,
+            reason: Some(
+                "system backends are not app capabilities; use elastos://content".to_string(),
+            ),
+        }));
+    }
+
+    if let Err(reason) = ensure_generic_wallet_capability(&input.resource, action) {
+        return Ok(Json(RequestCapabilityOutput {
+            status: "denied".to_string(),
+            request_id: None,
+            token: None,
+            reason: Some(reason),
+        }));
+    }
+```
+
+`elastos/crates/elastos-common/src/localhost.rs:36-53` names the seven first segments and the split set:
+
+```text
+pub fn is_system_only_backend_resource(uri: &str) -> bool {
+    let Some(rest) = uri.strip_prefix("elastos://") else {
+        return false;
+    };
+
+    matches!(
+        rest.split(['/', '?', '#']).next(),
+        Some(
+            "elacity"
+                | "elacity-sdk"
+                | "gateway"
+                | "ipfs"
+                | "ipfs-cluster"
+                | "ipfs-provider"
+                | "kubo"
+        )
+    )
+}
+```
+
+`elastos/crates/elastos-server/src/provider_resource.rs:12` and `:577-594` give the exact status resource, the wallet segment rule and the wallet reason:
+
+```text
+pub const WALLET_STATUS_RESOURCE: &str = "elastos://wallet/meta/status";
+```
+
+```text
+pub fn is_wallet_resource(resource: &str) -> bool {
+    resource
+        .strip_prefix("elastos://")
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+        == Some("wallet")
+}
+
+pub fn ensure_generic_wallet_capability(resource: &str, action: Action) -> Result<(), String> {
+    if !is_wallet_resource(resource)
+        || (resource == WALLET_STATUS_RESOURCE && action == Action::Read)
+    {
+        return Ok(());
+    }
+    Err(
+        "generic Wallet access is limited to read-only elastos://wallet/meta/status; use the private Runtime Wallet Bus for authority-bound operations"
+            .to_string(),
+    )
+}
+```
+
+The system reason is `system backends are not app capabilities; use elastos://content`. The wallet reason is `generic Wallet access is limited to read-only elastos://wallet/meta/status; use the private Runtime Wallet Bus for authority-bound operations`. The seven first-segment names are `elacity`, `elacity-sdk`, `gateway`, `ipfs`, `ipfs-cluster`, `ipfs-provider` and `kubo`. The exact status resource is `elastos://wallet/meta/status`, and only action `read` passes it.
+
+### Code
+
+- `prestore_denial` at `standin-runtime/mod.rs:1332` is the only new private production function. It strips `elastos://`, takes the first `split(['/', '?', '#'])` segment without lowercasing it, then compares the seven system names at `:1340-1345` before the wallet segment at `:1346-1348`. The status resource and action `read` are its one exception. The two reasons are the only copies of their text in the module.
+- `post_capability_request` calls it once at `:383`, after the live-instance refusal at `:380-382` and before `format!("request-{}", self.next_request)` at `:386`. `Some` returns the denied Ok object at `:384` with only `status` and `reason`; nothing is stored and `next_request` stays. `None` reaches the unchanged `self.seed_request(...)?` at `:387`, which is still the only writer. The doc comment at `:341-342` names the new denial.
+- `seed_request` at `:257` keeps its full body, including the 1024 store-wide count. `get_capability_requests`, `post_capability_grant`, `post_capability_deny`, `delete_capability`, `post_capability_revoke_all` and `authorise` keep their bodies; `authorise` has no resource or action parameter, so 072 has not landed here. No new public method, no second denial function and no second name list.
+
+### Tests
+
+`standin_system_and_wallet_requests_never_become_pending` at `standin-runtime/mod.rs:7679` in the module's `#[cfg(test)]`, passing with no operator and no probe build. It reuses `launch_two_running`, `request_entries`, `pending_request`, `launch_starting`, `assert_capsule`, `assert_live_request_ids_empty` and `stop_body`. It compares each complete denied object, so each exact reason and the absence of `request_id`, `token` and `error` are asserted. It uses independent reason literals. Assertion text says the stand-in did the work.
+
+- Two running instances `component-1` and `component-2`. For the `component-1` client, ten system bodies are each Ok `{"status":"denied","reason":"system backends are not app capabilities; use elastos://content"}`: `elastos://elacity/x`, `elastos://elacity-sdk/x`, `elastos://gateway/x`, `elastos://ipfs/x`, `elastos://ipfs-cluster/x`, `elastos://ipfs-provider/x`, `elastos://kubo/x`, `elastos://ipfs?hash`, the bare `elastos://ipfs` and `elastos://kubo#x`, each with action `read` and reason `read shared`.
+- Six wallet bodies are each Ok `{"status":"denied","reason":"generic Wallet access is limited to read-only elastos://wallet/meta/status; use the private Runtime Wallet Bus for authority-bound operations"}`: `elastos://wallet/open` with `read`, `elastos://wallet/meta/status` with `write`, `elastos://wallet/meta/status/extra` with `read`, the bare `elastos://wallet`, `elastos://wallet?open` and `elastos://wallet#open` with `read`.
+- Both `request_entries` lists are empty after those sixteen denials. `elastos://IPFS/x` stores `request-1`, `elastos://wallet/meta/status` with `read` stores `request-2` and `elastos://content/demo` stores `request-3`. The three shell records equal `pending_request` bases with the three resources, so every field, including action `read`, is compared. A further `elastos://gateway/meta` body is denied, stores nothing and leaves `next_request` at 4, so no `request-4` is minted.
+- A shell stop of `component-2` with `{"reason":"stop one"}` then makes `elastos://ipfs/x` from that client 400 `instance is not live: stopped`; its records stay empty, `component-1` stays `running` with cause `""`, and the shell live-grant `request_id` set is empty.
+- A third launch `component-3` stays `starting`; one system and one wallet denial on it are each the full denied object, its records stay empty, it stays `starting`, and `next_request` stays at 4.
+- A second `StandIn` shows the near misses store: `elastos://ipfs-extra/x` is `request-1` and `elastos://elacity-sdk-extra/x` is `request-2`, so matching is by whole segment; `elastos://wallet/meta/status` with action `Read` is `request-3`, so the exception reads the lowercased action; `elastos://Wallet/open` is `request-4`, so the wallet segment keeps its case.
+
+### Hand-run falsifiers
+
+No `falsifiers.json` id and no new id. Each plant ran alone, the planted crate compiled, and it was restored before the next. The command was `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_system_and_wallet_requests_never_become_pending -- --exact`. Every planted run exited 101 with that test failed on its assertion. After the last restore, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows the candidate only, with no plant; `standin-runtime/mod.rs` SHA-256 is `3c45124d1fad7970fcb388d0588eaa34f9c8f4a515dce4201acce6186fe774fb` before and after the plants.
+
+F-standin-prestore-stub: the call is removed, so `elastos://ipfs/x` is stored. Planted run failed at `mod.rs:7721:13` (`:7724` restored): `assertion left == right failed: the stand-in did the work: it denies elastos://elacity/x before the store`, `left: Ok({"request_id":"request-1","status":"pending"})`, `right: Ok({"reason":"system backends are not app capabilities; use elastos://content","status":"denied"})`.
+
+Old:
+
+```text
+        if let Some(reason) = prestore_denial(resource, &action) {
+            return Ok(json!({ "status": "denied", "reason": reason }));
+        }
+```
+
+New:
+
+```text
+```
+
+F-standin-prestore-keep: the route returns the denied body and still calls `seed_request` for that resource. Planted run failed at `mod.rs:7757:9` (`:7754` restored): `the stand-in did the work: the denied requests store nothing for component-1`.
+
+Old:
+
+```text
+        if let Some(reason) = prestore_denial(resource, &action) {
+            return Ok(json!({ "status": "denied", "reason": reason }));
+        }
+```
+
+New:
+
+```text
+        if let Some(reason) = prestore_denial(resource, &action) {
+            let stored_id = format!("request-{}", self.next_request);
+            self.seed_request(&stored_id, session_id, resource, &action, reason)?;
+            self.next_request += 1;
+            return Ok(json!({ "status": "denied", "reason": reason }));
+        }
+```
+
+F-standin-prestore-wallet: `elastos://wallet/meta/status` with action `read` takes the wallet reason. Planted run failed at `mod.rs:7784:9`: `assertion left == right failed: the stand-in did the work: the read-only status resource stores request-2`, `left` the denied wallet reason, `right: Ok({"request_id":"request-2","status":"pending"})`.
+
+Old:
+
+```text
+    if segment == "wallet" && !(resource == "elastos://wallet/meta/status" && action == "read") {
+```
+
+New:
+
+```text
+    if segment == "wallet" {
+```
+
+F-standin-prestore-wallet-bypass: system denials keep working and every wallet resource becomes pending. Planted run failed at `mod.rs:7747:13`: `assertion left == right failed: the stand-in did the work: it denies elastos://wallet/open with action read before the store`, `left: Ok({"request_id":"request-1","status":"pending"})`, `right` the denied wallet reason.
+
+Old:
+
+```text
+        return Some(WALLET_REASON);
+```
+
+New:
+
+```text
+        return None;
+```
+
+F-standin-prestore-running-only: the gate applies only to a `running` instance. Planted run failed at `mod.rs:7900:13` (`:7898` restored): `assertion left == right failed: the stand-in did the work: it denies elastos://ipfs/x from a starting instance`, `left: Ok({"request_id":"request-4","status":"pending"})`, `right` the denied system reason.
+
+Old:
+
+```text
+        if let Some(reason) = prestore_denial(resource, &action) {
+            return Ok(json!({ "status": "denied", "reason": reason }));
+        }
+```
+
+New:
+
+```text
+        if matches!(phase, ResidentStatus::Running) {
+            if let Some(reason) = prestore_denial(resource, &action) {
+                return Ok(json!({ "status": "denied", "reason": reason }));
+            }
+        }
+```
+
+F-standin-prestore-action: the route passes the original action, so the status exception misses `Read`. Planted run failed at `mod.rs:7959:13`: `assertion left == right failed: the stand-in did the work: the status exception reads the lowercased action and stores request-3`, `left` the denied wallet reason, `right: Ok({"request_id":"request-3","status":"pending"})`.
+
+Old:
+
+```text
+        if let Some(reason) = prestore_denial(resource, &action) {
+```
+
+New:
+
+```text
+        if let Some(reason) = prestore_denial(resource, given_action) {
+```
+
+F-standin-prestore-system-reason: the system reason text changes. Planted run failed at `mod.rs:7725:13` (`:7724` restored): `the stand-in did the work: it denies elastos://elacity/x before the store`, `left` the reason with ` now`, `right` the exact reason.
+
+Old:
+
+```text
+    const SYSTEM_REASON: &str = "system backends are not app capabilities; use elastos://content";
+```
+
+New:
+
+```text
+    const SYSTEM_REASON: &str =
+        "system backends are not app capabilities; use elastos://content now";
+```
+
+F-standin-prestore-wallet-reason: the wallet reason text changes. Planted run failed at `mod.rs:7747:13`: `the stand-in did the work: it denies elastos://wallet/open with action read before the store`, `left` the reason with ` now`, `right` the exact reason.
+
+Old:
+
+```text
+    const WALLET_REASON: &str = "generic Wallet access is limited to read-only elastos://wallet/meta/status; use the private Runtime Wallet Bus for authority-bound operations";
+```
+
+New:
+
+```text
+    const WALLET_REASON: &str = "generic Wallet access is limited to read-only elastos://wallet/meta/status; use the private Runtime Wallet Bus for authority-bound operations now";
+```
+
+F-standin-prestore-extra-key: the denied Ok object gains `request_id`. Planted run failed at `mod.rs:7729:13` (`:7724` restored): `left: Ok({"reason":"system backends are not app capabilities; use elastos://content","request_id":"request-1","status":"denied"})`, `right` the two-key object.
+
+Old:
+
+```text
+        if let Some(reason) = prestore_denial(resource, &action) {
+            return Ok(json!({ "status": "denied", "reason": reason }));
+        }
+```
+
+New:
+
+```text
+        if let Some(reason) = prestore_denial(resource, &action) {
+            let denied_id = format!("request-{}", self.next_request);
+            return Ok(json!({
+                "status": "denied",
+                "reason": reason,
+                "request_id": denied_id,
+            }));
+        }
+```
+
+F-standin-prestore-separators: the segment splits on `/` only. Planted run failed at `mod.rs:7721:13` (`:7724` restored): `the stand-in did the work: it denies elastos://ipfs?hash before the store`, `left: Ok({"request_id":"request-1","status":"pending"})`, `right` the denied system reason.
+
+Old:
+
+```text
+    let segment = resource
+        .strip_prefix("elastos://")?
+        .split(['/', '?', '#'])
+        .next()?;
+```
+
+New:
+
+```text
+    let segment = resource.strip_prefix("elastos://")?.split('/').next()?;
+```
+
+F-standin-prestore-prefix: the system compare matches a prefix, so `ipfs-extra` is denied. Planted run failed at `mod.rs:7967:13` (`:7959` restored): `the stand-in did the work: ipfs-extra is not the ipfs segment and stores request-1`, `left` the denied system reason, `right: Ok({"request_id":"request-1","status":"pending"})`.
+
+Old:
+
+```text
+    if matches!(
+        segment,
+        "elacity" | "elacity-sdk" | "gateway" | "ipfs" | "ipfs-cluster" | "ipfs-provider" | "kubo"
+    ) {
+        return Some(SYSTEM_REASON);
+    }
+```
+
+New:
+
+```text
+    if [
+        "elacity",
+        "elacity-sdk",
+        "gateway",
+        "ipfs",
+        "ipfs-cluster",
+        "ipfs-provider",
+        "kubo",
+    ]
+    .iter()
+    .any(|name| segment.starts_with(name))
+    {
+        return Some(SYSTEM_REASON);
+    }
+```
+
+F-standin-prestore-lowercase: the segment is lowercased, so `IPFS` is denied. Planted run failed at `mod.rs:7773:9` (`:7771` restored): `assertion left == right failed: the stand-in did the work: the segment compare keeps its case, so IPFS stores request-1`, `left` the denied system reason, `right: Ok({"request_id":"request-1","status":"pending"})`.
+
+Old:
+
+```text
+    let segment = resource
+        .strip_prefix("elastos://")?
+        .split(['/', '?', '#'])
+        .next()?;
+```
+
+New:
+
+```text
+    let segment = resource
+        .strip_prefix("elastos://")?
+        .split(['/', '?', '#'])
+        .next()?
+        .to_lowercase();
+    let segment = segment.as_str();
+```
+
+### Docs
+
+`standin-runtime/README.md:65` adds one paragraph immediately before `## Callers`: `post_capability_request` denies a system-backend resource and a generic wallet resource before `seed_request`; the compare is case-sensitive on the text before the first `/`, `?` or `#`; the Ok body is `denied` and the handler's reason with no `request_id`, token or error; `elastos://wallet/meta/status` with `read` and `elastos://content/...` still store; a stopped instance still answers `instance is not live`; a PASS gives the Runtime no A6 credit for this denial. The RA-1 section, the RI-1 to RI-4 section and the settlement paragraph keep their bytes, and so do the ended-instance, cap, revoke and operation paragraphs.
+
+`RUNBOOK.md:749` gains one paragraph after the last stand-in paragraph: `standin_system_and_wallet_requests_never_become_pending` is this stand-in, and a PASS there gives the Runtime no A6 credit for this denial. Every other RUNBOOK paragraph keeps its bytes.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged; `git diff` for `src/harness.rs`, `src/census.rs`, `tests/effects.rs`, `tests/common/grants.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. The changed files are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.19 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 263.67 seconds (4m23.67s), inside the 600-second bound. Targets in order: lib 69 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.19 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_system_and_wallet_requests_never_become_pending -- --exact` exit 0, 1 passed and 0 failed, real 0.13 seconds.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The check compares a resource scheme segment at `standin-runtime/mod.rs:1336-1348`; it names no code or content identity and adds no route. |
+| 2. Capsule, Home or UI gains ungranted access? | No | A denied request stores nothing and mints no token at `:383-385`; Home and the UI hold nothing new. |
+| 3. A second path or a second copy of one rule? | No | The one rule lives in `prestore_denial` at `:1332`; `post_capability_request` reaches it once at `:383`, `seed_request` stays the only writer at `:387`, and the reasons have one copy each. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`; `elastos/` is untouched and quoted only. |
+| 5. Refusals deny by default with a clear reason? | Yes | Both denials return `denied` with the handler's exact reason at `:1336-1348`, and a stopped instance still returns `instance is not live` at `:380-382`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The stand-in stores or denies one record; no capsule code, import, world or Bus call changes. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_system_and_wallet_requests_never_become_pending` at `:7679`; the twelve plants each fail it, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | The denial matches no identity claim, the phase gate at `:380-382` stays a separate admission decision, and a denied request mints no allowance. |
+
+A passing row gives the real Runtime no A6 credit for this denial.

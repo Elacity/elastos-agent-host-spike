@@ -338,7 +338,9 @@ impl StandIn {
     /// A client instance that is `starting` or `running` stores one pending
     /// request through `seed_request`. A shell is refused before the body is
     /// read. A `stopped` or `failed` instance is not live and stores nothing.
-    /// Ok is `{"status": "pending", "request_id": ...}` and carries no token.
+    /// A system backend or a generic wallet resource is denied by
+    /// `prestore_denial` before the store. Ok is
+    /// `{"status": "pending", "request_id": ...}` and carries no token.
     pub fn post_capability_request(
         &mut self,
         caller: Caller<'_>,
@@ -377,6 +379,9 @@ impl StandIn {
             .ok_or_else(|| unknown_instance(session_id))?;
         if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
             return Err(not_live(phase));
+        }
+        if let Some(reason) = prestore_denial(resource, &action) {
+            return Ok(json!({ "status": "denied", "reason": reason }));
         }
         let request_id = format!("request-{}", self.next_request);
         self.seed_request(&request_id, session_id, resource, &action, reason)?;
@@ -1317,6 +1322,31 @@ fn request_body(body: &Value) -> Result<(&str, &str, &str), (u16, String)> {
         return Err((400, "request reason must be a string".to_owned()));
     }
     Ok((resource, action, reason))
+}
+
+/// The one pre-store denial for a system backend or a generic wallet resource.
+///
+/// The first segment after `elastos://` is the text before the first `/`, `?`
+/// or `#`, compared case-sensitively. `action` is the lowercased action the
+/// route already validated. `None` lets the route store one pending request.
+fn prestore_denial(resource: &str, action: &str) -> Option<&'static str> {
+    const SYSTEM_REASON: &str = "system backends are not app capabilities; use elastos://content";
+    const WALLET_REASON: &str = "generic Wallet access is limited to read-only elastos://wallet/meta/status; use the private Runtime Wallet Bus for authority-bound operations";
+
+    let segment = resource
+        .strip_prefix("elastos://")?
+        .split(['/', '?', '#'])
+        .next()?;
+    if matches!(
+        segment,
+        "elacity" | "elacity-sdk" | "gateway" | "ipfs" | "ipfs-cluster" | "ipfs-provider" | "kubo"
+    ) {
+        return Some(SYSTEM_REASON);
+    }
+    if segment == "wallet" && !(resource == "elastos://wallet/meta/status" && action == "read") {
+        return Some(WALLET_REASON);
+    }
+    None
 }
 
 /// The stop body is an object whose only key is a non-empty string `reason`.
@@ -7643,5 +7673,294 @@ mod tests {
             "",
             "the stand-in did the work: the empty reason leaves component-2 running",
         );
+    }
+
+    #[test]
+    fn standin_system_and_wallet_requests_never_become_pending() {
+        const SYSTEM_REASON: &str =
+            "system backends are not app capabilities; use elastos://content";
+        const WALLET_REASON: &str = "generic Wallet access is limited to read-only elastos://wallet/meta/status; use the private Runtime Wallet Bus for authority-bound operations";
+
+        let mut standin = StandIn::new();
+        launch_two_running(&mut standin);
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: it lists component-1 running before the requests",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: it lists component-2 running before the requests",
+        );
+        let owner = Caller::Client {
+            session_id: "component-1",
+        };
+
+        for resource in [
+            "elastos://elacity/x",
+            "elastos://elacity-sdk/x",
+            "elastos://gateway/x",
+            "elastos://ipfs/x",
+            "elastos://ipfs-cluster/x",
+            "elastos://ipfs-provider/x",
+            "elastos://kubo/x",
+            "elastos://ipfs?hash",
+            "elastos://ipfs",
+            "elastos://kubo#x",
+        ] {
+            let denied = standin.post_capability_request(
+                owner,
+                &json!({
+                    "resource": resource,
+                    "action": "read",
+                    "reason": "read shared",
+                }),
+            );
+            assert_eq!(
+                denied,
+                Ok(json!({ "status": "denied", "reason": SYSTEM_REASON })),
+                "the stand-in did the work: it denies {resource} before the store"
+            );
+        }
+
+        for (resource, action) in [
+            ("elastos://wallet/open", "read"),
+            ("elastos://wallet/meta/status", "write"),
+            ("elastos://wallet/meta/status/extra", "read"),
+            ("elastos://wallet", "read"),
+            ("elastos://wallet?open", "read"),
+            ("elastos://wallet#open", "read"),
+        ] {
+            let denied = standin.post_capability_request(
+                owner,
+                &json!({
+                    "resource": resource,
+                    "action": action,
+                    "reason": "read shared",
+                }),
+            );
+            assert_eq!(
+                denied,
+                Ok(json!({ "status": "denied", "reason": WALLET_REASON })),
+                "the stand-in did the work: it denies {resource} with action {action} before the store"
+            );
+        }
+
+        assert!(
+            request_entries(&standin, "component-1").is_empty(),
+            "the stand-in did the work: the denied requests store nothing for component-1"
+        );
+        assert!(
+            request_entries(&standin, "component-2").is_empty(),
+            "the stand-in did the work: the denied requests store nothing for component-2"
+        );
+
+        let upper_case = standin.post_capability_request(
+            owner,
+            &json!({
+                "resource": "elastos://IPFS/x",
+                "action": "read",
+                "reason": "read shared",
+            }),
+        );
+        assert_eq!(
+            upper_case,
+            Ok(json!({ "status": "pending", "request_id": "request-1" })),
+            "the stand-in did the work: the segment compare keeps its case, so IPFS stores request-1"
+        );
+        let status_read = standin.post_capability_request(
+            owner,
+            &json!({
+                "resource": "elastos://wallet/meta/status",
+                "action": "read",
+                "reason": "read shared",
+            }),
+        );
+        assert_eq!(
+            status_read,
+            Ok(json!({ "status": "pending", "request_id": "request-2" })),
+            "the stand-in did the work: the read-only status resource stores request-2"
+        );
+        let content = standin.post_capability_request(
+            owner,
+            &json!({
+                "resource": "elastos://content/demo",
+                "action": "read",
+                "reason": "read shared",
+            }),
+        );
+        assert_eq!(
+            content,
+            Ok(json!({ "status": "pending", "request_id": "request-3" })),
+            "the stand-in did the work: elastos://content stores request-3"
+        );
+
+        let stored: Vec<Value> = [
+            ("request-1", "elastos://IPFS/x"),
+            ("request-2", "elastos://wallet/meta/status"),
+            ("request-3", "elastos://content/demo"),
+        ]
+        .into_iter()
+        .map(|(request_id, resource)| {
+            let mut entry = pending_request(request_id, "component-1");
+            entry["resource"] = json!(resource);
+            entry
+        })
+        .collect();
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            stored,
+            "the stand-in did the work: component-1 holds exactly the three pending read requests"
+        );
+
+        let further = standin.post_capability_request(
+            owner,
+            &json!({
+                "resource": "elastos://gateway/meta",
+                "action": "read",
+                "reason": "read shared",
+            }),
+        );
+        assert_eq!(
+            further,
+            Ok(json!({ "status": "denied", "reason": SYSTEM_REASON })),
+            "the stand-in did the work: a further system body is denied before the store"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            stored,
+            "the stand-in did the work: the further system body stores nothing"
+        );
+        assert_eq!(
+            standin.next_request, 4,
+            "the stand-in did the work: the denied bodies mint no request-4"
+        );
+
+        standin
+            .delete_capsule(Caller::Shell, "component-2", &stop_body())
+            .expect("the stand-in stops component-2 with the stop reason");
+        let stopped = standin.post_capability_request(
+            Caller::Client {
+                session_id: "component-2",
+            },
+            &json!({
+                "resource": "elastos://ipfs/x",
+                "action": "read",
+                "reason": "read shared",
+            }),
+        );
+        assert_eq!(
+            stopped,
+            Err((400, "instance is not live: stopped".to_owned())),
+            "the stand-in did the work: the not-live refusal still answers a stopped instance"
+        );
+        assert!(
+            request_entries(&standin, "component-2").is_empty(),
+            "the stand-in did the work: the stopped instance stores nothing"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: it leaves component-1 running after the stop",
+        );
+        assert_live_request_ids_empty(
+            &standin,
+            "the denial route stores no live grant for component-1",
+        );
+
+        let third = launch_starting(&mut standin);
+        assert_eq!(
+            third, "component-3",
+            "the stand-in did the work: it numbers the third launch component-3"
+        );
+        let starting = Caller::Client {
+            session_id: "component-3",
+        };
+        for (resource, reason) in [
+            ("elastos://ipfs/x", SYSTEM_REASON),
+            ("elastos://wallet/open", WALLET_REASON),
+        ] {
+            let denied = standin.post_capability_request(
+                starting,
+                &json!({
+                    "resource": resource,
+                    "action": "read",
+                    "reason": "read shared",
+                }),
+            );
+            assert_eq!(
+                denied,
+                Ok(json!({ "status": "denied", "reason": reason })),
+                "the stand-in did the work: it denies {resource} from a starting instance"
+            );
+        }
+        assert!(
+            request_entries(&standin, "component-3").is_empty(),
+            "the stand-in did the work: the starting instance stores nothing"
+        );
+        assert_capsule(
+            &standin,
+            "component-3",
+            "starting",
+            "",
+            "the stand-in did the work: it leaves component-3 starting after the denials",
+        );
+        assert_eq!(
+            standin.next_request, 4,
+            "the stand-in did the work: the starting-instance denials mint no request-4"
+        );
+
+        let mut similar = StandIn::new();
+        launch_two_running(&mut similar);
+        let similar_owner = Caller::Client {
+            session_id: "component-1",
+        };
+        for (resource, action, request_id, message) in [
+            (
+                "elastos://ipfs-extra/x",
+                "read",
+                "request-1",
+                "ipfs-extra is not the ipfs segment",
+            ),
+            (
+                "elastos://elacity-sdk-extra/x",
+                "read",
+                "request-2",
+                "elacity-sdk-extra is not the elacity-sdk segment",
+            ),
+            (
+                "elastos://wallet/meta/status",
+                "Read",
+                "request-3",
+                "the status exception reads the lowercased action",
+            ),
+            (
+                "elastos://Wallet/open",
+                "read",
+                "request-4",
+                "Wallet is not the wallet segment",
+            ),
+        ] {
+            let accepted = similar.post_capability_request(
+                similar_owner,
+                &json!({
+                    "resource": resource,
+                    "action": action,
+                    "reason": "read shared",
+                }),
+            );
+            assert_eq!(
+                accepted,
+                Ok(json!({ "status": "pending", "request_id": request_id })),
+                "the stand-in did the work: {message} and stores {request_id}"
+            );
+        }
     }
 }
