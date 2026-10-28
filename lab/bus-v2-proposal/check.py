@@ -1176,7 +1176,9 @@ def _b2_code_refusal(contexts, first, last):
 
 def b2_mapping(text):
     """Return the (kind, resource) pairs of the one B2 table, or a reason."""
-    lines = text.splitlines()
+    # Markdown lines end only at LF, CRLF, or CR. Other splitlines()
+    # separators are content and cannot separate headings, markers, or rows.
+    lines = re.split(r"\r\n?|\n", text)
     contexts = _b2_contexts(lines)
     bounds = _b2_section_bounds(lines, contexts)
     if bounds is None:

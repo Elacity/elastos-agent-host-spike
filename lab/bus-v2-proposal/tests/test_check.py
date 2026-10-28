@@ -67,6 +67,8 @@ B2_MAP_DEFAULT = (
     "The paragraphs below in this section.",
 )
 
+B2_NON_MARKDOWN_LINE_ENDINGS = ("\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
+
 
 def b2_table(pairs, row=None, header=B2_MAP_COLUMNS, open_mark="<!-- b2-map -->",
              close_mark="<!-- /b2-map -->"):
@@ -8849,6 +8851,58 @@ class B2CoverageTests(CaughtMixin, unittest.TestCase):
                 "refuse: B2 mapping table is not one table",
             ])
 
+    def test_b2_markdown_line_endings_pass(self):
+        body = b2_body(b2_table(B2_PAIRS))
+        for ending in ("\n", "\r\n", "\r"):
+            self._assert_memory_mapping(body.replace("\n", ending), [])
+        endings = ("\n", "\r\n", "\r")
+        mixed = "".join(
+            line + endings[index % len(endings)]
+            for index, line in enumerate(body.splitlines())
+        )
+        self._assert_memory_mapping(mixed, [])
+
+    def test_b2_non_markdown_line_endings_are_refused(self):
+        lines = b2_table(B2_PAIRS).splitlines()
+        for ending in B2_NON_MARKDOWN_LINE_ENDINGS:
+            # Replacing every newline between the markers puts the entire
+            # mapping on one physical line, including both markers.
+            self._assert_memory_mapping(b2_body(ending.join(lines) + "\n"), [
+                "refuse: B2 mapping table is absent",
+            ])
+            # Standalone markers do not make one physical content line into
+            # separate header, separator, and body rows.
+            collapsed = [lines[0], ending.join(lines[1:-1]), lines[-1]]
+            self._assert_memory_mapping(b2_body("\n".join(collapsed)), [
+                "refuse: B2 mapping table has no header and separator row",
+            ])
+            # Each boundary matters even when the other line endings remain.
+            for index in range(1, len(lines)):
+                joined = lines[index - 1] + ending + lines[index]
+                changed = lines[:index - 1] + [joined] + lines[index + 1:]
+                if index in (1, len(lines) - 1):
+                    reason = "refuse: B2 mapping table is not one table"
+                elif index == 2:
+                    reason = "refuse: B2 mapping table columns are not " + ", ".join(B2_MAP_COLUMNS)
+                elif index == 3:
+                    reason = "refuse: B2 mapping table has no separator row"
+                else:
+                    reason = "refuse: B2 mapping row is not six cells: " + joined
+                self._assert_memory_mapping(b2_body("\n".join(changed)), [reason])
+
+    def test_falsifier_b2_non_markdown_line_endings_is_caught(self):
+        original = check.b2_mapping
+        for ending in B2_NON_MARKDOWN_LINE_ENDINGS:
+            # Restore splitlines() treatment for one separator at a time, so
+            # every separator must independently make the named test fail.
+            self._caught(
+                "b2_mapping",
+                lambda text, ending=ending: original(text.replace(ending, "\n")),
+                self.test_b2_non_markdown_line_endings_are_refused,
+                "refuse: B2",
+                "CAUGHT b2-line-ending-U+%04X" % ord(ending),
+            )
+
     def test_falsifier_b2_pair_whitespace_is_caught(self):
         original = check._b2_code
         self._caught(
@@ -9287,6 +9341,7 @@ class B2CoverageTests(CaughtMixin, unittest.TestCase):
             self.test_b2_html_table_is_refused,
             self.test_b2_literal_table_context_is_refused,
             self.test_b2_marker_order_and_count_are_refused,
+            self.test_b2_non_markdown_line_endings_are_refused,
             self.test_b2_table_shape_is_refused,
             self.test_b2_pinned_source_is_refused,
             self.test_b2_asks_use_the_pinned_commit,
