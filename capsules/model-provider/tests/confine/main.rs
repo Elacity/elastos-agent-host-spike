@@ -1005,14 +1005,13 @@ fn operations_section_cites_existing_tests() {
                             "operation `{first}` needs right cell `storage`, not `{right}`"
                         ));
                     }
-                } else if !right_ids.contains(&right) && right != NO_DECLARED_RIGHT {
-                    return Err(format!("right cell `{right}` is not an approved right id"));
                 }
             } else if right == UNSHOWN_RIGHT {
                 return Err(format!(
                     "right cell `{UNSHOWN_RIGHT}` does not pass; a shown call says `{NO_DECLARED_RIGHT}`"
                 ));
-            } else if !right_ids.contains(&right) && right != NO_DECLARED_RIGHT {
+            }
+            if !right_ids.contains(&right) && right != NO_DECLARED_RIGHT {
                 return Err(format!("right cell `{right}` is not an approved right id"));
             }
             let linux = cells.get(LINUX_PLACE - 1).copied().unwrap_or("");
@@ -1166,6 +1165,11 @@ fn operations_section_cites_existing_tests() {
         }
         let row = format!(
             "| {operation} | in | out | storage | effect | rule | designed, not enforced |"
+        );
+        assert_eq!(
+            operations_table_cells_stay_lab_claims(&row, &["bound-executable"], true),
+            Err("right cell `storage` is not an approved right id".to_string()),
+            "{operation} requires storage in the approved rights"
         );
         assert_eq!(
             operations_table_cells_stay_lab_claims(&row, &approved_ids, true),
