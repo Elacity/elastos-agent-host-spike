@@ -64,6 +64,8 @@ After one instance has ended, `post_capability_grant` of the survivor's pending 
 
 `StandIn::post_capability_request` denies a system-backend resource and a generic wallet resource before `seed_request`. A resource whose first segment after `elastos://` is `elacity`, `elacity-sdk`, `gateway`, `ipfs`, `ipfs-cluster`, `ipfs-provider` or `kubo` is denied, and so is a `wallet` resource other than `elastos://wallet/meta/status` with action `read`. The compare is case-sensitive on the text before the first `/`, `?` or `#`. The Ok body is `status` `denied` and the handler's reason, with no `request_id`, no token and no error key, and nothing is stored. `elastos://wallet/meta/status` with `read` and `elastos://content/...` still store one pending request. A stopped instance still answers `instance is not live`. This value is the lab stand-in and the real route can replace it later because the reason matches (M1-R). A PASS gives the Runtime no A6 credit for this denial.
 
+`StandIn::bridge_envelope` is the one hostcall. two-capsule-run passes the envelope line, the capsule id and the principal and does not copy this module. This lane does not run the component bytes. A capability line calls `post_capability_request` for that capsule id. An invoke line calls `authorise` for that capsule id, and the principal argument does not choose the caller. A PASS gives the Runtime no A3 credit. `session_id` still equals the instance id.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.

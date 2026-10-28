@@ -11196,3 +11196,422 @@ New:
 | 8. Identity, admission and allowance stay separate? | Yes | The denial matches no identity claim, the phase gate at `:380-382` stays a separate admission decision, and a denied request mints no allowance. |
 
 A passing row gives the real Runtime no A6 credit for this denial.
+
+## 075 — One hostcall records the capsule's request
+
+075: `bridge_envelope` is the one hostcall. A `request_capability` line calls `post_capability_request` for the given capsule id. A `resource_invoke` line calls `authorise` for that capsule id. `principal` does not choose the caller. `standin_bridge_envelope_records_the_capsule_request` fails on each of the fourteen hand-run plants and passes when they are restored. A PASS gives the Runtime no A3 credit.
+
+### Quotes from the contract (read only)
+
+`docs/AGENT_ARCHITECTURE.md:231-234`, "Request flow", steps 6 and 7:
+
+```text
+6. The Agent Host submits the proposed operation to Runtime as the active agent
+   principal and session.
+7. Runtime verifies the exact resource, action, operation, principal, session,
+   capsule, grant, expiry, and revocation state.
+```
+
+This task is the hostcall the component runner already makes for those two steps. It is not a second runner. Home still only shows the pending request.
+
+### Quotes from the call shape (read only, not imported)
+
+`elastos/crates/elastos-compute/src/providers/mod.rs:10-11` names the hostcall. The arguments are the envelope line, the capsule id, and the principal. The `Ok` string is one response envelope:
+
+```text
+pub type BridgeHostcall =
+    Arc<dyn Fn(&str, &str, Option<&str>) -> std::result::Result<String, String> + Send + Sync>;
+```
+
+`elastos/crates/elastos-compute/src/providers/component.rs:323-328`, `call_bridge`, builds one line and calls that hostcall:
+
+```text
+        let line = guest_bus::bridge_envelope_json(1, request)
+            .map_err(|err| bus_error("internal", err.to_string()))?;
+        let raw = hostcall(&line, &self.capsule_id, self.principal_id.as_deref())
+            .map_err(|err| bus_error("internal", err))?;
+        let envelope: ResponseEnvelope =
+            serde_json::from_str(&raw).map_err(|err| bus_error("internal", err.to_string()))?;
+```
+
+`elastos/crates/elastos-guest/src/bus.rs:81-83`, `bridge_envelope_json`, is the one line builder. This lane does not call it.
+
+### Quotes from the envelope (read only, not imported)
+
+`elastos/crates/elastos-guest/src/runtime.rs:82-85`, `RequestEnvelope`, is `id` plus `request`. `RuntimeRequest` at `:19-36` carries `request_capability` with `resource`, `action` and `reason`, and `resource_invoke` with `uri`, `operation`, `body` and `token`:
+
+```text
+pub struct RequestEnvelope {
+    pub id: RequestId,
+    pub request: RuntimeRequest,
+}
+```
+
+```text
+    RequestCapability {
+        resource: String,
+        action: String,
+        reason: String,
+    },
+    ResourceInvoke {
+        uri: String,
+        operation: String,
+        body: serde_json::Value,
+        token: String,
+    },
+```
+
+A line is JSON `{"id": <number>, "request": {"type": ...}}`.
+
+### Code
+
+- `bridge_envelope` at `standin-runtime/mod.rs:403` is the only new public method. The doc comment starts `Lab test seam, not a route.` `let _ = principal` at `:409` keeps the name and does not choose the caller. A line `serde_json::from_str` rejects returns `Err` whose text starts `Invalid JSON`. `bridge_id` at `:1434` reads a numeric `id`, uses `0` when `id` is absent, and returns `Invalid JSON: id must be a number` for any other present value. `bridge_request` at `:1447` returns `Invalid JSON: request must be an object` when `request` is missing or not an object. Neither stores.
+- `request_capability` builds `{"resource","action","reason"}` in `capability_fields` at `:1459` and calls `post_capability_request` at `:421` with `Caller::Client { session_id: capsule_id }`. A missing `resource` or `action` is omitted, so that method's body check stays the one validation. A present field is copied with its JSON type. A missing `reason` is `""`. The method does not call `seed_request` and does not push onto the request store.
+- `resource_invoke` reads `token` in `invoke_token` at `:1479`. A missing `token` is `""`. A non-string `token` is `Err` `Invalid JSON: token must be a string` and does not call `authorise`. A string `token` calls `authorise` at `:431` with `Caller::Client { session_id: capsule_id }`. The arm does not read `uri`, `operation` or `body`.
+- `Ok` from `post_capability_request` becomes `{"id","response":{"type":"ok","data":...}}` through `bridge_ok` at `:1487`. `Ok(())` from `authorise` uses that same shape with `data` null. `Err` from either call, and any other `type`, becomes `{"id","response":{"type":"error","code":"denied","message":...}}` through `bridge_error` at `:1494`. There is no `token` key. `post_capability_request` and `authorise` keep their bodies. `admit_resident`, `post_capsules`, `launch_two_running` and `seed_request` stay. No new request store, no wasmtime type, no `ComponentProvider` and no child process.
+
+### Tests
+
+`standin_bridge_envelope_records_the_capsule_request` at `standin-runtime/mod.rs:8200` in the module's `#[cfg(test)]`, passing with no operator and no probe build. It reuses `launch_two_running`, `request_entries`, `grant_record`, `pending_request` and `assert_live_request_ids_empty`. Assertion text says the stand-in did the work. Each `Ok` is parsed as one JSON object with no trailing text, and the whole envelope is compared, including the echoed `id`, `code` `denied`, present `data` (null on a successful invoke) and no `token` key.
+
+- `launch_two_running` leaves `component-1` and `component-2` `running` with cause `""`. `seed_grant` stores `req-once` on `component-1`, resource `localhost://Public/resident-instances/shared.txt`, action `read`, duration `once`, `granted_at` 1, life `Live`, `session_ended` false.
+- A missing `request`, a non-object `request`, and a JSON value that is not an object are each `Err` `Invalid JSON: request must be an object`. Both request lists stay empty and `next_request` stays 1. A present nonnumeric `id` (`"7"`, `true`, `7.5`, `null`, `-1`) is `Err` `Invalid JSON: id must be a number` and stores nothing.
+- The capability line `{"id":7,"request":{"type":"request_capability","resource":"localhost://Public/resident-instances/shared.txt","action":"read","reason":"read shared"}}` for `component-1` and principal `Some("person-a")` is `Ok`. `id` is 7, `response.type` is `ok`, and `response.data` is `{"status":"pending","request_id":"request-1"}`. `component-1` has that one pending request. `component-2` is empty. The same line for `component-2` and principal `None` stores `request-2` there, and `component-1` still has only `request-1`.
+- The `https://example` line is `Ok` with `response.message` `Unsupported resource scheme. Allowed: elastos://, localhost://` and stores no `request-3`. `not json` is `Err` and the text contains `Invalid JSON`, and that text is not the request-object or id refusal. `{"id":7,"request":{"type":"ping"}}`, a request with no `type`, and a non-string `type` are `unsupported bridge request` and store nothing further.
+- An omitted `id` echoes `0` and stores `request-3`. An omitted `reason` stores `request-4` with reason `""`. A missing `resource`, a missing `action`, a numeric `resource`, a numeric `action`, a numeric `reason` and action `jump` are the existing `post_capability_request` reasons: `request body needs resource`, `request body needs action`, `request resource must be a string`, `request action must be a string`, `request reason must be a string`, and `Invalid action: jump. Expected: read, write, execute, delete, message, admin`. None of them stores `request-5`.
+- A non-string `token` is `Err` `Invalid JSON: token must be a string`. An omitted `token` is `Ok` with message `unknown grant: ` and echoed id `9`. `grant_record` for `req-once` stays `(Life::Live, false)`.
+- The invoke line `{"id":8,"request":{"type":"resource_invoke","uri":"localhost://Public/resident-instances/shared.txt","operation":"read","body":{},"token":"req-once"}}` for `component-2` and principal `Some("component-1")` is `wrong capsule: expected component-1, got component-2`, and the grant stays `(Life::Live, false)`. The same line for `component-1` and principal `Some("person-a")` is `ok` with `data` null, and the grant is `(Life::Exhausted, false)`. A second owner invoke is `grant is not live: Exhausted`. Both instances stay `running` with cause `""`. The shell live-grant `request_id` set is empty.
+
+### Hand-run falsifiers
+
+No `falsifiers.json` id and no new id. Each plant ran alone, the planted crate compiled, and it was restored before the next. The command was `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_bridge_envelope_records_the_capsule_request -- --exact`. Every planted run exited 101 with that test failed on its assertion. After the last restore, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows the candidate only, with no plant. `standin-runtime/mod.rs` SHA-256 is `ff371dbcd18bbfa549dbe1f480a66c6060717a6cc6a1cbaaa18f9de75bcae57e` before and after the plants. A planted panic line that moved is named with the restored line.
+
+F-standin-bridge-stub: the start of `bridge_envelope` returns the canned `Ok` before the line is parsed. Planted run failed at `mod.rs:8248:13` (`:8244` restored): `the stand-in did the work: a request that is not an object is refused: {"id":7} Ok("{\"id\":7,\"response\":{\"type\":\"ok\",\"data\":{\"status\":\"pending\",\"request_id\":\"request-1\"}}}")`.
+
+Old:
+
+```text
+    ) -> Result<String, String> {
+        let _ = principal;
+```
+
+New:
+
+```text
+    ) -> Result<String, String> {
+        return Ok(
+            r#"{"id":7,"response":{"type":"ok","data":{"status":"pending","request_id":"request-1"}}}"#
+                .to_owned(),
+        );
+        let _ = principal;
+```
+
+F-standin-bridge-fixed-session: the `request_capability` arm calls `post_capability_request` with `component-1` for every capsule id. Planted run failed at `mod.rs:8304:9`: `the stand-in did the work: component-2 has that one pending request`, `left: []`, `right` the `request-2` entry for `component-2`.
+
+Old:
+
+```text
+                let capability_caller = Caller::Client {
+                    session_id: capsule_id,
+                };
+```
+
+New:
+
+```text
+                let capability_caller = Caller::Client {
+                    session_id: "component-1",
+                };
+```
+
+F-standin-bridge-principal-caller: the `resource_invoke` arm uses `principal.unwrap_or(capsule_id)` as the `Caller` session. Planted run failed at `mod.rs:8160:9` (`:8159` restored): `the stand-in did the work: a grant for the other capsule is refused`, `left` `ok` with `data` null, `right` the `wrong capsule` error envelope.
+
+Old:
+
+```text
+            "resource_invoke" => {
+                let token = invoke_token(request)?;
+                let invoke_caller = Caller::Client {
+                    session_id: capsule_id,
+                };
+```
+
+New:
+
+```text
+            "resource_invoke" => {
+                let token = invoke_token(request)?;
+                let invoke_session = principal.unwrap_or(capsule_id);
+                let invoke_caller = Caller::Client {
+                    session_id: invoke_session,
+                };
+```
+
+F-standin-bridge-request-object: a missing or non-object `request` skips the object check. Planted run failed at `mod.rs:8244:13`: `a request that is not an object is refused: {"id":7}`, `Ok` of the `unsupported bridge request` envelope.
+
+Old:
+
+```text
+fn bridge_request(envelope: &Value) -> Result<&Value, String> {
+    match envelope.get("request") {
+        Some(request) if request.is_object() => Ok(request),
+        _ => Err("Invalid JSON: request must be an object".to_owned()),
+    }
+}
+```
+
+New:
+
+```text
+fn bridge_request(envelope: &Value) -> Result<&Value, String> {
+    match envelope.get("request") {
+        Some(request) => Ok(request),
+        _ => Ok(envelope),
+    }
+}
+```
+
+F-standin-bridge-default-id: an omitted `id` becomes `7`. Planted run failed at `mod.rs:8137:9`: `an omitted id is 0 and stores request-3`, `left` id `7`, `right` id `0`.
+
+Old:
+
+```text
+        None => Ok(0),
+```
+
+New:
+
+```text
+        None => Ok(7),
+```
+
+F-standin-bridge-default-reason: an omitted `reason` is stored as `read shared`. Planted run failed at `mod.rs:8415:9`: `an omitted reason is stored as an empty string`, `request-4` `reason` `read shared` against `""`.
+
+Old:
+
+```text
+        None => Value::String(String::new()),
+```
+
+New:
+
+```text
+        None => Value::String("read shared".to_owned()),
+```
+
+F-standin-bridge-default-token: an omitted `token` is `req-once`. Planted run failed at `mod.rs:8159:9`: `an omitted token is an unknown grant`, `left` `ok` with `data` null, `right` message `unknown grant: `.
+
+Old:
+
+```text
+        None => Ok(""),
+```
+
+New:
+
+```text
+        None => Ok("req-once"),
+```
+
+F-standin-bridge-fixed-id: every response echoes id `7`. Planted run failed at `mod.rs:8159:9`: `any other request type is unsupported`, `left` id `7`, `right` id `6`.
+
+Old:
+
+```text
+        serde_json::to_string(&json!({
+            "id": id,
+            "response": response,
+        }))
+```
+
+New:
+
+```text
+        serde_json::to_string(&json!({
+            "id": 7,
+            "response": response,
+        }))
+```
+
+F-standin-bridge-error-code: the error envelope uses `code` `error`. Planted run failed at `mod.rs:8159:9`: `an unsupported scheme is refused`, `left` `code` `error`, `right` `code` `denied`.
+
+Old:
+
+```text
+fn bridge_error(message: &str) -> Value {
+    json!({
+        "type": "error",
+        "code": "denied",
+        "message": message,
+    })
+}
+```
+
+New:
+
+```text
+fn bridge_error(message: &str) -> Value {
+    json!({
+        "type": "error",
+        "code": "error",
+        "message": message,
+    })
+}
+```
+
+F-standin-bridge-omit-null: a null `data` is omitted. Planted run failed at `mod.rs:8141:9` (`:8137` restored): `the owner invoke authorises component-1`, `left` a response with no `data`, `right` `data` null.
+
+Old:
+
+```text
+fn bridge_ok(data: Value) -> Value {
+    json!({
+        "type": "ok",
+        "data": data,
+    })
+}
+```
+
+New:
+
+```text
+fn bridge_ok(data: Value) -> Value {
+    if data.is_null() {
+        json!({ "type": "ok" })
+    } else {
+        json!({
+            "type": "ok",
+            "data": data,
+        })
+    }
+}
+```
+
+F-standin-bridge-token-field: the envelope gains `token`. Planted run failed at `mod.rs:8138:9` (`:8137` restored): `component-1's capability line stores request-1`, `left` has `token` `req-once`, `right` has no `token`.
+
+Old:
+
+```text
+        serde_json::to_string(&json!({
+            "id": id,
+            "response": response,
+        }))
+```
+
+New:
+
+```text
+        serde_json::to_string(&json!({
+            "id": id,
+            "response": response,
+            "token": "req-once",
+        }))
+```
+
+F-standin-bridge-id-coerce: a nonnumeric `id` becomes `0`. Planted run failed at `mod.rs:8262:13` (`:8264` restored): `a nonnumeric id is refused: "7"`, `Ok` of id `0` and `request-1`.
+
+Old:
+
+```text
+        Some(id) => id
+            .as_u64()
+            .ok_or_else(|| "Invalid JSON: id must be a number".to_owned()),
+```
+
+New:
+
+```text
+        Some(id) => Ok(id.as_u64().unwrap_or(0)),
+```
+
+F-standin-bridge-token-coerce: a non-string `token` becomes `""`. Planted run failed at `mod.rs:8498:13`: `a non-string token is refused: 1`, `Ok` of the `unknown grant: ` envelope.
+
+Old:
+
+```text
+        Some(_) => Err("Invalid JSON: token must be a string".to_owned()),
+```
+
+New:
+
+```text
+        Some(_) => Ok(""),
+```
+
+F-standin-bridge-field-coerce: missing and non-string capability fields are forced to strings before `post_capability_request`. Planted run failed at `mod.rs:8166:9` (`:8159` restored): `a missing resource reaches post_capability_request`, `left` `Unsupported resource scheme. Allowed: elastos://, localhost://`, `right` `request body needs resource`.
+
+Old:
+
+```text
+fn capability_fields(request: &Value) -> Value {
+    let mut body = Map::new();
+    if let Some(resource) = request.get("resource") {
+        body.insert("resource".to_owned(), resource.clone());
+    }
+    if let Some(action) = request.get("action") {
+        body.insert("action".to_owned(), action.clone());
+    }
+    let reason = match request.get("reason") {
+        None => Value::String(String::new()),
+        Some(reason) => reason.clone(),
+    };
+    body.insert("reason".to_owned(), reason);
+    Value::Object(body)
+}
+```
+
+New:
+
+```text
+fn capability_fields(request: &Value) -> Value {
+    let mut body = Map::new();
+    let resource = request
+        .get("resource")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let action = request
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let reason = request
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    body.insert("resource".to_owned(), Value::String(resource));
+    body.insert("action".to_owned(), Value::String(action));
+    body.insert("reason".to_owned(), Value::String(reason));
+    Value::Object(body)
+}
+```
+
+### Docs
+
+`standin-runtime/README.md` adds one paragraph immediately before `## Callers`: `bridge_envelope` is the one hostcall; two-capsule-run passes the envelope line, the capsule id and the principal and does not copy this module; this lane does not run the component bytes; a capability line calls `post_capability_request` for that capsule id; an invoke line calls `authorise` for that capsule id, and the principal argument does not choose the caller; a PASS gives the Runtime no A3 credit; `session_id` still equals the instance id. The RA-1 section, the RI-1 to RI-4 section, the settlement paragraph, and the request, grant, cap and revoke paragraphs keep their bytes.
+
+`RUNBOOK.md` gains one paragraph after the last stand-in paragraph: `standin_bridge_envelope_records_the_capsule_request` is this stand-in, two-capsule-run owns the real-bytes run, and a PASS here gives the Runtime no A3 credit. Every other RUNBOOK paragraph keeps its bytes.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged. `git diff` for `src/harness.rs`, `src/census.rs`, `tests/effects.rs`, `tests/common/grants.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. The changed files are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.14 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 262.65 seconds, inside the 600-second bound. Targets in order: lib 70 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.15 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_bridge_envelope_records_the_capsule_request -- --exact` exit 0, 1 passed and 0 failed, real 0.12 seconds.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `capability_fields` at `standin-runtime/mod.rs:1459` copies the request fields into the existing body and names no bundle or content hash. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `let _ = principal` at `:409` discards the principal, and both arms pass `capsule_id` at `:418-420` and `:428-430`. |
+| 3. A second path or a second copy of one rule? | No | The capability arm calls `post_capability_request` once at `:421`, the invoke arm calls `authorise` once at `:431`, and this method does not call `seed_request`. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`; `elastos/` is untouched and quoted only. |
+| 5. Refusals deny by default with a clear reason? | Yes | `bridge_request` at `:1447`, `bridge_id` at `:1434` and `invoke_token` at `:1479` return `Invalid JSON` reasons, and `bridge_error` at `:1494` uses `code` `denied` plus the existing reason text. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `bridge_envelope` at `:403` is the one hostcall and starts no component bytes, process or wasmtime store. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_bridge_envelope_records_the_capsule_request` at `:8200`; the fourteen plants each fail it, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | The capsule id is only the caller session at `:418` and `:428`; `post_capability_request` still admits the instance, and `authorise` still decides the grant. |
+
+A passing row gives the real Runtime no A3 credit. two-capsule-run owns the real-bytes run.
