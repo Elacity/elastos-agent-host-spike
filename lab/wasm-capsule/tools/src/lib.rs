@@ -30,9 +30,9 @@
 
 pub mod bundle;
 pub mod receipt;
+pub mod refusal_receipts;
 pub mod run;
 pub mod verify;
-pub mod refusal_receipts;
 
 pub use capsule_identity::lab_cid as bundle_identity;
 

@@ -175,9 +175,7 @@ mod tests {
     fn one_allowed_one_refused_give_two_ordered_receipts() {
         let mut ledger = Receipts::new();
         ledger.record_allowed("verify").unwrap();
-        ledger
-            .record_refused("run", Refusal::ReceiptsFull)
-            .unwrap();
+        ledger.record_refused("run", Refusal::ReceiptsFull).unwrap();
 
         let all = ledger.all();
         assert_eq!(all.len(), 2);
