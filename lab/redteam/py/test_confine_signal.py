@@ -473,6 +473,55 @@ def unchanged_findings(start, end):
         )
 
 
+PTY_FINDING_NAMES = (
+    "CRITICAL-confine-061.md",
+    "CRITICAL-cc-model-confine-061.md",
+)
+
+
+def plant_pty_finding(repo):
+    """An existing 061 record, the kind a pty allow writes beside a signal deny.
+
+    The signal deny does not create this file. Callers check that a later
+    deny leaves these bytes in place.
+    """
+    findings = Path(repo) / "lab" / "redteam" / "findings"
+    findings.mkdir(parents=True)
+    (findings / ".gitkeep").write_bytes(b"")
+    (findings / "grant-binding-002.md").write_bytes(b"kept\n")
+    wallet = b"CRITICAL CRITICAL-confine-061 pty open preserved\n"
+    model = b"CRITICAL CRITICAL-cc-model-confine-061 pty open preserved\n"
+    (findings / "CRITICAL-confine-061.md").write_bytes(wallet)
+    (findings / "CRITICAL-cc-model-confine-061.md").write_bytes(model)
+    body = wallet + model
+    (Path(repo) / "lab" / "redteam" / "CRITICAL.md").write_bytes(body)
+    return body
+
+
+PTY_CRITICAL_IDS = tuple(name[:-3] for name in PTY_FINDING_NAMES)
+
+
+def assert_pty_critical_preserved(start, end):
+    """Keep a 061 ``CRITICAL.md`` that was already present.
+
+    ``unchanged_findings`` owns byte preservation for the whole snapshot.
+    Present content must name ``CRITICAL-confine-061`` or
+    ``CRITICAL-cc-model-confine-061`` and must be free of signal findings.
+    """
+    unchanged_findings(start, end)
+    end_critical = end.get("/CRITICAL.md")
+    if end_critical is None:
+        return
+    text = end_critical.decode("utf-8")
+    if "CRITICAL-confine-044" in text or "CRITICAL-cc-model-confine-044" in text:
+        raise AssertionError("lab/redteam/CRITICAL.md contains a signal finding while signals are denied")
+    if all(finding_id not in text for finding_id in PTY_CRITICAL_IDS):
+        raise AssertionError(
+            "lab/redteam/CRITICAL.md lacks CRITICAL-confine-061 or "
+            "CRITICAL-cc-model-confine-061"
+        )
+
+
 def _git(repo, *args):
     """A git command in a temporary repo. It does not touch this checkout."""
     completed = subprocess.run(
@@ -907,7 +956,8 @@ class SignalRules(unittest.TestCase):
         they were. Restoring clears the marker. A missing marker, an overbroad
         marker, and a leaked marker are each reported. A deny writes nothing.
         The temp directory is gone when this returns. The live findings stay
-        absent.
+        as they were. An existing 061 pty finding, and its ``CRITICAL.md``
+        paragraph, stay byte-identical when signals remain denied.
         """
         baseline = mark_snapshot(SignalProbe)
         live = findings_snapshot()
@@ -999,7 +1049,26 @@ class SignalRules(unittest.TestCase):
         self.assertEqual(findings_snapshot(), live)
         self.assert_findings_match_allows(ROOT, ALLOWS)
         if not ALLOWS:
-            self.assertFalse((ROOT / "lab" / "redteam" / "CRITICAL.md").exists())
+            assert_pty_critical_preserved(live, findings_snapshot())
+        with tempfile.TemporaryDirectory(prefix="ccrt-sig-pty-") as pty_repo:
+            body = plant_pty_finding(pty_repo)
+            before_pty = findings_snapshot(pty_repo)
+            self.assertIsNone(note_signal(pty_repo, "wallet", "deny"))
+            after_pty = findings_snapshot(pty_repo)
+            assert_pty_critical_preserved(before_pty, after_pty)
+            self.assertEqual(after_pty["CRITICAL-confine-061.md"], body.split(
+                b"CRITICAL CRITICAL-cc-model-confine-061", 1
+            )[0])
+            self.assertEqual(after_pty["/CRITICAL.md"], body)
+            self.assertIn(b"CRITICAL-confine-061", after_pty["/CRITICAL.md"])
+            self.assertIn(b"CRITICAL-cc-model-confine-061", after_pty["/CRITICAL.md"])
+            self.assertNotIn(b"CRITICAL-confine-044", after_pty["/CRITICAL.md"])
+            self.assertFalse((Path(pty_repo) / FINDINGS["wallet"]).exists())
+            removed = dict(after_pty)
+            del removed["CRITICAL-confine-061.md"]
+            with self.assertRaises(AssertionError) as caught:
+                unchanged_findings(after_pty, removed)
+            self.assertIn("CRITICAL-confine-061.md", str(caught.exception))
 
     def test_recorded_allow_keeps_gate_green(self):
         """Each profile's sole recorded allow keeps its real deny test green.
@@ -1409,19 +1478,102 @@ class SignalRules(unittest.TestCase):
         """A deny creates neither 044 finding. Existing finding bytes stay put.
 
         The live snapshot contains ``grant-binding-002.md``. ``.gitkeep``
-        matches the module-start bytes.
+        matches the module-start bytes. An existing 061 pty finding,
+        including its ``CRITICAL.md`` paragraph, stays byte-identical.
+        A signal paragraph in that file is rejected even with equal bytes.
         """
         end = findings_snapshot()
         self.assertIn(".gitkeep", end)
         self.assertIn("grant-binding-002.md", end)
         unchanged_findings(preserved_view(START_FINDINGS), preserved_view(end))
         self.assert_findings_match_allows(ROOT, ALLOWS)
-        if ALLOWS:
-            return
-        unchanged_findings(START_FINDINGS, end)
-        self.assertNotIn("CRITICAL-confine-044.md", end)
-        self.assertNotIn("CRITICAL-cc-model-confine-044.md", end)
-        self.assertIsNone(end["/CRITICAL.md"])
+        if not ALLOWS:
+            unchanged_findings(START_FINDINGS, end)
+            self.assertNotIn("CRITICAL-confine-044.md", end)
+            self.assertNotIn("CRITICAL-cc-model-confine-044.md", end)
+            assert_pty_critical_preserved(START_FINDINGS, end)
+        with tempfile.TemporaryDirectory(prefix="ccrt-sig-pty-deny-") as pty_repo:
+            body = plant_pty_finding(pty_repo)
+            start = findings_snapshot(pty_repo)
+            for name in ("wallet", "did", "model"):
+                self.assertIsNone(note_signal(pty_repo, name, "deny"))
+            kept = findings_snapshot(pty_repo)
+            assert_pty_critical_preserved(start, kept)
+            self.assertEqual(kept["/CRITICAL.md"], body)
+            self.assertEqual(kept["CRITICAL-confine-061.md"] + kept[
+                "CRITICAL-cc-model-confine-061.md"
+            ], body)
+            self.assertNotIn("CRITICAL-confine-044.md", kept)
+            self.assertNotIn("CRITICAL-cc-model-confine-044.md", kept)
+            removed = dict(kept)
+            del removed["CRITICAL-cc-model-confine-061.md"]
+            with self.assertRaises(AssertionError) as caught:
+                unchanged_findings(kept, removed)
+            self.assertIn(
+                "CRITICAL-cc-model-confine-061.md", str(caught.exception)
+            )
+            leaked = dict(kept)
+            leaked["/CRITICAL.md"] = b"CRITICAL-confine-044.md leaked\n"
+            with self.assertRaises(AssertionError) as caught:
+                assert_pty_critical_preserved(kept, leaked)
+            self.assertIn("/CRITICAL.md", str(caught.exception))
+
+    def test_pty_critical_preservation_checks_all_snapshot_bytes(self):
+        """The shared checker catches additions, edits and removals before content checks."""
+        pty = b"CRITICAL CRITICAL-confine-061 pty open preserved\n"
+        model = b"CRITICAL CRITICAL-cc-model-confine-061 pty open preserved\n"
+        for critical in (None, pty, model):
+            start = {name: pty for name in PTY_FINDING_NAMES}
+            start["/CRITICAL.md"] = critical
+            assert_pty_critical_preserved(start, dict(start))
+            for name in start:
+                removed = dict(start)
+                del removed[name]
+                edited = dict(start)
+                edited[name] = b"changed\n"
+                cases = [("edited", start, edited)]
+                if start[name] is not None:
+                    cases.extend((
+                        ("removed", start, removed),
+                        ("added", removed, start),
+                    ))
+                for change, before, after in cases:
+                    with self.subTest(critical=critical, name=name, change=change):
+                        with self.assertRaises(AssertionError) as caught:
+                            assert_pty_critical_preserved(before, after)
+                        self.assertEqual(
+                            str(caught.exception),
+                            "deny changed lab/redteam/findings: " + name,
+                        )
+
+    def test_pty_critical_content_refusal_reasons(self):
+        """Equal snapshots reach each content refusal independently of preservation."""
+        pty = b"CRITICAL CRITICAL-confine-061 pty open preserved\n"
+        missing = (
+            "lab/redteam/CRITICAL.md lacks CRITICAL-confine-061 or "
+            "CRITICAL-cc-model-confine-061"
+        )
+        cases = (
+            (
+                pty + b"CRITICAL-confine-044.md leaked\n",
+                "lab/redteam/CRITICAL.md contains a signal finding while signals are denied",
+            ),
+            (
+                pty + b"CRITICAL-cc-model-confine-044.md leaked\n",
+                "lab/redteam/CRITICAL.md contains a signal finding while signals are denied",
+            ),
+            (b"CRITICAL unrelated finding\n", missing),
+            (b"", missing),
+            (b"061\n", missing),
+            (b"task 061\n", missing),
+        )
+        for content, expected in cases:
+            with self.subTest(content=content):
+                start = {name: pty for name in PTY_FINDING_NAMES}
+                start["/CRITICAL.md"] = content
+                with self.assertRaises(AssertionError) as caught:
+                    assert_pty_critical_preserved(start, dict(start))
+                self.assertEqual(str(caught.exception), expected)
 
 
 if __name__ == "__main__":
