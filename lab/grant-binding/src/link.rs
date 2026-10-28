@@ -12,8 +12,9 @@ pub fn cargo_toml_path_depends_on_grant_binding(cargo_toml: &str) -> bool {
 
 /// Decode escapes in TOML basic strings, so an escaped link stays visible.
 ///
-/// Text outside a string, a comment, and every literal string (`'...'` or
-/// `'''...'''`), is copied unchanged. Only a basic string (`"..."` or
+/// Text outside a string and every literal string (`'...'` or `'''...'''`) is
+/// copied unchanged. A `#` comment is omitted through the end of its line, so
+/// comment text is not a path link. Only a basic string (`"..."` or
 /// `"""..."""`) decodes `\\`, `\"`, `\b`, `\t`, `\n`, `\f`, `\r`, `\uXXXX`
 /// and `\UXXXXXXXX`. An escape that is unknown, short or not a Unicode scalar
 /// stays as source. One or two quote characters just inside a multiline
@@ -29,7 +30,6 @@ fn decode_toml_basic_strings(cargo_toml: &str) -> String {
                     .iter()
                     .position(|byte| *byte == b'\n')
                     .map_or(bytes.len(), |offset| index + offset);
-                decoded.extend_from_slice(&bytes[index..end]);
                 index = end;
             }
             b'\'' => index = copy_literal(bytes, index, &mut decoded),
@@ -323,4 +323,18 @@ fn model_line_ending_escape_is_a_link() {
     let literal = "gb = { path = '''../grant-bindi\\\nng''', package = '''grant-bindi\\\nng''' }\n";
     assert!(!literal.contains("grant-binding"));
     assert!(!cargo_toml_path_depends_on_grant_binding(literal));
+}
+
+#[test]
+fn model_comment_is_not_a_path_link() {
+    let whole_line = "# path = \"../grant-binding\"\nname = \"other\"\n";
+    assert!(whole_line.contains("grant-binding"));
+    assert!(whole_line.contains("path"));
+    assert!(!cargo_toml_path_depends_on_grant_binding(whole_line));
+    let trailing = "name = \"grant-binding\" # path = \"lab/grant-binding\"\n";
+    assert!(trailing.contains("grant-binding"));
+    assert!(trailing.contains("path"));
+    assert!(!cargo_toml_path_depends_on_grant_binding(trailing));
+    let followed = "# path = \"../grant-binding\"\ngb = { path = \"../grant-binding\" }\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(followed));
 }
