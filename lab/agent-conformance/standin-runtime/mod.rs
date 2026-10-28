@@ -35,6 +35,11 @@
 //! `post_capsules` copies that principal onto the new instance.
 //! `protected_write` and `protected_read` resolve `Users/self` and
 //! `UsersAI/self` from it, then call `authorise`. One map holds the bytes.
+//!
+//! `bind_verified_component` stores the component hash the launch verified.
+//! `post_capsules` copies that hash onto the new instance. `component_hash`
+//! reads it. The launch body still rejects `component_hash`. A later bind
+//! does not change an instance already created.
 
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -99,6 +104,7 @@ struct Admitted {
     start: Start,
     world: &'static str,
     principal: Option<String>,
+    component_hash: Option<String>,
 }
 
 struct Instance {
@@ -109,6 +115,7 @@ struct Instance {
     cause: String,
     ended_at: Option<u64>,
     principal: Option<String>,
+    component_hash: Option<String>,
 }
 
 /// Four request statuses this slice stores.
@@ -923,6 +930,7 @@ impl StandIn {
             start,
             world: RESIDENT_WORLD,
             principal: None,
+            component_hash: None,
         });
         Ok(())
     }
@@ -948,6 +956,49 @@ impl StandIn {
         }
         row.principal = Some(principal.to_owned());
         Ok(())
+    }
+
+    /// Lab test seam, not a route.
+    ///
+    /// Stores the component hash the verified launch supplied on one admitted
+    /// path. It mints no instance id, and a later call does not change an
+    /// instance already created.
+    pub fn bind_verified_component(&mut self, path: &str, hash: &str) -> Result<(), (u16, String)> {
+        if hash.is_empty() {
+            return Err((400, "verified launch needs a component hash".to_owned()));
+        }
+        if !crate::report::hex(hash, 64) {
+            return Err((
+                400,
+                "component hash must be 64 lowercase hex characters".to_owned(),
+            ));
+        }
+        let Some(row) = self.admitted.iter_mut().find(|row| row.path == path) else {
+            return Err((400, format!("unknown resident path: {path}")));
+        };
+        if row.component_hash.is_some() {
+            return Err((400, "verified component hash already bound".to_owned()));
+        }
+        row.component_hash = Some(hash.to_owned());
+        Ok(())
+    }
+
+    /// Lab test seam, not a route.
+    ///
+    /// Returns the component hash `post_capsules` copied onto this instance.
+    /// It does not read the admit name, the path, or the launch body.
+    pub fn component_hash(&self, instance_id: &str) -> Result<String, (u16, String)> {
+        let Some(instance) = self
+            .instances
+            .iter()
+            .find(|instance| instance.id == instance_id)
+        else {
+            return Err(unknown_instance(instance_id));
+        };
+        instance
+            .component_hash
+            .clone()
+            .ok_or_else(|| (400, "instance has no verified component hash".to_owned()))
     }
 
     /// Lab test seam, not a route.
@@ -999,7 +1050,7 @@ impl StandIn {
     ) -> Result<Value, (u16, String)> {
         require_shell(caller)?;
         let path = launch_path(body)?;
-        let (name, start, principal) = self.admitted_start(path)?;
+        let (name, start, principal, component_hash) = self.admitted_start(path)?;
         let id = self.mint_id();
         let phase = ResidentStatus::Starting;
         self.instances.push(Instance {
@@ -1010,6 +1061,7 @@ impl StandIn {
             cause: String::new(),
             ended_at: None,
             principal,
+            component_hash,
         });
         Ok(launch_body(&id, &name, phase))
     }
@@ -1160,9 +1212,17 @@ impl StandIn {
         id
     }
 
-    fn admitted_start(&self, path: &str) -> Result<(String, Start, Option<String>), (u16, String)> {
+    fn admitted_start(
+        &self,
+        path: &str,
+    ) -> Result<(String, Start, Option<String>, Option<String>), (u16, String)> {
         if let Some(row) = self.admitted.iter().find(|row| row.path == path) {
-            return Ok((row.name.clone(), row.start.clone(), row.principal.clone()));
+            return Ok((
+                row.name.clone(),
+                row.start.clone(),
+                row.principal.clone(),
+                row.component_hash.clone(),
+            ));
         }
         Err(self.not_resident(path))
     }
@@ -10016,6 +10076,281 @@ mod tests {
             "running",
             "",
             "component-2 stays running",
+        );
+    }
+
+    #[test]
+    fn standin_instance_stores_the_verified_component_hash() {
+        let mut standin = StandIn::new();
+        standin
+            .admit_resident("/capsules/agent-a", "agent-a", Start::Ok)
+            .expect("the stand-in did the work: it admits agent-a");
+        standin
+            .admit_resident("/capsules/agent-b", "agent-b", Start::Ok)
+            .expect("the stand-in did the work: it admits agent-b");
+        standin
+            .admit_resident("/capsules/agent-a-again", "agent-a-again", Start::Ok)
+            .expect("the stand-in did the work: it admits agent-a-again");
+        standin
+            .admit_resident("/capsules/late", "late", Start::Ok)
+            .expect("the stand-in did the work: it admits late");
+
+        let hash_a = "a".repeat(64);
+        let hash_b = "b".repeat(64);
+        let hash_63 = "a".repeat(63);
+        let hash_65 = "a".repeat(65);
+        let hash_a_upper = format!("A{}", &hash_a[1..]);
+        let needs_hash = "verified launch needs a component hash";
+        let hex_hash = "component hash must be 64 lowercase hex characters";
+        let already_bound = "verified component hash already bound";
+
+        assert_eq!(
+            standin.bind_verified_component("/capsules/agent-a", ""),
+            Err((400, needs_hash.to_owned())),
+            "the stand-in did the work: an empty hash is refused"
+        );
+        assert_eq!(
+            standin.bind_verified_component("/capsules/missing", ""),
+            Err((400, needs_hash.to_owned())),
+            "the stand-in did the work: an empty hash is refused before the path"
+        );
+        assert_eq!(
+            standin.bind_verified_component("/capsules/agent-a", "agent-a"),
+            Err((400, hex_hash.to_owned())),
+            "the stand-in did the work: a name is not a component hash"
+        );
+        assert_eq!(
+            standin.bind_verified_component("/capsules/agent-a", &hash_a_upper),
+            Err((400, hex_hash.to_owned())),
+            "the stand-in did the work: an uppercase hash is refused"
+        );
+        assert_eq!(
+            standin.bind_verified_component("/capsules/agent-a", &hash_63),
+            Err((400, hex_hash.to_owned())),
+            "the stand-in did the work: a 63-character hash is refused"
+        );
+        assert_eq!(
+            standin.bind_verified_component("/capsules/agent-a", &hash_65),
+            Err((400, hex_hash.to_owned())),
+            "the stand-in did the work: a 65-character hash is refused"
+        );
+        assert_eq!(
+            standin.bind_verified_component("/capsules/missing", "agent-a"),
+            Err((400, hex_hash.to_owned())),
+            "the stand-in did the work: a malformed hash is refused before the path"
+        );
+        assert_eq!(
+            standin.bind_verified_component("/capsules/missing", &hash_63),
+            Err((400, hex_hash.to_owned())),
+            "the stand-in did the work: a short hash is refused before the path"
+        );
+        assert_eq!(
+            standin.bind_verified_component("/capsules/missing", &hash_a),
+            Err((400, "unknown resident path: /capsules/missing".to_owned())),
+            "the stand-in did the work: an unknown path is refused"
+        );
+        standin
+            .bind_verified_component("/capsules/agent-a", &hash_a)
+            .expect("the stand-in did the work: it binds agent-a");
+        assert_eq!(
+            standin.bind_verified_component("/capsules/agent-a", ""),
+            Err((400, needs_hash.to_owned())),
+            "the stand-in did the work: an empty hash is refused before a rebind"
+        );
+        assert_eq!(
+            standin.bind_verified_component("/capsules/agent-a", "agent-a"),
+            Err((400, hex_hash.to_owned())),
+            "the stand-in did the work: a malformed hash is refused before a rebind"
+        );
+        assert_eq!(
+            standin.bind_verified_component("/capsules/agent-a", &hash_63),
+            Err((400, hex_hash.to_owned())),
+            "the stand-in did the work: a short hash is refused before a rebind"
+        );
+        assert_eq!(
+            standin.bind_verified_component("/capsules/agent-a", &hash_b),
+            Err((400, already_bound.to_owned())),
+            "the stand-in did the work: a second hash is refused"
+        );
+        standin
+            .bind_verified_component("/capsules/agent-b", &hash_b)
+            .expect("the stand-in did the work: it binds agent-b");
+        standin
+            .bind_verified_component("/capsules/agent-a-again", &hash_a)
+            .expect("the stand-in did the work: it binds agent-a-again");
+        assert_eq!(
+            shell_list(&standin)["capsules"],
+            json!([]),
+            "the stand-in did the work: a bind mints no instance"
+        );
+
+        let first = standin
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/agent-a"}))
+            .expect("the stand-in did the work: it launches agent-a");
+        let second = standin
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/agent-b"}))
+            .expect("the stand-in did the work: it launches agent-b");
+        let third = standin
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/agent-a-again"}))
+            .expect("the stand-in did the work: it launches agent-a-again");
+        assert_eq!(
+            first["id"], "component-1",
+            "the stand-in did the work: the first launch is component-1"
+        );
+        assert_eq!(
+            second["id"], "component-2",
+            "the stand-in did the work: the second launch is component-2"
+        );
+        assert_eq!(
+            third["id"], "component-3",
+            "the stand-in did the work: the third launch is component-3"
+        );
+        for launch in [&first, &second, &third] {
+            assert_eq!(
+                launch["session_id"], launch["id"],
+                "the stand-in did the work: session_id equals the instance id"
+            );
+            assert_keys(
+                launch,
+                &["id", "name", "session_id", "status"],
+                "the stand-in did the work: the launch object has no component_hash key",
+            );
+        }
+        assert_eq!(
+            standin.component_hash("component-1"),
+            Ok(hash_a.clone()),
+            "the stand-in did the work: component-1 stores hash_a"
+        );
+        assert_eq!(
+            standin.component_hash("component-2"),
+            Ok(hash_b.clone()),
+            "the stand-in did the work: component-2 stores hash_b"
+        );
+        assert_eq!(
+            standin.component_hash("component-3"),
+            Ok(hash_a.clone()),
+            "the stand-in did the work: component-3 stores hash_a"
+        );
+        assert_ne!(
+            hash_a, hash_b,
+            "the stand-in did the work: the two component hashes differ"
+        );
+        for label in [
+            "agent-a",
+            "agent-b",
+            "/capsules/agent-a",
+            "/capsules/agent-b",
+        ] {
+            assert_ne!(
+                hash_a, label,
+                "the stand-in did the work: a component hash is not a name or a path"
+            );
+            assert_ne!(
+                hash_b, label,
+                "the stand-in did the work: a component hash is not a name or a path"
+            );
+        }
+        assert_eq!(
+            standin.post_capsules(
+                Caller::Shell,
+                &json!({"path": "/capsules/agent-a", "component_hash": hash_a}),
+            ),
+            Err((
+                400,
+                "resident launch body rejects component_hash".to_owned(),
+            )),
+            "the stand-in did the work: the launch body rejects component_hash"
+        );
+        assert_eq!(
+            standin.component_hash("component-9"),
+            Err((400, "unknown instance: component-9".to_owned())),
+            "the stand-in did the work: an unknown instance is refused"
+        );
+
+        let late = standin
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/late"}))
+            .expect("the stand-in did the work: it launches late");
+        assert_eq!(
+            late["id"], "component-4",
+            "the stand-in did the work: the unbound launch is component-4"
+        );
+        assert_eq!(
+            standin.component_hash("component-4"),
+            Err((400, "instance has no verified component hash".to_owned())),
+            "the stand-in did the work: an unbound launch stores no hash"
+        );
+        standin
+            .bind_verified_component("/capsules/late", &hash_b)
+            .expect("the stand-in did the work: it binds late");
+        assert_eq!(
+            standin.component_hash("component-4"),
+            Err((400, "instance has no verified component hash".to_owned())),
+            "the stand-in did the work: a later bind leaves the instance already created"
+        );
+        let late_again = standin
+            .post_capsules(Caller::Shell, &json!({"path": "/capsules/late"}))
+            .expect("the stand-in did the work: it launches late again");
+        assert_eq!(
+            late_again["id"], "component-5",
+            "the stand-in did the work: the later launch is component-5"
+        );
+        assert_eq!(
+            standin.component_hash("component-5"),
+            Ok(hash_b.clone()),
+            "the stand-in did the work: component-5 stores hash_b"
+        );
+        assert_eq!(
+            standin.finish_start("component-1"),
+            Ok(()),
+            "the stand-in did the work: component-1 finishes start"
+        );
+        assert_eq!(
+            standin.delete_capsule(Caller::Shell, "component-2", &json!({"reason": "stop one"}),),
+            Ok(Value::Null),
+            "the stand-in did the work: stopping component-2 answers null"
+        );
+        assert_eq!(
+            standin.component_hash("component-1"),
+            Ok(hash_a.clone()),
+            "the stand-in did the work: component-1 still stores hash_a"
+        );
+        assert_eq!(
+            standin.component_hash("component-2"),
+            Ok(hash_b),
+            "the stand-in did the work: component-2 still stores hash_b"
+        );
+        let listed = shell_list(&standin);
+        let capsules = listed["capsules"]
+            .as_array()
+            .expect("the stand-in returns capsules");
+        let entry = |id: &str| {
+            capsules
+                .iter()
+                .find(|entry| entry["id"] == id)
+                .unwrap_or_else(|| panic!("the stand-in lists {id}"))
+        };
+        let running = entry("component-1");
+        assert_keys(
+            running,
+            &["cause", "id", "name", "session_id", "status"],
+            "the stand-in did the work: the list entry has no component_hash key",
+        );
+        assert_eq!(
+            running["status"], "running",
+            "the stand-in did the work: component-1 is running"
+        );
+        assert_eq!(
+            running["cause"], "",
+            "the stand-in did the work: component-1 has an empty cause"
+        );
+        let starting = entry("component-3");
+        assert_eq!(
+            starting["status"], "starting",
+            "the stand-in did the work: component-3 stays starting"
+        );
+        assert_eq!(
+            starting["cause"], "",
+            "the stand-in did the work: component-3 has an empty cause"
         );
     }
 }

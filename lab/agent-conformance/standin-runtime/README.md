@@ -68,6 +68,8 @@ After one instance has ended, `post_capability_grant` of the survivor's pending 
 
 `bind_verified_principal` stores the principal the launch verified. The launch body still rejects `principal_id`. `protected_write` stores under `Users/self` or `UsersAI/self` resolved from that principal. The digest is `identity::sha256`. A constant principal is not the root. Another `UsersAI` root is refused. `protected_write` and `protected_read` present that uri and `write` or `read` to the one `authorise` check. A different action is `wrong action`. A different object is `wrong resource`. Either refusal stores nothing and spends nothing. A PASS gives the Runtime no A15 credit, and the UsersAI binding rows stay blocked. `session_id` still equals the instance id.
 
+`bind_verified_component` stores the component hash the launch verified. The launch body still rejects `component_hash`. `post_capsules` copies the hash onto the new instance. `component_hash` reads it. The list JSON does not carry it. A name is not a hash. A later bind does not change an instance already created. A PASS gives the Runtime no A3 credit. two-capsule-run owns the bytes. `session_id` still equals the instance id.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.
