@@ -701,8 +701,9 @@ B2 (Anders, 26 Oct)", added by task 026, whose citations are at that revision's 
   and `lab/capsule-identity/README.md:1188` `## Why a lab CID and not the Runtime's CID`
 - The profile: `lab/capsule-identity/README.md:33` `profile is Kubo v0.40.1's import flags as`
 - Tests: `lab/capsule-identity/tests/fixtures.rs:42` `fn lab_cid_matches_the_pinned_value_for_each_fixture() {`,
-  `lab/capsule-identity/tests/encoding.rs:149` `fn file_over_the_chunk_limit_is_refused() {`,
-  `lab/capsule-identity/tests/encoding.rs:168` `fn directory_over_the_hamt_threshold_is_refused() {`
+  `lab/capsule-identity/tests/encoding.rs:142` `fn single_block_at_the_chunk_limit_has_the_pinned_cid() {`,
+  `lab/capsule-identity/tests/encoding.rs:248` `fn directory_at_the_hamt_threshold_stays_basic() {`,
+  `lab/capsule-identity/tests/encoding.rs:278` `fn directory_over_the_hamt_threshold_is_a_shard() {`
   and `lab/capsule-identity/tests/cross_implementation.rs:127` `fn readme_python_recomputes_every_lab_cid_pin() {`
 - Archive hashes stay delivery checks: the lab names the bundle's files, not the Runtime's archive,
   `lab/capsule-identity/README.md:1200` `a delivery check of those archive bytes, not this CID.`
@@ -715,14 +716,20 @@ B2 (Anders, 26 Oct)", added by task 026, whose citations are at that revision's 
   recomputation of README's byte rules (the Python block that `readme_python_recomputes_every_lab_cid_pin`,
   cited above, runs), and the committed check is still that Python block:
   `lab/capsule-identity/README.md:1222` `README's Python block, written from the byte rules: the committed test`
-  Only the non-sharded subset of the profile is pinned, with files at any tree depth:
-  `lab/capsule-identity/README.md:46` `The tests pin only the non-sharded subset of that profile, with files at any`
-  (corrected by task 053, on 2026-10-28; until then it said single-block)
+  Both sides of the profile's shard decision are pinned, with files at any tree depth:
+  `lab/capsule-identity/README.md:46` `The tests pin both sides of the profile's shard decision, with files at any`
+  (corrected by task 056, on 2026-10-28; until then it said the non-sharded subset, and a directory block over
+  262144 bytes was refused)
   The pins are reproduced on one Mac only, so no construction rule is frozen.
   Added by task 053, on 2026-10-28: the hand-run Kubo, with the provider's two HAMT config values, also printed
   `bafybeifv7ypq27zanvn46j4q5jnm5akr55flfzne3zszdbbolt2dtgevc4` (`DIRECTORY_AT_LIMIT_LAB_CID`), the pin of a bundle
-  whose root block is exactly 262144 bytes, the largest the lab names, so Kubo did not shard it
-  (`test result: ok. 1 passed`); with the threshold set to `1KiB` by hand, that row alone differed.
+  whose root block is exactly 262144 bytes, so Kubo did not shard it
+  (`test result: ok. 1 passed`); with the threshold set to `1KiB` by hand, that row differed.
+  Added by task 056, on 2026-10-28: the links estimate decides, so a root block longer than 262144 bytes and a
+  root block of 262145 bytes both stay basic, and the lab pins both sides of the estimate at exactly 262144 and
+  262145 (`DIRECTORY_AT_HAMT_THRESHOLD_LAB_CID`, `DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID`,
+  `CHILD_DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID`). The hand-run Kubo printed all three, and with the threshold
+  set to `1KiB` by hand the directory-at-limit row and the directory-at-the-threshold row differed.
 - Runtime issue: none of 463, 464, 465 or 470 names a CID form (13.4, a2). 274, 285 and 213 were not read for
   this point.
 
@@ -945,21 +952,24 @@ Its schema check is still the Runtime's own manifest type
 Its value is a lab package CID: the 59-character CIDv1 `bafybei...` UnixFS directory root of the bundle
 (`lab/capsule-identity/README.md:19` `- Its value is a **lab CID**, a lab package CID: the CIDv1 SHA-256 UnixFS`
 and `lab/capsule-identity/tests/common/mod.rs:80` `assert_eq!((pin.len(), &pin[..7]), (59, "bafybei"), "{pin}");`),
-under the non-sharded subset of the model package profile, with files at any tree depth
-(`lab/capsule-identity/src/lib.rs:25` `//! and pins only the non-sharded subset of that profile, with files at any`)
-(corrected by task 053, on 2026-10-28; until then it said single-block).
-A file or a directory block over 262144 bytes is refused, not named another way
-(`lab/capsule-identity/src/lib.rs:224` `const CHUNK_SIZE: usize = 262_144;`
-and `lab/capsule-identity/src/lib.rs:230` `const DIRECTORY_BLOCK_LIMIT: usize = 262_144;`).
+under the profile and pins both sides of its shard decision, with files at any tree depth
+(`lab/capsule-identity/src/lib.rs:26` `//! and pins both sides of the profile's shard decision, with files at any`)
+(corrected by task 056, on 2026-10-28; until then it said the non-sharded subset).
+No file is refused for its length, and a directory whose links estimate is over 262144 bytes is a HAMT shard,
+not a refusal (`const CHUNK_SIZE: usize = 262_144;` and `const HAMT_THRESHOLD: usize = 262_144;` in
+`lab/capsule-identity/src/lib.rs`).
 Added by task 048, on 2026-10-28: since task 048, a file of 2 to 174 raw leaves (262145 to 45613056 bytes) is named
 by its balanced file root (`fn file_root(` and `const MAX_FILE_LINKS: usize = 174;` in
-`lab/capsule-identity/src/lib.rs`), and only a larger file or a directory block over 262144 bytes is refused; the
+`lab/capsule-identity/src/lib.rs`), and the
 listing call `encode_listed_files` still refuses a listed file over 262144 bytes.
 Added by task 051, on 2026-10-28: since task 051 a file of any size is named by Kubo's balanced layout (trickle
-off, `max-file-links` 174 at every level, any depth; `FileOverLeafLimit` is gone), so only a directory block over
-262144 bytes is refused, and the Runtime-admitted SmolLM2 model package (`weights.gguf`, 144811072 bytes, 553
+off, `max-file-links` 174 at every level, any depth; `FileOverLeafLimit` is gone), and the Runtime-admitted
+SmolLM2 model package (`weights.gguf`, 144811072 bytes, 553
 leaves) gets its admitted CID `bafybeiew3vuq32fvuz2kmps7lmgl4rxpvwsvklxykx4covogbrkhgy5qky` from the lab encoder
 (hand run, task 051: `kubo_profile_reproduces_the_admitted_model_package_cid`, `#[ignore]`, not in the gate).
+Added by task 056, on 2026-10-28: a directory whose links estimate is at most 262144 stays basic even when its
+block is longer, and a greater estimate is a HAMT shard over all of its children, including a child directory
+judged on its own estimate; the three pins on both sides got their CIDs from the hand-run Kubo.
 At `c641bcff2` the value was a framed SHA-256 stream printed `lab-cid:sha256:`
 (`lab/capsule-identity/src/lib.rs:73` `pub const LAB_CID_PREFIX: &str = "lab-cid:sha256:";` at that commit).
 It is not the Runtime's CID: the Runtime names a release archive, and that archive's hash and CID stay delivery

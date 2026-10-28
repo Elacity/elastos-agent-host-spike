@@ -16,13 +16,13 @@
 //!
 //! The profile is Kubo v0.40.1's import flags as
 //! `capsules/ipfs-provider/src/directory_hash.rs` sends them: CIDv1, sha2-256,
-//! raw leaves, chunker `size-262144`, no inline, no HAMT shard below its
-//! threshold. The lab CID follows the
+//! raw leaves, chunker `size-262144`, no inline, and a HAMT shard only past
+//! the profile's links estimate. The lab CID follows the
 //! Kubo v0.40.1 profile, computed by the lab: one offline Kubo v0.40.1
 //! hash-only cross-check with the Runtime's profile flags was run by hand on
 //! this Mac (task 050) and printed every committed pin, and the claim stays
 //! these words until Rong or Flint changes them. This crate runs no Kubo
-//! and pins only the non-sharded subset of that profile, with files at any
+//! and pins both sides of the profile's shard decision, with files at any
 //! tree depth:
 //!
 //! 1. Each regular file of at most 262144 bytes (`CHUNK_SIZE`) is one raw
@@ -49,12 +49,23 @@
 //!    the UnixFS data `08 01` (type directory) as field 1. A directory's CID
 //!    is `01 70 12 20` and the SHA-256 of its block (dag-pb codec `0x70`).
 //!    The Tsize of a link to a directory is that directory's block length
-//!    plus the Tsizes of its links. A block over 262144 bytes is refused: no
-//!    HAMT shard. Kubo shards later, by an estimate of its links' size, so
-//!    this refusal comes first and fails closed. The largest root block the
-//!    lab names (262144 bytes) got the same CID from Kubo with the
-//!    provider's HAMT config, unsharded (task 053,
-//!    `directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused`).
+//!    plus the Tsizes of its links. A directory whose **links estimate** is
+//!    at most 262144 bytes is this basic directory, even when its block is
+//!    larger: the estimate is the sum, over its direct children, of the
+//!    name's length plus the 36 bytes of a CIDv1 SHA-256. Kubo v0.40.1 does
+//!    the same (`Import.UnixFSHAMTDirectorySizeEstimation` `links`,
+//!    threshold `256KiB`, a strict `>`). A greater estimate is a HAMT of
+//!    fanout 256: each level takes the next whole byte of the murmur3 x64-128
+//! digest of the child's own name (the first 64 bits, seed 0), a bucket of
+//!    one link names `XX` and the child's name, a bucket of two or more links
+//!    names only `XX` and points at a child shard, and the shard's UnixFS
+//!    data is `08 05`, a 256-bit big-endian bitmap of its buckets (trimmed
+//!    to its highest set bucket, as Kubo writes it), `28 22` and
+//!    `30 80 02`. Each
+//!    child directory is judged on its own estimate. A name whose eight
+//!    digest bytes all collide is refused with [`Refusal::HamtTooDeep`].
+//!    The two hand-run Kubo checks printed the pins of both sides (tasks 053
+//!    and 056).
 //! 3. The root is the directory of the bundle's entries. Its CID prints as
 //!    `b` and the RFC 4648 base32 of its 36 bytes, lowercase, no padding.
 //!
@@ -199,6 +210,7 @@
 //! exactly as the bytes its checked handle held.
 #![forbid(unsafe_code)]
 
+use std::borrow::Cow;
 use std::ffi::{CString, OsStr};
 use std::fmt;
 use std::fs::File;
@@ -259,8 +271,8 @@ pub const VARIANT_RECIPE_ENTRY: &str = "provider-variant.recipe";
 
 // The profile: Kubo v0.40.1's import flags as
 // `capsules/ipfs-provider/src/directory_hash.rs` `ADD_OPTIONS` sends them, for
-// files at any tree depth and no HAMT shard, computed by the lab (no
-// Kubo runs here). Each
+// files at any tree depth and a HAMT shard only past the links estimate,
+// computed by the lab (no Kubo runs here). Each
 // one changes the CID or the refusal, and each has a falsifier. There is no
 // inline setting: no CID here uses the identity multihash, whatever the size of the block.
 
@@ -284,10 +296,27 @@ const MAX_FILE_LINKS: usize = 174;
 const DIRECTORY_TYPE: u8 = 1;
 /// The UnixFS data type of a file root, written in its block as `08 02`.
 const FILE_TYPE: u8 = 2;
-/// The longest directory block the lab names. Kubo shards a directory into a
-/// HAMT once its links' estimated size passes 256KiB; the lab refuses a block
-/// over this length instead, which is earlier, so it fails closed.
-const DIRECTORY_BLOCK_LIMIT: usize = 262_144;
+/// The UnixFS data type of a HAMT shard, written in its block as `08 05`.
+const SHARD_TYPE: u8 = 5;
+/// The hash type a shard's UnixFS data names, written as `28 22`: murmur3
+/// x64-128, boxo v0.37.0's `murmur3_128`.
+const SHARD_HASH_TYPE: u8 = 0x22;
+/// The most links one shard level has, its buckets: the fanout, written as
+/// `30 80 02` (`max-hamt-fanout` 256). One level takes one whole digest byte.
+const HAMT_FANOUT: usize = 256;
+/// The bytes of a HAMT digest, one per shard level.
+const HAMT_DIGEST_BYTES: usize = 8;
+/// The in-memory bytes of a shard's bitmap array: one bit per bucket, a
+/// big-endian bitfield. [`shard_block`] writes only the bytes from its
+/// highest set bucket to the end.
+const HAMT_BITMAP_BYTES: usize = HAMT_FANOUT / 8;
+/// The bytes of a CIDv1 SHA-256, which a links estimate counts with a name.
+const LINK_CID_BYTES: usize = 36;
+/// The links estimate at most which a directory stays basic: the sum, over
+/// its direct children, of the name's length plus [`LINK_CID_BYTES`]. Kubo
+/// shards only when the estimate is greater (`256KiB`, estimation `links`),
+/// so a block longer than this can still be basic.
+const HAMT_THRESHOLD: usize = 262_144;
 
 /// A lab CID, a lab package CID: the SHA-256 digest of a bundle's UnixFS
 /// root directory block. It prints as that root's CIDv1 in base32, 59
@@ -492,10 +521,11 @@ pub enum Refusal {
         expected: usize,
         supplied: usize,
     },
-    /// A directory's encoded block is longer than 262144 bytes; `.` is the
-    /// bundle root. The lab names no HAMT-sharded directory. `length` is the
-    /// block's length.
-    DirectoryOverBlockLimit { path: String, length: usize },
+    /// A directory's children share all eight bytes of their HAMT digest, so
+    /// the shard would need a ninth level. No test reaches it: eight bytes
+    /// over a fanout of 256 hold any set of names a bundle can hold. `path`
+    /// is the directory's bundle path, `.` for the root.
+    HamtTooDeep { path: String },
     /// An entry's open handle is not the kind its folder's listing said: the
     /// entry changed between the listing and the open.
     Changed { path: String },
@@ -614,9 +644,9 @@ impl fmt::Display for Refusal {
                 f,
                 "{path} is {size} bytes and holds {supplied} chunk digests: its size gives {expected} chunks of at most {CHUNK_SIZE} bytes, one for an empty file"
             ),
-            Refusal::DirectoryOverBlockLimit { path, length } => write!(
+            Refusal::HamtTooDeep { path } => write!(
                 f,
-                "the directory {path} encodes to {length} bytes, over the {DIRECTORY_BLOCK_LIMIT}-byte block limit: the lab names no HAMT-sharded directory"
+                "the directory {path} needs a HAMT level past the eight bytes of one digest: the lab names no deeper shard"
             ),
             Refusal::Changed { path } => write!(f, "{path} changed while the bundle was named"),
             Refusal::Unreadable { path, reason } => write!(f, "could not read {path}: {reason}"),
@@ -953,9 +983,9 @@ pub fn encode_entries(entries: &[BundleEntry]) -> Result<LabCid, Refusal> {
 /// empty, `.` or `..` part, a path with a part that starts with `.`, two
 /// files with one path, and one path that is both a file and a directory
 /// are refused. Each directory, deepest first,
-/// becomes one dag-pb block whose links are sorted by name bytes, a block
-/// over [`DIRECTORY_BLOCK_LIMIT`] bytes is refused, and the root block's
-/// SHA-256 is the lab CID.
+/// becomes one dag-pb block whose links are sorted by name bytes, or a HAMT
+/// shard when its links estimate is over [`HAMT_THRESHOLD`] bytes, and the
+/// root block's SHA-256 is the lab CID.
 pub fn encode_listed_files(files: &[ListedFile]) -> Result<LabCid, Refusal> {
     let mut leaves = Vec::new();
     for file in files {
@@ -1147,7 +1177,7 @@ fn file_root_leaves(leaves: &[FileLeaf]) -> (Vec<u8>, u64) {
                 let links: Vec<Link<'_>> = children
                     .iter()
                     .map(|child| Link {
-                        name: "",
+                        name: Cow::Borrowed(""),
                         cid: child.cid.clone(),
                         tsize: child.tsize,
                     })
@@ -1175,6 +1205,89 @@ fn naming_hash(block: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(block);
     hasher.finalize().into()
+}
+
+/// The HAMT bucket hash of one name: the lab's marked copy of boxo v0.37.0's
+/// `murmur3.New64()` (spaolacci v1.1.0), the first 64 bits of murmur3
+/// x64-128 over the name's UTF-8 bytes with seed 0, written big-endian. So
+/// bucket `n` is the digest's byte `n`, and a name's first bucket is its
+/// first byte. The digest of `hello` is `cb d8 a7 b3 41 bd 9b 02`. This hash
+/// picks a bucket and names no content: [`naming_hash`] stays the one naming
+/// hash.
+fn hamt_digest(name: &str) -> [u8; HAMT_DIGEST_BYTES] {
+    const C1: u64 = 0x87c3_7b91_1142_53d5;
+    const C2: u64 = 0x4cf5_ad43_2745_937f;
+    let bytes = name.as_bytes();
+    let mut h1: u64 = 0;
+    let mut h2: u64 = 0;
+    for block in bytes.chunks_exact(16) {
+        let k1 = u64::from_le_bytes(block[..8].try_into().expect("eight bytes"));
+        let k2 = u64::from_le_bytes(block[8..].try_into().expect("eight bytes"));
+        let k1 = k1.wrapping_mul(C1).rotate_left(31).wrapping_mul(C2);
+        h1 ^= k1;
+        h1 = h1
+            .rotate_left(27)
+            .wrapping_add(h2)
+            .wrapping_mul(5)
+            .wrapping_add(0x52dc_e729);
+        let k2 = k2.wrapping_mul(C2).rotate_left(33).wrapping_mul(C1);
+        h2 ^= k2;
+        h2 = h2
+            .rotate_left(31)
+            .wrapping_add(h1)
+            .wrapping_mul(5)
+            .wrapping_add(0x3849_5ab5);
+    }
+    let tail = &bytes[bytes.len() - bytes.len() % 16..];
+    let mut k1: u64 = 0;
+    let mut k2: u64 = 0;
+    for (index, byte) in tail.iter().enumerate() {
+        if index < 8 {
+            k1 ^= (*byte as u64) << (8 * index);
+        } else {
+            k2 ^= (*byte as u64) << (8 * (index - 8));
+        }
+    }
+    if tail.len() > 8 {
+        k2 = k2.wrapping_mul(C2).rotate_left(33).wrapping_mul(C1);
+        h2 ^= k2;
+    }
+    if !tail.is_empty() {
+        k1 = k1.wrapping_mul(C1).rotate_left(31).wrapping_mul(C2);
+        h1 ^= k1;
+    }
+    h1 ^= bytes.len() as u64;
+    h2 ^= bytes.len() as u64;
+    h1 = h1.wrapping_add(h2);
+    h2 = h2.wrapping_add(h1);
+    fmix64(h1).wrapping_add(fmix64(h2)).to_be_bytes()
+}
+
+/// murmur3's final mix of one 64-bit half.
+fn fmix64(mut k: u64) -> u64 {
+    k ^= k >> 33;
+    k = k.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    k ^= k >> 33;
+    k = k.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    k ^= k >> 33;
+    k
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hamt_digest;
+
+    // The bytes spaolacci v1.1.0's `New64` writes for `hello`, from the
+    // first 64 bits of murmur3 x64-128 (seed 0), big-endian: the first bucket
+    // is `0xCB`, not the low byte `0x02`. The shard tests' pins and the
+    // hand-run Kubo depend on these bytes.
+    #[test]
+    fn hamt_digest_matches_kubos_hello_bucket() {
+        assert_eq!(
+            hamt_digest("hello"),
+            [0xcb, 0xd8, 0xa7, 0xb3, 0x41, 0xbd, 0x9b, 0x02]
+        );
+    }
 }
 
 /// A directory as the encoder builds it: each child with its name, in the
@@ -1251,19 +1364,23 @@ impl Directory {
     }
 }
 
-/// One link of a directory block or a file root: the child's name (empty
-/// under a file root), CID bytes and Tsize.
+/// One link of a directory block, a shard block or a file root: the child's
+/// name (empty under a file root), CID bytes and Tsize. A shard's leaf link
+/// holds a name the shard makes, the bucket prefix and the child's own name,
+/// so a name is either borrowed or owned.
 struct Link<'a> {
-    name: &'a str,
+    name: Cow<'a, str>,
     cid: Vec<u8>,
     tsize: u64,
 }
 
-/// The sha2-256 digest and the Tsize of `directory`'s block, at the bundle
+/// The sha2-256 digest and the Tsize of `directory`'s node at the bundle
 /// path `path` (empty for the root). Each child directory is encoded first,
-/// and its link's Tsize is its block's length plus its links' Tsizes. The
-/// links are sorted by name bytes. A block over [`DIRECTORY_BLOCK_LIMIT`]
-/// bytes is refused with its path. `sha256` is the one naming hash.
+/// and its link's Tsize is its block's length plus its links' Tsizes. When
+/// the direct children's links estimate is at most [`HAMT_THRESHOLD`] bytes,
+/// the node is a basic directory whose links are sorted by name bytes, and
+/// its block may be longer than that. A greater estimate is a HAMT shard
+/// over the same children. `sha256` is the one naming hash.
 fn encode_directory(
     directory: &Directory,
     path: &str,
@@ -1283,16 +1400,78 @@ fn encode_directory(
                 (cid_bytes(DAG_PB_CODEC, &digest), tsize)
             }
         };
-        links.push(Link { name, cid, tsize });
+        links.push(Link {
+            name: Cow::Borrowed(name),
+            cid,
+            tsize,
+        });
+    }
+    if links_estimate(&links) > HAMT_THRESHOLD {
+        let children: Vec<&Link<'_>> = links.iter().collect();
+        return encode_shard(&children, 0, path, sha256);
     }
     links.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
     let block = directory_block(&links);
-    if block.len() > DIRECTORY_BLOCK_LIMIT {
-        return Err(Refusal::DirectoryOverBlockLimit {
-            path: shown(path),
-            length: block.len(),
-        });
+    let tsize = block.len() as u64 + links.iter().map(|link| link.tsize).sum::<u64>();
+    Ok((sha256(&block), tsize))
+}
+
+/// The links estimate of one directory node: the sum, over its direct
+/// children, of the child's name length plus the [`LINK_CID_BYTES`] of a
+/// CIDv1 SHA-256. It is neither the protobuf block length nor a child's
+/// Tsize. A directory is a HAMT shard only when this is over
+/// [`HAMT_THRESHOLD`], as Kubo v0.40.1 decides with estimation `links`.
+fn links_estimate(links: &[Link<'_>]) -> usize {
+    links
+        .iter()
+        .map(|link| link.name.len() + LINK_CID_BYTES)
+        .sum()
+}
+
+/// The sha2-256 digest and the Tsize of the shard over `children` at
+/// `level`, one of the eight digest bytes. Bucket `n` holds the children
+/// whose digest byte `level` is `n`, and links go out in bucket order, which
+/// is also name order. A bucket of one child is one link named `XX` (two
+/// uppercase hex digits) and that child's own name; a bucket of two or more
+/// is one link named only `XX` and pointing at a child shard over the next
+/// digest byte, so a bucket of one child is never wrapped in a shard. A set
+/// of children whose eight digest bytes all collide is refused with `path`:
+/// no test reaches it.
+fn encode_shard(
+    children: &[&Link<'_>],
+    level: usize,
+    path: &str,
+    sha256: &dyn Fn(&[u8]) -> [u8; 32],
+) -> Result<([u8; 32], u64), Refusal> {
+    if level >= HAMT_DIGEST_BYTES {
+        return Err(Refusal::HamtTooDeep { path: shown(path) });
     }
+    let mut buckets: Vec<Vec<&Link<'_>>> = vec![Vec::new(); HAMT_FANOUT];
+    for child in children {
+        buckets[hamt_digest(child.name.as_ref())[level] as usize].push(child);
+    }
+    let mut bitmap = [0u8; HAMT_BITMAP_BYTES];
+    let mut links = Vec::new();
+    for (bucket, group) in buckets.iter().enumerate() {
+        if group.is_empty() {
+            continue;
+        }
+        bitmap[HAMT_BITMAP_BYTES - 1 - bucket / 8] |= 1 << (bucket % 8);
+        let prefix = format!("{bucket:02X}");
+        let (name, cid, tsize) = if group.len() == 1 {
+            let child = group[0];
+            (
+                Cow::Owned(format!("{prefix}{}", child.name)),
+                child.cid.clone(),
+                child.tsize,
+            )
+        } else {
+            let (digest, tsize) = encode_shard(group, level + 1, path, sha256)?;
+            (Cow::Owned(prefix), cid_bytes(DAG_PB_CODEC, &digest), tsize)
+        };
+        links.push(Link { name, cid, tsize });
+    }
+    let block = shard_block(&links, &bitmap);
     let tsize = block.len() as u64 + links.iter().map(|link| link.tsize).sum::<u64>();
     Ok((sha256(&block), tsize))
 }
@@ -1304,6 +1483,31 @@ fn directory_block(links: &[Link<'_>]) -> Vec<u8> {
     let mut block = Vec::new();
     put_links(&mut block, links);
     put_length_delimited(&mut block, 1, &[1 << 3, DIRECTORY_TYPE]);
+    block
+}
+
+/// A shard's dag-pb block: its links (`put_links`, in bucket order), then
+/// the UnixFS data as field 1: type `08 05` (field 1, a HAMT shard), the
+/// `bitmap` of field 2, hash type `28 22` (field 5) and fanout `30 80 02`
+/// (field 6, 256). The bitmap is a 256-bit big-endian bitfield: bucket `i`
+/// is bit `i`, byte `31 - i / 8` at mask `1 << (i % 8)`, written from its
+/// highest set byte to the end, as Kubo v0.40.1 writes it (a shard whose
+/// highest bucket is 199 writes 25 bytes, `80` and 24 zero bytes). It has no
+/// filesize, blocksize, mode or mtime.
+fn shard_block(links: &[Link<'_>], bitmap: &[u8; HAMT_BITMAP_BYTES]) -> Vec<u8> {
+    let mut block = Vec::new();
+    put_links(&mut block, links);
+    let mut data = vec![1 << 3, SHARD_TYPE];
+    let highest = bitmap
+        .iter()
+        .position(|byte| *byte != 0)
+        .unwrap_or(HAMT_BITMAP_BYTES - 1);
+    put_length_delimited(&mut data, 2, &bitmap[highest..]);
+    data.push(5 << 3);
+    put_varint(&mut data, SHARD_HASH_TYPE as u64);
+    data.push(6 << 3);
+    put_varint(&mut data, HAMT_FANOUT as u64);
+    put_length_delimited(&mut block, 1, &data);
     block
 }
 

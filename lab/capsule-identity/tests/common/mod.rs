@@ -146,6 +146,80 @@ pub fn directory_at_limit_files(longer: usize) -> Vec<BundleEntry> {
     files
 }
 
+/// The flat bundle whose root links estimate is 262144 + `beyond` bytes:
+/// content-sample's two files, then empty files whose names carry the rest.
+/// A link's estimate is its name's length plus 36 CID bytes, and the helper
+/// measures both that base and the names it adds: it adds 200-digit names
+/// until the rest fits in one shorter name, so `beyond` 1 lengthens exactly
+/// one name and no length is written by hand here. Built in a temp dir and
+/// in memory and never committed.
+pub fn directory_estimate_files(beyond: usize) -> Vec<BundleEntry> {
+    let mut entries: Vec<BundleEntry> = CONTENT_SAMPLE
+        .files
+        .iter()
+        .map(|file| BundleEntry {
+            path: (*file).to_owned(),
+            content: read_fixture(&CONTENT_SAMPLE, file),
+        })
+        .collect();
+    let base: usize = entries.iter().map(|entry| entry.path.len() + 36).sum();
+    let budget = 262_144 + beyond - base;
+    // The last name keeps 1 to 236 bytes: a name's estimate is its length
+    // plus 36, and 200-digit names are 236 with it.
+    let full = (budget - 37) / 236;
+    let rest = budget - full * 236;
+    for number in 0..full {
+        entries.push(BundleEntry {
+            path: format!("{number:0>200}"),
+            content: Vec::new(),
+        });
+    }
+    entries.push(BundleEntry {
+        path: "z".repeat(rest - 36),
+        content: Vec::new(),
+    });
+    entries
+}
+
+/// The bundle of [`directory_estimate_files`] with every file one folder
+/// down, under `photos`, and content-sample's own two files at the root as
+/// well: `photos/capsule.json` is not the root `capsule.json`. The `photos`
+/// directory has the flat bundle's estimate and the root only `capsule.json`,
+/// `sample.example` and `photos`.
+pub fn child_directory_estimate_files(beyond: usize) -> Vec<BundleEntry> {
+    let mut entries: Vec<BundleEntry> = directory_estimate_files(beyond)
+        .into_iter()
+        .map(|entry| BundleEntry {
+            path: format!("photos/{}", entry.path),
+            content: entry.content,
+        })
+        .collect();
+    entries.extend(CONTENT_SAMPLE.files.iter().map(|file| BundleEntry {
+        path: (*file).to_owned(),
+        content: read_fixture(&CONTENT_SAMPLE, file),
+    }));
+    entries
+}
+
+/// The flat bundle of [`directory_estimate_files`]`(0)`: its root links
+/// estimate is exactly 262144 bytes, so it stays a basic directory even
+/// though its block is larger. Built in a temp dir and in memory and never
+/// committed.
+pub const DIRECTORY_AT_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeih3pepvrkwvq6j62k6d7s5ofymhsfjypzhdt7yievq7bt5qughxaa";
+
+/// The flat bundle of [`directory_estimate_files`]`(1)`: its root links
+/// estimate is 262145 bytes, one over the threshold, so it is a HAMT shard.
+/// Built in a temp dir and in memory and never committed.
+pub const DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeidgkeww33q74umnfxw7xs6ysuxfcq75sr2u5o5d7jxxf5j2ac4p4e";
+
+/// The bundle of [`child_directory_estimate_files`]`(1)`: `photos` has a
+/// 262145-byte estimate and its own shard, and the root stays basic. Built
+/// in a temp dir and in memory and never committed.
+pub const CHILD_DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeibymqzfrqlkjhlaz4sobhh7g73vd65vvhirgyqokooocjm6zauqou";
+
 /// The photo lane's PH6 stand-in photo set, a consumer copy and not a
 /// fixture: its five files, copied byte for byte from
 /// `examples/photo-viewer/host-test/fixtures/stand-in-photo-set/` at

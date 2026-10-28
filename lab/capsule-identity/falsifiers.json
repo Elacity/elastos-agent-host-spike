@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049, 051, 053 and 055). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049, 051, 053, 055 and 056). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -2826,18 +2826,19 @@
     },
     {
       "id": "F-CI18h",
-      "title": "the directory-block limit check is removed: an oversize root is named, unsharded",
+      "title": "the shard branch is removed: an over-threshold directory is named as a basic block",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    if block.len() > DIRECTORY_BLOCK_LIMIT {\n        return Err(Refusal::DirectoryOverBlockLimit {\n            path: shown(path),\n            length: block.len(),\n        });\n    }\n",
-          "new": ""
+          "old": "    if links_estimate(&links) > HAMT_THRESHOLD {\n",
+          "new": "    if false && links_estimate(&links) > HAMT_THRESHOLD {\n"
         }
       ],
       "tests": [
-        "directory_over_the_hamt_threshold_is_refused"
+        "directory_over_the_hamt_threshold_is_a_shard",
+        "child_directory_over_the_hamt_threshold_is_a_shard"
       ]
     },
     {
@@ -4628,34 +4629,35 @@
     },
     {
       "id": "F-CI53a",
-      "title": "the directory block limit is checked with >=: a root block of exactly 262144 bytes is refused",
+      "title": "the threshold is checked with >=: an estimate of exactly 262144 bytes is a shard",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    if block.len() > DIRECTORY_BLOCK_LIMIT {\n",
-          "new": "    if block.len() >= DIRECTORY_BLOCK_LIMIT {\n"
+          "old": "    if links_estimate(&links) > HAMT_THRESHOLD {\n",
+          "new": "    if links_estimate(&links) >= HAMT_THRESHOLD {\n"
         }
       ],
       "tests": [
-        "directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused"
+        "directory_at_the_hamt_threshold_stays_basic"
       ]
     },
     {
       "id": "F-CI53b",
-      "title": "the directory block limit becomes 262145: a root block of 262145 bytes is named",
+      "title": "the threshold becomes 262145: an estimate of 262145 bytes stays basic",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "const DIRECTORY_BLOCK_LIMIT: usize = 262_144;\n",
-          "new": "const DIRECTORY_BLOCK_LIMIT: usize = 262_145;\n"
+          "old": "const HAMT_THRESHOLD: usize = 262_144;\n",
+          "new": "const HAMT_THRESHOLD: usize = 262_145;\n"
         }
       ],
       "tests": [
-        "directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused"
+        "directory_over_the_hamt_threshold_is_a_shard",
+        "child_directory_over_the_hamt_threshold_is_a_shard"
       ]
     },
     {
@@ -4704,6 +4706,88 @@
       ],
       "tests": [
         "chunked_listing_reproduces_every_existing_pin"
+      ]
+    },
+    {
+      "id": "F-CI56a",
+      "title": "the digest byte is taken from the far end: every bucket and link differs",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        buckets[hamt_digest(child.name.as_ref())[level] as usize].push(child);\n",
+          "new": "        let digest = hamt_digest(child.name.as_ref());\n        buckets[digest[HAMT_DIGEST_BYTES - 1 - level] as usize].push(child);\n"
+        }
+      ],
+      "tests": [
+        "directory_over_the_hamt_threshold_is_a_shard",
+        "child_directory_over_the_hamt_threshold_is_a_shard"
+      ]
+    },
+    {
+      "id": "F-CI56b",
+      "title": "a one-name bucket's link holds only the two bucket digits: the child's name is lost",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "                Cow::Owned(format!(\"{prefix}{}\", child.name)),\n",
+          "new": "                Cow::Owned(prefix.clone()),\n"
+        }
+      ],
+      "tests": [
+        "directory_over_the_hamt_threshold_is_a_shard",
+        "child_directory_over_the_hamt_threshold_is_a_shard"
+      ]
+    },
+    {
+      "id": "F-CI56c",
+      "title": "a one-name bucket at the root is wrapped in a child shard",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        let (name, cid, tsize) = if group.len() == 1 {\n",
+          "new": "        let (name, cid, tsize) = if group.len() == 1 && level > 0 {\n"
+        }
+      ],
+      "tests": [
+        "directory_over_the_hamt_threshold_is_a_shard"
+      ]
+    },
+    {
+      "id": "F-CI56d",
+      "title": "the links estimate uses each child's Tsize: a basic directory is sharded",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        .map(|link| link.name.len() + LINK_CID_BYTES)\n",
+          "new": "        .map(|link| link.name.len() + usize::try_from(link.tsize).unwrap_or(usize::MAX))\n"
+        }
+      ],
+      "tests": [
+        "directory_over_the_hamt_threshold_is_a_shard"
+      ]
+    },
+    {
+      "id": "F-CI56e",
+      "title": "only the root directory is sharded: a child over the threshold stays basic",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    if links_estimate(&links) > HAMT_THRESHOLD {\n",
+          "new": "    if path.is_empty() && links_estimate(&links) > HAMT_THRESHOLD {\n"
+        }
+      ],
+      "tests": [
+        "child_directory_over_the_hamt_threshold_is_a_shard"
       ]
     }
   ]
