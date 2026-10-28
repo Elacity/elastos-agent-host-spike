@@ -211,7 +211,7 @@ This section records the lab evidence for M1 checks C0 and B3 for
 `wallet-provider`. It states what the evidence is and gives no verdict;
 cc-redteam judges C0 and B3.
 
-Pins: read at the pinned head `606956b3dded92b183c56472b447b96fe0204a61` (`git rev-parse HEAD`), an ancestor of the fetched head `c76403f1c26ac1ed8be7ed218b988d9d34ce2327` from `git fetch spike spike/agent-host` and one `git rev-parse FETCH_HEAD`; each file pin below is a commit that holds the file, read with `git show <commit>:<path>`, every `confine.rs` line number is from `git show 606956b3dded92b183c56472b447b96fe0204a61:capsules/wallet-provider/tests/confine.rs`, and each wallet `falsifiers.json` entry line is from `git show 606956b3dded92b183c56472b447b96fe0204a61:capsules/wallet-provider/falsifiers.json`.
+Pins: read at the base head this build started from, `16c4997d20b332d5e5f82999a10a035fcee6a3ab`, read with `git rev-parse spike/spike/agent-host`; the earlier fetched head `c76403f1c26ac1ed8be7ed218b988d9d34ce2327` from `git fetch spike spike/agent-host` and one `git rev-parse FETCH_HEAD` is an ancestor of it; each file pin below is a commit that holds the file, read with `git show <commit>:<path>`, every `confine.rs` line number is from `git show 16c4997d20b332d5e5f82999a10a035fcee6a3ab:capsules/wallet-provider/tests/confine.rs`, and each wallet `falsifiers.json` entry line is from `git show 16c4997d20b332d5e5f82999a10a035fcee6a3ab:capsules/wallet-provider/falsifiers.json`.
 
 Gap (#309, routed to Flint): draft PR #309 at 513988ebd names no provider-launch ask, so this launcher has no RA route to copy, and M1-R for C0 and B3 waits on that ask.
 
@@ -228,7 +228,7 @@ refusal with a reason, a CAUGHT falsifier, and reviews that pass.
 
 Journey test: `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host`
 in `capsules/wallet-provider/tests/confine.rs` at
-`606956b3dded92b183c56472b447b96fe0204a61` (line 4165). It runs did first and
+`16c4997d20b332d5e5f82999a10a035fcee6a3ab` (line 4165). It runs did first and
 then wallet, and this doc records wallet's leg. Its macOS leg is
 `standin_confined_journey` (line 3999): it starts the provider under the
 stand-in's generated profile, refuses one outside write with nothing created,
@@ -240,13 +240,13 @@ keeps the root answering, and exits 0 on `shutdown`. Its refusal rows call
 Files at their commits:
 
 - `capsules/wallet-provider/tests/confine.rs` at
-  `606956b3dded92b183c56472b447b96fe0204a61`, the journey test and the stand-in.
+  `16c4997d20b332d5e5f82999a10a035fcee6a3ab`, the journey test and the stand-in.
 - `capsules/wallet-provider/tests/fixtures/confine/declared-rights.json` at
   `9bb0e9ba4debac4a78b512156841f1594d9bb8a4`.
 - `capsules/did-provider/tests/fixtures/confine/declared-rights.json` at
   `7c5a31a956bec77db60c9d03c77d05ce6704852a`.
 - `capsules/wallet-provider/falsifiers.json` at
-  `606956b3dded92b183c56472b447b96fe0204a61`.
+  `16c4997d20b332d5e5f82999a10a035fcee6a3ab`.
 - `lab/agent-conformance/standin-runtime/README.md` at
   `cccbd8ceb2fde5c2c3eda59ff932d09b33fc1592` answers the stand-in's routes and
   names no provider-launch route.
@@ -272,7 +272,7 @@ parts, and require the forbidden parts absent (lines 3776-3790); cases (c3),
 - An `init` answer that is not ok: the code produces `wallet-provider start is refused: init answered <answer>`; the row checks that the reason carries `init answered` and `"status":"error"` (lines 3970-3976), and it checks no prefix.
 
 CAUGHT falsifiers. Each entry is in `capsules/wallet-provider/falsifiers.json`
-at `606956b3dded92b183c56472b447b96fe0204a61`. The gate logs of PR #561, PR
+at `16c4997d20b332d5e5f82999a10a035fcee6a3ab`. The gate logs of PR #561, PR
 #607, PR #643, PR #692 and PR #710 are not part of this tree, so this summary
 quotes no raw `CAUGHT` line for those runs. One hand run of
 `examples/agent-host/falsify.py --from
@@ -319,7 +319,7 @@ plant named on its line.
 
 Reviews. Read with `gh pr view <number> --repo
 Elacity/elastos-agent-host-spike --json body,mergeCommit`; each merge commit is
-an ancestor of `606956b3dded92b183c56472b447b96fe0204a61`. Each PASS line is
+an ancestor of `16c4997d20b332d5e5f82999a10a035fcee6a3ab`. Each PASS line is
 the pull request body, which states the reviews as passed; no reviewed SHA is
 recorded in it.
 
@@ -357,7 +357,7 @@ Counting rule, as `lab/redteam/acceptance/C8.md` words it: a complete journey, a
 refusal with a reason, a CAUGHT falsifier, and reviews that pass.
 
 Journey test: `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
-in the same file at `606956b3dded92b183c56472b447b96fe0204a61` (line 4875). Its
+in the same file at `16c4997d20b332d5e5f82999a10a035fcee6a3ab` (line 4875). Its
 leg is `standin_b3_journey` (line 4780). The launched-profile checks are
 `check_profile_contract` (line 5564), `check_declared_rights` (line 5686) and
 `compare_profile_to_its_oracle` (line 6604). The suite comparison is
@@ -367,7 +367,7 @@ leg is `standin_b3_journey` (line 4780). The launched-profile checks are
 Files at their commits:
 
 - `capsules/wallet-provider/tests/confine.rs` at
-  `606956b3dded92b183c56472b447b96fe0204a61`, the journey test and the
+  `16c4997d20b332d5e5f82999a10a035fcee6a3ab`, the journey test and the
   comparison body.
 - `capsules/wallet-provider/confine.sb` at
   `959b104022bd0e8ae55636f69f6f06b8eb028e2b`.
@@ -378,10 +378,18 @@ Files at their commits:
 - `capsules/did-provider/tests/fixtures/confine/declared-rights.json` at
   `7c5a31a956bec77db60c9d03c77d05ce6704852a`.
 - `capsules/wallet-provider/falsifiers.json` at
-  `606956b3dded92b183c56472b447b96fe0204a61`.
+  `16c4997d20b332d5e5f82999a10a035fcee6a3ab`.
 
-Refusals, with the reason the test panics with for `wallet-provider`. The did
-leg asserts the same strings with `did-provider` in place of `wallet-provider`.
+Refusals, with the message the code writes for `wallet-provider`: each quoted
+line is the panic's own message, and the panic prints it with Rust's frame. The
+suite rows quote the assertion's own message. The `assert_eq!` rows (wrong case
+or class, case count, entry, extra entries) print it after Rust's ``assertion
+`left == right` failed: `` and before the left/right lines.
+`assert_suite_outcomes` runs on the stand-in record with the label `<name>'s
+stand-in launched profile`, which the lines below quote, and on the record under
+the committed `confine.sb` with the label `<name>'s committed confine.sb`. The
+did leg asserts the same strings with `did-provider` in place of
+`wallet-provider`.
 
 - Launched-profile mismatch, contract check: `wallet-provider B3 journey: the launched profile must pass the contract check: wallet-provider must deny the network explicitly with (deny network*)`.
 - Launched-profile mismatch, declared-rights check: `wallet-provider B3 journey: the launched profile must trace to its declared rights: wallet-provider allow rule has no declared right and no platform-baseline rule: <appended allow form>`.
@@ -390,9 +398,12 @@ leg asserts the same strings with `did-provider` in place of `wallet-provider`.
 - Suite mismatch, entry: `wallet-provider stand-in start differs from the committed confine.sb on case "<case>": committed <outcome>, stand-in <outcome>`.
 - Suite mismatch, short record: `wallet-provider's stand-in launched profile suite must record case "<case>" as <class>: the record holds N entries`, where N is the record's length (lines 4679-4682).
 - Suite mismatch, order or class: `wallet-provider's stand-in launched profile must record case "<case>" as <class>` (lines 4684-4688).
+- Suite mismatch, permitted case not `ok`: `wallet-provider's stand-in launched profile must permit case "<case>": <outcome>` (lines 4690-4695).
+- Suite mismatch, denied case not refused: `wallet-provider's stand-in launched profile must refuse case "<case>": <outcome>` (lines 4696-4701).
+- Suite mismatch, extra entries: `wallet-provider's stand-in launched profile suite must record no case beyond Some("<case>")` (lines 4704-4709), where `cases.last()` is an `Option`, so `{:?}` prints `Some("<case>")`.
 
 CAUGHT falsifiers. Each entry is in `capsules/wallet-provider/falsifiers.json`
-at `606956b3dded92b183c56472b447b96fe0204a61`. The gate logs of PR #593, PR
+at `16c4997d20b332d5e5f82999a10a035fcee6a3ab`. The gate logs of PR #593, PR
 #624, PR #635, PR #655, PR #704 and PR #718 are not part of this tree, so this
 summary quotes no raw `CAUGHT` line and did not rerun a plant. The evidence read
 for each entry is its `expect` of `caught`, its only named test
@@ -414,7 +425,7 @@ merged words of PR #718 say.
 
 Reviews. Read with `gh pr view <number> --repo
 Elacity/elastos-agent-host-spike --json body,mergeCommit`; each merge commit is
-an ancestor of `606956b3dded92b183c56472b447b96fe0204a61`. Each PASS line is
+an ancestor of `16c4997d20b332d5e5f82999a10a035fcee6a3ab`. Each PASS line is
 the pull request body, which states the reviews as passed; no reviewed SHA is
 recorded in it.
 
