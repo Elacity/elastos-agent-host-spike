@@ -14601,3 +14601,274 @@ New:
 - Rerun `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 270.09 seconds, inside the 600-second bound. Targets: lib 85 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; provider_launch 22 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0.
 - Proof after the plant was restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test provider_launch standin_provider_launch_refuses_a_sparse_stdout -- --nocapture`: exit 0, 1 passed, real 1.53 seconds.
 - `Cargo.toml` and `Cargo.lock` are unchanged. The wallet binary was built once under `lab/agent-conformance/target/wallet-provider` by the launch tests.
+
+## 091
+
+091: a public hostcall invoke presents its uri and operation to the one `authorise_presented` check. `authorise` stays `(caller, request_id)`. A mismatch is `wrong action` or `wrong resource` and spends nothing. A stored `/*` resource matches one path under that prefix. A PASS gives the Runtime no A6 credit.
+
+### Quotes (read only)
+
+Allow once, `docs/AGENT_ARCHITECTURE.md` section "Delegation and mandates":
+
+> **Allow once** authorizes one exact operation.
+
+`ResourceId::normalize` and `ResourceId::matches` in `elastos/crates/elastos-runtime/src/capability/token.rs`: after `://`, empty segments and `.` segments are dropped and `..` is kept. A stored resource whose normalized form ends in `/*` matches a presented resource under that prefix, and fails when the suffix contains `..`. Any other stored resource matches only the normalized presented resource.
+
+### Plants
+
+Each plant was applied alone. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib TEST -- --exact`. The planted crate compiled, and that test failed on its assertion. The file was restored before the next plant. Restored, `standin_hostcall_invoke_covers_one_operation` passes. No `falsifiers.json` id. Panic lines are `src/../standin-runtime/mod.rs`.
+
+F-standin-invoke-stub: the public invoke arm returns `data` null before `authorise_presented`. Failed at `src/../standin-runtime/mod.rs:9296:9`: `the stand-in did the work: a grant for the other capsule is refused`, left `data` null, right `wrong capsule: expected component-1, got component-2`. Real 8.34 seconds.
+
+Old:
+
+```text
+                } else {
+                    match request.get("operation") {
+                        Some(Value::String(operation)) => {
+                            let invoke_caller = Caller::Client {
+                                session_id: capsule_id,
+                            };
+                            match self.authorise_presented(
+                                invoke_caller,
+                                token,
+                                Some((uri, operation)),
+                            ) {
+                                Ok(()) => bridge_ok(Value::Null),
+                                Err((_status, message)) => bridge_error(&message),
+                            }
+                        }
+                        _ => bridge_error("invoke operation must be a string"),
+                    }
+                }
+```
+
+New:
+
+```text
+                } else {
+                    bridge_ok(Value::Null)
+                }
+```
+
+F-standin-invoke-skip-action: the action compare is removed, so `write` returns `data` null. Failed at `src/../standin-runtime/mod.rs:9308:9`: `the stand-in did the work: a different action is refused`, left `data` null, right `wrong action: expected read, got write`. Real 1.60 seconds.
+
+Old:
+
+```text
+            if grant_action != action {
+                return Err(wrong_action(&grant_action, action));
+            }
+```
+
+New: those three lines removed.
+
+F-standin-invoke-dotdot: `public_resource_covers` accepts a suffix that contains `..`. Failed at `src/../standin-runtime/mod.rs:9311:9`: `the stand-in did the work: a wildcard suffix that contains .. is refused`, left `data` null, right `wrong resource: expected localhost://Public/resident-instances/*, got localhost://Public/resident-instances/nested/../shared.txt`. Real 1.61 seconds.
+
+Old:
+
+```text
+        let suffix = &presented_norm[prefix.len()..];
+        return !suffix.split('/').any(|piece| piece == "..");
+```
+
+New:
+
+```text
+        let _suffix = &presented_norm[prefix.len()..];
+        return true;
+```
+
+F-standin-invoke-bypass-resource: the public resource compare is skipped, so a different path returns `data` null. The caller check and the action check still run. Failed at `src/../standin-runtime/mod.rs:9311:9`: `the stand-in did the work: a different public resource is refused`, left `data` null, right `wrong resource: expected localhost://Public/resident-instances/shared.txt, got localhost://Public/other/shared.txt`. Real 1.60 seconds.
+
+Old:
+
+```text
+            } else if !public_resource_covers(&grant_resource, requested) {
+                return Err(wrong_resource(&grant_resource, requested));
+            }
+```
+
+New:
+
+```text
+            } else {
+                let _ = (&grant_resource, requested);
+            }
+```
+
+F-standin-invoke-nonstr: a non-string operation is presented as `read`. A missing operation still returns the validation error. Failed at `src/../standin-runtime/mod.rs:9324:9`: `the stand-in did the work: a non-string operation is refused`, left `data` null, right `invoke operation must be a string`. Real 2.18 seconds.
+
+Old:
+
+```text
+                        _ => bridge_error("invoke operation must be a string"),
+```
+
+New:
+
+```text
+                        None => bridge_error("invoke operation must be a string"),
+                        Some(_) => {
+                            let invoke_caller = Caller::Client {
+                                session_id: capsule_id,
+                            };
+                            match self.authorise_presented(
+                                invoke_caller,
+                                token,
+                                Some((uri, "read")),
+                            ) {
+                                Ok(()) => bridge_ok(Value::Null),
+                                Err((_status, message)) => bridge_error(&message),
+                            }
+                        }
+```
+
+F-standin-invoke-spend-early: the validation arm calls `authorise` before it returns `invoke operation must be a string`. Failed at `src/../standin-runtime/mod.rs:9989:9`: `the stand-in did the work: a missing operation leaves the once grant live`, left `(Exhausted, false)`, right `(Live, false)`. Real 1.76 seconds.
+
+Old:
+
+```text
+                        _ => bridge_error("invoke operation must be a string"),
+```
+
+New:
+
+```text
+                        _ => {
+                            let invoke_caller = Caller::Client {
+                                session_id: capsule_id,
+                            };
+                            let _ = self.authorise(invoke_caller, token);
+                            bridge_error("invoke operation must be a string")
+                        }
+```
+
+F-standin-cover-keep-dot: `.` pieces stay. Caught by `standin_public_resource_covers_matches_runtime`. Failed at `src/../standin-runtime/mod.rs:10033:9`: `the stand-in did the work: a dot segment is dropped on the presented resource`. Real 1.73 seconds.
+
+Old:
+
+```text
+.filter(|piece| !piece.is_empty() && *piece != ".")
+```
+
+New:
+
+```text
+.filter(|piece| !piece.is_empty())
+```
+
+F-standin-cover-keep-slash: empty pieces stay. Failed at `src/../standin-runtime/mod.rs:10047:9`: `the stand-in did the work: an empty segment is dropped on the presented resource`. Real 1.71 seconds.
+
+Old:
+
+```text
+.filter(|piece| !piece.is_empty() && *piece != ".")
+```
+
+New:
+
+```text
+.filter(|piece| *piece != ".")
+```
+
+F-standin-cover-collapse-dotdot: `..` is popped, so an exact pair collapses. Failed at `src/../standin-runtime/mod.rs:10075:9`: `the stand-in did the work: exact match does not collapse ..`. Real 1.71 seconds.
+
+Old:
+
+```text
+    let pieces = rest
+        .split('/')
+        .filter(|piece| !piece.is_empty() && *piece != ".")
+        .collect::<Vec<_>>();
+    format!("{scheme}{}", pieces.join("/"))
+```
+
+New:
+
+```text
+    let mut pieces = Vec::new();
+    for piece in rest.split('/') {
+        if piece.is_empty() || piece == "." {
+            continue;
+        }
+        if piece == ".." {
+            pieces.pop();
+            continue;
+        }
+        pieces.push(piece);
+    }
+    format!("{scheme}{}", pieces.join("/"))
+```
+
+F-standin-cover-scheme: the whole string is split, including the scheme. Failed at `src/../standin-runtime/mod.rs:10069:9`: `the stand-in did the work: text without :// stays as stored`. Real 1.69 seconds.
+
+Old:
+
+```text
+fn normalize_public_resource(resource: &str) -> String {
+    let Some(scheme_at) = resource.find("://") else {
+        return resource.to_owned();
+    };
+    let split_at = scheme_at + 3;
+    let scheme = &resource[..split_at];
+    let rest = &resource[split_at..];
+    let pieces = rest
+        .split('/')
+        .filter(|piece| !piece.is_empty() && *piece != ".")
+        .collect::<Vec<_>>();
+    format!("{scheme}{}", pieces.join("/"))
+}
+```
+
+New:
+
+```text
+fn normalize_public_resource(resource: &str) -> String {
+    let pieces = resource
+        .split('/')
+        .filter(|piece| !piece.is_empty() && *piece != ".")
+        .collect::<Vec<_>>();
+    pieces.join("/")
+}
+```
+
+F-standin-cover-one-segment: a wildcard suffix that contains `/` is refused. Failed at `src/../standin-runtime/mod.rs:10090:9`: `the stand-in did the work: a stored /* resource matches a nested path under that prefix`. Real 1.69 seconds.
+
+Old:
+
+```text
+        return !suffix.split('/').any(|piece| piece == "..");
+```
+
+New:
+
+```text
+        return !suffix.contains('/') && !suffix.split('/').any(|piece| piece == "..");
+```
+
+F-standin-cover-prefix-boundary: the prefix drops the trailing `/`. Failed at `src/../standin-runtime/mod.rs:10111:9`: `the stand-in did the work: a prefix boundary refuses a longer first segment`. Real 1.69 seconds.
+
+Old:
+
+```text
+        let prefix = &stored_norm[..stored_norm.len() - 1];
+```
+
+New:
+
+```text
+        let prefix = stored_norm.strip_suffix("/*").unwrap_or(stored_norm.as_str());
+```
+
+After every restore, `standin-runtime/mod.rs` matched SHA-256 `90d3a627037e63cd49314d77cb7a4573686f920bec23f50078b8d2469653e322`.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. `CARGO_TARGET_DIR` and `CARGO_BUILD_TARGET_DIR` were `lab/agent-conformance/target`. `CARGO_BUILD_BUILD_DIR` was `lab/agent-conformance/target/host-build`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.18 seconds.
+- First `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, real 285.90 seconds, inside the 600-second bound. lib 87 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; provider_launch 21 passed and 1 failed. `standin_provider_launch_refuses_invalid_init_responses` returned `provider response exceeded its deadline` where the test expects `init answered null`. Cargo stopped at that target, so report, runtime, standin_contract, probe and doc-tests did not run.
+- Rerun `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, real 253.57 seconds, inside the 600-second bound. The same targets passed until provider_launch. `standin_provider_launch_refuses_invalid_init_responses` passed. `standin_provider_launch_refuses_the_next_request_after_a_transport_failure` failed at `tests/provider_launch.rs:715:10` with `process leftover; processes:1 paths:["stdout-112"]`. That test is outside the named rerun list. The rerun failed, so this task stops. No source change followed either failure.
+- Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_invoke_covers_one_operation -- --exact`: exit 0, 1 passed, real 0.07 seconds.
+- `Cargo.toml` and `Cargo.lock` are unchanged. `authorise` stays `(caller, request_id)`.

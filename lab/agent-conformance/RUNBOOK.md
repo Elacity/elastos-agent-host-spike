@@ -767,3 +767,5 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 `standin_provider_launch_starts_under_caller_profile` is this stand-in, and a PASS there gives the Runtime no C0 credit.
 
 `standin_storage_refuses_a_raw_dot_home` is this stand-in, and a PASS there gives the Runtime no A9 credit.
+
+`standin_hostcall_invoke_covers_one_operation` is this stand-in, and a PASS there gives the Runtime no A6 credit.

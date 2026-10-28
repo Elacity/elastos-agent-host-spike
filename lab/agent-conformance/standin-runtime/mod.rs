@@ -29,9 +29,10 @@
 //! `bridge_envelope` is the one hostcall. A capability line calls
 //! `post_capability_request` for the given capsule id. A `resource_invoke`
 //! on `localhost://Users/` or `localhost://UsersAI/` calls `protected_read`
-//! or `protected_write` for that capsule id. Any other invoke calls
-//! `authorise` for that capsule id and returns `data` null. The principal
-//! argument does not choose the caller.
+//! or `protected_write` for that capsule id. Any other invoke presents its
+//! uri and operation to `authorise_presented` and returns `data` null.
+//! `authorise` stays two arguments. The principal argument does not choose
+//! the caller.
 //!
 //! `bind_verified_principal` stores the principal the launch verified.
 //! `post_capsules` copies that principal onto the new instance.
@@ -493,9 +494,11 @@ impl StandIn {
     /// `post_capability_request` for `capsule_id`. A `resource_invoke` whose
     /// uri starts with `localhost://Users/` or `localhost://UsersAI/` calls
     /// `protected_read` or `protected_write` for `capsule_id`. Any other
-    /// invoke calls `authorise` for `capsule_id` and returns `data` null.
-    /// `principal` does not choose the caller. This method reads no clock
-    /// and no disk.
+    /// invoke reads `operation` and presents that uri and operation to
+    /// `authorise_presented`. A missing or non-string `operation` is
+    /// `invoke operation must be a string` and does not call
+    /// `authorise_presented`. `authorise` stays two arguments. `principal`
+    /// does not choose the caller. This method reads no clock and no disk.
     pub fn bridge_envelope(
         &mut self,
         line: &str,
@@ -525,12 +528,21 @@ impl StandIn {
                 if protected_invoke(uri) {
                     self.bridge_protected_invoke(request, capsule_id, token, uri)
                 } else {
-                    let invoke_caller = Caller::Client {
-                        session_id: capsule_id,
-                    };
-                    match self.authorise(invoke_caller, token) {
-                        Ok(()) => bridge_ok(Value::Null),
-                        Err((_status, message)) => bridge_error(&message),
+                    match request.get("operation") {
+                        Some(Value::String(operation)) => {
+                            let invoke_caller = Caller::Client {
+                                session_id: capsule_id,
+                            };
+                            match self.authorise_presented(
+                                invoke_caller,
+                                token,
+                                Some((uri, operation)),
+                            ) {
+                                Ok(()) => bridge_ok(Value::Null),
+                                Err((_status, message)) => bridge_error(&message),
+                            }
+                        }
+                        _ => bridge_error("invoke operation must be a string"),
                     }
                 }
             }
@@ -977,16 +989,21 @@ impl StandIn {
     ///
     /// `Ok(())` means the grant authorises that caller, and a `once` grant
     /// stores `Exhausted`. This method reads no clock, no disk and no WIT file.
-    /// Storage presents its uri and action through the same check.
+    /// Storage presents its uri and action through the same check. This call
+    /// passes no presentation. The signature stays `(caller, request_id)`.
     pub fn authorise(&mut self, caller: Caller<'_>, request_id: &str) -> Result<(), (u16, String)> {
         self.authorise_presented(caller, request_id, None)
     }
 
-    /// One authorise check. `presented` is the storage uri and `write` or `read`.
+    /// One authorise check. `presented` is the uri and the operation.
     ///
     /// Unknown, not-live and wrong-caller refusals come first. A different
-    /// action is `wrong action`. A different object is `wrong resource`. Either
-    /// spends nothing. A missing presentation is the grant's own caller check.
+    /// action is `wrong action`. A `localhost://Users/` or `localhost://UsersAI/`
+    /// uri keeps the `resolve_protected_uri` compare. Any other uri uses
+    /// `public_resource_covers` and does not resolve a principal. A mismatch
+    /// is `wrong resource`. Either spends nothing. A missing presentation is
+    /// the grant's own caller check. A `once` grant stores `Exhausted` only
+    /// after that check.
     fn authorise_presented(
         &mut self,
         caller: Caller<'_>,
@@ -1013,13 +1030,17 @@ impl StandIn {
             if grant_action != action {
                 return Err(wrong_action(&grant_action, action));
             }
-            let session_id = self.grants[index].session_id.clone();
-            let wanted = self.resolve_protected_uri(&session_id, requested)?;
-            let granted = match self.resolve_protected_uri(&session_id, &grant_resource) {
-                Ok(uri) => uri,
-                Err(_) => return Err(wrong_resource(&grant_resource, requested)),
-            };
-            if wanted != granted {
+            if protected_invoke(requested) {
+                let session_id = self.grants[index].session_id.clone();
+                let wanted = self.resolve_protected_uri(&session_id, requested)?;
+                let granted = match self.resolve_protected_uri(&session_id, &grant_resource) {
+                    Ok(uri) => uri,
+                    Err(_) => return Err(wrong_resource(&grant_resource, requested)),
+                };
+                if wanted != granted {
+                    return Err(wrong_resource(&grant_resource, requested));
+                }
+            } else if !public_resource_covers(&grant_resource, requested) {
                 return Err(wrong_resource(&grant_resource, requested));
             }
         }
@@ -2133,9 +2154,49 @@ fn invoke_uri(request: &Value) -> &str {
     request.get("uri").and_then(Value::as_str).unwrap_or("")
 }
 
-/// A protected invoke. Any other uri stays on the `authorise` arm.
+/// A protected invoke. Any other uri presents its operation to
+/// `authorise_presented`.
 fn protected_invoke(uri: &str) -> bool {
     uri.starts_with("localhost://Users/") || uri.starts_with("localhost://UsersAI/")
+}
+
+/// One public resource compare.
+///
+/// After `://`, empty pieces and `.` pieces are dropped and `..` is kept.
+/// A stored form that ends in `/*` matches a presented form under that
+/// prefix when the suffix has no `..` piece. Any other stored form matches
+/// only the same normalized text. This function does not resolve a principal
+/// and does not read the disk.
+fn public_resource_covers(stored: &str, presented: &str) -> bool {
+    let stored_norm = normalize_public_resource(stored);
+    let presented_norm = normalize_public_resource(presented);
+    if stored_norm.ends_with("/*") {
+        let prefix = &stored_norm[..stored_norm.len() - 1];
+        if !presented_norm.starts_with(prefix) {
+            return false;
+        }
+        let suffix = &presented_norm[prefix.len()..];
+        return !suffix.split('/').any(|piece| piece == "..");
+    }
+    stored_norm == presented_norm
+}
+
+/// The text after `://`, with empty pieces and `.` pieces dropped.
+///
+/// `..` stays. Text with no `://` stays as given. This is the one collapse
+/// `public_resource_covers` uses.
+fn normalize_public_resource(resource: &str) -> String {
+    let Some(scheme_at) = resource.find("://") else {
+        return resource.to_owned();
+    };
+    let split_at = scheme_at + 3;
+    let scheme = &resource[..split_at];
+    let rest = &resource[split_at..];
+    let pieces = rest
+        .split('/')
+        .filter(|piece| !piece.is_empty() && *piece != ".")
+        .collect::<Vec<_>>();
+    format!("{scheme}{}", pieces.join("/"))
 }
 
 fn bridge_ok(data: Value) -> Value {
@@ -9682,6 +9743,396 @@ mod tests {
             "the stand-in did the work: component-2 stays running",
         );
         assert_live_request_ids_empty(&standin, "the shell live-grant request_id set is empty");
+    }
+
+    fn invoke_line(id: u64, uri: &str, operation: &str, token: &str) -> String {
+        format!(
+            r#"{{"id":{id},"request":{{"type":"resource_invoke","uri":"{uri}","operation":"{operation}","body":{{}},"token":"{token}"}}}}"#
+        )
+    }
+
+    fn invoke_line_without_operation(id: u64, uri: &str, token: &str) -> String {
+        format!(
+            r#"{{"id":{id},"request":{{"type":"resource_invoke","uri":"{uri}","body":{{}},"token":"{token}"}}}}"#
+        )
+    }
+
+    fn invoke_line_raw_operation(id: u64, uri: &str, operation_json: &str, token: &str) -> String {
+        format!(
+            r#"{{"id":{id},"request":{{"type":"resource_invoke","uri":"{uri}","operation":{operation_json},"body":{{}},"token":"{token}"}}}}"#
+        )
+    }
+
+    #[test]
+    fn standin_hostcall_invoke_covers_one_operation() {
+        let star = "localhost://Public/resident-instances/*";
+        let other = "localhost://Public/other/shared.txt";
+        let dotted = "localhost://Public/resident-instances/./shared.txt";
+        let traversed = "localhost://Public/resident-instances/nested/../shared.txt";
+        let mut standin = StandIn::new();
+        launch_two_running(&mut standin);
+        standin.seed_grant(
+            "req-once",
+            "component-1",
+            SHARED_RESOURCE,
+            "read",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-star",
+            "component-2",
+            star,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-op",
+            "component-1",
+            SHARED_RESOURCE,
+            "read",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Live, false),
+            "the stand-in did the work: req-once starts live"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-star"),
+            (Life::Live, false),
+            "the stand-in did the work: req-star starts live"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-op"),
+            (Life::Live, false),
+            "the stand-in did the work: req-op starts live"
+        );
+
+        let sibling = invoke_line(8, SHARED_RESOURCE, "read", "req-once");
+        let sibling_body = host_line(&mut standin, &sibling, "component-2", Some("component-1"))
+            .expect("the stand-in did the work: the sibling invoke is one response");
+        assert_host_error(
+            &sibling_body,
+            8,
+            "wrong capsule: expected component-1, got component-2",
+            "a grant for the other capsule is refused",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Live, false),
+            "the stand-in did the work: the sibling refusal leaves req-once live"
+        );
+
+        let write = invoke_line(8, SHARED_RESOURCE, "write", "req-once");
+        let write_body = host_line(&mut standin, &write, "component-1", Some("person-a"))
+            .expect("the stand-in did the work: the write invoke is one response");
+        assert_host_error(
+            &write_body,
+            8,
+            "wrong action: expected read, got write",
+            "a different action is refused",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Live, false),
+            "the stand-in did the work: the wrong action leaves req-once live"
+        );
+
+        let other_line = invoke_line(8, other, "read", "req-once");
+        let other_body = host_line(&mut standin, &other_line, "component-1", Some("person-a"))
+            .expect("the stand-in did the work: the other-resource invoke is one response");
+        assert_host_error(
+            &other_body,
+            8,
+            "wrong resource: expected localhost://Public/resident-instances/shared.txt, got localhost://Public/other/shared.txt",
+            "a different public resource is refused",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Live, false),
+            "the stand-in did the work: the wrong resource leaves req-once live"
+        );
+
+        let dotted_line = invoke_line(8, dotted, "read", "req-once");
+        let dotted_body = host_line(&mut standin, &dotted_line, "component-1", Some("person-a"))
+            .expect("the stand-in did the work: the dotted invoke is one response");
+        assert_host_ok(
+            &dotted_body,
+            8,
+            Value::Null,
+            "a dot segment is the same public object",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: the matching once invoke stores Exhausted"
+        );
+
+        let again = invoke_line(8, SHARED_RESOURCE, "read", "req-once");
+        let again_body = host_line(&mut standin, &again, "component-1", Some("person-a"))
+            .expect("the stand-in did the work: the second invoke is one response");
+        assert_host_error(
+            &again_body,
+            8,
+            "grant is not live: Exhausted",
+            "a second invoke finds the grant exhausted",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: the second invoke leaves the grant exhausted"
+        );
+
+        let star_hit = invoke_line(8, SHARED_RESOURCE, "read", "req-star");
+        let star_body = host_line(&mut standin, &star_hit, "component-2", Some("person-a"))
+            .expect("the stand-in did the work: the star invoke is one response");
+        assert_host_ok(
+            &star_body,
+            8,
+            Value::Null,
+            "a stored /* resource matches one path under that prefix",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-star"),
+            (Life::Live, false),
+            "the stand-in did the work: the session grant stays live"
+        );
+
+        let star_dotdot = invoke_line(8, traversed, "read", "req-star");
+        let star_dotdot_body =
+            host_line(&mut standin, &star_dotdot, "component-2", Some("person-a"))
+                .expect("the stand-in did the work: the traversal invoke is one response");
+        assert_host_error(
+            &star_dotdot_body,
+            8,
+            "wrong resource: expected localhost://Public/resident-instances/*, got localhost://Public/resident-instances/nested/../shared.txt",
+            "a wildcard suffix that contains .. is refused",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-star"),
+            (Life::Live, false),
+            "the stand-in did the work: the traversal refusal leaves req-star live"
+        );
+
+        let star_other = invoke_line(8, other, "read", "req-star");
+        let star_other_body = host_line(&mut standin, &star_other, "component-2", Some("person-a"))
+            .expect("the stand-in did the work: the star other-resource invoke is one response");
+        assert_host_error(
+            &star_other_body,
+            8,
+            "wrong resource: expected localhost://Public/resident-instances/*, got localhost://Public/other/shared.txt",
+            "a path outside the prefix is refused",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-star"),
+            (Life::Live, false),
+            "the stand-in did the work: the prefix refusal leaves req-star live"
+        );
+
+        let star_write = invoke_line(8, SHARED_RESOURCE, "write", "req-star");
+        let star_write_body = host_line(&mut standin, &star_write, "component-2", Some("person-a"))
+            .expect("the stand-in did the work: the star write invoke is one response");
+        assert_host_error(
+            &star_write_body,
+            8,
+            "wrong action: expected read, got write",
+            "a different action on the session grant is refused",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-star"),
+            (Life::Live, false),
+            "the stand-in did the work: the session wrong action leaves req-star live"
+        );
+
+        let missing_star = invoke_line_without_operation(9, SHARED_RESOURCE, "req-star");
+        let missing_star_body =
+            host_line(&mut standin, &missing_star, "component-2", Some("person-a"))
+                .expect("the stand-in did the work: a missing operation is one response");
+        assert_host_error(
+            &missing_star_body,
+            9,
+            "invoke operation must be a string",
+            "a missing operation is refused",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-star"),
+            (Life::Live, false),
+            "the stand-in did the work: a missing operation leaves req-star live"
+        );
+
+        let missing_once = invoke_line_without_operation(10, SHARED_RESOURCE, "req-op");
+        let missing_once_body =
+            host_line(&mut standin, &missing_once, "component-1", Some("person-a")).expect(
+                "the stand-in did the work: a missing operation on a once grant is one response",
+            );
+        assert_host_error(
+            &missing_once_body,
+            10,
+            "invoke operation must be a string",
+            "a missing operation on a once grant is refused",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-op"),
+            (Life::Live, false),
+            "the stand-in did the work: a missing operation leaves the once grant live"
+        );
+
+        for operation_json in ["1", "null", "true", "[]", "{}"] {
+            let line = invoke_line_raw_operation(11, SHARED_RESOURCE, operation_json, "req-op");
+            let parsed = host_line(&mut standin, &line, "component-1", Some("person-a"))
+                .expect("the stand-in did the work: a non-string operation is one response");
+            assert_host_error(
+                &parsed,
+                11,
+                "invoke operation must be a string",
+                "a non-string operation is refused",
+            );
+            assert_eq!(
+                grant_record(&standin, "req-op"),
+                (Life::Live, false),
+                "the stand-in did the work: a non-string operation leaves the once grant live: {operation_json}"
+            );
+        }
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: the operation refusals leave req-once exhausted"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-star"),
+            (Life::Live, false),
+            "the stand-in did the work: the operation refusals leave req-star live"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 stays running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running",
+        );
+    }
+
+    #[test]
+    fn standin_public_resource_covers_matches_runtime() {
+        assert!(
+            public_resource_covers(
+                "localhost://Public/resident-instances/shared.txt",
+                "localhost://Public/resident-instances/./shared.txt",
+            ),
+            "the stand-in did the work: a dot segment is dropped on the presented resource"
+        );
+        assert!(
+            public_resource_covers(
+                "localhost://Public/resident-instances/./shared.txt",
+                "localhost://Public/resident-instances/shared.txt",
+            ),
+            "the stand-in did the work: a dot segment is dropped on the stored resource"
+        );
+        assert!(
+            public_resource_covers(
+                "localhost://Public/resident-instances/shared.txt",
+                "localhost://Public/resident-instances//shared.txt",
+            ),
+            "the stand-in did the work: an empty segment is dropped on the presented resource"
+        );
+        assert!(
+            public_resource_covers(
+                "localhost://Public//resident-instances/shared.txt",
+                "localhost://Public/resident-instances/shared.txt",
+            ),
+            "the stand-in did the work: an empty segment is dropped on the stored resource"
+        );
+        assert!(
+            public_resource_covers(
+                "localhost://Public/resident-instances/nested/../shared.txt",
+                "localhost://Public/resident-instances/nested/../shared.txt",
+            ),
+            "the stand-in did the work: an exact pair keeps .."
+        );
+        assert!(
+            !public_resource_covers(
+                "localhost://Public/resident-instances/shared.txt",
+                "localhost://Public/resident-instances/nested/../shared.txt",
+            ),
+            "the stand-in did the work: exact match does not collapse .."
+        );
+        assert!(
+            !public_resource_covers("foo/./bar", "foo/bar"),
+            "the stand-in did the work: text without :// stays as stored"
+        );
+        assert!(
+            !public_resource_covers("localhost://Public/a/b", "localhost:/Public/a/b"),
+            "the stand-in did the work: only the text after :// is normalized"
+        );
+        assert!(
+            public_resource_covers(
+                "localhost://Public/resident-instances/*",
+                "localhost://Public/resident-instances/shared.txt",
+            ),
+            "the stand-in did the work: a stored /* resource matches one path under that prefix"
+        );
+        assert!(
+            public_resource_covers(
+                "localhost://Public/resident-instances/*",
+                "localhost://Public/resident-instances/nested/deep/shared.txt",
+            ),
+            "the stand-in did the work: a stored /* resource matches a nested path under that prefix"
+        );
+        assert!(
+            public_resource_covers(
+                "localhost://Public/resident-instances/./*",
+                "localhost://Public//resident-instances/nested/shared.txt",
+            ),
+            "the stand-in did the work: a stored wildcard is normalized before the prefix compare"
+        );
+        assert!(
+            !public_resource_covers(
+                "localhost://Public/resident-instances/*",
+                "localhost://Public/resident-instances/nested/../shared.txt",
+            ),
+            "the stand-in did the work: a wildcard suffix that contains .. is refused"
+        );
+        assert!(
+            !public_resource_covers(
+                "localhost://Public/resident-instances/*",
+                "localhost://Public/resident-instances-extra/shared.txt",
+            ),
+            "the stand-in did the work: a prefix boundary refuses a longer first segment"
+        );
+        assert!(
+            !public_resource_covers(
+                "localhost://Public/resident-instances/*",
+                "localhost://Public/resident-instances",
+            ),
+            "the stand-in did the work: a prefix boundary refuses the prefix directory itself"
+        );
+        assert!(
+            public_resource_covers("elastos://*", "elastos://peer/alice/shared"),
+            "the stand-in did the work: elastos://* matches one path under that prefix"
+        );
+        assert!(
+            !public_resource_covers(
+                "localhost://Public/resident-instances/shared.txt",
+                "localhost://Public/other/shared.txt",
+            ),
+            "the stand-in did the work: an exact resource refuses a different path"
+        );
     }
 
     fn assert_named_capsule(
