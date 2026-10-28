@@ -807,6 +807,81 @@ fn runtime_hosted_stream_answer() -> Vec<u8> {
     answer
 }
 
+/// Fields a hosted stream may carry beside answer text. The caller must not
+/// see them: `extract_stream_text_delta` reads `content` only.
+const HOSTED_STREAM_PRIVATE_MARKERS: [&str; 5] = [
+    "fixture-private-reasoning",
+    "call-fixture",
+    "runs_create",
+    "grant:from-model",
+    "tool_calls",
+];
+
+/// The Runtime's accepted answer for a stream that also carries private
+/// reasoning and a proposed tool call. The bytes are the same head, chunk
+/// framing and closing `0\r\n\r\n` as `runtime_hosted_stream_answer`. Frame
+/// order: the `ready` content event, a delta with `content: null` and
+/// `reasoning_content`, a `tool_calls` delta, a ` set` content delta, an
+/// empty delta with `finish_reason: "stop"`, the usage event, then `[DONE]`.
+fn runtime_hosted_tool_and_reasoning_frames() -> Vec<u8> {
+    let reasoning = serde_json::to_string(&json!({
+        "model": "resolved-model",
+        "choices": [{
+            "delta": {
+                "content": null,
+                "reasoning_content": "fixture-private-reasoning"
+            }
+        }]
+    }))
+    .expect("the reasoning frame is json");
+    let tool_call = serde_json::to_string(&json!({
+        "model": "resolved-model",
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "id": "call-fixture",
+                    "function": {
+                        "name": "runs_create",
+                        "arguments": "{\"grant_id\":\"grant:from-model\"}"
+                    }
+                }]
+            }
+        }]
+    }))
+    .expect("the tool-call frame is json");
+    let continuation = serde_json::to_string(&json!({
+        "model": "resolved-model",
+        "choices": [{
+            "delta": {"content": " set"}
+        }]
+    }))
+    .expect("the continuation frame is json");
+    let finish = serde_json::to_string(&json!({
+        "model": "resolved-model",
+        "choices": [{
+            "delta": {},
+            "finish_reason": "stop"
+        }]
+    }))
+    .expect("the finish frame is json");
+    let payloads = [
+        RUNTIME_HOSTED_STREAM_EVENTS[0],
+        reasoning.as_str(),
+        tool_call.as_str(),
+        continuation.as_str(),
+        finish.as_str(),
+        RUNTIME_HOSTED_STREAM_EVENTS[1],
+        "[DONE]",
+    ];
+    let mut answer = runtime_hosted_stream_head();
+    for payload in payloads {
+        let frame = format!("data: {payload}\n\n");
+        push_runtime_hosted_stream_frame(&mut answer, frame.as_bytes());
+    }
+    answer.extend_from_slice(b"0\r\n\r\n");
+    answer
+}
+
 /// The Runtime's answer when it cuts a hosted stream: the head, then one chunk
 /// that holds the first event, and the connection closes with no `0\r\n\r\n`
 /// and no usage event. The Runtime returns an error after the head when the
@@ -833,7 +908,11 @@ fn runtime_hosted_cut_answer() -> Vec<u8> {
 #[derive(Clone)]
 enum HostedEffectAnswer {
     Refused,
-    Streaming,
+    /// The Runtime's accepted stream. `None` is `runtime_hosted_stream_answer`.
+    /// `Some` is the same response shape with the caller's frames.
+    Streaming {
+        frames: Option<Vec<u8>>,
+    },
     Cut,
     /// Relays the recorded request body to this base URL and copies the backend
     /// answer back as the Runtime's hosted stream.
@@ -955,9 +1034,21 @@ impl HostedEffectStandIn {
     }
 
     /// Binds the stand-in that answers as the Runtime does when it accepts a
-    /// hosted effect.
+    /// hosted effect. The answer is `runtime_hosted_stream_answer`.
     fn bind_streaming(label: &str) -> Self {
-        Self::bind_answering(label, HostedEffectAnswer::Streaming, None)
+        Self::bind_answering(label, HostedEffectAnswer::Streaming { frames: None }, None)
+    }
+
+    /// Binds the stand-in that answers with `frames`, the same accepted-stream
+    /// path as `bind_streaming`. `bind_streaming` stays the default-frame caller.
+    fn bind_streaming_frames(label: &str, frames: Vec<u8>) -> Self {
+        Self::bind_answering(
+            label,
+            HostedEffectAnswer::Streaming {
+                frames: Some(frames),
+            },
+            None,
+        )
     }
 
     /// Binds the stand-in that answers as the Runtime does when it cuts a
@@ -1205,7 +1296,9 @@ fn serve_hosted_effect(
     }
     let response = match answer {
         HostedEffectAnswer::Refused => RUNTIME_HOSTED_REFUSAL.to_vec(),
-        HostedEffectAnswer::Streaming => runtime_hosted_stream_answer(),
+        HostedEffectAnswer::Streaming { frames } => {
+            frames.unwrap_or_else(runtime_hosted_stream_answer)
+        }
         HostedEffectAnswer::Cut => runtime_hosted_cut_answer(),
         HostedEffectAnswer::Relay { backend_url } => {
             let outcome = relay_hosted_effect(&stream, &body, &backend_url);
@@ -2725,22 +2818,16 @@ struct RelayedHostedTurn {
     provider: ProviderProcess,
 }
 
-/// One hosted text run on an already started provider: `runs_create` with the
-/// binding's grant and request id, then the settled run. The provider only
-/// checks that `grant_id` is not empty; the stand-in decides whether a live
-/// grant exists for `request_id`, so the caller owns the grant.
-fn run_hosted_text_turn(
-    provider: &mut ProviderProcess,
-    request_id: &str,
-    grant_id: &str,
-    prompt: &str,
-    settle_deadline: Duration,
-) -> Value {
+/// The `runs_create` body every hosted text turn sends. A missing `grant_id`
+/// is refused before any send, so the grant id is non-empty. The stand-in
+/// decides whether a live grant exists for `request_id`.
+fn hosted_text_create_request(request_id: &str, grant_id: &str, prompt: &str) -> Value {
     let input = json!({
         "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
         "prompt": prompt
     });
-    let create_request = json!({
+    let input_hash = model_input_hash(&input).unwrap();
+    json!({
         "op": "runs_create",
         "offer_id": HOSTED_EFFECT_OFFER,
         "operation": "text.generate",
@@ -2754,9 +2841,23 @@ fn run_hosted_text_turn(
             "request_id": request_id,
             "offer_id": HOSTED_EFFECT_OFFER,
             "operation": "text.generate",
-            "input_hash": model_input_hash(&input).unwrap()
+            "input_hash": input_hash
         }
-    });
+    })
+}
+
+/// One hosted text run on an already started provider: `runs_create` with the
+/// binding's grant and request id, then the settled run. The provider only
+/// checks that `grant_id` is not empty; the stand-in decides whether a live
+/// grant exists for `request_id`, so the caller owns the grant.
+fn run_hosted_text_turn(
+    provider: &mut ProviderProcess,
+    request_id: &str,
+    grant_id: &str,
+    prompt: &str,
+    settle_deadline: Duration,
+) -> Value {
+    let create_request = hosted_text_create_request(request_id, grant_id, prompt);
     let binding: RuntimeCreateBinding =
         serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
     let expected_run_id = model_run_id(&binding);
@@ -2970,6 +3071,269 @@ fn hosted_relay_forwards_the_provider_body_unchanged_and_no_key() {
         names, RELAY_BACKEND_HEADER_NAMES,
         "the relay sends only its own content-type and the client's defaults: {:?}",
         backend_request.headers
+    );
+
+    provider.shutdown();
+}
+
+/// Every `runs_events` page of one run from sequence 0, joined in order.
+/// A page that says `has_more` advances the cursor by the last event it
+/// returned, so the read cannot spin on one page. Sequences must start at 1
+/// and rise by one, and exactly one event (the last) must be the terminal.
+///
+/// This is the one page-until-done walk. The local-llama poll in
+/// `managed_streaming_stop_switch` reads one page until a `text_delta`
+/// appears, and that poll stays its own rule. Each complete page is checked
+/// for the private stream markers before its events are taken out, so the
+/// page envelope is part of the exclusion.
+fn read_hosted_run_events(
+    provider: &mut ProviderProcess,
+    run_id: &str,
+    access: &Value,
+) -> Vec<Value> {
+    let mut events: Vec<Value> = Vec::new();
+    let mut after_sequence: u64 = 0;
+    loop {
+        let page = provider.request(json!({
+            "op": "runs_events",
+            "run_id": run_id,
+            "runtime_binding": access,
+            "after_sequence": after_sequence
+        }));
+        assert_eq!(page["status"], "ok", "unexpected events response: {page}");
+        let page_text = page.to_string();
+        for marker in HOSTED_STREAM_PRIVATE_MARKERS {
+            assert!(
+                !page_text.contains(marker),
+                "an events page must not carry the private marker {marker}: {page}"
+            );
+        }
+        let page_events = page["data"]["events"]
+            .as_array()
+            .expect("runs_events returns an event array")
+            .clone();
+        let has_more = page["data"]["has_more"] == true;
+        if has_more {
+            let next = page_events
+                .last()
+                .expect("a page with more events carries at least one event")["sequence"]
+                .as_u64()
+                .expect("an event has a sequence");
+            assert!(
+                next > after_sequence,
+                "a later events page must move past sequence {after_sequence}: {page}"
+            );
+            after_sequence = next;
+        }
+        events.extend(page_events);
+        if !has_more {
+            break;
+        }
+    }
+    assert!(
+        !events.is_empty(),
+        "the run must keep its events: {events:?}"
+    );
+    for (position, event) in events.iter().enumerate() {
+        assert_eq!(
+            event["sequence"].as_u64(),
+            Some(position as u64 + 1),
+            "event sequences must start at 1 and rise by exactly one: {events:?}"
+        );
+    }
+    let last = events.len() - 1;
+    assert_eq!(
+        events[last]["terminal"], true,
+        "the last event must be the terminal: {events:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["terminal"] == true)
+            .count(),
+        1,
+        "the run must keep exactly one terminal event: {events:?}"
+    );
+    events
+}
+
+/// A hosted stream that carries private reasoning and a proposed tool call
+/// beside its answer text reaches the caller with only the answer text. The
+/// provider's extractor reads `/choices/0/delta/content` and ignores every
+/// other field (`capsules/model-provider/src/adapters.rs`,
+/// `extract_stream_text_delta`), so:
+/// - the private reasoning chunk (`content: null`, `reasoning_content`
+///   string), the tool-call chunk (id `call-fixture`, `name: "runs_create"`,
+///   arguments carrying `grant:from-model`) and the finish chunk
+///   (`finish_reason: "stop"`) never reach the answer;
+/// - the answer is `ready set` — the concatenation of the two content
+///   deltas — and nothing else;
+/// - the created run reports the resolved model, usage and cost the existing
+///   answer fixture resolves, and the last event is terminal, kind `output`,
+///   with that answer in `data`;
+/// - every create/get response and events page is clean of `fixture-private-
+///   reasoning`, `call-fixture`, `runs_create`, `grant:from-model` and
+///   `tool_calls`;
+/// - `observe` still reads exactly one hosted-effect connection and one
+///   request with no `authorization` header, so the proposed operation
+///   caused no second send.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn a_hosted_tool_call_or_reasoning_never_reaches_the_caller() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted reasoning and tool call: off macOS the \
+             provider refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-reasoning-tool-call");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind_streaming_frames(
+        "hosted-reasoning-tool-call",
+        runtime_hosted_tool_and_reasoning_frames(),
+    );
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let init_response = provider.request(init);
+    assert_eq!(
+        init_response["status"], "ok",
+        "unexpected init response: {init_response}"
+    );
+
+    // The whole request prompt is fixed on the test side. None of the private
+    // markers may appear in it.
+    let prompt = "a hosted answer whose stream carries private reasoning and a tool call";
+    for marker in HOSTED_STREAM_PRIVATE_MARKERS {
+        assert!(
+            !prompt.contains(marker),
+            "the request prompt must not carry the private marker {marker}"
+        );
+    }
+    let create_request = hosted_text_create_request(
+        &test_support::fixture_model_request_id("request:hosted-reasoning-tool-call"),
+        "grant:test",
+        prompt,
+    );
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    assert_eq!(
+        create["data"]["run_id"], expected_run_id,
+        "runs_create must return the contract run id"
+    );
+
+    let settled = wait_for_run_terminal_within(
+        &mut provider,
+        &expected_run_id,
+        &access_binding(&create_request),
+        FIXTURE_EVENT_TIMEOUT,
+    );
+    assert_eq!(
+        settled["data"]["run_id"], expected_run_id,
+        "runs_get must return the contract run id"
+    );
+    assert_eq!(
+        settled["data"]["status"], "completed",
+        "the reasoning and tool-call stream must complete: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["output"],
+        json!({
+            "schema": RUN_OUTPUT_TEXT_SCHEMA,
+            "text": "ready set",
+        }),
+        "the caller must see only the answer text: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["backend_report"],
+        json!({
+            "schema": BACKEND_REPORT_SCHEMA,
+            "resolved_model": {"status": "reported", "value": "resolved-model"},
+            "usage": {"status": "reported", "value": {
+                "input_tokens": 7,
+                "output_tokens": 1,
+                "total_tokens": 8,
+            }},
+            "cost": {"status": "unknown"},
+        }),
+        "the backend report must match the answer fixture: {settled}"
+    );
+
+    let events = read_hosted_run_events(
+        &mut provider,
+        &expected_run_id,
+        &access_binding(&create_request),
+    );
+    let mut joined = String::new();
+    for event in &events {
+        if event["kind"] == "text_delta" {
+            joined.push_str(event["data"]["text"].as_str().unwrap_or(""));
+        }
+    }
+    assert_eq!(
+        joined, "ready set",
+        "joined text deltas must be exactly the answer: {events:?}"
+    );
+    let terminal = events.last().unwrap();
+    assert_eq!(
+        terminal["terminal"], true,
+        "the last event must be the terminal: {terminal}"
+    );
+    assert_eq!(
+        terminal["kind"], "output",
+        "the last event must be the completed output: {terminal}"
+    );
+    assert_eq!(
+        terminal["data"],
+        json!({
+            "schema": RUN_OUTPUT_TEXT_SCHEMA,
+            "text": "ready set",
+        }),
+        "the terminal output must be only the answer text: {terminal}"
+    );
+
+    // Create and get are checked here. Each events page is checked inside
+    // `read_hosted_run_events` before its events are taken out.
+    for marker in HOSTED_STREAM_PRIVATE_MARKERS {
+        assert!(
+            !create.to_string().contains(marker),
+            "the create response must not carry the private marker {marker}: {create}"
+        );
+        assert!(
+            !settled.to_string().contains(marker),
+            "the get response must not carry the private marker {marker}: {settled}"
+        );
+    }
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "the hosted run must open exactly one connection, not one per proposed effect"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "the hosted run must send exactly one request, never one per proposed effect"
+    );
+    assert_eq!(
+        requests[0].value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
     );
 
     provider.shutdown();
