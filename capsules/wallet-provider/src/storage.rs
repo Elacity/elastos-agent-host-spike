@@ -653,6 +653,7 @@ mod uf_tests {
         fs::write(&path, b"{ not valid json").unwrap();
         let err = load_store(&path).unwrap_err();
         assert!(!err.is_empty());
+        assert_eq!(err, "key must be a string at line 1 column 3");
         assert!(load_store_if_present(&path).is_err());
     }
 

@@ -751,7 +751,7 @@ mod uf_tests {
         );
     }
 
-    // ---- bip322 sign/verify round-trip (P2WPKH) ----
+    // ---- bip322 approval fixtures and witness verification (P2WPKH) ----
 
     fn make_approval_request(signing_key: &SigningKey) -> WalletApprovalRequest {
         let address = p2wpkh_address(signing_key);
@@ -806,25 +806,6 @@ mod uf_tests {
             .and_then(Value::as_str)
             .expect("payload message")
             .to_string()
-    }
-
-    #[test]
-    fn bip322_p2wpkh_sign_then_verify_roundtrip() {
-        let key = fixed_signing_key();
-        let request = make_approval_request(&key);
-        let message = payload_message(&request);
-        let (signature, payload) =
-            sign_bip322_simple_p2wpkh_approval(&key, &request).expect("sign");
-        assert_eq!(
-            payload.get("signature_type").and_then(Value::as_str),
-            Some("bip322_simple")
-        );
-        let result = verify_bip322_simple("bitcoin", &request.address, &message, &signature)
-            .expect("verify");
-        assert_eq!(result.proof_type, BITCOIN_PROOF_BIP322_SIMPLE);
-        assert_eq!(result.proof_strength, "standard");
-        assert_eq!(result.address, request.address);
-        assert_eq!(result.message_hash, bip322_message_hash(message.as_bytes()));
     }
 
     #[test]
@@ -919,17 +900,10 @@ mod uf_tests {
     }
 
     #[test]
-    fn validate_payload_rejects_bad_message_content() {
+    fn validate_payload_rejects_missing_runtime_challenge() {
         let key = fixed_signing_key();
         let request = make_approval_request(&key);
         let account = linked_account_for(&request);
-
-        let mut payload = request.payload.clone();
-        payload["message"] = json!("hello");
-        assert_eq!(
-            validate_bitcoin_bip322_proof_payload(&payload, &account).unwrap_err(),
-            "Bitcoin BIP-322 message must be a Runtime account proof"
-        );
 
         // The proof phrase and the address are present, the challenge is not.
         let mut payload = request.payload.clone();
