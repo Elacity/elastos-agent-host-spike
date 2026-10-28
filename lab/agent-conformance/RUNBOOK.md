@@ -733,3 +733,5 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 `standin_unanswered_request_expires` is this stand-in, and a PASS there gives the Runtime no A10 or A11 credit for expiry.
 
 `standin_once_grant_is_spent_by_one_use` is this stand-in, and a PASS there gives the Runtime no A6 credit for a once grant.
+
+`standin_ended_instance_request_is_refused` is this stand-in, and a PASS there gives the Runtime no A10 credit for a new request.

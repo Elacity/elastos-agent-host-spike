@@ -123,6 +123,7 @@ pub struct StandIn {
     admitted: Vec<Admitted>,
     instances: Vec<Instance>,
     next_id: u64,
+    next_request: u64,
     instant: u64,
 }
 
@@ -134,6 +135,7 @@ impl StandIn {
             admitted: Vec::new(),
             instances: Vec::new(),
             next_id: 1,
+            next_request: 1,
             instant: 0,
         }
     }
@@ -307,6 +309,57 @@ impl StandIn {
         listed.sort_by(|left, right| left.request_id.cmp(&right.request_id));
         let requests = listed.into_iter().map(request_entry).collect::<Vec<_>>();
         Ok(json!({ "requests": requests }))
+    }
+
+    /// `POST /api/capability/request`.
+    ///
+    /// A client instance that is `starting` or `running` stores one pending
+    /// request through `seed_request`. A shell is refused before the body is
+    /// read. A `stopped` or `failed` instance is not live and stores nothing.
+    /// Ok is `{"status": "pending", "request_id": ...}` and carries no token.
+    pub fn post_capability_request(
+        &mut self,
+        caller: Caller<'_>,
+        body: &Value,
+    ) -> Result<Value, (u16, String)> {
+        let Caller::Client { session_id } = caller else {
+            return Err((
+                403,
+                "capability request needs an instance session".to_owned(),
+            ));
+        };
+        let (resource, given_action, reason) = request_body(body)?;
+        if !resource.starts_with("elastos://") && !resource.starts_with("localhost://") {
+            return Err((
+                400,
+                "Unsupported resource scheme. Allowed: elastos://, localhost://".to_owned(),
+            ));
+        }
+        let action = given_action.to_lowercase();
+        if !matches!(
+            action.as_str(),
+            "read" | "write" | "execute" | "delete" | "message" | "admin"
+        ) {
+            return Err((
+                400,
+                format!(
+                    "Invalid action: {given_action}. Expected: read, write, execute, delete, message, admin"
+                ),
+            ));
+        }
+        let phase = self
+            .instances
+            .iter()
+            .find(|instance| instance.id == session_id)
+            .map(|instance| instance.phase)
+            .ok_or_else(|| unknown_instance(session_id))?;
+        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
+            return Err(not_live(phase));
+        }
+        let request_id = format!("request-{}", self.next_request);
+        self.seed_request(&request_id, session_id, resource, &action, reason)?;
+        self.next_request += 1;
+        Ok(json!({ "status": "pending", "request_id": request_id }))
     }
 
     /// Lab observation, not a route.
@@ -1034,6 +1087,60 @@ fn grant_body(body: &Value) -> Result<(&str, &str, &str), (u16, String)> {
         },
     };
     Ok((request_id, duration, rationale.unwrap_or(DEFAULT_RATIONALE)))
+}
+
+/// The request body's only keys are `resource`, `action` and a `reason`.
+///
+/// The returned action is the given text; its lowercase form is checked by the
+/// caller. A missing reason is `""`.
+fn request_body(body: &Value) -> Result<(&str, &str, &str), (u16, String)> {
+    const NEEDS_RESOURCE: &str = "request body needs resource";
+    const NEEDS_ACTION: &str = "request body needs action";
+
+    let Some(object) = body.as_object() else {
+        return Err((400, NEEDS_RESOURCE.to_owned()));
+    };
+    let mut resource = None;
+    let mut action = None;
+    let mut reason = "";
+    let mut resource_not_string = false;
+    let mut action_not_string = false;
+    let mut reason_not_string = false;
+    for (key, value) in object {
+        match key.as_str() {
+            "resource" => match value {
+                Value::String(text) => resource = Some(text.as_str()),
+                _ => resource_not_string = true,
+            },
+            "action" => match value {
+                Value::String(text) => action = Some(text.as_str()),
+                _ => action_not_string = true,
+            },
+            "reason" => match value {
+                Value::String(text) => reason = text.as_str(),
+                _ => reason_not_string = true,
+            },
+            other => {
+                return Err((400, format!("request body rejects {other}")));
+            }
+        }
+    }
+    if resource_not_string {
+        return Err((400, "request resource must be a string".to_owned()));
+    }
+    let Some(resource) = resource else {
+        return Err((400, NEEDS_RESOURCE.to_owned()));
+    };
+    if action_not_string {
+        return Err((400, "request action must be a string".to_owned()));
+    }
+    let Some(action) = action else {
+        return Err((400, NEEDS_ACTION.to_owned()));
+    };
+    if reason_not_string {
+        return Err((400, "request reason must be a string".to_owned()));
+    }
+    Ok((resource, action, reason))
 }
 
 /// The stop body is an object whose only key is a non-empty string `reason`.
@@ -5107,5 +5214,343 @@ mod tests {
             );
         }
         home.finish().expect("the throwaway Home finishes");
+    }
+
+    fn request_client_body() -> Value {
+        json!({
+            "resource": SHARED_RESOURCE,
+            "action": "read",
+            "reason": "read shared",
+        })
+    }
+
+    fn assert_live_request_ids_empty(standin: &StandIn, message: &str) {
+        let listed = standin
+            .get_capability_list(Caller::Shell, None)
+            .expect("the stand-in shell live-grant view");
+        assert!(
+            request_ids(&listed).is_empty(),
+            "the stand-in did the work: {message}"
+        );
+    }
+
+    #[test]
+    fn standin_ended_instance_request_is_refused() {
+        const FAILING_PATH: &str = "/capsules/fail-after-submit";
+        const FAILING_NAME: &str = "fail-after-submit";
+
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        let first = launch_finished(&mut standin);
+        let second = launch_finished(&mut standin);
+        assert_eq!(
+            (first.as_str(), second.as_str()),
+            ("component-1", "component-2"),
+            "the stand-in did the work: it numbers the two launches component-1 and component-2"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: it lists component-1 running before the stop",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: it lists component-2 running before the stop",
+        );
+        standin
+            .delete_capsule(Caller::Shell, "component-1", &stop_body())
+            .expect("the stand-in stops component-1 with the stop reason");
+        let stopped = standin.post_capability_request(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            &request_client_body(),
+        );
+        assert_eq!(
+            stopped,
+            Err((400, "instance is not live: stopped".to_owned())),
+            "the stand-in did the work: it refuses a new request from the stopped instance"
+        );
+        assert_eq!(
+            shell_requests(&standin, "component-1"),
+            json!({ "requests": [] }),
+            "the stand-in did the work: the stopped instance stores no request"
+        );
+        standin.set_instant(60);
+        let after_instant = standin.post_capability_request(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            &request_client_body(),
+        );
+        assert_eq!(
+            after_instant,
+            Err((400, "instance is not live: stopped".to_owned())),
+            "the stand-in did the work: it refuses the stopped instance that left the list at instant 60"
+        );
+        assert_eq!(
+            shell_requests(&standin, "component-1"),
+            json!({ "requests": [] }),
+            "the stand-in did the work: the stopped instance stores no request at instant 60"
+        );
+
+        let sibling = standin.post_capability_request(
+            Caller::Client {
+                session_id: "component-2",
+            },
+            &request_client_body(),
+        );
+        assert_eq!(
+            sibling,
+            Ok(json!({ "status": "pending", "request_id": "request-1" })),
+            "the stand-in did the work: it answers pending and request-1 for the running sibling"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-2"),
+            vec![pending_request("request-1", "component-2")],
+            "the stand-in did the work: it stores one pending request for component-2"
+        );
+        assert_live_request_ids_empty(
+            &standin,
+            "the request route stores no live grant for component-2",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: it leaves component-2 running after the request",
+        );
+
+        let unknown = standin.post_capability_request(
+            Caller::Client {
+                session_id: "component-9",
+            },
+            &request_client_body(),
+        );
+        assert_eq!(
+            unknown,
+            Err((400, "unknown instance: component-9".to_owned())),
+            "the stand-in did the work: it refuses a client whose instance is unknown"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-2"),
+            vec![pending_request("request-1", "component-2")],
+            "the stand-in did the work: the unknown client leaves the sibling's request as it was"
+        );
+
+        let mut failed = StandIn::new();
+        failed
+            .admit_resident(
+                FAILING_PATH,
+                FAILING_NAME,
+                Start::Error("start refused".to_owned()),
+            )
+            .expect("the stand-in admits the failing path");
+        let only = failed
+            .post_capsules(Caller::Shell, &agent_body(FAILING_PATH))
+            .expect("the stand-in launches the failing path once");
+        assert_eq!(
+            only["id"], "component-1",
+            "the stand-in did the work: it numbers the only failing launch component-1"
+        );
+        failed
+            .finish_start("component-1")
+            .expect("the stand-in finishes the failing start");
+        let refused = failed.post_capability_request(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            &request_client_body(),
+        );
+        assert_eq!(
+            refused,
+            Err((400, "instance is not live: failed".to_owned())),
+            "the stand-in did the work: it refuses a new request from the failed instance"
+        );
+        assert_eq!(
+            shell_requests(&failed, "component-1"),
+            json!({ "requests": [] }),
+            "the stand-in did the work: the failed instance stores no request"
+        );
+        assert_eq!(
+            shell_list(&failed),
+            json!({
+                "capsules": [{
+                    "id": "component-1",
+                    "name": FAILING_NAME,
+                    "status": "failed",
+                    "session_id": "component-1",
+                    "cause": "start refused",
+                }]
+            }),
+            "the stand-in did the work: it leaves the failed entry listed with its cause"
+        );
+    }
+
+    #[test]
+    fn standin_live_instance_request_stays_pending() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        let launched = standin
+            .post_capsules(Caller::Shell, &shared_body())
+            .expect("the stand-in launches once");
+        assert_eq!(
+            (launched["id"].as_str(), launched["status"].as_str()),
+            (Some("component-1"), Some("starting")),
+            "the stand-in did the work: it launches component-1 starting"
+        );
+        let shell = standin.post_capability_request(Caller::Shell, &Value::Null);
+        assert_eq!(
+            shell,
+            Err((
+                403,
+                "capability request needs an instance session".to_owned()
+            )),
+            "the stand-in did the work: it refuses a shell before the body is read"
+        );
+        assert_eq!(
+            shell_requests(&standin, "component-1"),
+            json!({ "requests": [] }),
+            "the stand-in did the work: the shell request stores nothing"
+        );
+
+        let first = standin.post_capability_request(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            &request_client_body(),
+        );
+        assert_eq!(
+            first,
+            Ok(json!({ "status": "pending", "request_id": "request-1" })),
+            "the stand-in did the work: it answers pending and request-1 for component-1"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![pending_request("request-1", "component-1")],
+            "the stand-in did the work: it stores one pending request for component-1"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "starting",
+            "",
+            "the stand-in did the work: the starting instance stays starting after the request",
+        );
+        assert_live_request_ids_empty(
+            &standin,
+            "the request route stores no live grant for the starting instance",
+        );
+
+        standin
+            .finish_start("component-1")
+            .expect("the stand-in finishes the start");
+        let second = standin.post_capability_request(
+            Caller::Client {
+                session_id: "component-1",
+            },
+            &json!({
+                "resource": SHARED_RESOURCE,
+                "action": "Write",
+                "reason": "read shared",
+            }),
+        );
+        assert_eq!(
+            second,
+            Ok(json!({ "status": "pending", "request_id": "request-2" })),
+            "the stand-in did the work: it mints request-2 for the running instance"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![
+                pending_request("request-1", "component-1"),
+                json!({
+                    "request_id": "request-2",
+                    "session_id": "component-1",
+                    "resource": SHARED_RESOURCE,
+                    "action": "write",
+                    "reason": "read shared",
+                    "status": "pending",
+                    "decision_reason": "",
+                    "settled_by": Value::Null,
+                }),
+            ],
+            "the stand-in did the work: it stores both pending requests and lowercases the second action"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: the running instance stays running after the second request",
+        );
+    }
+
+    #[test]
+    fn standin_capability_request_refuses_a_bad_body() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        let launched = standin
+            .post_capsules(Caller::Shell, &shared_body())
+            .expect("the stand-in launches once");
+        assert_eq!(
+            (launched["id"].as_str(), launched["status"].as_str()),
+            (Some("component-1"), Some("starting")),
+            "the stand-in did the work: it launches component-1 starting"
+        );
+        let caller = Caller::Client {
+            session_id: "component-1",
+        };
+        for (body, reason, message) in [
+            (
+                json!({}),
+                "request body needs resource",
+                "a body with no resource",
+            ),
+            (
+                json!({ "resource": "https://example", "action": "read" }),
+                "Unsupported resource scheme. Allowed: elastos://, localhost://",
+                "a resource without an allowed scheme",
+            ),
+            (
+                json!({ "resource": SHARED_RESOURCE, "action": "mint" }),
+                "Invalid action: mint. Expected: read, write, execute, delete, message, admin",
+                "an action outside the six names",
+            ),
+            (
+                json!({ "resource": SHARED_RESOURCE, "action": "read", "token": "x" }),
+                "request body rejects token",
+                "an extra body key",
+            ),
+        ] {
+            let refused = standin.post_capability_request(caller, &body);
+            assert_eq!(
+                refused,
+                Err((400, reason.to_owned())),
+                "the stand-in did the work: it refuses {message} and stores nothing"
+            );
+        }
+        assert_eq!(
+            shell_requests(&standin, "component-1"),
+            json!({ "requests": [] }),
+            "the stand-in did the work: every refused body stores no request"
+        );
+        let accepted = standin.post_capability_request(caller, &request_client_body());
+        assert_eq!(
+            accepted,
+            Ok(json!({ "status": "pending", "request_id": "request-1" })),
+            "the stand-in did the work: the refused bodies do not advance the request id"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![pending_request("request-1", "component-1")],
+            "the stand-in did the work: the valid body stores request-1"
+        );
     }
 }

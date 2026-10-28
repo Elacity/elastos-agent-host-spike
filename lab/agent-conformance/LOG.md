@@ -9372,3 +9372,110 @@ New:
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_once_grant_is_spent_by_one_use` at `standin-runtime/mod.rs:4663`; the stub, keep, session and sibling plants each fail that named test on its assertion, and the restored test passes. |
 | 8. Identity, admission and allowance stay separate? | Yes | The caller decision at `standin-runtime/mod.rs:472` and the liveness decision at `:469` come before the duration-limited spend at `:475`; the Runtime checks the caller at `manager.rs:422-427` before `try_use_token` at `:486`, so a refused caller spends nothing in either place. A PASS gives the Runtime no A6 credit for a once grant. |
 
+## 066 — A10: an ended instance cannot make a request
+
+066: `StandIn` gains one route, `post_capability_request(caller, body) -> Result<Value, (u16, String)>` at `standin-runtime/mod.rs:320`. Its doc comment starts `POST /api/capability/request.` A shell caller is status 403 with `capability request needs an instance session` before the body is read. The one body parser `request_body` at `:1096` accepts only `resource`, `action` and `reason`; a missing or non-string `resource` or `action`, a non-string `reason`, or an extra key is status 400 with the named reason, and a missing `reason` is `""`. A resource without `elastos://` or `localhost://` is status 400 with `Unsupported resource scheme. Allowed: elastos://, localhost://`; an action whose lowercase form is not one of the six names is status 400 with `Invalid action: ` plus the given text plus `. Expected: read, write, execute, delete, message, admin`. The method then looks up the stored instance by `id`, the way `finish_start` does, and refuses an unknown id with `unknown_instance` or any stored phase other than `Starting` or `Running` with `not_live`. On success it mints `request-` plus the new `next_request` counter (`:126`, starts at 1 at `:138`), calls `seed_request` once for the caller's `session_id` with the resource, the lowercase action and the reason, and advances the counter only after `Ok`. It returns `{"status":"pending","request_id":...}` with no token and stores no grant. `seed_request`, `get_capability_requests`, `settle_pending`, `stop_one`, `finish_start`, `delete_capsule`, `not_live`, `unknown_instance`, `post_capability_grant`, `post_capability_deny`, `watch_ended`, `expire_due` and `authorise` keep their bytes. The instance counter stays separate: two launches still answer `component-1` and `component-2`.
+
+### Quote from the resident SPEC (read only)
+
+> later Bus calls from it are refused.
+
+The stop still ends the instance and revokes its grants; this route adds the later-call refusal for a new capability request.
+
+### Quote from the Runtime route (read only, `elastos/crates/elastos-server/src/api/handlers/capability.rs`)
+
+> The body keys are `resource`, `action` and `reason`. The caller is the authenticated session. A request with no auto-grant returns `status` `pending` and `request_id`, and no token.
+
+The stand-in keeps the `pending` plus `request_id` shape and adds no token. It does not copy the system-backend or wallet branch.
+
+### Tests
+
+Three tests in `standin_runtime::tests`, each passing with no operator and no probe build. They reuse `pending_request`, `request_entries`, `shell_requests`, `get_capability_list`, `request_ids`, `assert_capsule`, `admit_shared`, `launch_finished`, `stop_body` and `SHARED_RESOURCE`; assertion text says the stand-in did the work.
+
+- `standin_ended_instance_request_is_refused` (`:5238`) admits `/capsules/read-shared` as `read-shared` with `Start::Ok`, launches twice and finishes both starts, so `component-1` and `component-2` are `running`. It deletes `component-1` with `{"reason":"stop one"}`. The client body is `{"resource":"localhost://Public/resident-instances/shared.txt","action":"read","reason":"read shared"}`. The `component-1` call is status 400 `instance is not live: stopped`, and its shell record is `{"requests":[]}`. At instant 60 the same call is still that 400 and the record is still empty. The `component-2` call is Ok `{"status":"pending","request_id":"request-1"}`, its shell record is `pending_request("request-1", "component-2")`, the shell live-grant `request_id` set is empty, and `component-2` stays `running` with cause `""`. A `component-9` call is status 400 `unknown instance: component-9`, and the `component-2` record stays that one pending request. A second `StandIn` admits `/capsules/fail-after-submit` as `fail-after-submit` with `Start::Error("start refused")`, launches once, and finishes the start: the same body is status 400 `instance is not live: failed`, the shell record is empty, and the list entry stays `failed` with cause `start refused`.
+- `standin_live_instance_request_stays_pending` (`:5397`) admits the same path and launches once without `finish_start`: `component-1` is `starting`. The shell caller with a null body is status 403 `capability request needs an instance session`, and the shell record is empty. The client call is Ok `{"status":"pending","request_id":"request-1"}`, the record is `pending_request("request-1", "component-1")`, the phase stays `starting` with cause `""`, and the live-grant set is empty. After `finish_start("component-1")`, a second client call with `"action":"Write"` is Ok `{"status":"pending","request_id":"request-2"}`; the record holds `request-1` and `request-2`, both `pending`, and `request-2`'s action is `write`; the phase stays `running`.
+- `standin_capability_request_refuses_a_bad_body` (`:5496`) uses one starting instance. A client body `{}` is `request body needs resource`; `{"resource":"https://example","action":"read"}` is the unsupported-scheme reason; `{"resource":"localhost://Public/resident-instances/shared.txt","action":"mint"}` is `Invalid action: mint. Expected: read, write, execute, delete, message, admin`; a body with the extra key `token` is `request body rejects token`. The shell record stays empty, and the valid body is then Ok `request-1`, so the refused bodies do not advance the counter.
+
+### Hand-run falsifiers
+
+Each plant ran alone and was restored before the next. The command was `env RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_ended_instance_request_is_refused -- --exact`. The planted crate compiled every time, and every planted run exited 101. After the last restore, `sha256sum standin-runtime/mod.rs` was `2113d941c669f88af8a20b8932b57f8001470899f66388019757435b036f6156`, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` showed the candidate only, and no plant expression remained. No `falsifiers.json` id was added.
+
+F-standin-request-stub. Assertion: `src/../standin-runtime/mod.rs:5275:9` `assertion left == right failed: the stand-in did the work: it refuses a new request from the stopped instance`, `left: Ok(Object {"request_id": String("request-1"), "status": String("pending")})`, `right: Err((400, "instance is not live: stopped"))`.
+
+Old:
+
+```text
+    ) -> Result<Value, (u16, String)> {
+        let Caller::Client { session_id } = caller else {
+```
+
+New:
+
+```text
+    ) -> Result<Value, (u16, String)> {
+        return Ok(json!({ "status": "pending", "request_id": "request-1" }));
+        let Caller::Client { session_id } = caller else {
+```
+
+F-standin-request-ended. Assertion: `src/../standin-runtime/mod.rs:5277:9` `assertion left == right failed: the stand-in did the work: it refuses a new request from the stopped instance`, `left: Ok(Object {"request_id": String("request-1"), "status": String("pending")})`, `right: Err((400, "instance is not live: stopped"))`.
+
+Old:
+
+```text
+            .map(|instance| instance.phase)
+            .ok_or_else(|| unknown_instance(session_id))?;
+        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
+```
+
+New:
+
+```text
+            .map(|instance| instance.phase)
+            .ok_or_else(|| unknown_instance(session_id))?;
+        if !matches!(
+            phase,
+            ResidentStatus::Starting | ResidentStatus::Running | ResidentStatus::Stopped
+        ) {
+```
+
+F-standin-request-sibling. Assertion: `src/../standin-runtime/mod.rs:5313:9` `assertion left == right failed: the stand-in did the work: it stores one pending request for component-2`, `left: []`, `right: [Object {... "session_id": String("component-2"), "status": String("pending") ...}]`.
+
+Old:
+
+```text
+        self.seed_request(&request_id, session_id, resource, &action, reason)?;
+```
+
+New:
+
+```text
+        self.seed_request(&request_id, "component-1", resource, &action, reason)?;
+```
+
+### Docs
+
+`standin-runtime/README.md:53` adds one paragraph immediately before `## Callers`: `post_capability_request` answers `POST /api/capability/request`; it calls `seed_request` only for a `starting` or `running` instance, and a `stopped` or `failed` instance is `instance is not live` and stores nothing; the Ok body is `status` `pending` and `request_id`, with no token; `seed_request` can still store a record after the end; a PASS gives the Runtime no A10 credit for this refusal. The RA-1 section, the RI-1 to RI-4 section, the settlement paragraph and the watch, survivor, expiry and once-grant paragraphs keep their bytes. `RUNBOOK.md:737` adds one paragraph after the last stand-in paragraph: `standin_ended_instance_request_is_refused` is this stand-in, and a PASS there gives the Runtime no A10 credit for a new request. Every other RUNBOOK paragraph keeps its bytes.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged; `git diff` for `src/harness.rs`, `src/census.rs`, `tests/effects.rs`, `tests/common/grants.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. The only changed files are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.165 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 258 seconds, inside the 600-second bound. Targets in order: lib 59 passed; one-target 1 passed; effects 7 passed; artifact 1 passed; runtime 61 passed with 12 ignored; standin_contract 9 passed; report 23 passed; report 10 passed with 2 ignored; 2 passed; 3 passed; doc-tests 0. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_ended_instance_request_is_refused -- --exact` exit 0, 1 passed and 0 failed.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The route stores the caller's `session_id` and the requested resource text at `standin-runtime/mod.rs:359-361`; it adds no code or content identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | A client instance gains one pending request record through `seed_request` at `:360`; no grant, token or resource access is minted, and a shell is refused at `:326`. |
+| 3. A second path or a second copy of one rule? | No | The success path calls `seed_request` and no other writer at `:360`; `request_body` at `:1096` is the one body rule, and the stored record is read through `get_capability_requests`. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`; `elastos/`, `capsules/` and `scripts/` are untouched, and the Runtime route is quoted only. |
+| 5. Refusals deny by default with a clear reason? | Yes | Shell, body, scheme, action, unknown-instance and not-live refusals return 400/403 with the named reason at `:326`, `:1096-1141`, `:332`, `:342`, `:355` and `:357`, and each stores nothing. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The instance stores its request through one granted route while `starting` or `running`; no capsule code or import changes. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `:5238`, `:5397` and `:5496`; the stub, stopped-phase and sibling plants each fail the named test on its assertion, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | The caller identity check at `:326`, admission through `finish_start` (unchanged), and the liveness gate at `:356` come before the request record; storing a request grants no allowance, and the counter is separate from the instance counter. |
+
+A passing row gives the real Runtime no A10 credit for this refusal.
+
