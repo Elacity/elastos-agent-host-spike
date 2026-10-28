@@ -879,8 +879,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "fn type_only_component(data: &[u8], validator: &mut Validator) -> Result<(), Refusal> {",
-          "new": "fn type_only_component(data: &[u8], validator: &mut Validator) -> Result<(), Refusal> {\n    let _ = (data, validator);\n    return Ok(());"
+          "old": "fn type_only_component(data: &[u8]) -> Result<(), Refusal> {",
+          "new": "fn type_only_component(data: &[u8]) -> Result<(), Refusal> {\n    let _ = data;\n    return Ok(());"
         }
       ],
       "tests": [
@@ -896,8 +896,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "fn type_only_payload(payload: Payload<'_>) -> Result<(), Refusal> {",
-          "new": "fn type_only_payload(payload: Payload<'_>) -> Result<(), Refusal> {\n    let _ = payload;\n    return Ok(());"
+          "old": "        _ => Err(Refusal::CodeInCustomSection),",
+          "new": "        _ => Ok(()),"
         }
       ],
       "tests": [
@@ -918,6 +918,54 @@
       ],
       "tests": [
         "component_type_section_inside_component_type_data_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA24a",
+      "title": "The one-section count never runs, so a second section is accepted",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "if component_type_sections > 1 {",
+          "new": "if false && component_type_sections > 1 {"
+        }
+      ],
+      "tests": [
+        "second_component_type_section_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA24b",
+      "title": "The allowlist never runs, so a type-only component-type name is enough",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    if type_imports.is_empty()\n        || type_imports\n            .iter()\n            .any(|name| !ALLOWED_BUS_IMPORTS.contains(&name.as_str()))\n    {",
+          "new": "    if false {"
+        }
+      ],
+      "tests": [
+        "type_level_wasi_or_env_import_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA24c",
+      "title": "A type-level name passes when it starts with a listed name or with elastos:bus",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "            .any(|name| !ALLOWED_BUS_IMPORTS.contains(&name.as_str()))",
+          "new": "            .any(|name| {\n                !ALLOWED_BUS_IMPORTS\n                    .iter()\n                    .any(|allowed| name.starts_with(allowed))\n                    && !name.starts_with(\"elastos:bus\")\n            })"
+        }
+      ],
+      "tests": [
+        "type_level_wasi_or_env_import_is_refused"
       ]
     }
   ]
