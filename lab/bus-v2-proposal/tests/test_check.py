@@ -31,6 +31,14 @@ NEXT_NUMBER = 3755
 NEXT_SPAN = "examples/agent-host/src/lib.rs:3755"
 NEXT_QUOTE = "/// The Runtime scopes that to the launching person."
 
+MARKER_NUMBER = 8162
+MARKER_REL = OWNED_REL
+MARKER_SPAN = "examples/agent-host/src/lib.rs:8162"
+MARKER_HEAD = "/// The one marker a declared pattern may hold: the user-namespace root,"
+MARKER_TAIL = "/// `Users/<one name>`. The declaration names no person and no host path."
+MARKER_CFG = "#[cfg(test)]"
+MARKER_CONST = 'const PRINCIPAL_MARKER: &str = "<principal>";'
+
 
 class CitationCheckTests(unittest.TestCase):
     def _temp_root(self):
@@ -116,6 +124,25 @@ class CitationCheckTests(unittest.TestCase):
         if following is not None:
             body += "    " + following + "\n"
         return body + "\n"
+
+    def _marker_source(self, last=MARKER_CONST, head=MARKER_HEAD):
+        """A committed file with the owned lines and the marker block at 8159-8162."""
+        rows = ["// filler"] * (OWNED_NUMBER - 1) + [OWNED_QUOTE, NEXT_QUOTE]
+        rows += ["// filler"] * (MARKER_NUMBER - 4 - len(rows))
+        rows += [head, MARKER_TAIL, MARKER_CFG, last]
+        return ("\n".join(rows) + "\n").encode("utf-8")
+
+    def _marker_body(self, last, head=MARKER_HEAD):
+        """A draft that cites the marker span and indents four lines below it."""
+        return (
+            "`" + MARKER_SPAN + "` defines the marker a declared pattern may hold.\n"
+            "\n"
+            "    " + head + "\n"
+            "    " + MARKER_TAIL + "\n"
+            "    " + MARKER_CFG + "\n"
+            "    " + last + "\n"
+            "\n"
+        )
 
     def _caught(self, global_name, planted, named_test, prefix, label):
         named_test()
@@ -299,6 +326,102 @@ class CitationCheckTests(unittest.TestCase):
         )
         self.assertEqual(check.problems(root), [expected])
 
+    def test_marker_quoted_line_mismatch_is_refused(self):
+        expected = "refuse: quoted line does not match " + MARKER_SPAN
+        root = self._draft(
+            self._marker_body(MARKER_CONST + "x"),
+            {MARKER_REL: self._marker_source()},
+        )
+        self.assertEqual(check.problems(root), [expected])
+        (root / MARKER_REL).write_bytes(
+            self._marker_source("// edited in the worktree")
+        )
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_marker_quoted_line_match_ignores_the_worktree_file(self):
+        root = self._draft(
+            self._marker_body(MARKER_CONST),
+            {MARKER_REL: self._marker_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+        (root / MARKER_REL).write_bytes(
+            self._marker_source("// edited in the worktree")
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_marker_first_line_does_not_stand_for_line_8162(self):
+        root = self._draft(
+            self._marker_body(MARKER_CONST, head=MARKER_HEAD + "x"),
+            {MARKER_REL: self._marker_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_marker_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        expected = "refuse: quoted line is not in the pinned commit: " + MARKER_SPAN
+        short = ("// filler\n" * 10).encode("utf-8")
+        root = self._draft(self._marker_body(MARKER_CONST), {MARKER_REL: short})
+        (root / MARKER_REL).write_bytes(self._marker_source())
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_two_marker_spans_are_refused(self):
+        expected = "refuse: quoted line is not one line: " + MARKER_SPAN
+        body = (
+            "`" + MARKER_SPAN + "` defines the marker.\n"
+            "\n"
+            "    " + MARKER_HEAD + "\n"
+            "    " + MARKER_TAIL + "\n"
+            "    " + MARKER_CFG + "\n"
+            "    " + MARKER_CONST + "\n"
+            "\n"
+            "Again `" + MARKER_SPAN + "`.\n"
+        )
+        got, reads = self._pinned_reads(body, {MARKER_REL: self._marker_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [])
+
+    def test_draft_without_the_marker_span_adds_no_marker_refusal(self):
+        root = self._draft(
+            self._quote_body(OWNED_QUOTE, NEXT_QUOTE),
+            {OWNED_REL: self._marker_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_owned_line_mismatch_adds_no_marker_refusal(self):
+        expected = "refuse: quoted line does not match " + OWNED_SPAN
+        body = self._quote_body(OWNED_QUOTE + "x", NEXT_QUOTE) + self._marker_body(
+            MARKER_CONST + "y"
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._marker_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [OWNED_NUMBER])
+
+    def test_next_line_mismatch_adds_no_marker_refusal(self):
+        expected = "refuse: quoted line does not match " + NEXT_SPAN
+        body = self._quote_body(OWNED_QUOTE, NEXT_QUOTE + "x") + self._marker_body(
+            MARKER_CONST + "y"
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._marker_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [OWNED_NUMBER, NEXT_NUMBER])
+
+    def test_marker_quote_refusal_waits_for_a_known_pin(self):
+        body = self._marker_body(MARKER_CONST + "x")
+        files = {MARKER_REL: self._marker_source()}
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+        bad_pin = "Pinned commit: HEAD\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(bad_pin, files)),
+            ["refuse: pinned commit is not one 40-hex commit"],
+        )
+        unknown = "Pinned commit: " + "f" * 40 + "\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(unknown, files, commit=True)),
+            ["refuse: pinned commit is not a commit: " + "f" * 40],
+        )
+
     def test_short_pinned_file_refuses_the_owned_line_only(self):
         expected = "refuse: quoted line is not in the pinned commit: " + OWNED_SPAN
         short = ("// filler\n" * 10).encode("utf-8")
@@ -420,6 +543,19 @@ class CitationCheckTests(unittest.TestCase):
             NEXT_QUOTE,
         )
 
+    def test_live_draft_marker_quote_matches_its_pinned_line(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        self.assertEqual(check.marker_quote(text), MARKER_CONST)
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        self.assertEqual(
+            check.pinned_line(root, sha, MARKER_REL, MARKER_NUMBER),
+            MARKER_CONST,
+        )
+
     def test_falsifier_missing_path_is_caught(self):
         self._caught(
             "read_file",
@@ -517,6 +653,15 @@ class CitationCheckTests(unittest.TestCase):
             self.test_next_quoted_line_mismatch_is_refused,
             "refuse: quoted line does not match",
             "CAUGHT next-quoted-line",
+        )
+
+    def test_falsifier_marker_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_marker_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT marker-quoted-line",
         )
 
     def test_worktree_root_contains_checker(self):

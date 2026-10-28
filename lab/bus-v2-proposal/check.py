@@ -25,6 +25,10 @@ OWNED_MARKER = "`" + OWNED_SPAN + "`"
 # Its quotation is the second indented line after the owned span.
 NEXT_SPAN = "examples/agent-host/src/lib.rs:3755"
 
+# Its quotation is the last indented line after the marker span, source line 8162.
+MARKER_SPAN = "examples/agent-host/src/lib.rs:8162"
+MARKER_MARKER = "`" + MARKER_SPAN + "`"
+
 # The draft indents a quotation by exactly four spaces.
 DRAFT_INDENT = "    "
 
@@ -153,11 +157,11 @@ def _span_target(span):
     return rel, int(number)
 
 
-def _owned_remainders(text):
-    """Return the indented remainders after the owned span, in order."""
+def _remainders(text, marker):
+    """Return the indented remainders after MARKER, in order."""
     lines = text.splitlines()
     for index, line in enumerate(lines):
-        if OWNED_MARKER not in line:
+        if marker not in line:
             continue
         remainders = []
         for following in lines[index + 1:]:
@@ -172,7 +176,7 @@ def _owned_remainders(text):
 
 def owned_quote(text):
     """Return the first quotation after the owned span, or None when absent."""
-    remainders = _owned_remainders(text)
+    remainders = _remainders(text, OWNED_MARKER)
     if not remainders:
         return None
     return remainders[0]
@@ -180,10 +184,18 @@ def owned_quote(text):
 
 def next_owned_quote(text):
     """Return the second quotation after the owned span, or None when absent."""
-    remainders = _owned_remainders(text)
+    remainders = _remainders(text, OWNED_MARKER)
     if len(remainders) < 2:
         return None
     return remainders[1]
+
+
+def marker_quote(text):
+    """Return the last quotation after the marker span, or None when absent."""
+    remainders = _remainders(text, MARKER_MARKER)
+    if not remainders:
+        return None
+    return remainders[-1]
 
 
 def quoted_line_matches(quoted, source):
@@ -205,23 +217,41 @@ def _next_quote_refusal(root, text, sha):
     return None
 
 
+def _marker_quote_refusal(root, text, sha):
+    """Return the 8162 refusal, or None when that quote is absent or matches."""
+    if text.count(MARKER_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + MARKER_SPAN
+    quoted = marker_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(MARKER_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + MARKER_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + MARKER_SPAN
+    return None
+
+
 def _quote_refusals(root, text, sha):
-    """Return the quote refusals, the owned line first."""
+    """Return the quote refusals, the owned line first, then the marker line."""
     if text.count(OWNED_MARKER) > 1:
         return ["refuse: quoted line is not one line: " + OWNED_SPAN]
     quoted = owned_quote(text)
-    if quoted is None:
+    if quoted is not None:
+        rel, number = _span_target(OWNED_SPAN)
+        source = pinned_line(root, sha, rel, number)
+        if source is None:
+            return ["refuse: quoted line is not in the pinned commit: " + OWNED_SPAN]
+        if not quoted_line_matches(quoted, source):
+            return ["refuse: quoted line does not match " + OWNED_SPAN]
+        following = _next_quote_refusal(root, text, sha)
+        if following is not None:
+            return [following]
+    marker = _marker_quote_refusal(root, text, sha)
+    if marker is None:
         return []
-    rel, number = _span_target(OWNED_SPAN)
-    source = pinned_line(root, sha, rel, number)
-    if source is None:
-        return ["refuse: quoted line is not in the pinned commit: " + OWNED_SPAN]
-    if not quoted_line_matches(quoted, source):
-        return ["refuse: quoted line does not match " + OWNED_SPAN]
-    following = _next_quote_refusal(root, text, sha)
-    if following is None:
-        return []
-    return [following]
+    return [marker]
 
 
 def _past_end(number, rel, count):
