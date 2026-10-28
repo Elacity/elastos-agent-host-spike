@@ -39,6 +39,16 @@ MARKER_TAIL = "/// `Users/<one name>`. The declaration names no person and no ho
 MARKER_CFG = "#[cfg(test)]"
 MARKER_CONST = 'const PRINCIPAL_MARKER: &str = "<principal>";'
 
+LAUNCHING_NUMBER = 8168
+LAUNCHING_SPAN = "examples/agent-host/src/lib.rs:8168"
+LAUNCHING_HEAD = "/// The one principal a declared pattern may name. The guest names only"
+LAUNCHING_SECOND = (
+    "/// `Users/self`, which the Runtime scopes to the launching person, so the"
+)
+LAUNCHING_THIRD = "/// declaration covers that person and no other `Users/<name>`."
+LAUNCHING_CFG = "#[cfg(test)]"
+LAUNCHING_CONST = 'const LAUNCHING_PRINCIPAL: &str = "Users/self";'
+
 
 class CitationCheckTests(unittest.TestCase):
     def _temp_root(self):
@@ -140,6 +150,28 @@ class CitationCheckTests(unittest.TestCase):
             "    " + head + "\n"
             "    " + MARKER_TAIL + "\n"
             "    " + MARKER_CFG + "\n"
+            "    " + last + "\n"
+            "\n"
+        )
+
+    def _launching_source(self, last=LAUNCHING_CONST, head=LAUNCHING_HEAD):
+        """A committed file with lines 3754-3755, 8162 and the block at 8164-8168."""
+        rows = ["// filler"] * (OWNED_NUMBER - 1) + [OWNED_QUOTE, NEXT_QUOTE]
+        rows += ["// filler"] * (MARKER_NUMBER - 4 - len(rows))
+        rows += [MARKER_HEAD, MARKER_TAIL, MARKER_CFG, MARKER_CONST]
+        rows += ["// filler"] * (LAUNCHING_NUMBER - len(rows) - 5)
+        rows += [head, LAUNCHING_SECOND, LAUNCHING_THIRD, LAUNCHING_CFG, last]
+        return ("\n".join(rows) + "\n").encode("utf-8")
+
+    def _launching_body(self, last, head=LAUNCHING_HEAD):
+        """A draft that cites the launching span and indents five lines below it."""
+        return (
+            "`" + LAUNCHING_SPAN + "` names the launching principal.\n"
+            "\n"
+            "    " + head + "\n"
+            "    " + LAUNCHING_SECOND + "\n"
+            "    " + LAUNCHING_THIRD + "\n"
+            "    " + LAUNCHING_CFG + "\n"
             "    " + last + "\n"
             "\n"
         )
@@ -422,6 +454,104 @@ class CitationCheckTests(unittest.TestCase):
             ["refuse: pinned commit is not a commit: " + "f" * 40],
         )
 
+    def test_launching_quoted_line_mismatch_is_refused(self):
+        expected = "refuse: quoted line does not match " + LAUNCHING_SPAN
+        root = self._draft(
+            self._launching_body(LAUNCHING_CONST + "x"),
+            {MARKER_REL: self._launching_source()},
+        )
+        self.assertEqual(check.problems(root), [expected])
+        (root / MARKER_REL).write_bytes(
+            self._launching_source("// edited in the worktree")
+        )
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_launching_quoted_line_match_ignores_the_worktree_file(self):
+        root = self._draft(
+            self._launching_body(LAUNCHING_CONST),
+            {MARKER_REL: self._launching_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+        (root / MARKER_REL).write_bytes(
+            self._launching_source("// edited in the worktree")
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_launching_first_line_does_not_stand_for_line_8168(self):
+        root = self._draft(
+            self._launching_body(LAUNCHING_CONST, head=LAUNCHING_HEAD + "x"),
+            {MARKER_REL: self._launching_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_launching_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        expected = "refuse: quoted line is not in the pinned commit: " + LAUNCHING_SPAN
+        short = ("// filler\n" * 10).encode("utf-8")
+        root = self._draft(self._launching_body(LAUNCHING_CONST), {MARKER_REL: short})
+        (root / MARKER_REL).write_bytes(self._launching_source())
+        self.assertEqual(check.problems(root), [expected])
+
+    def test_two_launching_spans_are_refused(self):
+        expected = "refuse: quoted line is not one line: " + LAUNCHING_SPAN
+        body = self._launching_body(LAUNCHING_CONST) + (
+            "\nAgain `" + LAUNCHING_SPAN + "`.\n"
+        )
+        got, reads = self._pinned_reads(body, {MARKER_REL: self._launching_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [])
+
+    def test_draft_without_the_launching_span_adds_no_launching_refusal(self):
+        root = self._draft(
+            self._marker_body(MARKER_CONST),
+            {MARKER_REL: self._launching_source()},
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def test_owned_line_mismatch_adds_no_launching_refusal(self):
+        expected = "refuse: quoted line does not match " + OWNED_SPAN
+        body = self._quote_body(OWNED_QUOTE + "x", NEXT_QUOTE) + self._launching_body(
+            LAUNCHING_CONST + "y"
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._launching_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [OWNED_NUMBER])
+
+    def test_next_line_mismatch_adds_no_launching_refusal(self):
+        expected = "refuse: quoted line does not match " + NEXT_SPAN
+        body = self._quote_body(OWNED_QUOTE, NEXT_QUOTE + "x") + self._launching_body(
+            LAUNCHING_CONST + "y"
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._launching_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [OWNED_NUMBER, NEXT_NUMBER])
+
+    def test_marker_line_mismatch_adds_no_launching_refusal(self):
+        expected = "refuse: quoted line does not match " + MARKER_SPAN
+        body = self._marker_body(MARKER_CONST + "x") + self._launching_body(
+            LAUNCHING_CONST + "y"
+        )
+        got, reads = self._pinned_reads(body, {MARKER_REL: self._launching_source()})
+        self.assertEqual(got, [expected])
+        self.assertEqual(reads, [MARKER_NUMBER])
+
+    def test_launching_quote_refusal_waits_for_a_known_pin(self):
+        body = self._launching_body(LAUNCHING_CONST + "x")
+        files = {MARKER_REL: self._launching_source()}
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+        bad_pin = "Pinned commit: HEAD\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(bad_pin, files)),
+            ["refuse: pinned commit is not one 40-hex commit"],
+        )
+        unknown = "Pinned commit: " + "f" * 40 + "\n" + body
+        self.assertEqual(
+            check.problems(self._raw_draft(unknown, files, commit=True)),
+            ["refuse: pinned commit is not a commit: " + "f" * 40],
+        )
+
     def test_short_pinned_file_refuses_the_owned_line_only(self):
         expected = "refuse: quoted line is not in the pinned commit: " + OWNED_SPAN
         short = ("// filler\n" * 10).encode("utf-8")
@@ -556,6 +686,19 @@ class CitationCheckTests(unittest.TestCase):
             MARKER_CONST,
         )
 
+    def test_live_draft_launching_quote_matches_its_pinned_line(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        self.assertEqual(check.launching_quote(text), LAUNCHING_CONST)
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        self.assertEqual(
+            check.pinned_line(root, sha, MARKER_REL, LAUNCHING_NUMBER),
+            LAUNCHING_CONST,
+        )
+
     def test_falsifier_missing_path_is_caught(self):
         self._caught(
             "read_file",
@@ -662,6 +805,15 @@ class CitationCheckTests(unittest.TestCase):
             self.test_marker_quoted_line_mismatch_is_refused,
             "refuse: quoted line does not match",
             "CAUGHT marker-quoted-line",
+        )
+
+    def test_falsifier_launching_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_launching_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT launching-quoted-line",
         )
 
     def test_worktree_root_contains_checker(self):

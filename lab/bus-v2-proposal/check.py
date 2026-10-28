@@ -29,6 +29,10 @@ NEXT_SPAN = "examples/agent-host/src/lib.rs:3755"
 MARKER_SPAN = "examples/agent-host/src/lib.rs:8162"
 MARKER_MARKER = "`" + MARKER_SPAN + "`"
 
+# Its quotation is the last indented line after the launching span, source line 8168.
+LAUNCHING_SPAN = "examples/agent-host/src/lib.rs:8168"
+LAUNCHING_MARKER = "`" + LAUNCHING_SPAN + "`"
+
 # The draft indents a quotation by exactly four spaces.
 DRAFT_INDENT = "    "
 
@@ -198,6 +202,14 @@ def marker_quote(text):
     return remainders[-1]
 
 
+def launching_quote(text):
+    """Return the last quotation after the launching span, or None when absent."""
+    remainders = _remainders(text, LAUNCHING_MARKER)
+    if not remainders:
+        return None
+    return remainders[-1]
+
+
 def quoted_line_matches(quoted, source):
     """True only when the quotation equals the pinned source line."""
     return quoted == source
@@ -233,8 +245,24 @@ def _marker_quote_refusal(root, text, sha):
     return None
 
 
+def _launching_quote_refusal(root, text, sha):
+    """Return the 8168 refusal, or None when that quote is absent or matches."""
+    if text.count(LAUNCHING_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + LAUNCHING_SPAN
+    quoted = launching_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(LAUNCHING_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + LAUNCHING_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + LAUNCHING_SPAN
+    return None
+
+
 def _quote_refusals(root, text, sha):
-    """Return the quote refusals, the owned line first, then the marker line."""
+    """Return the quote refusals in source order: 3754, 3755, 8162, then 8168."""
     if text.count(OWNED_MARKER) > 1:
         return ["refuse: quoted line is not one line: " + OWNED_SPAN]
     quoted = owned_quote(text)
@@ -249,9 +277,12 @@ def _quote_refusals(root, text, sha):
         if following is not None:
             return [following]
     marker = _marker_quote_refusal(root, text, sha)
-    if marker is None:
+    if marker is not None:
+        return [marker]
+    launching = _launching_quote_refusal(root, text, sha)
+    if launching is None:
         return []
-    return [marker]
+    return [launching]
 
 
 def _past_end(number, rel, count):
