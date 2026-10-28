@@ -543,9 +543,7 @@ impl StandIn {
                     Ok(text) => bridge_ok(Value::String(text)),
                     Err(_bytes) => bridge_error("protected read is not utf-8"),
                 },
-                Err((_status, message)) => {
-                    bridge_error(&self.redact_protected_reason(capsule_id, &message))
-                }
+                Err((_status, message)) => bridge_error(&Self::redact_protected_reason(&message)),
             },
             "write" => {
                 let Some(text) = request.get("body").and_then(Value::as_str) else {
@@ -554,7 +552,7 @@ impl StandIn {
                 match self.protected_write(capsule_id, token, uri, text.as_bytes()) {
                     Ok(_resolved) => bridge_ok(json!({ "stored": true })),
                     Err((_status, message)) => {
-                        bridge_error(&self.redact_protected_reason(capsule_id, &message))
+                        bridge_error(&Self::redact_protected_reason(&message))
                     }
                 }
             }
@@ -562,17 +560,28 @@ impl StandIn {
         }
     }
 
-    /// Rewrites a resolved `Users` or `UsersAI` root back to the guest form.
+    /// Rewrites every `Users` or `UsersAI` root in a reason to the guest form.
     ///
-    /// `protected_write` and `protected_read` can name that root in
-    /// `wrong resource`. The stored text is not passed here.
-    fn redact_protected_reason(&self, instance_id: &str, message: &str) -> String {
+    /// A stored grant can name another principal's root in `wrong resource`,
+    /// so redaction is independent of the caller. Stored text stays separate.
+    fn redact_protected_reason(message: &str) -> String {
         let mut redacted = message.to_owned();
-        if let Ok(root) = self.resolve_protected_uri(instance_id, "localhost://Users/self") {
-            redacted = redacted.replace(&root, "localhost://Users/self");
-        }
-        if let Ok(root) = self.resolve_protected_uri(instance_id, "localhost://UsersAI/self") {
-            redacted = redacted.replace(&root, "localhost://UsersAI/self");
+        for prefix in ["localhost://Users/", "localhost://UsersAI/"] {
+            let mut remaining = redacted.as_str();
+            let mut output = String::new();
+            while let Some((before, after)) = remaining.split_once(prefix) {
+                output.push_str(before);
+                output.push_str(prefix);
+                let root_end = after
+                    .find(|c: char| c == '/' || c == ',' || c.is_whitespace())
+                    .unwrap_or(after.len());
+                if root_end > 0 {
+                    output.push_str("self");
+                }
+                remaining = &after[root_end..];
+            }
+            output.push_str(remaining);
+            redacted = output;
         }
         redacted
     }
@@ -12656,6 +12665,58 @@ mod tests {
             (Life::Live, false),
             "the stand-in did the work: the redacted UsersAI error leaves the grant live"
         );
+
+        let digest_b_hex = crate::identity::sha256(b"agent-bob");
+        let digest_b = &digest_b_hex[..24];
+        for digest in [digest_a, digest_b] {
+            for namespace in ["Users", "UsersAI"] {
+                for operation in ["read", "write"] {
+                    for suffix in ["", "/journal"] {
+                        let request_id = format!("req-{digest}-{namespace}-{operation}-{suffix}");
+                        let resource = format!("localhost://{namespace}/{digest}{suffix}");
+                        let uri = format!("localhost://{namespace}/self/other");
+                        standin.seed_grant(
+                            &request_id,
+                            "component-1",
+                            &resource,
+                            operation,
+                            "once",
+                            1,
+                            Life::Live,
+                            false,
+                        );
+                        let line = json!({
+                            "id": 3,
+                            "request": {
+                                "type": "resource_invoke",
+                                "uri": uri,
+                                "operation": operation,
+                                "body": "nope",
+                                "token": request_id,
+                            },
+                        })
+                        .to_string();
+                        let (raw, parsed) = host_pair(&mut standin, &line, "component-1", None)
+                            .expect("the stand-in did the work: a root mismatch is one response");
+                        assert_host_error(
+                            &parsed,
+                            3,
+                            &format!(
+                                "wrong resource: expected localhost://{namespace}/self{suffix}, got {uri}"
+                            ),
+                            &format!("the hostcall redacts any owner's {namespace} root on {operation}"),
+                        );
+                        assert_no_protected_leak(&raw, digest_a, "agent-ada", "a root mismatch");
+                        assert_no_protected_leak(&raw, digest_b, "agent-bob", "a root mismatch");
+                        assert_eq!(
+                            grant_record(&standin, &request_id),
+                            (Life::Live, false),
+                            "the stand-in did the work: a root mismatch leaves the once grant live"
+                        );
+                    }
+                }
+            }
+        }
         assert!(
             standin.protected_objects.is_empty(),
             "the stand-in did the work: a redacted refusal stores nothing"
@@ -12666,7 +12727,11 @@ mod tests {
     fn standin_hostcall_preserves_payload_text() {
         let digest_a_hex = crate::identity::sha256(b"agent-ada");
         let digest_a = &digest_a_hex[..24];
-        let payload = format!("agent-ada {digest_a}");
+        let digest_b_hex = crate::identity::sha256(b"agent-bob");
+        let digest_b = &digest_b_hex[..24];
+        let payload = format!(
+            "agent-ada {digest_a} agent-bob {digest_b} localhost://Users/{digest_a}/journal localhost://UsersAI/{digest_a}/journal localhost://Users/{digest_b}/journal localhost://UsersAI/{digest_b}/journal"
+        );
         let mut standin = running_ada();
         standin.seed_grant(
             "req-w",

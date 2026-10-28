@@ -13218,3 +13218,36 @@ New:
 - Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.25 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_returns_the_protected_result -- --exact` exit 0, 1 passed and 0 failed, real 9.94 seconds.
 
 Principles: `protected_invoke` at `standin-runtime/mod.rs:1951` selects the guest uri. `bridge_envelope` at `:502` calls `bridge_protected_invoke` for that uri and does not call `authorise` there. The other invoke arm still calls `authorise` at `:507` and returns `data` null at `:508`. `bridge_protected_invoke` at `:541` calls `protected_read` or `protected_write` with `capsule_id`. `principal` is unused at `:481`. `protected_write` still calls `authorise_presented` at `:931`. `redact_protected_reason` at `:569` rewrites a resolved root through `resolve_protected_uri`. A write body that is not a string is `protected write body must be a string` at `:552`. Any other operation is `protected operation is read or write` at `:561`. Invalid UTF-8 is `protected read is not utf-8` at `:544`. A PASS gives the Runtime no A15 credit. `session_id` still equals the instance id.
+
+
+### Ownership repair — protected error roots
+
+The hostcall uses one `redact_protected_reason` for read and write errors. It now replaces the root segment of every `localhost://Users/` or `localhost://UsersAI/` URI in the reason with `self`, independent of the caller. The mismatch reason and guest path remain. Approved stored text follows the existing success path and stays unchanged.
+
+`standin_hostcall_redacts_protected_errors` keeps its existing assertions and adds 16 mismatch cases: Ada's and Bob's roots, both protected namespaces, read and write, and a root with or without a child path. Each grant belongs to Ada's instance. Each case asserts the exact redacted reason, checks both principals' privacy, and checks that the once grant stays live. The existing empty-store assertion covers all cases. `standin_hostcall_preserves_payload_text` now round-trips both principal names, both digests, and both namespaces' resolved URIs as approved text; all its assertions remain.
+
+Before the helper repair, the extended error test compiled and failed at `src/../standin-runtime/mod.rs:8627:9`, with `the stand-in did the work: the hostcall redacts any owner's Users root on read`. The returned expected-resource field still held Bob's digest; the assertion required `localhost://Users/self`. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_redacts_protected_errors -- --exact`. Exit 101, real 15.27 seconds.
+
+F-standin-bridge-public-protected changes only Public dispatch. Protected requests keep their existing dispatch, so the test reaches the Public assertion. This supplements F-standin-bridge-all-protected above.
+
+Exact old bytes, including the trailing newline:
+
+```text
+                if protected_invoke(uri) {
+```
+
+Exact new bytes, including the trailing newline:
+
+```text
+                if protected_invoke(uri) || uri.starts_with("localhost://Public/") {
+```
+
+Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_returns_the_protected_result -- --exact`. The planted crate compiled. Exit 101, real 6.22 seconds. The assertion at `src/../standin-runtime/mod.rs:8614:9` failed with `the stand-in did the work: the public invoke returns data null`: actual `id` 8 with `type` `error`, `code` `denied`, and message `protected storage needs a Users/self or UsersAI/self resource`; expected `id` 8 with `type` `ok` and `data` null. The source bytes were restored in `finally` and checked for exact identity.
+
+Repair checks use `RUST_TEST_THREADS=2`, `CARGO_INCREMENTAL=0`, and `CARGO_NET_OFFLINE=true`. Cargo outputs stay under the lane's existing `target/`, with `CARGO_BUILD_BUILD_DIR` set to `target/host` and `CARGO_TARGET_DIR` set to `target`.
+
+- After restoration, `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.16 seconds.
+- After restoration, `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::`: exit 0, 78 passed, real 6.28 seconds. This includes all four hostcall tests.
+- Exact restored proof: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_returns_the_protected_result -- --exact`: exit 0, 1 passed, real 0.07 seconds.
+
+Source hashes before and after the repair confirm that `bridge_envelope`, `protected_write`, `protected_read`, `authorise`, `authorise_presented`, `bind_verified_principal`, `resolve_protected_uri`, `record_use`, and `get_audit` are unchanged. The Public invoke arm remains within the unchanged `bridge_envelope`. The repair changes only `standin-runtime/mod.rs` and this record. Full-suite verification remains with the supervisor: this repair turn forbids Git commands, and the integration tests invoke Git through their receipt and source checks. The supervisor's fresh review remains required.
