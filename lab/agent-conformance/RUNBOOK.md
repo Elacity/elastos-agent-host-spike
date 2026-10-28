@@ -144,7 +144,8 @@ the retained-root marker. Their exact edits and named tests are in
 Task 003 adds these rows to the same table:
 
 - `ungranted_effect_is_refused`: runs the read build against the ready fixture operator. Requires a nonzero exit and the lifecycle error `Internal("capsule manifest does not declare authority for localhost://Public/agent-conformance-ungranted/outside-fixture.txt")` inside the Runtime's component-failure wrapper.
-- `ungranted_network_is_refused`: the manifest declares `elastos://net/stream`. The request is pending, and the fixture denies it with `fixture denies unlisted read`. Provider execution stays outside this row.
+- `ungranted_network_is_refused`: the manifest declares `elastos://net/stream`. The request is pending, and the fixture denies it with `fixture denies unlisted elastos://net/stream`. Provider execution stays outside this row.
+- `undeclared_network_manifest_is_refused`: stages the same probe bundle with a manifest whose capabilities omit `elastos://net/stream`. The manifest refuses the request, and its reason names that resource: `Internal("capsule manifest does not declare authority for elastos://net/stream")`. No fixture denial and no grant are involved.
 - `default_activation_refuses_without_selector`: runs the default build and requires the AC-002-ARGS unavailable reason through the guest lifecycle.
 - `ungranted_model_call_is_refused`: BLOCKED (RT3), with the Runtime change in GAPS.md.
 - `operator_storage_is_under_throwaway_home`: BLOCKED (AC-006-STORAGE), with the Runtime change in GAPS.md. The lane performs no reads through that Runtime-owned path.
@@ -289,8 +290,10 @@ once with scope `shell` at the operator's loopback port, then services pending
 requests during the existing process collection loop. Resource, action and
 reason must match an entry in `fixtures/grants.json` exactly. The entry supplies
 `once` or `session`; this fixture selects `once`. Every other request receives
-`fixture denies unlisted read`. An ambiguous match denies the whole pending
-snapshot with a reason. A consumed entry also refuses a later matching request.
+`fixture denies unlisted read`; a pending `elastos://net/stream` request
+receives `fixture denies unlisted elastos://net/stream`. An ambiguous match
+denies the whole pending snapshot with a reason. A consumed entry also refuses
+a later matching request.
 
 - `granted_read_succeeds`: seeds `Public/agent-conformance-grants/granted.txt`,
   observes exactly one matching request and grant, and requires exit 0 after
@@ -702,3 +705,67 @@ Every `standin_` row is the lab stand-in in `standin-runtime/`, and a PASS there
 The new `standin_` rows are this stand-in, and a PASS there leaves the real Runtime's resident rows blocked.
 
 These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A6 credit.
+
+`standin_stopped_run_leaves_no_live_grant` is this stand-in, and a PASS there gives the Runtime no A12 credit.
+
+`standin_stop_denies_that_sessions_pending` is this stand-in, and a PASS there gives the Runtime no A10 credit.
+
+`standin_matches_ra1_fields` and `standin_matches_ra6_states` are this stand-in, and a PASS there gives the Runtime no credit.
+
+`standin_two_agent_components_stay_resident` is this stand-in, and a PASS there gives the Runtime no A3 credit.
+
+`standin_storage_follows_the_selected_home` is this stand-in, and a PASS there gives the Runtime no A9 credit.
+
+`standin_storage_refuses_root_symlink_swap` is this stand-in, and a PASS there gives the Runtime no A9 credit.
+
+`standin_failed_start_denies_that_sessions_pending` is this stand-in, and a PASS there gives the Runtime no A11 credit.
+
+`standin_stopped_run_leaves_no_live_grant` is this stand-in, and a PASS there gives the Runtime no A12 credit for a pending request.
+
+`standin_shell_deny_fails_the_waiting_sibling` is this stand-in, and a PASS there gives the Runtime no A6 credit.
+
+`standin_shell_grant_makes_one_live_grant` is this stand-in, and a PASS there gives the Runtime no A6 credit.
+
+`standin_stopped_instance_makes_no_request` and `standin_failed_instance_makes_no_request` are this stand-in, and a PASS there gives the Runtime no A10 or A11 credit for the watch.
+
+`standin_cancel_survivor_reaches_running` and `standin_failed_survivor_reaches_running` are this stand-in, and a PASS there gives the Runtime no A10 or A11 credit for the survivor.
+
+`standin_unanswered_request_expires` is this stand-in, and a PASS there gives the Runtime no A10 or A11 credit for expiry.
+
+`standin_once_grant_is_spent_by_one_use` is this stand-in, and a PASS there gives the Runtime no A6 credit for a once grant.
+
+`standin_ended_instance_request_is_refused` is this stand-in, and a PASS there gives the Runtime no A10 credit for a new request.
+
+`standin_guest_reads_its_request_later` is this stand-in, and a PASS there gives the Runtime no A11 credit for a later read.
+
+`standin_session_pending_cap` is this stand-in, and a PASS there gives the Runtime no A11 credit for the pending cap.
+
+`standin_shell_revoke_drops_one_live_grant` is this stand-in, and a PASS there gives the Runtime no A6 credit for a shell revoke.
+
+`standin_shell_revoke_all_drops_every_live_grant` is this stand-in, and a PASS there gives the Runtime no A6 credit for a shell revoke of every grant.
+
+`standin_store_holds_at_most_1024_pending` is this stand-in, and a PASS there gives the Runtime no A11 credit for the store cap.
+
+`standin_system_and_wallet_requests_never_become_pending` is this stand-in, and a PASS there gives the Runtime no A6 credit for this denial.
+
+`standin_bridge_envelope_records_the_capsule_request` is this stand-in, two-capsule-run owns the real-bytes run, and a PASS here gives the Runtime no A3 credit.
+
+`standin_protected_storage_uses_the_launch_principal` is this stand-in, and a PASS there gives the Runtime no A15 credit.
+
+`standin_instance_stores_the_verified_component_hash` is this stand-in, two-capsule-run owns the bytes, and a PASS here gives the Runtime no A3 credit.
+
+`standin_shell_lists_every_pending_request` is this stand-in, and a PASS there gives the Runtime no A15 credit.
+
+`standin_approved_use_is_on_the_audit_list` is this stand-in, and a PASS there gives the Runtime no A15 credit.
+
+`standin_hostcall_returns_the_protected_result` is this stand-in, and a PASS there gives the Runtime no A15 credit.
+
+`standin_shell_decisions_join_the_audit_list` is this stand-in, and a PASS there gives the Runtime no A15 credit and no A6 credit.
+
+`standin_stop_revoke_joins_the_audit_list` is this stand-in, and a PASS there gives the Runtime no A15 credit and no A6 credit.
+
+`standin_provider_launch_starts_under_caller_profile` is this stand-in, and a PASS there gives the Runtime no C0 credit.
+
+`standin_storage_refuses_a_raw_dot_home` is this stand-in, and a PASS there gives the Runtime no A9 credit.
+
+`standin_hostcall_invoke_covers_one_operation` is this stand-in, and a PASS there gives the Runtime no A6 credit.
