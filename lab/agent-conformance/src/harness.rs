@@ -527,7 +527,7 @@ impl RunningChild<'_> {
                 }
                 None => {
                     if started.elapsed() >= deadline {
-                        let _ = self.kill_group();
+                        self.kill_group()?;
                         self.stopped = true;
                         return Err("provider exit exceeded its deadline");
                     }

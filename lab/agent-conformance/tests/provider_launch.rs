@@ -575,3 +575,127 @@ fn standin_provider_launch_refuses_an_exit_past_its_deadline() {
     drop(child);
     home.finish().expect("the passed home is removed");
 }
+
+/// Run the cwd change in an isolated test process through the existing harness,
+/// so other tests keep their working directory. Reuse the parent's built binary.
+#[test]
+fn standin_provider_launch_resolves_relative_profile_once() {
+    let marker = Path::new("relative-profile-binary");
+    if !marker.is_file() {
+        let binary = wallet_provider_binary();
+        let isolated = ThrowawayHome::new().expect("isolated test home");
+        fs::write(
+            isolated.home().join(marker),
+            binary.as_os_str().as_encoded_bytes(),
+        )
+        .expect("record the built binary for the isolated test");
+        let output = isolated
+            .launch(
+                &std::env::current_exe().expect("test executable"),
+                &[
+                    "--exact",
+                    "standin_provider_launch_resolves_relative_profile_once",
+                    "--test-threads=1",
+                    "--nocapture",
+                ],
+                Duration::from_secs(30),
+            )
+            .expect("the isolated relative-profile test completes");
+        assert!(
+            output.status.success(),
+            "relative-profile test: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        isolated
+            .finish()
+            .expect("the isolated test home is removed");
+        return;
+    }
+
+    let binary = PathBuf::from(fs::read_to_string(marker).expect("the built binary path"));
+    let tool = require_confinement_tool();
+    let home = ThrowawayHome::new().expect("throwaway home");
+    let normal = fs::read_to_string(committed_profile()).expect("the committed profile");
+    let restrictive = normal.replacen(WRITE_GRANT, READ_GRANT, 1);
+    assert_ne!(restrictive, normal, "setup: remove the wallet write grant");
+    write_profile(&home, "selected.sb", restrictive.as_bytes());
+    fs::write(home.home().join("selected.sb"), normal).expect("the permissive decoy");
+    std::os::unix::fs::symlink(binary, home.root().join("provider"))
+        .expect("relative binary in the caller directory");
+    std::os::unix::fs::symlink("/usr/bin/false", home.home().join("provider"))
+        .expect("binary decoy in the child's directory");
+    let base = fresh_base(&home, "relative-profile-base");
+    let previous = std::env::current_dir().expect("the original working directory");
+    std::env::set_current_dir(home.root()).expect("use the caller's directory");
+    let result = start(
+        &home,
+        Path::new("provider"),
+        &base,
+        macos_host(),
+        tool,
+        Path::new("selected.sb"),
+    );
+    std::env::set_current_dir(previous).expect("restore the working directory");
+    let reason = result
+        .err()
+        .expect("the restrictive caller profile refuses init");
+    assert!(reason.contains("storage_error"), "init refusal: {reason}");
+    assert!(
+        reason.contains("wallet storage"),
+        "storage reason: {reason}"
+    );
+    assert!(!wallet_dir(&base).exists(), "the wallet root stays absent");
+    let census = agent_conformance::census::cleanup(&home, closed_port())
+        .expect("census after the refused child is reaped");
+    assert!(census.contains("root checks PASS"), "census: {census}");
+    home.finish().expect("the passed home is removed");
+}
+
+/// A failed timeout cleanup leaves the same owner able to retry through either
+/// explicit stop or Drop after the Home's directory guard is restored.
+#[test]
+fn standin_provider_exit_cleanup_failure_keeps_ownership() {
+    for explicit_stop in [true, false] {
+        let home = ThrowawayHome::new().expect("throwaway home");
+        let mut child = home
+            .start(Path::new("/bin/sleep"), &["60"])
+            .expect("the long-running child starts");
+        let pgid = child.pgid();
+        let saved_temp = home.root().join("saved-tmp");
+        fs::rename(home.temp(), &saved_temp).expect("retain the original temp directory");
+        std::os::unix::fs::symlink(&saved_temp, home.temp()).expect("block the kill helper");
+        let result = child.wait_for_exit_within(Duration::ZERO);
+        fs::remove_file(home.temp()).expect("remove the temp symlink");
+        fs::rename(saved_temp, home.temp()).expect("restore the temp directory");
+        assert_eq!(
+            result.unwrap_err(),
+            "managed process group remains after SIGKILL"
+        );
+        assert!(child
+            .is_alive()
+            .expect("inspect the child after failed cleanup"));
+        if explicit_stop {
+            child
+                .stop()
+                .expect("stop retries cleanup after the guard is restored");
+            assert!(!child.is_alive().expect("the stopped child is reaped"));
+        }
+        drop(child);
+        assert!(!home.group_is_alive(pgid).expect("the owned group is gone"));
+        let census = agent_conformance::census::cleanup(&home, closed_port())
+            .expect("census after cleanup retries");
+        assert!(census.contains("root checks PASS"), "census: {census}");
+        if explicit_stop {
+            home.finish().expect("the passed home is removed");
+        } else {
+            let root = home.root().to_path_buf();
+            assert_eq!(
+                home.finish(),
+                Err("keep the root after an unstopped child or failed stop")
+            );
+            // The test has verified Drop's retention rule and the empty group.
+            fs::remove_dir_all(root).expect("remove the verified retained test root");
+        }
+    }
+}

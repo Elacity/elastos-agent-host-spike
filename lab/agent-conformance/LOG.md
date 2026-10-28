@@ -14114,4 +14114,30 @@ New: that block deleted.
 - `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 266.23 seconds, inside the 600-second bound. Targets: lib 80 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; provider_launch 7 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0.
 - Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test provider_launch -- --nocapture`: exit 0, 7 passed, finished in 2.50 seconds, real 2.57 seconds.
 
+### Ownership repair checks
+
+`start_provider` resolves the binary and profile through one `launch_file` check.
+Hashing and execution use those absolute paths. The exit deadline propagates
+`kill_group` failure and retains the child for a later cleanup attempt.
+
+Two added tests use the existing launch and child APIs. The relative-path test
+runs in an isolated process through `ThrowawayHome::launch`; its restrictive
+caller profile refuses wallet initialization despite a permissive profile in
+the child's working directory. It also exercises a relative binary path.
+The cleanup test blocks the kill helper with a temporary directory symlink,
+checks the cleanup error, restores the directory, and proves cleanup through
+both explicit `stop` and Drop with the existing physical census.
+
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test provider_launch --test harness -- --nocapture`
+first stopped in the harness tests because the execution sandbox prevented
+`pgrep` from reading the process list (exit 101, 6.27 seconds). With process
+inspection available, the same command completed with exit 0 in 9.37 seconds:
+9 harness tests and 9 provider-launch tests passed. Both runs held the shared
+heavy-build lease and used the lane's existing build directories. The retained
+Homes from the sandbox run were removed after `lsof` found zero open handles.
+`cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` completed
+with exit 0 in 0.16 seconds after the repair.
+The supervisor owns the full-suite check and fresh review; this repair ran
+the focused tests and kept Git untouched.
+
 

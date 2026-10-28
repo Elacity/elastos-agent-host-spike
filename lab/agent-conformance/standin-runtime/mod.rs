@@ -2257,18 +2257,8 @@ pub fn start_provider<'a>(
             tool_path.display()
         ));
     }
-    if !binary_path.is_file() {
-        return Err(format!(
-            "{name} start is refused: the provider binary {} is not a file",
-            binary_path.display()
-        ));
-    }
-    if !profile_path.is_file() {
-        return Err(format!(
-            "{name} start is refused: the confinement profile {} is not a file",
-            profile_path.display()
-        ));
-    }
+    let binary = launch_file(binary_path, name, "provider binary")?;
+    let profile = launch_file(profile_path, name, "confinement profile")?;
     let root = storage_layout(name, base_path)?;
     let parent = root.parent().ok_or_else(|| {
         format!(
@@ -2276,18 +2266,12 @@ pub fn start_provider<'a>(
             root.display()
         )
     })?;
-    let binary = fs::canonicalize(binary_path).map_err(|_| {
-        format!(
-            "{name} start is refused: the provider binary {} is not a file",
-            binary_path.display()
-        )
-    })?;
     let binary_text = path_text(&binary, name, "provider binary")?;
-    let profile_text = path_text(profile_path, name, "confinement profile")?;
+    let profile_text = path_text(&profile, name, "confinement profile")?;
     let root_text = path_text(&root, name, "storage root")?;
     let parent_text = path_text(parent, name, "storage parent")?;
     let binary_sha256 = hash_file(&binary, name, "provider binary")?;
-    let profile_sha256 = hash_file(profile_path, name, "confinement profile")?;
+    let profile_sha256 = hash_file(&profile, name, "confinement profile")?;
     fs::create_dir_all(parent).map_err(|err| {
         format!(
             "{name} start is refused: the storage parent {} could not be created: {err}",
@@ -2372,6 +2356,20 @@ fn storage_layout(name: &str, base: &Path) -> Result<PathBuf, String> {
              storage root layout"
         )),
     }
+}
+
+// Resolve both launch files once in the caller's working directory. Hashing
+// and execution then use the same absolute paths after spawn changes directory.
+fn launch_file(path: &Path, name: &str, label: &str) -> Result<PathBuf, String> {
+    fs::canonicalize(path)
+        .ok()
+        .filter(|resolved| resolved.is_file())
+        .ok_or_else(|| {
+            format!(
+                "{name} start is refused: the {label} {} is not a file",
+                path.display()
+            )
+        })
 }
 
 fn path_text<'a>(path: &'a Path, name: &str, label: &str) -> Result<&'a str, String> {
