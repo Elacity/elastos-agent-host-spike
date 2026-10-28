@@ -13971,4 +13971,24 @@ New:
 - Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_storage_refuses_a_raw_dot_entry -- --exact`: exit 0, 1 passed, real 0.08 seconds.
 - Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_storage_refuses_absolute_entry -- --exact`: exit 0, 1 passed, real 0.06 seconds.
 
+### Review repair: non-UTF-8 Home paths
+
+`slash_pieces` now splits raw bytes on `/` for both storage functions. The
+stand-in keeps the original Home path for `data_dir(home).join("storage")`.
+The regression test uses `OsString::from_vec(b"/var/standin-\xff".to_vec())`
+and checks the returned paths from `storage_for_home` and `confirm_storage`,
+including an empty entry and `entry.txt`. It checks that the Home and storage
+remain absent. A second test checks raw `.` and `..` segments at the start,
+middle and end of a non-UTF-8 Home, with the exact status and refusal reason.
+
+Checks use `RUST_TEST_THREADS=2`, `CARGO_INCREMENTAL=0`, and
+`CARGO_NET_OFFLINE=true`. `CARGO_TARGET_DIR` and `CARGO_BUILD_TARGET_DIR`
+point to the lane's existing `target/`; `CARGO_BUILD_BUILD_DIR` points to
+`target/host` under that same lane.
+
+- Before the fix, `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_storage_accepts_a_non_utf8_home -- --exact` compiled and exited 101 in 18.23 seconds. The assertion at `src/../standin-runtime/mod.rs:6361:9` failed with `storage needs a selected Home` instead of the joined path.
+- After the fix, `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.17 seconds.
+- After the fix, `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib storage`: exit 0, 10 passed, real 2.02 seconds. This includes both new tests and the existing raw-dot, absolute-entry, shared-temp, symlink and hard-link checks. These tests use the stand-in and start neither an operator nor a probe build.
+- The supervisor owns the full gate rerun and fresh review for this repair.
+
 

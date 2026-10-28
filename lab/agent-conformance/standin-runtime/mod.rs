@@ -196,9 +196,11 @@ impl StandIn {
         }
     }
 
-    /// Pieces of path text between `/`. Empty pieces are dropped. `.` and `..` stay.
-    fn slash_pieces(text: &str) -> Vec<&str> {
-        text.split('/').filter(|piece| !piece.is_empty()).collect()
+    /// Pieces of raw path bytes between `/`. Empty pieces are dropped. `.` and `..` stay.
+    fn slash_pieces(text: &[u8]) -> Vec<&[u8]> {
+        text.split(|byte| *byte == b'/')
+            .filter(|piece| !piece.is_empty())
+            .collect()
     }
 
     /// Lab test seam, not a route.
@@ -216,12 +218,9 @@ impl StandIn {
         if home.as_os_str().is_empty() || !home.is_absolute() {
             return refused(NEEDS_HOME);
         }
-        let Some(text) = home.to_str() else {
-            return refused(NEEDS_HOME);
-        };
-        if Self::slash_pieces(text)
+        if Self::slash_pieces(home.as_os_str().as_encoded_bytes())
             .iter()
-            .any(|piece| *piece == "." || *piece == "..")
+            .any(|piece| *piece == b"." || *piece == b"..")
         {
             return refused(NEEDS_HOME);
         }
@@ -254,9 +253,9 @@ impl StandIn {
         if entry.is_empty() {
             return Ok(storage);
         }
-        let pieces = Self::slash_pieces(entry);
+        let pieces = Self::slash_pieces(entry.as_bytes());
         let absolute = entry.starts_with('/');
-        if absolute || pieces.len() != 1 || pieces[0] == "." || pieces[0] == ".." {
+        if absolute || pieces.len() != 1 || pieces[0] == b"." || pieces[0] == b".." {
             return Err((400, ENTRY_REASON.to_owned()));
         }
         let file = storage.join(entry);
@@ -6343,6 +6342,64 @@ mod tests {
             );
         }
         home.finish().expect("the throwaway Home finishes");
+    }
+
+    #[test]
+    fn standin_storage_accepts_a_non_utf8_home() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let home = PathBuf::from(OsString::from_vec(b"/var/standin-\xff".to_vec()));
+        let storage = crate::harness::data_dir(&home)
+            .expect("the selected Home has a data directory")
+            .join("storage");
+        assert!(
+            !home.exists(),
+            "the stand-in test starts with an absent non-UTF-8 Home"
+        );
+        assert_eq!(
+            StandIn::storage_for_home(&home),
+            Ok(storage.clone()),
+            "the stand-in did the work: it preserves the non-UTF-8 Home in the joined storage path"
+        );
+        for entry in ["", "entry.txt"] {
+            let expected = if entry.is_empty() {
+                storage.clone()
+            } else {
+                storage.join(entry)
+            };
+            assert_eq!(
+                StandIn::confirm_storage(&home, entry),
+                Ok(expected),
+                "the stand-in did the work: it confirms storage under the non-UTF-8 Home"
+            );
+        }
+        assert!(
+            !home.exists() && !storage.exists(),
+            "the stand-in did the work: it creates neither the non-UTF-8 Home nor its storage"
+        );
+    }
+
+    #[test]
+    fn standin_storage_refuses_raw_dots_in_a_non_utf8_home() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        for bytes in [
+            b"/var/standin-\xff/./other".as_slice(),
+            b"/var/standin-\xff/../other",
+            b"/./var/standin-\xff",
+            b"/../var/standin-\xff",
+            b"/var/standin-\xff/.",
+            b"/var/standin-\xff/..",
+        ] {
+            let home = PathBuf::from(OsString::from_vec(bytes.to_vec()));
+            assert_eq!(
+                StandIn::storage_for_home(&home),
+                Err((400, "storage needs a selected Home".to_owned())),
+                "the stand-in did the work: it refuses a raw dot segment in non-UTF-8 Home {home:?}"
+            );
+        }
     }
 
     #[test]
