@@ -416,19 +416,22 @@ impl ProviderCoordinator {
         let Some(provider) = self.provider.as_mut() else {
             return;
         };
-        let run_ids = provider.adapters().active_text_run_ids();
-        for run_id in run_ids {
+        // Collect the run ids before the workers go, then abort the workers so
+        // no worker owns any of these runs. The settlement below then takes the
+        // same no-worker rule a restart takes (`src/state.rs:849-893`).
+        let text_run_ids = provider.adapters().active_text_run_ids();
+        let http_run_ids = provider.adapters().active_http_create_run_ids();
+        provider.adapters().shutdown_workers().await;
+        for run_id in text_run_ids {
             if let Err(err) = provider.settle_local_text_run_unknown(run_id.as_str()) {
                 err.log();
             }
         }
-        let run_ids = provider.adapters().active_http_create_run_ids();
-        for run_id in run_ids {
+        for run_id in http_run_ids {
             if let Err(err) = provider.settle_http_job_create_run_unknown(run_id.as_str()) {
                 err.log();
             }
         }
-        provider.adapters().shutdown_workers().await;
         if let Err(fault) = provider.adapters().shutdown_local_llama().await {
             eprintln!("[model-provider] local engine closure unconfirmed: {fault:?}");
         }
@@ -4769,9 +4772,15 @@ mod tests {
                 })
             );
             assert!(terminal["data"]["terminal"]["output"].is_null());
+            // The upstream answered and the event stream started, then ended
+            // with a terminal failure event and no usage; that is the cut case,
+            // not a refusal. The error itself stays generic.
             assert_eq!(
                 terminal["data"]["terminal"]["backend_report"],
-                serde_json::to_value(crate::contract::BackendReport::unknown()).unwrap()
+                serde_json::to_value(crate::contract::BackendReport::unknown_with_usage_reason(
+                    crate::contract::UsageUnknownReason::Cut
+                ))
+                .unwrap()
             );
             assert_no_private_leakage(&[terminal.to_string()], &["private failure detail"]);
             assert_eq!(server.requests.lock().unwrap().len(), index + 1);

@@ -4,8 +4,8 @@ use crate::config::{
 };
 use crate::contract::{
     BackendCost, BackendFact, BackendReport, BackendTokenUsage, ErrorClass, RunError, RunEvent,
-    RunStatus, RuntimeCreateBinding, BACKEND_REPORT_SCHEMA, MAX_EVENT_SEQUENCE, RUN_EVENT_SCHEMA,
-    RUN_OUTPUT_CONTENT_SCHEMA, RUN_OUTPUT_OBJECT_SCHEMA, RUN_OUTPUT_TEXT_SCHEMA,
+    RunStatus, RuntimeCreateBinding, UsageUnknownReason, BACKEND_REPORT_SCHEMA, MAX_EVENT_SEQUENCE,
+    RUN_EVENT_SCHEMA, RUN_OUTPUT_CONTENT_SCHEMA, RUN_OUTPUT_OBJECT_SCHEMA, RUN_OUTPUT_TEXT_SCHEMA,
 };
 use crate::journal::{deterministic_run_id, now_ms};
 use crate::local_llama::{LocalLlamaEngines, LocalLlamaFault, LocalTiming, LocalTimingStage};
@@ -379,10 +379,20 @@ impl<T: PartialEq> CapturedBackendFact<T> {
         }
     }
 
+    fn reported(&self) -> Option<&T> {
+        match self {
+            Self::Reported(value) => Some(value),
+            Self::Unknown | Self::Invalid => None,
+        }
+    }
+
     fn into_report(self) -> BackendFact<T> {
         match self {
             Self::Reported(value) => BackendFact::Reported { value },
-            Self::Unknown | Self::Invalid => BackendFact::Unknown,
+            Self::Unknown | Self::Invalid => BackendFact::Unknown {
+                reason: None,
+                observed_partial: None,
+            },
         }
     }
 }
@@ -1429,17 +1439,7 @@ fn reconcile_local_text(
             },
         });
     }
-    Ok(ReconcileResult::Terminal {
-        events: Vec::new(),
-        status: RunStatus::SettlementUnknown,
-        output: None,
-        error: Some(RunError {
-            class: ErrorClass::SettlementUnknown,
-            code: "settlement_unknown".to_string(),
-            message: "model backend settlement is unknown".to_string(),
-        }),
-        backend_report: None,
-    })
+    Ok(worker_settlement_unknown_result())
 }
 
 fn reserve_local_text_cancel(
@@ -1473,41 +1473,99 @@ fn cancel_local_text(
     })
 }
 
+/// How far one hosted effect request reached before a worker fault. `NotSent`
+/// is a fault before `request.send()`; `ConnectFailed` is a send error that
+/// never established a connection; `SendUncertain` is a send error after the
+/// request may have been written, so the provider cannot claim nothing was
+/// sent; `Sent` is the Runtime's status answer, and `ResponseStarted` is a
+/// response body that started and then failed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum HostedEffectSend {
+    #[default]
+    NotSent,
+    ConnectFailed,
+    SendUncertain,
+    Sent,
+    ResponseStarted,
+}
+
+/// How far one hosted effect reached before a worker fault, and the usage the
+/// stream really reported before it. The worker keeps the observed counts
+/// here, because a cut returns a fault and the report it built is consumed
+/// only on a clean end.
+#[derive(Default)]
+struct HostedEffectProgress {
+    send: HostedEffectSend,
+    observed_usage: Option<BackendTokenUsage>,
+}
+
+impl HostedEffectProgress {
+    /// Keeps the counts the stream reported so far. Only a `Reported` usage is
+    /// observed: `Invalid` (two different values, or a bad object) keeps no
+    /// partial count, because nothing there was observed as one value.
+    fn observe_usage(&mut self, report: Option<&HostedBackendReport>) {
+        self.observed_usage = report.and_then(|report| report.usage.reported()).cloned();
+    }
+}
+
+fn hosted_fault_backend_report(
+    hosted: bool,
+    progress: &HostedEffectProgress,
+) -> Option<Box<BackendReport>> {
+    if !hosted {
+        return None;
+    }
+    let reason = match progress.send {
+        HostedEffectSend::NotSent | HostedEffectSend::ConnectFailed => UsageUnknownReason::Refused,
+        HostedEffectSend::SendUncertain | HostedEffectSend::Sent => return None,
+        HostedEffectSend::ResponseStarted => UsageUnknownReason::Cut,
+    };
+    Some(Box::new(BackendReport::unknown_with_observed_usage(
+        reason,
+        progress.observed_usage.clone(),
+    )))
+}
+
 async fn run_local_text_worker(mut task: LocalTextWorkerTask) -> bool {
     let timing =
         matches!(&task.backend, LocalTextBackend::LocalLlama { .. }).then(LocalTiming::start);
     if let Some(timing) = &timing {
         timing.record(LocalTimingStage::RunStarted);
     }
-    let result = match run_local_text_worker_with_timing(&mut task, timing.as_ref()).await {
-        Ok(result) => result,
-        Err(fault) if fault.error.class == ErrorClass::BackendTimeout => {
-            if let Some(timing) = &timing {
-                timing.record(LocalTimingStage::RunTimeout);
+    let mut progress = HostedEffectProgress::default();
+    let result =
+        match run_local_text_worker_with_timing(&mut task, timing.as_ref(), &mut progress).await {
+            Ok(result) => result,
+            Err(fault) if fault.error.class == ErrorClass::BackendTimeout => {
+                if let Some(timing) = &timing {
+                    timing.record(LocalTimingStage::RunTimeout);
+                }
+                return true;
             }
-            return true;
-        }
-        Err(fault) => {
-            // The public terminal carries the error class, not the detail.
-            // The test seam keeps it, keyed by this run.
-            #[cfg(test)]
-            crate::test_support::record_adapter_detail(&task.run_id, fault.detail.as_deref());
-            if let Some(timing) = &timing {
-                timing.record(LocalTimingStage::RunFailed);
+            Err(fault) => {
+                // The public terminal carries the error class, not the detail.
+                // The test seam keeps it, keyed by this run.
+                #[cfg(test)]
+                crate::test_support::record_adapter_detail(&task.run_id, fault.detail.as_deref());
+                if let Some(timing) = &timing {
+                    timing.record(LocalTimingStage::RunFailed);
+                }
+                ReconcileResult::Terminal {
+                    events: Vec::new(),
+                    status: match fault.error.class {
+                        ErrorClass::Cancelled => RunStatus::Cancelled,
+                        ErrorClass::SettlementUnknown => RunStatus::SettlementUnknown,
+                        _ => RunStatus::Failed,
+                    },
+                    output: None,
+                    error: Some(fault.error),
+                    backend_report: hosted_fault_backend_report(
+                        task.offer.summary().hosted.is_some(),
+                        &progress,
+                    ),
+                }
             }
-            ReconcileResult::Terminal {
-                events: Vec::new(),
-                status: match fault.error.class {
-                    ErrorClass::Cancelled => RunStatus::Cancelled,
-                    ErrorClass::SettlementUnknown => RunStatus::SettlementUnknown,
-                    _ => RunStatus::Failed,
-                },
-                output: None,
-                error: Some(fault.error),
-                backend_report: None,
-            }
-        }
-    };
+        };
     let guard = if matches!(&task.backend, LocalTextBackend::LocalLlama { .. })
         && *task.cancel_rx.borrow()
         && pure_local_stop_result(&result)
@@ -1757,12 +1815,14 @@ async fn run_http_artifact_status_worker_inner(
 async fn run_local_text_worker_inner(
     task: &mut LocalTextWorkerTask,
 ) -> std::result::Result<ReconcileResult, AdapterFault> {
-    run_local_text_worker_with_timing(task, None).await
+    let mut progress = HostedEffectProgress::default();
+    run_local_text_worker_with_timing(task, None, &mut progress).await
 }
 
 async fn run_local_text_worker_with_timing(
     task: &mut LocalTextWorkerTask,
     timing: Option<&LocalTiming>,
+    progress: &mut HostedEffectProgress,
 ) -> std::result::Result<ReconcileResult, AdapterFault> {
     if !matches!(&task.backend, LocalTextBackend::LocalLlama { .. }) {
         require_external_http_containment(task.hosted_socket.as_deref())?;
@@ -1794,6 +1854,7 @@ async fn run_local_text_worker_with_timing(
                 &task.run_id,
                 &task.request_id,
                 task.hosted_socket.as_deref(),
+                progress,
             )
             .await;
         }
@@ -1992,11 +2053,21 @@ async fn run_local_text_worker_with_timing(
         _ = task.cancel_rx.changed() => {
             return Ok(cancel_text_worker(&task.backend).await);
         }
-        response = request.send() => response.map_err(|err| map_text_reqwest_failure(err, private_endpoint))?
+        response = request.send() => response.map_err(|err| {
+            progress.send = if err.is_connect() {
+                HostedEffectSend::ConnectFailed
+            } else {
+                // The request may have been written; nothing here proves it was not.
+                HostedEffectSend::SendUncertain
+            };
+            map_text_reqwest_failure(err, private_endpoint)
+        })?
     };
+    progress.send = HostedEffectSend::Sent;
     if !response.status().is_success() {
         return Err(map_effect_http_status(&response, runtime_socket));
     }
+    progress.send = HostedEffectSend::ResponseStarted;
 
     let mut response = response;
     let mut line = Vec::new();
@@ -2070,6 +2141,9 @@ async fn run_local_text_worker_with_timing(
                     )?,
                     _ => parse_chat_completions_stream_event(&payload, backend_report.as_mut())?,
                 };
+                // Keep what the stream already reported, so a cut after this
+                // event can record it as observed partial.
+                progress.observe_usage(backend_report.as_ref());
                 match parsed {
                     ParsedTextStreamEvent::Delta(delta) if !delta.is_empty() => {
                         append_local_text_delta(&mut stream_state, &task.offer, &delta)?;
@@ -2165,6 +2239,7 @@ async fn run_decision_worker(
     run_id: &str,
     request_id: &str,
     hosted_socket: Option<&str>,
+    progress: &mut HostedEffectProgress,
 ) -> std::result::Result<ReconcileResult, AdapterFault> {
     require_external_http_containment(hosted_socket)?;
     let client = backend_client_with_socket(
@@ -2194,11 +2269,21 @@ async fn run_decision_worker(
     }
     let response = tokio::select! {
         _ = cancel.changed() => return Ok(worker_settlement_unknown_result()),
-        response = request.send() => response.map_err(map_reqwest_failure)?,
+        response = request.send() => response.map_err(|err| {
+            progress.send = if err.is_connect() {
+                HostedEffectSend::ConnectFailed
+            } else {
+                // The request may have been written; nothing here proves it was not.
+                HostedEffectSend::SendUncertain
+            };
+            map_reqwest_failure(err)
+        })?,
     };
+    progress.send = HostedEffectSend::Sent;
     if !response.status().is_success() {
         return Err(map_effect_http_status(&response, hosted_socket));
     }
+    progress.send = HostedEffectSend::ResponseStarted;
     let value = tokio::select! {
         _ = cancel.changed() => return Ok(worker_settlement_unknown_result()),
         value = read_bounded_json_response_async(response) => value?,
@@ -2682,7 +2767,11 @@ fn parse_backend_cost(
     Ok(Some(BackendCost { value, unit }))
 }
 
-fn worker_settlement_unknown_result() -> ReconcileResult {
+/// The one `settlement_unknown` terminal. `reconcile_local_text`'s no-worker
+/// branch and every stop settlement (`src/state.rs`) return this exact result,
+/// so a planted change here reaches all of them (P10). A worker that cannot
+/// name its backend outcome also returns it.
+pub(crate) fn worker_settlement_unknown_result() -> ReconcileResult {
     ReconcileResult::Terminal {
         events: Vec::new(),
         status: RunStatus::SettlementUnknown,
@@ -4006,6 +4095,7 @@ mod tests {
                     "run:fixture",
                     "fixture-request",
                     None,
+                    &mut HostedEffectProgress::default(),
                 ))
                 .unwrap();
             let ReconcileResult::Terminal {
@@ -4081,6 +4171,7 @@ mod tests {
             let input = decision_input();
             let offer = openai_offer(&url);
             let result = runtime.block_on(async {
+                let mut progress = HostedEffectProgress::default();
                 let worker = run_decision_worker(
                     &url,
                     None,
@@ -4092,6 +4183,7 @@ mod tests {
                     "run:fixture",
                     "fixture-request",
                     None,
+                    &mut progress,
                 );
                 let interrupt = async {
                     ready_rx.await.unwrap();
@@ -5828,6 +5920,7 @@ mod tests {
             "run:fixture",
             "fixture-request",
             None,
+            &mut HostedEffectProgress::default(),
         ));
         assert!(fault.unwrap_err().error.message.contains("paused"));
         TEST_EXTERNAL_HTTP_ALLOWED.with(|allowed| allowed.set(true));

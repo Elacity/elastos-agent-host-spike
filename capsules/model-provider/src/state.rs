@@ -1,7 +1,7 @@
 use crate::adapters::{
     is_http_job_creating_backend_state, is_local_text_backend_state, local_text_cancel_requested,
-    pure_local_stop_result, AdapterExecutor, CancelResult, DispatchResult, ReconcileResult,
-    WorkerApplyGuard,
+    pure_local_stop_result, worker_settlement_unknown_result, AdapterExecutor, CancelResult,
+    DispatchResult, ReconcileResult, WorkerApplyGuard,
 };
 use crate::config::{
     journal_root, AdapterConfig, BridgeProviderConfig, ConfiguredOffer, ProviderInitExtra,
@@ -11,8 +11,9 @@ use crate::config::{
 use crate::contract::{
     ok_response, validate_run_id, BackendReport, ErrorClass, OfferSummary, OffersListRequest,
     ProviderFault, RunError, RunEvent, RunEventsPage, RunStatus, RunsCancelRequest,
-    RunsCreateRequest, RunsEventsRequest, RunsGetRequest, RuntimeAccessBinding, MAX_EVENT_SEQUENCE,
-    PROVIDER_ID, PROVIDER_PROTOCOL_VERSION, RUN_EVENTS_SCHEMA, RUN_EVENT_SCHEMA,
+    RunsCreateRequest, RunsEventsRequest, RunsGetRequest, RuntimeAccessBinding, UsageUnknownReason,
+    MAX_EVENT_SEQUENCE, PROVIDER_ID, PROVIDER_PROTOCOL_VERSION, RUN_EVENTS_SCHEMA,
+    RUN_EVENT_SCHEMA,
 };
 use crate::journal::validate_run_error;
 use crate::journal::{deterministic_run_id, now_ms, request_fingerprint, RunJournal, StoredRun};
@@ -607,7 +608,7 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
 
         let active_runs = self.journal.active_run_count(&offer.id)?;
         if active_runs > offer.policy.concurrency_limit as usize {
-            transition_error(
+            transition_error_refused_before_send(
                 &offer,
                 &mut run,
                 RunError {
@@ -634,7 +635,9 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
             Err(fault) => {
                 fault.log();
                 let stored_offer = run.offer.clone();
-                transition_error(&stored_offer, &mut run, fault.error)?;
+                // Every dispatch error precedes the worker that writes the
+                // effect request, so a hosted run sends nothing.
+                transition_error_refused_before_send(&stored_offer, &mut run, fault.error)?;
             }
         }
         self.journal.store_run(&run)?;
@@ -862,18 +865,14 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
         if !is_local {
             return Ok(());
         }
+        // The stop settlement returns the same terminal a read after a restart
+        // returns with no worker for the run (`reconcile_local_text`,
+        // `src/adapters.rs:1424-1443`): the one `settlement_unknown` result from
+        // `worker_settlement_unknown_result` (`src/adapters.rs:2774`). The
+        // workers are gone by now, at `init` and at `shutdown`, so this settles
+        // the run without a second terminal rule.
         let stored_offer = run.offer.clone();
-        transition_terminal(
-            &stored_offer,
-            &mut run,
-            RunStatus::SettlementUnknown,
-            None,
-            Some(RunError {
-                class: ErrorClass::SettlementUnknown,
-                code: "settlement_unknown".to_string(),
-                message: "model backend settlement is unknown".to_string(),
-            }),
-        )?;
+        apply_reconcile_result(&stored_offer, &mut run, worker_settlement_unknown_result())?;
         self.journal.store_run(&run)?;
         Ok(())
     }
@@ -957,17 +956,7 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
     ) -> Result<(), ProviderFault> {
         if run.status == RunStatus::Prepared && run.backend_state.is_none() {
             let stored_offer = run.offer.clone();
-            transition_terminal(
-                &stored_offer,
-                run,
-                RunStatus::SettlementUnknown,
-                None,
-                Some(RunError {
-                    class: ErrorClass::SettlementUnknown,
-                    code: "settlement_unknown".to_string(),
-                    message: "model backend settlement is unknown".to_string(),
-                }),
-            )?;
+            apply_reconcile_result(&stored_offer, run, worker_settlement_unknown_result())?;
             self.journal.store_run(run)?;
             return Ok(());
         }
@@ -989,17 +978,7 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
         }
         let Some(offer) = offer else {
             let stored_offer = run.offer.clone();
-            transition_terminal(
-                &stored_offer,
-                run,
-                RunStatus::SettlementUnknown,
-                None,
-                Some(RunError {
-                    class: ErrorClass::SettlementUnknown,
-                    code: "settlement_unknown".to_string(),
-                    message: "model backend settlement is unknown".to_string(),
-                }),
-            )?;
+            apply_reconcile_result(&stored_offer, run, worker_settlement_unknown_result())?;
             self.journal.store_run(run)?;
             return Ok(());
         };
@@ -1011,25 +990,37 @@ impl<A: AdapterExecutor> ModelProviderState<A> {
             self.journal.store_run(run)?;
             return Ok(());
         }
-        let Some(backend_state) = run.backend_state.as_ref() else {
+        if !self.reconcile_run_with_offer(offer, run)? {
             return Ok(());
-        };
-        match self
-            .adapters
-            .reconcile(&offer.adapter, offer, &run.runtime_binding, backend_state)
-        {
-            Ok(result) => {
-                let stored_offer = run.offer.clone();
-                apply_reconcile_result(&stored_offer, run, result)?
-            }
-            Err(fault) => {
-                fault.log();
-                let stored_offer = run.offer.clone();
-                transition_error(&stored_offer, run, fault.error)?;
-            }
         }
         self.journal.store_run(run)?;
         Ok(())
+    }
+
+    /// Applies the adapter's one reconcile rule to `run`, and says whether it
+    /// did. A run with no stored backend state has nothing to reconcile, so the
+    /// caller keeps its own settlement. The reconcile rule's no-worker branch
+    /// returns `worker_settlement_unknown_result` (`src/adapters.rs:2774`), the
+    /// same terminal every stop settlement applies.
+    fn reconcile_run_with_offer(
+        &mut self,
+        offer: &ConfiguredOffer,
+        run: &mut StoredRun,
+    ) -> Result<bool, ProviderFault> {
+        let Some(backend_state) = run.backend_state.clone() else {
+            return Ok(false);
+        };
+        match self
+            .adapters
+            .reconcile(&offer.adapter, offer, &run.runtime_binding, &backend_state)
+        {
+            Ok(result) => apply_reconcile_result(offer, run, result)?,
+            Err(fault) => {
+                fault.log();
+                transition_error(offer, run, fault.error)?;
+            }
+        }
+        Ok(true)
     }
 
     fn current_execution_offer_for_run(
@@ -1408,12 +1399,35 @@ fn transition_error(
     run: &mut StoredRun,
     error: RunError,
 ) -> Result<(), ProviderFault> {
+    transition_error_with_usage_reason(offer, run, error, None)
+}
+
+/// A hosted terminal reached before the effect request is written to the
+/// Runtime socket: the provider sent nothing, so `usage` names `refused`.
+fn transition_error_refused_before_send(
+    offer: &impl OfferLimitsView,
+    run: &mut StoredRun,
+    error: RunError,
+) -> Result<(), ProviderFault> {
+    transition_error_with_usage_reason(offer, run, error, Some(UsageUnknownReason::Refused))
+}
+
+fn transition_error_with_usage_reason(
+    offer: &impl OfferLimitsView,
+    run: &mut StoredRun,
+    error: RunError,
+    reason: Option<UsageUnknownReason>,
+) -> Result<(), ProviderFault> {
     let status = match error.class {
         ErrorClass::Cancelled => RunStatus::Cancelled,
         ErrorClass::SettlementUnknown => RunStatus::SettlementUnknown,
         _ => RunStatus::Failed,
     };
-    transition_terminal(offer, run, status, None, Some(error))
+    let backend_report = match (run.offer.hosted.as_ref(), reason) {
+        (Some(_), Some(reason)) => Some(BackendReport::unknown_with_usage_reason(reason)),
+        _ => None,
+    };
+    transition_terminal_with_backend_report(offer, run, status, None, Some(error), backend_report)
 }
 
 fn transition_timeout(run: &mut StoredRun) -> Result<(), ProviderFault> {
