@@ -895,8 +895,11 @@ fn wait_for_terminal(
 /// keys equal `error_response`. `function_region` and `shutdown_arm_region`
 /// share one skip for strings, character literals, comments and raw strings.
 /// `shutdown_arm_region` ends at the first comma at nesting count zero.
-/// `json_literal_keys` reads the top-level keys of one `json!({` literal and
-/// refuses a raw string or character literal inside it. In-memory plants cover
+/// `json_literal_keys` reads the top-level keys of one `json!({` literal. It
+/// refuses a raw string, a character literal, a mismatched closer, or an
+/// unsupported key inside that literal. `mask_opaque` hides strings and
+/// comments before a declaration, an arm marker, or a literal is located.
+/// In-memory plants cover
 /// the region shapes, the skip forms, every refusal cause and each Outputs
 /// mismatch. The honesty limit is in that helper's doc comment.
 ///
@@ -1398,9 +1401,10 @@ fn operations_section_cites_existing_tests() {
         &rest[chars.next().map(|(index, _)| index).unwrap_or(rest.len())..]
     }
     /// Step over one opaque token at the front of `rest`: an ordinary string,
-    /// a character literal, a line comment, a block comment, or a raw string
-    /// (`r`, `br` or `cr` with any number of `#`). `Ok(None)` means `rest`
-    /// starts none of them. `Err` means the token has no end.
+    /// a character literal, a line comment, a nested block comment, or a raw
+    /// string (`r`, `br` or `cr` with any number of `#`). `Ok(None)` means
+    /// `rest` starts none of them; a lifetime is not a character literal.
+    /// `Err` means the token has no end.
     fn skip_opaque(rest: &str) -> Result<Option<(&str, Opaque)>, String> {
         for prefix in ["br", "cr", "r"] {
             let Some(after_prefix) = rest.strip_prefix(prefix) else {
@@ -1437,6 +1441,8 @@ fn operations_section_cites_existing_tests() {
             let content = if let Some(inner) = body.strip_prefix('\\') {
                 if inner.starts_with("u{") {
                     inner.find('}').map(|close| close + 2)
+                } else if inner.starts_with('x') {
+                    Some(4)
                 } else {
                     inner.chars().next().map(|first| 1 + first.len_utf8())
                 }
@@ -1448,19 +1454,68 @@ fn operations_section_cites_existing_tests() {
                     return Ok(Some((&body[content + 1..], Opaque::Character)));
                 }
             }
-            return Ok(None);
+            let lifetime = !body.starts_with('\\')
+                && body
+                    .chars()
+                    .next()
+                    .is_some_and(|first| first == '_' || first.is_ascii_alphabetic());
+            if lifetime {
+                return Ok(None);
+            }
+            return Err("unfinished character literal".to_string());
         }
         if let Some(body) = rest.strip_prefix("//") {
             let end = body.find('\n').map(|index| index + 1).unwrap_or(body.len());
             return Ok(Some((&body[end..], Opaque::LineComment)));
         }
         if let Some(body) = rest.strip_prefix("/*") {
-            let Some(end) = body.find("*/") else {
-                return Err("unfinished block comment".to_string());
-            };
-            return Ok(Some((&body[end + 2..], Opaque::BlockComment)));
+            let bytes = body.as_bytes();
+            let mut depth = 1usize;
+            let mut index = 0;
+            while index + 1 < bytes.len() {
+                if &bytes[index..index + 2] == b"/*" {
+                    depth += 1;
+                    index += 2;
+                } else if &bytes[index..index + 2] == b"*/" {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(Some((&body[index + 2..], Opaque::BlockComment)));
+                    }
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+            return Err("unfinished block comment".to_string());
         }
         Ok(None)
+    }
+    /// `source` with every opaque token replaced by spaces, keeping newlines
+    /// and byte offsets. `Err` names the unfinished token.
+    fn mask_opaque(source: &str) -> Result<String, String> {
+        let mut masked = String::with_capacity(source.len());
+        let mut cursor = source;
+        loop {
+            match skip_opaque(cursor) {
+                Err(reason) => return Err(reason),
+                Ok(Some((after, _))) => {
+                    let token = &cursor[..cursor.len() - after.len()];
+                    for byte in token.bytes() {
+                        masked.push(if byte == b'\n' { '\n' } else { ' ' });
+                    }
+                    cursor = after;
+                    continue;
+                }
+                Ok(None) => {}
+            }
+            if cursor.is_empty() {
+                break;
+            }
+            let next = next_char(cursor);
+            masked.push_str(&cursor[..cursor.len() - next.len()]);
+            cursor = next;
+        }
+        Ok(masked)
     }
     /// The text from the front of `rest` through the brace that closes the
     /// first `{` after any skipped string, character literal, comment or raw
@@ -1510,11 +1565,13 @@ fn operations_section_cites_existing_tests() {
         Err(format!("{label}: the opening `{{` has no closing `}}`"))
     }
     /// The `fn {name}(` declaration line through the brace that closes it.
+    /// A declaration inside a string or a comment is not a declaration.
     fn function_region<'a>(source: &'a str, name: &str) -> Result<&'a str, String> {
         let signature = format!("fn {name}(");
+        let masked = mask_opaque(source).map_err(|reason| format!("{name}: {reason}"))?;
         let mut starts = Vec::new();
         let mut offset = 0;
-        for line in source.split_inclusive('\n') {
+        for line in masked.split_inclusive('\n') {
             if after_declaration_prefix(line).starts_with(&signature) {
                 starts.push(offset);
             }
@@ -1530,17 +1587,19 @@ fn operations_section_cites_existing_tests() {
         Ok(&source[starts[0]..starts[0] + region.len()])
     }
     /// The one `ProviderOperation::Shutdown =>` arm through the comma that
-    /// ends the expression at nesting count zero.
+    /// ends the expression at nesting count zero. The marker in a string or a
+    /// comment is not an arm.
     fn shutdown_arm_region(source: &str) -> Result<&str, String> {
         const MARKER: &str = "ProviderOperation::Shutdown =>";
-        let arms = source.matches(MARKER).count();
+        let masked = mask_opaque(source).map_err(|reason| format!("Shutdown: {reason}"))?;
+        let arms = masked.matches(MARKER).count();
         if arms == 0 {
             return Err("Shutdown: missing `ProviderOperation::Shutdown =>` arm".to_string());
         }
         if arms > 1 {
             return Err("Shutdown: has a second `ProviderOperation::Shutdown =>` arm".to_string());
         }
-        let start = source.find(MARKER).expect("the arm count found the marker");
+        let start = masked.find(MARKER).expect("the arm count found the marker");
         let arm = &source[start..];
         let after_arrow = arm.find("=>").expect("the marker holds `=>`") + 2;
         let mut cursor = &arm[after_arrow..];
@@ -1588,21 +1647,24 @@ fn operations_section_cites_existing_tests() {
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
     }
     /// The top-level `"key":` names of the one `json!({` literal in `region`,
-    /// in order. Zero or two literals, a raw string or a character literal
-    /// inside the body, and an unfinished body are errors. The reader does not
-    /// descend into a value.
+    /// in order. A literal in a string or a comment is not a literal. Zero or
+    /// two literals, a mismatched closer, an unsupported key, a raw string or
+    /// a character literal inside the body, and an unfinished token are
+    /// errors. The reader does not descend into a value.
     fn json_literal_keys(region: &str, label: &str) -> Result<Vec<String>, String> {
         const OPEN: &str = "json!({";
-        let literals = region.matches(OPEN).count();
+        let masked =
+            mask_opaque(region).map_err(|reason| format!("{label}: {reason} before `json!({{`"))?;
+        let literals = masked.matches(OPEN).count();
         if literals == 0 {
             return Err(format!("{label}: no `json!({{` literal"));
         }
         if literals > 1 {
             return Err(format!("{label}: has a second `json!({{` literal"));
         }
-        let open_at = region.find(OPEN).expect("the literal count found it") + OPEN.len();
+        let open_at = masked.find(OPEN).expect("the literal count found it") + OPEN.len();
         let mut cursor = &region[open_at..];
-        let mut depth = 1usize;
+        let mut stack = vec![b'{'];
         let mut keys = Vec::new();
         loop {
             if cursor.is_empty() {
@@ -1610,19 +1672,24 @@ fn operations_section_cites_existing_tests() {
             }
             match skip_opaque(cursor) {
                 Err(reason) => return Err(format!("{label}: {reason}")),
-                Ok(Some((after, Opaque::RawString))) => {
+                Ok(Some((_, Opaque::RawString))) => {
                     return Err(format!("{label}: a raw string inside the `json!({{` body"));
                 }
-                Ok(Some((after, Opaque::Character))) => {
+                Ok(Some((_, Opaque::Character))) => {
                     return Err(format!(
                         "{label}: a character literal inside the `json!({{` body"
                     ));
                 }
                 Ok(Some((after, Opaque::OrdinaryString))) => {
-                    if depth == 1 {
+                    if stack.len() == 1 {
                         let token_len = cursor.len() - after.len();
                         let content = &cursor[1..token_len - 1];
-                        if is_json_key(content) && after.trim_start().starts_with(':') {
+                        if after.trim_start().starts_with(':') {
+                            if !is_json_key(content) {
+                                return Err(format!(
+                                    "{label}: unsupported key `{content}` in the `json!({{` body"
+                                ));
+                            }
                             keys.push(content.to_string());
                         }
                     }
@@ -1636,14 +1703,21 @@ fn operations_section_cites_existing_tests() {
                 Ok(None) => {}
             }
             match cursor.as_bytes()[0] {
-                b'{' | b'[' => {
-                    depth += 1;
+                open @ (b'{' | b'[') => {
+                    stack.push(open);
                     cursor = &cursor[1..];
                 }
-                b'}' | b']' => {
-                    depth -= 1;
+                close @ (b'}' | b']') => {
+                    let expected = if close == b'}' { b'{' } else { b'[' };
+                    let top = stack.pop().expect("the outer `{` is on the stack");
+                    if top != expected {
+                        return Err(format!(
+                            "{label}: `{}` closes a `{}` in the `json!({{` body",
+                            close as char, top as char
+                        ));
+                    }
                     cursor = &cursor[1..];
-                    if depth == 0 {
+                    if stack.is_empty() {
                         return Ok(keys);
                     }
                 }
@@ -2532,6 +2606,131 @@ fn operations_section_cites_existing_tests() {
             block_arm,
         ),
         "Shutdown: has a second `json!({` literal"
+    );
+
+    // A closer must match its opener. `]` cannot finish a `{` body.
+    let bracket_contract = "fn ok_response(data: Value) -> Value {\n    json!({\"status\": \"ok\", \"data\": 1], \"result\": 1})\n}\nfn error_response(code: &str, message: &str) -> Value {\n    json!({\"status\": \"error\", \"code\": code, \"message\": message})\n}\n";
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            bracket_contract,
+            answers_state,
+            answers_execution,
+        ),
+        "ok_response: `]` closes a `{` in the `json!({` body"
+    );
+
+    // An `'` that does not close is not a lifetime, and it is not a `'` that
+    // leaves the next `}` structural.
+    let unclosed_char_contract = "fn ok_response(data: Value) -> Value {\n    json!({\"status\": \"ok\", \"data\": '} , \"result\": 1})\n}\nfn error_response(code: &str, message: &str) -> Value {\n    json!({\"status\": \"error\", \"code\": code, \"message\": message})\n}\n";
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            unclosed_char_contract,
+            answers_state,
+            answers_execution,
+        ),
+        "ok_response: unfinished character literal"
+    );
+    assert_eq!(
+        json_literal_keys(
+            "fn ok_response() {\n    json!({\"status\": \"ok\", \"data\": '} , \"result\": 1})\n}\n",
+            "ok_response",
+        ),
+        Err("ok_response: unfinished character literal before `json!({`".to_string())
+    );
+
+    // A marker or a literal inside a comment is not executable text.
+    let comment_only_arm =
+        "// ProviderOperation::Shutdown => Ok(ok_response(json!({\"shutdown\": true}))),\n";
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            answers_contract,
+            answers_state,
+            comment_only_arm,
+        ),
+        "Shutdown: missing `ProviderOperation::Shutdown =>` arm"
+    );
+    let commented_literal_contract = "fn ok_response(data: Value) -> Value {\n    // json!({\"status\": \"ok\", \"data\": data})\n    Value::Null\n}\nfn error_response(code: &str, message: &str) -> Value {\n    json!({\"status\": \"error\", \"code\": code, \"message\": message})\n}\n";
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            commented_literal_contract,
+            answers_state,
+            answers_execution,
+        ),
+        "ok_response: no `json!({` literal"
+    );
+    let only_commented_declaration = "/* fn ok_response() { json!({\"status\": \"ok\", \"data\": 1}) } */\nfn error_response(code: &str, message: &str) -> Value {\n    json!({\"status\": \"error\", \"code\": code, \"message\": message})\n}\n";
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            only_commented_declaration,
+            answers_state,
+            answers_execution,
+        ),
+        "ok_response: missing fn ok_response("
+    );
+    let commented_declaration_then_real = "/* fn ok_response_example() { json!({\"wrong\": 1}) } */\nfn ok_response(data: Value) -> Value {\n    json!({\"status\": \"ok\", \"data\": data})\n}\nfn error_response(code: &str, message: &str) -> Value {\n    json!({\"status\": \"error\", \"code\": code, \"message\": message})\n}\n";
+    assert_eq!(
+        operations_outputs_match_the_answers(
+            &outputs_row("shutdown", shutdown_outputs),
+            commented_declaration_then_real,
+            answers_state,
+            answers_execution,
+        ),
+        Ok(()),
+        "a commented declaration is not the declaration"
+    );
+
+    // Rust block comments nest, so the commented `}` is not the end.
+    let nested_comment_contract = "fn ok_response(data: Value) -> Value {\n    json!({\"status\": \"ok\", \"data\": data});\n    /* outer /* inner */ } */\n    json!({\"status\": \"ok\", \"result\": data})\n}\nfn error_response(code: &str, message: &str) -> Value {\n    json!({\"status\": \"error\", \"code\": code, \"message\": message})\n}\n";
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            nested_comment_contract,
+            answers_state,
+            answers_execution,
+        ),
+        "ok_response: has a second `json!({` literal"
+    );
+
+    // An unsupported key is refused, not dropped, so an extra name fails.
+    let extra_key_arm =
+        "ProviderOperation::Shutdown => Ok(ok_response(json!({\"shutdown\": true, \"extra-key\": 1}))),\n";
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            answers_contract,
+            answers_state,
+            extra_key_arm,
+        ),
+        "Shutdown: unsupported key `extra-key` in the `json!({` body"
+    );
+    for key in ["", "caf\u{e9}", "a\\nb"] {
+        let arm =
+            format!("ProviderOperation::Shutdown => Ok(ok_response(json!({{\"{key}\": 1}}))),\n");
+        assert_eq!(
+            outputs_failure(
+                &outputs_row("shutdown", shutdown_outputs),
+                answers_contract,
+                answers_state,
+                &arm,
+            ),
+            format!("Shutdown: unsupported key `{key}` in the `json!({{` body"),
+            "the key `{key}` must be refused"
+        );
+    }
+
+    // A token that never ends refuses in the shared scan, with its own reason.
+    assert_eq!(
+        function_region("fn ok_response() { let c = '}", "ok_response"),
+        Err("ok_response: unfinished character literal".to_string())
+    );
+    assert_eq!(
+        shutdown_arm_region("// arm\nProviderOperation::Shutdown => Ok(1),\nlet c = '}"),
+        Err("Shutdown: unfinished character literal".to_string())
     );
 
     // One skip feeds `braced_region` and `shutdown_arm_region`, so every
