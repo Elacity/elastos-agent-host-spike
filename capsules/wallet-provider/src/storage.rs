@@ -784,6 +784,41 @@ mod uf_tests {
 mod uf_storage_key_refusal_tests {
     use super::*;
 
+    /// Restore a fixture's original permissions before assertions or on unwind.
+    #[cfg(unix)]
+    struct ModeGuard<'a> {
+        path: &'a Path,
+        original: Option<fs::Permissions>,
+    }
+
+    #[cfg(unix)]
+    impl<'a> ModeGuard<'a> {
+        fn set(path: &'a Path, mode: u32) -> Self {
+            let guard = Self {
+                path,
+                original: Some(fs::metadata(path).unwrap().permissions()),
+            };
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+            guard
+        }
+
+        fn restore(&mut self) -> std::io::Result<()> {
+            if let Some(original) = &self.original {
+                fs::set_permissions(self.path, original.clone())?;
+                self.original = None;
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ModeGuard<'_> {
+        fn drop(&mut self) {
+            // Preserve the original panic if cleanup also fails during unwind.
+            let _ = self.restore();
+        }
+    }
+
     /// The same 32 bytes in the form `load_or_create_storage_key` writes them:
     /// 64 hex characters and a newline.
     fn key_text() -> String {
@@ -801,7 +836,8 @@ mod uf_storage_key_refusal_tests {
         (dir, key_path)
     }
 
-    /// Falsifier: answer `Ok(None)` for a missing key instead of refusing it.
+    /// Falsifier: use `Ok(read_storage_key_if_present(key_path)?.unwrap_or([0; 32]))`
+    /// for a missing key instead of refusing it.
     /// `read_storage_key` is the arm `load_or_create_storage_key` skips over
     /// when a key is absent, so a missing key must be named, not invented.
     #[test]
@@ -868,7 +904,8 @@ mod uf_storage_key_refusal_tests {
     }
 
     /// Falsifier: let `read_limited_file` compute `max_bytes + 1` without
-    /// checking, so a limit of `usize::MAX` wraps and the read is unbounded.
+    /// checking, so `usize::MAX` panics with overflow checks or wraps to zero
+    /// without them, making the read limit zero.
     /// `usize::MAX.checked_add(1)` is `None`, which is the one input that
     /// reaches this arm.
     #[test]
@@ -894,10 +931,10 @@ mod uf_storage_key_refusal_tests {
         fs::create_dir(&locked).unwrap();
         let path = locked.join("wallet-state.json");
         fs::write(&path, b"{}").unwrap();
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let mut mode = ModeGuard::set(&locked, 0o000);
         let reason = fs::symlink_metadata(&path).unwrap_err();
         let refused = load_store_if_present(&path);
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        mode.restore().unwrap();
         assert_eq!(
             refused.unwrap_err(),
             format!("failed to inspect wallet store: {reason}")
@@ -915,10 +952,10 @@ mod uf_storage_key_refusal_tests {
         let locked = dir.path().join("locked");
         fs::create_dir(&locked).unwrap();
         let path = locked.join("wallet-state.json");
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let mut mode = ModeGuard::set(&locked, 0o000);
         let reason = fs::symlink_metadata(&path).unwrap_err();
         let refused = ensure_regular_file_or_absent(&path, "wallet store");
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        mode.restore().unwrap();
         assert_eq!(
             refused.unwrap_err(),
             format!("failed to inspect wallet store: {reason}")
@@ -937,10 +974,10 @@ mod uf_storage_key_refusal_tests {
         fs::create_dir(&locked).unwrap();
         let wallet_dir = locked.join("Wallet");
         fs::create_dir(&wallet_dir).unwrap();
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let mut mode = ModeGuard::set(&locked, 0o000);
         let reason = fs::symlink_metadata(&wallet_dir).unwrap_err();
         let refused = ensure_directory(&wallet_dir, "wallet storage directory");
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        mode.restore().unwrap();
         assert_eq!(
             refused.unwrap_err(),
             format!("failed to inspect wallet storage directory: {reason}")
@@ -955,10 +992,13 @@ mod uf_storage_key_refusal_tests {
     #[cfg(unix)]
     #[test]
     fn open_regular_file_if_present_refuses_a_file_it_cannot_open() {
-        let (_dir, key_path) = key_dir_with(key_text().as_bytes(), 0o000);
+        let (_dir, key_path) = key_dir_with(key_text().as_bytes(), 0o600);
+        let mut mode = ModeGuard::set(&key_path, 0o000);
         let reason = File::open(&key_path).unwrap_err();
+        let refused = read_storage_key_if_present(&key_path);
+        mode.restore().unwrap();
         assert_eq!(
-            read_storage_key_if_present(&key_path).unwrap_err(),
+            refused.unwrap_err(),
             format!("failed to open wallet storage key: {reason}")
         );
     }
@@ -994,10 +1034,10 @@ mod uf_storage_key_refusal_tests {
         let parent = dir.path().join("parent");
         fs::create_dir(&parent).unwrap();
         let wallet_dir = parent.join("Wallet");
-        fs::set_permissions(&parent, fs::Permissions::from_mode(0o500)).unwrap();
+        let mut mode = ModeGuard::set(&parent, 0o500);
         let reason = fs::create_dir(&wallet_dir).unwrap_err();
         let refused = create_wallet_dir_durable(&wallet_dir);
-        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        mode.restore().unwrap();
         assert_eq!(
             refused.unwrap_err(),
             format!("failed to create wallet storage directory: {reason}")
