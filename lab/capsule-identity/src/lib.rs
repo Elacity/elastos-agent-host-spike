@@ -2452,6 +2452,22 @@ mod tests {
     }
 
     #[test]
+    fn nine_byte_name_mixes_the_second_words_first_byte() {
+        // Task 067: `photo.jpg` is 9 bytes, so its murmur3 tail is 9 bytes and
+        // tail index 8, the first byte of the hash's second word, enters that
+        // word. A tail of 8 never reaches it. README's `murmur64` prints
+        // these eight big-endian bytes for that name.
+        let name = "photo.jpg";
+        assert_eq!(name.len(), 9, "the name's bytes");
+        assert_eq!(name.as_bytes().last(), Some(&b'g'), "the last byte");
+        assert_eq!(name.len() % 16, 9, "the tail's bytes");
+        assert_eq!(
+            hamt_digest(name.as_bytes()),
+            [0xc8, 0x93, 0x6b, 0xcd, 0xf7, 0x98, 0x4c, 0x4c]
+        );
+    }
+
+    #[test]
     fn hamt_data_trims_leading_zero_bitmap_bytes() {
         // Bucket 0 is the last byte's low bit, so its bitmap is one byte.
         let mut low = [0u8; HAMT_BITMAP_BYTES];

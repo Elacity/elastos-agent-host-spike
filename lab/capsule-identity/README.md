@@ -136,9 +136,13 @@ To recompute a lab CID by hand:
    whose length leaves a 15-byte tail past its last full 16-byte block mixes
    tail index 14, that tail's last byte, into the hash's second word:
    `photo-tail.jpeg` is 15 bytes and its last byte `g` is tail index 14
-   (`fifteen_byte_name_mixes_the_last_tail_byte`, F-CI65a). A name whose
-   length is a multiple of 16 has an empty tail, so its last 16-byte block is
-   mixed once: `photo-block.jpeg` is 16 bytes and that one block is its last
+   (`fifteen_byte_name_mixes_the_last_tail_byte`, F-CI65a). A name of 9 bytes
+   leaves a 9-byte tail, one byte more than 8, so tail index 8, the first byte
+   of the hash's second word, is mixed: `photo.jpg` is 9 bytes and its last
+   byte `g` is tail index 8 (`nine_byte_name_mixes_the_second_words_first_byte`,
+   F-CI67a). A name whose length is a multiple of 16 has an empty tail, so
+   its last 16-byte block is mixed once: `photo-block.jpeg` is 16 bytes and
+   that one block is its last
    (`sixteen_byte_name_mixes_its_last_block_once`, F-CI66a). A bucket
    holds the children whose digest byte at this level is equal. A bucket of
    one child is one link named the bucket's two
@@ -167,7 +171,9 @@ To recompute a lab CID by hand:
    `fifteen_byte_name_over_the_hamt_threshold_is_a_shard` and
    `sixteen_byte_name_over_the_hamt_threshold_is_a_shard` name this shape,
    with falsifiers F-CI56a to F-CI56l, F-CI18h, F-CI53a, F-CI53b,
-   F-CI61a, F-CI62a, F-CI63b, F-CI64a, F-CI65a and F-CI66a.
+   F-CI61a, F-CI62a, F-CI63b, F-CI64a, F-CI65a and F-CI66a; the nine-byte
+   bundle's `nine_byte_name_over_the_hamt_threshold_is_a_shard` names it with
+   F-CI67a.
 7. A directory's CID is `01 70 12 20` and the SHA-256 of its block (the dag-pb
    codec `0x70`). The Tsize of a link to a directory is the length of its
    block plus the Tsizes of its own links. Every varint inside a CID here is
@@ -383,6 +389,7 @@ rules and not from the Rust code, in
 | A path part is stored as its UTF-8 bytes, so a combining mark stays in the name: the 200-byte name of 66 marks keeps the 262145 estimate and a name stripped of its 132 mark bytes would give 262013 (task 064) | `combining_mark_over_the_hamt_threshold_is_a_shard` | F-CI64a (the store strips the mark) |
 | A name whose last full 16-byte block leaves a 15-byte tail mixes tail index 14, its last byte, into the hash's second word: `photo-tail.jpeg` is 15 bytes, last byte `g` (task 065) | `fifteen_byte_name_mixes_the_last_tail_byte`, `fifteen_byte_name_over_the_hamt_threshold_is_a_shard` | F-CI65a (tail index 14 is not mixed) |
 | A name whose length is a positive multiple of 16 has an empty tail, so its last 16-byte block is mixed once: `photo-block.jpeg` is 16 bytes (task 066) | `sixteen_byte_name_mixes_its_last_block_once`, `sixteen_byte_name_over_the_hamt_threshold_is_a_shard` | F-CI66a (the tail takes the last 16 bytes again) |
+| A 9-byte name leaves a 9-byte tail, so tail index 8, the first byte of the hash's second word, is mixed: `photo.jpg` is 9 bytes and the measured name is 242 bytes (task 067) | `nine_byte_name_mixes_the_second_words_first_byte`, `nine_byte_name_over_the_hamt_threshold_is_a_shard` | F-CI67a (a tail must be longer than 9 bytes to mix its second word) |
 | A HAMT bitmap sets bucket `i` in byte `31 - i / 8` at `1 << (i % 8)` and drops leading zero bytes; a collision bucket gets a child shard (task 056) | `hamt_data_trims_leading_zero_bitmap_bytes`, `two_names_in_one_bucket_get_a_child_shard` | F-CI56f (bitmap byte order), F-CI56g (no trimming) |
 | The largest basic root block task 053 named (262144 bytes) is still named, and one name byte more is named too; no block-length refusal remains (task 053, extended by task 056) | `directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused` | — |
 | No inline: no identity multihash | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18i (inline at most 32 bytes) |
@@ -524,6 +531,20 @@ it first and `encode_entries` agrees; the hand-run Kubo printed it too. Its
 named tests are `sixteen_byte_name_mixes_its_last_block_once` and
 `sixteen_byte_name_over_the_hamt_threshold_is_a_shard`; F-CI66a plants a tail
 that takes the last 16 bytes of a multiple-of-16 name again.
+Task 067 adds one more pin, built in a temp dir and in memory and never
+committed: that same 262145-estimate bundle with its fourth 200-byte filler
+replaced by `photo.jpg`, a 9-byte name whose last byte is `g`, with empty
+content, and its 51-byte measured name lengthened by 191 bytes to 242. The
+byte estimate stays 262145, so the directory is a HAMT shard. The 9-byte name
+leaves a 9-byte murmur3 tail, one byte more than 8, so tail index 8, the first
+byte of the hash's second word, enters that word. It is
+`bafybeih3re3nvbzap3xfhns7g7o2m64qiwsqsy6voo4ahuuzc3ww2mfkfe`
+(`NINE_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID`) and its entries are
+`nine_byte_name_over_the_hamt_threshold_bundle`. README's Python block gave it
+first and `encode_entries` agrees; the hand-run Kubo printed it too. Its named
+tests are `nine_byte_name_mixes_the_second_words_first_byte` and
+`nine_byte_name_over_the_hamt_threshold_is_a_shard`; F-CI67a plants a tail
+requirement of more than 9 bytes, so a 9-byte name misses the second-word mix.
 
 ### The cross-implementation check
 
@@ -548,9 +569,9 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    (`python3 -I could not run: <error>`), a non-zero exit (even after it
    printed a valid CID), no output, or more than one line is refused with its
    own reason, and the test asserts each of these reasons.
-5. For each of the 25 pins, the Python answer, the pin constant and the
+5. For each of the 26 pins, the Python answer, the pin constant and the
    printed `encode_entries` result for the same files must be equal, and the
-   test asserts that it checked exactly 25 bundles in all. The 25 are the seven
+   test asserts that it checked exactly 26 bundles in all. The 26 are the seven
    pinned fixtures (`content-sample`, `web-app`, `agent-host`, `provider`,
    `model`, `provider-variant-a`, `provider-variant-b`), the recipe, the
    chunk-limit, empty-file and long-name bundles above, which are built as
@@ -562,7 +583,8 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    061), the child directory over the HAMT threshold (task 056), the file
    root inside a HAMT shard (task 062), the multibyte-name shard (task 063),
    the combining-mark shard (task 064), the fifteen-byte-name shard (task
-   065) and the sixteen-byte-name shard (task 066), also built in memory.
+   065), the sixteen-byte-name shard (task 066) and the nine-byte-name shard
+   (task 067), also built in memory.
    `wc001-core` has no pin, because its `capsule.wasm` is
    built on each machine, so it is not checked here.
 
@@ -570,7 +592,7 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
 | --- | --- | --- |
 | README's rule agrees with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19a (the block's `0x55` becomes `0x70` before it runs) |
 | Rust agrees with README's rule, not only with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19b (the encoder's `RAW_CODEC` becomes `0x56`) |
-| A missing block is no pass: exactly 25 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
+| A missing block is no pass: exactly 26 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
 | An interpreter that cannot start fails the test | `readme_python_recomputes_every_lab_cid_pin` | F-CI19d (a program that does not exist) |
 | A non-zero exit is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19e (exit status not checked) |
 | No output is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19f (empty answer taken) |
@@ -586,14 +608,14 @@ script's `KUBO_ADD_FLAGS`, `scripts/ci-model-package.mjs:211`, written once as
 `KUBO_ADD_FLAGS` in the test file) in a fresh temp repo made by
 `init --empty-repo`, with the provider's two HAMT config values set. No daemon
 runs and nothing is written outside the temp folders.
-`kubo_hash_only_import_prints_every_lab_cid_pin` writes each of the 25 pinned
+`kubo_hash_only_import_prints_every_lab_cid_pin` writes each of the 26 pinned
 bundles above into a temp folder (since task 051 with the two-level file
 bundle, since task 053 with the directory-at-limit bundle, since task 056
 with the HAMT bundles, since task 061 with the one-link shard, since task
 062 with the file root inside a shard, since task 063 with the
 multibyte-name shard, since task 064 with the combining-mark shard, since
-task 065 with the fifteen-byte-name shard and since task 066 with the
-sixteen-byte-name shard), and
+task 065 with the fifteen-byte-name shard, since task 066 with the
+sixteen-byte-name shard and since task 067 with the nine-byte-name shard), and
 Kubo's root,
 the pin and `encode_entries` must be one value. On 2026-10-28 it passed at
 task 053 too (`test result: ok. 1 passed`), and with the HAMT threshold set to
@@ -2192,7 +2214,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 311 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 312 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -2252,8 +2274,8 @@ F-CI62a (see [the encoding](#the-encoding)) and F-CI62b (see
 is retargeted by it), and task 064's F-CI64a (see
 [the encoding](#the-encoding)) and F-CI64b and F-CI64c (both: see
 [the cross-implementation check](#the-cross-implementation-check); F-CI62b
-is retargeted by it too), and task 065's F-CI65a and task 066's F-CI66a
-(both: see [the encoding](#the-encoding)).
+is retargeted by it too), and task 065's F-CI65a, task 066's F-CI66a and
+task 067's F-CI67a (all: see [the encoding](#the-encoding)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
