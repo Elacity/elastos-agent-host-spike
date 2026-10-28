@@ -32,6 +32,18 @@ pub mod bundle;
 pub mod receipt;
 pub mod run;
 pub mod verify;
+pub mod ui_toggle;
+pub mod ui_toast;
+pub mod ui_scroll;
+pub mod ui_textarea;
+pub mod ui_stars;
+pub mod ui_swatch;
+pub mod ui_limits;
+pub mod ui_badge;
+pub mod ui_sparkline;
+pub mod ui_tab_badges;
+pub mod ui_focus_trap;
+pub mod ui_focus_order;
 
 pub use capsule_identity::lab_cid as bundle_identity;
 
