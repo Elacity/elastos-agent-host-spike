@@ -1156,6 +1156,52 @@ fn model_reported_usage_does_not_move_the_use_call() {
 }
 
 #[test]
+fn model_forged_append_does_not_move_the_use_grant() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    let decision = verifier
+        .use_grant(call, &request)
+        .expect("forged append does not move the use grant");
+    assert_eq!(decision.instance, instance);
+    assert_eq!(decision.identity, "agent-1");
+    assert_eq!(decision.session, "session-a");
+}
+
+#[test]
+fn model_forged_child_journal_does_not_move_the_use_grant() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let decision = verifier
+        .use_grant(call, &request)
+        .expect("forged child journal does not move the use grant");
+    assert_eq!(decision.instance, instance);
+    assert_eq!(decision.identity, "agent-1");
+    assert_eq!(decision.session, "session-a");
+}
+
+#[test]
 fn model_use_path_dotdot_is_refused() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
