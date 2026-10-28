@@ -194,6 +194,31 @@ PROJECT_RESOURCE_MARKER = "`" + PROJECT_RESOURCE_SPAN + "`"
 AUTHORIZE_SPAN = "examples/agent-host/src/lib.rs:3449"
 AUTHORIZE_MARKER = "`" + AUTHORIZE_SPAN + "`"
 
+# Its quotation is the child-host doc line, remainder 0 after the child host
+# span, source line 3455.
+CHILD_HOST_DOC_SPAN = "examples/agent-host/src/lib.rs:3455"
+CHILD_HOST_DOC_MARKER = "`" + CHILD_HOST_DOC_SPAN + "`"
+
+# Its quotation is the empty-journal line, remainder 15 after the empty-journal
+# span, source line 3470.
+EMPTY_JOURNAL_SPAN = "examples/agent-host/src/lib.rs:3470"
+EMPTY_JOURNAL_MARKER = "`" + EMPTY_JOURNAL_SPAN + "`"
+
+# Its quotation is the admit-system line, remainder 16 after the admit-system
+# span, source line 3471.
+ADMIT_SYSTEM_SPAN = "examples/agent-host/src/lib.rs:3471"
+ADMIT_SYSTEM_MARKER = "`" + ADMIT_SYSTEM_SPAN + "`"
+
+# Its quotation is the inherited arm, remainder 1 after the inherited span,
+# source line 3474.
+INHERITED_ERR_SPAN = "examples/agent-host/src/lib.rs:3474"
+INHERITED_ERR_MARKER = "`" + INHERITED_ERR_SPAN + "`"
+
+# Its quotation is the parent-grant arm, remainder 3 after the grant span,
+# source line 3482.
+GRANT_PARENT_SPAN = "examples/agent-host/src/lib.rs:3482"
+GRANT_PARENT_MARKER = "`" + GRANT_PARENT_SPAN + "`"
+
 # Its quotation is remainder 5 after the declaration span, source line 8488.
 COVER_SPAN = "examples/agent-host/src/lib.rs:8488"
 COVER_MARKER = "`" + COVER_SPAN + "`"
@@ -709,6 +734,46 @@ def parent_compare_quote(text):
     return remainders[17]
 
 
+def child_host_doc_quote(text):
+    """Return remainder 0 after the child-host span, or None when it is absent."""
+    remainders = _remainders(text, CHILD_HOST_DOC_MARKER)
+    if not remainders:
+        return None
+    return remainders[0]
+
+
+def empty_journal_quote(text):
+    """Return remainder 15 after the empty-journal span, or None when absent."""
+    remainders = _remainders(text, EMPTY_JOURNAL_MARKER)
+    if len(remainders) <= 15:
+        return None
+    return remainders[15]
+
+
+def admit_system_quote(text):
+    """Return remainder 16 after the admit-system span, or None when absent."""
+    remainders = _remainders(text, ADMIT_SYSTEM_MARKER)
+    if len(remainders) <= 16:
+        return None
+    return remainders[16]
+
+
+def inherited_err_quote(text):
+    """Return remainder 1 after the inherited span, or None when it is absent."""
+    remainders = _remainders(text, INHERITED_ERR_MARKER)
+    if len(remainders) <= 1:
+        return None
+    return remainders[1]
+
+
+def grant_parent_quote(text):
+    """Return remainder 3 after the grant span, or None when it is absent."""
+    remainders = _remainders(text, GRANT_PARENT_MARKER)
+    if len(remainders) <= 3:
+        return None
+    return remainders[3]
+
+
 def cover_quote(text):
     """Return remainder 5 after the cover span, or None when it is absent."""
     remainders = _remainders(text, COVER_MARKER)
@@ -1115,6 +1180,86 @@ def _parent_compare_quote_refusal(root, text, sha):
         return "refuse: quoted line is not in the pinned commit: " + AUTHORIZE_SPAN
     if not quoted_line_matches(quoted, source):
         return "refuse: quoted line does not match " + AUTHORIZE_SPAN
+    return None
+
+
+def _child_host_doc_quote_refusal(root, text, sha):
+    """Return the 3455 refusal, or None when that quote is absent or matches."""
+    if text.count(CHILD_HOST_DOC_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + CHILD_HOST_DOC_SPAN
+    quoted = child_host_doc_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(CHILD_HOST_DOC_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + CHILD_HOST_DOC_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + CHILD_HOST_DOC_SPAN
+    return None
+
+
+def _empty_journal_quote_refusal(root, text, sha):
+    """Return the 3470 refusal, or None when that quote is absent or matches."""
+    if text.count(EMPTY_JOURNAL_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + EMPTY_JOURNAL_SPAN
+    quoted = empty_journal_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(EMPTY_JOURNAL_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + EMPTY_JOURNAL_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + EMPTY_JOURNAL_SPAN
+    return None
+
+
+def _admit_system_quote_refusal(root, text, sha):
+    """Return the 3471 refusal, or None when that quote is absent or matches."""
+    if text.count(ADMIT_SYSTEM_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + ADMIT_SYSTEM_SPAN
+    quoted = admit_system_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(ADMIT_SYSTEM_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + ADMIT_SYSTEM_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + ADMIT_SYSTEM_SPAN
+    return None
+
+
+def _inherited_err_quote_refusal(root, text, sha):
+    """Return the 3474 refusal, or None when that quote is absent or matches."""
+    if text.count(INHERITED_ERR_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + INHERITED_ERR_SPAN
+    quoted = inherited_err_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(INHERITED_ERR_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + INHERITED_ERR_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + INHERITED_ERR_SPAN
+    return None
+
+
+def _grant_parent_quote_refusal(root, text, sha):
+    """Return the 3482 refusal, or None when that quote is absent or matches."""
+    if text.count(GRANT_PARENT_MARKER) > 1:
+        return "refuse: quoted line is not one line: " + GRANT_PARENT_SPAN
+    quoted = grant_parent_quote(text)
+    if quoted is None:
+        return None
+    rel, number = _span_target(GRANT_PARENT_SPAN)
+    source = pinned_line(root, sha, rel, number)
+    if source is None:
+        return "refuse: quoted line is not in the pinned commit: " + GRANT_PARENT_SPAN
+    if not quoted_line_matches(quoted, source):
+        return "refuse: quoted line does not match " + GRANT_PARENT_SPAN
     return None
 
 
@@ -1581,7 +1726,7 @@ def _default_action_quote_refusal(root, text, sha):
 
 
 def _quote_refusals(root, text, sha):
-    """Return the quote refusals in source order: 2067, 2421, 2422, 2720, 2741, 2749, 2958, 2981, 3290, 3308, 3339, 3360, 3370, 3382, 3387, 3403, 3449, 3526, 3549, 3754, 3755, 3757, 3767, 3849, 3850, 3935, 3936, 3947, 3961, 3966, 3967, 4023, 4032, 4033, 4061, 8149, 8162, 8168, 8187, 8188, 8189, 8190, 8191, 8192, 8193, 8194, 8488, then 123, 189, 190, 192."""
+    """Return the quote refusals in source order: 2067, 2421, 2422, 2720, 2741, 2749, 2958, 2981, 3290, 3308, 3339, 3360, 3370, 3382, 3387, 3403, 3449, 3455, 3470, 3471, 3474, 3482, 3526, 3549, 3754, 3755, 3757, 3767, 3849, 3850, 3935, 3936, 3947, 3961, 3966, 3967, 4023, 4032, 4033, 4061, 8149, 8162, 8168, 8187, 8188, 8189, 8190, 8191, 8192, 8193, 8194, 8488, then 123, 189, 190, 192."""
     observe = _observe_quote_refusal(root, text, sha)
     if observe is not None:
         return [observe]
@@ -1633,6 +1778,21 @@ def _quote_refusals(root, text, sha):
     parent_compare = _parent_compare_quote_refusal(root, text, sha)
     if parent_compare is not None:
         return [parent_compare]
+    child_host_doc = _child_host_doc_quote_refusal(root, text, sha)
+    if child_host_doc is not None:
+        return [child_host_doc]
+    empty_journal = _empty_journal_quote_refusal(root, text, sha)
+    if empty_journal is not None:
+        return [empty_journal]
+    admit_system = _admit_system_quote_refusal(root, text, sha)
+    if admit_system is not None:
+        return [admit_system]
+    inherited_err = _inherited_err_quote_refusal(root, text, sha)
+    if inherited_err is not None:
+        return [inherited_err]
+    grant_parent = _grant_parent_quote_refusal(root, text, sha)
+    if grant_parent is not None:
+        return [grant_parent]
     deny = _deny_quote_refusal(root, text, sha)
     if deny is not None:
         return [deny]
