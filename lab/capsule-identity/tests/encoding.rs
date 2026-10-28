@@ -685,6 +685,67 @@ fn nine_byte_name_over_the_hamt_threshold_is_a_shard() {
 }
 
 #[test]
+fn one_byte_name_over_the_hamt_threshold_is_a_shard() {
+    // Task 068: the fifth 200-byte filler of the 262145-estimate bundle is
+    // `a`, 1 byte, and the 51-byte measured name grows by 199 bytes to 250,
+    // so the links estimate stays 262145 and the directory is a HAMT shard.
+    // The 1-byte name leaves a 1-byte murmur3 tail, so its only byte is
+    // mixed into the bucket hash's first word. The pin was recomputed by
+    // README's Python rule and printed by Kubo v0.40.1 with the provider's
+    // HAMT config.
+    let entries = one_byte_name_over_the_hamt_threshold_bundle();
+    let one: Vec<&BundleEntry> = entries.iter().filter(|entry| entry.path == "a").collect();
+    assert_eq!(one.len(), 1, "one 1-byte name");
+    assert_eq!(one[0].path.len(), 1, "the name's byte");
+    assert_eq!(one[0].path.len() % 16, 1, "a 1-byte tail");
+    let measured: Vec<&BundleEntry> = entries
+        .iter()
+        .filter(|entry| entry.path.len() == 250)
+        .collect();
+    assert_eq!(measured.len(), 1, "the one lengthened measured name");
+    assert_eq!(measured[0].path.len(), 250, "the measured name's bytes");
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    let (_bundle, walked, encoded) = walk_and_encode(&entries);
+    assert_eq!(
+        (walked.as_str(), encoded.as_str()),
+        (
+            ONE_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID,
+            ONE_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID
+        ),
+        "(lab_cid, encode_entries) against the pin"
+    );
+    assert!(walked.starts_with("bafybei"), "{walked}");
+    assert_ne!(
+        walked, DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID,
+        "a 1-byte tail got the empty fillers' name"
+    );
+    assert_ne!(
+        walked, MULTIBYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID,
+        "a 1-byte tail got the multibyte shard's name"
+    );
+    assert_ne!(
+        walked, COMBINING_MARK_OVER_HAMT_THRESHOLD_LAB_CID,
+        "a 1-byte tail got the combining-mark shard's name"
+    );
+    assert_ne!(
+        walked, FIFTEEN_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID,
+        "a 1-byte tail got the fifteen-byte shard's name"
+    );
+    assert_ne!(
+        walked, SIXTEEN_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID,
+        "a 1-byte tail got the sixteen-byte shard's name"
+    );
+    assert_ne!(
+        walked, NINE_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID,
+        "a 1-byte tail got the nine-byte shard's name"
+    );
+}
+
+#[test]
 fn child_directory_over_the_hamt_threshold_is_a_shard() {
     // The 262145-estimate flat bundle sits under `photos/`, and
     // content-sample's own two files stay at the root, so `photos/capsule.json`

@@ -196,6 +196,15 @@ pub const SIXTEEN_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID: &str =
 /// committed.
 pub const NINE_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID: &str =
     "bafybeih3re3nvbzap3xfhns7g7o2m64qiwsqsy6voo4ahuuzc3ww2mfkfe";
+/// Task 068: the 262145-estimate flat bundle with its fifth 200-byte filler
+/// replaced by `a` (1 byte, its only byte `a`, empty content) and its
+/// 51-byte measured name lengthened by 199 bytes to 250, so the links
+/// estimate stays 262145 and the directory is a HAMT shard. The 1-byte name
+/// leaves a 1-byte murmur3 tail, so its only byte is mixed into the hash's
+/// first word; a tail of 0 or more than 1 byte never takes that branch.
+/// Built in a temp dir and in memory and never committed.
+pub const ONE_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeickofbvelg2sn63rs5bzkuis4p53hwpcukvfho3ucmua4jbq6gadm";
 
 /// The empty files that bring content-sample's root block to 262144 bytes
 /// and `longer` more: 1064 named by 200 digits and one by 235 + `longer`
@@ -570,6 +579,73 @@ pub fn nine_byte_name_over_the_hamt_threshold_bundle() -> Vec<BundleEntry> {
         .filter(|entry| entry.path.len() % 16 == 9)
         .count();
     assert_eq!(nine_tails, 1, "one name leaves a 9-byte tail");
+    entries
+}
+
+/// Task 068: [`directory_at_hamt_threshold_bundle`]`(1)` with its fifth
+/// 200-byte filler replaced by `a` (1 byte, its only byte `a`, empty
+/// content) and its 51-byte measured name lengthened by 199 bytes to 250.
+/// The links estimate stays 262145, so the directory is a HAMT shard, and
+/// exactly one path leaves a 1-byte murmur3 tail, so the name's only byte
+/// is mixed into the bucket hash's first word. Built in a temp dir and in
+/// memory and never committed.
+pub fn one_byte_name_over_the_hamt_threshold_bundle() -> Vec<BundleEntry> {
+    let name = "a";
+    assert_eq!(name.len(), 1, "the name's byte");
+    assert_eq!(name.as_bytes(), b"a", "the only byte");
+    let mut seen = 0;
+    let mut replaced = 0;
+    let mut lengthened = 0;
+    let entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(1)
+        .into_iter()
+        .map(|entry| {
+            if entry.path.len() == 200 {
+                seen += 1;
+                if seen == 5 {
+                    replaced += 1;
+                    return BundleEntry {
+                        path: name.to_owned(),
+                        content: Vec::new(),
+                    };
+                }
+            }
+            if entry.path.len() == 51 {
+                lengthened += 1;
+                return BundleEntry {
+                    path: format!("{}{}", entry.path, "0".repeat(199)),
+                    content: entry.content,
+                };
+            }
+            entry
+        })
+        .collect();
+    assert_eq!(
+        (seen, replaced, lengthened),
+        (1110, 1, 1),
+        "the 200-byte fillers, the one replacement and the measured name lengthened"
+    );
+    let name_len = entries
+        .iter()
+        .find(|entry| entry.path == name)
+        .map(|entry| entry.path.len())
+        .expect("the 1-byte name is in the bundle");
+    assert_eq!(name_len, 1, "the replaced name's bytes");
+    let measured_len = entries
+        .iter()
+        .find(|entry| entry.path.len() == 250)
+        .map(|entry| entry.path.len())
+        .expect("the lengthened measured name is in the bundle");
+    assert_eq!(measured_len, 250, "the measured name's bytes");
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    let one_byte_tails = entries
+        .iter()
+        .filter(|entry| entry.path.len() % 16 == 1)
+        .count();
+    assert_eq!(one_byte_tails, 1, "one name leaves a 1-byte tail");
     entries
 }
 

@@ -2468,6 +2468,23 @@ mod tests {
     }
 
     #[test]
+    fn one_byte_name_mixes_its_only_tail_byte() {
+        // Task 068: `a` is 1 byte, so its murmur3 tail is 1 byte and its
+        // only byte is the tail's first, mixed into the hash's first word.
+        // A tail that mixes nothing (an empty tail) would leave it out.
+        // README's `murmur64` prints these eight big-endian bytes for that
+        // name.
+        let name = "a";
+        assert_eq!(name.len(), 1, "the name's byte");
+        assert_eq!(name.as_bytes(), b"a", "the only byte");
+        assert_eq!(name.len() % 16, 1, "the tail's bytes");
+        assert_eq!(
+            hamt_digest(name.as_bytes()),
+            [0x85, 0x55, 0x55, 0x65, 0xf6, 0x59, 0x78, 0x89]
+        );
+    }
+
+    #[test]
     fn hamt_data_trims_leading_zero_bitmap_bytes() {
         // Bucket 0 is the last byte's low bit, so its bitmap is one byte.
         let mut low = [0u8; HAMT_BITMAP_BYTES];
