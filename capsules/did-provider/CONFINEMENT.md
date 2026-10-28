@@ -111,8 +111,13 @@ one, the cell says "no named test shows this". A citation is a backtick span
 that holds a file relative to this folder, two colons and a function name. The
 check `every_operations_table_cites_existing_tests` in
 `../wallet-provider/tests/confine.rs` finds `fn <fn>(` in that file and does
-not decide whether the function is a `#[test]`. A refusal under `(deny
-default)` is a denial, not a grant, and no row writes it as a right. The
+not decide whether the function is a `#[test]`. The check
+`every_operations_table_row_matches_its_provider_and_the_contract` holds every
+row to four rules: the row set follows the provider's own dispatch, a Right
+cell names a declared id or `none: needs no declared right`, a right row cites
+both sides, and every Linux cell stays `designed, not enforced`. A refusal
+under `(deny default)` is a denial, not a grant, and no row writes it as a
+right. The
 startup grants stay in "What the profile allows". A `storage` row cites both
 sides of its right: `permitted:` names the test that shows the operation under
 `STORAGE_ROOT`, and `nearest outside refused:` names the test that shows the
