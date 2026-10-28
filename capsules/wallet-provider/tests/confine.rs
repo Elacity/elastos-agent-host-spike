@@ -6670,38 +6670,90 @@ struct OperationsRow {
     linux: String,
 }
 
+/// The one first cell of an operations table's header line.
+const OPERATION_HEADER: &str = "Operation";
+
+/// The one cell count every line of an operations table holds.
+const TABLE_CELLS: usize = 7;
+
+/// Whether `line` is one line of a Markdown table, which may sit under leading
+/// whitespace.
+fn is_table_line(line: &str) -> bool {
+    line.trim_start().starts_with('|')
+}
+
+/// The trimmed cells of one Markdown table line, without its outer bars.
+fn table_cells(line: &str) -> Vec<&str> {
+    let mut cells: Vec<&str> = line.trim().split('|').collect();
+    if cells.first() == Some(&"") {
+        cells.remove(0);
+    }
+    if cells.last() == Some(&"") {
+        cells.pop();
+    }
+    cells.into_iter().map(str::trim).collect()
+}
+
+/// Whether `cells` are the table's separator line: `TABLE_CELLS` dashes-only
+/// cells, with at least one cell that is not empty.
+fn is_separator_cells(cells: &[&str]) -> bool {
+    cells.len() == TABLE_CELLS
+        && cells
+            .iter()
+            .all(|cell| cell.chars().all(|character| character == '-'))
+        && cells.iter().any(|cell| !cell.is_empty())
+}
+
 /// Every data row of one operations table section, in table order, and every
 /// row that cannot be read.
 ///
-/// A row is a line that starts with `|`. The header line, whose first cell is
-/// `Operation`, and the separator line, whose cells are dashes only, are not
-/// rows. Each row must hold the table's seven cells; a row with any other count
-/// is refused, naming the document and the row.
-fn operations_table_rows(document_name: &str, section: &str) -> (Vec<OperationsRow>, Vec<String>) {
+/// The first table line, a line that starts with `|` under optional leading
+/// whitespace, is the header and the second is the separator. Only the later
+/// table lines are rows, so no line is skipped by its cells: a line that
+/// repeats the header words is a row, and so is an indented row. Every one of
+/// the three holds the table's `TABLE_CELLS` cells. A section with no table
+/// line, a first line that is not the header, a second line that would be a row
+/// and a header with no second line are refusals that name the document and the
+/// line; so is a row with any other cell count.
+fn operations_table_rows(
+    document_name: &str,
+    section: &str,
+) -> Result<(Vec<OperationsRow>, Vec<String>), Vec<String>> {
+    let mut lines = section.lines().filter(|line| is_table_line(line));
+    let Some(header) = lines.next() else {
+        return Err(vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} holds no table line"
+        )]);
+    };
+    let header_cells = table_cells(header);
+    if header_cells.len() != TABLE_CELLS || header_cells.first() != Some(&OPERATION_HEADER) {
+        return Err(vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} table line 1 is not the header \
+             {OPERATION_HEADER} over {TABLE_CELLS} cells: {}",
+            header.trim()
+        )]);
+    }
+    let Some(separator) = lines.next() else {
+        return Err(vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} table line 1 is the header and \
+             the table holds no separator line"
+        )]);
+    };
+    if !is_separator_cells(&table_cells(separator)) {
+        return Err(vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} table line 2 is not the \
+             separator of {TABLE_CELLS} dash cells: {}",
+            separator.trim()
+        )]);
+    }
     let mut rows = Vec::new();
     let mut problems = Vec::new();
-    for line in section.lines().filter(|line| line.starts_with('|')) {
-        let mut cells: Vec<&str> = line.split('|').collect();
-        if cells.first() == Some(&"") {
-            cells.remove(0);
-        }
-        if cells.last() == Some(&"") {
-            cells.pop();
-        }
-        let cells: Vec<&str> = cells.iter().map(|cell| cell.trim()).collect();
-        if cells.first() == Some(&"Operation")
-            || (!cells.is_empty()
-                && cells
-                    .iter()
-                    .all(|cell| cell.chars().all(|character| character == '-'))
-                && cells.iter().any(|cell| !cell.is_empty()))
-        {
-            continue;
-        }
-        if cells.len() != 7 {
+    for line in lines {
+        let cells = table_cells(line);
+        if cells.len() != TABLE_CELLS {
             problems.push(format!(
                 "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds {} cells, \
-                 and every row holds 7",
+                 and every row holds {TABLE_CELLS}",
                 cells.first().copied().unwrap_or_default(),
                 cells.len()
             ));
@@ -6714,7 +6766,7 @@ fn operations_table_rows(document_name: &str, section: &str) -> (Vec<OperationsR
             linux: cells[6].to_string(),
         });
     }
-    (rows, problems)
+    Ok((rows, problems))
 }
 
 /// `variant` in snake_case, by the rule the wire protocol uses
@@ -6983,7 +7035,10 @@ fn linux_status_problems(document_name: &str, row: &OperationsRow) -> Vec<String
 /// Every problem with one operations table's rows, each naming the document,
 /// the row (or the arm) and the value.
 ///
-/// The section under `OPERATIONS_HEADING` must hold four things. Its row set,
+/// The section under `OPERATIONS_HEADING` must hold a table whose first line is
+/// the `Operation` header and whose second is the dash separator: only the
+/// lines after those two are rows, so no row hides behind a repeated header or
+/// leading whitespace. Then the section must hold four things. Its row set,
 /// in table order, must equal the operations `<provider_dir>/src/main.rs`
 /// answers through `fn handle`, with a `wallet_contract` arm expanded to one
 /// `wallet_contract <kind>` row per `fn dispatch_wallet_operation` arm. Each
@@ -7005,7 +7060,10 @@ fn operations_table_row_problems(
         Ok(section) => section,
         Err(problems) => return problems,
     };
-    let (rows, mut problems) = operations_table_rows(document_name, &section);
+    let (rows, mut problems) = match operations_table_rows(document_name, &section) {
+        Ok(read) => read,
+        Err(problems) => return problems,
+    };
     let provider_path = provider_dir.join("src").join("main.rs");
     match fs::read_to_string(&provider_path) {
         Ok(source) => {
@@ -8844,8 +8902,13 @@ const FIXTURE_OPERATIONS: [&str; 4] = [
 /// arm, a kind arm with no row, ordinary rows in another order and a kind row
 /// before an ordinary row. A two-kind fixture also refuses swapped kind rows,
 /// duplicate ordinary and kind rows, and equal-length rows with the wrong
-/// multiplicity. An acronym fixture requires serde's wire name. Rule 2 refuses
-/// a Right cell that names an undeclared
+/// multiplicity. An acronym fixture requires serde's wire name. The table's
+/// header and separator are read by position, so an appended row that repeats
+/// the header words or sits under leading whitespace reaches every rule, and a
+/// section with no table line, a first line that is not the header, a header
+/// with no separator, a second line that would be a row and a separator with
+/// another cell count are each refused as one problem. Rule 2 refuses a Right
+/// cell that names an undeclared
 /// id and one that says `no named test shows this`. Rule 3 refuses a right row
 /// missing `permitted:`, a right row missing `nearest outside refused:` and a
 /// `none:` row citing `permitted:`. Rule 4 refuses a Linux cell that is not
@@ -8935,6 +8998,115 @@ fn operations_table_row_check_refuses_each_bad_table() {
             provider_source.display()
         )],
         "a row with no arm must be refused"
+    );
+
+    // A row that repeats the header words or sits under leading whitespace is
+    // still a body row, so no appended row hides from the four rules.
+    let clean = fixture_row_document(&FIXTURE_OPERATIONS);
+    for (case, row, row_name) in [
+        (
+            "a row that repeats the header words",
+            "| Operation | op | ok | `undeclared` | effect | permitted: | enforced |\n",
+            "Operation",
+        ),
+        (
+            "an indented row",
+            "   | ping | op | ok | `undeclared` | effect | permitted: | enforced |\n",
+            "ping",
+        ),
+    ] {
+        let document = format!("{clean}{row}");
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![
+                format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row set: the row \
+                     {row_name} has no arm in {}",
+                    provider_source.display()
+                ),
+                format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {row_name} holds \
+                     the Right cell `undeclared`, which is neither {NO_DECLARED_RIGHT} nor one \
+                     declared contract id"
+                ),
+                format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {row_name} names \
+                     the Linux cell enforced, and every Linux cell is {LINUX_STATUS}"
+                ),
+            ],
+            "{case} must reach rules 1, 2 and 4"
+        );
+    }
+
+    // The table's shape is read by position, so a section that hides its rows
+    // or its header is refused instead of read as an empty table.
+    for (case, document, reason) in [
+        (
+            "a section with no table",
+            format!("{OPERATIONS_HEADING}\n\nno table here\n"),
+            format!("{OPERATIONS_HEADING} holds no table line"),
+        ),
+        (
+            "a first line that is not the header",
+            format!("{OPERATIONS_HEADING}\n\n{}", passing_fixture_row("init")),
+            format!(
+                "{OPERATIONS_HEADING} table line 1 is not the header {OPERATION_HEADER} over \
+                 {TABLE_CELLS} cells: {}",
+                passing_fixture_row("init").trim()
+            ),
+        ),
+        (
+            "a header with no separator",
+            format!(
+                "{OPERATIONS_HEADING}\n\n| Operation | Inputs | Outputs | Right | Effect | macOS \
+                 rule and test | Linux |\n"
+            ),
+            format!(
+                "{OPERATIONS_HEADING} table line 1 is the header and the table holds no \
+                 separator line"
+            ),
+        ),
+        (
+            "a second line that would be a row",
+            fixture_row_document(&FIXTURE_OPERATIONS).replacen(
+                "| --- | --- | --- | --- | --- | --- | --- |\n",
+                &passing_fixture_row("init"),
+                1,
+            ),
+            format!(
+                "{OPERATIONS_HEADING} table line 2 is not the separator of {TABLE_CELLS} dash \
+                 cells: {}",
+                passing_fixture_row("init").trim()
+            ),
+        ),
+        (
+            "a separator with another cell count",
+            fixture_row_document(&FIXTURE_OPERATIONS).replacen(
+                "| --- | --- | --- | --- | --- | --- | --- |\n",
+                "| --- | --- |\n",
+                1,
+            ),
+            format!(
+                "{OPERATIONS_HEADING} table line 2 is not the separator of {TABLE_CELLS} dash \
+                 cells: | --- | --- |"
+            ),
+        ),
+    ] {
+        assert_eq!(
+            operations_table_row_problems("fixture-provider", &document, provider.path()),
+            vec![format!("fixture-provider CONFINEMENT.md: {reason}")],
+            "{case} must be refused as one problem"
+        );
+    }
+
+    let short_row = format!("{clean}| init | op | ok |\n");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &short_row, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds 3 cells, and \
+             every row holds {TABLE_CELLS}"
+        )],
+        "a row with another cell count must be refused"
     );
 
     // Rule 1: rows in another order, and a kind row before an ordinary row.
