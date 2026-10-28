@@ -145,6 +145,7 @@ fn assert_component_kind_skip_shape(original: &str, planted: &str) {
 
 fn component_kind_probe() -> PlantedProbe {
     PlantedProbe {
+        anchor: ANCHOR,
         replacement: type_skip_replacement("Component"),
         assert_shape: assert_component_kind_skip_shape,
         test_file: "redteam_component_kind_import.rs",
