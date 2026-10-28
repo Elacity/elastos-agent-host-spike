@@ -704,6 +704,11 @@ B2 (Anders, 26 Oct)", added by task 026, whose citations are at that revision's 
   `lab/capsule-identity/tests/encoding.rs:149` `fn file_over_the_chunk_limit_is_refused() {`,
   `lab/capsule-identity/tests/encoding.rs:168` `fn directory_over_the_hamt_threshold_is_refused() {`
   and `lab/capsule-identity/tests/cross_implementation.rs:127` `fn readme_python_recomputes_every_lab_cid_pin() {`
+  Changed by task 056, on 2026-10-28: `directory_over_the_hamt_threshold_is_refused` is gone with
+  `Refusal::DirectoryOverBlockLimit`. The HAMT tests are `directory_at_the_hamt_threshold_stays_basic`,
+  `directory_over_the_hamt_threshold_is_a_shard` and
+  `child_directory_over_the_hamt_threshold_is_a_shard`, all in `lab/capsule-identity/tests/encoding.rs`,
+  and the hand-run Kubo printed their three pins.
 - Archive hashes stay delivery checks: the lab names the bundle's files, not the Runtime's archive,
   `lab/capsule-identity/README.md:1200` `a delivery check of those archive bytes, not this CID.`
 - Kubo (corrected by task 051, on 2026-10-28; until task 050 this bullet said no Kubo had checked the value).
@@ -718,6 +723,13 @@ B2 (Anders, 26 Oct)", added by task 026, whose citations are at that revision's 
   Only the non-sharded subset of the profile is pinned, with files at any tree depth:
   `lab/capsule-identity/README.md:46` `The tests pin only the non-sharded subset of that profile, with files at any`
   (corrected by task 053, on 2026-10-28; until then it said single-block)
+  Changed by task 056, on 2026-10-28: the lab now pins the sharded subset too. A directory is judged on the
+  sum over its direct children of each name's byte length and 36, and a sum over 262144 makes a fanout-256
+  murmur3 HAMT shard. The three pins are `bafybeicqo67qvp3orvh33xcxh5eugdsqb2x2fqqzvqk423qpqwnjgodrfe`
+  at a sum of exactly 262144 (a basic directory whose block is over 262144 bytes),
+  `bafybeian4wlj6o5y4nbogpkeyauitvmxsrrc55fsfe2pcwcp4ki7hagbqq` at 262145 (a shard), and
+  `bafybeibvx4eqxqix2zsu3yufv7bbpq4gochl22mpfjznfxp43vtrvh33du` for the same shard under `photos/`
+  with a basic root. README's Python block and the hand-run Kubo gave all three.
   The pins are reproduced on one Mac only, so no construction rule is frozen.
   Added by task 053, on 2026-10-28: the hand-run Kubo, with the provider's two HAMT config values, also printed
   `bafybeifv7ypq27zanvn46j4q5jnm5akr55flfzne3zszdbbolt2dtgevc4` (`DIRECTORY_AT_LIMIT_LAB_CID`), the pin of a bundle
@@ -948,9 +960,14 @@ and `lab/capsule-identity/tests/common/mod.rs:80` `assert_eq!((pin.len(), &pin[.
 under the non-sharded subset of the model package profile, with files at any tree depth
 (`lab/capsule-identity/src/lib.rs:25` `//! and pins only the non-sharded subset of that profile, with files at any`)
 (corrected by task 053, on 2026-10-28; until then it said single-block).
-A file or a directory block over 262144 bytes is refused, not named another way
+A file or a directory block over 262144 bytes was refused, not named another way
 (`lab/capsule-identity/src/lib.rs:224` `const CHUNK_SIZE: usize = 262_144;`
 and `lab/capsule-identity/src/lib.rs:230` `const DIRECTORY_BLOCK_LIMIT: usize = 262_144;`).
+Changed by task 056, on 2026-10-28: the non-sharded subset sentence above is the record before this task.
+`README.md:46` now names the directory rule instead: a links estimate of at most 262144 makes a basic
+directory whatever its block length, and a greater estimate makes a HAMT shard. A directory block over
+262144 bytes is named, not refused: `Refusal::DirectoryOverBlockLimit` is gone, and
+`Refusal::HamtTooDeep` covers a ninth murmur3 byte.
 Added by task 048, on 2026-10-28: since task 048, a file of 2 to 174 raw leaves (262145 to 45613056 bytes) is named
 by its balanced file root (`fn file_root(` and `const MAX_FILE_LINKS: usize = 174;` in
 `lab/capsule-identity/src/lib.rs`), and only a larger file or a directory block over 262144 bytes is refused; the

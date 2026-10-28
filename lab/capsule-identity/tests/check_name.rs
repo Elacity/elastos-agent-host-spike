@@ -232,11 +232,15 @@ fn check_name_uses_the_single_naming_path() {
     );
     assert_eq!(code.matches("file_root_block(").count(), 2);
     assert_eq!(code.matches("FILE_TYPE").count(), 2, "FILE_TYPE");
-    // One link encoding: directory blocks and file roots write their links
-    // only through put_links.
-    assert_eq!(code.matches("put_links(").count(), 3, "put_links");
+    // One link encoding: directory blocks, file roots and HAMT shard blocks
+    // write their links only through put_links.
+    assert_eq!(code.matches("put_links(").count(), 4, "put_links");
     assert_eq!(code.matches("let mut pb_link").count(), 1, "pb_link");
-    for block in ["fn directory_block(", "fn file_root_block("] {
+    for block in [
+        "fn directory_block(",
+        "fn file_root_block(",
+        "fn hamt_block(",
+    ] {
         assert_eq!(
             library_item(&code, block).matches("put_links(").count(),
             1,

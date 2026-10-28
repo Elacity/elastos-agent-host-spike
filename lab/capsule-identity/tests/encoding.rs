@@ -226,42 +226,140 @@ fn file_over_174_leaves_gets_a_second_tree_level() {
     assert_ne!(one_level, two_levels, "174 and 175 leaves got one name");
 }
 
-#[test]
-fn directory_over_the_hamt_threshold_is_refused() {
-    // 1100 empty files with 200-byte names give the root a block of 270719
-    // bytes: over the 262144-byte block limit, so the lab refuses it and
-    // returns no CID. Kubo would not shard it yet. The block counts 246 bytes
-    // per link (field 2 with its length, the CID, the name and the Tsize,
-    // each with its tag and length), while the provider's `links` estimate
-    // counts only each link's name and CID bytes, 236 (by our reading of
-    // Kubo), about 259700 in all, under 256KiB. So the lab refuses before
-    // Kubo would shard, and never names a HAMT.
-    let bundle = assemble(&CONTENT_SAMPLE);
-    for number in 0..1100 {
-        write_file(bundle.path(), &format!("{number:0>200}"), b"");
+/// A fresh temp bundle holding exactly `entries`, with its name by the walk
+/// and by the encoder.
+fn walk_and_encode(entries: &[BundleEntry]) -> (TempDir, String, String) {
+    let bundle = temp_dir();
+    for entry in entries {
+        write_file(bundle.path(), &entry.path, &entry.content);
     }
-    let refusal = lab_cid(bundle.path()).expect_err("a root block over the limit must be refused");
-    let Refusal::DirectoryOverBlockLimit { path, length } = &refusal else {
-        panic!("another refusal: {refusal}");
-    };
-    assert_eq!(path, ".", "the refusal does not name the root");
-    assert!(*length > 262_144, "{refusal}");
-    assert_eq!(
-        refusal.to_string(),
-        format!(
-            "the directory . encodes to {length} bytes, over the 262144-byte block limit: the lab names no HAMT-sharded directory"
-        )
+    let walked = name(&bundle);
+    let encoded = encode_entries(entries)
+        .unwrap_or_else(|refusal| panic!("{refusal}"))
+        .to_string();
+    (bundle, walked, encoded)
+}
+
+#[test]
+fn directory_at_the_hamt_threshold_stays_basic() {
+    // content-sample plus the measured empty files of the flat helper, whose
+    // links estimate is exactly 262144: a basic directory, not a shard. Its
+    // pin was recomputed by README's Python rule and printed by Kubo v0.40.1
+    // with the provider's HAMT config (task 056).
+    let entries = directory_at_hamt_threshold_bundle(0);
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT, "the links estimate");
+    // Each link still adds its field-2 tag and length, the CID's tag and
+    // length, the name's length, and the Tsize's tag and zero: at least 8
+    // bytes beyond the estimate's name and 36, and the UnixFS data adds 4.
+    // So this basic directory's block is longer than 262144 bytes.
+    let lowest_block = estimate + 8 * entries.len() + 4;
+    assert!(
+        lowest_block > HAMT_LINKS_LIMIT,
+        "the basic block's lower bound {lowest_block} does not exceed the threshold"
     );
+    let (_bundle, walked, encoded) = walk_and_encode(&entries);
+    assert_eq!(
+        (walked.as_str(), encoded.as_str()),
+        (
+            DIRECTORY_AT_HAMT_THRESHOLD_LAB_CID,
+            DIRECTORY_AT_HAMT_THRESHOLD_LAB_CID
+        ),
+        "(lab_cid, encode_entries) against the pin"
+    );
+    assert!(walked.starts_with("bafybei"), "{walked}");
+}
+
+#[test]
+fn directory_over_the_hamt_threshold_is_a_shard() {
+    // One name byte more makes the links estimate 262145: past the threshold,
+    // so the directory is a HAMT shard, and its pin differs from the basic
+    // one. The pin was recomputed by README's Python rule and printed by
+    // Kubo v0.40.1 with the provider's HAMT config (task 056).
+    let entries = directory_at_hamt_threshold_bundle(1);
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    let (_bundle, walked, encoded) = walk_and_encode(&entries);
+    assert_eq!(
+        (walked.as_str(), encoded.as_str()),
+        (
+            DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID,
+            DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID
+        ),
+        "(lab_cid, encode_entries) against the pin"
+    );
+    assert!(walked.starts_with("bafybei"), "{walked}");
+    assert_ne!(
+        walked, DIRECTORY_AT_HAMT_THRESHOLD_LAB_CID,
+        "262144 and 262145 estimates got one name"
+    );
+}
+
+#[test]
+fn child_directory_over_the_hamt_threshold_is_a_shard() {
+    // The 262145-estimate flat bundle sits under `photos/`, and
+    // content-sample's own two files stay at the root, so `photos/capsule.json`
+    // is not the root `capsule.json`. Each directory is judged on its own
+    // estimate: `photos` is a shard, and the root's three children are far
+    // below the threshold, so the root stays a basic directory. Its pin was
+    // recomputed by README's Python rule and printed by Kubo v0.40.1 with the
+    // provider's HAMT config (task 056).
+    let entries = child_directory_at_hamt_threshold_bundle(1);
+    let child: usize = entries
+        .iter()
+        .filter_map(|entry| entry.path.strip_prefix("photos/"))
+        .map(|name| name.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(child, HAMT_LINKS_LIMIT + 1, "photos' links estimate");
+    let root: usize = entries
+        .iter()
+        .filter(|entry| !entry.path.starts_with("photos/"))
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum::<usize>()
+        + "photos".len()
+        + LINKED_CID_LENGTH;
+    assert_eq!(root, 140, "the root's links estimate");
+    assert!(root < HAMT_LINKS_LIMIT, "{root}");
+    assert!(
+        entries.iter().any(|entry| entry.path == "capsule.json"),
+        "the root lost content-sample's capsule.json"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.path == "photos/capsule.json"),
+        "photos/capsule.json is not under photos"
+    );
+    let (_bundle, walked, encoded) = walk_and_encode(&entries);
+    assert_eq!(
+        (walked.as_str(), encoded.as_str()),
+        (
+            CHILD_DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID,
+            CHILD_DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID
+        ),
+        "(lab_cid, encode_entries) against the pin"
+    );
+    assert!(walked.starts_with("bafybei"), "{walked}");
+    assert_ne!(walked, DIRECTORY_AT_HAMT_THRESHOLD_LAB_CID);
+    assert_ne!(walked, DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID);
 }
 
 #[test]
 fn directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused() {
     // content-sample and the 1065 empty files of `directory_at_limit_files`,
     // whose names bring the root block to exactly 262144 bytes: the largest
-    // directory block the lab names. Its pin was recomputed by README's
+    // directory block task 053 named. Since task 056 the links estimate, not
+    // the block length, decides, and this bundle's estimate stays far below
+    // 262144, so it is a basic directory. Its pin was recomputed by README's
     // Python rule and printed by Kubo v0.40.1 with the provider's HAMT
-    // config, so Kubo did not shard it (task 053). The files are made here
-    // and never committed.
+    // config. The name kept task 053's words; no refusal remains. The files
+    // are made here and never committed.
     let at_limit = |longer: usize| {
         let files = directory_at_limit_files(longer);
         let bundle = assemble(&CONTENT_SAMPLE);
@@ -288,25 +386,24 @@ fn directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused() {
         ),
         "(lab_cid, encode_entries) against the pin"
     );
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert!(estimate <= HAMT_LINKS_LIMIT, "{estimate}");
 
-    // One name one byte longer makes a root block of 262145 bytes: refused
-    // by the walk and by the encoder, with the root's path and the length.
+    // One name one byte longer makes a root block of 262145 bytes. Its
+    // estimate is still at most 262144, so it is still a basic directory:
+    // the walk and the encoder name it, and the name differs from the pin.
+    // This value is not pinned.
     let (bundle, entries) = at_limit(1);
-    let walked = lab_cid(bundle.path()).expect_err("a 262145-byte root block must be refused");
-    let encoded = encode_entries(&entries).expect_err("a 262145-byte root block must be refused");
-    for refusal in [walked, encoded] {
-        assert_eq!(
-            refusal,
-            Refusal::DirectoryOverBlockLimit {
-                path: ".".into(),
-                length: 262_145
-            }
-        );
-        assert_eq!(
-            refusal.to_string(),
-            "the directory . encodes to 262145 bytes, over the 262144-byte block limit: the lab names no HAMT-sharded directory"
-        );
-    }
+    let walked = name(&bundle);
+    let encoded = encode_entries(&entries)
+        .unwrap_or_else(|refusal| panic!("{refusal}"))
+        .to_string();
+    assert_eq!(walked, encoded, "the walk and the encoder disagree");
+    assert!(walked.starts_with("bafybei"), "{walked}");
+    assert_ne!(walked, DIRECTORY_AT_LIMIT_LAB_CID);
 }
 
 #[test]

@@ -128,6 +128,22 @@ pub fn two_level_bytes() -> Vec<u8> {
 pub const DIRECTORY_AT_LIMIT_LAB_CID: &str =
     "bafybeifv7ypq27zanvn46j4q5jnm5akr55flfzne3zszdbbolt2dtgevc4";
 
+/// content-sample plus the measured empty files of
+/// [`directory_at_hamt_threshold_bundle`]`(0)`: its links estimate is exactly
+/// 262144, so it is a basic directory even though its block is larger.
+/// Built in a temp dir and in memory and never committed.
+pub const DIRECTORY_AT_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeicqo67qvp3orvh33xcxh5eugdsqb2x2fqqzvqk423qpqwnjgodrfe";
+/// The same flat bundle with an estimate of 262145: a HAMT shard. Built in a
+/// temp dir and in memory and never committed.
+pub const DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeian4wlj6o5y4nbogpkeyauitvmxsrrc55fsfe2pcwcp4ki7hagbqq";
+/// content-sample at the root with the 262145-estimate flat bundle under
+/// `photos/`: the root stays basic and `photos` is a HAMT shard. Built in a
+/// temp dir and in memory and never committed.
+pub const CHILD_DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeibvx4eqxqix2zsu3yufv7bbpq4gochl22mpfjznfxp43vtrvh33du";
+
 /// The empty files that bring content-sample's root block to 262144 bytes
 /// and `longer` more: 1064 named by 200 digits and one by 235 + `longer`
 /// digits. An empty file's link is 46 bytes and its name (its 36-byte CID, the
@@ -144,6 +160,84 @@ pub fn directory_at_limit_files(longer: usize) -> Vec<BundleEntry> {
         .collect();
     files.push(empty(format!("{:0>width$}", 1064, width = 235 + longer)));
     files
+}
+
+/// The links estimate Kubo shards past: the sum over a directory's direct
+/// children of each name's byte length and [`LINKED_CID_LENGTH`]. An estimate
+/// of exactly this value is a basic directory; a greater one is a HAMT.
+pub const HAMT_LINKS_LIMIT: usize = 262_144;
+
+/// The bytes a directory link's estimate counts for its child's CID: a CIDv1
+/// SHA-256 multihash.
+pub const LINKED_CID_LENGTH: usize = 36;
+
+/// The bundle whose flat links estimate is exactly `HAMT_LINKS_LIMIT +
+/// longer`: content-sample's two files plus empty files. The helper starts
+/// with 1110 names of 200 digits and lengthens one name by the measured
+/// difference between that estimate and the target, so it hardcodes no
+/// measured length. A filesystem name holds at most 255 bytes; the helper
+/// asserts the name it measured fits. Built in a temp dir and in memory and
+/// never committed.
+pub fn directory_at_hamt_threshold_bundle(longer: usize) -> Vec<BundleEntry> {
+    let mut names: Vec<String> = (0..1110).map(|number| format!("{number:0>200}")).collect();
+    names.push("1110".to_owned());
+    let estimate = |names: &[String]| {
+        CONTENT_SAMPLE
+            .files
+            .iter()
+            .map(|file| file.len() + LINKED_CID_LENGTH)
+            .sum::<usize>()
+            + names
+                .iter()
+                .map(|name| name.len() + LINKED_CID_LENGTH)
+                .sum::<usize>()
+    };
+    let target = HAMT_LINKS_LIMIT + longer;
+    let width = names.last().expect("one placeholder").len() + target - estimate(&names);
+    assert!(
+        width <= 255,
+        "a measured name of {width} bytes does not fit in a folder"
+    );
+    names.pop();
+    names.push(format!("{:0>width$}", 1110, width = width));
+    let mut entries: Vec<BundleEntry> = CONTENT_SAMPLE
+        .files
+        .iter()
+        .map(|file| BundleEntry {
+            path: (*file).to_owned(),
+            content: read_fixture(&CONTENT_SAMPLE, file),
+        })
+        .collect();
+    entries.extend(names.into_iter().map(|path| BundleEntry {
+        path,
+        content: Vec::new(),
+    }));
+    let measured: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(measured, target, "the helper measured {measured} bytes");
+    entries
+}
+
+/// The child-shard bundle: content-sample's two files at the root, and the
+/// flat threshold bundle under `photos/`, so `photos/capsule.json` is not the
+/// root `capsule.json`. The root's direct children are `capsule.json`,
+/// `sample.example` and `photos`; `photos`' own estimate is the flat one.
+/// Built in a temp dir and in memory and never committed.
+pub fn child_directory_at_hamt_threshold_bundle(longer: usize) -> Vec<BundleEntry> {
+    let mut entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(longer)
+        .into_iter()
+        .map(|entry| BundleEntry {
+            path: format!("photos/{}", entry.path),
+            content: entry.content,
+        })
+        .collect();
+    entries.extend(CONTENT_SAMPLE.files.iter().map(|file| BundleEntry {
+        path: (*file).to_owned(),
+        content: read_fixture(&CONTENT_SAMPLE, file),
+    }));
+    entries
 }
 
 /// The photo lane's PH6 stand-in photo set, a consumer copy and not a
