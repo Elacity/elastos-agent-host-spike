@@ -54,6 +54,8 @@ After one instance has ended, `post_capability_grant` of the survivor's pending 
 
 `StandIn::get_capability_request` answers `GET /api/capability/request/:id`. The id is the path segment, a method argument, not a JSON field, and it reads the one request store. The owning client receives `pending` or `granted` as a body whose only key is `status`. A denied or expired record also carries `reason`, the record's decision reason. A shell, or a client of another session, is status 403 with the reason `Cannot access another session's request`; a missing record is status 404 with `Request not found: ` plus that id. The body carries no token, and the read stores nothing. A PASS gives the Runtime no A11 credit for this later call.
 
+`seed_request` holds at most 32 pending records for one session. The next pending record of that session is status 400 with the reason `Too many pending requests for this session`, and it stores nothing. A record whose status is `granted`, `denied` or `expired` does not count, and a pending record of another session does not count, so the sibling session still stores its request. `post_capability_request` returns that status and reason and does not count pending records. A PASS gives the Runtime no A11 credit for this cap.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.
