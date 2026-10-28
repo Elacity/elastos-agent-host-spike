@@ -1,0 +1,13 @@
+{
+  "schema": "elastos.capsule/v1",
+  "name": "stand-in-photo-set",
+  "version": "0.1.0",
+  "description": "This test code stands in for the Runtime's launch by CID, which does not exist yet.",
+  "role": "content",
+  "type": "data",
+  "entrypoint": "images/01.png",
+  "viewer": {
+    "name": "image-viewer",
+    "cid": "bafkreih2r3y7kst2gylz5miex5wptz2iqzfap2g53xmy27q2y6s6niurhe"
+  }
+}

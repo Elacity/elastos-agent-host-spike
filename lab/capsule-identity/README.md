@@ -38,13 +38,23 @@ lines 21-43, and the HAMT defaults at lines 507-517): CIDv1, `sha2-256`, raw
 leaves, chunker `size-262144`, trickle off (balanced layout), `max-file-links`
 174, `max-directory-links` 0, HAMT fanout 256 and size threshold 256KiB, no
 inline (inline limit 32 unused), no preserved mode or mtime, no empty
-directories. This crate runs no Kubo, and no Kubo is installed on this Mac.
-So the lab CID follows the Kubo v0.40.1 profile, computed by the lab: no Kubo has
-computed any pin, and [Claim scope](#claim-scope) states the gate before the
-lab CID may be called more than that.
-The tests pin only the single-block, non-sharded subset of that profile: one
-raw leaf per file and one block per directory. Anything bigger is refused, not
-named another way.
+directories. This crate runs no Kubo; the gate runs none either.
+So the lab CID follows the Kubo v0.40.1 profile, computed by the lab. One
+offline Kubo v0.40.1 hash-only cross-check with the Runtime's profile flags
+was run by hand on this Mac (task 050) and printed every committed pin, and
+[Claim scope](#claim-scope) states that gate.
+The tests pin that profile at any tree depth: a file of one raw leaf, a file
+of 2 to 174 raw leaves under one balanced file root (task 048), since task
+051 a larger file under Kubo's balanced file tree at any depth (trickle off,
+`max-file-links` 174 at every level), and since task 056 a basic directory or
+a HAMT shard as Kubo names it. A directory whose links estimate is at most
+262144 bytes is a basic directory, even when its block is larger; a greater
+estimate is the HAMT in step 6, and a child directory is judged on its own
+estimate. No file is refused for its size. The file
+tree's bytes are the lab's reading of the profile; the hand-run Kubo printed
+every file-tree pin too, and the model package the Runtime admitted gets its
+admitted CID from the lab encoder (task 051, see
+[the Kubo cross-check](#the-cross-implementation-check)).
 
 To recompute a lab CID by hand:
 
@@ -54,27 +64,84 @@ To recompute a lab CID by hand:
    file's bytes (an empty file is an empty block). Its CID is the 36 bytes
    `01 55 12 20` and the SHA-256 of the block: CID version 1, the raw codec
    `0x55`, the multihash code `0x12` (sha2-256) and length `0x20` (32). Its
-   Tsize is its length. A file of 262145 bytes or more is refused with its
-   path, its length and the limit: there is no chunked file DAG.
-3. Each path part but the last is a **directory**: `browser/app.js` is a
+   Tsize is its length.
+3. A file of more than 262144 bytes is split into 262144-byte chunks, the
+   last one shorter, and each chunk is a raw leaf as in step 2. They hang
+   under a **file tree** of dag-pb nodes, Kubo's balanced layout (trickle
+   off) at any depth. The depth is the smallest `d >= 1` with
+   `174^d >= leaves` (`max-file-links` 174). A node at depth 1 links up to
+   174 leaves; a node at depth `k > 1` links up to 174 nodes of depth
+   `k - 1`. Nodes are filled left to right, each full before the next
+   starts, so only the last node of each level can be short, and a last
+   node of depth `k - 1` that holds a single leaf is still a node of one
+   link. So a file of 175 leaves (45613057 bytes or more) is a root over two
+   depth-1 nodes, of 174 leaves and of 1, and a file of 553 leaves is a root
+   over four, of 174, 174, 174 and 31 leaves. Each node's block is, for each
+   child in order, field 2 (`0x12`, length) holding a link: field 1 (`0x0a`,
+   length) the child's CID bytes, field 2 with an empty name (`12 00`), field
+   3 (`0x18`) the child's Tsize as a varint. Then field 1 (`0x0a`, length)
+   holds the UnixFS data: `08 02` (type 2, a file), `18` and the number of
+   file bytes under the node as a varint (filesize, field 3), and for each
+   child `20` and the child's filesize as a varint (blocksizes, field 4, one
+   tag per value, not packed; a leaf's filesize is its length, and a
+   blocksize is never a child's Tsize). There is no Data field (field 2). A
+   node's CID is `01 70 12 20` and the SHA-256 of its block, and its Tsize
+   is its block's length plus its children's Tsizes. The tree's root is the
+   file's node. No file is refused for its length.
+4. Each path part but the last is a **directory**: `browser/app.js` is a
    directory `browser` with a link named `app.js`. The root is the directory
-   of the bundle's entries. No empty directory is ever made.
-4. A directory's **block** is dag-pb. Sort its children by name bytes. For each
+   of the bundle's entries. Two names the walk meets are refused with their
+   reason instead of being left out: a folder that holds no file, at any
+   depth (`EmptyFolder`), since Kubo's import with `--empty-dirs=false` leaves
+   out an empty folder and keeps a folder that holds only empty folders, and
+   the lab refuses rather than print a name Kubo may not give; and a name
+   that starts with `.` (`HiddenName`), since Kubo without `--hidden` leaves
+   that name out, and the lab names every byte or refuses.
+5. A directory's **block** is dag-pb. Sort its children by name bytes. For each
    child, write protobuf field 2 (tag `0x12`, then the length as a varint)
    holding a link: field 1 (`0x0a`, length) the child's CID bytes, field 2
    (`0x12`, length) its name in UTF-8, field 3 (`0x18`) its Tsize as a varint.
    Then write field 1 (`0x0a 0x02`) holding the UnixFS data `08 01`: type
    (field 1) = 1, a directory. Lengths and Tsizes are ordinary unsigned
    varints: 7 bits per byte, low bits first, so a value over 127 takes two
-   bytes. A block over 262144 bytes is refused with the directory's path (`.`
-   is the root) and the limit: there is no HAMT shard. Kubo shards later, by
-   an estimate of its links' size, so this refusal comes first and fails
-   closed.
-5. A directory's CID is `01 70 12 20` and the SHA-256 of its block (the dag-pb
+   bytes. A directory is judged on the sum over its direct children of the
+   name's byte length plus 36 (a CIDv1 SHA-256). At most 262144 is a basic
+   directory, whatever the block's length; greater is a HAMT shard. A child
+   directory is judged on its own sum, which the third test below shows. A
+   basic directory's block may be larger than 262144 bytes: the links
+   estimate decides. The 262144-byte root is the block task 053 pinned, and
+   it got the same CID from Kubo with the provider's HAMT config, unsharded
+   (`directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused`).
+   The exact-threshold bundle is a larger basic block, and it is named
+   (`directory_at_the_hamt_threshold_stays_basic`).
+6. A directory whose sum is greater than 262144 is a **HAMT shard** (task
+   056): fanout 256, bucket hash murmur3 `New64` (the first 64 bits of
+   x64-128 with seed 0), one digest byte per level. Hash each child's name,
+   not its path. A bucket holds the children whose digest byte at this level
+   is equal. A bucket of one child is one link named the bucket's two
+   uppercase hex digits and the child's name; a bucket of two or more is one
+   link named only those two digits, pointing at a child shard built from the
+   next digest byte, even when that child shard holds one link. A shard of
+   one link is allowed when its children share this byte; only a bucket of
+   one child is a leaf. A ninth byte is refused
+   with `Refusal::HamtTooDeep`. Links go out in bucket order. The shard's
+   block writes its links as in step 5, then field 1 holds its UnixFS data:
+   `08 05` (type 5), `12` and the bitmap as field 2, `28 22` (hash type
+   `0x22`) and `30 80 02` (fanout 256). The bitmap sets bucket `i` in byte
+   `31 - i / 8` at `1 << (i % 8)` and drops its leading zero bytes, so its
+   length is not always 32. The shard's CID is `01 70 12 20` and the SHA-256
+   of its block, and its Tsize is its block's length plus its links' Tsizes.
+   `directory_at_the_hamt_threshold_stays_basic`,
+   `directory_over_the_hamt_threshold_is_a_shard`,
+   `child_directory_over_the_hamt_threshold_is_a_shard` and
+   `directory_with_a_one_link_hamt_shard_has_the_pinned_cid` name this shape,
+   with falsifiers F-CI56a to F-CI56l, F-CI18h, F-CI53a, F-CI53b and
+   F-CI61a.
+7. A directory's CID is `01 70 12 20` and the SHA-256 of its block (the dag-pb
    codec `0x70`). The Tsize of a link to a directory is the length of its
    block plus the Tsizes of its own links. Every varint inside a CID here is
    one byte.
-6. **Print** the root's 36 CID bytes as `b` (the multibase prefix) and their
+8. **Print** the root's 36 CID bytes as `b` (the multibase prefix) and their
    RFC 4648 base32, in the lowercase alphabet
    `abcdefghijklmnopqrstuvwxyz234567`, with no `=` padding: 288 bits make 58
    characters, the last one padded with two zero bits. The result is 59
@@ -113,21 +180,109 @@ def field(number, data):  # protobuf, wire type 2
 def cid(codec, block):
     return bytes([0x01, codec, 0x12, 0x20]) + hashlib.sha256(block).digest()
 
-def directory(tree):  # {name: bytes or a dict}; returns (CID bytes, Tsize)
+def file_tree(chunks, depth):  # returns (CID bytes, Tsize, filesize)
+    if depth == 0:  # one raw leaf
+        return cid(0x55, chunks[0]), len(chunks[0]), len(chunks[0])
+    span = 174 ** (depth - 1)  # the most leaves under one child
+    children = [file_tree(chunks[at:at + span], depth - 1)
+                for at in range(0, len(chunks), span)]
     links = b""
+    unixfs = b"\x08\x02\x18" + varint(sum(size for _, _, size in children))
+    for child_cid, tsize, size in children:
+        link = field(1, child_cid) + field(2, b"")
+        links += field(2, link + b"\x18" + varint(tsize))
+        unixfs += b"\x20" + varint(size)
+    block = links + field(1, unixfs)
+    tsize = len(block) + sum(tsize for _, tsize, _ in children)
+    return cid(0x70, block), tsize, sum(size for _, _, size in children)
+
+def file_node(data):  # a file's bytes; returns (CID bytes, Tsize)
+    if len(data) <= 262144:
+        return cid(0x55, data), len(data)
+    chunks = [data[at:at + 262144] for at in range(0, len(data), 262144)]
+    depth = 1
+    while 174 ** depth < len(chunks):
+        depth += 1
+    return file_tree(chunks, depth)[:2]
+
+MASK = (1 << 64) - 1
+
+def rotl(x, r):
+    return ((x << r) | (x >> (64 - r))) & MASK
+
+def fmix(k):
+    k ^= k >> 33
+    k = k * 0xFF51AFD7ED558CCD & MASK
+    k ^= k >> 33
+    k = k * 0xC4CEB9FE1A85EC53 & MASK
+    k ^= k >> 33
+    return k
+
+def murmur64(data):  # the first 64 bits of murmur3 x64-128, seed 0
+    c1, c2 = 0x87C37B91114253D5, 0x4CF5AD432745937F
+    h1 = h2 = 0
+    for at in range(0, len(data) // 16 * 16, 16):
+        k1 = int.from_bytes(data[at:at + 8], "little")
+        k2 = int.from_bytes(data[at + 8:at + 16], "little")
+        k1 = rotl((k1 * c1) & MASK, 31) * c2 & MASK
+        h1 = ((rotl(h1 ^ k1, 27) + h2) * 5 + 0x52DCE729) & MASK
+        k2 = rotl((k2 * c2) & MASK, 33) * c1 & MASK
+        h2 = ((rotl(h2 ^ k2, 31) + h1) * 5 + 0x38495AB5) & MASK
+    tail = data[len(data) // 16 * 16:]
+    k1 = int.from_bytes(tail[:8].ljust(8, b"\x00"), "little")
+    k2 = int.from_bytes(tail[8:16].ljust(8, b"\x00"), "little")
+    if len(tail) > 8:
+        h2 ^= rotl((k2 * c2) & MASK, 33) * c1 & MASK
+    if tail:
+        h1 ^= rotl((k1 * c1) & MASK, 31) * c2 & MASK
+    h1 = (h1 ^ len(data)) & MASK
+    h2 = (h2 ^ len(data)) & MASK
+    h1 = (h1 + h2) & MASK
+    h2 = (h2 + h1) & MASK
+    h1, h2 = fmix(h1), fmix(h2)
+    return (h1 + h2) & MASK
+
+def hamt(children, depth):  # [(name, CID bytes, Tsize)]; returns (CID bytes, Tsize)
+    buckets = {}
+    for name, child_cid, tsize in children:
+        byte = murmur64(name.encode("utf-8")).to_bytes(8, "big")[depth]
+        buckets.setdefault(byte, []).append((name, child_cid, tsize))
+    links = b""
+    bitmap = 0
     total = 0
+    for bucket in sorted(buckets):
+        group = buckets[bucket]
+        bitmap |= 1 << bucket
+        if len(group) == 1:
+            name, child_cid, tsize = group[0]
+            link_name = f"{bucket:02X}{name}"
+        else:
+            child_cid, tsize = hamt(group, depth + 1)
+            link_name = f"{bucket:02X}"
+        link = field(1, child_cid) + field(2, link_name.encode("utf-8"))
+        links += field(2, link + b"\x18" + varint(tsize))
+        total += tsize
+    data = (b"\x08\x05" + field(2, bitmap.to_bytes(32, "big").lstrip(b"\x00"))
+            + b"\x28\x22" + b"\x30" + varint(256))
+    block = links + field(1, data)
+    return cid(0x70, block), len(block) + total
+
+def directory(tree):  # {name: bytes or a dict}; returns (CID bytes, Tsize)
+    children = []
     for name in sorted(tree, key=lambda n: n.encode("utf-8")):
         child = tree[name]
-        if isinstance(child, dict):
-            child_cid, tsize = directory(child)
-        else:
-            assert len(child) <= 262144
-            child_cid, tsize = cid(0x55, child), len(child)
+        cid_bytes, tsize = (directory(child) if isinstance(child, dict)
+                            else file_node(child))
+        children.append((name, cid_bytes, tsize))
+    if sum(len(name.encode("utf-8")) + 36 for name, _, _ in children) > 262144:
+        return hamt(children, 0)
+    links = b""
+    total = 0
+    for name, child_cid, tsize in children:
         link = field(1, child_cid) + field(2, name.encode("utf-8"))
         links += field(2, link + b"\x18" + varint(tsize))
         total += tsize
     block = links + field(1, b"\x08\x01")
-    assert len(block) <= 262144
     return cid(0x70, block), len(block) + total
 
 def lab_cid(files):  # {bundle path: bytes}
@@ -142,13 +297,24 @@ def lab_cid(files):  # {bundle path: bytes}
     return "b" + "".join(B32[int(bits[i:i + 5], 2)] for i in range(0, 290, 5))
 ```
 
-In Rust, the walk (`checked_bundle`, which `lab_cid` runs too) reads a bundle
-and `encode_entries` is the encoder. They are the only code that names a
-bundle; tests call them and copy neither. `encode_entries` holds the one
-naming hash, and leaves and directory blocks share it. It also refuses what
-the walk can never give but a caller of the encoder could: a path with an
-empty, `.` or `..` part, two entries with one path, and one path that is both
-a file and a directory (`a` and `a/b`, in either order). `check_name` checks a
+In Rust, the walk (`checked_bundle`, which `lab_cid` runs too) reads a bundle,
+and `encode_entries` makes each file's node from its bytes with `file_node`
+(one raw leaf, or `file_root`, the balanced file tree over its leaves at
+any depth, task 051) and hands the nodes to
+`encode_tree`, the one tree builder. `encode_listed_files` (task 047; see
+[naming a closure listing](#naming-a-closure-listing)) makes one raw leaf per
+listed file and hands them to the same `encode_tree` (task 048).
+`encode_chunked_files` (task 055; see
+[naming a closure listing](#naming-a-closure-listing)) makes each file's node
+from its chunk digests and hands it to the same `encode_tree` (task 055).
+Every leaf is
+made by `raw_leaf`, every node of a file tree by `file_root_block`, and
+directory blocks and file-tree nodes write their links with one `put_links`. They are the only code that names a bundle; tests call them
+and copy none. `naming_hash` holds the one naming hash, and leaves, file roots
+and directory blocks share it. The encoder also
+refuses what the walk can never give but a caller of the encoder could: a path
+with an empty, `.` or `..` part, two entries with one path, and one path that
+is both a file and a directory (`a` and `a/b`, in either order). `check_name` checks a
 claimed name by calling `lab_cid`; it computes no name of its own.
 
 The CIDv1 bytes and the base32 text are one marked lab copy inside
@@ -158,7 +324,8 @@ lab does not link, and any new crate here would make the locks of
 `lab/wasm-capsule` and `lab/agent-conformance` (both path-depend on this
 crate) stale. So the lab adds no crate.
 
-Each profile setting has a named test and a falsifier (`tests/encoding.rs`;
+Each profile setting has a named test and a falsifier (`tests/encoding.rs`
+and `tests/walk.rs`;
 every pin is also recomputed by the Python block above, written from these
 rules and not from the Rust code, in
 `readme_python_recomputes_every_lab_cid_pin`):
@@ -170,10 +337,17 @@ rules and not from the Rust code, in
 | Raw leaves, codec `0x55` | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18c (`0x70`) |
 | Directory codec `0x70`, dag-pb | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18r (`0x71`) |
 | Chunk size 262144: a file of exactly that size is one block | `single_block_at_the_chunk_limit_has_the_pinned_cid` | F-CI18d (262143) |
-| A larger file is refused | `file_over_the_chunk_limit_is_refused` | F-CI18e (no refusal) |
+| A file over one leaf is a balanced root of raw leaves: empty link names, type 2, filesize, blocksizes, and a Tsize of its block and its leaves | `file_over_one_leaf_has_the_pinned_cid` | F-CI48a (no name field), F-CI48b (no blocksizes), F-CI48c (no filesize), F-CI48d (Tsize without the root block) |
+| A file over 174 leaves gets a second tree level: a root over a node of 174 leaves and a node of one link; each inner node's blocksize is its filesize, and its link's Tsize holds its block (task 051) | `file_over_174_leaves_gets_a_second_tree_level` | F-CI18e (the tree stops at one level, leaves past 174 dropped), F-CI48e (174 becomes 175), F-CI51a (a lone leaf linked straight from the root), F-CI51b (the blocksize is the inner node's Tsize), F-CI51c (the link's Tsize leaves out the inner block) |
+| The listing call names a file of at most one leaf; a listed file over one chunk is refused and named from its bytes instead | `listed_file_over_the_chunk_limit_is_refused`, `listed_file_over_one_leaf_names_the_bytes_call` | F-CI47c (`encode_listed_files` has no size refusal) |
 | Links sorted by name bytes | `lab_cid_matches_the_pinned_value_for_each_fixture`, `lab_cid_does_not_depend_on_listing_order` | F-CI18f (reverse), F-CI1a (no sort) |
 | Directory type 1 | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18g (5) |
-| A directory block over 262144 bytes is refused, no HAMT | `directory_over_the_hamt_threshold_is_refused` | F-CI18h (no refusal) |
+| A directory whose links estimate is at most 262144 is a basic directory, even when its block is larger; a greater estimate is a HAMT shard (task 056) | `directory_at_the_hamt_threshold_stays_basic`, `directory_over_the_hamt_threshold_is_a_shard` | F-CI18h (no shard), F-CI53a (`>=`), F-CI53b (the threshold becomes 262145), F-CI56a (digest bytes reversed), F-CI56d (a child's Tsize, not 36), F-CI56f (bitmap byte reversed), F-CI56h (type 1), F-CI56i (hash type), F-CI56j (fanout), F-CI56l (a two-name bucket is a leaf) |
+| A child directory is judged on its own links estimate: the 262145-estimate set under `photos/` shards while the root stays basic (task 056) | `child_directory_over_the_hamt_threshold_is_a_shard` | F-CI56e (only the root shards), F-CI56k (a shard's Tsize leaves out its block) |
+| A HAMT leaf link names its bucket in two uppercase hex digits and then the child's name; a bucket of two or more children is one link named only the prefix (task 056) | `directory_over_the_hamt_threshold_is_a_shard`, `child_directory_over_the_hamt_threshold_is_a_shard` | F-CI56b (a leaf has the prefix only), F-CI56c (a one-entry bucket is a child shard) |
+| A child shard of one link stays a shard link when its names share the next digest byte; a bucket of two or more children is never a leaf (task 061) | `directory_with_a_one_link_hamt_shard_has_the_pinned_cid`, `two_names_in_one_bucket_get_a_child_shard` | F-CI61a (a child shard of one link becomes a leaf) |
+| A HAMT bitmap sets bucket `i` in byte `31 - i / 8` at `1 << (i % 8)` and drops leading zero bytes; a collision bucket gets a child shard (task 056) | `hamt_data_trims_leading_zero_bitmap_bytes`, `two_names_in_one_bucket_get_a_child_shard` | F-CI56f (bitmap byte order), F-CI56g (no trimming) |
+| The largest basic root block task 053 named (262144 bytes) is still named, and one name byte more is named too; no block-length refusal remains (task 053, extended by task 056) | `directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused` | — |
 | No inline: no identity multihash | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18i (inline at most 32 bytes) |
 | The printed form, `b` and lowercase base32 | `lab_cid_prints_with_the_lab_label`, `the_library_names_a_bundle_one_way`, `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18j (old prefix), F-CI18k (uppercase), F-CI1d (no `b`) |
 | A directory link's Tsize includes its child's links | `lab_cid_matches_the_pinned_value_for_each_fixture` (`web-app` has `browser/`) | F-CI18m |
@@ -182,6 +356,8 @@ rules and not from the Rust code, in
 | A name and a file's length are written with their lengths | `path_and_content_boundaries_cannot_collide` | F-CI1b, F-CI1p (name), F-CI1q (Tsize) |
 | A file and a directory at one path are refused | `encoder_refuses_file_directory_conflict` | F-CI18p, F-CI18q (one silently replaces the other) |
 | An empty, `.` or `..` path part is refused | `encoder_refuses_a_path_with_an_empty_or_dot_part` | F-CI18s |
+| A name that starts with `.` is refused with its reason (task 054) | `a_hidden_name_is_refused_with_its_reason` | F-CI54a (the hidden check removed), F-CI54b (only the last part checked), F-CI54c (any `.` refused) |
+| A folder that holds no file, at any depth, is refused with its reason (task 054) | `a_folder_with_no_file_is_refused_with_its_reason` | F-CI54d (the empty-folder check removed), F-CI54e (a folder whose files sit in subfolders is refused) |
 | Two entries with one path are refused | `encoder_refuses_a_duplicate_path` | F-CI1r |
 
 The three pins these tests add are in `tests/common/mod.rs`, and the Python
@@ -193,8 +369,61 @@ committed) is `bafybeibt53faomuek2j4yihvseuib2h6fosmkzympgilbnay2xevciasb4`;
 `bafybeic2y3c3met6txd62reatxwqjnodhfejchfmltmd6dnpyhtah7l5we`; and
 `content-sample` with a file named fifty `名` and `.txt` holding `long name`
 and a newline is `bafybeih6g5cy7asndjexb7bazovwryqyj4faxvababcjrbe4jxayhzvgmy`.
-The directory-block test builds 1100 empty files with 200-byte names in a temp
-dir.
+Task 048 adds two more, also built in a temp dir and in memory and never
+committed: `content-sample` with `sample.example` as 262145 zero bytes (two
+leaves, 262144 and 1 bytes) is
+`bafybeidbd7gfhommypeks66twpnbbb3lwovdqe6iwtmdxptgcq5jqbaaby`; and
+`content-sample` with an added `core/big.bin` of 600000 bytes, byte `i` being
+`i % 251` (three leaves, 262144, 262144 and 75712 bytes, one directory down),
+is `bafybeidpgwbsi22cbsmthqupvn37xphujhs6fnzyuy64uc6nsauc6bftqe`. Both were
+first computed by a `python3 -I` script written from the hand rules above,
+before any Rust code named them; that script used Python's own `base64` for
+the printed form and gave `content-sample`'s pin too. Task 051 adds one more,
+built in memory and never committed: `content-sample` with `sample.example` as
+45613057 bytes, byte `i` being `i % 251` (175 leaves, so a root over a node of
+174 leaves and a node of one leaf), is
+`bafybeia6jmw5u4ns4zxsglupvm25hkmxy6tr5m2a6irt5kapton6vgduee`
+(`TWO_LEVEL_FILE_LAB_CID`). README's Python block above, extended from the
+layout in step 3 (top down, by depth), gave it before any Rust code named it,
+and the hand-run Kubo printed it too. The same test names the first 45613056
+of those bytes (174 leaves, one file node) and checks that its CID differs;
+that value is not pinned.
+Task 053 adds one more pin, built in a temp dir and in memory and never
+committed: `content-sample` with 1065 added empty files, 1064 named by 200
+digits (`0` to `1063`, padded with zeros) and one by 235 digits (`1064`), so
+the root block is exactly 262144 bytes, is
+`bafybeifv7ypq27zanvn46j4q5jnm5akr55flfzne3zszdbbolt2dtgevc4`
+(`DIRECTORY_AT_LIMIT_LAB_CID`, the entries made once by
+`directory_at_limit_files`). README's Python block gives it, and the hand-run
+Kubo printed it with the provider's HAMT config. With the last name one digit
+longer the root block is 262145 bytes and is named too, because the links
+estimate decides which directory shape to use (task 056).
+Task 056 adds three pins, each built in a temp dir and in memory and never
+committed. `directory_at_hamt_threshold_bundle(0)` is `content-sample` plus
+1110 empty files named by 200 digits and one name lengthened to the width the
+helper measures, so the links estimate is exactly 262144: a basic directory
+whose block is larger than 262144 bytes, `bafybeicqo67qvp3orvh33xcxh5eugdsqb2x2fqqzvqk423qpqwnjgodrfe`
+(`DIRECTORY_AT_HAMT_THRESHOLD_LAB_CID`). One more name byte makes the estimate
+262145, and the directory is a HAMT shard,
+`bafybeian4wlj6o5y4nbogpkeyauitvmxsrrc55fsfe2pcwcp4ki7hagbqq`
+(`DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID`). The same 262145-estimate set under
+`photos/`, with `content-sample`'s two files at the root, is
+`bafybeibvx4eqxqix2zsu3yufv7bbpq4gochl22mpfjznfxp43vtrvh33du`
+(`CHILD_DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID`); the root's three children
+estimate 140, so the root stays basic. README's Python block gives all three
+from the rule in steps 5 and 6, and the hand-run Kubo printed them with the
+provider's HAMT config.
+Task 061 adds one more pin, built in a temp dir and in memory and never
+committed: the 262145-estimate bundle with two 200-byte names whose digest
+bytes 0 and 1 are equal (`FE 57`) and whose byte 2 differs, so the first
+byte's bucket holds only those two names and the child shard from the next
+digest byte holds one link. The parent still links that child shard, named
+only the first byte's two digits, so the bundle's shape is the one the rule
+in step 6 keeps. It is
+`bafybeiap7fmepwaka7go2lxcfkxuhpi3ifs3rhpy7u6oolxtrtb77v5maq`
+(`DIRECTORY_WITH_A_ONE_LINK_HAMT_SHARD_LAB_CID`) and its entries are
+`directory_with_a_one_link_hamt_shard_bundle`. README's Python block gave it
+first and `encode_entries` agrees; the hand-run Kubo printed it too.
 
 ### The cross-implementation check
 
@@ -219,20 +448,24 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    (`python3 -I could not run: <error>`), a non-zero exit (even after it
    printed a valid CID), no output, or more than one line is refused with its
    own reason, and the test asserts each of these reasons.
-5. For each of the 11 pins, the Python answer, the pin constant and the
+5. For each of the 16 pins, the Python answer, the pin constant and the
    printed `encode_entries` result for the same files must be equal, and the
-   test asserts that it checked exactly 11 bundles. The 11 are the seven
+   test asserts that it checked exactly 16 bundles. The 16 are the seven
    pinned fixtures (`content-sample`, `web-app`, `agent-host`, `provider`,
-   `model`, `provider-variant-a`, `provider-variant-b`), the recipe, and the
+   `model`, `provider-variant-a`, `provider-variant-b`), the recipe, the
    chunk-limit, empty-file and long-name bundles above, which are built as
-   entries in memory. `wc001-core` has no pin, because its `capsule.wasm` is
+   entries in memory, the photo stand-in consumer copy (task 047, see
+   [naming a closure listing](#naming-a-closure-listing)), and the two-leaf
+   and three-leaf file bundles (task 048), the two-level file bundle (task
+   051) and the directory-at-limit bundle (task 053), also built in memory.
+   `wc001-core` has no pin, because its `capsule.wasm` is
    built on each machine, so it is not checked here.
 
 | Rule | Named test | Falsifier |
 | --- | --- | --- |
 | README's rule agrees with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19a (the block's `0x55` becomes `0x70` before it runs) |
 | Rust agrees with README's rule, not only with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19b (the encoder's `RAW_CODEC` becomes `0x56`) |
-| A missing block is no pass: exactly 11 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
+| A missing block is no pass: exactly 16 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
 | An interpreter that cannot start fails the test | `readme_python_recomputes_every_lab_cid_pin` | F-CI19d (a program that does not exist) |
 | A non-zero exit is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19e (exit status not checked) |
 | No output is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19f (empty answer taken) |
@@ -240,6 +473,51 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
 | The driver holds no rule | `readme_python_recomputes_every_lab_cid_pin` | F-CI19h (`import hashlib`) |
 | It runs isolated | `readme_python_recomputes_every_lab_cid_pin` | F-CI19i (no `-I`) |
 | It runs from a fresh, empty folder | `readme_python_recomputes_every_lab_cid_pin` | F-CI19j (the lane folder) |
+
+**Kubo cross-check (task 050, run by hand on 2026-10-28).** Two tests in
+`tests/cross_implementation.rs` run Kubo itself: an offline, hash-only import
+(`add` with `--offline`, `--only-hash=true` and every flag of the release
+script's `KUBO_ADD_FLAGS`, `scripts/ci-model-package.mjs:211`, written once as
+`KUBO_ADD_FLAGS` in the test file) in a fresh temp repo made by
+`init --empty-repo`, with the provider's two HAMT config values set. No daemon
+runs and nothing is written outside the temp folders.
+`kubo_hash_only_import_prints_every_lab_cid_pin` writes each of the 16 pinned
+bundles above into a temp folder (since task 051 with the two-level file
+bundle, since task 053 with the directory-at-limit bundle), and Kubo's root,
+the pin and `encode_entries` must be one value. On 2026-10-28 it passed at
+task 053 too (`test result: ok. 1 passed`), and with the HAMT threshold set to
+`1KiB` by hand it failed on the directory-at-limit row alone, so the HAMT
+config reaches Kubo and that row would catch a shard (LOG.md).
+`kubo_profile_reproduces_the_admitted_model_package_cid`
+is the control that the flags are the Runtime's: Kubo must print
+`bafybeiew3vuq32fvuz2kmps7lmgl4rxpvwsvklxykx4covogbrkhgy5qky`, the package CID
+the Runtime admitted on this Mac for the SmolLM2 model package (in
+`model-catalog.json`). Since task 051 it also checks the lab against that
+value, a value Kubo and the Runtime made, not the lab: `weights.gguf` must be
+553 leaves (two tree levels: a root over nodes of 174, 174, 174 and 31
+leaves), `encode_entries` over the six files' bytes must give that CID, and so
+must `lab_cid` on the folder (the walk and the Runtime's manifest check; it
+only reads the folder). Until task 051 the lab refused that folder with
+`FileOverLeafLimit`; that refusal is gone. Both are
+`#[ignore]`: the gate's `cargo test` lists them as ignored and never runs
+them. Each panics with its reason if a variable is unset or Kubo is not
+v0.40.1. The command, from this folder:
+
+```sh
+LAB_KUBO="/Users/sash/Library/Application Support/elastos/bin/kubo" \
+LAB_ADMITTED_MODEL_DIR="/Users/sash/Library/Application Support/elastos/model-preparation/admitted-913d4376794b52b08b521a858386178522b685fb70e08c6e4c4eb89f01caf4a4" \
+cargo test --offline --locked --test cross_implementation -- --ignored
+```
+
+That Kubo is the one ElastOS installed (not on `PATH`), `version --number`
+`0.40.1`, `shasum -a 256`
+`6c55b0ca7eea68854d82d90498a1dbda513f6bc5e5078ba0db346317a98bb79a`. On
+2026-10-28 both passed (`test result: ok. 2 passed`), at task 050 and again at
+task 051. One limit: dropping `--raw-leaves=true` from the list changes
+nothing on Kubo v0.40.1 with `--cid-version=1` (this Kubo uses raw leaves for
+CID version 1 without the flag), so neither test shows that the flag is
+present. The hand break that guards the leaf codec is `--raw-leaves=false`,
+which fails both tests (tasks 050 and 051, LOG.md).
 
 Task 020 runs README's two digest blocks the same way (Anders's Q2: the
 record encoding and the signature domain under cross-implementation tests):
@@ -275,8 +553,12 @@ no answers fails.
 | A block never closed before the next section is refused | `readme_python_matches_the_name_signature_digest`, `readme_python_matches_the_package_record_bytes` | F-CI24e (the block runs to the end of its section) |
 | An interpreter that cannot start fails all three tests | all three tests above | F-CI19d (a program that does not exist) |
 
-Not shown: Kubo itself, and Python on another machine. The check is two
-implementations on one Mac (Python 3.9.6 here), not an outside IPFS tool.
+Not shown: Kubo in the gate, and Python on another machine. The gated check
+is two implementations on one Mac (Python 3.9.6 here). Kubo, the outside IPFS
+tool, ran only by hand: one offline Kubo v0.40.1 hash-only cross-check with
+the Runtime's profile flags was run by hand on this Mac (task 050) and printed
+every committed pin, and again at task 051 with the new pin (the "Kubo
+cross-check" paragraph above).
 
 ## Fixtures and their pinned lab CIDs
 
@@ -670,6 +952,120 @@ stops failing and the runner reads F-CI27d as not caught; the entry's test
 names must then change. `the_consumer_scan_uses_cargos_reader` catches it
 either way, on synthetic metadata with no consumer file involved.
 
+## Naming a closure listing
+
+A lab whose own walk already lists each file's path, size and SHA-256 gets the
+lab CID from `encode_listed_files(&[ListedFile])` (task 047). `ListedFile` is
+`{ path: String, size: u64, sha256: [u8; 32] }`. A raw leaf needs only the
+SHA-256 and the length of its bytes (step 2 of [the encoding](#the-encoding)),
+so such a listing is enough for a file of one leaf. It is no second
+encoder: `encode_listed_files` makes each leaf with `raw_leaf`, the leaf rule
+`encode_entries` uses too, and both hand their nodes to `encode_tree`, the one
+tree builder, and `lab_cid` is the walk and then `encode_entries`, so the
+directory encoding exists once (`check_name_uses_the_single_naming_path`
+checks it). It reads no file and
+checks no manifest. So the lab CID names the bytes only if each `sha256` and
+`size` are those of the bytes: the caller's walk owns that. A `size` over
+262144 is refused with `FileOverChunkLimit` and the file's path, and the path
+refusals are the ones `encode_entries` gives. Since task 048 a file over one
+leaf has a lab CID, but only from its bytes: a listed file's one SHA-256 names
+a single raw leaf, and a file root needs each leaf's SHA-256. So the refusal's
+text says to name such a file with `encode_entries` (or `lab_cid`), which take
+the bytes; `ListedFile` keeps its three fields. There is no hex form: a caller
+decodes its own hex.
+
+It is for the photo lane (Flint's 28 Oct note; Rong's DR-1, one identity rule;
+Anders's Q3). On `spike/spike/photo-viewer` at `d047a069a`, the photo bundle
+tool names a closure by a second rule, a raw CIDv1 over a JSON listing of
+`{path, size, sha256}` (`examples/photo-viewer/bundle/src/listing.rs:478-485`,
+`cid.rs:5`), so one bundle gets two lab names. The photo lane switches its
+`cid_of` to this call itself; this lane edits none of its files.
+
+**A file of any size.** A walk that kept each raw leaf's digest instead of
+the bytes calls `encode_chunked_files(&[ChunkedFile])` (task 055).
+`ChunkedFile` is `{ path: String, size: u64, chunk_sha256: Vec<[u8; 32]> }`:
+the SHA-256 of each 262144-byte chunk in file-byte order, the last one
+shorter, and one empty-block digest for an empty file. The call makes each
+leaf from its digest and length, builds the balanced file root with the
+builder `encode_entries` uses, and hands the node to the same `encode_tree`.
+It checks the count its size gives, `max(1, ceil(size / 262144))`, once
+before a node is built, and refuses a mismatch with `ChunkCountMismatch`
+naming the path, the size, the expected count and the supplied count. It
+reads no payload and parses no manifest: the caller supplies `size` and the
+digests from the same observed bytes and owns reading and hashing them. Byte
+verification stays the caller's job; the name is computed by the lab.
+
+A short example, with the digests the caller already holds:
+
+```rust
+let files = vec![ChunkedFile {
+    path: "images/a.raw".to_owned(),
+    size: 262_145,
+    chunk_sha256: vec![first_leaf, last_leaf],
+}];
+let cid = encode_chunked_files(&files)?;   // the one lab CID
+let record = sign_cid_record(&key, cid);   // the one package record, below
+```
+
+The photo lane can adopt this call in its own lane; its existing
+`encode_listed_files` path and values stay as they are.
+
+**Signing the name.** A listing-named closure is signed with
+`sign_cid_record(key, cid)` and checked with `verify_cid_record(cid, record,
+accepted)` (task 049), the one package record
+([below](#lab-package-record-outside-the-bundle)) that the folder and checked
+record calls also make and check, so the photo lane needs no signed record of
+its own.
+
+**The pin.** `consumer-fixtures/photo-stand-in-photo-set/` is a byte-for-byte
+copy of the photo lane's PH6 fixture folder
+`examples/photo-viewer/host-test/fixtures/stand-in-photo-set/` at `d047a069a`.
+`git hash-object` of each copy equals its blob id there:
+
+| File | Bytes | Git blob |
+| --- | --- | --- |
+| `README.md` | 1585 | `1b4548402e4618ca21569d918fe1914b8692e7f4` |
+| `capsule.json` | 387 | `5ec198ec721267ce8b629b78f7bd6b9462a4b60c` |
+| `images/01.png` | 180 | `1ec336b5402de32a9d9969bb7a718bf744b1e8b1` |
+| `images/02.jpg` | 293 | `58d489a1eb0e4a24bb517f8d6345372a8e416aaa` |
+| `images/03.webp` | 350 | `c4ecc5b848a405c1a79f02fd53ada7da7c1aeb97` |
+
+The lab CID of the five files is
+`bafybeiepelczjykxjbhpwaqjnmxx346l52alcxfzgg52ip2ejf5yijiuna`
+(`PHOTO_STAND_IN_LAB_CID`). It was first computed by this README's Python block
+run on the five copied files, before any Rust code named them, and
+`readme_python_recomputes_every_lab_cid_pin` recomputes it. The pin is of this
+five-file folder. The photo lane's own pack keeps `README.md` out of the packed
+closure (its README says so), so a packed PH6 bundle holds four files and gets
+another name by the same rule.
+
+**The snag.** The copy sits outside `fixtures/`. Its `capsule.json` has
+`"viewer": {"name": ..., "cid": ...}`, an object, while the Runtime's
+`CapsuleManifest` has `viewer: Option<String>` and refuses what does not fit
+(`deny_unknown_fields`; `elastos/crates/elastos-common/src/manifest.rs:126-128`).
+So `lab_cid` on the exact folder refuses with `ManifestUnparsed`, and the copy
+cannot be a fixture: every folder in `fixtures/` must pass that parse. The
+photo lane's switch reaches this lane's name through `encode_listed_files`, and
+through `lab_cid` only once its `viewer` fits the Runtime type. The lab does
+not loosen, skip or copy the manifest check.
+
+| Rule | Named test | Falsifiers |
+| --- | --- | --- |
+| The listing of the copy's five files gets the pin, the value `encode_entries` gives for the same files; on a temp copy whose `viewer` is the Runtime type's string, `lab_cid` of the folder equals `encode_listed_files` of that folder's listing | `photo_listing_gets_the_lab_cid_of_its_folder` | F-CI47a (the root is the photo rule's raw-listing CID: the SHA-256 of a `{path,size,sha256}` JSON listing, not of the directory block), F-CI47b (every leaf's Tsize is 0) |
+| README's Python rule recomputes the photo pin | `readme_python_recomputes_every_lab_cid_pin` | F-CI47a |
+| `lab_cid` refuses the exact PH6 folder with `ManifestUnparsed`, as the Runtime type does | `lab_cid_refuses_the_photo_manifest_the_runtime_type_refuses` | F-CI1g (a manifest the Runtime type refuses is read as plain JSON) |
+| A listed file over one chunk is refused with its path; one of exactly one chunk is a leaf | `listed_file_over_the_chunk_limit_is_refused` | F-CI47c (`encode_listed_files` has no size refusal) |
+| A listed file over one leaf is still refused, its text names its path, its length and `encode_entries`, and `encode_entries` names the same file from its bytes (task 048) | `listed_file_over_one_leaf_names_the_bytes_call` | F-CI47c |
+| The listing's lab CID gets the one package record from `sign_cid_record`, with the record's exact payload, and `verify_cid_record` passes it; no folder is walked (task 049) | `a_closure_listing_gets_a_package_record_by_its_cid` | F-CI49c |
+| A chunked listing of every pinned bundle names the pin, agrees with `encode_entries`, and keeps each root when the file list is reversed (task 055) | `chunked_listing_reproduces_every_existing_pin` | F-CI55a (the chunk order is reversed before the one file-tree builder), F-CI55c (a multi-leaf file gets its first leaf's CID) |
+| A digest count its size does not give is refused, naming the path, the size, the expected count and the supplied count; an empty file, an exact full chunk and a short last chunk are accepted (task 055) | `chunked_listing_refuses_a_wrong_chunk_count` | F-CI55b (a surplus chunk is dropped before the count check) |
+| A saved chunked listing keeps the name of the bytes it was collected from after the source changes, signs and verifies, refuses the old record for the changed bytes with both names, and names another CID when distinct chunk digests are reversed (task 055) | `chunked_photo_listing_keeps_its_signed_name_after_source_changes` | F-CI49c |
+| Chunked paths reach the one path checker: hidden names, duplicate paths and file-and-directory paths keep its refusals (task 055) | `chunked_listing_keeps_the_one_path_checker` | F-CI18p, F-CI18q (the file-and-directory conflict) |
+
+The tests are in `tests/closure_listing.rs`. Task 047 also named
+`lab_cid_refuses_the_photo_manifest_the_runtime_type_refuses` on F-CI1g, task
+005's entry. The listing names bytes; it is no admission, grant or launch step.
+
 ## Test-key publisher signature (lab proposal)
 
 A test key can sign a bundle's printed lab CID. The check answers only "did
@@ -847,7 +1243,9 @@ signs it:
   `verify_checked_signature` and `verify_name_signature`, and task 011's
   package record: `domain_separated_digest`,
   `PackageRecord::package_record_payload`, `sign_package_record`,
-  `verify_checked_package_record` and `verify_package_record`. Each answers
+  `verify_checked_package_record` and `verify_package_record`, and task
+  049's `sign_cid_record` and `verify_cid_record`, the record's one signer
+  and one verifier over a lab CID. Each answers
   "do these bytes match this name" or "did this key sign this name or this
   record". None takes
   or returns a grant, an admission or a launch value. A test keeps the list:
@@ -909,6 +1307,12 @@ Claim scope: one Mac, these fixtures, test keys only.
 Anders's answer splits the package CID from the publisher. The CID names
 the bytes. A separate signed record names the signer and binds that CID.
 `PackageRecord` is that record, in the lab. It stays outside the bundle.
+The record binds a lab CID however it was computed: a folder walk
+(`lab_cid`), a checked bundle (`checked_bundle`), entries (`encode_entries`)
+or a closure listing (`encode_listed_files`). Since task 049 one call signs it
+and one call checks it, both over a `LabCid`: `sign_cid_record` and
+`verify_cid_record`. The folder and checked calls are the walk, or the checked
+bundle's CID, and then those calls.
 
 **The record.** `PackageRecord` has three fields: `cid` (the printed lab
 CID, exactly as `LabCid`'s `Display` prints it), `signer_did` (a canonical
@@ -963,23 +1367,25 @@ signature must verify, in Rust, over Python's digest. A short driver
 (`RECORD_DRIVER`) calls the two functions; the test checks that it holds no
 hash, domain, schema, JSON layout or function of its own.
 
-**Sign.** `sign_package_record(key, bundle)` names the bundle with `lab_cid`.
-A refusal from that walk passes through unchanged, and a refused bundle gets
-no record. It sets `signer_did` with the one DID encoder
-(`elastos_identity::encode_signing_key_did`, the same call `sign_bundle`
-uses) and signs the digest above. It writes no file and changes no bundle
-byte. The manifest's `signature` field stays empty.
+**Sign.** `sign_cid_record(key, cid)` is the one place a record is built and
+signed. It sets `cid` to the `LabCid`'s printed form and `signer_did` with the
+one DID encoder (`elastos_identity::encode_signing_key_did`, the same call
+`sign_bundle` uses), and signs the digest above. It reads and writes no file.
+`sign_package_record(key, bundle)` is `lab_cid(bundle)` and then
+`sign_cid_record`. A refusal from that walk passes through unchanged, and a
+refused bundle gets no record. Neither call changes a bundle byte, and the
+manifest's `signature` field stays empty.
 
-**Verify.** `verify_checked_package_record(checked, record, accepted)` checks
-009's `CheckedBundle` in this order. The first refusal is the answer, and it
-reads nothing from disk:
+**Verify.** `verify_cid_record(cid, record, accepted)` is the one place a
+record is checked. It checks in this order. The first refusal is the answer,
+and it reads nothing from disk:
 
 1. Decode `record.signer_did` with the one DID decoder. On error: `signer DID <did> is not a canonical Ed25519 did:key: <the decoder's own text>`.
 2. The DID is an exact member of `accepted`, the explicit list (no trust
    policy). An empty list refuses every signer: `signer <did> is not in the
    accepted list`.
-3. `record.cid` equals `checked.cid()`'s printed form. Otherwise: `record
-   names <record cid>; the bundle names <bundle cid>`.
+3. `record.cid` equals `cid`'s printed form. Otherwise: `record names
+   <record cid>; the bundle names <cid>`.
 4. Ed25519 over the digest of the record domain and
    `package_record_payload(record)`, with the key from step 1. On failure:
    `signature by <did> does not verify over <record cid>`.
@@ -988,10 +1394,19 @@ Steps 1, 2 and 4 are the name signature's own checks and reasons, from the
 same functions (`decode_signer`, `require_accepted` and one shared Ed25519
 check). Step 3 runs before step 4, so when the payload is hashed its CID is a
 printed lab CID and its DID is canonical: neither holds a character JSON
-would escape. `verify_package_record(bundle, record, accepted)` is
-`checked_bundle(bundle)` and then the checked form. It holds no check of its
-own, so a bundle the walk refuses is refused first, with the walk's reason.
+would escape. `verify_checked_package_record(checked, record, accepted)` is
+`verify_cid_record` over 009's `checked.cid()`, and
+`verify_package_record(bundle, record, accepted)` is `checked_bundle(bundle)`
+and then the checked form. Neither holds a check of its own, so a bundle the
+walk refuses is refused first, with the walk's reason.
 `Ok(())` grants nothing: it is no trust, admission or launch value.
+
+**A name, not bytes.** `sign_cid_record` and `verify_cid_record` sign and
+check a name. They read no byte, so the `LabCid` must come from
+`encode_listed_files`, `encode_entries`, `lab_cid` or `checked_bundle`, which
+name the bytes they read or were given. For a closure listing, the caller's
+walk owns that each `sha256` and `size` are those of the bytes
+([naming a closure listing](#naming-a-closure-listing)).
 
 **What stays.** `NameSignature`, `sign_bundle`, `verify_checked_signature`
 and `verify_name_signature` stay as they are: the in-memory name signature
@@ -1021,7 +1436,10 @@ several CIDs.
 | A malformed DID is refused with the decoder's text, even when listed | `record_malformed_signer_did_is_refused` | F-CI11g, F-CI11p |
 | Two faults at once: the earlier check answers | `record_refusal_order_is_stable` | F-CI11h, F-CI11i, F-CI11j |
 | Signing and the path verifier keep the walk's refusal, whatever the record | `record_paths_preserve_walk_refusals` | F-CI11k, F-CI11l, F-CI11m, F-CI11n, F-CI11o |
-| One payload builder, one digest, one DID encoder and decoder, one Ed25519 check; the path form holds no check of its own | `record_paths_share_one_implementation` | F-CI11t, F-CI11u, F-CI11v, F-CI11w |
+| One payload builder, one digest, one DID encoder and decoder, one Ed25519 check; the record is built and signed only in `sign_cid_record` and checked only in `verify_cid_record`; the folder and checked calls hold no build or check of their own | `record_paths_share_one_implementation` | F-CI11t, F-CI11u, F-CI11v, F-CI11w, F-CI49b |
+| A closure listing's lab CID (the PH6 copy's pin) gets a record with the exact payload, and `verify_cid_record` passes it | `a_closure_listing_gets_a_package_record_by_its_cid` (`tests/closure_listing.rs`) | F-CI49c |
+| For every pinned fixture, `sign_package_record` of the folder equals `sign_cid_record` of its `lab_cid`; on the PH6 copy with `viewer` as a string, a record over the listing's CID passes `verify_package_record` of the folder, and a record from the folder passes `verify_cid_record` over the listing's CID | `the_folder_record_is_the_cid_record` (`tests/closure_listing.rs`) | F-CI49b |
+| `verify_cid_record` refuses as `verify_checked_package_record` does, with the same refusal and text: a record over the PH6 listing checked against the listing with one `sha256` byte changed (naming both CIDs), and the other way round; a signer not listed; an empty list; a flipped signature byte; a malformed DID | `cid_record_refuses_as_the_checked_record_does` (`tests/closure_listing.rs`) | F-CI49a |
 | README's `record_payload` and `record_digest` give `package_record_payload`'s bytes and the signed digest for test-key records over `content-sample` and `web-app` | `readme_python_matches_the_package_record_bytes` (`tests/cross_implementation.rs`) | F-CI20a, F-CI20b, F-CI20c, F-CI20f, F-CI19d |
 
 The tests are in `tests/package_record.rs`. Every refusal test runs both
@@ -1031,7 +1449,9 @@ from the pins in `tests/common/mod.rs`, never from a literal, so a change of
 the printed form changes the pins in one place. The domains in these tests
 are written out, not read from the library, so a changed domain constant
 fails them (F-CI11x). F-CI11u, F-CI11v and F-CI11w also fail 004's
-`signature_paths_share_one_implementation`.
+`signature_paths_share_one_implementation`. Task 049's three tests are in
+`tests/closure_listing.rs`, beside the listing they sign. Every key in them is
+generated in memory.
 
 Claim scope: one Mac, these fixtures, test keys only.
 
@@ -1060,6 +1480,13 @@ web-projection app: role `app`, type `web-projection`), a provider
   loads or admits them. The test holds them tiny: each manifest at most 1024
   bytes, each provider and model stand-in at most 64 bytes, and every
   web-app file at most 1024 bytes. No file is big enough to chunk or shard.
+  These rules are not only for toy models: since task 051 a real model
+  package gets a lab CID too. The SmolLM2 package the Runtime admitted on this
+  Mac (`weights.gguf`, 144811072 bytes, 553 leaves) gets its admitted CID,
+  `bafybeiew3vuq32fvuz2kmps7lmgl4rxpvwsvklxykx4covogbrkhgy5qky`, from
+  `encode_entries` and `lab_cid` (a hand run, see the "Kubo cross-check"
+  paragraph under
+  [the cross-implementation check](#the-cross-implementation-check)).
 - **A WASM app here has one closure.** `wc001-core` (role `app`, type
   `wasm`) is the WASM app. Its committed fixture is the manifest alone: its
   entrypoint `capsule.wasm` is built separately by wc-001's `tools/build` in
@@ -1414,7 +1841,7 @@ Each route, field and state, and where it comes from. #309 is draft PR #309,
 | A refused launch leaves no instance | `standin_launches_by_cid_only`, `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32f (the instance is added before the checks) |
 | A launched answer has its listed instance | `standin_launches_a_signed_bundle_by_its_cid` | F-CI32g (answers launched, adds no instance) |
 | A valid signature alone yields no grant: a launch adds none, and the answer and the list hold no grant key | `standin_valid_signature_alone_yields_no_grant` | F-CI33a (a launch grants each `capabilities` entry of the manifest) |
-| The grant view lists every held grant, so it is not a constant | `standin_grant_view_lists_a_seeded_grant` | F-CI33b (the view answers no entries whatever is held) |
+| The grant view lists every held grant of every session, so it is not a constant | `standin_grant_view_lists_a_seeded_grant`, `standin_grant_view_lists_every_held_grant_of_every_session` | F-CI33b (the view answers no entries whatever is held), F-CI37a (only the first held grant), F-CI37b (only the first held grant's session), F-CI37c (one `request_id` for every grant) |
 | The grant view answers under the `all_sessions_live` marker | `standin_valid_signature_alone_yields_no_grant`, `standin_grant_view_lists_a_seeded_grant` | F-CI33c (the marker dropped) |
 
 Not shown:
@@ -1440,7 +1867,11 @@ checked bundle that passed every check above. `checked_launch` takes the
 manifest's `name` (`CheckedBundle::manifest_name()`) and the content of the
 `asks.json` entry (`CheckedBundle::entries()`) from the same `CheckedBundle`,
 the one walk (P10), and the launch keeps that content in the instance, once: `Some(bytes)`, or `None` when
-the bundle has no `asks.json`. Nothing reads the folder again.
+the bundle has no `asks.json`. Nothing reads the folder again. Task 044 shows
+that for the launch itself: `set_after_walk`, a lab test seam, not a route,
+gives `checked_launch` a hook that it calls once on the stored folder, right
+after the one walk and before (e), so a test can change the bytes on disk
+between the walk and the launch. With no hook set, nothing is called.
 `asks_of(session_id)`, a lab test seam, not a route (#309 has no asks field on
 any route), answers that instance's bytes, and `None` for an unknown session.
 The launch answer, the `get_capsules` entry and the grant view keep exactly
@@ -1456,12 +1887,20 @@ no new instance and an empty grant view.
 (which has no `asks.json`), each signed by a fresh test key, in both orders:
 the `agent-host` session answers its bytes, the `web-app` session answers
 `None`, and so does an unknown session.
+`standin_takes_the_asks_from_the_walk_not_the_folder` launches the same signed
+bundle with a hook that changes one byte of the stored `asks.json`: the launch
+answers `launched`, the stored `asks.json` no longer equals the committed
+fixture bytes (so the hook ran), and the session answers the committed fixture
+bytes, which the test reads itself. Before task 044, a launch that read
+`asks.json` from the folder after the walk passed both tests above, because
+neither changes the folder between the walk and the launch.
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
 | The instance keeps the signed bytes from launch; a change on disk after launch does not reach it | `standin_hands_an_instance_only_its_signed_asks_bytes` | F-CI35a (the planted accept-anything stub: `asks_of` reads `asks.json` from the stored folder at call time) |
 | Each session answers its own asks | `standin_gives_each_session_its_own_asks` | F-CI35b (`asks_of` ignores the session and answers the first instance's asks) |
 | A bundle with no `asks.json` is handed `None`, not empty bytes | `standin_gives_each_session_its_own_asks` | F-CI35c (`Some(Vec::new())` for a bundle with no `asks.json`) |
+| A change on disk between the walk and the launch does not reach the instance | `standin_takes_the_asks_from_the_walk_not_the_folder` | F-CI44a (the 041 review's stub: `checked_launch` reads `asks.json` from the stored folder at launch), F-CI44b (the hook is never called), F-CI44c (the hook runs before the walk, so (e) refuses) |
 
 Not shown:
 
@@ -1504,19 +1943,29 @@ second identity scheme sits beside it (task 018, the carry of blocked task
 One Mac, these fixtures: macOS 26.5.2 on arm64 (APFS), rustc 1.91.0
 (f8297e351 2025-10-28). The swap tests make each change happen at a chosen
 moment through the observer; they do not prove the walk against every timing
-on every filesystem. Not checked here: Linux, the Runtime's IPFS CID, and
-Kubo itself (none is installed on this Mac). The outside check is the
+on every filesystem. Not checked here: Linux and the Runtime's IPFS CID.
+Kubo itself is checked only by hand, not by the gate (see the "Kubo
+cross-check" paragraph under
+[the cross-implementation check](#the-cross-implementation-check)). The
+committed outside check is the
 README's Python block, written from the byte rules: the committed test
 `readme_python_recomputes_every_lab_cid_pin` runs it with `python3 -I` (Python
 3.9.6 on this Mac) and requires it to give every pin and the Rust encoder's
-value for the same files. The tests pin the single-block, non-sharded subset
-of the profile only.
+value for the same files. The tests pin the non-sharded subset of the
+profile only, with files at any tree depth (one raw leaf, since task 048 a
+balanced file root over 2 to 174 raw leaves, and since task 051 Kubo's
+balanced file tree at any depth, pinned at two levels). The file tree's bytes
+are the lab's reading of the profile; the hand-run Kubo printed every
+file-tree pin too, and the lab encoder gives the model package CID the
+Runtime admitted on this Mac (task 051).
 
 The claim is "Kubo v0.40.1 profile, computed by the lab", and nothing more.
-No offline Kubo cross-check has been run (Kubo v0.40.1, the same profile
-flags, hash-only import, no network). Until one prints the same value as a
-committed pin, the lab CID is not called equal to the Runtime's CID or to
-Kubo's output. The Runtime's CID names a release archive, not the bundle's
+One offline Kubo v0.40.1 hash-only cross-check with the Runtime's profile
+flags was run by hand on this Mac (task 050) and printed every committed pin,
+and the claim words stay "Kubo v0.40.1 profile, computed by the lab" until
+Rong or Flint changes them. A hand run on one Mac is not a gate, so the lab
+CID is still not called equal to the Runtime's CID or to Kubo's output in
+general. The Runtime's CID names a release archive, not the bundle's
 files (see [Why a lab CID](#why-a-lab-cid-and-not-the-runtimes-cid)). The test
 `the_lab_cid_claim_stays_computed_by_the_lab` keeps this: these two sections
 and the module doc of `src/lib.rs` say the claim word for word, this section
@@ -1585,6 +2034,10 @@ src/lib.rs               checked_bundle, lab_cid, check_name and its checked for
                          digest, the lab package record and the lab variant binding
 fixtures/                content-sample, web-app, wc001-core, agent-host, provider,
                          model, provider-variant-a, provider-variant-b
+consumer-fixtures/       photo-stand-in-photo-set: the photo lane's PH6 fixture,
+                         byte for byte from examples/photo-viewer/host-test/
+                         fixtures/stand-in-photo-set/ at d047a069a; not a
+                         fixture (its manifest fails the Runtime parse)
 recipes/                 provider-variant.recipe, the variants' lab stand-in recipe
 tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 driver,
                          the library's code for tests that read it, fresh test keys,
@@ -1600,6 +2053,9 @@ tests/bytes.rs           every byte is the name: manifest, payload, asks.json, f
 tests/check_name.rs      a claimed name is checked, never trusted; one naming path
 tests/checked_bundle.rs  the name and the bytes it covers; the checked name check
 tests/claims.rs          the claim stays "Kubo v0.40.1 profile, computed by the lab"
+tests/closure_listing.rs a closure listing gets the lab CID of its folder; the PH6
+                         manifest is refused; a listed file over one chunk is refused;
+                         the listing's CID gets the one package record
 tests/cross_implementation.rs
                          README's Python rule, the pins and the encoder agree;
                          README's two digest blocks and the signed bytes agree
@@ -1625,7 +2081,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 259 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 302 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1662,7 +2118,23 @@ and task 032's F-CI32a to F-CI32g, task 033's F-CI33a to F-CI33c and task
 035's F-CI35a to F-CI35c (all three: see
 [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)), and task 036's
 F-CI36a (see [the checked bundle](#checked-bundle-the-name-and-the-bytes-it-covers))
-and F-CI36b (see [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)).
+and F-CI36b (see [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)),
+and task 037's F-CI37a to F-CI37c (see
+[the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)), and task 044's
+F-CI44a to F-CI44c (see
+[asks come only from the signed bytes](#asks-come-only-from-the-signed-bytes-m1-check-b2-no-schema-part)),
+and task 047's F-CI47a to F-CI47c (see
+[naming a closure listing](#naming-a-closure-listing)), and task 048's
+F-CI48a to F-CI48e (see [the encoding](#the-encoding)), and task 049's
+F-CI49a to F-CI49c (see
+[the lab package record](#lab-package-record-outside-the-bundle)), and task
+051's F-CI51a to F-CI51c, and task 053's F-CI53a and F-CI53b (both: see
+[the encoding](#the-encoding)), and task 055's F-CI55a to F-CI55c (see
+[naming a closure listing](#naming-a-closure-listing)), and task 056's
+F-CI56a to F-CI56l (see [the encoding](#the-encoding); F-CI18h, F-CI53a and
+F-CI53b are retargeted by it), and task 054's F-CI54a to F-CI54e (see
+[the encoding](#the-encoding)), and task 061's F-CI61a (see
+[the encoding](#the-encoding); F-CI56j is retargeted by it).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -1753,6 +2225,89 @@ The stand-in's record lookup moved into `check_records`, so F-CI32c now
 replaces the record check there and F-CI32d answers `Ok(())` where no record
 binds the CID. The stand-in imports neither `CapsuleManifest` nor
 `MANIFEST_FILE` now, so F-CI33a's planted code names both by their paths.
+Task 037's entries also edit `tests/common/mod.rs`, in `StandInRuntime`:
+F-CI37a and F-CI37b in `get_capability_list_all_sessions_live`, on F-CI33b's
+anchor line (found exactly once; entries may share an anchor), and F-CI37c in
+`seed_grant`, its anchor a line task 033 added, found exactly once. Task 037
+changed no older edit's text.
+Task 044's entries also edit `tests/common/mod.rs`, in `checked_launch`:
+F-CI44a on the answer line, F-CI44b on the hook call, and F-CI44c on the walk
+line and the hook call together. Each anchor is found exactly once (F-CI44b's
+line is part of F-CI44c's anchor). Task 044 changed no older edit's text, and
+F-CI35a to F-CI35c's anchor lines stay byte for byte.
+Task 047's entries all edit `src/lib.rs`, in `encode_listed_files`: F-CI47a on
+the root line (`encode_directory(&root, "", &naming_hash)`), F-CI47b on the
+leaf's `tsize` line, and F-CI47c on the size refusal. Each anchor is a line
+task 047 added, found exactly once; F-CI47c shares F-CI18e's anchor (entries
+may share one) and names its own test. Task 047 moved the leaf and the size
+refusal from `encode_entries` into `encode_listed_files`, so four of task
+018's edits anchor there now, each with its same tests: F-CI18c gives the leaf
+the dag-pb codec, F-CI18e removes the size refusal, and F-CI18n makes an empty
+file a dag-pb file node, each as before. F-CI18i still gives a file of at most
+32 bytes an inline CID (identity multihash `0x00` and its length), but the
+encoder holds a digest and no bytes now, so the first bytes of the digest stand
+in for the file's bytes; its title says so. F-CI1g (task 005's) also names
+`lab_cid_refuses_the_photo_manifest_the_runtime_type_refuses`. Every other
+older edit's text is still found exactly once.
+Task 048's entries all edit `src/lib.rs`: F-CI48a on the link-name line of
+`put_links` (F-CI1b's and F-CI1p's anchor; entries may share one), which it
+skips for an empty name, so only a file root's links change; F-CI48b and
+F-CI48c in `file_root_block`; F-CI48d on `file_root`'s Tsize line; F-CI48e on
+`MAX_FILE_LINKS` (task 051 moved two of these anchors and one test, below). Each anchor is found exactly once. Task 048 moved the leaf
+into one `raw_leaf`, which `encode_listed_files`, `file_node` and `file_root`
+all call, so the leaf's line is now `(cid_bytes(RAW_CODEC, sha256), size)`.
+Four edits anchor there now, each with its same bug and tests: F-CI18c (the
+dag-pb codec), F-CI18i (an inline CID for at most 32 bytes), F-CI18n (an empty
+file as a dag-pb file node) and F-CI47b (every leaf's Tsize 0). Without the
+move they would plant only in the listing call, and `lab_cid` would no longer
+see them. The root line F-CI47a anchors on is now in `encode_tree`, where no
+`ListedFile` is in scope, so its planted code lists the tree's files (path,
+the leaf CID's digest, Tsize) itself; its title, bug and tests are the same.
+The one-leaf refusal F-CI18e removed is now only the listing call's (F-CI47c
+removes it), so F-CI18e, keeping its id, then removed the 174-leaf refusal and
+named `file_of_174_leaves_is_named_and_one_byte_more_is_refused`; its title
+said so (task 051 retargeted it again, below). F-CI47c also names `listed_file_over_one_leaf_names_the_bytes_call`.
+Task 048 split `directory_block`'s link loop into `put_links` with the same
+lines, so F-CI1b, F-CI1p and F-CI1q keep their text, and every other older
+edit's text is still found exactly once.
+Task 049's entries all edit `src/lib.rs`: F-CI49a removes the CID compare
+call from `verify_cid_record`, F-CI49b makes `sign_package_record` build and
+sign its own record under the name-signature domain, and F-CI49c makes
+`sign_cid_record` sign the payload of a record with an empty `cid`. Each
+anchor is found exactly once (F-CI49a shares F-CI11r's first anchor, and
+F-CI49b F-CI11e's; entries may share one). Task 049 moved the record's build
+into `sign_cid_record` and its four checks into `verify_cid_record`, and
+`require_record_cid` now takes the `LabCid`. So six edits anchor on lines
+whose text changed, each with its same bug and tests: F-CI11c, F-CI11i,
+F-CI11j, F-CI11p and F-CI11r read `require_record_cid(cid, record)` (F-CI11c's
+rebound record takes `cid.to_string()`, and F-CI11r's path form compares
+against `held.cid()`), and F-CI15ae's anchor is the compare line
+`if record.cid != cid.to_string() {`. `sign_package_record` is now
+`lab_cid(bundle)?` and then `sign_cid_record`, so F-CI11k drops the
+walk's refusal on `let cid = lab_cid(bundle)?;`, and F-CI11e writes the record
+next to the bundle after that call. The titles of F-CI11p to F-CI11v name
+`verify_cid_record`, and F-CI11w's names `sign_cid_record`, where their bug
+is planted now. Every other older edit's text is the same and still found
+exactly once.
+Task 051's entries all edit `file_root` in `src/lib.rs`, and each names
+`file_over_174_leaves_gets_a_second_tree_level`, whose 175-leaf pin is the
+only one with an inner node: F-CI51a links a lone leaf past the last full
+node straight from its parent (no node of one link), F-CI51b writes an inner
+node's Tsize as its blocksize in its parent, not its filesize, and F-CI51c
+writes the child's filesize as a link's Tsize, so the link to an inner node
+leaves out that node's block (a leaf's Tsize and filesize are equal, so one
+level is unchanged by F-CI51b and F-CI51c). Each anchor is a line task 051
+added, found exactly once. Task 051 removed the 174-leaf refusal, so F-CI18e,
+keeping its id, now stops the tree at one level by dropping every leaf past
+the first 174 (`.take(MAX_FILE_LINKS)` on the leaves) and names the new test;
+its title says so. F-CI48e keeps its anchor (`MAX_FILE_LINKS` 175, so the
+175-leaf file gets one node) and now names the new test. A file tree's node
+now takes each child's filesize as a blocksize and sums its children's
+Tsizes, so two task 048 anchors moved, each with its same bug and test:
+F-CI48b removes the `for blocksize in blocksizes` loop of `file_root_block`,
+and F-CI48d drops `block.len()` from the node's Tsize line in `file_root`;
+their titles say so. Every other older edit's text is the same and still
+found exactly once.
 
 ### The inventory check
 
@@ -1888,7 +2443,26 @@ At task 032 it reported `summary: 251 CAUGHT of 251` (`baseline: 130 named
 tests pass without an edit, 0 do not`; with the id prefix `F-CI32`: 7 of 7).
 At task 036 it reported `summary: 259 CAUGHT of 259` (`baseline: 136 named
 tests pass without an edit, 0 do not`; with the id prefix `F-CI36`: 2 of 2,
-and the seventeen moved edits each CAUGHT).
+and the seventeen moved edits each CAUGHT). At task 037 it reported
+`summary: 262 CAUGHT of 262` (`baseline: 137 named tests pass without an
+edit, 0 do not`; with the id prefix `F-CI37`: 3 of 3). At task 044 it
+reported `summary: 265 CAUGHT of 265` (`baseline: 138 named tests pass
+without an edit, 0 do not`; with the id prefix `F-CI44`: 3 of 3, and with
+`F-CI35`: 3 of 3).
+At task 047, run with the ids `F-CI47 F-CI18 F-CI1g` (the new entries, the
+four task 018 entries it moved, with the rest of task 018's, and F-CI1g, which
+gained a test), it reported `summary: 23 CAUGHT of 23` (`baseline: 16 named
+tests pass without an edit, 0 do not`). The whole list was not run at task 047.
+At task 048, run with the ids `F-CI48 F-CI18e F-CI47c`, it reported
+`summary: 7 CAUGHT of 7` (`baseline: 4 named tests pass without an edit, 0 do
+not`); run with the prefixes `F-CI1 F-CI18 F-CI19 F-CI47 F-CI48` (every edit in
+`src/lib.rs`'s encoder and every entry task 048 moved, with F-CI10 to F-CI17,
+which the prefix `F-CI1` also selects), it reported
+`summary: 134 CAUGHT of 134` (`baseline: 80 named tests pass without an edit,
+0 do not`). The whole list was not run at task 048.
+At task 051, run with the ids `F-CI51 F-CI48 F-CI18e`, it reported
+`summary: 9 CAUGHT of 9` (`baseline: 2 named tests pass without an edit, 0 do
+not`). The whole list was not run at task 051.
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029,
 030, 031 and 032 prove each of their falsifiers by break, named test fails, revert.
