@@ -61,7 +61,9 @@
 //!
 //! `start_provider` is a lab test seam, not a route. The caller passes the
 //! confinement profile it already wrote. Started means `init` answered `ok`.
-//! Refused leaves no child.
+//! Refused leaves no child. The storage root stays under the borrowed home:
+//! an outside base, a `..` component, or a symlink is refused before a
+//! directory is created and before a child starts.
 
 use crate::harness::{ChildInput, RunningChild, ThrowawayHome};
 use crate::identity;
@@ -2231,8 +2233,10 @@ impl StartedProvider<'_> {
 /// decide that an unverified caller is authorized." The caller passes the
 /// profile path it already wrote. Started means that binary answered `init`
 /// with `status` `ok`, and this value owns the live child. Refused carries a
-/// nonempty reason and leaves no child. This seam stores no key and no
-/// credential, and it does not mint a grant.
+/// nonempty reason and leaves no child. The storage root stays under the
+/// borrowed home. An outside base, a `..` component, or a symlink is refused
+/// before a directory is created and before a child starts. This seam stores
+/// no key and no credential, and it does not mint a grant.
 pub fn start_provider<'a>(
     home: &'a ThrowawayHome,
     binary_path: &Path,
@@ -2260,6 +2264,15 @@ pub fn start_provider<'a>(
     let binary = launch_file(binary_path, name, "provider binary")?;
     let profile = launch_file(profile_path, name, "confinement profile")?;
     let root = storage_layout(name, base_path)?;
+    // One check for the base, the parent `create_dir_all` would make, and the
+    // `STORAGE_ROOT` binding. The layout path contains that base, and the
+    // parent is its prefix. Refuse before creating a directory or binding it.
+    if !crate::harness::directories_only(&root, home.root()) {
+        return Err(format!(
+            "{name} start is refused: the storage root {} stays under this home",
+            root.display()
+        ));
+    }
     let parent = root.parent().ok_or_else(|| {
         format!(
             "{name} start is refused: the storage root {} has no parent",

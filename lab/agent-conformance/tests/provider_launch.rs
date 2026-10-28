@@ -652,6 +652,154 @@ fn standin_provider_launch_resolves_relative_profile_once() {
     home.finish().expect("the passed home is removed");
 }
 
+fn storage_stays_home(base: &Path) -> String {
+    format!(
+        "wallet-provider start is refused: the storage root {} stays under this home",
+        wallet_dir(base).display()
+    )
+}
+
+fn home_name(home: &ThrowawayHome) -> String {
+    home.root()
+        .file_name()
+        .expect("home name")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Removes a path this test created, or a path a broken launch created.
+struct RemoveDir(PathBuf);
+
+impl Drop for RemoveDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn normal_profile(home: &ThrowawayHome) -> PathBuf {
+    let bytes = fs::read(committed_profile()).expect("the committed profile must be readable");
+    write_profile(home, "confine.sb", &bytes)
+}
+
+/// The first base is an absent sibling of the home. The normal profile would
+/// allow wallet init there. The seam refuses before it creates that sibling
+/// and before it starts a child.
+///
+/// Falsifier: F-shared-launch-unowned deletes the `directories_only` call.
+/// This test, the parent-segment test and the symlink test then fail.
+#[test]
+fn standin_provider_launch_refuses_storage_outside_its_home() {
+    let tool = require_confinement_tool();
+    let binary = wallet_provider_binary();
+    let home = ThrowawayHome::new().expect("throwaway home");
+    let profile = normal_profile(&home);
+    let sibling = home
+        .root()
+        .parent()
+        .expect("lane target")
+        .join(format!("outside-base-{}", home_name(&home)));
+    let _cleanup = RemoveDir(sibling.clone());
+    assert!(
+        !sibling.exists(),
+        "the outside base starts absent: {}",
+        sibling.display()
+    );
+
+    let reason = refused(&home, binary, &sibling, macos_host(), tool, &profile);
+    assert_eq!(reason, storage_stays_home(&sibling));
+    assert!(
+        !sibling.exists(),
+        "an outside base creates no directory: {}",
+        sibling.display()
+    );
+    assert_no_child(&home);
+    home.finish().expect("the passed home is removed");
+}
+
+/// A base whose lexical path contains `..` leaves the home. The seam refuses
+/// before `create_dir_all` follows that segment and before a child starts.
+///
+/// Falsifier: F-shared-launch-dotdot deletes the non-normal component refusal
+/// in `directories_only`. The launch then creates the escaped parent and the
+/// ownership assertion fails. F-shared-launch-unowned deletes the call and
+/// this test fails with the other two.
+#[test]
+fn standin_provider_launch_refuses_storage_with_a_parent_segment() {
+    let tool = require_confinement_tool();
+    let binary = wallet_provider_binary();
+    let home = ThrowawayHome::new().expect("throwaway home");
+    let profile = normal_profile(&home);
+    let escaped = home
+        .root()
+        .parent()
+        .expect("lane target")
+        .join(format!("outside-dotdot-{}", home_name(&home)));
+    let _cleanup = RemoveDir(escaped.clone());
+    let base = home
+        .root()
+        .join(format!("nested/../../outside-dotdot-{}", home_name(&home)));
+    assert!(
+        !escaped.exists(),
+        "the escaped directory starts absent: {}",
+        escaped.display()
+    );
+
+    let reason = refused(&home, binary, &base, macos_host(), tool, &profile);
+    assert_eq!(reason, storage_stays_home(&base));
+    assert!(
+        reason.contains(".."),
+        "the refusal keeps the parent segment: {reason}"
+    );
+    assert!(
+        !escaped.exists(),
+        "a parent segment creates no directory: {}",
+        escaped.display()
+    );
+    assert!(
+        !home.root().join("nested").exists(),
+        "a parent segment creates no intermediate directory"
+    );
+    assert_no_child(&home);
+    home.finish().expect("the passed home is removed");
+}
+
+/// A base that is a symlink to a directory outside the home is refused before
+/// the seam creates children through that link and before a child starts.
+///
+/// Falsifier: F-shared-launch-unowned deletes the `directories_only` call.
+/// The launch then creates `ElastOS` through the link and the ownership
+/// assertion fails.
+#[test]
+fn standin_provider_launch_refuses_storage_through_a_symlink() {
+    let tool = require_confinement_tool();
+    let binary = wallet_provider_binary();
+    let home = ThrowawayHome::new().expect("throwaway home");
+    let profile = normal_profile(&home);
+    let outside = home
+        .root()
+        .parent()
+        .expect("lane target")
+        .join(format!("outside-link-{}", home_name(&home)));
+    let _cleanup = RemoveDir(outside.clone());
+    fs::create_dir(&outside).expect("the symlink target must exist");
+    let link = home.root().join("storage-link");
+    std::os::unix::fs::symlink(&outside, &link).expect("the base symlink");
+    assert!(
+        !outside.join("ElastOS").exists(),
+        "the link target starts without storage"
+    );
+
+    let reason = refused(&home, binary, &link, macos_host(), tool, &profile);
+    assert_eq!(reason, storage_stays_home(&link));
+    assert!(
+        !outside.join("ElastOS").exists(),
+        "a symlink base creates no directory in {}",
+        outside.display()
+    );
+    assert_no_child(&home);
+    home.finish().expect("the passed home is removed");
+}
+
 /// A failed timeout cleanup leaves the same owner able to retry through either
 /// explicit stop or Drop after the Home's directory guard is restored.
 #[test]

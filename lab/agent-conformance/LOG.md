@@ -14140,4 +14140,79 @@ with exit 0 in 0.16 seconds after the repair.
 The supervisor owns the full-suite check and fresh review; this repair ran
 the focused tests and kept Git untouched.
 
+### Round 2 ownership
+
+`start_provider` calls `directories_only` on the storage root before `create_dir_all` and before the `STORAGE_ROOT` binding. That one check refuses an outside base, a `..` or `.` component, and a symlink. The reason is `wallet-provider start is refused: the storage root <path> stays under this home`. A PASS gives the Runtime no C0 credit and no B3 credit.
+
+Plants were applied alone, then restored before the next. Each planted crate compiled. No `falsifiers.json` id. After restore, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` shows the ownership check and no plant.
+
+F-shared-launch-unowned: the `directories_only` call is deleted. Named tests: `standin_provider_launch_refuses_storage_outside_its_home` panicked at `tests/provider_launch.rs:132:18`, `Ok(_) => panic!("the launch must be refused")`. `standin_provider_launch_refuses_storage_through_a_symlink` panicked at `tests/provider_launch.rs:791:5`, `assert_eq!(reason, storage_stays_home(&link))`, left the init `storage_error` (`Operation not permitted`), right the ownership reason. `standin_provider_launch_refuses_storage_with_a_parent_segment` panicked at `tests/provider_launch.rs:747:5`, `assert_eq!(reason, storage_stays_home(&base))`, left the init `storage_error` for the escaped `SystemServices` directory, right the ownership reason. Real 2.76 seconds. The restored file has those two `assert_eq!` lines at 793 and 748 after the doc comments gained lines.
+
+Old:
+
+```text
+    // One check for the base, the parent `create_dir_all` would make, and the
+    // `STORAGE_ROOT` binding. The layout path contains that base, and the
+    // parent is its prefix. Refuse before creating a directory or binding it.
+    if !crate::harness::directories_only(&root, home.root()) {
+        return Err(format!(
+            "{name} start is refused: the storage root {} stays under this home",
+            root.display()
+        ));
+    }
+```
+
+New: that block deleted.
+
+F-shared-launch-dotdot: the non-normal component refusal in `directories_only` is deleted. Named test `standin_provider_launch_refuses_storage_with_a_parent_segment` panicked at `tests/provider_launch.rs:747:5`, `assert_eq!(reason, storage_stays_home(&base))`. Left was the init `storage_error` (`Operation not permitted`) for the escaped `SystemServices` directory. Right was the ownership reason. `standin_provider_launch_refuses_storage_outside_its_home` and `standin_provider_launch_refuses_storage_through_a_symlink` passed. Real 1.92 seconds.
+
+Old:
+
+```text
+    if relative
+        .components()
+        .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return false;
+    }
+```
+
+New: that block deleted.
+
+F-shared-launch-binary-file: `launch_file` is not used for the provider binary. Named test `standin_provider_launch_refuses_unconfined_host` panicked at `tests/provider_launch.rs:356:5`, the missing-binary `assert_eq!`. Left was the unused profile's `is not a file` reason. Right was `wallet-provider start is refused: the provider binary <path> is not a file`. Real 1.47 seconds.
+
+Old:
+
+```text
+    let binary = launch_file(binary_path, name, "provider binary")?;
+```
+
+New:
+
+```text
+    let binary = binary_path.to_path_buf();
+```
+
+F-shared-launch-profile-file: `launch_file` is not used for the confinement profile. Named test `standin_provider_launch_uses_supplied_profile` panicked at `tests/provider_launch.rs:410:5`, `missing_reason.contains("is not a file")`. The reason was `wallet-provider start is refused: the confinement profile <path> could not be read: No such file or directory (os error 2)`. Real 2.00 seconds.
+
+Old:
+
+```text
+    let profile = launch_file(profile_path, name, "confinement profile")?;
+```
+
+New:
+
+```text
+    let profile = profile_path.to_path_buf();
+```
+
+### Round 2 gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. The wallet-provider binary stayed the one already built under `lab/agent-conformance/target/wallet-provider`. The shared heavy-build lease was held. No `Cargo.toml` or `Cargo.lock` change. No census leftover, so no rerun.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.17 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 265.63 seconds, inside the 600-second bound. Targets: lib 80 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; provider_launch 12 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0.
+- Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test provider_launch -- --nocapture`: exit 0, 12 passed, finished in 4.97 seconds, real 5.08 seconds.
+
 

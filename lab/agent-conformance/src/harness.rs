@@ -32,12 +32,19 @@ fn inside(path: &Path, root: &Path) -> bool {
             .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
 }
 
-// Examine each in-root component before going further. In particular, never
-// canonicalize an outside path or follow a symlink to learn where it leads.
+// Examine each in-root component before going further. A `.` or `..` component
+// is refused before any stat, so a missing prefix cannot hide a later escape.
+// Never canonicalize an outside path or follow a symlink to learn where it leads.
 pub(crate) fn directories_only(path: &Path, root: &Path) -> bool {
     let Ok(relative) = path.strip_prefix(root) else {
         return false;
     };
+    if relative
+        .components()
+        .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return false;
+    }
     let mut cursor = root.to_path_buf();
     for part in relative.components() {
         cursor.push(part);
