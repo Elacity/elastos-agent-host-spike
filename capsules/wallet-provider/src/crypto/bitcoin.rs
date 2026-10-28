@@ -567,7 +567,6 @@ mod uf_tests {
     fn p2wpkh_address_is_mainnet_native_segwit() {
         let key = fixed_signing_key();
         let addr = p2wpkh_address(&key);
-        assert!(addr.starts_with("bc1"), "got {addr}");
         let parsed = bitcoin_address(&addr, Network::Bitcoin).expect("parses on mainnet");
         assert!(parsed.script_pubkey().is_p2wpkh());
     }

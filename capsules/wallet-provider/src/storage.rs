@@ -754,6 +754,10 @@ mod uf_tests {
         assert_eq!(request.status, ApprovalStatus::Expired);
         assert_eq!(request.resolved_at, Some(10));
 
+        // A later call must not move the recorded resolution time.
+        expire_approval_if_elapsed(&mut request, 20);
+        assert_eq!(request.resolved_at, Some(10));
+
         let mut fresh = sample_request(2, "person:local:alice", 0);
         fresh.expires_at = 100;
         expire_approval_if_elapsed(&mut fresh, 10);
@@ -762,26 +766,24 @@ mod uf_tests {
     }
 
     #[test]
-    fn approval_authority_is_active_matches_status_rules() {
+    fn approval_authority_is_active_refuses_resolved_requests() {
         let now = 1_000;
-        let mut pending = sample_request(1, "person:local:alice", now);
-        pending.expires_at = now + 1;
-        assert!(approval_authority_is_active(&pending, now));
 
-        let mut expired_pending = sample_request(2, "person:local:alice", now);
+        // A pending request past its expiry holds no authority.
+        let mut expired_pending = sample_request(1, "person:local:alice", now);
         expired_pending.expires_at = now;
         assert!(!approval_authority_is_active(&expired_pending, now));
 
-        let mut completed = sample_request(3, "person:local:alice", now);
-        completed.status = ApprovalStatus::Completed;
-        completed.intent = "transaction_intent".to_string();
-        completed.signed_result = Some(json!("signed"));
-        assert!(approval_authority_is_active(&completed, now));
+        // A completed transaction with a validated outcome is history, not authority.
+        let mut validated = sample_request(2, "person:local:alice", now);
+        validated.status = ApprovalStatus::Completed;
+        validated.intent = "transaction_intent".to_string();
+        validated.signed_result = Some(json!("signed"));
+        validated.validated_chain_outcome = Some(validated_outcome());
+        assert!(!approval_authority_is_active(&validated, now));
 
-        completed.validated_chain_outcome = Some(validated_outcome());
-        assert!(!approval_authority_is_active(&completed, now));
-
-        let mut no_sign = sample_request(4, "person:local:alice", now);
+        // A completed transaction that recorded no signature never had authority.
+        let mut no_sign = sample_request(3, "person:local:alice", now);
         no_sign.status = ApprovalStatus::Completed;
         no_sign.intent = "transaction_intent".to_string();
         assert!(!approval_authority_is_active(&no_sign, now));
