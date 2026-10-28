@@ -10192,3 +10192,288 @@ New:
 | 8. Identity, admission and allowance stay separate? | Yes | The shell check at `:597`, the record-status filter at `:620-624` and the grant-life filter at `:629-633` are separate decisions; the route changes no instance phase, and an `Exhausted` grant stays `Exhausted`. |
 
 A passing row gives the real Runtime no A6 credit for this revoke.
+
+### Round 2 — SPEC FIX extensions
+
+The route's bytes stay as round 1 except its doc comment now states the refusal precedence: another body key is refused before a non-string `reason` is checked (`standin-runtime/mod.rs:588-589`). The two named tests now cover preserved record and grant states, a live grant with `session_ended: true`, all preserved grant fields, malformed client bodies, a null body, an empty reason, and the two-fault body precedence. All plants ran by hand and were restored before the next one.
+
+`standin_shell_revoke_all_drops_every_live_grant` at `:6513` now seeds `req-expired` on `component-2`, lets it expire at instant 300, and then sets instant 4 through the existing `set_instant` seam. It seeds `req-denied` on `component-1` and denies it with the shell route before the revoke-all. It seeds `req-ended` on `component-2` (`res-ended`, `read`, `session`, `granted_at` 4, `Live`, `session_ended` true) and `req-old` on `component-1` (`res-old`, `read`, `session`, `granted_at` 4, `Expired`, `session_ended` false). The live-grant set before the revoke-all is exactly `req-1`, `req-2`, `req-ended` and `req-orphan`. After the revoke-all the component-1 records are `req-1` and `req-3` denied with `stop every grant` and `req-denied` still denied with `deny shared read`; the component-2 records are `req-2` denied with `stop every grant`, `req-expired` still expired, and `req-p` still pending. `req-ended` is `(Revoked, true)` and `req-old` is `(Expired, false)`. The `entry` view of `req-3`, `req-old` and `req-ended` keeps `request_id`, `session_id`, `resource`, `action`, `duration` and `granted_at`; `req-3` keeps its once duration and `req-ended` keeps `res-ended`. The second call leaves every record, every life and the empty live set.
+
+`standin_shell_revoke_all_refuses_without_shell` at `:6937` now adds a client with a string body and a client with two body faults; both are 403 `This endpoint requires shell privileges` before the body is read. A shell body `{"reason":1,"token":"req-1"}` is 400 `revoke body rejects token`: the unknown key wins over the non-string reason. After the `{}` default-reason scenario it builds two fresh two-grant stand-ins. `Value::Null` is Ok `{"success":true,"reason":"Revoked all by user"}` and `{"reason":""}` is Ok `{"success":true,"reason":""}`; both records are denied with that shell reason, both grants are `(Revoked, false)`, the live set is empty and both instances stay `running`.
+
+Hand-run plants: no `falsifiers.json` id and no new id. The drops-test command was `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_revoke_all_drops_every_live_grant -- --exact`. The refusal-test command was the same with `standin_runtime::tests::standin_shell_revoke_all_refuses_without_shell`. Each planted crate compiled and each planted run failed on its named assertion. After the last restore, `git diff` shows no plant.
+
+F-standin-revoke-all-stub (drops): the start of `post_capability_revoke_all` returns Ok of `{"success": true, "reason": "stop every grant"}` before the caller is read. Failed at `:6690:9` on `:6696` ("the revoke-all denies both granted component-1 records and keeps req-denied"), with the left records `granted` and the right records `denied`.
+
+Old:
+
+```text
+        const DEFAULT_REASON: &str = "Revoked all by user";
+
+        require_shell(caller)?;
+```
+
+New:
+
+```text
+        const DEFAULT_REASON: &str = "Revoked all by user";
+
+        return Ok(json!({ "success": true, "reason": "stop every grant" }));
+        require_shell(caller)?;
+```
+
+F-standin-revoke-all-keep (drops): the route writes the denied records and does not call the `Revoked` function. Failed at `:6716:9` on `:6728` ("the revoke-all drops the req-1 live grant"), `left: (Live, false)`, `right: (Revoked, false)`.
+
+Old:
+
+```text
+        let live = self
+            .grants
+            .iter()
+            .filter(|grant| is_live(grant.life))
+            .map(|grant| grant.request_id.clone())
+            .collect::<Vec<_>>();
+        for request_id in live {
+            self.revoke_grant(&request_id);
+        }
+        Ok(json!({ "success": true, "reason": reason }))
+```
+
+New:
+
+```text
+        Ok(json!({ "success": true, "reason": reason }))
+```
+
+F-standin-revoke-all-one-session (drops): the route calls `revoke_live` for `component-1` and does not revoke `component-2`. Failed at `:6722:9` on `:6733` ("the revoke-all drops the req-2 live grant"), `left: (Live, false)`, `right: (Revoked, false)`.
+
+Old:
+
+```text
+        let live = self
+            .grants
+            .iter()
+            .filter(|grant| is_live(grant.life))
+            .map(|grant| grant.request_id.clone())
+            .collect::<Vec<_>>();
+        for request_id in live {
+            self.revoke_grant(&request_id);
+        }
+        Ok(json!({ "success": true, "reason": reason }))
+```
+
+New:
+
+```text
+        self.revoke_live("component-1");
+        Ok(json!({ "success": true, "reason": reason }))
+```
+
+F-standin-revoke-all-overwrite-records (drops): the route settles every record, not only `Granted`. Failed at `:6689:9` on `:6696`; the left `req-denied` record reads `denied` with `stop every grant` and the right reads `denied` with `deny shared read`.
+
+Old:
+
+```text
+            .filter(|request| request.status == RequestStatus::Granted)
+```
+
+New:
+
+```text
+            .filter(|_request| true)
+```
+
+F-standin-revoke-all-clear-ended (drops): the one `Revoked` function also clears `session_ended`. Failed at `:6746:9` on `:6748` ("the revoke-all drops the live grant and keeps its ended session flag"), `left: (Revoked, false)`, `right: (Revoked, true)`.
+
+Old:
+
+```text
+            grant.life = Life::Revoked;
+        }
+    }
+```
+
+New:
+
+```text
+            grant.life = Life::Revoked;
+            grant.session_ended = false;
+        }
+    }
+```
+
+F-standin-revoke-all-change-metadata (drops): the one `Revoked` function also clears `resource`. Failed at `:6796:13` on `:6798` ("the revoke-all keeps every field of req-ended"), with the left `resource` `""` and the right `res-ended`.
+
+Old:
+
+```text
+            grant.life = Life::Revoked;
+        }
+    }
+```
+
+New:
+
+```text
+            grant.life = Life::Revoked;
+            grant.resource = String::new();
+        }
+    }
+```
+
+F-standin-revoke-all-reject-null (refusal): a null body is refused as a non-object. Failed at `:7157:14` ("the stand-in accepts a null body as the default reason") with `(400, "revoke body needs an object")`.
+
+Old:
+
+```text
+            Value::Null => DEFAULT_REASON,
+```
+
+New:
+
+```text
+            Value::Null => return Err((400, "revoke body needs an object".to_owned())),
+```
+
+F-standin-revoke-all-empty-default (refusal): an empty reason is replaced with the default reason. Failed at `:7209:9` on `:7212` ("an empty reason is stored as given"), `left` reason `Revoked all by user`, `right` reason `""`.
+
+Old:
+
+```text
+                reason.unwrap_or(DEFAULT_REASON)
+```
+
+New:
+
+```text
+                reason.filter(|text| !text.is_empty()).unwrap_or(DEFAULT_REASON)
+```
+
+F-standin-revoke-all-change-default (refusal): the default reason loses ` by user`. Failed at `:7075:9` on `:7078` ("a missing reason is Revoked all by user"), `left` reason `Revoked all`, `right` reason `Revoked all by user`.
+
+Old:
+
+```text
+        const DEFAULT_REASON: &str = "Revoked all by user";
+```
+
+New:
+
+```text
+        const DEFAULT_REASON: &str = "Revoked all";
+```
+
+F-standin-revoke-all-shell-after-body (refusal): `require_shell` moves after the body parse. Failed at `:1768:9` on the helper assertion for `:7031` ("a client with a malformed body is refused before the body is read"), with `Err((400, "revoke body needs an object"))`.
+
+Old:
+
+```text
+        require_shell(caller)?;
+        let reason = match body {
+```
+
+New:
+
+```text
+        let reason = match body {
+```
+
+and:
+
+Old:
+
+```text
+            _ => return Err((400, "revoke body needs an object".to_owned())),
+        };
+        let granted = self
+```
+
+New:
+
+```text
+            _ => return Err((400, "revoke body needs an object".to_owned())),
+        };
+        require_shell(caller)?;
+        let granted = self
+```
+
+F-standin-revoke-all-accept-extra-key (refusal): the unknown-key guard is removed. Failed at `:1765:9` on the helper assertion for `:7011` ("another body key is refused"), with `Ok({"reason":"req-1","success":true})`.
+
+Old:
+
+```text
+                for (key, value) in object {
+                    if key != "reason" {
+                        return Err((400, format!("revoke body rejects {key}")));
+                    }
+                    match value {
+```
+
+New:
+
+```text
+                for (_key, value) in object {
+                    match value {
+```
+
+F-standin-revoke-all-accept-non-object (refusal): a non-object body uses the default reason. Failed at `:1768:9` on the helper assertion for `:7001` ("a string body is refused"), with `Ok({"reason":"Revoked all by user","success":true})`.
+
+Old:
+
+```text
+            _ => return Err((400, "revoke body needs an object".to_owned())),
+```
+
+New:
+
+```text
+            _ => DEFAULT_REASON,
+```
+
+F-standin-revoke-all-reverse-precedence (refusal): a non-string reason returns before the unknown-key check. Failed at `:1768:9` on the helper assertion for `:7051` ("an unknown body key wins over a non-string reason"), with `Err((400, "revoke reason must be a string"))`.
+
+Old:
+
+```text
+                        Value::String(text) => reason = Some(text.as_str()),
+                        _ => reason_not_string = true,
+```
+
+New:
+
+```text
+                        Value::String(text) => reason = Some(text.as_str()),
+                        _ => return Err((400, "revoke reason must be a string".to_owned())),
+```
+
+F-standin-revoke-all-drop-reason-guard (refusal): the non-string reason guard is removed. Failed at `:1765:9` on the helper assertion for `:7019` ("a non-string reason is refused"), with `Ok({"reason":"Revoked all by user","success":true})`.
+
+Old:
+
+```text
+                if reason_not_string {
+                    return Err((400, "revoke reason must be a string".to_owned()));
+                }
+                reason.unwrap_or(DEFAULT_REASON)
+```
+
+New:
+
+```text
+                reason.unwrap_or(DEFAULT_REASON)
+```
+
+After the last restore, the two named tests pass and `git diff --stat` shows only `standin-runtime/mod.rs` as changed.
+
+### Round 2 gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. No `Cargo.toml` or `Cargo.lock` change. `git diff` for `src/harness.rs`, `src/census.rs`, `tests/effects.rs`, `tests/common/grants.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. The production method differs from round 1 only by its two doc lines; no plant remains.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.13 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: real 246.26 seconds, inside the 600-second bound. Observed: lib 66 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0 in both crates. No census line and no listed flaky test failed, so the rerun rule did not apply.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0 in 0.13 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_shell_revoke_all_drops_every_live_grant -- --exact` passed 1, failed 0 (65 filtered) in 0.06 seconds.
+- `git diff --stat`: `LOG.md` and `standin-runtime/mod.rs` only. Restored `standin-runtime/mod.rs` SHA-256: `c11c848fe5e4ecf02428b15888b7e67151e47920f0510c8238d06c56e003f617`.
+
+The eight principle answers above still hold. Row 3 gains no second path or rule: the refusals stay in the one method and the revoke stays on the one writer and the one `Revoked` assignment. Row 5 covers the null body, the empty reason, the malformed client body and the two-fault precedence. Row 7 now names fourteen caught plants, six on the drops test and eight on the refusal test.
+
+070 round 2: extended both revoke-all tests to preserved denied and expired records, an expired grant, a live grant with `session_ended: true`, all preserved grant fields, malformed client bodies, a null body, an empty reason and the two-fault refusal precedence; the route gained only its precedence doc sentence, and fourteen hand-run plants each failed the named test.
