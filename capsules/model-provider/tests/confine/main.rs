@@ -877,6 +877,22 @@ fn wait_for_terminal(
 /// the old phrase panics with that phrase and `right`. In the true mode, a
 /// wrong Right cell panics with the operation and the rejected cell.
 ///
+/// `operation_row_names` reads the Operation cells in order. The cut for
+/// `parse_request_operation_names` runs from the `fn parse_request(` line to
+/// the next function, and its `match op` arms are the quoted strings in
+/// source order; the one `other =>` arm is the `unsupported` row. A missing
+/// `fn parse_request`, a missing `match op`, an arm that is neither a quoted
+/// string nor `other =>`, a second `other =>`, and a missing `other =>` each
+/// refuse with their own `parse_request` reason.
+/// `operation_rows_match_parse_request` requires the same names in the same
+/// order on the real section and on in-memory strings: an extra arm, a
+/// missing arm, a swap, an extra trailing row and a missing trailing row each
+/// fail with the operation that has no partner.
+///
+/// `operation_rows_match_parse_request` reads the match as text. It shows the
+/// Operation cells equal those arms. It does not show that every arm is
+/// reachable, and it does not read `src/execution.rs`.
+///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
 /// test no longer finds that function. F-cc49a drops the `generated_`
 /// acceptance, so the in-memory stand-in citation fails. F-cc50a drops the
@@ -1020,6 +1036,106 @@ fn operations_section_cites_existing_tests() {
                     "Linux cell `{linux}` is not designed, not enforced"
                 ));
             }
+        }
+        Ok(())
+    }
+    fn operation_row_names(section: &str) -> Vec<&str> {
+        section
+            .lines()
+            .filter(|line| line.starts_with("| "))
+            .filter_map(|line| {
+                let mut cells = line
+                    .split('|')
+                    .map(str::trim)
+                    .filter(|cell| !cell.is_empty());
+                let first = cells.next()?;
+                (first != "Operation" && first != "---").then_some(first)
+            })
+            .collect()
+    }
+    /// The `match op` arms in source order, with `other =>` read as
+    /// `unsupported`.
+    ///
+    /// The cut runs from the `fn parse_request(` line to the next function.
+    /// The arms are the lines between `match op {` and its closing `};`. Each
+    /// arm is a quoted string or the one `other =>`. The compare reads the
+    /// match as text: it shows the Operation cells equal these arms, not that
+    /// every arm is reachable, and it does not read `src/execution.rs`.
+    fn parse_request_operation_names(source: &str) -> Result<Vec<String>, String> {
+        const SIGNATURE: &str = "fn parse_request(";
+        let Some(start) = source.find(SIGNATURE) else {
+            return Err("parse_request: the source has no `fn parse_request`".to_string());
+        };
+        let mut cut_len = source[start..].len();
+        let mut offset = 0;
+        for line in source[start..].lines() {
+            if offset > 0 {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("fn ")
+                    || trimmed.starts_with("pub fn ")
+                    || trimmed.starts_with("async fn ")
+                    || trimmed.starts_with("pub async fn ")
+                {
+                    cut_len = offset;
+                    break;
+                }
+            }
+            offset += line.len() + 1;
+        }
+        let cut = &source[start..start + cut_len];
+        let Some(match_at) = cut.find("match op {") else {
+            return Err("parse_request: the cut has no `match op`".to_string());
+        };
+        let mut names = Vec::new();
+        let mut other_arms = 0;
+        for line in cut[match_at..].lines().skip(1) {
+            let arm = line.trim();
+            if arm.starts_with('}') {
+                break;
+            }
+            if arm.is_empty() || arm.starts_with("//") {
+                continue;
+            }
+            if arm.starts_with("other =>") {
+                other_arms += 1;
+                if other_arms > 1 {
+                    return Err(
+                        "parse_request: the `match op` has a second `other =>` arm".to_string()
+                    );
+                }
+                names.push("unsupported".to_string());
+                continue;
+            }
+            let Some(rest) = arm.strip_prefix('"') else {
+                return Err(format!(
+                    "parse_request: arm `{arm}` is not a quoted string and not `other =>`"
+                ));
+            };
+            let Some(end) = rest.find('"') else {
+                return Err(format!("parse_request: arm `{arm}` has no closing quote"));
+            };
+            names.push(rest[..end].to_string());
+        }
+        if other_arms == 0 {
+            return Err("parse_request: the `match op` has no `other =>` arm".to_string());
+        }
+        Ok(names)
+    }
+    fn operation_rows_match_parse_request(section: &str, source: &str) -> Result<(), String> {
+        let rows = operation_row_names(section);
+        let arms = parse_request_operation_names(source)?;
+        for (row, arm) in rows.iter().zip(arms.iter()) {
+            if row != arm {
+                return Err(format!(
+                    "operation row `{row}` has no partner: the parse_request arm there is `{arm}`"
+                ));
+            }
+        }
+        if let Some(row) = rows.get(arms.len()) {
+            return Err(format!("operation row `{row}` has no parse_request arm"));
+        }
+        if let Some(arm) = arms.get(rows.len()) {
+            return Err(format!("parse_request arm `{arm}` has no operation row"));
         }
         Ok(())
     }
@@ -1177,6 +1293,77 @@ fn operations_section_cites_existing_tests() {
         );
     }
 
+    // The compare holds the Operation cells to the parse_request arms. Each
+    // plant fails when its refusal is removed.
+    let short_source = "pub fn parse_request(line: &str) -> Result<Envelope, Fault> {\n    let value = parse(line)?;\n    let operation = match op {\n        \"init\" => Operation::Init,\n        other => Operation::Unsupported(other.to_string()),\n    };\n    Ok(Envelope { operation, value })\n}\n";
+    let init_then_unsupported = "| Operation | Inputs | Outputs | Right | Effect | rule | Linux |\n| --- | --- | --- | --- | --- | --- | --- |\n| init | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n| unsupported | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n";
+    assert_eq!(
+        operation_rows_match_parse_request(init_then_unsupported, short_source),
+        Ok(())
+    );
+    let unsupported_then_init = "| Operation | Inputs | Outputs | Right | Effect | rule | Linux |\n| --- | --- | --- | --- | --- | --- | --- |\n| unsupported | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n| init | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n";
+    let swapped = operation_rows_match_parse_request(unsupported_then_init, short_source)
+        .expect_err("a swapped row order must fail");
+    assert!(
+        swapped.contains("init") && swapped.contains("unsupported"),
+        "{swapped}"
+    );
+    let init_then_status = "| Operation | Inputs | Outputs | Right | Effect | rule | Linux |\n| --- | --- | --- | --- | --- | --- | --- |\n| init | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n| status | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n";
+    let missing_arm = operation_rows_match_parse_request(init_then_status, short_source)
+        .expect_err("a row with no arm must fail");
+    assert!(missing_arm.contains("unsupported"), "{missing_arm}");
+    let extra_arm_source = "pub fn parse_request(line: &str) -> Result<Envelope, Fault> {\n    let value = parse(line)?;\n    let operation = match op {\n        \"init\" => Operation::Init,\n        \"ping\" => Operation::Ping,\n        other => Operation::Unsupported(other.to_string()),\n    };\n    Ok(Envelope { operation, value })\n}\n";
+    let extra_arm = operation_rows_match_parse_request(init_then_unsupported, extra_arm_source)
+        .expect_err("an arm with no row must fail");
+    assert!(extra_arm.contains("ping"), "{extra_arm}");
+    let extra_trailing_row = "| Operation | Inputs | Outputs | Right | Effect | rule | Linux |\n| --- | --- | --- | --- | --- | --- | --- |\n| init | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n| unsupported | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n| status | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n";
+    let extra_row = operation_rows_match_parse_request(extra_trailing_row, short_source)
+        .expect_err("a trailing row with no arm must fail");
+    assert!(extra_row.contains("status"), "{extra_row}");
+    let missing_trailing_row = "| Operation | Inputs | Outputs | Right | Effect | rule | Linux |\n| --- | --- | --- | --- | --- | --- | --- |\n| init | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n";
+    let missing_row = operation_rows_match_parse_request(missing_trailing_row, short_source)
+        .expect_err("a trailing arm with no row must fail");
+    assert!(missing_row.contains("unsupported"), "{missing_row}");
+    let no_signature =
+        operation_rows_match_parse_request(init_then_unsupported, "fn other_reader() {}\n")
+            .expect_err("a source with no parse_request must fail");
+    assert!(
+        no_signature.contains("parse_request") && no_signature.contains("no `fn parse_request`"),
+        "{no_signature}"
+    );
+    let no_match_op = "fn parse_request(line: &str) {\n    let value = parse(line);\n}\n";
+    let no_match = operation_rows_match_parse_request(init_then_unsupported, no_match_op)
+        .expect_err("a cut with no match op must fail");
+    assert!(
+        no_match.contains("parse_request") && no_match.contains("no `match op`"),
+        "{no_match}"
+    );
+    let unquoted_arm = "fn parse_request(line: &str) {\n    match op {\n        \"init\" => Operation::Init,\n        _ => Operation::Unsupported(op.to_string()),\n    };\n}\n";
+    let unquoted = operation_rows_match_parse_request(init_then_unsupported, unquoted_arm)
+        .expect_err("an unquoted arm must fail");
+    assert!(
+        unquoted.contains("parse_request") && unquoted.contains("not a quoted string"),
+        "{unquoted}"
+    );
+    let two_other_arms = "fn parse_request(line: &str) {\n    match op {\n        \"init\" => Operation::Init,\n        other => Operation::Unsupported(other.to_string()),\n        other => Operation::Unsupported(other.to_string()),\n    };\n}\n";
+    let duplicate_other = operation_rows_match_parse_request(init_then_unsupported, two_other_arms)
+        .expect_err("a second other arm must fail");
+    assert!(
+        duplicate_other.contains("parse_request") && duplicate_other.contains("second `other =>`"),
+        "{duplicate_other}"
+    );
+    assert_ne!(no_signature, no_match);
+    assert_ne!(no_match, unquoted);
+    assert_ne!(unquoted, duplicate_other);
+    let no_other_arm = "fn parse_request(line: &str) {\n    match op {\n        \"init\" => Operation::Init,\n    };\n}\n";
+    let missing_other = operation_rows_match_parse_request(missing_trailing_row, no_other_arm)
+        .expect_err("a match op with no other arm must fail");
+    assert!(
+        missing_other.contains("parse_request") && missing_other.contains("no `other =>`"),
+        "{missing_other}"
+    );
+    assert_ne!(duplicate_other, missing_other);
+
     let doc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("CONFINEMENT.md");
     let doc = fs::read_to_string(&doc_path).unwrap_or_else(|err| {
         panic!(
@@ -1218,6 +1405,15 @@ fn operations_section_cites_existing_tests() {
     let right_ids: Vec<&str> = rights.iter().map(entry_id).collect();
     operations_table_cells_stay_lab_claims(section, &right_ids, true)
         .expect("the real operations section keeps its Right and Linux lab claims");
+    let contract_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/contract.rs");
+    let contract = fs::read_to_string(&contract_path).unwrap_or_else(|err| {
+        panic!(
+            "src/contract.rs must be readable ({}): {err}",
+            contract_path.display()
+        )
+    });
+    operation_rows_match_parse_request(section, &contract)
+        .expect("the operations table names the parse_request arms in order");
 }
 
 /// The Id cells in `section` are the same set as `ids`.
