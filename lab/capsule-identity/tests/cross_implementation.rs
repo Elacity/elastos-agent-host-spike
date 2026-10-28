@@ -41,9 +41,9 @@ use tempfile::TempDir;
 /// bundle whose root block is exactly 262144 bytes (task 053), the four
 /// HAMT bundles (tasks 056 and 061), the bundle with a file root inside a
 /// HAMT shard (task 062), the multibyte-name shard (task 063), the
-/// combining-mark shard (task 064) and the fifteen-byte-name shard (task
-/// 065): 24.
-const PINNED_BUNDLES: usize = 24;
+/// combining-mark shard (task 064), the fifteen-byte-name shard (task 065)
+/// and the sixteen-byte-name shard (task 066): 25.
+const PINNED_BUNDLES: usize = 25;
 
 /// How many committed fixtures have a pin: all but wc001-core.
 const PINNED_FIXTURES: usize = 7;
@@ -220,6 +220,11 @@ fn pinned_bundles() -> Vec<Pinned> {
         what: "fifteen-byte name over the HAMT threshold".to_owned(),
         pin: FIFTEEN_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID,
         entries: fifteen_byte_name_over_the_hamt_threshold_bundle(),
+    });
+    bundles.push(Pinned {
+        what: "sixteen-byte name over the HAMT threshold".to_owned(),
+        pin: SIXTEEN_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID,
+        entries: sixteen_byte_name_over_the_hamt_threshold_bundle(),
     });
     bundles
 }

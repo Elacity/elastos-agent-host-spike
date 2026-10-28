@@ -2436,6 +2436,22 @@ mod tests {
     }
 
     #[test]
+    fn sixteen_byte_name_mixes_its_last_block_once() {
+        // Task 066: `photo-block.jpeg` is 16 bytes, one whole murmur3 block,
+        // so its tail is empty and that block is mixed once. A tail that took
+        // the last 16 bytes again would mix the same block twice and print
+        // another name. README's `murmur64` prints these eight big-endian
+        // bytes for that name.
+        let name = "photo-block.jpeg";
+        assert_eq!(name.len(), 16, "the name's bytes");
+        assert_eq!(name.len() % 16, 0, "one whole block");
+        assert_eq!(
+            hamt_digest(name.as_bytes()),
+            [0xfe, 0x17, 0x69, 0x64, 0xde, 0x66, 0x1a, 0x32]
+        );
+    }
+
+    #[test]
     fn hamt_data_trims_leading_zero_bitmap_bytes() {
         // Bucket 0 is the last byte's low bit, so its bitmap is one byte.
         let mut low = [0u8; HAMT_BITMAP_BYTES];

@@ -179,6 +179,14 @@ pub const COMBINING_MARK_OVER_HAMT_THRESHOLD_LAB_CID: &str =
 /// and never committed.
 pub const FIFTEEN_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID: &str =
     "bafybeihjth7idik23jjnvdaiy4ciznq3x4bggs3vc76jwfpinfif7eauk4";
+/// Task 066: the 262145-estimate flat bundle with its third 200-byte filler
+/// replaced by `photo-block.jpeg` (16 bytes, empty content) and its 51-byte
+/// measured name lengthened by 184 bytes to 235, so the links estimate stays
+/// 262145 and the directory is a HAMT shard. The 16-byte name is one whole
+/// murmur3 block, so its tail is empty and that block is mixed once. Built in
+/// a temp dir and in memory and never committed.
+pub const SIXTEEN_BYTE_NAME_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeigopgfjx3ab3pdtczsq463dzeug5p4wp7k22v465oem7lcjbzj44i";
 
 /// The empty files that bring content-sample's root block to 262144 bytes
 /// and `longer` more: 1064 named by 200 digits and one by 235 + `longer`
@@ -419,6 +427,73 @@ pub fn fifteen_byte_name_over_the_hamt_threshold_bundle() -> Vec<BundleEntry> {
         .filter(|entry| entry.path.len() % 16 == 15)
         .count();
     assert_eq!(fifteen_tails, 1, "one name leaves a 15-byte tail");
+    entries
+}
+
+/// Task 066: [`directory_at_hamt_threshold_bundle`]`(1)` with its third
+/// 200-byte filler replaced by `photo-block.jpeg` (16 bytes, empty content)
+/// and its 51-byte measured name lengthened by 184 bytes to 235. The links
+/// estimate stays 262145, so the directory is a HAMT shard, and exactly one
+/// path's length is a multiple of 16, so that name's last 16-byte block is
+/// its only block and its murmur3 tail is empty. Built in a temp dir and in
+/// memory and never committed.
+pub fn sixteen_byte_name_over_the_hamt_threshold_bundle() -> Vec<BundleEntry> {
+    let photo = "photo-block.jpeg";
+    assert_eq!(photo.len(), 16, "the photo name's bytes");
+    assert_eq!(photo.len() % 16, 0, "one whole block");
+    let mut seen = 0;
+    let mut replaced = 0;
+    let mut lengthened = 0;
+    let entries: Vec<BundleEntry> = directory_at_hamt_threshold_bundle(1)
+        .into_iter()
+        .map(|entry| {
+            if entry.path.len() == 200 {
+                seen += 1;
+                if seen == 3 {
+                    replaced += 1;
+                    return BundleEntry {
+                        path: photo.to_owned(),
+                        content: Vec::new(),
+                    };
+                }
+            }
+            if entry.path.len() == 51 {
+                lengthened += 1;
+                return BundleEntry {
+                    path: format!("{}{}", entry.path, "0".repeat(184)),
+                    content: entry.content,
+                };
+            }
+            entry
+        })
+        .collect();
+    assert_eq!(
+        (seen, replaced, lengthened),
+        (1110, 1, 1),
+        "the 200-byte fillers, the one replacement and the measured name lengthened"
+    );
+    let photo_len = entries
+        .iter()
+        .find(|entry| entry.path == photo)
+        .map(|entry| entry.path.len())
+        .expect("the photo name is in the bundle");
+    assert_eq!(photo_len, 16, "the replaced name's bytes");
+    let measured_len = entries
+        .iter()
+        .find(|entry| entry.path.len() == 235)
+        .map(|entry| entry.path.len())
+        .expect("the lengthened measured name is in the bundle");
+    assert_eq!(measured_len, 235, "the measured name's bytes");
+    let estimate: usize = entries
+        .iter()
+        .map(|entry| entry.path.len() + LINKED_CID_LENGTH)
+        .sum();
+    assert_eq!(estimate, HAMT_LINKS_LIMIT + 1, "the links estimate");
+    let whole_blocks = entries
+        .iter()
+        .filter(|entry| entry.path.len() % 16 == 0)
+        .count();
+    assert_eq!(whole_blocks, 1, "one name is a whole number of blocks");
     entries
 }
 
