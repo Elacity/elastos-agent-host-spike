@@ -1394,7 +1394,8 @@ fn operations_section_cites_existing_tests() {
     /// `cr`, then zero or more `#`, then `"`, and closes at `"` followed by
     /// that same number of `#`. `return`, `break` and `result` are not raw
     /// strings. In a character literal `\'` and `\\` are one character and
-    /// the closer is `'`. An unterminated raw string and an unterminated
+    /// the closer follows that one character. Lifetimes and labels leave
+    /// `index` unchanged. An unterminated raw string and an unterminated
     /// character name different reasons.
     fn skip_code_literal(source: &str, index: usize) -> Result<usize, String> {
         let bytes = source.as_bytes();
@@ -1415,12 +1416,47 @@ fn operations_section_cites_existing_tests() {
             None
         };
         if let Some(mut cursor) = character_at {
-            while cursor < bytes.len() {
-                match bytes[cursor] {
-                    b'\\' => cursor += 2,
-                    b'\'' => return Ok(cursor + 1),
-                    _ => cursor += 1,
+            let character = source[cursor..].chars().next();
+            if first == b'\'' && character.is_some_and(|c| c == '_' || c.is_alphabetic()) {
+                let name_end = cursor
+                    + source[cursor..]
+                        .chars()
+                        .take_while(|c| *c == '_' || c.is_alphanumeric())
+                        .map(char::len_utf8)
+                        .sum::<usize>();
+                // A lifetime ends at a type, bound, label or expression
+                // boundary. Quoted multi-character text and macro-shaped
+                // text still take the character refusal below.
+                if bytes.get(name_end).is_none_or(|byte| {
+                    byte.is_ascii_whitespace() || b":,>+()=;[]}{&/".contains(byte)
+                }) {
+                    return Ok(index);
                 }
+            }
+            if character == Some('\\') {
+                cursor += 1;
+                match bytes.get(cursor) {
+                    Some(b'x') => cursor += 3,
+                    Some(b'u') if bytes.get(cursor + 1) == Some(&b'{') => {
+                        cursor += 2;
+                        while bytes
+                            .get(cursor)
+                            .is_some_and(|byte| byte.is_ascii_hexdigit() || *byte == b'_')
+                        {
+                            cursor += 1;
+                        }
+                        if bytes.get(cursor) == Some(&b'}') {
+                            cursor += 1;
+                        }
+                    }
+                    Some(_) => cursor += 1,
+                    None => {}
+                }
+            } else if let Some(character) = character {
+                cursor += character.len_utf8();
+            }
+            if bytes.get(cursor) == Some(&b'\'') {
+                return Ok(cursor + 1);
             }
             return Err("an unterminated character is in the region".to_string());
         }
@@ -2580,6 +2616,47 @@ fn operations_section_cites_existing_tests() {
         );
     }
 
+    // Lifetimes and labels keep executable code visible in the signature,
+    // body and literal scan. Scanning to the next apostrophe hides the
+    // returned `result` object in the first case.
+    for body in [
+        r#"fn ok_response() -> Value {
+            let _ = json!({"status":"ok","data":1});
+            let _: &'static str = "";
+            let answer = json!({"status":"ok","result":1});
+            let _: &'static str = "";
+            answer
+        }"#,
+        r#"fn ok_response<'a>(_: &'a str) -> Value { json!({"status":"ok","data":1}) }"#,
+        r#"fn ok_response() -> &'static str { json!({"status":"ok","data":1}) }"#,
+        r#"fn ok_response() { let _: &'_ str = ""; json!({"status":"ok","data":1}) }"#,
+        r#"fn ok_response() { 'answer: { break 'answer json!({"status":"ok","data":1}); } }"#,
+    ] {
+        let region = function_region(body, "fn ok_response")
+            .expect("lifetimes and labels preserve the function region");
+        if body.contains("let answer") {
+            assert_eq!(
+                json_literal_keys(region),
+                Err("a second json! literal is in the region".to_string()),
+                "{body}"
+            );
+        } else {
+            assert_eq!(
+                json_literal_keys(region),
+                Ok(vec!["status".to_string(), "data".to_string()]),
+                "{body}"
+            );
+        }
+    }
+    let lifetime_arm = r#"ProviderOperation::Shutdown => {
+        let _: &'static str = "";
+        json!({ "shutdown": { let _: &'_ str = ""; true }, "kept": true })
+    },"#;
+    assert_eq!(
+        json_literal_keys(shutdown_arm_region(lifetime_arm).expect("the lifetime arm stays whole")),
+        Ok(vec!["shutdown".to_string(), "kept".to_string()])
+    );
+
     // A `json!` inside a raw string is not a literal, and a raw string in a
     // value keeps the `"kept"` key that follows it. On the 094 head the value
     // reader ends at the `}` inside `r#""}"#` and then reports an unterminated
@@ -2636,6 +2713,13 @@ fn operations_section_cites_existing_tests() {
         ("'\\''", 4),
         ("'\\\\'", 4),
         ("b'}'", 4),
+        ("'a'", 3),
+        ("'é'", 4),
+        ("'\\n'", 4),
+        ("'\\x7d'", 6),
+        ("'\\u{7d}'", 8),
+        ("b'\\''", 5),
+        ("b'\\\\'", 5),
     ] {
         assert_eq!(skip_code_literal(literal, 0), Ok(end), "{literal}");
     }
@@ -2643,6 +2727,30 @@ fn operations_section_cites_existing_tests() {
     // returns `index` unchanged.
     for unchanged in ["return", "break", "result", "x", "{"] {
         assert_eq!(skip_code_literal(unchanged, 0), Ok(0), "{unchanged}");
+    }
+    for unchanged in [
+        "'static",
+        "'a str",
+        "'_ str",
+        "'label:",
+        "'a>",
+        "'a,",
+        "'é str",
+        "'a[u8]",
+        "'a&str",
+        "'a/* bound */ str",
+    ] {
+        assert_eq!(skip_code_literal(unchanged, 0), Ok(0), "{unchanged}");
+    }
+    assert_eq!(skip_code_literal("prefix 'static str", 7), Ok(7));
+    assert_eq!(skip_code_literal("", 0), Ok(0));
+    assert_eq!(skip_code_literal("x", 1), Ok(1));
+    for malformed in ["'ab'", "b'ab'", "'} json!({}) '"] {
+        assert_eq!(
+            skip_code_literal(malformed, 0),
+            Err("an unterminated character is in the region".to_string()),
+            "{malformed}"
+        );
     }
     // An unterminated raw string and an unterminated character have different
     // reasons. A reader that returns `index` for `'` or `r#"` instead of
