@@ -1313,10 +1313,10 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` fails
   at its final wallet directory compare after `shutdown`, which finds
   `shutdown-falsifier.hex`, a name the setup did not leave.
-- Make the field reader ignore a field's `#[serde(rename = "...")]` (WP146):
-  `operations_table_row_check_refuses_each_bad_table` fails on its
-  renamed-field case, because a cell naming the Rust name `field_name` instead
-  of the wire name `wire_name` is then accepted.
+- Make the field reader honour no `serde` attribute (WP146): the same test
+  fails at its passing-table assertion, because `init`'s renamed field then
+  reads as its Rust name `field_name` while the table names the wire name
+  `wire_name`, and `_runtime_invocation` reads as `runtime_invocation`.
 - Make the Inputs compare tolerate a cell that stops before a declared field
   (WP147): the same test fails on its missing-name case, because a cell naming
   `op` and `config` without `wire_name` is then accepted.

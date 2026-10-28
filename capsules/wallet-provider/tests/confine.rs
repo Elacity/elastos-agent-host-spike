@@ -6806,10 +6806,13 @@ fn declaration_qualifier(text: &str) -> bool {
 /// `item`, and a name that sits inside another item or a string, are other
 /// items. A declaration with no fields, such as `Status,`, returns an empty
 /// list, so a missing item and an item with no fields stay apart. Inside the
-/// braces every field is one comma-separated item, and
+/// braces every field is one comma-separated item, and the active
 /// `#[serde(rename = "...")]` on that item names the wire field; every other
-/// field keeps its Rust name. A trailing comma is optional.
+/// field keeps its Rust name. A trailing comma is optional. The source's
+/// comments are read as nothing, so no comment names an item or a field.
 fn wire_field_names(source: &str, item: &str) -> Option<Vec<String>> {
+    let source = without_comments(source);
+    let source = source.as_str();
     let mut from = 0;
     while let Some(offset) = source[from..].find(item) {
         let start = from + offset;
@@ -6840,6 +6843,57 @@ fn field_names(body: &str) -> Vec<String> {
         .filter(|field| !field.trim().is_empty())
         .map(field_wire_name)
         .collect()
+}
+
+/// `text` with every `//` line comment and every `/* ... */` block comment
+/// removed. A `//` or `/*` inside a string literal stays part of that string, a
+/// line comment ends at its newline and keeps it, so the items around it keep
+/// their own lines, and a block comment keeps one space so the tokens around it
+/// stay apart.
+fn without_comments(text: &str) -> String {
+    let mut kept = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    let mut in_string = false;
+    let mut quote_escape = false;
+    while let Some(character) = characters.next() {
+        if in_string {
+            if character == '"' && !quote_escape {
+                in_string = false;
+                quote_escape = false;
+            } else {
+                quote_escape = character == '\\' && !quote_escape;
+            }
+            kept.push(character);
+            continue;
+        }
+        if character == '"' {
+            in_string = true;
+            kept.push(character);
+            continue;
+        }
+        if character == '/' && characters.peek() == Some(&'/') {
+            for next in characters.by_ref() {
+                if next == '\n' {
+                    kept.push('\n');
+                    break;
+                }
+            }
+            continue;
+        }
+        if character == '/' && characters.peek() == Some(&'*') {
+            characters.next();
+            while let Some(next) = characters.next() {
+                if next == '*' && characters.peek() == Some(&'/') {
+                    characters.next();
+                    break;
+                }
+            }
+            kept.push(' ');
+            continue;
+        }
+        kept.push(character);
+    }
+    kept
 }
 
 /// The index of the `}` that closes a body whose opening brace sits directly
@@ -6895,21 +6949,26 @@ fn declaration_items(text: &str) -> Vec<&str> {
     items
 }
 
-/// The wire name of one field item: its `#[serde(rename = "...")]` when it
-/// carries one, else the name it declares before its `:`, without its leading
-/// attributes and without a `pub` qualifier.
+/// The wire name of one field item: the `rename = "..."` of the active
+/// `#[serde(...)]` attribute the field carries, else the name it declares
+/// before its `:`, without its leading attributes and without a `pub`
+/// qualifier.
+///
+/// Only a `serde` attribute that stands before the field's name is read, so a
+/// `rename` inside a comment or inside another attribute's string never names
+/// the field.
 fn field_wire_name(field: &str) -> String {
-    if let Some(rest) = field.split("rename = \"").nth(1) {
-        let end = rest
-            .find(|character| matches!(character, '"' | '\'' | ')'))
-            .unwrap_or(rest.len());
-        return rest[..end].to_string();
-    }
     let mut declared = field.trim_start();
     while let Some(attributes) = declared.strip_prefix("#[") {
         let Some(end) = attribute_end(attributes) else {
             break;
         };
+        if is_serde_attribute(&attributes[..end]) {
+            if let Some(rest) = attributes[..end].split("rename = \"").nth(1) {
+                let end = rest.find('"').unwrap_or(rest.len());
+                return rest[..end].to_string();
+            }
+        }
         declared = attributes[end + 1..].trim_start();
     }
     declared
@@ -6920,6 +6979,15 @@ fn field_wire_name(field: &str) -> String {
         .last()
         .unwrap_or_default()
         .to_string()
+}
+
+/// Whether the text of one attribute, after its `#[`, is `serde(...)`. A longer
+/// path such as `serde_with(...)` is another attribute.
+fn is_serde_attribute(attribute: &str) -> bool {
+    attribute
+        .trim_start()
+        .strip_prefix("serde")
+        .is_some_and(|rest| rest.trim_start().starts_with('('))
 }
 
 /// The index of the `]` that closes the attribute whose text follows `#[`, or
@@ -7085,6 +7153,10 @@ fn without_params_names(items: Vec<InputsItem>) -> Vec<InputsItem> {
 
 /// Whether the `params` group of `cell` holds `declared` in declaration order,
 /// or the one `NO_CONTRACT_FIELDS` word when no field is declared.
+///
+/// The expected items come from `params_items_of`, the one place that turns
+/// declared fields into those items, so the comparison and the refusal message
+/// cannot disagree.
 fn params_names_match(cell: &str, declared: &[String]) -> bool {
     let Some(items) = input_items(cell) else {
         return false;
@@ -7092,12 +7164,7 @@ fn params_names_match(cell: &str, declared: &[String]) -> bool {
     let Some(observed) = params_items(&items) else {
         return false;
     };
-    let expected: Vec<InputsItem> = if declared.is_empty() {
-        vec![InputsItem::leaf(NO_CONTRACT_FIELDS)]
-    } else {
-        declared.iter().map(|name| InputsItem::leaf(name)).collect()
-    };
-    observed == expected
+    observed == params_items_of(declared)
 }
 
 /// The items inside the `params` group of `items`, wherever that group sits.
@@ -9434,13 +9501,16 @@ fn operations_table_check_rejects_paths_outside_provider() {
 /// the one `list_accounts` kind.
 ///
 /// `init` carries a field whose wire name is `wire_name` by
-/// `#[serde(rename = "...")]`. `Ping` declares a field and no dispatch arm
+/// `#[serde(rename = "...")]`, and a `//` comment above that attribute names an
+/// older `stale_name`, so only the active attribute may name the field.
+/// `Ping` declares a field and no dispatch arm
 /// answers it, so the fixture table names no field of it. `Status` and
 /// `Shutdown` declare no field.
 const ROW_FIXTURE_PROVIDER: &str = "\
 enum Request {
     Init {
         config: Value,
+        // Previously rename = \"stale_name\".
         #[serde(rename = \"wire_name\")]
         field_name: Option<Value>,
     },
@@ -9589,10 +9659,13 @@ const FIXTURE_OPERATIONS: [&str; 4] = [
 /// `none:` row citing `permitted:`. Rule 4 refuses a Linux cell that is not
 /// `designed, not enforced`, naming every row. Rule 5 refuses an Inputs cell
 /// with an extra name, a missing name, another order, a renamed field's Rust
-/// name and no `op`; it refuses a `wallet_contract` row that omits an envelope
+/// name, a name only a comment mentions and no `op`; it refuses a
+/// `wallet_contract` row that omits an envelope
 /// name, names another kind, names another `params` name, omits `params`, and
 /// writes `params` (none) for an arm with fields or a name for an arm with
-/// none. Missing Request and contract enums, ordinary and contract arms, and
+/// none. The `params` compare and the refusal message read their expected items
+/// from one function, so the cell a refusal prints validates as written. Missing
+/// Request and contract enums, ordinary and contract arms, and
 /// the wallet envelope declaration each keep their own reason. A provider
 /// source that cannot be read, one with no `fn handle` and
 /// one with no `fn dispatch_wallet_operation` each keep their own reason. The
@@ -9602,9 +9675,10 @@ const FIXTURE_OPERATIONS: [&str; 4] = [
 ///
 /// Falsifiers: WP141 disables the row-set rule, WP142 the Right-vocabulary
 /// rule, WP143 the both-sides rule, WP144 the Linux-status rule, WP146 the
-/// field reader's rename, WP147 the Inputs compare's length rule and WP148 the
-/// `params`-name compare; this test fails on that rule's cases, because the bad
-/// table is then accepted.
+/// field reader's `serde` attribute, WP147 the Inputs compare's length rule and
+/// WP148 the `params`-name compare; this test fails on that rule's cases,
+/// because the bad table is then accepted. WP146 also fails the passing
+/// table, because `init`'s renamed field then reads as its Rust name.
 #[test]
 fn operations_table_row_check_refuses_each_bad_table() {
     let provider = tempfile::tempdir().expect("temporary provider folder");
@@ -10130,7 +10204,9 @@ fn operations_table_row_check_refuses_each_bad_table() {
 
     // Rule 5: an Inputs cell that names a field the arm does not declare, one
     // that omits a declared field, one that puts the fields in another order,
-    // one that names a renamed field's Rust name, and one that names no `op`.
+    // one that names a renamed field's Rust name, one that names the wire name
+    // a comment above the active attribute mentions, and one that names no
+    // `op`.
     let provider_paths = format!("{}", provider.path().join("src/main.rs").display());
     for (case, cell, expected) in [
         (
@@ -10151,6 +10227,11 @@ fn operations_table_row_check_refuses_each_bad_table() {
         (
             "a renamed field's Rust name",
             "`op`, `config`, `field_name`",
+            "`op`, `config`, `wire_name`",
+        ),
+        (
+            "a name a comment mentions",
+            "`op`, `config`, `stale_name`",
             "`op`, `config`, `wire_name`",
         ),
         (
@@ -10270,6 +10351,25 @@ fn operations_table_row_check_refuses_each_bad_table() {
         )],
         "a `params` name on an arm with no fields must be refused"
     );
+
+    // The compare and the refusal message take their expected items from the
+    // one `params_items_of`, so an empty declaration and a populated one read
+    // the same on both sides: the cell a refusal prints validates as written,
+    // and the other declaration's cell does not.
+    let envelope = ["request".to_string(), "_runtime_invocation".to_string()];
+    let empty: Vec<String> = Vec::new();
+    let populated = vec!["include_revoked".to_string()];
+    for (declared, other) in [(&empty, &populated), (&populated, &empty)] {
+        let cell = render_inputs(&contract_row_inputs("k", &envelope), declared);
+        assert!(
+            params_names_match(&cell, declared),
+            "the cell a refusal prints for {declared:?} must validate as written: {cell}"
+        );
+        assert!(
+            !params_names_match(&cell, other),
+            "the cell a refusal prints for {declared:?} must not validate as {other:?}: {cell}"
+        );
+    }
     fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
 
     // Rule 5: every missing declaration keeps its own reason, even when the
@@ -10286,7 +10386,7 @@ fn operations_table_row_check_refuses_each_bad_table() {
         (
             "a missing ordinary arm declaration",
             false,
-            "    Init {\n        config: Value,\n        #[serde(rename = \"wire_name\")]\n        field_name: Option<Value>,\n    },\n",
+            "    Init {\n        config: Value,\n        // Previously rename = \"stale_name\".\n        #[serde(rename = \"wire_name\")]\n        field_name: Option<Value>,\n    },\n",
             "",
             Some("init"),
             "Init arm",
@@ -10410,13 +10510,17 @@ fn operations_table_row_check_refuses_each_bad_table() {
 /// a field carrying `#[serde(rename = "...")]`, a trailing comma and no trailing
 /// comma each return their wire names in declaration order, and a `pub` struct
 /// qualifier and a field type such as `Option<String>` do not change them. An
-/// item named inside a string or after another item does not match. The text is
+/// item named inside a string or after another item does not match. A comment
+/// names no item and no field, whether it is a `//` line comment or a
+/// `/* ... */` block comment, so a comment before a renamed field that mentions
+/// another `rename` leaves the active attribute's name. The text is
 /// built in the test; no file is read.
 #[test]
 fn wire_field_reader_keeps_an_empty_item_apart_from_a_missing_one() {
     let source = "\
 enum Request {
     Init { config: Value, count: u64 },
+    // A comment naming Init { config } is no declaration.
     Status,
     WalletContract {
         request: Value,
@@ -10424,6 +10528,10 @@ enum Request {
         runtime_invocation: Box<RuntimeInvocationEnvelope>,
     },
     Empty {},
+    // A comment naming no item: Status { phantom: u8 }
+    Commented {
+        // a note, with a comma
+    },
     Shutdown,
 }
 
@@ -10431,7 +10539,13 @@ pub struct Envelope {
     pub schema: String,
     #[serde(default, skip_serializing_if = \"Option::is_none\")]
     label: Option<String>,
+    // Previously rename = \"stale_name\".
     #[serde(rename = \"wire_name\", default)]
+    field_name: Option<Value>,
+}
+
+pub struct BlockCommented {
+    /* Previously rename = \"block_stale\" */ #[serde(rename = \"block_wire\")]
     field_name: Option<Value>,
 }
 ";
@@ -10444,6 +10558,16 @@ pub struct Envelope {
             Some(Vec::<String>::new()),
         ),
         ("an empty arm", "Empty", Some(Vec::new())),
+        (
+            "an arm holding only a comment",
+            "Commented",
+            Some(Vec::new()),
+        ),
+        (
+            "an arm whose comment names another arm",
+            "Status",
+            Some(Vec::new()),
+        ),
         (
             "a single-line arm",
             "Init",
@@ -10459,9 +10583,15 @@ pub struct Envelope {
             "Envelope",
             Some(vec!["schema".into(), "label".into(), "wire_name".into()]),
         ),
+        (
+            "a struct with a block comment before a renamed field",
+            "BlockCommented",
+            Some(vec!["block_wire".into()]),
+        ),
         ("an item the source does not declare", "Missing", None),
         ("a name inside another item", "config", None),
         ("a name inside a string", "wire_name", None),
+        ("a name inside a comment", "stale_name", None),
     ] {
         assert_eq!(
             wire_field_names(source, item),
