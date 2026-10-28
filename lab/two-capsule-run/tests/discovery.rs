@@ -137,16 +137,23 @@ fn hex_tokens(line: &str, len: usize) -> Vec<&str> {
 /// `BridgeHostcall` shape: `(&str, &str, Option<&str>) -> Result<String, String>`.
 fn bridge_entry(source: &str) -> String {
     let code = code_without_strings_and_comments(source);
+    // Whitespace and comments separate tokens; their spelling is not part of
+    // the impl or method name.
+    let code = code.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut entries: Vec<String> = Vec::new();
     let mut search = 0;
     while let Some(offset) = code[search..].find("impl StandIn") {
         let start = search + offset;
         let after = &code[start + "impl StandIn".len()..];
-        if after
+        if code[..start]
             .chars()
-            .next()
+            .next_back()
             .is_some_and(|character| character.is_alphanumeric() || character == '_')
         {
+            search = start + "impl StandIn".len();
+            continue;
+        }
+        if !after.trim_start().starts_with('{') && !after.trim_start().starts_with("where ") {
             search = start + "impl StandIn".len();
             continue;
         }
@@ -158,12 +165,20 @@ fn bridge_entry(source: &str) -> String {
             break;
         };
         let block = &code[open + 1..close];
-        let mut method = 0;
-        while let Some(offset) = block[method..].find("pub fn ") {
-            let start = method + offset;
+        let mut depth = 0usize;
+        for (start, character) in block.char_indices() {
+            match character {
+                '{' | '(' | '[' => depth += 1,
+                '}' | ')' | ']' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            // Method bodies, associated values, attributes and macro token
+            // trees can contain other owners' methods. Only direct items count.
+            if depth != 0 || !block[start..].starts_with("pub fn ") {
+                continue;
+            }
             let before = block[..start].chars().next_back();
             if before.is_some_and(|character| character.is_alphanumeric() || character == '_') {
-                method = start + "pub fn ".len();
                 continue;
             }
             let Some(brace) = block[start..].find('{') else {
@@ -172,7 +187,6 @@ fn bridge_entry(source: &str) -> String {
             if let Some(name) = bridge_shaped(&block[start..start + brace]) {
                 entries.push(name);
             }
-            method = start + brace + 1;
         }
         search = close + 1;
     }
@@ -481,9 +495,8 @@ fn component_build_step(source: &str) -> String {
     const BUILDER: &str = "scripts/build-component-capsule.sh";
     // Resolve the command word through wrappers and interpreters. An argument
     // that merely names the script is not an invocation.
-    let source = shell_without_comments(source).replace("\\\n", " ");
-    for segment in source.split([';', '&', '|', '\n']) {
-        let words = segment.split_whitespace().collect::<Vec<_>>();
+    for command in shell_commands(source) {
+        let words = command.iter().map(String::as_str).collect::<Vec<_>>();
         let mut index = 0;
         while index < words.len() && is_assignment(words[index]) {
             index += 1;
@@ -597,31 +610,110 @@ fn is_builder_path(word: &str) -> bool {
     relative == BUILDER
 }
 
-/// Removes shell comments while keeping quoted text, so a commented call and
-/// a quoted builder path stay different.
-fn shell_without_comments(source: &str) -> String {
+/// Read command words without treating quoted separators or here-document
+/// bodies as commands. This is source discovery only; shell text is never run.
+fn shell_commands(source: &str) -> Vec<Vec<String>> {
     let characters = source.chars().collect::<Vec<_>>();
-    let mut out = String::with_capacity(source.len());
+    let mut commands = Vec::new();
+    let mut command = Vec::new();
+    let mut word = String::new();
+    let mut word_started = false;
+    let mut quote = None;
+    let mut delimiter = None;
+    let mut heredocs = Vec::new();
     let mut index = 0;
-    let mut single = false;
-    let mut double = false;
-    while index < characters.len() {
-        let character = characters[index];
-        if character == '#' && !single && !double {
+    while index <= characters.len() {
+        // An artificial final newline flushes the last command.
+        let character = characters.get(index).copied().unwrap_or('\n');
+        if character == '\\' && quote != Some('\'') && index + 1 < characters.len() {
+            let next = characters[index + 1];
+            if quote.is_none() || matches!(next, '$' | '`' | '"' | '\\' | '\n') {
+                if next != '\n' {
+                    word.push(next);
+                    word_started = true;
+                }
+                index += 2;
+                continue;
+            }
+        }
+        if let Some(quoted) = quote {
+            if character == quoted {
+                quote = None;
+            } else {
+                word.push(character);
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            quote = Some(character);
+            word_started = true;
+            index += 1;
+            continue;
+        }
+        if character == '#' && !word_started {
             while index < characters.len() && characters[index] != '\n' {
                 index += 1;
             }
             continue;
         }
-        if character == '\'' && !double {
-            single = !single;
-        } else if character == '"' && !single {
-            double = !double;
+        let heredoc = character == '<' && characters.get(index + 1) == Some(&'<');
+        let separator = matches!(character, ';' | '&' | '|' | '\n');
+        if character.is_whitespace() || separator || heredoc {
+            if word_started {
+                let finished = std::mem::take(&mut word);
+                if let Some(strip_tabs) = delimiter.take() {
+                    heredocs.push((finished, strip_tabs));
+                } else {
+                    command.push(finished);
+                }
+                word_started = false;
+            }
+            if heredoc {
+                index += 2;
+                if characters.get(index) == Some(&'<') {
+                    // A here-string has one ordinary (possibly quoted) word,
+                    // not a body on following lines.
+                    command.push("<<<".to_string());
+                    index += 1;
+                } else {
+                    let strip_tabs = characters.get(index) == Some(&'-');
+                    delimiter = Some(strip_tabs);
+                    index += usize::from(strip_tabs);
+                }
+                continue;
+            }
+            if separator && !command.is_empty() {
+                commands.push(std::mem::take(&mut command));
+            }
+            index += 1;
+            if character == '\n' {
+                for (end, strip_tabs) in heredocs.drain(..) {
+                    while index < characters.len() {
+                        let start = index;
+                        while index < characters.len() && characters[index] != '\n' {
+                            index += 1;
+                        }
+                        let line = characters[start..index].iter().collect::<String>();
+                        index += 1;
+                        let line = if strip_tabs {
+                            line.trim_start_matches('\t')
+                        } else {
+                            &line
+                        };
+                        if line == end {
+                            break;
+                        }
+                    }
+                }
+            }
+            continue;
         }
-        out.push(character);
+        word.push(character);
+        word_started = true;
         index += 1;
     }
-    out
+    commands
 }
 
 /// A component binary starts with `\0asm` and the component-model version;
@@ -982,6 +1074,81 @@ fn bridge_entry_accepts_equivalent_signature_layouts() {
 }
 
 #[test]
+fn bridge_entry_requires_direct_method_ownership() {
+    let method = "pub fn bridge(&self, line: &str, id: &str, principal: Option<&str>) -> Result<String, String> { Ok(line.to_owned()) }";
+    let foreign_owner = format!("impl StandIn for Helper {{ {method} }}");
+    assert_eq!(bridge_entry(&foreign_owner), "none");
+    for item in [
+        format!("pub fn unrelated(&self) {{ struct Helper; impl Helper {{ {method} }} }}"),
+        format!("fn unrelated(&self) {{ struct Helper; impl Helper {{ {method} }} }}"),
+        format!("pub fn unrelated(&self) {{ {{ struct Helper; impl Helper {{ {method} }} }} }}"),
+        format!("const UNRELATED: () = {{ struct Helper; impl Helper {{ {method} }} }};"),
+        format!("unrelated! {{ {method} }}"),
+        format!("unrelated! ( {method} );"),
+        format!("unrelated! [ {method} ];"),
+    ] {
+        let source = format!("impl StandIn {{ {item} }}");
+        assert_eq!(bridge_entry(&source), "none", "{source}");
+        // Skipping a nested body must preserve the next direct method.
+        let source = format!("impl StandIn {{ {item} {method} }}");
+        assert_eq!(bridge_entry(&source), "bridge", "{source}");
+    }
+
+    let repo = repo_root();
+    let source = format!(
+        "impl StandIn {{ pub fn unrelated(&self) {{ struct Helper; impl Helper {{ {method} }} }} }}"
+    );
+    let tree = observe_sources(&repo, |path| {
+        if path == BRIDGE_PATH {
+            Ok(source.clone())
+        } else {
+            read(&repo, path)
+        }
+    })
+    .expect("observe the helper method fixture");
+    assert_eq!(tree.bridge_entry, "none");
+    assert_record_matches(&repo, &read_record(&repo), &tree);
+}
+
+#[test]
+fn bridge_entry_accepts_token_spacing() {
+    for gap in [
+        " ",
+        "\n",
+        "\t",
+        " /* comment */ ",
+        "/* comment */",
+        " // comment\n",
+    ] {
+        let source = format!(
+            "impl{gap}StandIn {{ pub{gap}fn{gap}bridge(&self, line: &str, id: &str, principal: Option<&str>) -> Result<String, String> {{ Ok(line.to_owned()) }} }}"
+        );
+        assert_eq!(bridge_entry(&source), "bridge", "{source}");
+    }
+    let source = "impl StandIn where Self: Sized { pub fn bridge(&self, line: &str, id: &str, principal: Option<&str>) -> Result<String, String> { Ok(line.to_owned()) } }";
+    assert_eq!(bridge_entry(source), "bridge");
+}
+
+#[test]
+#[should_panic(
+    expected = "field bridge_entry: record says \"none\", tree says \"bridge\"\nthe record is stale; this task does not start activations."
+)]
+fn commented_impl_bridge_stales_the_record() {
+    let repo = repo_root();
+    let source = "impl /* comment */ StandIn { pub fn bridge(&self, line: &str, id: &str, principal: Option<&str>) -> Result<String, String> { Ok(line.to_owned()) } }";
+    let tree = observe_sources(&repo, |path| {
+        if path == BRIDGE_PATH {
+            Ok(source.to_string())
+        } else {
+            read(&repo, path)
+        }
+    })
+    .expect("observe the commented impl fixture");
+    assert_eq!(tree.bridge_entry, "bridge");
+    assert_record_matches(&repo, &read_record(&repo), &tree);
+}
+
+#[test]
 #[should_panic(
     expected = "field bridge_entry: record says \"none\", tree says \"bridge\"\nthe record is stale; this task does not start activations."
 )]
@@ -1060,6 +1227,79 @@ fn component_build_requires_an_invocation() {
     ] {
         assert_eq!(component_build_step(&source), "absent", "{source}");
     }
+}
+
+#[test]
+fn component_build_ignores_shell_prose() {
+    const CALL: &str = "\"${REPO_ROOT}/scripts/build-component-capsule.sh\" \"${HOST_DIR}\"";
+    for source in [
+        format!("cat <<'HANDOFF'\n{CALL}\nHANDOFF\n"),
+        format!("cat <<HANDOFF\n{CALL}\nHANDOFF\n"),
+        format!("cat <<\"HANDOFF\"\n{CALL}\nHANDOFF\n"),
+        format!("cat <<\\HANDOFF\n{CALL}\nHANDOFF\n"),
+        format!("cat <<'HAND'OFF\n{CALL}\nHANDOFF\n"),
+        format!("cat <<-'HANDOFF'\n\t{CALL}\n\tHANDOFF\n"),
+        format!("cat <<FIRST <<'SECOND'\n{CALL}\nFIRST\n{CALL}\nSECOND\n"),
+        format!("cat <<'HANDOFF' # instructions\n{CALL}\nHANDOFF\n"),
+        format!("cat <<'HAND OFF'\n{CALL}\nHAND OFF\n"),
+        format!("printf '%s\\n' '\n{CALL}\n'\n"),
+        "printf '%s\\n' \"\n${REPO_ROOT}/scripts/build-component-capsule.sh ${HOST_DIR}\n\"\n".to_string(),
+        "printf '%s\\n' \"\n\\\"${REPO_ROOT}/scripts/build-component-capsule.sh\\\" \\\"${HOST_DIR}\\\"\n\"\n".to_string(),
+        format!("INSTRUCTIONS='\n{CALL}\n'\n"),
+        format!("cat <<<'\n{CALL}\n'\n"),
+        format!("printf '%s\\n' 'instructions; {CALL} | {CALL} & {CALL}'\n"),
+        format!("printf '%s\\n' \\\'\ncat <<'HANDOFF'\n{CALL}\nHANDOFF\n"),
+    ] {
+        assert_eq!(component_build_step(&source), "absent", "{source}");
+        let followed_by_call = format!("{source}{CALL}\n");
+        assert_eq!(
+            component_build_step(&followed_by_call),
+            "scripts/build-component-capsule.sh",
+            "{followed_by_call}"
+        );
+    }
+    assert_eq!(
+        component_build_step(&format!("cat <<'HANDOFF'\n{CALL}\n")),
+        "absent"
+    );
+}
+
+#[test]
+#[should_panic(
+    expected = "field agent_host_build: record says \"scripts/build-component-capsule.sh\", tree says \"absent\"\nthe record is stale; this task does not start activations."
+)]
+fn heredoc_component_build_stales_the_record() {
+    let repo = repo_root();
+    let source = "cat <<'HANDOFF'\n\"${REPO_ROOT}/scripts/build-component-capsule.sh\" \"${HOST_DIR}\"\nHANDOFF\n";
+    let tree = observe_sources(&repo, |path| {
+        if path == AGENT_HOST_BUILD {
+            Ok(source.to_string())
+        } else {
+            read(&repo, path)
+        }
+    })
+    .expect("observe the here-document build fixture");
+    assert_eq!(tree.agent_host_build, "absent");
+    assert_record_matches(&repo, &read_record(&repo), &tree);
+}
+
+#[test]
+#[should_panic(
+    expected = "field agent_host_build: record says \"scripts/build-component-capsule.sh\", tree says \"absent\"\nthe record is stale; this task does not start activations."
+)]
+fn quoted_component_build_stales_the_record() {
+    let repo = repo_root();
+    let source = "printf '%s\\n' '\n\"${REPO_ROOT}/scripts/build-component-capsule.sh\" \"${HOST_DIR}\"\n'\n";
+    let tree = observe_sources(&repo, |path| {
+        if path == AGENT_HOST_BUILD {
+            Ok(source.to_string())
+        } else {
+            read(&repo, path)
+        }
+    })
+    .expect("observe the quoted build fixture");
+    assert_eq!(tree.agent_host_build, "absent");
+    assert_record_matches(&repo, &read_record(&repo), &tree);
 }
 
 #[test]
