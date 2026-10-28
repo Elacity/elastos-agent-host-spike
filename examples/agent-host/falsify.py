@@ -279,12 +279,15 @@ def load(path=DATA):
 # - capsules/model-provider/falsifiers.json: the model provider's
 #   src/local_memory.rs, src/journal.rs, src/contract.rs, src/state.rs,
 #   tests/process.rs, src/local_llama.rs and src/adapters.rs.
-#   tests/process.rs is named here because the model list's MP30-MP36 and
-#   MP38 edit it: MP30, MP31 and MP34 change the relay request, MP33 sends it
-#   a second time, MP32 changes the record of a closed provider socket, MP35
-#   drops the no-live-grant refusal in the granting stand-in, MP36 answers from
-#   a canned stream instead of relaying, and MP38 drops the shared stand-in's
-#   authorise call so a grant for another session reaches the model. The model
+#   tests/process.rs is named here because the model list's MP30-MP36, MP38
+#   and MP39 edit it: MP30, MP31 and MP34 change the relay request, MP33 sends
+#   it a second time, MP32 changes the record of a closed provider socket, MP35
+#   ignores the shared stand-in's authorise result so a run with no grant
+#   reaches the model, MP36 answers from a canned stream instead of relaying,
+#   MP38 passes the session the shell view lists instead of the served session
+#   so another session's grant reaches the model, and MP39 passes the first
+#   live entry's request id instead of the effect's so a run whose own request
+#   id has no grant is admitted. The model
 #   list's `selftest` entries
 #   edit falsify.py, which recovery
 #   finds under examples/agent-host.
