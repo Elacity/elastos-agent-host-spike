@@ -4,6 +4,8 @@
 
 If you find a security vulnerability, please report it privately via [GitHub Security Advisories](https://github.com/Elacity/elastos-runtime/security/advisories/new). Do not open a public issue.
 
+Do not describe an unfixed issue in a public issue, pull request, commit message, or branch name.
+
 ## Current isolation and target boundary
 
 First-party apps run as web projections in the browser's opaque sandboxed
@@ -66,16 +68,33 @@ key and revocation state are committed atomically, operators must verify the
 persisted key and restart result instead of treating command completion as a
 durable rotation receipt.
 
-### Host-plane Carrier providers use Runtime admission
+### Runtime owns Carrier admission
 
 **Severity:** Medium
-**Files:** `elastos/crates/elastos-server/src/carrier_service.rs`
-**Status:** Open
+**Files:** `elastos/crates/elastos-server/src/carrier.rs`, `elastos/crates/elastos-server/src/carrier_service.rs`
+**Status:** Open (host-plane envelope)
 
-Host-plane Carrier service requests use a raw operation/path envelope without
-a capsule capability-token field. Runtime owns admission for this trusted
-provider class. Its trust boundary must remain explicit in manifests and audit
-output; the envelope is not an independent grant of capsule authority.
+Runtime identifies each Carrier peer by its endpoint key. A key alone gives no
+authority. Any peer can read content that this Home holds locally. In this
+release a seed accepts no new copies from other Homes; copies it already holds
+stay. A Home accepts a new copy from a peer only if the owner gave that peer
+the `content.replica` permission; copies it already holds stay. The owner
+trusts such a peer like an own device: it can ask the Home to pin content,
+import complete content and read storage status. An import pins only the CID
+it was asked for and never removes an existing pin. No peer can publish,
+remove or repair content on a Home or a seed. Peers cannot use the
+availability provider. A Home signs an availability announcement only from its
+own pin state. Peers cannot push or read gossip messages directly. Only topics
+that a Home joins keep messages, to a maximum of 100 topics. A granted peer's
+`ensure` (once the pin succeeds) and `import_object` announce the CID and join
+its topic, so a granted peer shares that limit with the Home's own topics. A
+granted peer's `import_exact`, `admission` and `status`, and any peer's
+`fetch`, join no topic.
+
+Host-process provider capsules use a raw operation and path envelope without a
+capsule capability token. Runtime owns admission for this trusted provider
+class. Manifests and audit output must show this boundary. The envelope does
+not grant capsule authority.
 
 ### I/O bridge line reads are not bounded while reading
 
@@ -87,13 +106,15 @@ allocate before that check. Size checks after reading do not bound memory use
 or an incomplete frame's lifetime. Add bounds while reading, with oversized
 and slow-frame tests.
 
-### Whole-object Carrier fetch replies are not size-bounded
+### Whole-object Carrier fetch replies are held in memory
 
 **Files:** `elastos/crates/elastos-server/src/carrier.rs`
 **Status:** Open ([#341](https://github.com/Elacity/elastos-runtime/issues/341))
 
-A whole-object content fetch reply arrives as one line without a size cap.
-Only two such fetches run at once, and one per peer.
+A whole-object content fetch reply arrives as one line. It is refused while
+reading once it passes one 200 MiB file as base64 (about 268 MiB), the largest
+file Runtime downloads whole. Only two such fetches run at once, and one per
+peer.
 
 ## Resolved Findings
 
@@ -121,8 +142,9 @@ requests, read before their signature is checked, allow 64 KiB within 10
 seconds. Replies are capped by what the request can return: a full gossip
 topic for a pull, one importable object for a provider call, update metadata
 for an operator answer. Provider replies share a 256 MiB in-flight budget.
-Whole-object content fetch replies are the open exception below. Relays close after five minutes without bytes in
-either direction, and stream acknowledgements have deadlines.
+Whole-object content fetch replies allow one 200 MiB file as base64; the open
+item above tracks streaming them. Relays close after five minutes without bytes
+in either direction, and stream acknowledgements have deadlines.
 
 ## Architecture
 

@@ -1418,7 +1418,7 @@ fn unbound_copy_is_refused_under_profile() {
         .collect();
     assert_eq!(
         entries,
-        [stored.copy.clone()],
+        std::slice::from_ref(&stored.copy),
         "STORAGE_ROOT must hold only the copy"
     );
     assert_eq!(

@@ -1,15 +1,25 @@
 # Reviewed cargo-audit exceptions. The CI job `cargo-audit` runs from elastos/ and reads this file
-# for every tracked Cargo.lock. Each entry says why it does not apply and which issue removes it.
+# for every tracked Cargo.lock. Each entry says why it does not apply or which part is an accepted
+# risk, and what removes it.
 [advisories]
 ignore = [
-  # zip 2.4.2 (elastos-server): the zip crate's own ZipArchive::extract and
-  # ZipStreamReader::extract write entries, symlinks and Unix permission bits to disk. ElastOS
-  # never calls them. Library reads each entry with ZipArchive::by_index; its own extraction
-  # (extract_zip_archive, write_selected_archive_file in library.rs) refuses symlink entries and
-  # writes bytes without archive permission bits; ZipWriter builds archives in memory.
-  # Upgrade to zip >= 9.0.1 (upstream GHSA-4684-h2q9-2vcp is fixed in 9.0.1, not 9.0.0) and
-  # remove these three lines: #414.
-  "RUSTSEC-2026-0367",
-  "RUSTSEC-2026-0368",
-  "RUSTSEC-2026-0369",
+  # Reviewed 2026-10-20. webpki-roots 0.26.11 (via ureq 2.12.1 in elastos and the
+  # availability, content-block-graph, exit and ipfs provider capsules) has no 0.26.x patch:
+  # it is a shim whose only item is `pub use parent::TLS_SERVER_ROOTS` from webpki-roots 1,
+  # which every lock now pins to the patched 1.0.10 (emSign ECC Root CA - G3 removed), and
+  # path checks run in rustls-webpki 0.103.16, which rejects the distrusted intermediates.
+  # Remove when ureq 2 leaves these locks (ureq 3 depends on webpki-roots 1 directly);
+  # re-review by 2026-11-20 at the latest.
+  "RUSTSEC-2026-0381",
+  # Reviewed 2026-10-23. crypto-bigint 0.5.5 comes only through elliptic-curve 0.13.8 (k256 0.13,
+  # p256 0.13, hpke 0.13) in elastos and the chain, custody, did, media, object, protected-content
+  # and wallet provider capsules. The fix exists only as 0.7.6 and the 0.5 line has no patch;
+  # every lock already uses 0.7.6 for its 0.7 copy, so this entry covers only 0.5.5. Not in
+  # 0.5.5: the subtraction branch (added by crypto-bigint PR 1029, December 2025; 0.5.5 is from
+  # November 2023 and subtracts through WideWord casts) and the UintRef, BoxedMontyForm and
+  # ctutils items. Accepted risk: the zero-counting, division and Montgomery-multiplication
+  # fixes have 0.5.5 counterparts that are not proven constant-time.
+  # Remove when elliptic-curve 0.14 (k256 and p256 0.14) replaces 0.13 in these locks;
+  # re-review by 2026-11-20 at the latest.
+  "RUSTSEC-2026-0387",
 ]

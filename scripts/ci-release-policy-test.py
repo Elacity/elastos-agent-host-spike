@@ -15,6 +15,7 @@ import sys
 import tarfile
 import tempfile
 import textwrap
+import time
 import unittest
 from unittest import mock
 
@@ -27,6 +28,13 @@ CACHE_ACTION = WORKFLOW.parents[1] / "actions/rust-compile-cache/action.yml"
 LOCAL_CACHE_ACTION = "./.github/actions/rust-compile-cache"
 UNIT_CACHE_JOBS = {"lint", "test-elastos", "test-capsules"}
 SOURCE_HOME_CACHE_JOBS = {"source-home-linux", "source-home-linux-arm64", "source-home-macos", "update-hop-linux"}
+# Jobs whose guard skips a spark/* pull request. Quick checks are the rest.
+FULL_PROOF_JOBS = {
+    "engine-llama-amd64", "engine-llama-arm64", "test-elastos", "test-capsules",
+    "custody-harness-smoke", "release-upstream-paths", "release-upstream-assets",
+    "source-home-linux", "source-home-linux-arm64", "source-home-macos", "update-hop-linux",
+}
+SPARK_SKIP = "!(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))"
 # Read the fixed job/step indentation used here; actionlint checks YAML syntax.
 def jobs(source):
     return dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)",
@@ -65,6 +73,7 @@ def steps(job, workflow_jobs=JOBS):
 
 def evaluate(expression, context):
     # Evaluate only this repository's workflow/action expressions, never external input.
+    # startsWith is GitHub's prefix function; str.startswith is the same check.
     expression = expression.removeprefix("${{").removesuffix("}}").strip()
     expression = expression.replace("&&", " and ").replace("||", " or ")
     expression = re.sub(r"!(?!=)", " not ", expression)
@@ -72,6 +81,26 @@ def evaluate(expression, context):
                         lambda match: repr(context[match[0]]), expression)
     return eval(expression, {"__builtins__": {}},
                 {"startsWith": str.startswith, "true": True, "false": False})
+
+
+def event_context(event, ref, ref_type="", override="", head_ref=None, **extra):
+    """One simulated GitHub context.
+
+    github.head_ref is the pull request head branch. GitHub leaves it empty on
+    every other event. A pull_request case that omits the branch is an ordinary
+    non-spark branch, which is what the historical cases are.
+    """
+    if head_ref is None:
+        head_ref = "feature" if event == "pull_request" else ""
+    context = {
+        "github.event_name": event,
+        "github.ref": ref,
+        "github.ref_type": ref_type,
+        "inputs.ref": override,
+        "github.head_ref": head_ref,
+    }
+    context.update(extra)
+    return context
 
 
 def validate_action_pins(source, cache_action):
@@ -360,9 +389,7 @@ def validate_cache_guards(source):
             for event, ref, ref_type, override, cached in CASES:
                 if cached:
                     continue
-                context = {"github.event_name": event, "github.ref": ref,
-                           "github.ref_type": ref_type, "inputs.ref": override,
-                           **NO_CACHE_HIT}
+                context = event_context(event, ref, ref_type, override, **NO_CACHE_HIT)
                 for name in ("CI_USE_CACHE", "CI_SAVE_CACHE"):
                     context["env." + name] = str(evaluate(field(source, name), context)).lower()
                 context["steps.should-run.outputs.run"] = str(custody_should_run(source, context, "true")).lower()
@@ -416,12 +443,12 @@ def validate_cache_writers(source):
     if not writers:
         raise AssertionError("missing cache writers")
     for event, ref, ref_type, override, _ in [*CASES, ("push", "refs/heads/feature", "branch", "", True)]:
-        context = {"github.event_name": event, "github.ref": ref,
-                   "github.ref_type": ref_type, "inputs.ref": override,
-                   "env.CI_USE_CACHE": "true", "steps.should-run.outputs.run": "true",
-                   "steps.engine-cache.outputs.cache-hit": "false", "steps.kubo-cache.outputs.cache-hit": "false",
-                   "steps.previous-release-cache.outputs.cache-hit": "false",
-                   "steps.apt-prerequisites.outputs.changed": "true"}
+        context = event_context(
+            event, ref, ref_type, override,
+            **{"env.CI_USE_CACHE": "true", "steps.should-run.outputs.run": "true",
+               "steps.engine-cache.outputs.cache-hit": "false", "steps.kubo-cache.outputs.cache-hit": "false",
+               "steps.previous-release-cache.outputs.cache-hit": "false",
+               "steps.apt-prerequisites.outputs.changed": "true"})
         context["env.CI_SAVE_CACHE"] = str(evaluate(field(source, "CI_SAVE_CACHE"), context)).lower()
         trusted = event == "push" and ref == CACHE_SAVING_REF
         if (context["env.CI_SAVE_CACHE"] == "true") != trusted:
@@ -487,8 +514,7 @@ def validate_jetson_package_lifecycle(source):
         raise AssertionError("release package builds require --locked")
     for event, ref, ref_type, override, _ in CASES:
         for runner in ("ubuntu-24.04", "ubuntu-22.04-arm"):
-            context = {"github.event_name": event, "github.ref": ref,
-                       "github.ref_type": ref_type, "inputs.ref": override, "matrix.os": runner}
+            context = event_context(event, ref, ref_type, override, **{"matrix.os": runner})
             if evaluate(field(verify, "if"), context) and not evaluate(field(package, "if"), context):
                 raise AssertionError(f"Jetson verification lacks its package on {event} {runner}")
 
@@ -593,8 +619,7 @@ def validate_journey_builds(source, release_source):
             if f'echo "{key}={value}" >> "$GITHUB_ENV"' not in profile or step_source.count(key) != 1:
                 raise AssertionError(f"missing journey profile setting: {job} {key}")
         for event, ref, ref_type, override, _ in CASES:
-            context = {"github.event_name": event, "github.ref": ref,
-                       "github.ref_type": ref_type, "inputs.ref": override}
+            context = event_context(event, ref, ref_type, override)
             expected = event in ("pull_request", "merge_group") or (event == "push" and ref == "refs/heads/develop")
             if evaluate(field(profile, "if"), context) != expected:
                 raise AssertionError(f"journey profile changes shipped build: {job} {event} {ref}")
@@ -754,7 +779,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertIn("\n  merge_group:\n    types: [checks_requested]\n", triggers)
         self.assertIn("\n  pull_request:\n", triggers)
         self.assertIn("branches: [main, develop]", triggers)
-        context = {"github.event_name": "merge_group", "github.ref": "refs/heads/gh-readonly-queue/develop/pr-1"}
+        context = event_context("merge_group", "refs/heads/gh-readonly-queue/develop/pr-1")
         for job in JOBS:
             if job == "cancel-on-failure":
                 continue
@@ -767,8 +792,7 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertEqual(field(checkout, "ref"),
                              "${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}")
         for event, ref, ref_type, override, _ in CASES:
-            context = {"github.event_name": event, "github.ref": ref,
-                       "github.ref_type": ref_type, "inputs.ref": override}
+            context = event_context(event, ref, ref_type, override)
             context["env.CI_SAVE_CACHE"] = str(evaluate(field(SOURCE, "CI_SAVE_CACHE"), context)).lower()
             expected_job = event in ("merge_group", "workflow_dispatch", "pull_request") or \
                 (event == "push" and ref in SAVING_REFS)
@@ -781,6 +805,74 @@ class ReleasePolicyTests(unittest.TestCase):
                     filtered = paths if event == "pull_request" else ""
                     self.assertEqual(upstream_assets_run(SOURCE, context, filtered),
                                      event in ("merge_group", "workflow_dispatch") or filtered == "true")
+
+    def test_spark_pull_requests_skip_full_jobs_and_other_runs_keep_them(self):
+        def job_level_if(job):
+            guard = re.search(r"(?m)^    if: (.*)$", JOBS[job])
+            return guard[1] if guard else ""
+
+        self.assertEqual({job for job in JOBS if SPARK_SKIP in job_level_if(job)}, FULL_PROOF_JOBS)
+        only_spark = "${{ " + SPARK_SKIP + " }}"
+        for job in FULL_PROOF_JOBS - {"custody-harness-smoke", "release-upstream-assets"}:
+            self.assertEqual(job_level_if(job), only_spark, job)
+        self.assertEqual(
+            job_level_if("custody-harness-smoke"),
+            "(github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || "
+            "github.event_name == 'merge_group' || (github.event_name == 'push' && "
+            "(github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'))) && " + SPARK_SKIP)
+        self.assertEqual(
+            job_level_if("release-upstream-assets"),
+            "(needs.release-upstream-paths.outputs.run == 'true') && " + SPARK_SKIP)
+        for job in ("source-gate", "test-behaviour", "cargo-audit", "lint"):
+            self.assertEqual(job_level_if(job), "", job)
+        self.assertNotIn(SPARK_SKIP, job_level_if("cancel-on-failure"))
+
+        def run(event, ref, head_ref):
+            return event_context(event, ref, "branch", "", head_ref)
+
+        spark = run("pull_request", "refs/pull/9/merge", "spark/lane")
+        nested = run("pull_request", "refs/pull/9/merge", "spark/lane/child")
+        ordinary = run("pull_request", "refs/pull/9/merge", "feature/ordinary")
+        batch = run("pull_request", "refs/pull/9/merge", "batch/20261027")
+        # The guard is the prefix spark/, not the substring spark.
+        bare = run("pull_request", "refs/pull/9/merge", "spark")
+        sparked = run("pull_request", "refs/pull/9/merge", "sparked/lane")
+        develop = run("push", "refs/heads/develop", "")
+        merge = run("merge_group", "refs/heads/gh-readonly-queue/develop/pr-1", "")
+        side_push = run("push", "refs/heads/v-work", "")
+        manual = run("workflow_dispatch", "refs/heads/main", "")
+        tag = event_context("push", "refs/tags/v0.7.1", "tag", "", "")
+        kept = (ordinary, batch, bare, sparked, develop, merge, side_push, manual, tag)
+        always = FULL_PROOF_JOBS - {"custody-harness-smoke", "release-upstream-assets"}
+        for job in always:
+            self.assertFalse(job_runs(job, spark), job)
+            self.assertFalse(job_runs(job, nested), job)
+            for context in kept:
+                self.assertTrue(
+                    job_runs(job, context),
+                    (job, context["github.event_name"], context["github.ref"], context["github.head_ref"]))
+        for context in (spark, nested):
+            self.assertFalse(job_runs("custody-harness-smoke", context), context["github.head_ref"])
+            self.assertFalse(upstream_assets_run(SOURCE, context, "true"), context["github.head_ref"])
+        for context in (ordinary, batch, bare, sparked):
+            self.assertTrue(job_runs("custody-harness-smoke", context), context["github.head_ref"])
+            self.assertTrue(upstream_assets_run(SOURCE, context, "true"), context["github.head_ref"])
+            self.assertFalse(upstream_assets_run(SOURCE, context, "false"), context["github.head_ref"])
+        for context in (develop, merge, manual):
+            self.assertTrue(job_runs("custody-harness-smoke", context), context["github.event_name"])
+        self.assertFalse(job_runs("custody-harness-smoke", side_push))
+        self.assertFalse(job_runs("custody-harness-smoke", tag))
+        self.assertTrue(upstream_assets_run(SOURCE, merge, ""))
+        self.assertTrue(upstream_assets_run(SOURCE, manual, ""))
+        self.assertFalse(upstream_assets_run(SOURCE, develop, ""))
+        self.assertTrue(upstream_assets_run(SOURCE, develop, "true"))
+        for job in ("source-gate", "test-behaviour", "cargo-audit", "lint"):
+            self.assertTrue(job_runs(job, spark), job)
+        same_repo = event_context(
+            "pull_request", "refs/pull/9/merge", "branch", "", "spark/lane",
+            **{"github.repository": "Elacity/elastos-runtime",
+               "github.event.pull_request.head.repo.full_name": "Elacity/elastos-runtime"})
+        self.assertTrue(job_runs("cancel-on-failure", same_repo))
 
     def test_sccache_is_scoped_to_test_jobs(self):
         expected = UNIT_CACHE_JOBS | SOURCE_HOME_CACHE_JOBS
@@ -1297,8 +1389,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertEqual(len(caches), 33)
         for event, ref, ref_type, override, cached in CASES:
             with self.subTest(event=event, ref=ref, override=override):
-                context = {"github.event_name": event, "github.ref": ref,
-                           "github.ref_type": ref_type, "inputs.ref": override}
+                context = event_context(event, ref, ref_type, override)
                 use_cache = evaluate(field(SOURCE, "CI_USE_CACHE"), context)
                 self.assertEqual(use_cache, cached)
                 context["env.CI_USE_CACHE"] = str(use_cache).lower()
@@ -1335,7 +1426,7 @@ class ReleasePolicyTests(unittest.TestCase):
         decision, = [step for step in steps("custody-harness-smoke") if "id: should-run" in step]
         script = textwrap.dedent(decision.split("        run: |\n", 1)[1])
         for event, ref, _, _, _ in CASES:
-            context = {"github.event_name": event, "github.ref": ref}
+            context = event_context(event, ref)
             eligible = event in ("pull_request", "merge_group", "workflow_dispatch") or (event == "push" and ref in SAVING_REFS)
             self.assertEqual(evaluate(field(JOBS["custody-harness-smoke"], "if"), context), eligible)
             self.assertEqual(evaluate(field(filter_step, "if"), context), event == "pull_request")
@@ -1402,8 +1493,7 @@ class ReleasePolicyTests(unittest.TestCase):
         for event, ref, _, _, _ in CASES:
             groups = []
             for run_id in ("101", "102", "103"):
-                context = {"github.workflow": "CI", "github.event_name": event,
-                           "github.ref": ref, "github.run_id": run_id}
+                context = event_context(event, ref, **{"github.workflow": "CI", "github.run_id": run_id})
                 groups.append(re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda match: str(evaluate(match[1], context)), group))
                 self.assertEqual(evaluate(field(concurrency, "cancel-in-progress"), context), event == "pull_request")
             self.assertEqual(len(set(groups)), 1 if event == "pull_request" else 3)
@@ -1449,8 +1539,7 @@ class ReleasePolicyTests(unittest.TestCase):
                             ("source-home-macos", "macos-14")):
             packages = [step for step in steps(job) if step.startswith("name: build and package release binaries\n")]
             for event, ref, ref_type, override, _ in CASES:
-                context = {"github.event_name": event, "github.ref": ref,
-                           "github.ref_type": ref_type, "inputs.ref": override, "matrix.os": runner}
+                context = event_context(event, ref, ref_type, override, **{"matrix.os": runner})
                 with self.subTest(job=job, event=event, ref=ref, override=override):
                     self.assertEqual(any(evaluate(field(step, "if"), context) for step in packages),
                                      job == "source-home-linux-arm64")
@@ -1502,8 +1591,7 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertIn("sccache --show-stats", statistics)
             self.assertIn("sccache --show-stats --stats-format=json", statistics)
         for event, ref, ref_type, override, cached in CASES:
-            context = {"github.event_name": event, "github.ref": ref,
-                       "github.ref_type": ref_type, "inputs.ref": override}
+            context = event_context(event, ref, ref_type, override)
             context["env.CI_USE_CACHE"] = str(evaluate(field(SOURCE, "CI_USE_CACHE"), context)).lower()
             for job in expected_jobs:
                 setup, = [step for step in steps(job) if f"uses: {LOCAL_CACHE_ACTION}" in step]
@@ -1712,8 +1800,10 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertEqual(watcher.split("    permissions:\n", 1)[1].split("    steps:\n", 1)[0], "      actions: write\n")
         for event, ref, ref_type, override, _ in CASES:
             for head in ("Elacity/elastos-runtime", "someone/fork"):
-                context = {"github.event_name": event, "github.ref": ref, "github.repository": "Elacity/elastos-runtime",
-                           "github.event.pull_request.head.repo.full_name": head}
+                context = event_context(
+                    event, ref, ref_type, override,
+                    **{"github.repository": "Elacity/elastos-runtime",
+                       "github.event.pull_request.head.repo.full_name": head})
                 self.assertEqual(job_runs("cancel-on-failure", context),
                                  event == "pull_request" and head == "Elacity/elastos-runtime", (event, head))
         watch = ("cancel-on-failure", "in_progress", None)
@@ -1824,9 +1914,10 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertNotIn("restore-keys:", restore)
         for event, ref, ref_type, override, cached in CASES:
             for hit in ("true", "false"):
-                context = {"github.event_name": event, "github.ref": ref,
-                           "env.CI_USE_CACHE": str(cached).lower(),
-                           "steps.engine-cache.outputs.cache-hit": hit}
+                context = event_context(
+                    event, ref, ref_type, override,
+                    **{"env.CI_USE_CACHE": str(cached).lower(),
+                       "steps.engine-cache.outputs.cache-hit": hit})
                 self.assertEqual(evaluate(field(save, "if"), context),
                                  cached and event == "push" and ref == "refs/heads/develop" and hit == "false")
         self.assertEqual(field(JOBS["engine-llama-arm64"], "image"),
@@ -2161,14 +2252,15 @@ class InstalledJourneyTests(unittest.TestCase):
             (blocks / key[-3:-1]).mkdir()
             (blocks / key[-3:-1] / f"{key}.data").write_bytes(b"package root")
 
-    def execute(self, home, data, evidence, available=20 * 1024 ** 3, carrier=False, consumer_holds_root=False, memory_gib=0):
+    def execute(self, home, data, evidence, available=20 * 1024 ** 3, carrier=False, consumer_holds_root=False, memory_gib=0,
+                finite=None):
         journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
         child = mock.Mock(pid=12345)
         child.poll.return_value = None
         response = mock.MagicMock()
         response.__enter__.return_value.status = 200
         self.holder = mock.Mock(return_value=(mock.Mock(pid=23456), {"holder_did": "did:key:holder"}))
-        self.finite = mock.Mock()
+        self.finite = finite or mock.Mock()
 
         def node_journey(*args, **kwargs):
             if args[0][1] == "scripts/ci-model-package.mjs":
@@ -3231,6 +3323,23 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                 self.assertEqual(self.journey["private_json"](owner.control / "stop.json"), {"stop": True})
         detail.__str__.assert_not_called()
 
+    def test_finite_observer_fixed_messages_and_phase_still_pass_redaction(self):
+        failure_of = self.journey["finite_observer_failure"]
+        # Every fixed message is readable after redact(), so it is saved as written.
+        for message in sorted(self.globals["FINITE_OBSERVER_MESSAGES"]):
+            with self.subTest(message=message):
+                self.assertEqual(failure_of("census", RuntimeError(message))["message"], message)
+        # A message or phase added later with a secret value or a path is still redacted.
+        added = 'finite journey control said {"token":"tq-41"} at /home/ci-person/x'
+        with mock.patch.dict(self.globals, {"FINITE_OBSERVER_MESSAGES": frozenset({added})}), \
+                mock.patch.dict(os.environ, {"HOME": "/home/ci-person"}):
+            failure = failure_of('stage_{"token":"pq-17"}', RuntimeError(added))
+        self.assertEqual(failure["message"], 'finite journey control said {"token":"<redacted>"} at <path>')
+        self.assertEqual(failure["phase"], 'stage_{"token":"<redacted>"}')
+        self.assertEqual(failure["type"], "RuntimeError")
+        for private in ("tq-41", "pq-17", "ci-person"):
+            self.assertNotIn(private, json.dumps(failure))
+
     def test_finite_observer_stage_phase_uses_only_validated_action_text(self):
         for action in ("engine_stopped", "private-action-Token1234567890"):
             with self.subTest(action=action), tempfile.TemporaryDirectory() as temp:
@@ -3267,6 +3376,206 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                 owner.action({"id": 1, "action": "engine_running"})
             self.assertEqual(owner.actions, [])
             self.assertFalse((owner.control / "response.json").exists())
+
+    def test_finite_observer_failure_names_its_phase_type_message_and_runtime_exit(self):
+        cases = (("census", RuntimeError("finite journey Runtime left its unit"), True),
+                 ("census", RuntimeError("finite journey child escaped its finite unit"), False),
+                 ("stage_engine_running", RuntimeError("finite journey engine stage deadline"), False))
+        for phase, error, exited in cases:
+            with self.subTest(phase=phase, error=str(error)), tempfile.TemporaryDirectory() as temp:
+                owner, _ = self.finite_owner(Path(temp))
+                owner.started, owner.fds = time.monotonic(), {100: 1100}
+                owner.observe_once = mock.Mock(side_effect=None if phase.startswith("stage") else error)
+                owner.action = mock.Mock(side_effect=error)
+                if phase.startswith("stage"):
+                    self.journey["private_json"](owner.control / "request.json", {"id": 1, "action": "engine_running"})
+                self.journey["private_json"](owner.control / "runtime-stopped.json", {"reaped": True})
+                with mock.patch.dict(self.globals, {"pidfd_exited": lambda fd: exited and fd == 1100}), \
+                        mock.patch.object(os, "close"):
+                    owner.observe()
+                    expected = {"phase": phase, "type": "RuntimeError", "message": str(error), "runtime_exited": exited}
+                    self.assertEqual(owner.failure, expected)
+                    self.assertEqual(owner.poll(), 1)
+                    # The same cause reaches the CI log line that used to end the job without it.
+                    with self.assertRaisesRegex(AssertionError, re.escape(f"exited before health ({phase}: RuntimeError: {error})")):
+                        self.journey["wait_healthy"](owner, "127.0.0.1:1", "Runtime")
+                    receipt = owner.finish()
+                self.assertEqual(receipt["status"], "failed")
+                self.assertEqual(receipt["observer_failure"], expected)
+                self.assertEqual(receipt.get("runtime_exited_before_cleanup"), True if exited else None)
+
+    def test_observer_failure_text_is_bounded_and_single_line(self):
+        cause = self.journey["observer_failure"]("census", OSError("first line\nsecond " + "x" * 2000))
+        self.assertEqual(cause["type"], "OSError")
+        self.assertNotIn("\n", cause["message"])
+        self.assertTrue(cause["message"].startswith("first line second x"))
+        self.assertLessEqual(len(cause["message"]), 483)
+
+    def test_finite_observer_failure_reaches_the_uploaded_installed_journey_receipt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            owner, _ = self.finite_owner(Path(temp) / "observer")
+            owner.started, owner.fds, owner.launch_requested = time.monotonic(), {}, False
+            owner.observe_once = mock.Mock(side_effect=RuntimeError("finite journey Runtime left its unit"))
+            owner.observe()
+            owner.start = mock.Mock(return_value=owner)
+            case = InstalledJourneyTests()
+            home, data, evidence, _ = case.fixture(Path(temp) / "journey", "linux")
+            # The unit helper creates the private log before start() returns.
+            (home / "journey-runtime.private.log").write_text("private Runtime log line\n")
+            factory = mock.Mock(return_value=owner)
+            with self.assertRaisesRegex(AssertionError, re.escape(
+                    "installed Runtime exited before health (census: RuntimeError: finite journey Runtime left its unit)")):
+                case.execute(home, data, evidence, memory_gib=4, finite=factory)
+            factory.assert_called_once()
+            record = json.loads((evidence / "installed-journeys.json").read_text())
+            self.assertEqual(record["finite_memory"]["observer_failure"]["message"], "finite journey Runtime left its unit")
+            self.assertEqual(record["finite_memory"]["observer_failure"]["phase"], "census")
+            self.assertEqual(record["results"]["finite_memory_boundary"], "failed")
+            self.assertNotIn("private Runtime log line", (evidence / "installed-journeys.json").read_text())
+
+    def test_observer_failure_redacts_home_paths_and_tokens_before_the_record_is_saved(self):
+        hexdigest = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        did = "z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+        private = ["/home/ci-person", "ci-person", "observer root", "Application Support", "/opt/build-cache",
+                   "eyJhbGciOiJFZERTQSJ9.payload-77", "s3cr3t-value", "hunter2pass", hexdigest, did,
+                   "QWxhZGRpbjpvcGVuIHNlc2FtZQ9xYz", "q-secret-9"]
+
+        def message(home, data):
+            return (f"[Errno 2] No such file or directory: '{data / 'finite-control/request.json'}' "
+                    f"after {home}/model-inputs and /home/ci-person/.config/elastos/keys and "
+                    f"/opt/build-cache/run-41/llama.bin and file:///home/ci-person/x; "
+                    "Authorization: Bearer eyJhbGciOiJFZERTQSJ9.payload-77 token=s3cr3t-value "
+                    f"password: hunter2pass digest {hexdigest} holder did:key:{did} "
+                    "blob QWxhZGRpbjpvcGVuIHNlc2FtZQ9xYz body {\"token\": \"q-secret-9\"}")
+
+        def assert_redacted(text, failure, finite=False):
+            for value in private:
+                self.assertNotIn(value, text)
+            if finite:
+                # The finite observer saves only its fixed harness messages.
+                self.assertEqual(failure["message"], "observer detail redacted")
+                return
+            self.assertIn("No such file or directory: '<path>/request.json'", failure["message"])
+            self.assertIn("did:key:<redacted>", failure["message"])
+            self.assertIn("Bearer <redacted>", failure["message"])
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.dict(os.environ, {"HOME": "/home/ci-person"}):
+            owner, _ = self.finite_owner(Path(temp) / "observer root")
+            owner.data = owner.home / "Library/Application Support/elastos"
+            owner.started, owner.fds, owner.launch_requested = time.monotonic(), {}, False
+            owner.observe_once = mock.Mock(side_effect=FileNotFoundError(message(owner.home, owner.data)))
+            owner.observe()
+            owner.start = mock.Mock(return_value=owner)
+            case = InstalledJourneyTests()
+            home, data, evidence, _ = case.fixture(Path(temp) / "journey", "linux")
+            (home / "journey-runtime.private.log").write_text("")
+            with self.assertRaisesRegex(AssertionError, "installed Runtime exited before health") as raised:
+                case.execute(home, data, evidence, memory_gib=4, finite=mock.Mock(return_value=owner))
+            saved = (evidence / "installed-journeys.json").read_text()
+            failure = json.loads(saved)["finite_memory"]["observer_failure"]
+            self.assertEqual((failure["phase"], failure["type"], failure["runtime_exited"]),
+                             ("census", "FileNotFoundError", False))
+            assert_redacted(saved, failure, finite=True)
+            # The CI log line carries the same redacted cause.
+            assert_redacted(str(raised.exception), failure, finite=True)
+
+            repair = self.journey["RepairRuntime"].__new__(self.journey["RepairRuntime"])
+            repair.home = owner.home
+            repair.data = owner.data
+            repair.control, repair.record = Path(temp) / "repair-control", {"actions": []}
+            repair.control.mkdir(mode=0o700)
+            repair.stop = mock.Mock()
+            repair.stop.wait.return_value = False
+            self.journey["private_json"](repair.control / "request.json", {"id": 1, "action": "engine_running"})
+            repair.engine_running = mock.Mock(side_effect=OSError(message(repair.home, repair.data)))
+            repair.observe()
+            self.assertEqual(repair.record["control_failure"]["phase"], "stage_engine_running")
+            assert_redacted(json.dumps(repair.record), repair.record["control_failure"])
+
+    def test_observer_failure_redacts_url_user_info_windows_network_paths_and_paths_with_spaces(self):
+        # Each case: the error text, the values that must not survive, and the
+        # cause that is saved. No case is under a known root, so only the
+        # general rules can catch it.
+        cases = (
+            ("GET http://ci-user:hunter9@127.0.0.1:8090/api failed", ("ci-user", "hunter9"),
+             "GET http://<redacted>@127.0.0.1:8090/api failed"),
+            ("proxy https://alice@proxy.corp.example:3128 refused", ("alice",),
+             "proxy https://<redacted>@proxy.corp.example:3128 refused"),
+            ("fetch ftp://bob:pw-77@files.example/x (timeout)", ("bob", "pw-77"),
+             "fetch ftp://<redacted>@files.example/x (timeout)"),
+            ("via socks5h://carol:p@ss@10.0.0.1:1080/", ("carol", "p@ss", "ss@"),
+             "via socks5h://<redacted>@10.0.0.1:1080/"),
+            (r"open \\fileserver\share$\ci person\keys.json: denied", ("fileserver", "share$", "person"),
+             "open <path>/keys.json: denied"),
+            ("open //fileserver/share/ci person/keys failed", ("fileserver", "share", "person"), "open <path>"),
+            (r"\\?\C:\Users\ci person\AppData\x.json missing", ("Users", "person", "AppData"), "<path>"),
+            (r"pipe \\.\pipe\elastos-ci-person busy", ("ci-person",), "pipe <path>"),
+            (r"C:\Program Files\ElastOS Person\bin\elastos.exe: not found", ("Program", "Person"),
+             "<path>: not found"),
+            ("C:/Users/ci person/AppData/Local/elastos/data failed", ("Users", "person"), "<path>"),
+            ("cannot read /srv/ci person/Shared Keys/vault: Permission denied", ("srv", "person", "Shared", "Keys"),
+             "cannot read <path>: Permission denied"),
+            ("No such file or directory: '/var/my folder/secret stuff/key.pem'", ("folder", "secret", "stuff"),
+             "No such file or directory: '<path>'"),
+            ("error at /Volumes/Backup Disk/ci-person (exit 2)", ("Volumes", "Backup", "Disk", "ci-person"),
+             "error at <path> (exit 2)"),
+        )
+        with mock.patch.dict(os.environ, {"HOME": "/home/runner"}):
+            for text, private, saved in cases:
+                with self.subTest(text=text):
+                    failure = self.journey["observer_failure"]("census", OSError(text))
+                    for value in private:
+                        self.assertNotIn(value, failure["message"])
+                    self.assertEqual(failure["message"], saved)
+            # The rules keep what carries no person: a plain URL, a quoted
+            # command's options and a cause with no path.
+            for text in ("GET http://127.0.0.1:8090/api/health returned 503", "Expecting value: line 1 column 1 (char 0)",
+                         "3/4 samples and/or a // b"):
+                with self.subTest(text=text):
+                    self.assertEqual(self.journey["observer_failure"]("census", OSError(text))["message"], text)
+
+    def test_observer_failure_redacts_secret_values_under_quoted_and_escaped_keys(self):
+        # Each case: the error text, the secret that must not survive, and the
+        # saved cause. The key and the names around it stay readable.
+        cases = (
+            # The reviewer's case: one letter, so only the exact saved text proves it.
+            ('{"token":"x"}', None, '{"token":"<redacted>"}'),
+            ('{"api_key": "abc9"}', "abc9", '{"api_key": "<redacted>"}'),
+            ("{'password': 'p4ss'}", "p4ss", "{'password': '<redacted>'}"),
+            ('cause "secret" :  "s-9 9" in census', "s-9", 'cause "secret" : "<redacted>" in census'),
+            (r'body {\"token\":\"xq7\"}', "xq7", r'body {\"token\":\"<redacted>\"}'),
+            ('{"access_token":"at1","phase":"stage_engine_running"}', "at1",
+             '{"access_token":"<redacted>","phase":"stage_engine_running"}'),
+            (r'{"token":"a\"b c","stage":"census"}', "b c", '{"token":"<redacted>","stage":"census"}'),
+            (r'{\"token\":\"a1\\\"b2\",\"phase\":\"census\"}', "b2",
+             r'{\"token\":\"<redacted>\",\"phase\":\"census\"}'),
+            ('"client_secret" = \'c c\' tail', "c c", '"client_secret" = \'<redacted>\' tail'),
+            ('token: "no closing quote', "closing", 'token: "<redacted>"'),
+            ("token = x9 then", "x9", "token = <redacted> then"),
+            ("{token:k5}", "k5", "{token:<redacted>}"),
+        )
+        with mock.patch.dict(os.environ, {"HOME": "/home/runner"}):
+            for text, secret, saved in cases:
+                with self.subTest(text=text):
+                    failure = self.journey["observer_failure"]("stage_engine_running", OSError(text))
+                    self.assertEqual(failure["message"], saved)
+                    if secret:
+                        self.assertNotIn(secret, failure["message"])
+
+    def test_repair_control_failure_reaches_its_record(self):
+        owner = self.journey["RepairRuntime"].__new__(self.journey["RepairRuntime"])
+        with tempfile.TemporaryDirectory() as temp:
+            owner.control, owner.record = Path(temp), {"actions": []}
+            owner.home, owner.data = Path(temp), Path(temp) / "data"
+            owner.control.chmod(0o700)
+            owner.stop = mock.Mock()
+            owner.stop.wait.return_value = False
+            self.journey["private_json"](owner.control / "request.json", {"id": 1, "action": "engine_running"})
+            owner.engine_running = mock.Mock(side_effect=RuntimeError("repair journey engine deadline"))
+            owner.observe()
+        self.assertEqual(owner.error, "installed_model_repair_control_failed")
+        self.assertEqual(owner.record["control_failure"], {"phase": "stage_engine_running", "type": "RuntimeError",
+                                                           "message": "repair journey engine deadline"})
 
     def test_finite_start_requires_actual_runtime_and_every_kernel_limit(self):
         for fault in (None, "launcher_pid", "wrong_parent", "unit_max", "swap", "tasks", "tighter_parent",
@@ -3876,6 +4185,50 @@ class InstalledModelTimingTests(unittest.TestCase):
                       str(data / "bin/model-provider") + " --internal-local-llama-guard extra"):
             with self.subTest(guard=guard):
                 self.assertEqual(list(observe({**rows, 3: (2, guard)}, 1, data)), [])
+
+
+class PinnedModelProofLicenseTests(unittest.TestCase):
+    """The proof copies the vendored license text only after its pin matches; it never downloads it."""
+    def proof(self, root, change=None):
+        tree = root / "tree"
+        (tree / "scripts/fixtures/licenses").mkdir(parents=True)
+        for name in ("pinned-model-consumer-proof.sh", "pinned-smollm2-fixture.json", "fixtures/licenses/Apache-2.0.txt"):
+            shutil.copy2(REPO / "scripts" / name, tree / "scripts" / name)
+        vendored = tree / "scripts/fixtures/licenses/Apache-2.0.txt"
+        if change:
+            vendored.write_bytes(change(vendored.read_bytes()))
+        tools = root / "tools"
+        tools.mkdir()
+        (tools / "curl").write_text("#!/bin/sh\ntouch \"$0.called\"\nexit 22\n")
+        (tools / "curl").chmod(0o700)
+        (root / "model.gguf").write_bytes(b"not the pinned model")
+        environment = {"PATH": f"{tools}:/usr/bin:/bin", "HOME": str(root),
+                       "ELASTOS_PROOF_MODEL_PATH": str(root / "model.gguf")}
+        result = subprocess.run(["bash", str(tree / "scripts/pinned-model-consumer-proof.sh"), str(root / "proof"),
+                                 "--fetch", "--check-inputs"], env=environment, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+        self.assertFalse((tools / "curl.called").exists(), "the license has no network source")
+        return result, root / "proof/inputs/LICENSE"
+
+    def test_vendored_license_matches_its_pin_and_is_copied_before_model_checks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result, copied = self.proof(Path(temp))
+            fixture = json.loads((REPO / "scripts/pinned-smollm2-fixture.json").read_text())["license"]
+            self.assertNotIn("url", fixture)
+            self.assertIn(f"vendored license verified: {fixture['size']} bytes sha256 {fixture['sha256']}", result.stdout)
+            self.assertEqual(hashlib.sha256(copied.read_bytes()).hexdigest(), fixture["sha256"])
+            # The dummy model is refused after the license step; nothing else runs.
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("model size", result.stdout)
+
+    def test_tampered_vendored_license_is_refused_before_copy_or_download(self):
+        for name, change in (("same size", lambda text: text.replace(b"Apache License", b"Apache Licanse", 1)),
+                             ("appended", lambda text: text + b"extra grant\n"), ("empty", lambda text: b"")):
+            with self.subTest(change=name), tempfile.TemporaryDirectory() as temp:
+                result, copied = self.proof(Path(temp), change)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertRegex(result.stdout, r"vendored license (sha256|size) .* differs from pinned")
+                self.assertFalse(copied.exists() or copied.is_symlink())
 
 
 if __name__ == "__main__":
