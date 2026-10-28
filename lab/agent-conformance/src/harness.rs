@@ -534,7 +534,7 @@ impl RunningChild<'_> {
                 }
                 None => {
                     if started.elapsed() >= deadline {
-                        self.kill_group()?;
+                        self.kill_group(self.home)?;
                         self.stopped = true;
                         return Err("provider exit exceeded its deadline");
                     }
@@ -592,13 +592,13 @@ impl RunningChild<'_> {
         Ok(Some(output))
     }
 
-    fn signal(&self, signal: &str, group: bool) -> Result<()> {
+    fn signal(&self, helper_home: &ThrowawayHome, signal: &str, group: bool) -> Result<()> {
         let target = if group {
             format!("-{}", self.pgid())
         } else {
             self.pgid().to_string()
         };
-        let output = self.home.launch(
+        let output = helper_home.launch(
             Path::new("/bin/kill"),
             &[signal, &target],
             Duration::from_secs(1),
@@ -609,17 +609,25 @@ impl RunningChild<'_> {
         Ok(())
     }
 
-    fn kill_group(&mut self) -> Result<()> {
+    fn kill_group(&mut self, helper_home: &ThrowawayHome) -> Result<()> {
         // Signal first even if the leader exited: its children can still live.
-        let _ = self.signal("-KILL", true);
+        let _ = self.signal(helper_home, "-KILL", true);
         let bound = Instant::now();
         while bound.elapsed() < Duration::from_secs(2) {
-            if !self.is_alive()? && !self.home.group_is_alive(self.pgid())? {
+            if !self.is_alive()? && !helper_home.group_is_alive(self.pgid())? {
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(20));
         }
         Err("managed process group remains after SIGKILL")
+    }
+
+    // The owned process group survives a damaged Home. Run the same cleanup
+    // through a fresh guarded Home so signalling and inspection can complete.
+    fn cleanup_group(&mut self) -> Result<()> {
+        let helper_home = ThrowawayHome::new()?;
+        self.kill_group(&helper_home)?;
+        helper_home.finish()
     }
 
     pub fn stop(&mut self) -> Result<()> {
@@ -629,7 +637,7 @@ impl RunningChild<'_> {
         let result = self.stop_within_bound();
         if result.is_err() {
             self.home.keep.set(true);
-            self.kill_group()?;
+            self.cleanup_group()?;
         }
         self.stopped = true;
         result
@@ -638,7 +646,7 @@ impl RunningChild<'_> {
     fn stop_within_bound(&mut self) -> Result<()> {
         let started = Instant::now();
         if self.is_alive()? {
-            self.signal("-TERM", false)?;
+            self.signal(self.home, "-TERM", false)?;
         }
         while started.elapsed() < Duration::from_secs(10) {
             if !self.is_alive()? && !self.home.group_is_alive(self.pgid())? {
@@ -776,7 +784,7 @@ impl Drop for RunningChild<'_> {
     fn drop(&mut self) {
         if !self.stopped {
             self.home.keep.set(true);
-            if let Err(reason) = self.kill_group() {
+            if let Err(reason) = self.cleanup_group() {
                 eprintln!("managed child cleanup failed: {reason}");
             }
         }

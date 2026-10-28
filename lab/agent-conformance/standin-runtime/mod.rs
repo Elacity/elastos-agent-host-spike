@@ -2207,17 +2207,18 @@ impl StartedProvider<'_> {
         let answer = match exchange(&mut self.child, &json!({ "op": "shutdown" })) {
             Ok(answer) => answer,
             Err(reason) => {
-                let _ = self.child.stop();
-                return Err(reason);
+                return Err(provider_refusal(&mut self.child, reason));
             }
         };
         if answer.get("status").and_then(Value::as_str) != Some("ok") {
-            let _ = self.child.stop();
-            return Err(format!("shutdown answered {answer}"));
+            return Err(provider_refusal(
+                &mut self.child,
+                format!("shutdown answered {answer}"),
+            ));
         }
         let status = match self.child.wait_for_exit_within(EXIT_DEADLINE) {
             Ok(status) => status,
-            Err(reason) => return Err(reason.to_string()),
+            Err(reason) => return Err(provider_refusal(&mut self.child, reason.to_string())),
         };
         if status.code() != Some(0) {
             return Err(format!("provider exit status {status}"));
@@ -2264,6 +2265,8 @@ pub fn start_provider<'a>(
     let binary = launch_file(binary_path, name, "provider binary")?;
     let profile = launch_file(profile_path, name, "confinement profile")?;
     let root = storage_layout(name, base_path)?;
+    home.guard(home.home(), home.data())
+        .map_err(|reason| format!("{name} start is refused: {reason}"))?;
     // One check for the base, the parent `create_dir_all` would make, and the
     // `STORAGE_ROOT` binding. The layout path contains that base, and the
     // parent is its prefix. Refuse before creating a directory or binding it.
@@ -2317,23 +2320,31 @@ pub fn start_provider<'a>(
         "op": "init",
         "config": { "base_path": base_path.display().to_string() },
     });
-    let init = match exchange(&mut child, &init_request) {
-        Ok(init) => init,
-        Err(reason) => {
-            let _ = child.stop();
-            return Err(format!("{name} start is refused: {reason}"));
-        }
-    };
-    if init.get("status").and_then(Value::as_str) != Some("ok") {
-        let _ = child.stop();
-        return Err(format!("{name} start is refused: init answered {init}"));
-    }
+    let init = exchange(&mut child, &init_request)
+        .and_then(|init| {
+            if init.get("status").and_then(Value::as_str) == Some("ok") {
+                Ok(init)
+            } else {
+                Err(format!("init answered {init}"))
+            }
+        })
+        .map_err(|reason| {
+            provider_refusal(&mut child, format!("{name} start is refused: {reason}"))
+        })?;
     Ok(StartedProvider {
         child,
         init,
         binary_sha256,
         profile_sha256,
     })
+}
+
+// Every dialogue refusal settles the same child owner and keeps both causes.
+fn provider_refusal(child: &mut RunningChild<'_>, reason: String) -> String {
+    match child.stop() {
+        Ok(()) => reason,
+        Err(cleanup) => format!("{reason}; cleanup failed: {cleanup}"),
+    }
 }
 
 fn host_refusal(name: &str, host: HostReport) -> Result<(), String> {

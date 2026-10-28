@@ -14215,4 +14215,30 @@ New:
 - `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 265.63 seconds, inside the 600-second bound. Targets: lib 80 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; provider_launch 12 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0.
 - Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test provider_launch -- --nocapture`: exit 0, 12 passed, finished in 4.97 seconds, real 5.08 seconds.
 
+### Root identity and refusal cleanup repair
+
+`start_provider` calls the existing Home guard before inspecting or creating
+provider storage. Both initialization response failures use `provider_refusal`,
+which stops the owned child and includes a cleanup error in the refusal reason.
+Shutdown uses that same handler. `RunningChild` runs its existing group cleanup
+from a fresh guarded helper Home after a failed stop and on Drop; the helper
+uses the existing spawn site and is removed after cleanup.
+
+The new root test replaces the borrowed root with both a symlink and a different
+directory. It checks the exact refusal, unchanged unrelated contents and empty
+child inventory. The initialization and shutdown tests swap the temporary
+directory before returning either an error response or invalid JSON. They check
+that the group has ended before restoring the directory, preserve both refusal
+and cleanup reasons, and use `census::cleanup` for physical evidence. Existing
+tests and assertions remain in place.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test provider_launch --test harness -- --nocapture`: exit 0 in 12.37 seconds; 15 provider-launch tests and 9 harness tests passed.
+
+The focused test command held the shared heavy-build lease, used the existing
+lane build directories and ran with macOS process inspection and local loopback
+access. Free space was 116.2 GiB before the run. Test fixtures removed their
+Homes after physical cleanup. Git commands were unused. The supervisor owns
+the complete checks and fresh review for this edit.
+
 

@@ -800,6 +800,178 @@ fn standin_provider_launch_refuses_storage_through_a_symlink() {
     home.finish().expect("the passed home is removed");
 }
 
+/// The borrowed root keeps its original identity before any storage access.
+/// Both a symlink and a different directory at the same path are refused.
+#[test]
+fn standin_provider_launch_refuses_a_replaced_home_root() {
+    let tool = require_confinement_tool();
+    let external = ThrowawayHome::new().expect("external launch inputs");
+    let profile = normal_profile(&external);
+    for symlink in [true, false] {
+        let home = ThrowawayHome::new().expect("throwaway home");
+        let saved_root = external.root().join("saved-home");
+        let unrelated = external.root().join("unrelated");
+        fs::create_dir(&unrelated).expect("the unrelated directory");
+        fs::write(unrelated.join("sentinel"), b"unchanged").expect("unrelated contents");
+        fs::rename(home.root(), &saved_root).expect("retain the owned root");
+        if symlink {
+            std::os::unix::fs::symlink(&unrelated, home.root()).expect("replace the root");
+        } else {
+            fs::rename(&unrelated, home.root()).expect("replace the root directory");
+        }
+        let reason = refused(
+            &home,
+            Path::new("/usr/bin/false"),
+            &home.root().join("base"),
+            macos_host(),
+            tool,
+            &profile,
+        );
+        if symlink {
+            fs::remove_file(home.root()).expect("remove the replacement link");
+        } else {
+            fs::rename(home.root(), &unrelated).expect("return the unrelated directory");
+        }
+        fs::rename(&saved_root, home.root()).expect("restore the owned root");
+        assert_eq!(
+            reason,
+            "wallet-provider start is refused: throwaway root is no longer the fresh directory"
+        );
+        let entries: Vec<_> = fs::read_dir(&unrelated)
+            .expect("inspect the unrelated directory")
+            .map(|entry| entry.expect("unrelated entry").file_name())
+            .collect();
+        assert_eq!(entries, ["sentinel"], "storage leaves the target unchanged");
+        assert_eq!(
+            fs::read(unrelated.join("sentinel")).expect("sentinel bytes"),
+            b"unchanged"
+        );
+        assert_no_child(&home);
+        home.finish().expect("the restored home is removed");
+        fs::remove_dir_all(unrelated).expect("remove the unchanged fixture directory");
+    }
+    external.finish().expect("external inputs are removed");
+}
+
+/// Exercise both response failures with a child and descendant that stay alive
+/// after the reply. Cleanup must finish while the temp guard still refuses.
+fn refusal_cleans_replaced_temp(shutdown: bool, invalid_json: bool) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tool = require_confinement_tool();
+    let home = ThrowawayHome::new().expect("throwaway home");
+    let observer = ThrowawayHome::new().expect("independent process observer");
+    let profile = write_profile(&home, "fixture.sb", b"(version 1)\n(allow default)\n");
+    let binary = home.root().join("provider-fixture");
+    let response = if invalid_json {
+        "invalid-response".to_owned()
+    } else {
+        json!({ "status": "error", "message": "fixture refuses" }).to_string()
+    };
+    let first_reply = if shutdown {
+        "printf '%s\\n' '{\"status\":\"ok\"}'\nIFS= read -r request\n"
+    } else {
+        ""
+    };
+    fs::write(
+        &binary,
+        format!(
+            "#!/bin/sh\n\
+             trap '' TERM\n\
+             /bin/sleep 60 &\n\
+             printf '%s\\n' \"$$\" > \"$HOME/provider-pgid\"\n\
+             IFS= read -r request\n\
+             {first_reply}\
+             /bin/mv \"$TMPDIR\" \"$TMPDIR-saved\"\n\
+             /bin/ln -s \"$TMPDIR-saved\" \"$TMPDIR\"\n\
+             printf '%s\\n' '{response}'\n\
+             wait\n"
+        ),
+    )
+    .expect("write the provider fixture");
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+        .expect("make the fixture executable");
+    let base = home.root().join("base");
+    let result = start(&home, &binary, &base, macos_host(), tool, &profile);
+    let reason = if shutdown {
+        result
+            .expect("the fixture answers init ok")
+            .shutdown()
+            .expect_err("the shutdown response is refused")
+    } else {
+        result.err().expect("the init response is refused")
+    };
+    let pgid = fs::read_to_string(home.home().join("provider-pgid"))
+        .expect("the provider recorded its process group")
+        .trim()
+        .parse()
+        .expect("the process group is numeric");
+    let guard = home.guard(home.home(), home.data());
+    let alive = observer
+        .group_is_alive(pgid)
+        .expect("inspect the group before restoring temp");
+    if alive {
+        // Keep a failing regression from leaving the fixture running.
+        observer
+            .launch(
+                Path::new("/bin/kill"),
+                &["-KILL", &format!("-{pgid}")],
+                Duration::from_secs(1),
+            )
+            .expect("stop the failed fixture");
+    }
+    fs::remove_file(home.temp()).expect("remove the temp symlink");
+    fs::rename(home.root().join("tmp-saved"), home.temp()).expect("restore temp");
+    assert_eq!(
+        guard,
+        Err("temp directory must use directories without symlinks")
+    );
+    assert!(
+        !alive,
+        "refusal must reap the provider and drain its group before returning"
+    );
+    let response_reason = if invalid_json {
+        format!("provider answered with invalid JSON: {response}")
+    } else if shutdown {
+        format!("shutdown answered {response}")
+    } else {
+        format!("init answered {response}")
+    };
+    let prefix = if shutdown {
+        ""
+    } else {
+        "wallet-provider start is refused: "
+    };
+    assert_eq!(
+        reason,
+        format!("{prefix}{response_reason}; cleanup failed: temp directory must use directories without symlinks")
+    );
+    let census = agent_conformance::census::cleanup(&home, closed_port())
+        .expect("physical cleanup after refusal");
+    assert!(census.contains("root checks PASS"), "census: {census}");
+    observer.finish().expect("remove the observer");
+    let root = home.root().to_path_buf();
+    assert_eq!(
+        home.finish(),
+        Err("keep the root after an unstopped child or failed stop")
+    );
+    fs::remove_dir_all(root).expect("remove the verified retained test root");
+}
+
+#[test]
+fn standin_provider_launch_refusal_cleans_a_replaced_temp() {
+    for invalid_json in [false, true] {
+        refusal_cleans_replaced_temp(false, invalid_json);
+    }
+}
+
+#[test]
+fn standin_provider_shutdown_refusal_cleans_a_replaced_temp() {
+    for invalid_json in [false, true] {
+        refusal_cleans_replaced_temp(true, invalid_json);
+    }
+}
+
 /// A failed timeout cleanup leaves the same owner able to retry through either
 /// explicit stop or Drop after the Home's directory guard is restored.
 #[test]
