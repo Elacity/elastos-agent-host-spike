@@ -925,6 +925,59 @@ async function probePromptTouchClose(frame, target = "library") {
   return { target, guardLeftMs, closed };
 }
 
+// Welcome to Home with every step shown: on a short screen the card scrolls
+// within the viewport (the page does not), so its last action stays reachable.
+async function probeWelcomeReach(frame) {
+  await frame.evaluate(() => {
+    const sheet = document.querySelector("#setup-sheet");
+    window.__welcomeBefore = { sheet: sheet.hidden, yielded: sheet.classList.contains("is-yielded"),
+      goals: [...sheet.querySelectorAll("[data-setup-goal]")].map((step) => step.hidden) };
+    sheet.classList.remove("is-yielded");
+    for (const step of sheet.querySelectorAll("[data-setup-goal]")) step.hidden = false;
+    sheet.hidden = false;
+  });
+  await sleep(SHEET_SETTLE_MS);
+  const last = frame.locator("#setup-sheet .setup-sheet-goal:last-child button");
+  const state = await last.evaluate((button) => {
+    const card = button.closest(".setup-sheet-card");
+    button.scrollIntoView({ block: "nearest" });
+    const rect = button.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return {
+      label: button.textContent.trim(),
+      scrolls: card.scrollHeight > card.clientHeight,
+      cardInView: cardRect.top >= 0 && cardRect.bottom <= innerHeight + 0.5,
+      buttonInView: rect.top >= 0 && rect.bottom <= innerHeight + 0.5,
+      hit: hit === button || button.contains(hit),
+    };
+  });
+  let clickable = true;
+  try {
+    await last.click({ trial: true, timeout: SHEET_SETTLE_MS });
+  } catch (_error) {
+    clickable = false;
+  }
+  await frame.evaluate(() => {
+    const sheet = document.querySelector("#setup-sheet");
+    const before = window.__welcomeBefore;
+    sheet.querySelector(".setup-sheet-card").scrollTop = 0;
+    sheet.hidden = before.sheet;
+    sheet.classList.toggle("is-yielded", before.yielded);
+    sheet.querySelectorAll("[data-setup-goal]").forEach((step, index) => { step.hidden = before.goals[index]; });
+  });
+  return { ...state, clickable };
+}
+
+function welcomeReachFailures(run) {
+  const probe = run.welcomeReach;
+  if (!probe) {
+    return [];
+  }
+  const ok = probe.label === "Open Updates" && probe.cardInView && probe.buttonInView && probe.hit && probe.clickable;
+  return ok ? [] : [`${run.engine}/${run.profile}/welcome-reach: the welcome card must fit the screen and its last action (Open Updates) must be reachable and clickable. Got ${JSON.stringify(probe)}`];
+}
+
 function promptCloseFailures(run) {
   const probe = run.promptClose;
   if (!probe) {
@@ -2018,6 +2071,7 @@ async function runProfile(browser, engineId, profile, origin) {
   let backProbe = null;
   let promptCloseProbe = null;
   let backRacesProbe = null;
+  let welcomeReachProbe = null;
   let viewportMeta = null;
   let bootRetries = 0;
   try {
@@ -2078,6 +2132,7 @@ async function runProfile(browser, engineId, profile, origin) {
       inboxOpenProbe = await probeInboxOpenClosesRail(page, frame);
     }
     if (profile.id.startsWith("phone")) {
+      welcomeReachProbe = await probeWelcomeReach(frame);
       homeEditProbe = await probePhoneHomeEdit(page, frame, dir);
       backProbe = await probePhoneBack(frame);
       promptCloseProbe = await probePromptTouchClose(frame);
@@ -2108,7 +2163,7 @@ async function runProfile(browser, engineId, profile, origin) {
   } finally {
     await context.close();
   }
-  return { engine: engineId, profile: profile.id, viewport: profile.viewport, viewportMeta, surfaces, dock: dockProbe, stage: stageProbe, keyboard: keyboardProbe, spotlight: spotlightProbe, sheetHandles: sheetHandleProbe, link: linkProbe, touchMenu: touchMenuProbe, inboxOpen: inboxOpenProbe, home: homeProbe, homeEdit: homeEditProbe, back: backProbe, promptClose: promptCloseProbe, backRaces: backRacesProbe, externalLink: await runExternalLinkProbe(browser, profile, origin, dir), bootRetries };
+  return { engine: engineId, profile: profile.id, viewport: profile.viewport, viewportMeta, surfaces, dock: dockProbe, stage: stageProbe, keyboard: keyboardProbe, spotlight: spotlightProbe, sheetHandles: sheetHandleProbe, link: linkProbe, touchMenu: touchMenuProbe, inboxOpen: inboxOpenProbe, home: homeProbe, homeEdit: homeEditProbe, back: backProbe, promptClose: promptCloseProbe, backRaces: backRacesProbe, welcomeReach: welcomeReachProbe, externalLink: await runExternalLinkProbe(browser, profile, origin, dir), bootRetries };
 }
 
 // The link probe opens a real new tab, so it runs on its own Home: the layout
@@ -3549,7 +3604,7 @@ try {
         }
         const run = await runProfile(browser, engineId, profile, origin);
         report.runs.push(run);
-        failures.push(...shellFailures(run), ...viewportMetaFailures(run), ...phoneDockFailures(run), ...phoneStageFailures(run), ...phoneKeyboardFailures(run), ...phoneSpotlightFailures(run), ...phoneSheetHandleFailures(run), ...phoneLinkFailures(run), ...phoneTouchMenuFailures(run), ...phoneHomeFailures(run), ...phoneHomeEditFailures(run), ...phoneBackFailures(run), ...promptCloseFailures(run), ...backRaceFailures(run), ...externalLinkFailures(run));
+        failures.push(...shellFailures(run), ...viewportMetaFailures(run), ...phoneDockFailures(run), ...phoneStageFailures(run), ...phoneKeyboardFailures(run), ...phoneSpotlightFailures(run), ...phoneSheetHandleFailures(run), ...phoneLinkFailures(run), ...phoneTouchMenuFailures(run), ...phoneHomeFailures(run), ...phoneHomeEditFailures(run), ...phoneBackFailures(run), ...promptCloseFailures(run), ...welcomeReachFailures(run), ...backRaceFailures(run), ...externalLinkFailures(run));
         console.log(`[home-phone-layout] ${engineId}/${profile.id} ${summarize(run)}`);
       }
       const closedStream = await runClosedStream(browser, engineId, origin);

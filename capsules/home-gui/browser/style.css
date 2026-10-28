@@ -1521,6 +1521,12 @@ img {
   flex-direction: column;
   gap: 14px;
   width: min(92vw, 420px);
+  /* A short screen scrolls the card: the page itself does not scroll. */
+  max-height: calc(100vh - 48px);
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   padding: 28px 24px 22px;
   border-radius: 20px;
   background: var(--menu-fill, var(--panel-strong));
@@ -5706,6 +5712,19 @@ body.assistant-space-active #inbox-rail {
 
 .window-active .window-frame {
   pointer-events: auto;
+}
+
+/* Browser close waits for Runtime cleanup (a few seconds): say so on the
+   window instead of looking frozen. */
+.window-closing-status {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--frame-fill) 72%, transparent);
+  color: var(--text);
+  font-size: 0.95rem;
 }
 
 .window-resize-handle {

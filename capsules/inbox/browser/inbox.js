@@ -186,7 +186,7 @@
           {
             title: "View",
             items: [
-              { label: "All Pending", cmd: "filter-all" },
+              { label: "All", cmd: "filter-all" },
               { label: "Needs Review", cmd: "filter-review" },
             ],
           },
@@ -378,7 +378,7 @@
         button.classList.toggle("active", active);
         button.setAttribute("aria-pressed", active ? "true" : "false");
       }
-      elements.listTitle.textContent = state.filter === "review" ? "Needs Review" : "Requests";
+      elements.listTitle.textContent = state.filter === "review" ? "Needs Review" : "All";
       renderInbox();
     }
 
@@ -391,6 +391,9 @@
       const attentionCount = state.entries.filter((entry) => entry && entry.severity === "attention").length;
       const pendingCount = pendingRequestEntries().length;
       elements.pendingCount.textContent = String(pendingCount);
+      // The list shows grants and route history too; the count is only pending requests.
+      elements.filterButtons.find((button) => button.dataset.filter === "all")
+        ?.setAttribute("aria-label", `All, ${pendingCount} pending ${pendingCount === 1 ? "request" : "requests"}`);
       elements.reviewCount.textContent = String(attentionCount);
       const requestedSelectionPresent = state.requestedSelectionId
         && entries.some((entry) => entryId(entry) === state.requestedSelectionId);

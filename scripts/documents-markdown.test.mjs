@@ -9,7 +9,17 @@ const source = readFileSync(new URL("../capsules/documents/browser/documents.js"
 const start = source.indexOf("function escapeHtml(");
 const end = source.indexOf("function shortCid(", start);
 assert.ok(start >= 0 && end > start, "Documents Markdown renderer must exist");
-const renderer = vm.runInNewContext(source.slice(start, end) + "\n({ renderMarkdownDocument, renderInlineMarkdown, safeMarkdownHref })");
+const exports = "\n({ renderMarkdownDocument, renderInlineMarkdown, markdownHref })";
+// DOCUMENTS_INSIDE_HOME is a module constant decided at launch; the
+// renderer reads it, so each context supplies it.
+const renderer = vm.runInNewContext(source.slice(start, end) + exports, { DOCUMENTS_INSIDE_HOME: false });
+const homeRenderer = vm.runInNewContext(source.slice(start, end) + exports, { DOCUMENTS_INSIDE_HOME: true });
+// Spellings browsers resolve to another host: a backslash reads as "/" and
+// tabs and newlines are dropped.
+const offOriginSpellings = [
+  "//example.invalid/x", "/\\example.invalid/x", "\\\\example.invalid/x", "\\/example.invalid/x",
+  "/\t/example.invalid/x", "/\n/example.invalid/x", "/\r/example.invalid/x", "./\\..\\x",
+];
 
 test("Documents loads its module through an external script", () => {
   const html = readFileSync(new URL("../capsules/documents/browser/index.html", import.meta.url), "utf8");
@@ -71,14 +81,14 @@ test("link and image destinations refuse executable or hidden schemes", () => {
   for (const href of [
     "javascript:alert", "JaVaScRiPt:alert", "java\tscript:alert", "java\nscript:alert",
     "&#106;avascript:alert", "javascript&#58;alert", "data:text/html,<script>alert</script>",
-    "vbscript:alert", "file:///etc/passwd", "blob:https://example.test/id", "//example.test/",
+    "vbscript:alert", "file:///etc/passwd", "blob:https://example.test/id", ...offOriginSpellings,
   ]) {
     for (const prefix of ["", "!"]) {
       const { html } = renderer.renderMarkdownDocument(prefix + "[label](" + href + ")");
       assert.doesNotMatch(html, /href="(?!#")/);
       assertSafeHtml(html);
     }
-    assert.equal(renderer.safeMarkdownHref(href), "#");
+    assert.equal(renderer.markdownHref(href), "#");
   }
 });
 
@@ -115,4 +125,62 @@ test("safe Markdown retains formatting, tasks, links, tables, and fence language
   assert.match(html, /<td>1<\/td><td>2<\/td>/);
   assert.match(html, /<hr>/);
   assertSafeHtml(html);
+});
+
+test("inside Home Markdown has no href: web links ask Home, '#' links scroll, other links are text (#436)", () => {
+  const markdown = "# [Head](https://example.test/h)\n\n- **[item](http://example.test/?a=1&b=2)**\n\n| [cell](https://example.test/c) |\n| --- |\n| [jump](#notes) |";
+  // No option: every caller gets the policy.
+  const { html } = homeRenderer.renderMarkdownDocument(markdown);
+  assert.doesNotMatch(html, /href=/);
+  assert.equal((html.match(/<a data-open-external="[^"]*" role="link" tabindex="0">/g) || []).length, 3);
+  assert.match(html, /data-open-external="http:\/\/example\.test\/\?a=1&amp;b=2"/);
+  assertSafeHtml(html);
+  // A hostile address stays inside the quoted attribute value.
+  assert.equal(homeRenderer.renderInlineMarkdown('[x](https://example.test/" onmouseover="alert)'),
+    '<a data-open-external="https://example.test/&quot; onmouseover=&quot;alert" role="link" tabindex="0">x</a>');
+  // Same origin included: a native href would replace the Documents frame.
+  assert.equal(homeRenderer.renderInlineMarkdown("[health](https://documents.test/api/health)"),
+    '<a data-open-external="https://documents.test/api/health" role="link" tabindex="0">health</a>');
+  // A place in the document: a control that scrolls, the address untouched.
+  assert.equal(homeRenderer.renderInlineMarkdown("[label](#notes)"),
+    '<a data-scroll-to="notes" role="link" tabindex="0">label</a>');
+  assert.equal(homeRenderer.renderInlineMarkdown('[x](#a" onclick="b)'),
+    '<a data-scroll-to="a&quot; onclick=&quot;b" role="link" tabindex="0">x</a>');
+  for (const href of ["elastos://document/example", "localhost://example", "/document/example", "./example", "../example"]) {
+    assert.equal(homeRenderer.renderInlineMarkdown("[**label**](" + href + ")"),
+      "<span><strong>label</strong></span>");
+  }
+  for (const href of ["#", "javascript:alert(1", ...offOriginSpellings]) {
+    assert.equal(homeRenderer.renderInlineMarkdown("[label](" + href + ")"), "<span>label</span>");
+  }
+  assert.equal(renderer.renderInlineMarkdown("[label](https://example.test/)"),
+    '<a href="https://example.test/" rel="noopener noreferrer">label</a>');
+  assert.equal(renderer.renderInlineMarkdown("[label](/document/example)"),
+    '<a href="/document/example" rel="noopener noreferrer">label</a>');
+  assert.equal(renderer.renderInlineMarkdown("[label](#notes)"),
+    '<a href="#notes" rel="noopener noreferrer">label</a>');
+});
+
+test("every Markdown view renders through renderMarkdownInto, which binds the Home link handlers", () => {
+  // A new view that renders Markdown another way would skip the handlers
+  // that ask Home; the policy itself lives in renderMarkdownLink.
+  // The function each call sits in (the definition itself excluded).
+  const callers = [...source.matchAll(/(?<!function )renderMarkdownDocument\(/g)].map((match) => {
+    const before = source.slice(0, match.index);
+    return before.slice(before.lastIndexOf("\nfunction ") + 1).match(/^function (\w+)/)[1];
+  });
+  assert.deepEqual(callers, ["renderMarkdownInto"]);
+  const helper = source.slice(source.indexOf("function renderMarkdownInto("), source.indexOf("\n}\n", source.indexOf("function renderMarkdownInto(")));
+  assert.match(helper, /addEventListener\("click", activateMarkdownLink\)/);
+  assert.match(helper, /addEventListener\("keydown", activateMarkdownLink\)/);
+  // Inside Home is decided once from the launch token, never per call and
+  // never from the current address (a followed fragment replaces it).
+  assert.equal([...source.matchAll(/const DOCUMENTS_INSIDE_HOME = window\.top !== window && !!state\.homeToken;/g)].length, 1);
+  assert.equal([...source.matchAll(/DOCUMENTS_INSIDE_HOME\s*=/g)].length, 1);
+  assert.equal([...source.matchAll(/location\.hash/g)].length, 1, "only the launch token reads the address hash");
+  assert.match(source, /^const state = \{\n  homeToken: new URLSearchParams\(window\.location\.hash/m);
+  assert.doesNotMatch(source, /insideHome:/, "inside-Home is decided in one place, never per call");
+  for (const view of ["elements.preview", "article"]) {
+    assert.match(source, new RegExp("renderMarkdownInto\\(" + view.replace(".", "\\.") + ","));
+  }
 });

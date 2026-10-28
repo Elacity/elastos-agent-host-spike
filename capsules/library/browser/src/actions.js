@@ -41,8 +41,6 @@ export function createLibraryActions({
   showObjectStatus,
   showProtectAndListDialog,
   showProperties,
-  showShareDialog,
-  showShareReceipt,
   showSharedAccessReceipt,
   startCreateObject,
   state,
@@ -436,19 +434,6 @@ export function createLibraryActions({
     setStatus(`Availability ready for ${object.name}.`);
   }
 
-  async function shareObject(object) {
-    const decision = await showShareDialog(object);
-    if (!decision) return;
-    const payload = { uri: object.uri, policy: decision.policy };
-    if (decision.policy === "recipient_scoped") {
-      payload.recipients = decision.recipients;
-    }
-    const share = await providerApi("share", payload);
-    await copyText(share.uri, "share URI");
-    showShareReceipt(share);
-    await loadCurrentFolder();
-  }
-
   async function checkMyAccess(object) {
     const principalId = principalIdFromHomeToken(state.homeToken);
     if (!principalId) {
@@ -487,6 +472,7 @@ export function createLibraryActions({
         ? `${object.name} will be removed from Trash and cannot be restored.`
         : `${object.name} will be permanently removed from this location. This cannot be restored.`,
       confirmLabel: "Delete Permanently",
+      targetUris: [object.uri],
     });
     if (!confirmed) return;
     await providerApi("delete_permanently", { uri: object.uri, if_revision: object.revision });
@@ -638,9 +624,10 @@ export function createLibraryActions({
     const confirmed = await confirmDestructive({
       title: "Delete permanently?",
       message: allTrash
-        ? `${objects.length} item${objects.length === 1 ? "" : "s"} will be removed from Trash and cannot be restored.`
-        : `${objects.length} item${objects.length === 1 ? "" : "s"} will be permanently removed. This cannot be restored.`,
+        ? `${describeObjects(objects)} will be removed from Trash and cannot be restored.`
+        : `${describeObjects(objects)} will be permanently removed. This cannot be restored.`,
       confirmLabel: "Delete Permanently",
+      targetUris: objects.map((object) => object.uri),
     });
     if (!confirmed) return;
     await runBatchAction("Deleted", objects, (object) => providerApi("delete_permanently", {
@@ -731,7 +718,6 @@ export function createLibraryActions({
     restoreObject,
     restoreSelectedObjects,
     setClipboard,
-    shareObject,
     showStatusObject,
     trashObject,
     trashSelectedObjects,
@@ -739,4 +725,11 @@ export function createLibraryActions({
     unpublishSelectedObjects,
     uploadFiles,
   };
+}
+
+function describeObjects(objects, limit = 3) {
+  const count = `${objects.length} item${objects.length === 1 ? "" : "s"}`;
+  const names = objects.slice(0, limit).map((object) => object.name || object.uri);
+  const more = objects.length - names.length;
+  return `${count} (${names.join(", ")}${more ? ` and ${more} more` : ""})`;
 }

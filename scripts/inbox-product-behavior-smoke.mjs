@@ -352,7 +352,7 @@ async function runInboxHomeChromeSmoke() {
         {
           title: "View",
           items: [
-            { label: "All Pending", cmd: "filter-all" },
+            { label: "All", cmd: "filter-all" },
             { label: "Needs Review", cmd: "filter-review" },
           ],
         },
@@ -532,6 +532,9 @@ async function runInboxHomeChromeSmoke() {
   }
   await settle();
   assert.equal(nodes.get("pending-count").textContent, "0");
+  // The All list holds a grant card; the count beside it names only pending requests.
+  assert.equal(filterAll.getAttribute("aria-label"), "All, 0 pending requests");
+  assert.equal(nodes.get("list-title").textContent, "All");
   assert.equal(nodes.get("review-count").textContent, "0");
   const grantButtons = descendants(nodes.get("entry-rows")).filter(node => node.tagName === "BUTTON");
   assert.deepEqual(grantButtons.map(button => button.textContent), ["Open", "Revoke access"]);
@@ -586,6 +589,7 @@ async function runInboxHomeChromeSmoke() {
   }
   await settle();
   assert.equal(nodes.get("pending-count").textContent, "1");
+  assert.equal(filterAll.getAttribute("aria-label"), "All, 1 pending request");
   assert.equal(nodes.get("review-count").textContent, "1");
 }
 

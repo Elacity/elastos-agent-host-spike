@@ -62,7 +62,8 @@ test("model repair failures retain only the fixed journey phase", () => {
   const secret = "home_token=fixture-secret /private/operator/home";
   const stages = {
     model_stop_get_different: ["stop_real_stream", "get_other_model", "open_assistant", "other_model_reply"],
-    model_interrupted_get_retry: ["fresh_get_precondition", "partial_get", "restarted_home", "retry_retained_get"],
+    model_interrupted_get_retry: ["fresh_get_precondition", "partial_get", "restarted_page_load", "restarted_home_ready", "restarted_signed_in",
+      "restarted_desktop", "restarted_marketplace", "restarted_model_detail", "restarted_retry_text", "retry_retained_get"],
   };
   for (const [stage, checks] of Object.entries(stages)) {
     for (const check of checks) {

@@ -5406,17 +5406,68 @@ fn read_protected_principal_root_object_file(
         PrincipalRootObjectFileClass::Envelope => PrincipalRootObjectDamage::FailedCheck,
         PrincipalRootObjectFileClass::Damaged(damage) => damage,
     };
-    let data_key = principal_root_data_key_from_protection(data_dir, protection)?;
-    let bytes = read_principal_root_object_rest(&mut file, probe.prefix)
-        .with_context(|| format!("failed to read {path:?}"))?;
-    decrypt_principal_root_object_envelope_bytes(&data_key, &expected, &bytes).map_err(|_| {
+    let damaged = |damage| {
         principal_root_object_damaged_error(&PrincipalRootObjectNotice::new(
             data_dir,
             localhost_root,
             object_uri,
             damage,
         ))
+    };
+    if principal_root_object_label_never_opens(&damage) {
+        return Err(damaged(damage));
+    }
+    let data_key = principal_root_data_key_from_protection(data_dir, protection)?;
+    let bytes = read_principal_root_object_rest(&mut file, probe.prefix)
+        .with_context(|| format!("failed to read {path:?}"))?;
+    decrypt_principal_root_object_envelope_bytes(&data_key, &expected, &bytes)
+        .map_err(|_| damaged(damage))
+}
+
+/// The most content a Library read of this object can return, judged from
+/// its head and tail only, never its body (#481). A canonical envelope bound
+/// here under the current key opens only by decrypting, which returns less
+/// than three quarters of its length: the base64 ciphertext's share. Anything
+/// else counts its whole length, since a plaintext file is read whole.
+pub(crate) fn principal_root_object_content_bound(
+    principal_id: &str,
+    localhost_root: &str,
+    object_uri: &str,
+    path: &Path,
+    data_key_id: Option<&str>,
+) -> anyhow::Result<u64> {
+    let (mut file, len) = open_principal_root_object_file(path)?;
+    let expected = PrincipalRootObjectExpectation {
+        principal_id,
+        localhost_root,
+        object_uri,
+        data_key_id,
+    };
+    let mut no_whole_reads = 0;
+    let probe = classify_principal_root_object_file(&mut file, len, &expected, &mut no_whole_reads)
+        .with_context(|| format!("failed to read {path:?}"))?;
+    Ok(match probe.class {
+        PrincipalRootObjectFileClass::Envelope => len / 4 * 3,
+        _ => len,
     })
+}
+
+/// A file whose canonical label names another format, Home, place or key is
+/// refused without reading past the label (#450 L9). It can never open: the
+/// full parse (`deny_unknown_fields`, which also refuses a repeated field)
+/// either fails or yields the same first seven values, decoded the same way,
+/// and `validate_principal_root_object_envelope` refuses that same mismatch
+/// before AES-GCM. An unreadable label is still read whole: an authentic
+/// envelope written in another layout opens.
+fn principal_root_object_label_never_opens(damage: &PrincipalRootObjectDamage) -> bool {
+    matches!(
+        damage,
+        PrincipalRootObjectDamage::UnsupportedFormat { .. }
+            | PrincipalRootObjectDamage::OtherHome
+            | PrincipalRootObjectDamage::WrongPlace { .. }
+            | PrincipalRootObjectDamage::OtherKey { .. }
+            | PrincipalRootObjectDamage::NoKey
+    )
 }
 
 /// Full parse, binding and AES-GCM over an envelope's whole bytes.
@@ -5449,12 +5500,14 @@ fn decrypt_principal_root_object_envelope_bytes(
 }
 
 /// Opens a declared object without following a final symlink and requires a
-/// regular file. Returns the file and its length at open.
+/// regular file. Returns the file and its length at open. `O_NONBLOCK` keeps
+/// a FIFO swapped in after the walk from blocking the open while the caller
+/// holds its locks (#450 L8); it does not change reads of a regular file.
 fn open_principal_root_object_file(path: &Path) -> anyhow::Result<(File, u64)> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW);
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     let file = options
         .open(path)
         .with_context(|| format!("failed to read {path:?}"))?;
@@ -7469,6 +7522,78 @@ impl PrincipalRootWalk<'_> {
     }
 }
 
+/// The walk's folder-depth rule for a writer (#449). The walk refuses a
+/// folder 16 or more folders below a declared root, so a writer refuses to
+/// create one, or a file inside one, before anything is written: no write can
+/// stop the next start. `folder` is false for a file, which sits in the
+/// folder above it. The walk's other rules need no writer check: writers name
+/// objects with UTF-8 text and create only regular files and folders.
+///
+/// The rule applies to the folder the write lands in, not to its spelling:
+/// empty segments are dropped as `rooted_localhost_fs_path` drops them, and
+/// segments are compared case-insensitively, so `Root//documents/…` on a
+/// case-insensitive volume counts as `Root/Documents/…`. On a case-sensitive
+/// volume that also limits a sibling folder that differs only in case.
+pub(crate) fn refuse_principal_root_depth_breach(
+    localhost_root: &str,
+    inventory: &[PrincipalRootProtectedObjectDeclarationV1],
+    object_uri: &str,
+    folder: bool,
+) -> anyhow::Result<()> {
+    let object = canonical_localhost_segments(object_uri);
+    for declaration in inventory {
+        let PrincipalRootProtectedObjectDeclarationV1::Root { root_uri } = declaration else {
+            continue;
+        };
+        let root = canonical_localhost_segments(root_uri);
+        if object.len() < root.len() || object[..root.len()] != root[..] {
+            continue;
+        }
+        let below = object.len() - root.len();
+        let depth = if folder {
+            below
+        } else {
+            below.saturating_sub(1)
+        };
+        if depth >= MAX_PRINCIPAL_ROOT_INVENTORY_DEPTH {
+            let shown = format!(
+                "localhost://{}",
+                object_uri
+                    .strip_prefix("localhost://")
+                    .unwrap_or(object_uri)
+                    .split('/')
+                    .filter(|segment| !segment.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            );
+            return Err(anyhow!(
+                "{} was not saved: it would be more than 16 folders deep in {}, and Home does not \
+                 start with folders that deep. Save it fewer folders down.",
+                principal_root_home_relative_path(localhost_root, &shown),
+                principal_root_home_relative_path(localhost_root, root_uri),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A localhost URI's non-empty segments, case-folded (upper, then lower, so
+/// `ſ` and `K` fold as a case-insensitive volume folds them).
+fn canonical_localhost_segments(uri: &str) -> Vec<String> {
+    uri.strip_prefix("localhost://")
+        .unwrap_or(uri)
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            segment
+                .chars()
+                .flat_map(char::to_uppercase)
+                .flat_map(char::to_lowercase)
+                .collect()
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Principal-root object classifier (#444).
 //
@@ -7672,7 +7797,7 @@ fn principal_root_object_changed_error(localhost_root: &str, object_uri: &str) -
     )
 }
 
-fn principal_root_home_relative_path(localhost_root: &str, object_uri: &str) -> String {
+pub(crate) fn principal_root_home_relative_path(localhost_root: &str, object_uri: &str) -> String {
     printable_text(
         object_uri
             .strip_prefix(localhost_root)
@@ -7699,7 +7824,7 @@ fn printable_path(path: &Path) -> String {
 /// order. Control, format (bidi included) and line or paragraph separator
 /// characters are written as `\u{…}`, so no name can start a forged second
 /// line or reorder the text around it.
-fn printable_text(value: &str) -> String {
+pub(crate) fn printable_text(value: &str) -> String {
     let mut printable = String::with_capacity(value.len());
     for ch in value.chars() {
         if is_unprintable_char(ch) {

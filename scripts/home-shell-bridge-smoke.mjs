@@ -249,7 +249,7 @@ const summary = {
     { target: "chat-room", title: "Chat", attach_kind: "iframe", role: "app", target_kind: "app" },
     { target: "assistant", title: "Assistant", attach_kind: "iframe", role: "app", target_kind: "app" },
     { target: "home-agent", title: "Home Agent", attach_kind: "iframe", role: "app", target_kind: "app" },
-    { target: "marketplace", title: "Apps", attach_kind: "iframe", role: "app", target_kind: "app" },
+    { target: "marketplace", title: "Marketplace", attach_kind: "iframe", role: "app", target_kind: "app" },
     { target: "system", title: "System", attach_kind: "iframe", role: "app", target_kind: "app" },
     { target: "wallet", title: "Wallet", attach_kind: "iframe", role: "app", target_kind: "app" },
   ],
