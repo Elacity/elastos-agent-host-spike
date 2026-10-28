@@ -1002,7 +1002,8 @@ impl StandIn {
     ///
     /// Unknown, not-live and wrong-caller refusals come first. A different
     /// action is `wrong action`. A `localhost://Users/` or `localhost://UsersAI/`
-    /// uri keeps the `resolve_protected_uri` compare. Any other uri uses
+    /// uri keeps the `resolve_protected_uri` compare. Protected operations
+    /// present the resolver's collapsed uri. Any other uri uses
     /// `public_resource_covers` and does not resolve a principal. A mismatch
     /// is `wrong resource`. Either spends nothing. A missing presentation is
     /// the grant's own caller check. A `once` grant stores `Exhausted` only
@@ -1035,9 +1036,9 @@ impl StandIn {
             }
             if protected_invoke(requested) {
                 let session_id = self.grants[index].session_id.clone();
-                let wanted = self.resolve_protected_uri(&session_id, requested)?;
+                let (_, wanted) = self.resolve_protected_uri(&session_id, requested)?;
                 let granted = match self.resolve_protected_uri(&session_id, &grant_resource) {
-                    Ok(uri) => uri,
+                    Ok((_, uri)) => uri,
                     Err(_) => return Err(wrong_resource(&grant_resource, requested)),
                 };
                 if wanted != granted {
@@ -1065,13 +1066,13 @@ impl StandIn {
         uri: &str,
         bytes: &[u8],
     ) -> Result<String, (u16, String)> {
-        let resolved = self.resolve_protected_uri(instance_id, uri)?;
+        let (collapsed, resolved) = self.resolve_protected_uri(instance_id, uri)?;
         self.authorise_presented(
             Caller::Client {
                 session_id: instance_id,
             },
             request_id,
-            Some((uri, "write")),
+            Some((&collapsed, "write")),
         )?;
         self.protected_objects
             .insert(resolved.clone(), bytes.to_vec());
@@ -1097,13 +1098,13 @@ impl StandIn {
         request_id: &str,
         uri: &str,
     ) -> Result<Vec<u8>, (u16, String)> {
-        let resolved = self.resolve_protected_uri(instance_id, uri)?;
+        let (collapsed, resolved) = self.resolve_protected_uri(instance_id, uri)?;
         self.authorise_presented(
             Caller::Client {
                 session_id: instance_id,
             },
             request_id,
-            Some((uri, "read")),
+            Some((&collapsed, "read")),
         )?;
         let stored = self
             .protected_objects
@@ -1218,7 +1219,12 @@ impl StandIn {
     /// `Users/self`, `UsersAI/self` and digest-root rules run on that text.
     /// The root is the first 24 characters of `identity::sha256` of the
     /// instance principal. The principal text is not part of the root.
-    fn resolve_protected_uri(&self, instance_id: &str, uri: &str) -> Result<String, (u16, String)> {
+    /// Returns the collapsed guest uri for authorization and the storage key.
+    fn resolve_protected_uri(
+        &self,
+        instance_id: &str,
+        uri: &str,
+    ) -> Result<(String, String), (u16, String)> {
         let Some(instance) = self
             .instances
             .iter()
@@ -1249,18 +1255,20 @@ impl StandIn {
         let digest = &crate::identity::sha256(principal.as_bytes())[..24];
         if let Some(suffix) = collapsed.strip_prefix("localhost://Users/self") {
             if suffix.is_empty() || suffix.starts_with('/') {
-                return Ok(format!("localhost://Users/{digest}{suffix}"));
+                let resolved = format!("localhost://Users/{digest}{suffix}");
+                return Ok((collapsed, resolved));
             }
         }
         if let Some(suffix) = collapsed.strip_prefix("localhost://UsersAI/self") {
             if suffix.is_empty() || suffix.starts_with('/') {
-                return Ok(format!("localhost://UsersAI/{digest}{suffix}"));
+                let resolved = format!("localhost://UsersAI/{digest}{suffix}");
+                return Ok((collapsed, resolved));
             }
         }
         let users_root = format!("localhost://Users/{digest}");
         let users_child = format!("{users_root}/");
         if collapsed == users_root || collapsed.starts_with(&users_child) {
-            return Ok(collapsed);
+            return Ok((collapsed.clone(), collapsed));
         }
         if collapsed.starts_with("localhost://UsersAI/") {
             return Err((400, "UsersAI roots must use UsersAI/self".to_owned()));
@@ -15908,6 +15916,143 @@ mod tests {
             "",
             "the stand-in did the work: component-2 stays running after the starting deny",
         );
+    }
+
+    #[test]
+    fn standin_protected_uri_spellings_share_authorization() {
+        let digest = &crate::identity::sha256(b"agent-ada")[..24];
+        for (namespace, root) in [("UsersAI", "self"), ("Users", "self"), ("Users", digest)] {
+            let mut standin = StandIn::new();
+            standin
+                .admit_resident("/capsules/journal-a", "journal-a", Start::Ok)
+                .expect("the stand-in did the work: it admits journal-a");
+            standin
+                .bind_verified_principal("/capsules/journal-a", "agent-ada")
+                .expect("the stand-in did the work: it binds agent-ada");
+            let launched = standin
+                .post_capsules(Caller::Shell, &json!({"path": "/capsules/journal-a"}))
+                .expect("the stand-in did the work: it launches journal-a");
+            assert_eq!(
+                launched["id"], "component-1",
+                "the stand-in did the work: the launch id is component-1"
+            );
+            standin
+                .finish_start("component-1")
+                .expect("the stand-in did the work: it finishes the start");
+            let canonical = format!("localhost://{namespace}/{root}/journal");
+            let resolved = format!("localhost://{namespace}/{digest}/journal");
+            let wildcard = format!("localhost://{namespace}/{root}/*");
+            for (request, resource, action, duration) in [
+                ("req-seed", &canonical, "write", "once"),
+                ("req-read", &canonical, "read", "session"),
+                ("req-wild-write", &wildcard, "write", "once"),
+                ("req-wild-read", &wildcard, "read", "once"),
+            ] {
+                standin.seed_grant(
+                    request,
+                    "component-1",
+                    resource,
+                    action,
+                    duration,
+                    1,
+                    Life::Live,
+                    false,
+                );
+            }
+            assert_eq!(
+                standin.protected_write("component-1", "req-seed", &canonical, b"journal-v1"),
+                Ok(resolved.clone()),
+                "the stand-in did the work: the canonical write seeds one protected object"
+            );
+            let kept = standin.protected_objects.clone();
+            for (index, uri) in [
+                canonical.clone(),
+                format!("localhost:///{namespace}/{root}/journal"),
+                format!("localhost://./{namespace}/{root}/journal"),
+                format!("localhost:///.//{namespace}/./{root}//./journal/"),
+                format!("localhost://{namespace}//{root}/journal"),
+                format!("localhost://{namespace}/./{root}/journal"),
+                format!("localhost://{namespace}/{root}//journal"),
+                format!("localhost://{namespace}/{root}/./journal"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let reason = format!("wrong resource: expected {wildcard}, got {canonical}");
+                let audit_len = standin.audit.len();
+                assert_eq!(
+                    standin.protected_write("component-1", "req-wild-write", &uri, b"other"),
+                    Err((403, reason.clone())),
+                    "the stand-in did the work: {uri} keeps the protected write comparison"
+                );
+                assert_eq!(
+                    grant_record(&standin, "req-wild-write"),
+                    (Life::Live, false),
+                    "the stand-in did the work: refusing {uri} preserves the once write grant"
+                );
+                assert_eq!(
+                    standin.protected_objects, kept,
+                    "the stand-in did the work: refusing {uri} preserves all stored bytes"
+                );
+                assert_eq!(
+                    standin.protected_read("component-1", "req-wild-read", &uri),
+                    Err((403, reason)),
+                    "the stand-in did the work: {uri} keeps the protected read comparison"
+                );
+                assert_eq!(
+                    grant_record(&standin, "req-wild-read"),
+                    (Life::Live, false),
+                    "the stand-in did the work: refusing {uri} preserves the once read grant"
+                );
+                assert_eq!(
+                    standin.protected_objects, kept,
+                    "the stand-in did the work: the read refusal preserves all stored bytes"
+                );
+                assert_eq!(
+                    standin.audit.len(),
+                    audit_len,
+                    "the stand-in did the work: both refusals preserve the audit list"
+                );
+                assert_eq!(
+                    standin.protected_read("component-1", "req-read", &uri),
+                    Ok(b"journal-v1".to_vec()),
+                    "the stand-in did the work: an exact grant reads the same bytes through {uri}"
+                );
+                let request = format!("req-exact-write-{index}");
+                standin.seed_grant(
+                    &request,
+                    "component-1",
+                    &canonical,
+                    "write",
+                    "once",
+                    1,
+                    Life::Live,
+                    false,
+                );
+                assert_eq!(
+                    standin.protected_write("component-1", &request, &uri, b"journal-v1"),
+                    Ok(resolved.clone()),
+                    "the stand-in did the work: an exact grant writes the same object through {uri}"
+                );
+                assert_eq!(
+                    grant_record(&standin, &request),
+                    (Life::Exhausted, false),
+                    "the stand-in did the work: the exact once write grant is spent"
+                );
+                assert_eq!(
+                    standin.protected_objects, kept,
+                    "the stand-in did the work: equivalent spellings keep one object"
+                );
+            }
+            assert_named_capsule(
+                &standin,
+                "component-1",
+                "journal-a",
+                "running",
+                "",
+                "component-1 stays running after equivalent protected operations",
+            );
+        }
     }
 
     #[test]

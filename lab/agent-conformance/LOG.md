@@ -14927,3 +14927,16 @@ After every restore, `standin-runtime/mod.rs` matched SHA-256 `d7befdbfb17e9e778
 - `Cargo.toml` and `Cargo.lock` are unchanged. `authorise` stays `(caller, request_id)`. `normalize_public_resource` and `slash_pieces` stay. The new caller of `normalize_public_resource` is `resolve_protected_uri`.
 
 - 093: collapsed a dotted or empty protected `Users/self` or `UsersAI/self` uri through `normalize_public_resource`, and kept the raw `..` refusal in front of that collapse.
+
+### Repair checks
+
+The resolver returns the collapsed guest uri and its storage key. Both protected operations present that collapsed uri to the shared authorization check, which compares the resolved keys. `normalize_public_resource` remains the one collapse, with the same callers. The public invoke arm and comparison, `authorise` signature, and existing tests stay unchanged.
+
+`standin_protected_uri_spellings_share_authorization` exercises eight equivalent spellings for each of `UsersAI/self`, `Users/self`, and the active `Users` digest root. Wildcard refusals preserve the bytes, once-grant life, and audit list. Exact grants read and write the same object, and a successful once write exhausts its grant.
+
+Two temporary changes were checked separately with `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_protected_uri_spellings_share_authorization -- --exact`. Each compiled and failed at its named assertion; the source was restored after each run.
+
+- Write change: old bytes `Some((&collapsed, "write")),`, new bytes `Some((uri, "write")),`. Exit 101 in 12.06 seconds at `src/../standin-runtime/mod.rs:15983:17`, `the stand-in did the work: localhost:///UsersAI/self/journal keeps the protected write comparison`.
+- Read change: old bytes `Some((&collapsed, "read")),`, new bytes `Some((uri, "read")),`. Exit 101 in 2.14 seconds at `src/../standin-runtime/mod.rs:15997:17`, `the stand-in did the work: localhost:///UsersAI/self/journal keeps the protected read comparison`.
+
+Restored source SHA-256: `ea9174c862a9c21752b4f524e6795af931473c1899c0b875eff1d3b8b6c1204a`. With the same lane-local Cargo settings listed above, `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exited 0 in 0.22 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::` exited 0 in 1.82 seconds: 89 passed, including the original dot-segment test and the new regression. The supervisor owns the full gate rerun and fresh review for this repair.
