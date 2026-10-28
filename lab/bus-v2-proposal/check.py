@@ -475,13 +475,14 @@ def quote_for(remainders, pinned_lines, number):
     return remainders[sum(1 for row in window if row[0] < number)]
 
 
-@functools.lru_cache(maxsize=64)
 def _draft_lines(rel):
     """Return the pinned (number, line) of REL at this worktree's draft pin.
 
     The helper functions keep the one-argument signature the tests call and
     read the pin of the draft in this worktree, so a fixture draft is compared
-    against the same worktree commit the checker reads.
+    against the same worktree commit the checker reads. The draft pin can
+    change between two checks, so this reads the pin each time. Only
+    ``_pinned_lines`` caches, and its key holds the commit.
     """
     text = load_draft(worktree_root())
     if text is None:

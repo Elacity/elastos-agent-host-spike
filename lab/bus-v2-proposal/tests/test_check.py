@@ -1257,6 +1257,30 @@ class CitationCheckTests(unittest.TestCase):
         got = check.problems(self._draft(body, files))
         assert got == [expected], expected
 
+    def _commit_pinned(self, root, rows, body):
+        """Commit ROWS, then pin BODY at that commit. Return the pinned sha."""
+        source = root / OWNED_REL
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        self._git(root, "add", "-A")
+        self._git(root, "commit", "-q", "-m", "source")
+        sha = self._git_output(root, "rev-parse", "HEAD")
+        (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
+            "Pinned commit: " + sha + "\n" + body, encoding="utf-8"
+        )
+        self._git(root, "add", "-A")
+        self._git(root, "commit", "-q", "-m", "pinned " + sha)
+        return sha
+
+    def _check_at(self, root):
+        """Return the problems of ROOT read as the worktree, so its pin decides."""
+        original = check.worktree_root
+        try:
+            check.worktree_root = lambda: root
+            return check.problems(root)
+        finally:
+            check.worktree_root = original
+
     def _source(self, quote, following=NEXT_QUOTE):
         """A committed file whose line 3754 is QUOTE and line 3755 is FOLLOWING."""
         rows = ["// filler"] * (OWNED_NUMBER - 1) + [quote]
@@ -3661,6 +3685,23 @@ class CitationCheckTests(unittest.TestCase):
             "CAUGHT journal-quoted-line",
         )
 
+    def test_falsifier_mint_one_indented_line_skip_is_caught(self):
+        """Restoring the 131 skip for a one-line walk is caught."""
+
+        def skip_a_one_line_walk(text):
+            remainders = check._remainders(text, check.MINT_MARKER)
+            if len(remainders) < 2:
+                return None
+            return remainders[-1]
+
+        self._caught(
+            "mint_quote",
+            skip_a_one_line_walk,
+            self.test_mint_span_without_two_indented_lines_still_compares,
+            "refuse: quoted line does not match",
+            "CAUGHT mint-one-line-skip",
+        )
+
     def test_falsifier_journal_first_line_is_caught(self):
         def planted(text):
             remainders = check._remainders(text, check.JOURNAL_MARKER)
@@ -4715,6 +4756,53 @@ class CitationCheckTests(unittest.TestCase):
             self.test_zero_score_window_is_refused,
             "refuse: quoted line does not match",
             "CAUGHT zero-score-window",
+        )
+
+    def _pin_change_case(self):
+        """A draft checked at one pin, then at a pin whose lines differ.
+
+        The draft keeps the same two remainders. The first pin holds them at
+        8189 and 8190, so that check passes. The second pin moves the text, so
+        the same draft must be refused at 8189. A window cached by path alone
+        would keep the first pin's lines and accept the draft.
+        """
+        root = self._temp_root()
+        self._git(root, "init", "-q")
+        body = (
+            "`" + KIND_RUN_SPAN + "` cites the arm.\n"
+            "\n"
+            "    A\n"
+            "    B\n"
+            "\n"
+        )
+        self._commit_pinned(root, ["// filler"] * (KIND_RUN_NUMBER - 2) + ["X", "A", "B"], body)
+        self.assertEqual(self._check_at(root), [])
+        self._commit_pinned(root, ["// filler"] * (KIND_RUN_NUMBER - 2) + ["A", "A", "X"], body)
+        return root
+
+    def test_a_changed_pin_selects_the_new_lines(self):
+        """A second check at a new pin reads that pin, not the first one."""
+        root = self._pin_change_case()
+        self.assertEqual(
+            self._check_at(root),
+            ["refuse: quoted line does not match " + KIND_RUN_SPAN],
+        )
+
+    def test_falsifier_pin_change_reuse_is_caught(self):
+        original = check._draft_lines
+        cache = {}
+
+        def keep_the_first_pin(rel):
+            if rel not in cache:
+                cache[rel] = original(rel)
+            return cache[rel]
+
+        self._caught(
+            "_draft_lines",
+            keep_the_first_pin,
+            self.test_a_changed_pin_selects_the_new_lines,
+            "refuse: quoted line does not match",
+            "CAUGHT changed-pin",
         )
 
     def test_foreign_match_does_not_hide_a_mismatch(self):
