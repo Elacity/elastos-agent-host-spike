@@ -331,7 +331,10 @@ def load(path=DATA):
 #   probe/capsule.json, probe/src/lib.rs, src/census.rs, src/harness.rs,
 #   src/report.rs, tests/artifact.rs, tests/common/grants.rs,
 #   tests/common/mod.rs, tests/common/operator.rs, tests/common/probe.rs,
-#   tests/effects.rs and tests/runtime.rs. Its values are
+#   tests/effects.rs and tests/runtime.rs; its shared stand-in
+#   standin-runtime/mod.rs is registered here ahead of the pending WP move,
+#   so a killed edit to that authority implementation is restored too. Its
+#   values are
 #   `../../lab/agent-conformance/...`, relative to examples/agent-host, the
 #   folder the runner resolves every list's edit against, so recovery finds
 #   each of these files under lab/agent-conformance.
@@ -402,6 +405,7 @@ PROVIDER_TARGETS = (
     "lab/agent-conformance/src/census.rs",
     "lab/agent-conformance/src/harness.rs",
     "lab/agent-conformance/src/report.rs",
+    "lab/agent-conformance/standin-runtime/mod.rs",
     "lab/agent-conformance/tests/artifact.rs",
     "lab/agent-conformance/tests/common/grants.rs",
     "lab/agent-conformance/tests/common/mod.rs",
@@ -2141,10 +2145,11 @@ def a_killed_provider_edit_is_recovered():
     tools/src/bin/bundle.rs, tools/src/bundle.rs, tools/src/lib.rs,
     tools/src/receipt.rs, tools/src/run.rs, tools/src/verify.rs,
     tools/src/lab_name.rs and audit Cargo.toml, INTERFACE.md and src/lib.rs,
-    agent-conformance's 19 edit targets and grant-binding's five edit targets
-    all come back in either startup mode. Foreign backups, including both
-    providers' confinement documents, each harness's support neighbour, the
-    model provider tests' other.rs neighbour, wallet's test support
+    agent-conformance's 19 edit targets and its shared stand-in, which is
+    registered ahead of the pending WP move, and grant-binding's five edit
+    targets all come back in either startup mode. Foreign backups, including
+    both providers' confinement documents, each harness's support neighbour,
+    the model provider tests' other.rs neighbour, wallet's test support
     neighbour, the labs' adoption note, gap report and web-app fixture, the
     lab's tools manifest and a tools/src neighbour, stay with their owners."""
     owned = {entry["id"]: entry
@@ -2157,7 +2162,8 @@ def a_killed_provider_edit_is_recovered():
     # capsule-identity's .gitignore, README.md,
     # src/lib.rs, tests/common/mod.rs and fixtures/wc001-core/capsule.json,
     # the wasm lab's edit and run-log files, agent-conformance's 19 edit
-    # targets and grant-binding's five edit targets are named here, not read
+    # targets plus its shared stand-in, registered ahead of the pending WP
+    # move, and grant-binding's five edit targets are named here, not read
     # from the table, so a target dropped from PROVIDER_TARGETS is caught.
     # Their original bytes are written in the isolated tree, never read from
     # the real lab or crates.
@@ -2207,6 +2213,7 @@ def a_killed_provider_edit_is_recovered():
                  "../../lab/agent-conformance/src/census.rs",
                  "../../lab/agent-conformance/src/harness.rs",
                  "../../lab/agent-conformance/src/report.rs",
+                 "../../lab/agent-conformance/standin-runtime/mod.rs",
                  "../../lab/agent-conformance/tests/artifact.rs",
                  "../../lab/agent-conformance/tests/common/grants.rs",
                  "../../lab/agent-conformance/tests/common/mod.rs",
