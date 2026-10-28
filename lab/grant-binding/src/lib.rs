@@ -1050,6 +1050,22 @@ fn model_dot_prefix_segment_is_a_plain_name() {
 }
 
 #[test]
+fn model_underscore_segment_is_a_plain_name() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier
+        .use_path(
+            &verifier.open_call(instance),
+            &guest(handle),
+            "UsersAI/agent-1/notes/my_page",
+        )
+        .expect("a segment with an underscore stays inside the root");
+}
+
+#[test]
 fn model_use_path_outside_the_owned_root_is_refused() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
