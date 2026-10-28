@@ -1,0 +1,12 @@
+id: F-A7-dlnext
+file: src/ledger.rs
+test: ledger::model_later_deadline_does_not_move_the_hold
+--- old
+        if now < deadline {
+            return Err(TimeoutRefuse::Early);
+        }
+--- new
+        if now < ledger.verifier_deadline {
+            return Err(TimeoutRefuse::Early);
+        }
+--- end
