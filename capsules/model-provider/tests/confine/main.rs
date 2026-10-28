@@ -1082,6 +1082,7 @@ fn operations_section_cites_existing_tests() {
     /// when `after_declaration_prefix` leaves a `fn ` prefix, so `pub(crate)`,
     /// `pub(super)`, `pub(in crate::here)`, a same-line or previous-line
     /// attribute, `async`, `pub async`, `unsafe` and `const` all end the cut.
+    /// Each arm line permits one `=>`; a second one refuses the layout.
     ///
     /// The compare reads the match as text. It shows the Operation cells
     /// equal those arms, in order. It does not show that every arm is
@@ -1136,6 +1137,9 @@ fn operations_section_cites_existing_tests() {
             }
             if trimmed.contains('{') || trimmed.contains('}') {
                 return Err("parse_request: an arm line contains a brace".to_string());
+            }
+            if trimmed.matches("=>").count() > 1 {
+                return Err("parse_request: an arm line contains a second `=>`".to_string());
             }
             if let Some(rest) = trimmed.strip_prefix('"') {
                 let Some(close) = rest.find('"') else {
@@ -1462,6 +1466,31 @@ fn operations_section_cites_existing_tests() {
 "#;
     let failure = compare_failure(&two_rows, ping_arm);
     assert!(failure.contains("ping"), "{failure}");
+    for (first_arm, extra_arm) in [
+        (
+            "\"init\" => ProviderOperation::Init,",
+            "\"ping\" => ProviderOperation::Status,",
+        ),
+        (
+            "\"init\" => ProviderOperation::Init,",
+            "other => ProviderOperation::Unsupported(other.to_string()),",
+        ),
+        (
+            "other => ProviderOperation::Unsupported(other.to_string()),",
+            "\"ping\" => ProviderOperation::Status,",
+        ),
+        (
+            "other => ProviderOperation::Unsupported(other.to_string()),",
+            "other => ProviderOperation::Unsupported(other.to_string()),",
+        ),
+    ] {
+        let same_line_arms = own_cut.replace(first_arm, &format!("{first_arm} {extra_arm}"));
+        assert_eq!(
+            compare_failure(&two_rows, &same_line_arms),
+            "parse_request: an arm line contains a second `=>`",
+            "{same_line_arms}"
+        );
+    }
     let swapped_rows = rows(&["unsupported", "init"]);
     let failure = compare_failure(&swapped_rows, own_cut);
     assert!(
