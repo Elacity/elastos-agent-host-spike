@@ -32,6 +32,8 @@ pub mod bundle;
 pub mod receipt;
 pub mod run;
 pub mod verify;
+pub mod receipt_export;
+pub mod receipt_budget;
 
 pub use capsule_identity::lab_cid as bundle_identity;
 
