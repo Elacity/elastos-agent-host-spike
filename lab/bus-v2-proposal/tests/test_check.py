@@ -899,6 +899,208 @@ PROVIDER_LINES = {
     DEFAULT_ACTION_NUMBER: DEFAULT_ACTION_QUOTE,
 }
 
+NO_PROVIDER_NUMBER = 3339
+NO_PROVIDER_SPAN = "examples/agent-host/src/lib.rs:3339"
+NO_PROVIDER_LINES = (
+    "/// Record a hosted model proposal. The resource names the model. There is",
+    "/// no secret field. This does not call a provider.",
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    "fn propose_hosted(journal: &mut Journal, resource: &str) -> Result<u64, &'static str> {",
+    '    if !resource.starts_with("localhost://")',
+    "        || resource.chars().any(char::is_whitespace)",
+    "        || host_path(resource)",
+    "    {",
+    '        return Err("host path");',
+    "    }",
+    "    let id = propose_step(journal);",
+    "    let step = journal",
+    "        .steps",
+    "        .iter_mut()",
+    "        .find(|step| step.id == id)",
+    '        .expect("just pushed");',
+    "    step.kind = ProposalKind::Hosted;",
+    "    step.resource = resource.to_string();",
+    "    Ok(id)",
+    "}",
+)
+NO_PROVIDER_QUOTE = NO_PROVIDER_LINES[1]
+
+CHILD_NUMBER = 3360
+CHILD_SPAN = "examples/agent-host/src/lib.rs:3360"
+NARROWER_NUMBER = 3370
+NARROWER_SPAN = "examples/agent-host/src/lib.rs:3370"
+CHILD_GRANT_NONE_NUMBER = 3382
+CHILD_GRANT_NONE_SPAN = "examples/agent-host/src/lib.rs:3382"
+CHILD_LINES = (
+    "/// A child is a separate step. Its resource must sit under the parent's",
+    "/// resource. It does not copy the parent's grant.",
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    "fn propose_child(",
+    "    journal: &mut Journal,",
+    "    parent_id: u64,",
+    "    resource: &str,",
+    ") -> Result<u64, &'static str> {",
+    "    let Some(parent) = journal.steps.iter().find(|step| step.id == parent_id) else {",
+    '        return Err("no parent");',
+    "    };",
+    "    if parent.resource.is_empty() || !narrower_resource(&parent.resource, resource) {",
+    '        return Err("not a subset");',
+    "    }",
+    "    let id = propose_step(journal);",
+    "    let step = journal",
+    "        .steps",
+    "        .iter_mut()",
+    "        .find(|step| step.id == id)",
+    '        .expect("just pushed");',
+    "    step.kind = ProposalKind::Child;",
+    "    step.resource = resource.to_string();",
+    "    step.parent_id = Some(parent_id);",
+    "    step.grant = None;",
+    "    Ok(id)",
+    "}",
+)
+PARENT_GRANT_DOC_QUOTE = CHILD_LINES[1]
+NARROWER_QUOTE = CHILD_LINES[11]
+CHILD_GRANT_NONE_QUOTE = CHILD_LINES[23]
+
+PROJECT_NUMBER = 3387
+PROJECT_SPAN = "examples/agent-host/src/lib.rs:3387"
+PROJECT_RESOURCE_NUMBER = 3403
+PROJECT_RESOURCE_SPAN = "examples/agent-host/src/lib.rs:3403"
+PROJECT_LINES = (
+    "/// Record a project proposal. The resource is a `localhost://` project name.",
+    "/// A host path or a slash inside the root or the name creates no step.",
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    "fn propose_init(journal: &mut Journal, root: &str, name: &str) -> Result<u64, &'static str> {",
+    "    if root.is_empty()",
+    "        || name.is_empty()",
+    "        || root",
+    "            .chars()",
+    "            .any(|ch| ch.is_whitespace() || ch == '/' || ch == '\\\\')",
+    "        || name",
+    "            .chars()",
+    "            .any(|ch| ch.is_whitespace() || ch == '/' || ch == '\\\\')",
+    "        || host_path(root)",
+    "        || host_path(name)",
+    "    {",
+    '        return Err("host path");',
+    "    }",
+    '    let resource = format!("localhost://Users/{root}/Projects/{name}");',
+    "    let id = propose_step(journal);",
+    "    let step = journal",
+    "        .steps",
+    "        .iter_mut()",
+    "        .find(|step| step.id == id)",
+    '        .expect("just pushed");',
+    "    step.kind = ProposalKind::Init;",
+    "    step.resource = resource;",
+    "    Ok(id)",
+    "}",
+)
+INIT_GUARD_QUOTE = PROJECT_LINES[1]
+PROJECT_RESOURCE_QUOTE = PROJECT_LINES[17]
+
+AUTHORIZE_NUMBER = 3449
+AUTHORIZE_SPAN = "examples/agent-host/src/lib.rs:3449"
+AUTHORIZE_LINES = (
+    "/// Give a child its own grant. The parent's grant string is refused, and the",
+    "/// child stays prepared. This does not start a process.",
+    '#[cfg(any(test, target_arch = "wasm32"))]',
+    "fn authorize_child(journal: &mut Journal, child_id: u64, grant: Option<&str>) -> bool {",
+    "    let Some(child) = journal.steps.iter().find(|step| step.id == child_id) else {",
+    "        return false;",
+    "    };",
+    "    if child.kind != ProposalKind::Child {",
+    "        return false;",
+    "    }",
+    "    let parent_grant = child.parent_id.and_then(|parent_id| {",
+    "        journal",
+    "            .steps",
+    "            .iter()",
+    "            .find(|step| step.id == parent_id)",
+    "            .and_then(|step| step.grant.clone())",
+    "    });",
+    '    if grant.is_none() || grant == Some("") || parent_grant.as_deref() == grant {',
+    "        return false;",
+    "    }",
+    "    authorize(journal, child_id, grant)",
+    "}",
+)
+PARENT_COMPARE_QUOTE = AUTHORIZE_LINES[17]
+
+UNCHECKED_SPAN = "examples/agent-host/src/lib.rs:3455"
+UNCHECKED_LINES = ("// a remainder no slice compares yet",)
+
+# The seven hosted, child and project quotes, their pinned lines and index.
+HOSTED_CASES = (
+    ("no_provider", NO_PROVIDER_NUMBER, NO_PROVIDER_SPAN, NO_PROVIDER_LINES, 1),
+    ("parent_grant_doc", CHILD_NUMBER, CHILD_SPAN, CHILD_LINES, 1),
+    ("narrower", NARROWER_NUMBER, NARROWER_SPAN, CHILD_LINES, 11),
+    (
+        "child_grant_none",
+        CHILD_GRANT_NONE_NUMBER,
+        CHILD_GRANT_NONE_SPAN,
+        CHILD_LINES,
+        23,
+    ),
+    ("init_guard", PROJECT_NUMBER, PROJECT_SPAN, PROJECT_LINES, 1),
+    (
+        "project_resource",
+        PROJECT_RESOURCE_NUMBER,
+        PROJECT_RESOURCE_SPAN,
+        PROJECT_LINES,
+        17,
+    ),
+    ("parent_compare", AUTHORIZE_NUMBER, AUTHORIZE_SPAN, AUTHORIZE_LINES, 17),
+)
+
+# The order in which the hosted decisions read their pinned lines.
+HOSTED_DECISION_ORDER = (
+    NO_PROVIDER_NUMBER,
+    CHILD_NUMBER,
+    NARROWER_NUMBER,
+    CHILD_GRANT_NONE_NUMBER,
+    PROJECT_NUMBER,
+    PROJECT_RESOURCE_NUMBER,
+    AUTHORIZE_NUMBER,
+)
+
+# The groups one hosted body cites, in the order it emits them.
+HOSTED_GROUPS = (
+    "no_write",
+    "no_provider",
+    "child",
+    "init",
+    "compare",
+    "deny",
+    "mint",
+    "cover",
+    "unchecked",
+    "provider",
+)
+
+# One correct pinned line for every hosted decision the body cites.
+HOSTED_LINES = {
+    NO_WRITE_NUMBER: NO_WRITE_QUOTE,
+    NO_PROVIDER_NUMBER: NO_PROVIDER_QUOTE,
+    CHILD_NUMBER: PARENT_GRANT_DOC_QUOTE,
+    NARROWER_NUMBER: NARROWER_QUOTE,
+    CHILD_GRANT_NONE_NUMBER: CHILD_GRANT_NONE_QUOTE,
+    PROJECT_NUMBER: INIT_GUARD_QUOTE,
+    PROJECT_RESOURCE_NUMBER: PROJECT_RESOURCE_QUOTE,
+    AUTHORIZE_NUMBER: PARENT_COMPARE_QUOTE,
+    DENY_NUMBER: DENY_QUOTE,
+    MINT_NUMBER: MINT_SECOND,
+    COVER_NUMBER: COVER_QUOTE,
+}
+
+# Every decision the hosted body reads, in order.
+HOSTED_READ_ORDER = (
+    (NO_WRITE_NUMBER,)
+    + HOSTED_DECISION_ORDER
+    + (DENY_NUMBER, MINT_NUMBER, COVER_NUMBER, SCHEME_NUMBER)
+)
+
 
 class CitationCheckTests(unittest.TestCase):
     def _temp_root(self):
@@ -6845,4 +7047,535 @@ class CitationCheckTests(unittest.TestCase):
             WRITE_INVOKE_SPAN,
             self.test_outcome_held_line_does_not_stand_for_line_4061,
             "CAUGHT outcome-held-as-invoke",
+        )
+
+    def _hosted_case(self, name):
+        for case in HOSTED_CASES:
+            if case[0] == name:
+                return case
+        raise AssertionError(name)
+
+    def _hosted_group(self, name):
+        if name == "no_provider":
+            return "no_provider"
+        if name in ("parent_grant_doc", "narrower", "child_grant_none"):
+            return "child"
+        if name in ("init_guard", "project_resource"):
+            return "init"
+        return "compare"
+
+    def _hosted_span(self, number):
+        for name, case_number, span, lines, index in HOSTED_CASES:
+            if case_number == number:
+                return span
+        raise AssertionError(number)
+
+    def _present_hosted_decisions(self, body):
+        """Return the hosted decisions whose span the draft cites."""
+        return [
+            number
+            for number in HOSTED_DECISION_ORDER
+            if "`" + self._hosted_span(number) + "`" in body
+        ]
+
+    def _hosted_body(
+        self,
+        no_write=NO_WRITE_LINES,
+        no_provider=NO_PROVIDER_LINES,
+        child=CHILD_LINES,
+        init=PROJECT_LINES,
+        compare=AUTHORIZE_LINES,
+        deny=DENY_QUOTE,
+        cover=COVER_LINES,
+        unchecked=UNCHECKED_LINES,
+        provider=SCHEME_LINES,
+        groups=None,
+        copies=None,
+        span_copies=None,
+        indented=True,
+        omit=(),
+    ):
+        """A draft that cites the hosted spans and indents their walks."""
+        copies = copies or {}
+        span_copies = span_copies or {}
+        chosen = HOSTED_GROUPS if groups is None else tuple(groups)
+        blocks = (
+            ("no_write", [NO_WRITE_SPAN], list(no_write)),
+            ("no_provider", [NO_PROVIDER_SPAN], list(no_provider)),
+            ("child", [CHILD_SPAN, NARROWER_SPAN, CHILD_GRANT_NONE_SPAN], list(child)),
+            ("init", [PROJECT_SPAN, PROJECT_RESOURCE_SPAN], list(init)),
+            ("compare", [AUTHORIZE_SPAN], list(compare)),
+            ("deny", [DENY_SPAN], [deny] + list(DENY_LINES[1:])),
+            ("mint", [MINT_SPAN], [MINT_FIRST, MINT_SECOND]),
+            ("cover", [COVER_SPAN], list(cover)),
+            ("unchecked", [UNCHECKED_SPAN], list(unchecked)),
+            ("provider", [SCHEME_SPAN], list(provider)),
+        )
+        parts = []
+        for name, spans, lines in blocks:
+            if name not in chosen:
+                continue
+            prose = " ".join(
+                self._cited(span, span_copies.get(span, copies.get(name, 1)))
+                for span in spans
+                if span not in omit
+            )
+            if not prose:
+                continue
+            parts.append(prose + "\n")
+            if indented:
+                parts.append("".join("    " + line + "\n" for line in lines))
+            parts.append("\n")
+        return "".join(parts)
+
+    def _hosted_source(self, count=COVER_NUMBER, lines=None):
+        """A committed file with one correct line for every hosted quote."""
+        rows = ["// filler"] * max(count, COVER_NUMBER)
+        for number, text in (lines or HOSTED_LINES).items():
+            rows[number - 1] = text
+        return ("\n".join(rows[:count]) + "\n").encode("utf-8")
+
+    def _hosted_files(self):
+        return {
+            OWNED_REL: self._hosted_source(),
+            PROVIDER_REL: self._provider_source(),
+        }
+
+    def _assert_hosted_quote_mismatch(self, name):
+        _, number, span, lines, index = self._hosted_case(name)
+        group = self._hosted_group(name)
+        expected = "refuse: quoted line does not match " + span
+        body = self._hosted_body(
+            groups=[group], **{group: self._changed(lines, index)}
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._hosted_source()})
+        self.assertEqual(got, [expected])
+        present = self._present_hosted_decisions(body)
+        self.assertEqual(reads, present[: present.index(number) + 1])
+        root = self._draft(body, {OWNED_REL: self._hosted_source()})
+        (root / OWNED_REL).write_bytes(
+            self._hosted_source(
+                lines={**HOSTED_LINES, number: "// edited in the worktree"}
+            )
+        )
+        self.assertEqual(check.problems(root), [expected])
+        root = self._draft(
+            self._hosted_body(groups=[group]),
+            {OWNED_REL: self._hosted_source()},
+        )
+        (root / OWNED_REL).write_bytes(
+            self._hosted_source(
+                lines={**HOSTED_LINES, number: "// edited in the worktree"}
+            )
+        )
+        self.assertEqual(check.problems(root), [])
+
+    def _assert_hosted_line_not_cited(self, name, index, omit=()):
+        _, number, span, lines, _ = self._hosted_case(name)
+        group = self._hosted_group(name)
+        body = self._hosted_body(
+            groups=[group], **{group: self._changed(lines, index)}, omit=omit
+        )
+        got, reads = self._pinned_reads(body, {OWNED_REL: self._hosted_source()})
+        self.assertEqual(got, [], span)
+        self.assertEqual(reads, self._present_hosted_decisions(body), span)
+
+    def test_live_draft_hosted_quotes_match_their_pinned_lines(self):
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        for name, number, span, lines, index in HOSTED_CASES:
+            selector = getattr(check, name + "_quote")
+            self.assertEqual(selector(text), lines[index], span)
+            self.assertEqual(
+                len(check._remainders(text, "`" + span + "`")), len(lines), span
+            )
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        for name, number, span, lines, index in HOSTED_CASES:
+            self.assertEqual(
+                check.pinned_line(root, sha, OWNED_REL, number), lines[index], span
+            )
+        self.assertEqual(check.problems(root), [])
+
+    def test_hosted_fixture_keeps_every_decision_on_its_pinned_line(self):
+        got, reads = self._pinned_reads(self._hosted_body(), self._hosted_files())
+        self.assertEqual(got, [])
+        self.assertEqual(reads, list(HOSTED_READ_ORDER))
+
+    def test_hosted_selectors_are_absent_below_their_index(self):
+        for name, number, span, lines, index in HOSTED_CASES:
+            selector = getattr(check, name + "_quote")
+            group = self._hosted_group(name)
+            self.assertIsNone(
+                selector(self._hosted_body(groups=[group], indented=False)), span
+            )
+            self.assertIsNone(selector("No hosted span here.\n"), span)
+            self.assertIsNone(
+                selector(
+                    self._hosted_body(groups=[group], **{group: lines[:index]})
+                ),
+                span,
+            )
+
+    def test_no_provider_quoted_line_mismatch_is_refused(self):
+        self._assert_hosted_quote_mismatch("no_provider")
+
+    def test_parent_grant_doc_quoted_line_mismatch_is_refused(self):
+        self._assert_hosted_quote_mismatch("parent_grant_doc")
+
+    def test_narrower_quoted_line_mismatch_is_refused(self):
+        self._assert_hosted_quote_mismatch("narrower")
+
+    def test_child_grant_none_quoted_line_mismatch_is_refused(self):
+        self._assert_hosted_quote_mismatch("child_grant_none")
+
+    def test_init_guard_quoted_line_mismatch_is_refused(self):
+        self._assert_hosted_quote_mismatch("init_guard")
+
+    def test_project_resource_quoted_line_mismatch_is_refused(self):
+        self._assert_hosted_quote_mismatch("project_resource")
+
+    def test_parent_compare_quoted_line_mismatch_is_refused(self):
+        self._assert_hosted_quote_mismatch("parent_compare")
+
+    def test_hosted_doc_start_does_not_stand_for_line_3339(self):
+        self._assert_hosted_line_not_cited("no_provider", 0)
+
+    def test_child_doc_start_does_not_stand_for_line_3360(self):
+        self._assert_hosted_line_not_cited("parent_grant_doc", 0)
+
+    def test_parent_grant_doc_does_not_stand_for_line_3370(self):
+        self._assert_hosted_line_not_cited("narrower", 1, omit=(CHILD_SPAN,))
+
+    def test_narrower_line_does_not_stand_for_line_3382(self):
+        self._assert_hosted_line_not_cited(
+            "child_grant_none", 11, omit=(CHILD_SPAN, NARROWER_SPAN)
+        )
+
+    def test_init_doc_start_does_not_stand_for_line_3387(self):
+        self._assert_hosted_line_not_cited("init_guard", 0)
+
+    def test_init_guard_line_does_not_stand_for_line_3403(self):
+        self._assert_hosted_line_not_cited(
+            "project_resource", 1, omit=(PROJECT_SPAN,)
+        )
+
+    def test_authorize_false_line_does_not_stand_for_line_3449(self):
+        self._assert_hosted_line_not_cited("parent_compare", 18)
+
+    def test_hosted_block_lines_do_not_stand_for_the_cited_lines(self):
+        cases = (
+            ("no_provider", 8),
+            ("no_provider", 19),
+            ("parent_grant_doc", 12),
+            ("parent_grant_doc", 25),
+            ("init_guard", 15),
+            ("init_guard", 27),
+            ("parent_compare", 0),
+            ("parent_compare", 5),
+            ("parent_compare", 8),
+            ("parent_compare", 21),
+        )
+        for name, index in cases:
+            self._assert_hosted_line_not_cited(name, index)
+
+    def test_two_hosted_spans_are_refused(self):
+        for name, number, span, lines, index in HOSTED_CASES:
+            expected = "refuse: quoted line is not one line: " + span
+            group = self._hosted_group(name)
+            body = self._hosted_body(
+                groups=[group], span_copies={span: 2}
+            )
+            got, reads = self._pinned_reads(
+                body, {OWNED_REL: self._hosted_source()}
+            )
+            self.assertEqual(got, [expected], span)
+            present = self._present_hosted_decisions(body)
+            self.assertEqual(reads, present[: present.index(number)], span)
+
+    def test_draft_without_a_hosted_span_adds_no_refusal(self):
+        for name, number, span, lines, index in HOSTED_CASES:
+            body = self._hosted_body(omit=(span,))
+            got, reads = self._pinned_reads(body, self._hosted_files())
+            self.assertEqual(got, [], span)
+            self.assertEqual(
+                reads, [other for other in HOSTED_READ_ORDER if other != number], span
+            )
+
+    def test_hosted_span_without_an_indented_line_adds_no_refusal(self):
+        got, reads = self._pinned_reads(
+            self._hosted_body(indented=False), self._hosted_files()
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, [])
+
+    def test_hosted_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        for name, number, span, lines, index in HOSTED_CASES:
+            expected = "refuse: quoted line is not in the pinned commit: " + span
+            got, reads = self._pinned_reads(
+                self._hosted_body(),
+                {
+                    OWNED_REL: self._hosted_source(count=number - 1),
+                    PROVIDER_REL: self._provider_source(),
+                },
+                {OWNED_REL: self._hosted_source()},
+            )
+            self.assertEqual(got, [expected], span)
+            self.assertEqual(
+                reads,
+                [NO_WRITE_NUMBER]
+                + list(HOSTED_DECISION_ORDER[: HOSTED_DECISION_ORDER.index(number) + 1]),
+                span,
+            )
+
+    def test_no_write_mismatch_stops_the_no_provider_decision(self):
+        got, reads = self._pinned_reads(
+            self._hosted_body(
+                no_write=self._changed(NO_WRITE_LINES, 4),
+                no_provider=self._changed(NO_PROVIDER_LINES, 1),
+            ),
+            self._hosted_files(),
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + NO_WRITE_SPAN]
+        )
+        self.assertEqual(reads, [NO_WRITE_NUMBER])
+
+    def test_no_provider_line_mismatch_follows_the_no_write_match(self):
+        got, reads = self._pinned_reads(
+            self._hosted_body(no_provider=self._changed(NO_PROVIDER_LINES, 1)),
+            self._hosted_files(),
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + NO_PROVIDER_SPAN]
+        )
+        self.assertEqual(reads, [NO_WRITE_NUMBER, NO_PROVIDER_NUMBER])
+
+    def test_no_provider_line_mismatch_without_the_no_write_span(self):
+        groups = tuple(group for group in HOSTED_GROUPS if group != "no_write")
+        got, reads = self._pinned_reads(
+            self._hosted_body(
+                groups=groups, no_provider=self._changed(NO_PROVIDER_LINES, 1)
+            ),
+            self._hosted_files(),
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + NO_PROVIDER_SPAN]
+        )
+        self.assertEqual(reads, [NO_PROVIDER_NUMBER])
+
+    def test_parent_grant_mismatch_stops_the_narrower_decision(self):
+        got, reads = self._pinned_reads(
+            self._hosted_body(child=self._changed(CHILD_LINES, 1)),
+            self._hosted_files(),
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + CHILD_SPAN])
+        self.assertEqual(
+            reads, [NO_WRITE_NUMBER, NO_PROVIDER_NUMBER, CHILD_NUMBER]
+        )
+
+    def test_child_grant_none_mismatch_follows_the_earlier_matches(self):
+        got, reads = self._pinned_reads(
+            self._hosted_body(child=self._changed(CHILD_LINES, 23)),
+            self._hosted_files(),
+        )
+        self.assertEqual(
+            got, ["refuse: quoted line does not match " + CHILD_GRANT_NONE_SPAN]
+        )
+        self.assertEqual(
+            reads,
+            [NO_WRITE_NUMBER]
+            + list(HOSTED_DECISION_ORDER[: HOSTED_DECISION_ORDER.index(CHILD_GRANT_NONE_NUMBER) + 1]),
+        )
+
+    def test_deny_mismatch_follows_the_hosted_matches(self):
+        got, reads = self._pinned_reads(
+            self._hosted_body(deny=DENY_QUOTE + "x"), self._hosted_files()
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + DENY_SPAN])
+        self.assertEqual(
+            reads,
+            [NO_WRITE_NUMBER]
+            + list(HOSTED_DECISION_ORDER)
+            + [DENY_NUMBER],
+        )
+
+    def test_deny_mismatch_without_the_hosted_spans_stays_the_deny_refusal(self):
+        got, reads = self._pinned_reads(
+            self._hosted_body(groups=["deny"], deny=DENY_QUOTE + "x"),
+            {OWNED_REL: self._hosted_source()},
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + DENY_SPAN])
+        self.assertEqual(reads, [DENY_NUMBER])
+
+    def test_unchecked_remainder_after_line_3455_is_not_compared(self):
+        got, reads = self._pinned_reads(
+            self._hosted_body(unchecked=("// a different remainder",)),
+            self._hosted_files(),
+        )
+        self.assertEqual(got, [])
+        self.assertEqual(reads, list(HOSTED_READ_ORDER))
+
+    def test_cover_mismatch_stops_the_provider_decision(self):
+        got, reads = self._pinned_reads(
+            self._hosted_body(cover=self._changed(COVER_LINES, 5)),
+            self._hosted_files(),
+        )
+        self.assertEqual(got, ["refuse: quoted line does not match " + COVER_SPAN])
+        self.assertEqual(
+            reads,
+            [NO_WRITE_NUMBER]
+            + list(HOSTED_DECISION_ORDER)
+            + [DENY_NUMBER, MINT_NUMBER, COVER_NUMBER],
+        )
+        self.assertNotIn(SCHEME_NUMBER, reads)
+
+    def test_hosted_quote_refusal_waits_for_a_known_pin(self):
+        body = self._hosted_body(no_provider=self._changed(NO_PROVIDER_LINES, 1))
+        files = self._hosted_files()
+        self.assertEqual(
+            check.problems(self._raw_draft(body, files)),
+            ["refuse: draft has no pinned commit"],
+        )
+        self.assertEqual(
+            check.problems(
+                self._raw_draft("Pinned commit: HEAD\n" + body, files)
+            ),
+            ["refuse: pinned commit is not one 40-hex commit"],
+        )
+        self.assertEqual(
+            check.problems(
+                self._raw_draft(
+                    "Pinned commit: " + "f" * 40 + "\n" + body, files, commit=True
+                )
+            ),
+            ["refuse: pinned commit is not a commit: " + "f" * 40],
+        )
+
+    def test_falsifier_no_provider_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_no_provider_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT no-provider-quoted-line",
+        )
+
+    def test_falsifier_hosted_doc_start_is_caught(self):
+        self._caught_walk_index(
+            "no_provider_quote",
+            0,
+            "`" + NO_PROVIDER_SPAN + "`",
+            self.test_hosted_doc_start_does_not_stand_for_line_3339,
+            "CAUGHT hosted-doc-start",
+        )
+
+    def test_falsifier_parent_grant_doc_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_parent_grant_doc_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT parent-grant-doc-quoted-line",
+        )
+
+    def test_falsifier_child_doc_start_is_caught(self):
+        self._caught_walk_index(
+            "parent_grant_doc_quote",
+            0,
+            "`" + CHILD_SPAN + "`",
+            self.test_child_doc_start_does_not_stand_for_line_3360,
+            "CAUGHT child-doc-start",
+        )
+
+    def test_falsifier_narrower_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_narrower_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT narrower-quoted-line",
+        )
+
+    def test_falsifier_parent_grant_doc_as_narrower_is_caught(self):
+        self._caught_walk_index(
+            "narrower_quote",
+            1,
+            "`" + NARROWER_SPAN + "`",
+            self.test_parent_grant_doc_does_not_stand_for_line_3370,
+            "CAUGHT parent-grant-doc-as-narrower",
+        )
+
+    def test_falsifier_child_grant_none_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_child_grant_none_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT child-grant-none-quoted-line",
+        )
+
+    def test_falsifier_narrower_as_grant_none_is_caught(self):
+        self._caught_walk_index(
+            "child_grant_none_quote",
+            11,
+            "`" + CHILD_GRANT_NONE_SPAN + "`",
+            self.test_narrower_line_does_not_stand_for_line_3382,
+            "CAUGHT narrower-as-grant-none",
+        )
+
+    def test_falsifier_init_guard_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_init_guard_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT init-guard-quoted-line",
+        )
+
+    def test_falsifier_init_doc_start_is_caught(self):
+        self._caught_walk_index(
+            "init_guard_quote",
+            0,
+            "`" + PROJECT_SPAN + "`",
+            self.test_init_doc_start_does_not_stand_for_line_3387,
+            "CAUGHT init-doc-start",
+        )
+
+    def test_falsifier_project_resource_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_project_resource_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT project-resource-quoted-line",
+        )
+
+    def test_falsifier_init_guard_as_resource_is_caught(self):
+        self._caught_walk_index(
+            "project_resource_quote",
+            1,
+            "`" + PROJECT_RESOURCE_SPAN + "`",
+            self.test_init_guard_line_does_not_stand_for_line_3403,
+            "CAUGHT init-guard-as-resource",
+        )
+
+    def test_falsifier_parent_compare_quoted_line_is_caught(self):
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_parent_compare_quoted_line_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT parent-compare-quoted-line",
+        )
+
+    def test_falsifier_authorize_false_as_compare_is_caught(self):
+        self._caught_walk_index(
+            "parent_compare_quote",
+            18,
+            "`" + AUTHORIZE_SPAN + "`",
+            self.test_authorize_false_line_does_not_stand_for_line_3449,
+            "CAUGHT authorize-false-as-compare",
         )
