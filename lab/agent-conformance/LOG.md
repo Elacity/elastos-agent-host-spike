@@ -13861,4 +13861,257 @@ New:
 - `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 247.84 seconds, inside the 600-second bound. Targets: lib 80 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0.
 - Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_stop_revoke_joins_the_audit_list -- --exact`: exit 0, 1 passed, real 1.54 seconds.
 
+## 089
+
+089: `start_provider` is the one lab launch seam. A caller passes the confinement profile path it already wrote. Started means that binary answered `init` with `status` `ok`, and the return owns the live child. Refused leaves no child. `ThrowawayHome::spawn` stays the only spawn; bounded stdin is an argument, and null stdin stays the default for every existing launch. A PASS gives the Runtime no C0 credit and no B3 credit.
+
+### Quote from the contract (read only)
+
+`docs/AGENT_ARCHITECTURE.md`, Runtime and provider architecture: "Runtime verifies the principal and session, enforces capabilities, owns lifecycle and audit, and routes the operation." Effect providers "do not decide that an unverified caller is authorized."
+
+This task is the lab launch under a profile the caller already wrote. It does not mint a grant. `#309 at 513988ebd names no provider-launch ask; routed to Flint`.
+
+### Plants
+
+Each plant was applied alone, then restored before the next. The planted crate compiled. The named test failed on its assertion. Restored, it passes. No `falsifiers.json` id. `git diff -- lab/agent-conformance/standin-runtime/mod.rs` after restore shows no plant.
+
+The four required plants used `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test provider_launch -- --nocapture`. The extra plants used that command with the named test before `--`.
+
+F-shared-launch-drop-profile: the spawn arguments omit `-f` and the profile path. Named test `standin_provider_launch_starts_under_caller_profile` panicked at `tests/provider_launch.rs:164:10`, `.expect("the caller profile starts the provider")`. Real 2.32 seconds. The same plant also failed `standin_provider_launch_refuses_stdin_past_its_limit` at `tests/provider_launch.rs:513:10` and `standin_provider_launch_uses_supplied_profile` at `tests/provider_launch.rs:431:5`.
+
+Old:
+
+```text
+    arguments.push("-f".to_string());
+    arguments.push(profile_text.to_string());
+```
+
+New: those two lines deleted.
+
+F-shared-launch-wrong-profile: the restrictive profile is replaced by the committed oracle path. Named test `standin_provider_launch_uses_supplied_profile` panicked at `tests/provider_launch.rs:132:18`, `Ok(_) => panic!("the launch must be refused")`. Real 2.91 seconds.
+
+Old:
+
+```text
+    arguments.push(profile_text.to_string());
+```
+
+New:
+
+```text
+    arguments.push(concat!(env!("CARGO_MANIFEST_DIR"), "/../../capsules/wallet-provider/confine.sb").to_string());
+```
+
+F-shared-launch-bare: the binary is started with no confinement tool. Named tests: `standin_provider_launch_starts_under_caller_profile` panicked at `tests/provider_launch.rs:213:5`, `assert_eq!(denied["status"], "error", "outside init: {denied}")`, left `String("ok")`, right `"error"`. `standin_provider_launch_uses_supplied_profile` panicked at `tests/provider_launch.rs:132:18`, `Ok(_) => panic!("the launch must be refused")`. Real 2.73 seconds. A later capture of the same plant confirmed the outside-init left/right values, then restored the file.
+
+Old:
+
+```text
+    let program = tool_path;
+    let arg_refs: Vec<&str> = arguments.iter().map(String::as_str).collect();
+```
+
+New:
+
+```text
+    let program = binary.as_path();
+    let arg_refs: Vec<&str> = Vec::new();
+```
+
+F-shared-launch-stub: the seam returns Started before `init` has answered `ok`. Named test `standin_provider_launch_starts_under_caller_profile` panicked at `tests/provider_launch.rs:188:5`, `wallet.is_dir() && status["data"]["storage_configured"] == true`. Real 2.52 seconds. The same plant also failed `standin_provider_launch_uses_supplied_profile` at `tests/provider_launch.rs:132:18`.
+
+Old:
+
+```text
+    let init = match exchange(&mut child, &init_request) {
+        Ok(init) => init,
+        Err(reason) => {
+            let _ = child.stop();
+            return Err(format!("{name} start is refused: {reason}"));
+        }
+    };
+    if init.get("status").and_then(Value::as_str) != Some("ok") {
+        let _ = child.stop();
+        return Err(format!("{name} start is refused: init answered {init}"));
+    }
+```
+
+New:
+
+```text
+    let init = json!({"status": "ok", "data": {"storage_configured": true}});
+```
+
+F-shared-launch-primitive: the missing-primitive arm of `host_refusal` is deleted. Named test `standin_provider_launch_refuses_unconfined_host` panicked at `tests/provider_launch.rs:330:9`, `assert_eq!(reason, expected)`. Real 1.23 seconds.
+
+Old:
+
+```text
+    if let Some(primitive) = host.unavailable {
+        let reason = primitive.design_refusal();
+        return Err(format!("{name} start on {} is refused: {reason}", host.os));
+    }
+```
+
+New: that block deleted.
+
+F-shared-launch-linux-lab: the Linux sentence says the lab enforces Linux. Same test, same assertion, `tests/provider_launch.rs:330:9`. Real 1.40 seconds.
+
+Old:
+
+```text
+linux is designed, not enforced, in this lab
+```
+
+New:
+
+```text
+linux is designed and enforced, in this lab
+```
+
+F-shared-launch-unnamed-os: the unsupported-OS reason drops the reported OS name. Same test, same assertion, `tests/provider_launch.rs:330:9`. Real 1.39 seconds.
+
+Old:
+
+```text
+        format!(
+            "{} has no confinement design, and the lab stand-in applies confinement only on \
+             {confined_os}",
+            host.os
+        )
+```
+
+New:
+
+```text
+        format!(
+            "a host has no confinement design, and the lab stand-in applies confinement only on \
+             {confined_os}"
+        )
+```
+
+F-shared-launch-absent-tool: the absent-tool check is deleted. Same test panicked at `tests/provider_launch.rs:334:5`, the absent-tool `assert_eq!`. Real 1.54 seconds.
+
+Old:
+
+```text
+    if !tool_path.is_file() {
+        return Err(format!(
+            "{name} start on {os} is refused: the confinement tool {} is absent",
+            tool_path.display()
+        ));
+    }
+```
+
+New: that block deleted.
+
+F-shared-launch-wrong-tool: the not-that-tool check is deleted. Same test panicked at `tests/provider_launch.rs:350:5`, the `/bin/echo` `assert_eq!`. Real 1.51 seconds.
+
+Old:
+
+```text
+    if tool_path != Path::new(SANDBOX_EXEC) {
+        return Err(format!(
+            "{name} start on {os} is refused: the confinement tool {} is not {SANDBOX_EXEC}, \
+             which is the one the stand-in runs",
+            tool_path.display()
+        ));
+    }
+```
+
+New: that block deleted.
+
+F-shared-launch-binary-file: the binary-is-a-file check is deleted. Same test panicked at `tests/provider_launch.rs:356:5`, the missing-binary `assert_eq!`. Real 1.65 seconds.
+
+Old:
+
+```text
+    if !binary_path.is_file() {
+        return Err(format!(
+            "{name} start is refused: the provider binary {} is not a file",
+            binary_path.display()
+        ));
+    }
+```
+
+New: that block deleted.
+
+F-shared-launch-profile-file: the profile-is-a-file check is deleted. Named test `standin_provider_launch_uses_supplied_profile` panicked at `tests/provider_launch.rs:410:5`, `missing_reason.contains("is not a file")`. Real 1.83 seconds.
+
+Old:
+
+```text
+    if !profile_path.is_file() {
+        return Err(format!(
+            "{name} start is refused: the confinement profile {} is not a file",
+            profile_path.display()
+        ));
+    }
+```
+
+New: that block deleted.
+
+F-shared-launch-unknown-name: an unknown name uses the wallet storage layout. Named test `standin_provider_launch_refuses_an_unknown_provider_name` panicked at `tests/provider_launch.rs:487:5`, the layout-sentence `assert_eq!`. Real 1.54 seconds.
+
+Old:
+
+```text
+        other => Err(format!(
+            "the stand-in serves only {DID_PROVIDER} and {WALLET_PROVIDER}, so {other} has no \
+             storage root layout"
+        )),
+```
+
+New:
+
+```text
+        other => Ok(base.join("ElastOS").join("SystemServices").join("Wallet")),
+```
+
+F-shared-launch-stdin: `write_bounded` no longer refuses a write past the limit. Named test `standin_provider_launch_refuses_stdin_past_its_limit` panicked at `tests/provider_launch.rs:517:10`, `.expect_err("a request past the stdin limit is refused")`. Real 2.31 seconds.
+
+Old:
+
+```text
+        if next > self.spawned.stdin_limit {
+            return Err("stdin exceeds its byte limit");
+        }
+```
+
+New: that block deleted.
+
+F-shared-launch-response-deadline: `read_line_within` no longer refuses at the deadline. Named test `standin_provider_launch_refuses_a_response_past_its_deadline` panicked at `tests/provider_launch.rs:547:5`, `assert_eq!(err, "provider response exceeded its deadline")`. Real 3.77 seconds.
+
+Old:
+
+```text
+            if started.elapsed() >= deadline {
+                return Err("provider response exceeded its deadline");
+            }
+```
+
+New: that block deleted.
+
+F-shared-launch-exit-deadline: `wait_for_exit_within` no longer refuses at the deadline. Named test `standin_provider_launch_refuses_an_exit_past_its_deadline` panicked at `tests/provider_launch.rs:572:10`, `.expect_err("a child that stays up is refused at the exit deadline")`. Real 3.44 seconds.
+
+Old:
+
+```text
+                    if started.elapsed() >= deadline {
+                        let _ = self.kill_group();
+                        self.stopped = true;
+                        return Err("provider exit exceeded its deadline");
+                    }
+```
+
+New: that block deleted.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. The wallet-provider binary was built once under `lab/agent-conformance/target/wallet-provider`, under the shared heavy-build lease. No `Cargo.toml` or `Cargo.lock` change. No census leftover, so no rerun.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.16 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 266.23 seconds, inside the 600-second bound. Targets: lib 80 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; provider_launch 7 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0.
+- Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test provider_launch -- --nocapture`: exit 0, 7 passed, finished in 2.50 seconds, real 2.57 seconds.
+
 

@@ -58,10 +58,18 @@
 //! `GET /api/audit/types` with the four type names and reads no store.
 //! `revoke_live` appends one `capability_revoke` for each `Live` grant a stop
 //! or a failed start drops. A pending settlement appends nothing.
+//!
+//! `start_provider` is a lab test seam, not a route. The caller passes the
+//! confinement profile it already wrote. Started means `init` answered `ok`.
+//! Refused leaves no child.
 
+use crate::harness::{ChildInput, RunningChild, ThrowawayHome};
+use crate::identity;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 const LIVE_SCOPE: &str = "all_sessions_live";
 const RESIDENT_WORLD: &str = "resident-capsule";
@@ -2131,6 +2139,272 @@ fn bridge_error(message: &str) -> Value {
         "code": "denied",
         "message": message,
     })
+}
+
+const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+const DID_PROVIDER: &str = "did-provider";
+const WALLET_PROVIDER: &str = "wallet-provider";
+const DECLARED_CONFINED_OS: [&str; 1] = ["macos"];
+
+/// Bytes one provider dialogue may write. A later write that would pass this
+/// limit is refused and is not sent.
+pub const STDIN_BYTE_LIMIT: usize = 4096;
+
+/// How long one provider response may take. A silent child is a different
+/// refusal from a child that has already exited.
+pub const RESPONSE_DEADLINE: Duration = Duration::from_secs(5);
+
+/// How long the provider may take to exit after `shutdown`.
+pub const EXIT_DEADLINE: Duration = Duration::from_secs(10);
+
+/// A simulated host report. `unavailable` is test input: a missing primitive
+/// is refused on every OS, before the confinement-tool check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostPrimitive {
+    Landlock,
+    UserNamespaces,
+    SeccompFilter,
+}
+
+impl HostPrimitive {
+    fn design_refusal(self) -> &'static str {
+        match self {
+            Self::Landlock => "linux confinement refused: the kernel has no Landlock",
+            Self::UserNamespaces => "linux confinement refused: user namespaces are turned off",
+            Self::SeccompFilter => {
+                "linux confinement refused: the seccomp filter cannot be installed"
+            }
+        }
+    }
+}
+
+/// The host the caller reports. This seam does not read a kernel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostReport {
+    pub os: &'static str,
+    pub unavailable: Option<HostPrimitive>,
+}
+
+/// The live child after `init` answered `status` `ok`.
+pub struct StartedProvider<'a> {
+    child: RunningChild<'a>,
+    pub init: Value,
+    pub binary_sha256: String,
+    pub profile_sha256: String,
+}
+
+impl StartedProvider<'_> {
+    /// One later request on the same child. The stdin limit and the response
+    /// deadline are the refusals from the one spawn site.
+    pub fn request(&mut self, body: &Value) -> Result<Value, String> {
+        exchange(&mut self.child, body)
+    }
+
+    /// `shutdown` answered `ok` and the child exited 0.
+    pub fn shutdown(mut self) -> Result<(), String> {
+        let answer = match exchange(&mut self.child, &json!({ "op": "shutdown" })) {
+            Ok(answer) => answer,
+            Err(reason) => {
+                let _ = self.child.stop();
+                return Err(reason);
+            }
+        };
+        if answer.get("status").and_then(Value::as_str) != Some("ok") {
+            let _ = self.child.stop();
+            return Err(format!("shutdown answered {answer}"));
+        }
+        let status = match self.child.wait_for_exit_within(EXIT_DEADLINE) {
+            Ok(status) => status,
+            Err(reason) => return Err(reason.to_string()),
+        };
+        if status.code() != Some(0) {
+            return Err(format!("provider exit status {status}"));
+        }
+        Ok(())
+    }
+}
+
+/// Lab test seam, not a route.
+///
+/// "Runtime verifies the principal and session, enforces capabilities, owns
+/// lifecycle and audit, and routes the operation." Effect providers "do not
+/// decide that an unverified caller is authorized." The caller passes the
+/// profile path it already wrote. Started means that binary answered `init`
+/// with `status` `ok`, and this value owns the live child. Refused carries a
+/// nonempty reason and leaves no child. This seam stores no key and no
+/// credential, and it does not mint a grant.
+pub fn start_provider<'a>(
+    home: &'a ThrowawayHome,
+    binary_path: &Path,
+    base_path: &Path,
+    name: &str,
+    host: HostReport,
+    tool_path: &Path,
+    profile_path: &Path,
+) -> Result<StartedProvider<'a>, String> {
+    host_refusal(name, host)?;
+    let os = host.os;
+    if !tool_path.is_file() {
+        return Err(format!(
+            "{name} start on {os} is refused: the confinement tool {} is absent",
+            tool_path.display()
+        ));
+    }
+    if tool_path != Path::new(SANDBOX_EXEC) {
+        return Err(format!(
+            "{name} start on {os} is refused: the confinement tool {} is not {SANDBOX_EXEC}, \
+             which is the one the stand-in runs",
+            tool_path.display()
+        ));
+    }
+    if !binary_path.is_file() {
+        return Err(format!(
+            "{name} start is refused: the provider binary {} is not a file",
+            binary_path.display()
+        ));
+    }
+    if !profile_path.is_file() {
+        return Err(format!(
+            "{name} start is refused: the confinement profile {} is not a file",
+            profile_path.display()
+        ));
+    }
+    let root = storage_layout(name, base_path)?;
+    let parent = root.parent().ok_or_else(|| {
+        format!(
+            "{name} start is refused: the storage root {} has no parent",
+            root.display()
+        )
+    })?;
+    let binary = fs::canonicalize(binary_path).map_err(|_| {
+        format!(
+            "{name} start is refused: the provider binary {} is not a file",
+            binary_path.display()
+        )
+    })?;
+    let binary_text = path_text(&binary, name, "provider binary")?;
+    let profile_text = path_text(profile_path, name, "confinement profile")?;
+    let root_text = path_text(&root, name, "storage root")?;
+    let parent_text = path_text(parent, name, "storage parent")?;
+    let binary_sha256 = hash_file(&binary, name, "provider binary")?;
+    let profile_sha256 = hash_file(profile_path, name, "confinement profile")?;
+    fs::create_dir_all(parent).map_err(|err| {
+        format!(
+            "{name} start is refused: the storage parent {} could not be created: {err}",
+            parent.display()
+        )
+    })?;
+    let mut arguments = Vec::new();
+    arguments.push("-f".to_string());
+    arguments.push(profile_text.to_string());
+    arguments.push("-D".to_string());
+    arguments.push(format!("STORAGE_ROOT={root_text}"));
+    arguments.push("-D".to_string());
+    arguments.push(format!("STORAGE_PARENT={parent_text}"));
+    arguments.push("-D".to_string());
+    arguments.push(format!("PROVIDER_EXECUTABLE={binary_text}"));
+    arguments.push(binary_text.to_string());
+    let program = tool_path;
+    let arg_refs: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    let mut child = match home.start_with_input(
+        program,
+        &arg_refs,
+        ChildInput::Bounded {
+            limit: STDIN_BYTE_LIMIT,
+        },
+    ) {
+        Ok(child) => child,
+        Err(reason) => return Err(format!("{name} start is refused: {reason}")),
+    };
+    let init_request = json!({
+        "op": "init",
+        "config": { "base_path": base_path.display().to_string() },
+    });
+    let init = match exchange(&mut child, &init_request) {
+        Ok(init) => init,
+        Err(reason) => {
+            let _ = child.stop();
+            return Err(format!("{name} start is refused: {reason}"));
+        }
+    };
+    if init.get("status").and_then(Value::as_str) != Some("ok") {
+        let _ = child.stop();
+        return Err(format!("{name} start is refused: init answered {init}"));
+    }
+    Ok(StartedProvider {
+        child,
+        init,
+        binary_sha256,
+        profile_sha256,
+    })
+}
+
+fn host_refusal(name: &str, host: HostReport) -> Result<(), String> {
+    let confined_os = DECLARED_CONFINED_OS.join(", ");
+    if let Some(primitive) = host.unavailable {
+        let reason = primitive.design_refusal();
+        return Err(format!("{name} start on {} is refused: {reason}", host.os));
+    }
+    if DECLARED_CONFINED_OS.contains(&host.os) {
+        return Ok(());
+    }
+    let reason = if host.os == "linux" {
+        format!(
+            "linux is designed, not enforced, in this lab, so linux is not in \
+             DECLARED_CONFINED_OS ({confined_os})"
+        )
+    } else {
+        format!(
+            "{} has no confinement design, and the lab stand-in applies confinement only on \
+             {confined_os}",
+            host.os
+        )
+    };
+    Err(format!("{name} start on {} is refused: {reason}", host.os))
+}
+
+fn storage_layout(name: &str, base: &Path) -> Result<PathBuf, String> {
+    match name {
+        DID_PROVIDER => Ok(base.join("did")),
+        WALLET_PROVIDER => Ok(base.join("ElastOS").join("SystemServices").join("Wallet")),
+        other => Err(format!(
+            "the stand-in serves only {DID_PROVIDER} and {WALLET_PROVIDER}, so {other} has no \
+             storage root layout"
+        )),
+    }
+}
+
+fn path_text<'a>(path: &'a Path, name: &str, label: &str) -> Result<&'a str, String> {
+    path.to_str().ok_or_else(|| {
+        format!(
+            "{name} start is refused: the {label} {} is not UTF-8",
+            path.display()
+        )
+    })
+}
+
+fn hash_file(path: &Path, name: &str, label: &str) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|err| {
+        format!(
+            "{name} start is refused: the {label} {} could not be read: {err}",
+            path.display()
+        )
+    })?;
+    Ok(identity::sha256(&bytes))
+}
+
+fn exchange(child: &mut RunningChild<'_>, body: &Value) -> Result<Value, String> {
+    let mut line =
+        serde_json::to_string(body).map_err(|_| "provider request is not JSON".to_string())?;
+    line.push('\n');
+    child
+        .write_bounded(line.as_bytes())
+        .map_err(str::to_owned)?;
+    let response = child
+        .read_line_within(RESPONSE_DEADLINE)
+        .map_err(str::to_owned)?;
+    serde_json::from_str(&response)
+        .map_err(|_| format!("provider answered with invalid JSON: {response}"))
 }
 
 #[cfg(test)]
