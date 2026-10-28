@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036 and 037). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037 and 044). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -4348,6 +4348,54 @@
       ],
       "tests": [
         "standin_grant_view_lists_every_held_grant_of_every_session"
+      ]
+    },
+    {
+      "id": "F-CI44a",
+      "title": "the 041 review's stub: checked_launch reads asks.json from the stored folder at launch, after the walk, instead of taking it from the checked entries",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        Ok((checked.manifest_name().to_owned(), signed_asks(&checked)))\n",
+          "new": "        Ok((checked.manifest_name().to_owned(), fs::read(folder.join(ASKS_FILE)).ok()))\n"
+        }
+      ],
+      "tests": [
+        "standin_takes_the_asks_from_the_walk_not_the_folder"
+      ]
+    },
+    {
+      "id": "F-CI44b",
+      "title": "the after-walk hook is never called, so the test's change on disk never happens",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "            hook(folder);\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "standin_takes_the_asks_from_the_walk_not_the_folder"
+      ]
+    },
+    {
+      "id": "F-CI44c",
+      "title": "the after-walk hook runs before the walk, so the changed bytes are walked and the name compare (e) refuses the launch",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        let checked = checked_bundle(folder).map_err(said)?;\n        if let Some(hook) = self.after_walk {\n            hook(folder);\n        }\n",
+          "new": "        if let Some(hook) = self.after_walk {\n            hook(folder);\n        }\n        let checked = checked_bundle(folder).map_err(said)?;\n"
+        }
+      ],
+      "tests": [
+        "standin_takes_the_asks_from_the_walk_not_the_folder"
       ]
     }
   ]
