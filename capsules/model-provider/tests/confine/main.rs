@@ -897,7 +897,8 @@ fn wait_for_terminal(
 /// `json_literal_keys` reader. In-memory answers cover the matching cell, a
 /// missing and an extra struct field, a dropped error key, a changed wrapper
 /// key, reordered keys, a nested key, a dropped `json!` key, zero and two
-/// literals, the `unsupported` ok side and a row without `from`.
+/// literals, a character literal, a prefix declaration name, a doubled
+/// declaration, the `unsupported` ok side and a row without `from`.
 ///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
 /// test no longer finds that function. F-cc49a drops the `generated_`
@@ -1421,7 +1422,9 @@ fn operations_section_cites_existing_tests() {
     /// value. It skips a string whole, so a `{` inside one is no brace. A
     /// call such as `ok_response(` is not a second literal.
     /// Regions with `//` or `/*` are refused, including those markers inside
-    /// strings. This check applies before the literal count and body scan.
+    /// strings. This check applies before the literal count and body scan. A
+    /// character literal in the body is refused, because `'}'` can hide the
+    /// closing brace or a later key.
     ///
     /// Honesty limit: this reads literal text, not a serialized answer. A key
     /// a helper adds at run time is not read. Nested values (`offers`,
@@ -1482,6 +1485,9 @@ fn operations_section_cites_existing_tests() {
                     }
                     index = end + 1;
                 }
+                b'\'' => {
+                    return Err("json: a character literal is not supported".to_string());
+                }
                 b'{' | b'[' => {
                     depth += 1;
                     index += 1;
@@ -1501,26 +1507,49 @@ fn operations_section_cites_existing_tests() {
         }
         Ok(keys)
     }
-    // The lines of one function, from the line that holds `marker` through the
-    // line before the next declaration line.
+    // The lines of the one function whose declaration line starts with
+    // `marker` after the optional declaration words, from that line through
+    // the line before the next declaration line. Only a declaration line
+    // matches, so a longer name such as `ok_response_example` is not
+    // `fn ok_response(`. Zero and two such declarations are refused with
+    // their own reasons.
     fn function_region<'a>(source: &'a str, marker: &str) -> Result<&'a str, String> {
-        let Some(at) = source.find(marker) else {
-            return Err(format!("the source has no `{marker}`"));
+        let mut starts = Vec::new();
+        let mut offset = 0;
+        for line in source.split_inclusive('\n') {
+            if declaration_text(line).starts_with(marker) {
+                starts.push(offset);
+            }
+            offset += line.len();
+        }
+        if starts.len() > 1 {
+            return Err(format!(
+                "the source has {} `{marker}` declarations, not one",
+                starts.len()
+            ));
+        }
+        let Some(&start) = starts.first() else {
+            return Err(format!("the source has no `{marker}` declaration"));
         };
-        let start = source[..at].rfind('\n').map_or(0, |index| index + 1);
         let mut offset = start;
         for line in source[start..].split_inclusive('\n') {
-            let trimmed = line.trim_start();
-            if offset > start
-                && (trimmed.starts_with("fn ")
-                    || trimmed.starts_with("pub fn ")
-                    || trimmed.starts_with("pub(crate) fn "))
-            {
+            if offset > start && declaration_text(line).starts_with("fn ") {
                 return Ok(&source[start..offset]);
             }
             offset += line.len();
         }
         Ok(&source[start..])
+    }
+    // One line without its leading space and the optional `pub(crate)`,
+    // `pub`, `async`, `unsafe` and `const` words.
+    fn declaration_text(line: &str) -> &str {
+        let mut rest = line.trim_start();
+        for prefix in ["pub(crate) ", "pub ", "async ", "unsafe ", "const "] {
+            if let Some(after) = rest.strip_prefix(prefix) {
+                rest = after;
+            }
+        }
+        rest
     }
     // The lines of the one `ProviderOperation::Shutdown =>` match arm, from
     // its line through the line before the next arm or the match close.
@@ -1607,8 +1636,9 @@ fn operations_section_cites_existing_tests() {
         execution_source: &str,
     ) -> Result<(), String> {
         const OUTPUTS_PLACE: usize = 3;
-        let ok_keys = json_literal_keys(function_region(contract_source, "fn ok_response")?)?;
-        let error_keys = json_literal_keys(function_region(contract_source, "fn error_response")?)?;
+        let ok_keys = json_literal_keys(function_region(contract_source, "fn ok_response(")?)?;
+        let error_keys =
+            json_literal_keys(function_region(contract_source, "fn error_response(")?)?;
         for cells in section.lines().filter_map(operation_row_cells) {
             let operation = cells[0];
             let cell = cells.get(OUTPUTS_PLACE - 1).copied().unwrap_or("");
@@ -1660,7 +1690,7 @@ fn operations_section_cites_existing_tests() {
             } else {
                 let answer_keys = match operation {
                     "offers_list" => {
-                        json_literal_keys(function_region(state_source, "fn handle_offers_list")?)?
+                        json_literal_keys(function_region(state_source, "fn handle_offers_list(")?)?
                     }
                     "shutdown" => json_literal_keys(shutdown_arm_region(execution_source)?)?,
                     other => {
@@ -2552,6 +2582,153 @@ pub fn error_response(code: &str, message: &str) -> Value {
             );
         }
     }
+
+    // A character literal cannot hide a key: the reader refuses it, so the
+    // stale `shutdown` cell does not pass.
+    let hidden_key_arm = r#"            ProviderOperation::Shutdown => Ok(ok_response(serde_json::json!({
+                "shutdown": '}' == '}',
+                "extra": true
+            }))),
+            ProviderOperation::OffersList => {
+"#;
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            &answers,
+            "",
+            hidden_key_arm
+        ),
+        "json: a character literal is not supported"
+    );
+    assert_eq!(
+        json_literal_keys("json!({ \"shutdown\": '}' == '}', \"extra\": true })"),
+        Err("json: a character literal is not supported".to_string())
+    );
+
+    // A function whose name merely starts with the marker's name is not that
+    // function: the example's stale keys must not be read.
+    let prefix_ok_contract = "\
+pub fn ok_response_example(data: Value) -> Value {
+    serde_json::json!({
+        \"status\": \"ok\",
+        \"data\": data,
+    })
+}
+
+pub fn ok_response(data: Value) -> Value {
+    serde_json::json!({
+        \"status\": \"ok\",
+        \"result\": data,
+    })
+}
+
+pub fn error_response(code: &str, message: &str) -> Value {
+    serde_json::json!({
+        \"status\": \"error\",
+        \"code\": code,
+        \"message\": message,
+    })
+}
+"
+    .to_string()
+        + status_struct;
+    assert_eq!(
+        outputs_failure(&init_row, &prefix_ok_contract, "", ""),
+        "operation `init` ok name `data` has no partner; the key there is `result`"
+    );
+    let prefix_error_contract = "\
+pub fn ok_response(data: Value) -> Value {
+    serde_json::json!({
+        \"status\": \"ok\",
+        \"data\": data,
+    })
+}
+
+pub fn error_response_example(code: &str, message: &str) -> Value {
+    serde_json::json!({
+        \"status\": \"error\",
+        \"code\": code,
+        \"message\": message,
+    })
+}
+
+pub fn error_response(code: &str, message: &str) -> Value {
+    serde_json::json!({
+        \"status\": \"error\",
+        \"code\": code,
+    })
+}
+"
+    .to_string()
+        + status_struct;
+    assert_eq!(
+        outputs_failure(&init_row, &prefix_error_contract, "", ""),
+        "operation `init` error name `message` has no partner in the answer"
+    );
+    let prefix_offers_state = "\
+    pub fn handle_offers_list_example(&self) -> Value {
+        json!({
+            \"schema\": schema,
+            \"provider\": provider,
+            \"protocol_version\": version,
+            \"offers\": offers,
+            \"offer_revisions\": revisions,
+        })
+    }
+
+    pub fn handle_offers_list(&self) -> Value {
+        json!({
+            \"schema\": schema,
+            \"provider\": provider,
+            \"protocol_version\": version,
+            \"offers\": offers,
+        })
+    }
+";
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("offers_list", offers_full),
+            &answers,
+            prefix_offers_state,
+            ""
+        ),
+        "operation `offers_list` ok `data` name `offer_revisions` has no partner in the answer"
+    );
+
+    // A missing or doubled declaration is refused with its own reason rather
+    // than selecting the first match.
+    assert_eq!(
+        outputs_failure(&init_row, "pub fn error_response() {}\n", "", ""),
+        "the source has no `fn ok_response(` declaration"
+    );
+    assert_eq!(
+        outputs_failure(
+            &init_row,
+            "pub fn ok_response() {}\npub fn ok_response() {}\n",
+            "",
+            ""
+        ),
+        "the source has 2 `fn ok_response(` declarations, not one"
+    );
+    // The arm selector matches the exact arm name and refuses zero or two.
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            &answers,
+            "",
+            "            ProviderOperation::ShutdownExtra => Ok(()),\n"
+        ),
+        "`src/execution.rs` has no `ProviderOperation::Shutdown =>`"
+    );
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            &answers,
+            "",
+            "ProviderOperation::Shutdown => x,\nProviderOperation::Shutdown => y,\n"
+        ),
+        "`src/execution.rs` has 2 `ProviderOperation::Shutdown =>` arms"
+    );
 
     // An unreadable answer source is an error that names its path.
     let missing_answer = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/no_such_answer_source.rs");
