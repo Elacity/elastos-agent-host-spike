@@ -896,12 +896,12 @@ fn wait_for_terminal(
 /// share one skip for strings, character literals, comments and raw strings.
 /// `shutdown_arm_region` ends at the first comma at nesting count zero.
 /// `json_literal_keys` reads the top-level keys of one `json!({` literal. It
-/// refuses a raw string, a character literal, a mismatched closer, or an
-/// unsupported key inside that literal. `mask_opaque` hides strings and
-/// comments before a declaration, an arm marker, or a literal is located.
-/// In-memory plants cover
-/// the region shapes, the skip forms, every refusal cause and each Outputs
-/// mismatch. The honesty limit is in that helper's doc comment.
+/// refuses a raw string, a character literal, a mismatched closer, an
+/// unsupported key, or a parenthesized key inside that literal. `mask_opaque`
+/// hides strings and comments before a declaration, an arm marker, or a
+/// literal is located. In-memory plants cover the region shapes, the skip
+/// forms, every refusal cause and each Outputs mismatch. The honesty limit is
+/// in that helper's doc comment.
 ///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
 /// test no longer finds that function. F-cc49a drops the `generated_`
@@ -1387,7 +1387,7 @@ fn operations_section_cites_existing_tests() {
         }
         Ok(())
     }
-    #[derive(Clone, Copy, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Opaque {
         OrdinaryString,
         Character,
@@ -1450,7 +1450,10 @@ fn operations_section_cites_existing_tests() {
                 body.chars().next().map(char::len_utf8)
             };
             if let Some(content) = content {
-                if body[content..].starts_with('\'') {
+                if body
+                    .get(content..)
+                    .is_some_and(|after| after.starts_with('\''))
+                {
                     return Ok(Some((&body[content + 1..], Opaque::Character)));
                 }
             }
@@ -1648,9 +1651,9 @@ fn operations_section_cites_existing_tests() {
     }
     /// The top-level `"key":` names of the one `json!({` literal in `region`,
     /// in order. A literal in a string or a comment is not a literal. Zero or
-    /// two literals, a mismatched closer, an unsupported key, a raw string or
-    /// a character literal inside the body, and an unfinished token are
-    /// errors. The reader does not descend into a value.
+    /// two literals, a mismatched closer, an unsupported key, a parenthesized
+    /// key, a raw string or a character literal inside the body, and an
+    /// unfinished token are errors. The reader does not descend into a value.
     fn json_literal_keys(region: &str, label: &str) -> Result<Vec<String>, String> {
         const OPEN: &str = "json!({";
         let masked =
@@ -1729,6 +1732,12 @@ fn operations_section_cites_existing_tests() {
                     if stack.is_empty() {
                         return Ok(keys);
                     }
+                }
+                paren @ (b'(' | b')') if stack.len() == 1 => {
+                    return Err(format!(
+                        "{label}: unsupported key syntax `{}` in the `json!({{` body",
+                        paren as char
+                    ));
                 }
                 _ => cursor = next_char(cursor),
             }
@@ -2775,6 +2784,32 @@ fn operations_section_cites_existing_tests() {
             "the key `{key}` must be refused"
         );
     }
+
+    // A parenthesized key is a key serde reads. The reader refuses it rather
+    // than dropping it, so the extra name cannot pass.
+    let parenthesized_key_arm = "ProviderOperation::Shutdown => Ok(ok_response(\n    json!({\"shutdown\": true, (\"extra\"): true})\n)),\n";
+    assert_eq!(
+        outputs_failure(
+            &outputs_row("shutdown", shutdown_outputs),
+            answers_contract,
+            answers_state,
+            parenthesized_key_arm,
+        ),
+        "Shutdown: unsupported key syntax `(` in the `json!({` body"
+    );
+
+    // A malformed character escape is refused, never a panic.
+    for malformed in ["'\\x", "'\\x0", "'\\x\u{20ac}'"] {
+        assert_eq!(
+            skip_opaque(malformed),
+            Err("unfinished character literal".to_string()),
+            "`{malformed}` must be refused"
+        );
+    }
+    assert!(matches!(
+        skip_opaque("'\\x7f'"),
+        Ok(Some(("", Opaque::Character)))
+    ));
 
     // A token that never ends refuses in the shared scan, with its own reason.
     assert_eq!(
