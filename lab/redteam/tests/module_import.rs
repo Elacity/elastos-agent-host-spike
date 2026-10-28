@@ -129,6 +129,7 @@ fn assert_module_skip_shape(original: &str, planted: &str) {
 
 fn module_probe() -> PlantedProbe {
     PlantedProbe {
+        anchor: ANCHOR,
         replacement: type_skip_replacement("Module"),
         assert_shape: assert_module_skip_shape,
         test_file: "redteam_module_import.rs",

@@ -120,6 +120,8 @@ fn finding_uses_live_head_and_bytes() {
         MODULE_FINDING_ID,
         TYPE_FINDING_ID,
         COMPONENT_FINDING_ID,
+        GLOBAL_FINDING_ID,
+        TABLE_FINDING_ID,
     ] {
         let line = read_live_attribution(finding_id);
         assert_live_attribution(&line, finding_id, &commit, &digest);
@@ -219,6 +221,16 @@ fn clean_run_writes_no_finding() {
             COMPONENT_FINDING_FILE,
             accept_detail("component-kind", "env"),
         ),
+        (
+            GLOBAL_FINDING_ID,
+            GLOBAL_FINDING_FILE,
+            accept_detail("global", "env.g"),
+        ),
+        (
+            TABLE_FINDING_ID,
+            TABLE_FINDING_FILE,
+            accept_detail("table", "env.t"),
+        ),
     ];
     for (finding_id, file_name, detail) in cases {
         let finding = dir.join(file_name);
@@ -236,6 +248,8 @@ fn clean_run_writes_no_finding() {
     assert_no_finding(&finding_path(MODULE_FINDING_FILE));
     assert_no_finding(&finding_path(TYPE_FINDING_FILE));
     assert_no_finding(&finding_path(COMPONENT_FINDING_FILE));
+    assert_no_finding(&finding_path(GLOBAL_FINDING_FILE));
+    assert_no_finding(&finding_path(TABLE_FINDING_FILE));
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -473,6 +487,7 @@ fn assert_func_skip_shape(original: &str, planted: &str) {
 
 fn func_probe() -> PlantedProbe {
     PlantedProbe {
+        anchor: ANCHOR,
         replacement: type_skip_replacement("Func"),
         assert_shape: assert_func_skip_shape,
         test_file: "redteam_func_import.rs",
