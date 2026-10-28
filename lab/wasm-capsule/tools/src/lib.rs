@@ -32,6 +32,12 @@ pub mod bundle;
 pub mod receipt;
 pub mod run;
 pub mod verify;
+pub mod scrub;
+pub mod sync_schedule;
+pub mod fetch_progress;
+pub mod cid_required;
+pub mod fetch_cancel;
+pub mod pin_report;
 
 pub use capsule_identity::lab_cid as bundle_identity;
 
