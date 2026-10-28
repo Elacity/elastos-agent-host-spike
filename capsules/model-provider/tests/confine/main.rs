@@ -879,16 +879,18 @@ fn wait_for_terminal(
 ///
 /// `operation_row_names` reads the Operation cells in order. The cut for
 /// `parse_request_operation_names` runs from the `fn parse_request(` line to
-/// the next function. It requires exactly one `match op {` in the cut, so a
-/// commented copy refuses as a second match. The arms are the lines after
+/// the next function. The source must contain exactly one such signature;
+/// a second copy, including one in a comment, refuses before the cut. It
+/// requires exactly one `match op {` in the cut, so a commented copy refuses
+/// as a second match. The arms are the lines after
 /// that brace, and the brace must end its line: a line that carries text
 /// after it refuses. Each arm line holds one plain quoted string followed by
 /// `=>`, or the one `other =>`; that arm is the `unsupported` row. A missing
-/// `fn parse_request`, a missing `match op`, more than one `match op {`, an
-/// arm on the `match op {` line, an arm that is not a plain quoted string
-/// followed by `=>` and not `other =>`, an arm line with more than one `=>`,
-/// a missing closing quote, a second `other =>`, and a missing `other =>`
-/// each refuse with their own `parse_request` reason.
+/// `fn parse_request`, a second signature, a missing `match op`, more than one
+/// `match op {`, an arm on the `match op {` line, an arm that is not a plain
+/// quoted string followed by `=>` and not `other =>`, an arm line with more
+/// than one `=>`, a missing closing quote, a second `other =>`, and a missing
+/// `other =>` each refuse with their own `parse_request` reason.
 /// `operation_rows_match_parse_request` requires the same names in the same
 /// order on the real section and on in-memory strings: an extra arm, a
 /// missing arm, a swap, an extra trailing row and a missing trailing row each
@@ -1052,6 +1054,8 @@ fn operations_section_cites_existing_tests() {
     /// `unsupported`.
     ///
     /// The cut runs from the `fn parse_request(` line to the next function.
+    /// Exactly one signature is allowed across the source, including comments
+    /// and strings: another copy makes the selection ambiguous and refuses.
     /// The arms are the lines between `match op {` and its closing `};`. Each
     /// line has one arm: a plain quoted string followed by `=>`, or the one
     /// `other =>`. Other patterns require an explicit refusal. The compare reads the
@@ -1059,9 +1063,15 @@ fn operations_section_cites_existing_tests() {
     /// every arm is reachable, and it does not read `src/execution.rs`.
     fn parse_request_operation_names(source: &str) -> Result<Vec<String>, String> {
         const SIGNATURE: &str = "fn parse_request(";
-        let Some(start) = source.find(SIGNATURE) else {
+        let mut signatures = source.match_indices(SIGNATURE);
+        let Some((start, _)) = signatures.next() else {
             return Err("parse_request: the source has no `fn parse_request`".to_string());
         };
+        if signatures.next().is_some() {
+            return Err(
+                "parse_request: the source has more than one `fn parse_request(`".to_string(),
+            );
+        }
         let mut cut_len = source[start..].len();
         let mut offset = 0;
         for line in source[start..].lines() {
@@ -1447,6 +1457,22 @@ fn operations_section_cites_existing_tests() {
         extra_arm,
         "operation row `unsupported` has no partner: the parse_request arm there is `ping`"
     );
+    // A copy outside the selected cut must still refuse. The leading block
+    // comment is the regression: the old cut stopped at the real function
+    // and accepted the commented arms, hiding the real function's ping arm.
+    for planted in [
+        format!("/*\n{short_source}*/\n{extra_arm_source}"),
+        format!("{short_source}/*\n{extra_arm_source}*/\n"),
+        format!("{short_source}{extra_arm_source}"),
+        format!("// {short_source}{extra_arm_source}"),
+        format!("const EXAMPLE: &str = r#\"\n{short_source}\"#;\n{extra_arm_source}"),
+    ] {
+        assert_eq!(
+            operation_rows_match_parse_request(init_then_unsupported, &planted),
+            Err("parse_request: the source has more than one `fn parse_request(`".to_string()),
+            "a second signature must refuse even outside the cut: {planted}"
+        );
+    }
     let extra_trailing_row = "| Operation | Inputs | Outputs | Right | Effect | rule | Linux |\n| --- | --- | --- | --- | --- | --- | --- |\n| init | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n| unsupported | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n| status | in | out | none: needs no declared right | effect | rule | designed, not enforced |\n";
     let extra_row = operation_rows_match_parse_request(extra_trailing_row, short_source)
         .expect_err("a trailing row with no arm must fail");
