@@ -3036,6 +3036,38 @@
       "tests": [
         "state::tests::mismatch_settlement_public_responses_do_not_leak_private_execution_details"
       ]
+    },
+    {
+      "id": "MP78",
+      "title": "the binding-field walk is skipped, so a nested grant_id is not invalid_request",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "        reject_untrusted_binding_fields(&request.input)?;\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "hosted_forged_binding_field_is_refused_before_any_send"
+      ]
+    },
+    {
+      "id": "MP79",
+      "title": "the array arm returns without walking, so a nested grant_id is not invalid_request",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "        Value::Array(values) => {\n            for value in values {\n                reject_untrusted_binding_fields_at(value)?;\n            }\n            Ok(())\n        }\n",
+          "new": "        Value::Array(_values) => {\n            Ok(())\n        }\n"
+        }
+      ],
+      "tests": [
+        "hosted_forged_binding_field_is_refused_before_any_send"
+      ]
     }
   ]
 }
