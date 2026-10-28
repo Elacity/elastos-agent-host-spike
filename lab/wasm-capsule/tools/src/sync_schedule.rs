@@ -283,7 +283,10 @@ mod tests {
         let s = Settings::default();
         let windows = schedule(&devices, &s).expect("schedule");
         for pair in windows.windows(2) {
-            assert_eq!(pair[1].starts_at_min, pair[0].starts_at_min + pair[0].length_min);
+            assert_eq!(
+                pair[1].starts_at_min,
+                pair[0].starts_at_min + pair[0].length_min
+            );
         }
         // Low battery lengthens a window so the device wakes less often.
         assert_eq!(windows[1].length_min, s.window_min * 2);
@@ -294,10 +297,16 @@ mod tests {
     fn zero_limits_are_refused() {
         let d = device("a", 90, Network::Unmetered);
         let one = [d];
-        let zero_window = Settings { window_min: 0, metered_cap: MeteredCap::new(1) };
+        let zero_window = Settings {
+            window_min: 0,
+            metered_cap: MeteredCap::new(1),
+        };
         let err = schedule(&one, &zero_window).unwrap_err();
         assert_eq!(err.code(), "zero_window");
-        let zero_cap = Settings { window_min: 1, metered_cap: MeteredCap::new(0) };
+        let zero_cap = Settings {
+            window_min: 1,
+            metered_cap: MeteredCap::new(0),
+        };
         let err = schedule(&one, &zero_cap).unwrap_err();
         assert_eq!(err.code(), "zero_metered_cap");
     }
@@ -314,7 +323,10 @@ mod tests {
         let unsafe_names = [device("../x", 90, Network::Unmetered)];
         let err = schedule(&unsafe_names, &s).unwrap_err();
         assert_eq!(err.code(), "unsafe_device_name");
-        let dup = [device("x", 90, Network::Unmetered), device("x", 90, Network::Metered)];
+        let dup = [
+            device("x", 90, Network::Unmetered),
+            device("x", 90, Network::Metered),
+        ];
         let err = schedule(&dup, &s).unwrap_err();
         assert_eq!(err.code(), "duplicate_device");
     }

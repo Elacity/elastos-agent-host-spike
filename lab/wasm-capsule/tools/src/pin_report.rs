@@ -209,7 +209,8 @@ mod tests {
     fn make_held(pins: &[(&str, bool)]) -> HeldPins {
         let mut h = HeldPins::new();
         for (cid, ok) in pins {
-            h.insert(HeldPin::new(*cid, *ok)).expect("non-empty test cid");
+            h.insert(HeldPin::new(*cid, *ok))
+                .expect("non-empty test cid");
         }
         h
     }

@@ -316,10 +316,7 @@ mod tests {
         };
         let mut plan = ScrubPlan::new(items.clone()).expect("plan");
         let out = plan.run(&verifier, ScrubLimits::default()).expect("run");
-        assert_eq!(
-            out.states[1],
-            ItemState::RefetchScheduled { attempts: 1 }
-        );
+        assert_eq!(out.states[1], ItemState::RefetchScheduled { attempts: 1 });
         assert_eq!(out.refetches.len(), 1);
         assert_eq!(out.refetches[0].cid, "cid-bad");
         assert_eq!(out.served(&items), vec![items[0].bytes.clone()]);
@@ -402,10 +399,7 @@ mod tests {
             ScrubError::DuplicateCid { cid: "x".into() }.code(),
             "duplicate_cid"
         );
-        assert_eq!(
-            ScrubError::MissingCid { index: 0 }.code(),
-            "missing_cid"
-        );
+        assert_eq!(ScrubError::MissingCid { index: 0 }.code(), "missing_cid");
         let shown = format!("{}", ScrubError::MissingCid { index: 0 });
         assert!(shown.starts_with("missing_cid: "));
     }

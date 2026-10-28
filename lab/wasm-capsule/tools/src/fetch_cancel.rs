@@ -180,7 +180,11 @@ mod tests {
 
         let err = cancel_fetch(&mut budget, 1).expect_err("second cancel must be refused");
         assert_eq!(err.code(), "fetch_not_active");
-        assert_eq!(budget.reserved(), after_first, "double cancel released nothing");
+        assert_eq!(
+            budget.reserved(),
+            after_first,
+            "double cancel released nothing"
+        );
         assert_eq!(budget.reserved(), 0);
     }
 

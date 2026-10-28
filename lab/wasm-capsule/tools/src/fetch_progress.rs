@@ -50,21 +50,15 @@ impl FetchProgressError {
 impl fmt::Display for FetchProgressError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let text = match self {
-            FetchProgressError::Backslide => {
-                "bytes done went backwards without a restart"
-            }
+            FetchProgressError::Backslide => "bytes done went backwards without a restart",
             FetchProgressError::ChunkBackslide => {
                 "verified chunks went backwards without a restart"
             }
             FetchProgressError::RestartAfterComplete => {
                 "cannot restart a fetch that already completed"
             }
-            FetchProgressError::Overflow => {
-                "advance overflowed the fetch counters"
-            }
-            FetchProgressError::TotalChanged => {
-                "byte total changed while a fetch was in progress"
-            }
+            FetchProgressError::Overflow => "advance overflowed the fetch counters",
+            FetchProgressError::TotalChanged => "byte total changed while a fetch was in progress",
         };
         write!(f, "{}: {}", self.code(), text)
     }
@@ -141,11 +135,7 @@ impl FetchProgress {
     /// The overflow check is on the running counters before the total
     /// clamp, so a sum that cannot fit is refused even when it would have
     /// been clamped to the total.
-    pub fn advance(
-        &mut self,
-        bytes: u64,
-        chunks: u64,
-    ) -> Result<(), FetchProgressError> {
+    pub fn advance(&mut self, bytes: u64, chunks: u64) -> Result<(), FetchProgressError> {
         if !self.fetch_restarted {
             if bytes < self.bytes_done {
                 return Err(FetchProgressError::Backslide);

@@ -79,7 +79,10 @@ impl Refusal {
                 given
             ),
             Refusal::InvalidCid { given_len } => {
-                format!("the given CID is not a valid content address ({} bytes)", given_len)
+                format!(
+                    "the given CID is not a valid content address ({} bytes)",
+                    given_len
+                )
             }
             Refusal::InvalidOwnerName { given_len } => {
                 format!("the owner name is not a valid token ({} bytes)", given_len)
@@ -118,10 +121,14 @@ impl OwnerNameTable {
     /// alias or path can never be stored as an owner's content address.
     pub fn bind(&mut self, owner: &str, cid: &str) -> Result<(), Refusal> {
         if !is_owner_name(owner) {
-            return Err(Refusal::InvalidOwnerName { given_len: owner.len() });
+            return Err(Refusal::InvalidOwnerName {
+                given_len: owner.len(),
+            });
         }
         if !is_cid(cid) {
-            return Err(Refusal::CidRequired { given: cid.to_string() });
+            return Err(Refusal::CidRequired {
+                given: cid.to_string(),
+            });
         }
         if !self.bindings.contains_key(owner) && self.bindings.len() >= MAX_OWNER_BINDINGS {
             return Err(Refusal::OwnerTableFull);
@@ -198,12 +205,16 @@ impl<'a> CidRequiredGate<'a> {
             return Ok(request.to_string());
         }
         if looks_like_alias_or_path(request) {
-            return Err(Refusal::CidRequired { given: request.to_string() });
+            return Err(Refusal::CidRequired {
+                given: request.to_string(),
+            });
         }
         if is_owner_name(request) {
             return self.table.resolve(request).map(|cid| cid.to_string());
         }
-        Err(Refusal::CidRequired { given: request.to_string() })
+        Err(Refusal::CidRequired {
+            given: request.to_string(),
+        })
     }
 }
 
@@ -331,7 +342,9 @@ mod tests {
     // P3: Display renders `<code>: <explanation>` with no host path.
     #[test]
     fn display_prefixes_the_code_and_never_a_host_path() {
-        let err = Refusal::CidRequired { given: "latest/x".to_string() };
+        let err = Refusal::CidRequired {
+            given: "latest/x".to_string(),
+        };
         let text = err.to_string();
         assert!(text.starts_with("cid_required: "));
         assert!(!text.contains("/home"));
