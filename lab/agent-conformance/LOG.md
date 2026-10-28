@@ -13918,22 +13918,22 @@ New:
     let arg_refs: Vec<&str> = Vec::new();
 ```
 
-F-shared-launch-stub: the seam returns Started before `init` has answered `ok`. Named test `standin_provider_launch_starts_under_caller_profile` panicked at `tests/provider_launch.rs:188:5`, `wallet.is_dir() && status["data"]["storage_configured"] == true`. Real 2.52 seconds. The same plant also failed `standin_provider_launch_uses_supplied_profile` at `tests/provider_launch.rs:132:18`.
+F-shared-launch-stub: the seam returns Started before `init` has answered `ok`. Named test `standin_provider_launch_starts_under_caller_profile` panicked at `tests/provider_launch.rs:188:5`, `wallet.is_dir() && status["data"]["storage_configured"] == true`. Real 2.52 seconds. The same plant also failed `standin_provider_launch_uses_supplied_profile` at `tests/provider_launch.rs:132:18`. Round 3 refreshed the old bytes to the current init exchange and re-ran the plant. See Round 3 below.
 
 Old:
 
 ```text
-    let init = match exchange(&mut child, &init_request) {
-        Ok(init) => init,
-        Err(reason) => {
-            let _ = child.stop();
-            return Err(format!("{name} start is refused: {reason}"));
-        }
-    };
-    if init.get("status").and_then(Value::as_str) != Some("ok") {
-        let _ = child.stop();
-        return Err(format!("{name} start is refused: init answered {init}"));
-    }
+    let init = exchange(&mut child, &init_request)
+        .and_then(|init| {
+            if init.get("status").and_then(Value::as_str) == Some("ok") {
+                Ok(init)
+            } else {
+                Err(format!("init answered {init}"))
+            }
+        })
+        .map_err(|reason| {
+            provider_refusal(&mut child, format!("{name} start is refused: {reason}"))
+        })?;
 ```
 
 New:
@@ -14092,13 +14092,13 @@ Old:
 
 New: that block deleted.
 
-F-shared-launch-exit-deadline: `wait_for_exit_within` no longer refuses at the deadline. Named test `standin_provider_launch_refuses_an_exit_past_its_deadline` panicked at `tests/provider_launch.rs:572:10`, `.expect_err("a child that stays up is refused at the exit deadline")`. Real 3.44 seconds.
+F-shared-launch-exit-deadline: `wait_for_exit_within` no longer refuses at the deadline. Named test `standin_provider_launch_refuses_an_exit_past_its_deadline` panicked at `tests/provider_launch.rs:572:10`, `.expect_err("a child that stays up is refused at the exit deadline")`. Real 3.44 seconds. Round 3 refreshed the old bytes to the current `kill_group(self.home)?` check and re-ran the plant. See Round 3 below.
 
 Old:
 
 ```text
                     if started.elapsed() >= deadline {
-                        let _ = self.kill_group();
+                        self.kill_group(self.home)?;
                         self.stopped = true;
                         return Err("provider exit exceeded its deadline");
                     }
@@ -14240,5 +14240,44 @@ lane build directories and ran with macOS process inspection and local loopback
 access. Free space was 116.2 GiB before the run. Test fixtures removed their
 Homes after physical cleanup. Git commands were unused. The supervisor owns
 the complete checks and fresh review for this edit.
+
+### Round 3
+
+A response deadline stops and reaps the child through `end_dialogue`, which calls `provider_refusal`. `request` and `shutdown` then return `provider dialogue ended: provider response exceeded its deadline` and do not read the unread line. A PASS gives the Runtime no C0 credit and no B3 credit.
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. The shared heavy-build lease was held. Free space was 116 GiB. No `Cargo.toml` or `Cargo.lock` change. HEAD stayed `115948858cdd0a25265ade5cf5c8625994bc6c2c`.
+
+F-shared-launch-deadline-cleanup: `end_dialogue` returns the deadline reason and does not stop the child or mark the dialogue ended. Named test `standin_provider_launch_refuses_the_next_request_after_a_response_deadline`. The planted crate compiled. Planted exit 101, real 6.66 seconds, test finished in 5.48 seconds. Assertion: `tests/provider_launch.rs:617:5` `assertion left == right failed`, left `Ok` with `answered` `A` and `status` `ok`, right `Err("provider dialogue ended: provider response exceeded its deadline")`. Restored, the named test passed, exit 0, real 6.52 seconds, finished in 5.59 seconds. No `falsifiers.json` id.
+
+Old:
+
+```text
+    fn end_dialogue(&mut self, reason: String) -> String {
+        let settled = provider_refusal(&mut self.child, reason);
+        self.ended = Some(format!("provider dialogue ended: {settled}"));
+        settled
+    }
+```
+
+New:
+
+```text
+    fn end_dialogue(&mut self, reason: String) -> String {
+        reason
+    }
+```
+
+F-shared-launch-stub, re-run on the current init exchange. The planted crate compiled with unused-variable warnings. Named test `standin_provider_launch_starts_under_caller_profile` panicked at `tests/provider_launch.rs:188:5`. Left was `status` `ok` with `storage_configured` false and the wallet root absent. Real 2.12 seconds. Restored with the other plants. The old bytes are the current `exchange`/`provider_refusal` init block recorded above. The new bytes stay `json!({"status": "ok", "data": {"storage_configured": true}})`.
+
+F-shared-launch-exit-deadline, re-run on the current `kill_group(self.home)?` check. The planted crate compiled with unused-variable warnings. Named test `standin_provider_launch_refuses_an_exit_past_its_deadline` panicked at `tests/provider_launch.rs:572:10`: `a child that stays up is refused at the exit deadline: ExitStatus(unix_wait_status(0))`. Real 3.38 seconds. Restored with the other plants. The old bytes are the current deadline block recorded above. New: that block deleted.
+
+After the plants were restored, `standin-runtime/mod.rs` and `src/harness.rs` matched the pre-plant bytes. The three retained plant homes were removed. No plant remains.
+
+### Round 3 gates
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.20 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, real 237.90 seconds. Lib 80 passed. bin/report 1 passed. artifact 7 passed. build 1 passed. effects failed `ungranted_network_is_refused` at `tests/effects.rs:497:5`. Census: `process leftover` path `home/Library/Application Support/elastos/host-process.lock` under `target/home-1229-1793221835929271000-264`. That path stops the task on the first run. No rerun. Census and the operator were not edited.
+
+089 round 3: a response deadline reaps the provider child and refuses the next request, so a late line cannot be read as the next answer.
 
 

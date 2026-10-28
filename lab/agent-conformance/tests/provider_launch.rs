@@ -576,6 +576,62 @@ fn standin_provider_launch_refuses_an_exit_past_its_deadline() {
     home.finish().expect("the passed home is removed");
 }
 
+/// Request A waits past the deadline, then writes its success before reading
+/// request B. A returns the deadline. The child is reaped, so B cannot read
+/// A's line. Shutdown is the same refusal.
+///
+/// Falsifier: F-shared-launch-deadline-cleanup removes the deadline
+/// settlement. B then receives A's success body.
+#[test]
+fn standin_provider_launch_refuses_the_next_request_after_a_response_deadline() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tool = require_confinement_tool();
+    let home = ThrowawayHome::new().expect("throwaway home");
+    let profile = write_profile(&home, "fixture.sb", b"(version 1)\n(allow default)\n");
+    let binary = home.root().join("late-provider");
+    // `read -t` waits in this process. A separate sleep would survive the
+    // shell and keep the process group up after the deadline.
+    fs::write(
+        &binary,
+        "#!/bin/sh\n\
+         IFS= read -r _init\n\
+         printf '%s\\n' '{\"status\":\"ok\",\"data\":{\"storage_configured\":true}}'\n\
+         IFS= read -r _request\n\
+         read -t 6 _delay\n\
+         printf '%s\\n' '{\"status\":\"ok\",\"data\":{\"answered\":\"A\"}}'\n\
+         IFS= read -r _next\n\
+         printf '%s\\n' '{\"status\":\"ok\",\"data\":{\"answered\":\"B\"}}'\n",
+    )
+    .expect("write the late-reply fixture");
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+        .expect("make the fixture executable");
+    let base = fresh_base(&home, "late-base");
+    let mut started = start(&home, &binary, &base, macos_host(), tool, &profile)
+        .expect("the fixture answers init");
+    let first = started
+        .request(&json!({ "op": "status", "which": "A" }))
+        .expect_err("request A exceeds the response deadline");
+    assert_eq!(first, "provider response exceeded its deadline");
+    let second = started.request(&json!({ "op": "status", "which": "B" }));
+    assert_eq!(
+        second,
+        Err("provider dialogue ended: provider response exceeded its deadline".to_string())
+    );
+    let shutdown = started.shutdown();
+    assert_eq!(
+        shutdown,
+        Err("provider dialogue ended: provider response exceeded its deadline".to_string())
+    );
+    let census = agent_conformance::census::cleanup(&home, closed_port())
+        .expect("census after the deadline reaps the child");
+    assert!(
+        census.contains("root checks PASS"),
+        "census after the deadline: {census}"
+    );
+    home.finish().expect("the passed home is removed");
+}
+
 /// Run the cwd change in an isolated test process through the existing harness,
 /// so other tests keep their working directory. Reuse the parent's built binary.
 #[test]

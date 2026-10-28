@@ -2190,20 +2190,33 @@ pub struct HostReport {
 /// The live child after `init` answered `status` `ok`.
 pub struct StartedProvider<'a> {
     child: RunningChild<'a>,
+    /// Set once a response deadline stops this child. Later calls return it
+    /// and do not read the unread line.
+    ended: Option<String>,
     pub init: Value,
     pub binary_sha256: String,
     pub profile_sha256: String,
 }
 
+const RESPONSE_DEADLINE_REASON: &str = "provider response exceeded its deadline";
+
 impl StartedProvider<'_> {
     /// One later request on the same child. The stdin limit and the response
-    /// deadline are the refusals from the one spawn site.
+    /// deadline are the refusals from the one spawn site. A response deadline
+    /// stops and reaps the child. A later request is refused and reads no line.
     pub fn request(&mut self, body: &Value) -> Result<Value, String> {
-        exchange(&mut self.child, body)
+        self.refuse_ended()?;
+        match exchange(&mut self.child, body) {
+            Ok(value) => Ok(value),
+            Err(reason) if reason == RESPONSE_DEADLINE_REASON => Err(self.end_dialogue(reason)),
+            Err(reason) => Err(reason),
+        }
     }
 
     /// `shutdown` answered `ok` and the child exited 0.
+    /// A dialogue that already ended on a response deadline is refused.
     pub fn shutdown(mut self) -> Result<(), String> {
+        self.refuse_ended()?;
         let answer = match exchange(&mut self.child, &json!({ "op": "shutdown" })) {
             Ok(answer) => answer,
             Err(reason) => {
@@ -2224,6 +2237,21 @@ impl StartedProvider<'_> {
             return Err(format!("provider exit status {status}"));
         }
         Ok(())
+    }
+
+    fn refuse_ended(&self) -> Result<(), String> {
+        if let Some(reason) = &self.ended {
+            return Err(reason.clone());
+        }
+        Ok(())
+    }
+
+    // One settlement for a response deadline: reap the child, then refuse
+    // every later call. The unread line must not become the next answer.
+    fn end_dialogue(&mut self, reason: String) -> String {
+        let settled = provider_refusal(&mut self.child, reason);
+        self.ended = Some(format!("provider dialogue ended: {settled}"));
+        settled
     }
 }
 
@@ -2333,6 +2361,7 @@ pub fn start_provider<'a>(
         })?;
     Ok(StartedProvider {
         child,
+        ended: None,
         init,
         binary_sha256,
         profile_sha256,
