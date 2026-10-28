@@ -42,16 +42,25 @@ directories. This crate runs no Kubo; the gate runs none either.
 So the lab CID follows the Kubo v0.40.1 profile, computed by the lab. One
 offline Kubo v0.40.1 hash-only cross-check with the Runtime's profile flags
 was run by hand on this Mac (task 050) and printed every committed pin, and
-[Claim scope](#claim-scope) states that gate.
-The tests pin only the non-sharded subset of that profile, with files at any
-tree depth: a file of one raw leaf, a file of 2 to 174 raw leaves under one
-balanced file root (task 048), and since task 051 a larger file under Kubo's
+[Claim scope](#claim-scope) states that gate. The pins added since then are
+checked by hand separately: task 056's run matched its threshold pin and
+printed other names for its two shard bundles, whose bitmap Kubo writes with
+its bytes in reverse order and trimmed to its highest bucket (LOG.md ci-56).
+The tests pin both sides of that profile's directory threshold, with files at
+any tree depth: a file of one raw leaf, a file of 2 to 174 raw leaves under
+one balanced file root (task 048), since task 051 a larger file under Kubo's
 balanced file tree at any depth (trickle off, `max-file-links` 174 at every
-level), and one block per directory. A directory block over 262144 bytes is
-refused, not named another way; no file is refused for its size. The file
-tree's bytes are the lab's reading of the profile; the hand-run Kubo printed
-every file-tree pin too, and the model package the Runtime admitted gets its
-admitted CID from the lab encoder (task 051, see
+level), and since task 056 a directory on both sides of the HAMT threshold. A
+directory whose links estimate is at most 262144 bytes is one basic directory,
+including when its block is larger; a greater estimate is the fanout-256
+HAMT. A child directory is judged on its own estimate, so it can shard while
+the root stays basic. Three tests name both sides:
+`directory_at_the_hamt_threshold_stays_basic`,
+`directory_over_the_hamt_threshold_is_a_shard` and
+`child_directory_over_the_hamt_threshold_is_a_shard`. No file is refused for
+its size. The file tree's bytes are the lab's reading of the profile; the
+hand-run Kubo printed every file-tree pin too, and the model package the
+Runtime admitted gets its admitted CID from the lab encoder (task 051, see
 [the Kubo cross-check](#the-cross-implementation-check)).
 
 To recompute a lab CID by hand:
@@ -89,23 +98,41 @@ To recompute a lab CID by hand:
 4. Each path part but the last is a **directory**: `browser/app.js` is a
    directory `browser` with a link named `app.js`. The root is the directory
    of the bundle's entries. No empty directory is ever made.
-5. A directory's **block** is dag-pb. Sort its children by name bytes. For each
-   child, write protobuf field 2 (tag `0x12`, then the length as a varint)
-   holding a link: field 1 (`0x0a`, length) the child's CID bytes, field 2
-   (`0x12`, length) its name in UTF-8, field 3 (`0x18`) its Tsize as a varint.
-   Then write field 1 (`0x0a 0x02`) holding the UnixFS data `08 01`: type
-   (field 1) = 1, a directory. Lengths and Tsizes are ordinary unsigned
-   varints: 7 bits per byte, low bits first, so a value over 127 takes two
-   bytes. A block over 262144 bytes is refused with the directory's path (`.`
-   is the root) and the limit: there is no HAMT shard. Kubo shards later, by
-   an estimate of its links' size, so this refusal comes first and fails
-   closed. The largest root block the lab names (262144 bytes) got the same
-   CID from Kubo with the provider's HAMT config, unsharded (task 053,
-   `directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused`).
-6. A directory's CID is `01 70 12 20` and the SHA-256 of its block (the dag-pb
-   codec `0x70`). The Tsize of a link to a directory is the length of its
-   block plus the Tsizes of its own links. Every varint inside a CID here is
-   one byte.
+5. A directory's **links estimate** is the sum, over its direct children, of
+   each name's byte length and 36 (a CIDv1 SHA-256 is 36 bytes). It is not the
+   block's length and not a child's Tsize. An estimate of at most 262144 bytes
+   is one **basic directory**: its block is dag-pb, its children sorted by
+   name bytes. For each child, write protobuf field 2 (tag `0x12`, then the
+   length as a varint) holding a link: field 1 (`0x0a`, length) the child's CID
+   bytes, field 2 (`0x12`, length) its name in UTF-8, field 3 (`0x18`) its
+   Tsize as a varint. Then write field 1 (`0x0a 0x02`) holding the UnixFS data
+   `08 01`: type (field 1) = 1, a directory. Lengths and Tsizes are ordinary
+   unsigned varints: 7 bits per byte, low bits first, so a value over 127
+   takes two bytes. A basic directory may be larger than 262144 bytes; its
+   length does not decide its shape. An estimate greater than 262144 bytes is
+   a **HAMT shard**: hash each child's name (not its path) with murmur3
+   x64-128, seed 0, and take the first 64 bits big-endian. Level `n` takes
+   digest byte `n` as its bucket; a ninth level has no digest byte and is
+   refused. A bucket of one child is one link named by the bucket's uppercase
+   two-digit hex and then the child's own name, pointing at that child; a
+   bucket of two or more is one link named by the hex alone, pointing at a
+   child shard built the same way from the next digest byte. Never emit a
+   shard of one link. Links go out in bucket order through the same link
+   writer. After them, field 1 holds the UnixFS data `08 05` (type 5,
+   HAMT shard), `12 20` and a 32-byte bitmap (bit `i` in byte `i / 8` at mask
+   `1 << (i % 8)`, zero bytes included), `28 22` (bucket hash murmur3) and
+   `30 80 02` (fanout 256); no filesize, blocksizes, mode or mtime. Each
+   shard's CID is `01 70 12 20` and the SHA-256 of its block, and its Tsize is
+   that block's length plus its children's Tsizes. A child directory is judged
+   on its own estimate, so a file set under `photos/` can shard while the root
+   stays basic. The tests `directory_at_the_hamt_threshold_stays_basic`,
+   `directory_over_the_hamt_threshold_is_a_shard` and
+   `child_directory_over_the_hamt_threshold_is_a_shard` show both sides, and
+   the falsifiers F-CI56a to F-CI56e plant a bug in each rule.
+6. A directory's (or shard's) CID is `01 70 12 20` and the SHA-256 of its
+   block (the dag-pb codec `0x70`). The Tsize of a link to a directory is the
+   length of its block plus the Tsizes of its own links. Every varint inside a
+   CID here is one byte.
 7. **Print** the root's 36 CID bytes as `b` (the multibase prefix) and their
    RFC 4648 base32, in the lowercase alphabet
    `abcdefghijklmnopqrstuvwxyz234567`, with no `=` padding: 288 bits make 58
@@ -170,20 +197,81 @@ def file_node(data):  # a file's bytes; returns (CID bytes, Tsize)
         depth += 1
     return file_tree(chunks, depth)[:2]
 
+def murmur3_64(data):  # the first 64 bits of murmur3 x64-128, seed 0
+    mask = (1 << 64) - 1
+    rotl = lambda x, r: (x << r | x >> (64 - r)) & mask
+    def fmix(k):
+        k ^= k >> 33
+        k = k * 0xFF51AFD7ED558CCD & mask
+        k ^= k >> 33
+        k = k * 0xC4CEB9FE1A85EC53 & mask
+        return k ^ k >> 33
+    h1 = h2 = 0
+    for at in range(0, len(data) // 16 * 16, 16):
+        k1 = int.from_bytes(data[at:at + 8], "little")
+        k2 = int.from_bytes(data[at + 8:at + 16], "little")
+        k1 = rotl(k1 * 0x87C37B91114253D5 & mask, 31) * 0x4CF5AD432745937F & mask
+        h1 ^= k1
+        h1 = (rotl(h1, 27) + h2) * 5 + 0x52DCE729 & mask
+        k2 = rotl(k2 * 0x4CF5AD432745937F & mask, 33) * 0x87C37B91114253D5 & mask
+        h2 ^= k2
+        h2 = (rotl(h2, 31) + h1) * 5 + 0x38495AB5 & mask
+    tail = data[len(data) // 16 * 16:]
+    k1 = k2 = 0
+    for at, byte in enumerate(tail):
+        if at < 8:
+            k1 ^= byte << (8 * at)
+        else:
+            k2 ^= byte << (8 * (at - 8))
+    if len(tail) > 8:
+        k2 = rotl(k2 * 0x4CF5AD432745937F & mask, 33) * 0x87C37B91114253D5 & mask
+        h2 ^= k2
+    if tail:
+        k1 = rotl(k1 * 0x87C37B91114253D5 & mask, 31) * 0x4CF5AD432745937F & mask
+        h1 ^= k1
+    h1 ^= len(data)
+    h2 ^= len(data)
+    h1 = (h1 + h2) & mask
+    h2 = (h2 + h1) & mask
+    return ((fmix(h1) + fmix(h2)) & mask).to_bytes(8, "big")
+
+def hamt(children, level):  # {name: (CID bytes, Tsize)}; returns (CID bytes, Tsize)
+    buckets = {}
+    for name in children:
+        buckets.setdefault(murmur3_64(name.encode("utf-8"))[level], []).append(name)
+    links = b""
+    bitmap = bytearray(32)
+    total = 0
+    for bucket in sorted(buckets):
+        bitmap[bucket // 8] |= 1 << bucket % 8
+        names = buckets[bucket]
+        if len(names) == 1:
+            child_cid, tsize = children[names[0]]
+            name = "%02X" % bucket + names[0]
+        else:
+            child_cid, tsize = hamt({n: children[n] for n in names}, level + 1)
+            name = "%02X" % bucket
+        link = field(1, child_cid) + field(2, name.encode("utf-8"))
+        links += field(2, link + b"\x18" + varint(tsize))
+        total += tsize
+    unixfs = b"\x08\x05" + field(2, bytes(bitmap)) + b"\x28\x22" + b"\x30\x80\x02"
+    block = links + field(1, unixfs)
+    return cid(0x70, block), len(block) + total
+
 def directory(tree):  # {name: bytes or a dict}; returns (CID bytes, Tsize)
+    children = {}
+    for name, child in tree.items():
+        children[name] = directory(child) if isinstance(child, dict) else file_node(child)
+    if sum(len(name.encode("utf-8")) + 36 for name in children) > 262144:
+        return hamt(children, 0)
     links = b""
     total = 0
-    for name in sorted(tree, key=lambda n: n.encode("utf-8")):
-        child = tree[name]
-        if isinstance(child, dict):
-            child_cid, tsize = directory(child)
-        else:
-            child_cid, tsize = file_node(child)
+    for name in sorted(children, key=lambda n: n.encode("utf-8")):
+        child_cid, tsize = children[name]
         link = field(1, child_cid) + field(2, name.encode("utf-8"))
         links += field(2, link + b"\x18" + varint(tsize))
         total += tsize
     block = links + field(1, b"\x08\x01")
-    assert len(block) <= 262144
     return cid(0x70, block), len(block) + total
 
 def lab_cid(files):  # {bundle path: bytes}
@@ -206,9 +294,9 @@ any depth, task 051) and hands the nodes to
 [naming a closure listing](#naming-a-closure-listing)) makes one raw leaf per
 listed file and hands them to the same `encode_tree` (task 048). Every leaf is
 made by `raw_leaf`, every node of a file tree by `file_root_block`, and
-directory blocks and file-tree nodes write their links with one `put_links`. They are the only code that names a bundle; tests call them
+directory blocks, HAMT shard blocks and file-tree nodes write their links with one `put_links`. They are the only code that names a bundle; tests call them
 and copy none. `naming_hash` holds the one naming hash, and leaves, file roots
-and directory blocks share it. The encoder also
+and directory and shard blocks share it. The encoder also
 refuses what the walk can never give but a caller of the encoder could: a path
 with an empty, `.` or `..` part, two entries with one path, and one path that
 is both a file and a directory (`a` and `a/b`, in either order). `check_name` checks a
@@ -238,8 +326,9 @@ rules and not from the Rust code, in
 | The listing call names a file of at most one leaf; a listed file over one chunk is refused and named from its bytes instead | `listed_file_over_the_chunk_limit_is_refused`, `listed_file_over_one_leaf_names_the_bytes_call` | F-CI47c (`encode_listed_files` has no size refusal) |
 | Links sorted by name bytes | `lab_cid_matches_the_pinned_value_for_each_fixture`, `lab_cid_does_not_depend_on_listing_order` | F-CI18f (reverse), F-CI1a (no sort) |
 | Directory type 1 | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18g (5) |
-| A directory block over 262144 bytes is refused, no HAMT | `directory_over_the_hamt_threshold_is_refused` | F-CI18h (no refusal) |
-| A root block of exactly 262144 bytes is named, and one of 262145 bytes is refused with its length (task 053) | `directory_block_of_262144_bytes_is_named_and_one_byte_more_is_refused` | F-CI53a (`>=`), F-CI53b (the limit becomes 262145) |
+| A directory whose links estimate is at most 262144 bytes is one basic block, including when the block is longer (task 056) | `directory_at_the_hamt_threshold_stays_basic`, `directory_block_of_262144_bytes_is_named_and_one_byte_more_is_named_too` | F-CI53a (`>=` on the estimate) |
+| A greater links estimate is a fanout-256 HAMT: each level takes the next digest byte of murmur3 x64-128 seed 0 big-endian, uppercase hex buckets, one child named with its bucket, two or more under a child shard, a 32-byte bitmap, type 5, hash `0x22` and fanout 256 (task 056) | `directory_over_the_hamt_threshold_is_a_shard` | F-CI56a (the digest bytes reversed), F-CI56b (a leaf named by its hex only), F-CI56c (a one-entry bucket gets a child shard), F-CI56d (the estimate adds the child's Tsize, not 36), F-CI53b (the threshold becomes 262145), F-CI18h (the encoder never shards) |
+| A child directory is judged on its own links estimate, so it can shard while the root stays basic (task 056) | `child_directory_over_the_hamt_threshold_is_a_shard` | F-CI56e (only the root shards) |
 | No inline: no identity multihash | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18i (inline at most 32 bytes) |
 | The printed form, `b` and lowercase base32 | `lab_cid_prints_with_the_lab_label`, `the_library_names_a_bundle_one_way`, `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18j (old prefix), F-CI18k (uppercase), F-CI1d (no `b`) |
 | A directory link's Tsize includes its child's links | `lab_cid_matches_the_pinned_value_for_each_fixture` (`web-app` has `browser/`) | F-CI18m |
@@ -278,8 +367,7 @@ layout in step 3 (top down, by depth), gave it before any Rust code named it,
 and the hand-run Kubo printed it too. The same test names the first 45613056
 of those bytes (174 leaves, one file node) and checks that its CID differs;
 that value is not pinned.
-The directory-block test builds 1100 empty files with 200-byte names in a temp
-dir. Task 053 adds one more pin, built in a temp dir and in memory and never
+Task 053 adds one more pin, built in a temp dir and in memory and never
 committed: `content-sample` with 1065 added empty files, 1064 named by 200
 digits (`0` to `1063`, padded with zeros) and one by 235 digits (`1064`), so
 the root block is exactly 262144 bytes, is
@@ -287,7 +375,32 @@ the root block is exactly 262144 bytes, is
 (`DIRECTORY_AT_LIMIT_LAB_CID`, the entries made once by
 `directory_at_limit_files`). README's Python block gives it, and the hand-run
 Kubo printed it with the provider's HAMT config. With the last name one digit
-longer the root block is 262145 bytes and is refused.
+longer the root block is 262145 bytes, its links estimate is still at most
+262144 bytes, and the bundle is a basic directory with a different `bafybei`
+name that is not a pin.
+Task 056 adds three pins, built in memory and never committed, from one
+helper `directory_at_estimate_files`, which lengthens one name until the
+root's links estimate is the value it is given: the flat bundle whose estimate
+is exactly 262144 bytes is
+`bafybeihzudjdlu6pa3nwwqogsdj36t5z6auopjm6trdn73ar5hngnmg6iy`
+(`DIRECTORY_AT_HAMT_THRESHOLD_LAB_CID`, one basic directory though its block
+is larger than 262144 bytes); one estimate byte more, 262145, is
+`bafybeig46c3zyqlblqrtjqtgvgbzzbxwkohfzx3lj5pmqabzgdaxk3mpcu`
+(`DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID`, a fanout-256 HAMT); and the same
+262145-estimate file set under `photos/`, with content-sample's two files at
+the root, is
+`bafybeiffm2y3dpu7wxqumjhiufjoqcsmdg4eu7u5affy4icen4e7fumoqe`
+(`CHILD_DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID`: the child shards and the root
+stays basic). README's Python block, extended from the rule in step 5, gave
+each of them before any Rust code named it. The hand-run Kubo matched the
+first pin only: it prints
+`bafybeib3fzlyiq6xqlzitmq7oz5h6uvzcbd55nvwvyriih6loujluz76ny` and
+`bafybeidk6kyk4ohqytvobx5x3f2d3jwdyypauk23czp5tvpecfgq7pg3ye` for the two
+shard bundles, because it writes the bitmap's bytes in reverse order and trims
+them to the highest bucket (task 056, LOG.md ci-56). The Python block shares that byte order, so it
+agrees with the lab and not with Kubo on those two names. The two shard pins
+stay the lab's own until the rule is settled; no threshold, bitmap, flag or
+pin was changed to match.
 
 ### The cross-implementation check
 
@@ -312,16 +425,17 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    (`python3 -I could not run: <error>`), a non-zero exit (even after it
    printed a valid CID), no output, or more than one line is refused with its
    own reason, and the test asserts each of these reasons.
-5. For each of the 16 pins, the Python answer, the pin constant and the
+5. For each of the 19 pins, the Python answer, the pin constant and the
    printed `encode_entries` result for the same files must be equal, and the
-   test asserts that it checked exactly 16 bundles. The 16 are the seven
+   test asserts that it checked exactly 19 bundles. The 19 are the seven
    pinned fixtures (`content-sample`, `web-app`, `agent-host`, `provider`,
    `model`, `provider-variant-a`, `provider-variant-b`), the recipe, the
    chunk-limit, empty-file and long-name bundles above, which are built as
    entries in memory, the photo stand-in consumer copy (task 047, see
    [naming a closure listing](#naming-a-closure-listing)), and the two-leaf
    and three-leaf file bundles (task 048), the two-level file bundle (task
-   051) and the directory-at-limit bundle (task 053), also built in memory.
+   051), the directory-at-limit bundle (task 053) and the three bundles on
+   both sides of the HAMT threshold (task 056), also built in memory.
    `wc001-core` has no pin, because its `capsule.wasm` is
    built on each machine, so it is not checked here.
 
@@ -329,7 +443,7 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
 | --- | --- | --- |
 | README's rule agrees with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19a (the block's `0x55` becomes `0x70` before it runs) |
 | Rust agrees with README's rule, not only with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19b (the encoder's `RAW_CODEC` becomes `0x56`) |
-| A missing block is no pass: exactly 16 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
+| A missing block is no pass: exactly 19 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
 | An interpreter that cannot start fails the test | `readme_python_recomputes_every_lab_cid_pin` | F-CI19d (a program that does not exist) |
 | A non-zero exit is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19e (exit status not checked) |
 | No output is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19f (empty answer taken) |
@@ -345,13 +459,17 @@ script's `KUBO_ADD_FLAGS`, `scripts/ci-model-package.mjs:211`, written once as
 `KUBO_ADD_FLAGS` in the test file) in a fresh temp repo made by
 `init --empty-repo`, with the provider's two HAMT config values set. No daemon
 runs and nothing is written outside the temp folders.
-`kubo_hash_only_import_prints_every_lab_cid_pin` writes each of the 16 pinned
+`kubo_hash_only_import_prints_every_lab_cid_pin` writes each of the 19 pinned
 bundles above into a temp folder (since task 051 with the two-level file
-bundle, since task 053 with the directory-at-limit bundle), and Kubo's root,
+bundle, since task 053 with the directory-at-limit bundle, and since task 056
+with the three HAMT-threshold bundles), and Kubo's root,
 the pin and `encode_entries` must be one value. On 2026-10-28 it passed at
 task 053 too (`test result: ok. 1 passed`), and with the HAMT threshold set to
 `1KiB` by hand it failed on the directory-at-limit row alone, so the HAMT
-config reaches Kubo and that row would catch a shard (LOG.md).
+config reaches Kubo and that row would catch a shard (LOG.md). Task 056 ran it
+again with the three new rows: the row whose estimate is exactly 262144 bytes
+matched, and the two shard rows differed (Kubo's names are in LOG.md ci-56).
+The `1KiB` hand-break stopped at that result.
 `kubo_profile_reproduces_the_admitted_model_package_cid`
 is the control that the flags are the Runtime's: Kubo must print
 `bafybeiew3vuq32fvuz2kmps7lmgl4rxpvwsvklxykx4covogbrkhgy5qky`, the package CID
@@ -421,8 +539,10 @@ Not shown: Kubo in the gate, and Python on another machine. The gated check
 is two implementations on one Mac (Python 3.9.6 here). Kubo, the outside IPFS
 tool, ran only by hand: one offline Kubo v0.40.1 hash-only cross-check with
 the Runtime's profile flags was run by hand on this Mac (task 050) and printed
-every committed pin, and again at task 051 with the new pin (the "Kubo
-cross-check" paragraph above).
+every pin committed then, and again at task 051 with the new pin (the "Kubo
+cross-check" paragraph above). Task 056's run matched its threshold pin and
+differed on its two shard pins, whose bitmap Kubo writes byte-reversed and
+trimmed to the highest bucket.
 
 ## Fixtures and their pinned lab CIDs
 
@@ -1815,19 +1935,23 @@ committed outside check is the
 README's Python block, written from the byte rules: the committed test
 `readme_python_recomputes_every_lab_cid_pin` runs it with `python3 -I` (Python
 3.9.6 on this Mac) and requires it to give every pin and the Rust encoder's
-value for the same files. The tests pin the non-sharded subset of the
-profile only, with files at any tree depth (one raw leaf, since task 048 a
-balanced file root over 2 to 174 raw leaves, and since task 051 Kubo's
-balanced file tree at any depth, pinned at two levels). The file tree's bytes
-are the lab's reading of the profile; the hand-run Kubo printed every
-file-tree pin too, and the lab encoder gives the model package CID the
-Runtime admitted on this Mac (task 051).
+value for the same files. The tests pin both sides of the directory threshold
+and the file tree at any depth (one raw leaf, since task 048 a balanced file
+root over 2 to 174 raw leaves, and since task 051 Kubo's balanced file tree at
+any depth, pinned at two levels). The file tree's bytes are the lab's reading
+of the profile; the hand-run Kubo printed every file-tree pin too, and the lab
+encoder gives the model package CID the Runtime admitted on this Mac (task
+051). The two shard pins of task 056 name bundles whose bitmap bytes Kubo
+writes byte-reversed and trimmed, so they stay the lab's own (LOG.md ci-56).
 
 The claim is "Kubo v0.40.1 profile, computed by the lab", and nothing more.
 One offline Kubo v0.40.1 hash-only cross-check with the Runtime's profile
 flags was run by hand on this Mac (task 050) and printed every committed pin,
 and the claim words stay "Kubo v0.40.1 profile, computed by the lab" until
-Rong or Flint changes them. A hand run on one Mac is not a gate, so the lab
+Rong or Flint changes them. The pins added since then are checked by hand
+separately: task 056's run matched its threshold pin and printed other names
+for its two shard bundles, whose bitmap Kubo writes byte-reversed and trimmed
+(LOG.md ci-56). A hand run on one Mac is not a gate, so the lab
 CID is still not called equal to the Runtime's CID or to Kubo's output in
 general. The Runtime's CID names a release archive, not the bundle's
 files (see [Why a lab CID](#why-a-lab-cid-and-not-the-runtimes-cid)). The test
@@ -1945,7 +2069,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 284 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 289 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1994,7 +2118,8 @@ F-CI49a to F-CI49c (see
 [the lab package record](#lab-package-record-outside-the-bundle)), and task
 051's F-CI51a to F-CI51c, and task 053's F-CI53a and F-CI53b (both: see
 [the encoding](#the-encoding)), and task 055's F-CI55a to F-CI55c (see
-[naming a closure listing](#naming-a-closure-listing)).
+[naming a closure listing](#naming-a-closure-listing)), and task 056's
+F-CI56a to F-CI56e (see [the encoding](#the-encoding)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -2168,6 +2293,20 @@ F-CI48b removes the `for blocksize in blocksizes` loop of `file_root_block`,
 and F-CI48d drops `block.len()` from the node's Tsize line in `file_root`;
 their titles say so. Every other older edit's text is the same and still
 found exactly once.
+Task 056's entries edit `src/lib.rs`. F-CI56a reverses the eight bytes of
+`hamt_digest` before the bucket byte is read (the `hello` unit test and the
+shard test fail); F-CI56b names a leaf link with its uppercase hex bucket
+only; F-CI56c gives a one-entry bucket a child shard, so a shard of one link
+is emitted; F-CI56d adds a child's Tsize where the links estimate adds 36, so
+the 262145-estimate set stays basic; F-CI56e shards only when the directory
+path is empty, so the child over the estimate stays basic. F-CI18h, keeping
+its id and retargeted by task 056, removes the shard path (the encoder never
+shards); F-CI53a changes the estimate comparison to `>=`; F-CI53b makes the
+threshold constant `262_145`. F-CI18h, F-CI53a and F-CI56e share the
+shard-decision line, and entries may share an anchor. Each anchor is a line
+task 056 added or retargeted, found exactly once. `HamtTooDeep` has no
+falsifier: no test reaches a ninth digest byte, so there is no test seam for
+it.
 
 ### The inventory check
 

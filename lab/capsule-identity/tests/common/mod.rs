@@ -146,6 +146,88 @@ pub fn directory_at_limit_files(longer: usize) -> Vec<BundleEntry> {
     files
 }
 
+/// The flat bundle whose root links estimate is exactly 262144 bytes: an
+/// estimate equal to the threshold is a basic directory, so its block is
+/// larger than 262144 bytes. Built in memory and never committed.
+pub const DIRECTORY_AT_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeihzudjdlu6pa3nwwqogsdj36t5z6auopjm6trdn73ar5hngnmg6iy";
+
+/// The same flat bundle one estimate byte more, 262145: a fanout-256 HAMT.
+/// Built in memory and never committed.
+pub const DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeig46c3zyqlblqrtjqtgvgbzzbxwkohfzx3lj5pmqabzgdaxk3mpcu";
+
+/// The 262145-estimate file set of [`directory_at_estimate_files`] under
+/// `photos/`, with content-sample's own two files at the root: the child is
+/// judged on its own estimate and shards, while the root's three names stay
+/// far under the threshold. Built in memory and never committed.
+pub const CHILD_DIRECTORY_OVER_HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeiffm2y3dpu7wxqumjhiufjoqcsmdg4eu7u5affy4icen4e7fumoqe";
+
+/// The flat bundle whose root links estimate is exactly `estimate` bytes:
+/// content-sample's entries, 1114 empty files named by 199 digits and one
+/// more name. One name is lengthened, a byte at a time, until the sum over
+/// the root's direct children of each name's byte length and 36 (a CIDv1
+/// SHA-256) is exactly `estimate`, and the sum is then checked, so this
+/// helper hardcodes no name length. Deterministic. Built in memory and never
+/// committed.
+pub fn directory_at_estimate_files(estimate: usize) -> Vec<BundleEntry> {
+    let mut entries: Vec<BundleEntry> = CONTENT_SAMPLE
+        .files
+        .iter()
+        .map(|file| BundleEntry {
+            path: (*file).to_owned(),
+            content: read_fixture(&CONTENT_SAMPLE, file),
+        })
+        .collect();
+    for number in 0..1114 {
+        entries.push(BundleEntry {
+            path: format!("{number:0>199}"),
+            content: Vec::new(),
+        });
+    }
+    let mut longest = String::from("1114");
+    entries.push(BundleEntry {
+        path: longest.clone(),
+        content: Vec::new(),
+    });
+    let measured = |entries: &[BundleEntry]| -> usize {
+        entries.iter().map(|entry| entry.path.len() + 36).sum()
+    };
+    while measured(&entries) < estimate {
+        longest.push('0');
+        if let Some(last) = entries.last_mut() {
+            last.path = longest.clone();
+        }
+    }
+    assert_eq!(
+        measured(&entries),
+        estimate,
+        "the helper cannot lengthen one name to the links estimate {estimate}"
+    );
+    entries
+}
+
+/// content-sample at the root with the 262145-estimate set of
+/// [`directory_at_estimate_files`] under `photos/`: the child's own links
+/// estimate is 262145 and the root's is 140, so the child shards and the
+/// root stays basic. `photos/capsule.json` is a copy, not the root manifest.
+/// Built in memory and never committed.
+pub fn child_directory_over_hamt_threshold_entries() -> Vec<BundleEntry> {
+    let mut entries: Vec<BundleEntry> = directory_at_estimate_files(262_145)
+        .into_iter()
+        .map(|entry| BundleEntry {
+            path: format!("photos/{}", entry.path),
+            content: entry.content,
+        })
+        .collect();
+    entries.extend(CONTENT_SAMPLE.files.iter().map(|file| BundleEntry {
+        path: (*file).to_owned(),
+        content: read_fixture(&CONTENT_SAMPLE, file),
+    }));
+    entries
+}
+
 /// The photo lane's PH6 stand-in photo set, a consumer copy and not a
 /// fixture: its five files, copied byte for byte from
 /// `examples/photo-viewer/host-test/fixtures/stand-in-photo-set/` at

@@ -708,16 +708,19 @@ B2 (Anders, 26 Oct)", added by task 026, whose citations are at that revision's 
   `lab/capsule-identity/README.md:1200` `a delivery check of those archive bytes, not this CID.`
 - Kubo (corrected by task 051, on 2026-10-28; until task 050 this bullet said no Kubo had checked the value).
   One offline Kubo v0.40.1 hash-only cross-check with the Runtime's
-  profile flags was run by hand on this Mac (task 050) and printed every committed pin, and the claim words stay
+  profile flags was run by hand on this Mac (task 050) and printed every pin committed then, and the claim words stay
   "Kubo v0.40.1 profile, computed by the lab" until Rong or Flint changes them.
   The two Kubo tests are `#[ignore]` in `lab/capsule-identity/tests/cross_implementation.rs` and not in the gate;
   task 051 ran them again with its new pin. Each pin was first computed by the lab code and a `python3 -I`
   recomputation of README's byte rules (the Python block that `readme_python_recomputes_every_lab_cid_pin`,
   cited above, runs), and the committed check is still that Python block:
   `lab/capsule-identity/README.md:1222` `README's Python block, written from the byte rules: the committed test`
-  Only the non-sharded subset of the profile is pinned, with files at any tree depth:
-  `lab/capsule-identity/README.md:46` `The tests pin only the non-sharded subset of that profile, with files at any`
-  (corrected by task 053, on 2026-10-28; until then it said single-block)
+  Both sides of the profile's directory threshold are pinned, with files at any tree depth:
+  `lab/capsule-identity/README.md:46` `The tests pin both sides of that profile's directory threshold, with files at`
+  (corrected by task 053, on 2026-10-28; until then it said single-block. Task 056 changed the line to pin both
+  sides of the threshold; its hand-run Kubo matched the basic threshold pin and printed other names for the two
+  shard bundles, whose bitmap Kubo writes byte-reversed and trimmed to the highest bucket, so those two pins
+  stay the lab's own, LOG.md ci-56.)
   The pins are reproduced on one Mac only, so no construction rule is frozen.
   Added by task 053, on 2026-10-28: the hand-run Kubo, with the provider's two HAMT config values, also printed
   `bafybeifv7ypq27zanvn46j4q5jnm5akr55flfzne3zszdbbolt2dtgevc4` (`DIRECTORY_AT_LIMIT_LAB_CID`), the pin of a bundle
@@ -945,12 +948,18 @@ Its schema check is still the Runtime's own manifest type
 Its value is a lab package CID: the 59-character CIDv1 `bafybei...` UnixFS directory root of the bundle
 (`lab/capsule-identity/README.md:19` `- Its value is a **lab CID**, a lab package CID: the CIDv1 SHA-256 UnixFS`
 and `lab/capsule-identity/tests/common/mod.rs:80` `assert_eq!((pin.len(), &pin[..7]), (59, "bafybei"), "{pin}");`),
-under the non-sharded subset of the model package profile, with files at any tree depth
-(`lab/capsule-identity/src/lib.rs:25` `//! and pins only the non-sharded subset of that profile, with files at any`)
-(corrected by task 053, on 2026-10-28; until then it said single-block).
-A file or a directory block over 262144 bytes is refused, not named another way
-(`lab/capsule-identity/src/lib.rs:224` `const CHUNK_SIZE: usize = 262_144;`
-and `lab/capsule-identity/src/lib.rs:230` `const DIRECTORY_BLOCK_LIMIT: usize = 262_144;`).
+on both sides of the model package profile's directory threshold, with files at any tree depth
+(`lab/capsule-identity/src/lib.rs:25` `//! and pins both sides of that profile's directory threshold, with files at`)
+(corrected by task 053, on 2026-10-28; until then it said single-block. Task 056 changed the line to pin both
+sides.)
+A file block over 262144 bytes is named by its balanced file tree (task 051); a directory whose links estimate is
+at most 262144 bytes is one basic directory even when its block is larger, and a greater estimate is a
+fanout-256 HAMT (task 056)
+(`lab/capsule-identity/src/lib.rs:308` `const DIRECTORY_SIZE_LIMIT: usize = 262_144;`)
+(corrected by task 056, on 2026-10-28; until then it quoted `DIRECTORY_BLOCK_LIMIT` and said a directory block over
+262144 bytes was refused. The hand-run Kubo matched the basic threshold pin and printed other names for the two
+shard bundles, whose bitmap Kubo writes byte-reversed and trimmed to the highest bucket, so those two pins stay
+the lab's own, LOG.md ci-56).
 Added by task 048, on 2026-10-28: since task 048, a file of 2 to 174 raw leaves (262145 to 45613056 bytes) is named
 by its balanced file root (`fn file_root(` and `const MAX_FILE_LINKS: usize = 174;` in
 `lab/capsule-identity/src/lib.rs`), and only a larger file or a directory block over 262144 bytes is refused; the
