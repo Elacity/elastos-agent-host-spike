@@ -1018,6 +1018,22 @@ fn model_use_path_dotdot_is_refused() {
 }
 
 #[test]
+fn model_dotdot_prefix_segment_is_a_plain_name() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier
+        .use_path(
+            &verifier.open_call(instance),
+            &guest(handle),
+            "UsersAI/agent-1/notes/..hidden",
+        )
+        .expect("a segment that only starts with dotdot stays inside the root");
+}
+
+#[test]
 fn model_use_path_outside_the_owned_root_is_refused() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
