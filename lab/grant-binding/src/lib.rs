@@ -371,6 +371,23 @@ fn walk_manifests(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
     }
 }
 
+#[cfg(test)]
+fn manifests_that_link_this_crate(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let own = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let mut manifests = Vec::new();
+    walk_manifests(root, &mut manifests);
+    let mut linked = Vec::new();
+    for path in manifests {
+        if path == own {
+            continue;
+        }
+        if link::manifest_depends_on_grant_binding(&path) {
+            linked.push(path);
+        }
+    }
+    linked
+}
+
 #[test]
 fn model_forged_identity_session_and_instance_have_no_effect() {
     let mut verifier = Verifier::new();
@@ -1607,24 +1624,16 @@ fn model_detects_a_path_dependency_on_this_crate() {
 #[test]
 fn model_no_other_cargo_toml_path_depends_on_this_crate() {
     let _guard = source_reads();
-    let own = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let root = repo_root();
     let mut manifests = Vec::new();
-    walk_manifests(&repo_root(), &mut manifests);
-    let mut checked = 0;
-    for path in manifests {
-        if path == own {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-        assert!(
-            !link::cargo_toml_path_depends_on_grant_binding(&text),
-            "{} has a path dependency on grant-binding",
-            path.display()
-        );
-        checked += 1;
-    }
-    assert!(checked > 0, "no other Cargo.toml was read");
+    walk_manifests(&root, &mut manifests);
+    assert!(
+        manifests.len() > 1,
+        "walk saw {} Cargo.toml files",
+        manifests.len()
+    );
+    let linked = manifests_that_link_this_crate(&root);
+    assert!(linked.is_empty(), "{linked:?}");
 }
 
 #[test]
@@ -1647,4 +1656,53 @@ fn model_crate_has_no_dependencies_and_forbids_unsafe() {
 fn model_planted_bugs_are_caught() {
     let _guard = source_reads();
     plant::run_all();
+}
+
+#[test]
+fn model_workspace_dependency_is_a_link_in_place() {
+    let _guard = source_reads();
+    let root = std::env::temp_dir().join(format!("gb-walk-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("app/src")).unwrap();
+    std::fs::create_dir_all(root.join("vendor/grant-binding/src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n\n[workspace.dependencies]\ngrant-binding = { path = \"vendor/grant-binding\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("app/Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\ngrant-binding = { workspace = true }\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("app/src/lib.rs"), "").unwrap();
+    std::fs::write(
+        root.join("vendor/grant-binding/Cargo.toml"),
+        "[package]\nname = \"grant-binding\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("vendor/grant-binding/src/lib.rs"), "").unwrap();
+    let app = root.join("app/Cargo.toml");
+    let vendor = root.join("vendor/grant-binding/Cargo.toml");
+    let linked = manifests_that_link_this_crate(&root);
+    let same = |left: &std::path::Path, right: &std::path::Path| {
+        std::fs::canonicalize(left).ok() == std::fs::canonicalize(right).ok()
+    };
+    assert!(
+        link::manifest_depends_on_grant_binding(&app),
+        "detector sees the workspace dependency"
+    );
+    assert!(
+        linked.iter().any(|path| same(path, &app)),
+        "walk sees the workspace dependency"
+    );
+    assert!(
+        !link::manifest_depends_on_grant_binding(&vendor),
+        "own manifest"
+    );
+    assert!(
+        !linked.iter().any(|path| same(path, &vendor)),
+        "walk skips the crate manifest"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
 }

@@ -2,6 +2,7 @@ id: F-GB-escape
 file: src/link.rs
 test: link::model_escaped_unicode_path_is_a_link
 test: link::model_workspace_metadata_names_the_member
+test: model_workspace_dependency_is_a_link_in_place
 --- old
     metadata_names(manifest).iter().any(|name| name == "grant-binding")
 --- new
