@@ -883,14 +883,16 @@ fn wait_for_terminal(
 /// a second copy, including one in a comment, refuses before the cut. It
 /// requires exactly one `match op {` in the cut, so a commented copy refuses
 /// as a second match. The arms are the lines after
-/// that brace, and the brace must end its line: a line that carries text
-/// after it refuses. Each arm line holds one plain quoted string followed by
+/// that brace, the brace must end its line, and the match ends at a line that
+/// starts with `};`: a shorter close refuses. Each arm line holds one plain
+/// quoted string followed by
 /// `=>`, or the one `other =>`; that arm is the `unsupported` row. A missing
 /// `fn parse_request`, a second signature, a missing `match op`, more than one
 /// `match op {`, an arm on the `match op {` line, an arm that is not a plain
 /// quoted string followed by `=>` and not `other =>`, an arm line with more
-/// than one `=>`, a missing closing quote, a second `other =>`, and a missing
-/// `other =>` each refuse with their own `parse_request` reason.
+/// than one `=>`, an arm line that opens or closes a nested block, a missing
+/// closing quote, a second `other =>`, and a missing `other =>` each refuse
+/// with their own `parse_request` reason.
 /// `operation_rows_match_parse_request` requires the same names in the same
 /// order on the real section and on in-memory strings: an extra arm, a
 /// missing arm, a swap, an extra trailing row and a missing trailing row each
@@ -1056,9 +1058,13 @@ fn operations_section_cites_existing_tests() {
     /// The cut runs from the `fn parse_request(` line to the next function.
     /// Exactly one signature is allowed across the source, including comments
     /// and strings: another copy makes the selection ambiguous and refuses.
-    /// The arms are the lines between `match op {` and its closing `};`. Each
+    /// The arms are the lines between `match op {` and the line that starts
+    /// with `};`. Each
     /// line has one arm: a plain quoted string followed by `=>`, or the one
-    /// `other =>`. Other patterns require an explicit refusal. The compare reads the
+    /// `other =>`. An arm line that contains `{` or `}` refuses, so a nested
+    /// match, a nested block, or a shorter close cannot hide an outer arm.
+    /// Other patterns require an
+    /// explicit refusal. The compare reads the
     /// match as text: it shows the Operation cells equal these arms, not that
     /// every arm is reachable, and it does not read `src/execution.rs`.
     fn parse_request_operation_names(source: &str) -> Result<Vec<String>, String> {
@@ -1107,11 +1113,16 @@ fn operations_section_cites_existing_tests() {
         let mut other_arms = 0;
         for line in after_brace.lines().skip(1) {
             let arm = line.trim();
-            if arm.starts_with('}') {
+            if arm.starts_with("};") {
                 break;
             }
             if arm.is_empty() || arm.starts_with("//") {
                 continue;
+            }
+            if arm.contains('{') || arm.contains('}') {
+                return Err(format!(
+                    "parse_request: arm line `{arm}` opens or closes a nested block"
+                ));
             }
             if arm.matches("=>").count() > 1 {
                 return Err(format!(
@@ -1511,6 +1522,20 @@ fn operations_section_cites_existing_tests() {
         opening_line_arm,
         "parse_request: the `match op {` line carries `\"ping\" => ProviderOperation::Status,` after the brace"
     );
+    let nested_arm_source = "fn parse_request(line: &str) -> Result<Envelope, Fault> {\n    let value = parse(line)?;\n    let operation = match op {\n        \"init\" => match value.get(\"reason\") {\n            other => Operation::Init,\n        },\n        \"ping\" => Operation::Status,\n        other => Operation::Unsupported(other.to_string()),\n    };\n    Ok(Envelope { operation, value })\n}\n";
+    let nested_arm = operation_rows_match_parse_request(init_then_unsupported, nested_arm_source)
+        .expect_err("a nested match arm must refuse");
+    assert_eq!(
+        nested_arm,
+        "parse_request: arm line `\"init\" => match value.get(\"reason\") {` opens or closes a nested block"
+    );
+    let stray_close_source = "fn parse_request(line: &str) -> Result<Envelope, Fault> {\n    let value = parse(line)?;\n    let operation = match op {\n        \"init\" => Operation::Init,\n        other => Operation::Unsupported(other.to_string()),\n    },\n        \"ping\" => Operation::Status,\n    };\n    Ok(Envelope { operation, value })\n}\n";
+    let stray_close = operation_rows_match_parse_request(init_then_unsupported, stray_close_source)
+        .expect_err("a short close must not end the match");
+    assert_eq!(
+        stray_close,
+        "parse_request: arm line `},` opens or closes a nested block"
+    );
     let unquoted_arm = "fn parse_request(line: &str) {\n    match op {\n        \"init\" => Operation::Init,\n        _ => Operation::Unsupported(op.to_string()),\n    };\n}\n";
     let unquoted = operation_rows_match_parse_request(init_then_unsupported, unquoted_arm)
         .expect_err("an unquoted arm must fail");
@@ -1535,7 +1560,9 @@ fn operations_section_cites_existing_tests() {
     assert_ne!(no_signature, no_match);
     assert_ne!(no_match, commented_match);
     assert_ne!(commented_match, opening_line_arm);
-    assert_ne!(opening_line_arm, unquoted);
+    assert_ne!(opening_line_arm, nested_arm);
+    assert_ne!(nested_arm, stray_close);
+    assert_ne!(stray_close, unquoted);
     assert_ne!(unquoted, unclosed);
     assert_ne!(unclosed, duplicate_other);
     let no_other_arm = "fn parse_request(line: &str) {\n    match op {\n        \"init\" => Operation::Init,\n    };\n}\n";
