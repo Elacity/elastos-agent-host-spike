@@ -2855,6 +2855,38 @@
       "tests": [
         "granted_model_turn_returns_the_answer_effect_and_audit"
       ]
+    },
+    {
+      "id": "MP68",
+      "title": "validate_text_messages no longer refuses max_output_tokens, so a hosted output limit is not context_rejected",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "    if input.get(\"max_output_tokens\").is_some()\n        && !matches!(offer.adapter, AdapterConfig::LocalLlamaCppText { .. })\n    {\n        return Err(AdapterFault::context(\n            \"model output request is not supported by this offer\",\n            \"max_output_tokens is supported only by local llama offers\",\n        ));\n    }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "hosted_token_and_byte_bounds_refuse_before_any_send"
+      ]
+    },
+    {
+      "id": "MP69",
+      "title": "the input byte comparison accepts one byte past the offer limit, so an oversized input is not policy_limit",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "        if input_bytes > offer.policy.input_bytes_limit {",
+          "new": "        if input_bytes > offer.policy.input_bytes_limit.saturating_add(1) {"
+        }
+      ],
+      "tests": [
+        "hosted_token_and_byte_bounds_refuse_before_any_send"
+      ]
     }
   ]
 }
