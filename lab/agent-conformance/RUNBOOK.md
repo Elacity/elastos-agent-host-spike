@@ -774,4 +774,4 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 
 `completed_child_capture_refuses_a_sparse_file` is this harness, and a PASS there gives the Runtime no C0 credit and no A12 credit.
 
-`standin_provider_file_hash_refuses_a_sparse_file` is this stand-in, and a PASS there gives the Runtime no C0 credit and no B3 credit.
+`standin_provider_file_hash_refuses_a_sparse_file` is this stand-in, and a PASS there gives the Runtime no C0 credit and no B3 credit. `standin_provider_file_hash_refuses_growth_after_inspection` and `standin_provider_file_hash_refuses_replacement_after_inspection` change the file after its length check and prove the bounded read returns the exact byte-limit reason. `standin_provider_file_hash_reports_exact_io_refusals` checks the complete metadata, open, and read error messages.

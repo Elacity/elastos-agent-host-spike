@@ -2535,11 +2535,13 @@ fn path_text<'a>(path: &'a Path, name: &str, label: &str) -> Result<&'a str, Str
     })
 }
 
-// A provider binary or confinement profile longer than this is refused
-// before `fs::read` sizes a buffer from the logical length.
+// Inspect the logical length before reading, then bound the read as well:
+// a writer can grow or replace the file after the metadata check.
 const PROVIDER_FILE_BYTE_LIMIT: u64 = 67108864;
 
 fn hash_file(path: &Path, name: &str, label: &str) -> Result<String, String> {
+    use std::io::Read;
+
     let len = fs::metadata(path)
         .map_err(|err| {
             format!(
@@ -2554,12 +2556,29 @@ fn hash_file(path: &Path, name: &str, label: &str) -> Result<String, String> {
             path.display()
         ));
     }
-    let bytes = fs::read(path).map_err(|err| {
-        format!(
-            "{name} start is refused: the {label} {} could not be read: {err}",
+    #[cfg(test)]
+    if let Some(hook) = tests::HASH_FILE_BEFORE_READ.with(|hook| hook.take()) {
+        hook();
+    }
+    let bytes = fs::File::open(path)
+        .and_then(|file| {
+            let mut bytes = Vec::new();
+            file.take(PROVIDER_FILE_BYTE_LIMIT + 1)
+                .read_to_end(&mut bytes)?;
+            Ok(bytes)
+        })
+        .map_err(|err| {
+            format!(
+                "{name} start is refused: the {label} {} could not be read: {err}",
+                path.display()
+            )
+        })?;
+    if bytes.len() as u64 > PROVIDER_FILE_BYTE_LIMIT {
+        return Err(format!(
+            "{name} start is refused: the {label} {} exceeds its byte limit",
             path.display()
-        )
-    })?;
+        ));
+    }
     Ok(identity::sha256(&bytes))
 }
 
@@ -2579,6 +2598,13 @@ fn exchange(child: &mut RunningChild<'_>, body: &Value) -> Result<Value, String>
 mod tests {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
+
+    // Each test consumes its own hook after the length check and before the
+    // read. This gives file mutations a fixed ordering without timing races.
+    thread_local! {
+        pub(super) static HASH_FILE_BEFORE_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
 
     fn keys(value: &Value) -> BTreeSet<String> {
         value
@@ -16395,6 +16421,14 @@ mod tests {
             }),
             "the stand-in did the work: a sparse confinement profile past the byte cap is refused: {profile_refusal:?}"
         );
+        assert_eq!(
+            profile_refusal,
+            Err(format!(
+                "wallet-provider start is refused: the confinement profile {} exceeds its byte limit",
+                sparse.display()
+            )),
+            "the stand-in did the work: the sparse profile has the exact byte-limit reason"
+        );
         let binary_refusal = hash_file(&sparse, "wallet-provider", "provider binary");
         let binary_text = binary_refusal.as_ref().err().map(String::as_str);
         assert!(
@@ -16402,6 +16436,14 @@ mod tests {
                 text.contains("the provider binary") && text.contains("exceeds its byte limit")
             }),
             "the stand-in did the work: a sparse provider binary past the byte cap is refused: {binary_refusal:?}"
+        );
+        assert_eq!(
+            binary_refusal,
+            Err(format!(
+                "wallet-provider start is refused: the provider binary {} exceeds its byte limit",
+                sparse.display()
+            )),
+            "the stand-in did the work: the sparse binary has the exact byte-limit reason"
         );
 
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -16419,5 +16461,124 @@ mod tests {
             Ok(()),
             "the stand-in did the work: the passed home is removed"
         );
+    }
+
+    #[test]
+    fn standin_provider_file_hash_refuses_growth_after_inspection() {
+        let home = ThrowawayHome::new().expect("setup: a throwaway Home");
+        let path = home.root().join("growing-file");
+        for label in ["confinement profile", "provider binary"] {
+            fs::write(&path, b"ok\n").expect("setup: the file starts at three bytes");
+            let writer = fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("setup: another handle can extend the file");
+            HASH_FILE_BEFORE_READ.with(|hook| {
+                hook.replace(Some(Box::new(move || {
+                    assert_eq!(
+                        writer.metadata().expect("setup: file length").len(),
+                        3,
+                        "setup: the inspected file still has three bytes"
+                    );
+                    writer
+                        .set_len(PROVIDER_FILE_BYTE_LIMIT + 1)
+                        .expect("setup: extend the checked file past the limit");
+                })));
+            });
+            assert_eq!(
+                hash_file(&path, "wallet-provider", label),
+                Err(format!(
+                    "wallet-provider start is refused: the {label} {} exceeds its byte limit",
+                    path.display()
+                )),
+                "the stand-in did the work: growth after inspection has the exact byte-limit reason"
+            );
+            assert!(
+                HASH_FILE_BEFORE_READ.with(|hook| hook.borrow().is_none()),
+                "the stand-in did the work: the read reached the file-growth hook"
+            );
+        }
+        assert_eq!(home.finish(), Ok(()), "the stand-in did the work: cleanup");
+    }
+
+    #[test]
+    fn standin_provider_file_hash_refuses_replacement_after_inspection() {
+        let home = ThrowawayHome::new().expect("setup: a throwaway Home");
+        let path = home.root().join("replaced-file");
+        fs::write(&path, b"ok\n").expect("setup: the file starts at three bytes");
+        let replacement = home.root().join("replacement");
+        fs::File::create(&replacement)
+            .expect("setup: a replacement file")
+            .set_len(1 << 30)
+            .expect("setup: the replacement is sparse and larger than the cap");
+        let replaced_path = path.clone();
+        HASH_FILE_BEFORE_READ.with(|hook| {
+            hook.replace(Some(Box::new(move || {
+                fs::rename(replacement, replaced_path)
+                    .expect("setup: replace the checked file before its read");
+            })));
+        });
+        assert_eq!(
+            hash_file(&path, "wallet-provider", "confinement profile"),
+            Err(format!(
+                "wallet-provider start is refused: the confinement profile {} exceeds its byte limit",
+                path.display()
+            )),
+            "the stand-in did the work: replacement after inspection has the exact byte-limit reason"
+        );
+        assert_eq!(home.finish(), Ok(()), "the stand-in did the work: cleanup");
+    }
+
+    #[test]
+    fn standin_provider_file_hash_reports_exact_io_refusals() {
+        use std::io::Read;
+
+        let home = ThrowawayHome::new().expect("setup: a throwaway Home");
+        for label in ["confinement profile", "provider binary"] {
+            let missing = home.root().join("missing-file");
+            let metadata_error = fs::metadata(&missing).expect_err("setup: metadata fails");
+            assert_eq!(
+                hash_file(&missing, "wallet-provider", label),
+                Err(format!(
+                    "wallet-provider start is refused: the {label} {} could not be read: {metadata_error}",
+                    missing.display()
+                )),
+                "the stand-in did the work: metadata failure has the exact read refusal"
+            );
+
+            let removed = home.root().join("removed-file");
+            let open_error =
+                fs::File::open(&removed).expect_err("setup: opening a missing file fails");
+            fs::write(&removed, b"ok\n").expect("setup: the inspected file exists");
+            let removed_path = removed.clone();
+            HASH_FILE_BEFORE_READ.with(|hook| {
+                hook.replace(Some(Box::new(move || {
+                    fs::remove_file(removed_path).expect("setup: remove the file after inspection");
+                })));
+            });
+            assert_eq!(
+                hash_file(&removed, "wallet-provider", label),
+                Err(format!(
+                    "wallet-provider start is refused: the {label} {} could not be read: {open_error}",
+                    removed.display()
+                )),
+                "the stand-in did the work: open failure after inspection has the exact read refusal"
+            );
+
+            let directory = home.root().join("home");
+            let read_error = fs::File::open(&directory)
+                .expect("setup: the directory opens")
+                .read(&mut [0u8; 1])
+                .expect_err("setup: reading directory bytes fails");
+            assert_eq!(
+                hash_file(&directory, "wallet-provider", label),
+                Err(format!(
+                    "wallet-provider start is refused: the {label} {} could not be read: {read_error}",
+                    directory.display()
+                )),
+                "the stand-in did the work: read failure has the exact read refusal"
+            );
+        }
+        assert_eq!(home.finish(), Ok(()), "the stand-in did the work: cleanup");
     }
 }

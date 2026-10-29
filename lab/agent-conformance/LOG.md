@@ -15021,7 +15021,7 @@ New:
 
 ## 095
 
-095: `hash_file` reads the provider file length and returns `{name} start is refused: the {label} {path} exceeds its byte limit` when that length is above `PROVIDER_FILE_BYTE_LIMIT` (67108864), before `fs::read` and before any buffer is sized from that length. A length at or under the cap is `identity::sha256` of the file bytes. A metadata or read error stays `could not be read`. `pull_stdout` still refuses with `provider response exceeds its byte limit` at 65536. `capture` stays the 094 bound. A PASS gives the Runtime no C0 credit and no B3 credit.
+095: `hash_file` reads the provider file length and returns `{name} start is refused: the {label} {path} exceeds its byte limit` when that length is above `PROVIDER_FILE_BYTE_LIMIT` (67108864), before reading bytes. The read also stops at 67108865 bytes and returns that byte-limit reason if growth or replacement after inspection supplies the extra byte. A length at or under the cap is `identity::sha256` of the file bytes. A metadata or read error stays `could not be read`. `pull_stdout` still refuses with `provider response exceeds its byte limit` at 65536. `capture` stays the 094 bound. A PASS gives the Runtime no C0 credit and no B3 credit.
 
 Runtime verifies the principal and session, enforces capabilities, owns lifecycle and audit, and routes the operation. Effect providers do not decide that an unverified caller is authorized.
 
@@ -15062,3 +15062,48 @@ New:
 The supervisor `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` failed with exit 101. The only failure was `process_isolation::runaway_trap_is_bounded_while_siblings_finish`. The census line was `process leftover; processes:1 paths:["stderr-220"]`. That path matches `stderr-<digits>`. It does not include `host-process.lock` or `config.toml`. The effects binary finished in 207.19 seconds. Census and the operator were left as they are. No source change.
 
 Rerun, same environment as the gate above: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.18 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` exit 0, real 280.92 seconds, inside the 600-second bound. lib 90 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 10 passed; provider_launch 22 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0. Proof: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_provider_file_hash_refuses_a_sparse_file -- --exact` exit 0, 1 passed, real 0.41 seconds.
+
+### Read-growth repair
+
+The one `hash_file` uses `Read::take(PROVIDER_FILE_BYTE_LIMIT + 1)` and refuses the extra byte before hashing. Its metadata check still rejects an already oversized file before reading. A test-only, thread-local hook runs after that check and before reading, so a second handle can extend the checked three-byte file to 67108865 bytes in a fixed order. Both launch labels get the exact byte-limit reason. A second test replaces the checked path with a sparse file; another asserts the complete metadata, open, and read refusal strings for both labels. The existing sparse-file assertions remain, with exact-string assertions added.
+
+The repair used the same Cargo environment above and held the shared build lease through each build, with its existing file opened read-only. The first build attempt was stopped after 4.80 seconds to acquire that lease. The first completed focused run took 7.69 seconds: the three new tests passed, and the original sparse-file test stopped at its loopback bind because the sandbox denied it. With local binding allowed, the same four tests passed in 0.48 seconds. The tests start zero providers and build neither the probe nor wallet binaries.
+
+Regression plant: restore the old unbounded read while keeping the ordering hook and all test assertions. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_provider_file_hash_refuses_growth_after_inspection -- --exact`. The crate compiled, then exited 101 after 3.47 seconds at the assertion `the stand-in did the work: growth after inspection has the exact byte-limit reason` (planted line 16475; restored assertion at line 16488, message at line 16494). The result was `Ok(hash)` instead of the byte-limit error. The bounded code was restored byte for byte in the plant runner's cleanup.
+
+Old bytes (bounded candidate):
+
+```text
+    let bytes = fs::File::open(path)
+        .and_then(|file| {
+            let mut bytes = Vec::new();
+            file.take(PROVIDER_FILE_BYTE_LIMIT + 1)
+                .read_to_end(&mut bytes)?;
+            Ok(bytes)
+        })
+        .map_err(|err| {
+            format!(
+                "{name} start is refused: the {label} {} could not be read: {err}",
+                path.display()
+            )
+        })?;
+    if bytes.len() as u64 > PROVIDER_FILE_BYTE_LIMIT {
+        return Err(format!(
+            "{name} start is refused: the {label} {} exceeds its byte limit",
+            path.display()
+        ));
+    }
+```
+
+New bytes (temporary plant):
+
+```text
+    let bytes = fs::read(path).map_err(|err| {
+        format!(
+            "{name} start is refused: the {label} {} could not be read: {err}",
+            path.display()
+        )
+    })?;
+```
+
+After restoration, `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exited 0 in 0.25 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_provider_file_hash_` exited 0 in 1.91 seconds: four tests passed. The two Homes retained by the sandbox failure and the plant were removed after checking their file contents and open handles. Successful tests removed their own Homes. The supervisor owns the full-suite rerun and fresh review. This repair ran zero Git commands.
