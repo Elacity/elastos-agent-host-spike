@@ -661,8 +661,11 @@ impl StandIn {
     /// B1). The row's one walk and one signature check run again over the
     /// bytes on disk now, with the row's own signature and accepted list, so
     /// bytes changed or a signature that no longer verifies after admission
-    /// is refused with status 403 and the library's own text. A launch adds
-    /// one `Starting` instance and no grant.
+    /// is refused with status 403 and the library's own text. That check
+    /// compares the row's signature name with the bytes, so a changed bundle
+    /// is refused there with `Refusal::NameMismatch`, before any other
+    /// compare. The launch names the instance from the row's checked manifest
+    /// name. A launch adds one `Starting` instance and no grant.
     pub fn post_capsules(
         &mut self,
         caller: Caller<'_>,
@@ -671,17 +674,7 @@ impl StandIn {
         require_shell(caller)?;
         let cid = launch_cid(body)?;
         let row = self.admit_row(cid)?;
-        let fresh = check_bundle(&row.bundle, &row.sig, &row.accepted)?;
-        if fresh.cid() != row.cid {
-            return Err((
-                403,
-                format!(
-                    "admitted bundle is now named {}; it was admitted as {}",
-                    fresh.cid(),
-                    row.cid
-                ),
-            ));
-        }
+        check_bundle(&row.bundle, &row.sig, &row.accepted)?;
         let name = row.name.clone();
         let start = row.start.clone();
         let id = self.mint_id();
@@ -1364,6 +1357,24 @@ mod tests {
         other
     }
 
+    /// A second signed bundle with other manifest bytes and so another lab
+    /// CID. Its manifest `name` is `name` and its `role` stays the fixture's,
+    /// so the walk accepts it and a launch that reports one admitted name for
+    /// every launch is caught.
+    fn named_bundle(name: &str) -> Shared {
+        let bundle = Shared::new();
+        let manifest = bundle.path().join("capsule.json");
+        let text = fs::read_to_string(&manifest).expect("read capsule.json");
+        let name_key = format!("\"name\": \"{SHARED_NAME}\"");
+        assert!(
+            text.contains(&name_key) && text.contains("\"role\": \"app\""),
+            "the committed fixture manifest holds {name_key} and the app role"
+        );
+        let renamed = text.replace(&name_key, &format!("\"name\": \"{name}\""));
+        fs::write(&manifest, renamed).expect("rename the second bundle's manifest");
+        bundle
+    }
+
     fn write_agent_host(root: &Path) {
         for (path, bytes) in AGENT_HOST_FILES {
             let target = root.join(path);
@@ -1781,10 +1792,11 @@ mod tests {
 
     /// The manifest `name` of `AGENT_HOST_FILES`.
     const SHARED_NAME: &str = "agent-host";
-    /// Names no fixture manifest carries: the list entry keeps the admitted
-    /// manifest's own name, so those entries read the shared name instead.
-    const AGENT_A_NAME: &str = SHARED_NAME;
-    const AGENT_B_NAME: &str = SHARED_NAME;
+    /// The manifest names of the two agent fixtures, each signed by its own
+    /// fresh test publisher. The list entry keeps the admitted manifest's own
+    /// name, so these entries must read their own name, not a shared one.
+    const AGENT_A_NAME: &str = "agent-a";
+    const AGENT_B_NAME: &str = "agent-b";
 
     fn shell_list(standin: &StandIn) -> Value {
         standin
@@ -2520,8 +2532,13 @@ mod tests {
 
     #[test]
     fn standin_two_agent_components_stay_resident() {
-        let agent_a = Shared::new();
-        let agent_b = other_bundle();
+        let agent_a = named_bundle(AGENT_A_NAME);
+        let agent_b = named_bundle(AGENT_B_NAME);
+        assert_ne!(
+            agent_a.cid(),
+            agent_b.cid(),
+            "the two agent bundles have two lab CIDs"
+        );
         let mut standin = StandIn::new();
         admit_shared(&agent_a, &mut standin, Start::Ok);
         admit_shared(&agent_b, &mut standin, Start::Ok);
