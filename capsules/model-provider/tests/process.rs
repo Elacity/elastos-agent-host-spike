@@ -882,6 +882,20 @@ fn runtime_hosted_tool_and_reasoning_frames() -> Vec<u8> {
     answer
 }
 
+/// The Runtime's accepted answer for caller-supplied Chat Completions frames
+/// followed by `[DONE]`. The bytes use the same head, `push_runtime_hosted_stream_frame`
+/// and closing `0\r\n\r\n` as `runtime_hosted_stream_answer`.
+fn runtime_hosted_chat_frames_answer(payloads: &[String]) -> Vec<u8> {
+    let mut answer = runtime_hosted_stream_head();
+    for payload in payloads {
+        let frame = format!("data: {payload}\n\n");
+        push_runtime_hosted_stream_frame(&mut answer, frame.as_bytes());
+    }
+    push_runtime_hosted_stream_frame(&mut answer, b"data: [DONE]\n\n");
+    answer.extend_from_slice(b"0\r\n\r\n");
+    answer
+}
+
 /// The Runtime's answer when it cuts a hosted stream: the head, then one chunk
 /// that holds the first event, and the connection closes with no `0\r\n\r\n`
 /// and no usage event. The Runtime returns an error after the head when the
@@ -1615,6 +1629,30 @@ impl LocalRelayBackend {
         let mut recorded = vec![first];
         while let Ok(request) = self.requests.try_recv() {
             recorded.push(request);
+        }
+        recorded
+    }
+
+    /// Every request already recorded, including none. A refusal returns before
+    /// the relay, so this call's backend has no request to wait for.
+    fn take_requests(mut self) -> Vec<RecordedRequest> {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(accept) = self.accept.take() {
+            let _ = accept.join();
+        }
+        while let Ok((stream, _)) = self.listener.accept() {
+            serve_local_relay_request(stream, &self.sender);
+        }
+        let mut recorded = Vec::new();
+        let deadline = Instant::now() + Duration::from_millis(200);
+        loop {
+            match self.requests.try_recv() {
+                Ok(request) => recorded.push(request),
+                Err(_) if recorded.is_empty() && Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
         }
         recorded
     }
@@ -2820,8 +2858,20 @@ struct RelayedHostedTurn {
 
 /// The `runs_create` body every hosted text turn sends. A missing `grant_id`
 /// is refused before any send, so the grant id is non-empty. The stand-in
-/// decides whether a live grant exists for `request_id`.
+/// decides whether a live grant exists for `request_id`. The session is the
+/// fixture session.
 fn hosted_text_create_request(request_id: &str, grant_id: &str, prompt: &str) -> Value {
+    hosted_text_create_request_for_session(request_id, grant_id, HOSTED_FIXTURE_SESSION_ID, prompt)
+}
+
+/// The same body with the caller's session in the runtime binding. The
+/// fixture helper passes `HOSTED_FIXTURE_SESSION_ID`.
+fn hosted_text_create_request_for_session(
+    request_id: &str,
+    grant_id: &str,
+    session_id: &str,
+    prompt: &str,
+) -> Value {
     let input = json!({
         "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
         "prompt": prompt
@@ -2835,7 +2885,7 @@ fn hosted_text_create_request(request_id: &str, grant_id: &str, prompt: &str) ->
         "runtime_binding": {
             "schema": RUNTIME_CREATE_BINDING_SCHEMA,
             "principal_id": "person:local:test",
-            "session_id": HOSTED_FIXTURE_SESSION_ID,
+            "session_id": session_id,
             "capsule_id": "assistant",
             "grant_id": grant_id,
             "request_id": request_id,
@@ -2847,17 +2897,19 @@ fn hosted_text_create_request(request_id: &str, grant_id: &str, prompt: &str) ->
 }
 
 /// One hosted text run on an already started provider: `runs_create` with the
-/// binding's grant and request id, then the settled run. The provider only
-/// checks that `grant_id` is not empty; the stand-in decides whether a live
-/// grant exists for `request_id`, so the caller owns the grant.
+/// binding's grant, session and request id, then the settled run. The provider
+/// only checks that `grant_id` is not empty; the stand-in decides whether a
+/// live grant exists for `request_id`, so the caller owns the grant.
 fn run_hosted_text_turn(
     provider: &mut ProviderProcess,
     request_id: &str,
     grant_id: &str,
+    session_id: &str,
     prompt: &str,
     settle_deadline: Duration,
 ) -> Value {
-    let create_request = hosted_text_create_request(request_id, grant_id, prompt);
+    let create_request =
+        hosted_text_create_request_for_session(request_id, grant_id, session_id, prompt);
     let binding: RuntimeCreateBinding =
         serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
     let expected_run_id = model_run_id(&binding);
@@ -2926,6 +2978,7 @@ fn run_granted_hosted_turn_through_relay(
         &mut provider,
         &test_support::fixture_model_request_id(&format!("request:{label}")),
         "grant:test",
+        HOSTED_FIXTURE_SESSION_ID,
         prompt,
         settle_deadline,
     );
@@ -3371,51 +3424,22 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
         );
         return;
     }
-    let backend = LocalRelayBackend::bind();
     let grants = Arc::new(Mutex::new(StandIn::new()));
-    let root = test_support::temp_root_path("model-provider-process", "ra1-granted-turn");
-    std::fs::create_dir_all(&root).unwrap();
-    let root = std::fs::canonicalize(root).unwrap();
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let stand_in = HostedEffectStandIn::bind_granting(
-        "ra1-granted-turn",
-        backend.url(),
-        Arc::clone(&grants),
-        HOSTED_FIXTURE_SESSION_ID,
-    );
-    let init = hosted_effect_init(
-        &root,
-        &stand_in,
-        HOSTED_FIXTURE_MODEL,
-        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
-    );
-    let mut provider = ProviderProcess::start();
-    let started = provider.request(init);
-    assert_eq!(
-        started["status"], "ok",
-        "unexpected init response: {started}"
-    );
-
     // The shared stand-in's shell view keeps only live grants
     // (`lab/agent-conformance/standin-runtime/mod.rs:128-139`), so it starts
-    // empty.
+    // empty. `ra1_view` reads this same call.
     assert_eq!(
-        stand_in.ra1_view(),
+        shell_live_grant_view(&grants),
         json!({"scope": SHELL_LIVE_GRANT_SCOPE, "capabilities": []}),
         "the shared stand-in shell view must list no grant before one is seeded"
     );
 
     // Run A names a grant id, but no grant was seeded for its request id, so
     // the effect has no live entry to be reached through.
-    let request_a = test_support::fixture_model_request_id("request:ra1-denied");
-    let prompt = "a turn reached only through a live grant";
-    let settled_a = run_hosted_text_turn(
-        &mut provider,
-        &request_a,
-        "grant:ra1-denied",
-        prompt,
-        FIXTURE_EVENT_TIMEOUT,
-    );
+    let prompt_a = "a turn with no live grant";
+    let request_a = granted_model_turn_request_id(HOSTED_FIXTURE_SESSION_ID, prompt_a);
+    let denied = granted_model_turn(Arc::clone(&grants), HOSTED_FIXTURE_SESSION_ID, prompt_a);
+    let settled_a = denied.settled;
     assert_eq!(
         settled_a["data"]["status"],
         "failed",
@@ -3435,7 +3459,7 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
         run_status_and_error_code(&settled_a)
     );
     assert_eq!(
-        stand_in.refusal_reasons(),
+        denied.refusal_reasons,
         vec![format!("no live grant for request {request_a}")],
         "the stand-in must record why it refused run A"
     );
@@ -3444,7 +3468,8 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
     // stand-in's `seed_grant` is its lab seam
     // (`lab/agent-conformance/standin-runtime/mod.rs:104-124`); the values are
     // this test's fixture, and the shared stand-in decides liveness.
-    let request_b = test_support::fixture_model_request_id("request:ra1-granted");
+    let prompt_b = "a turn reached only through a live grant";
+    let request_b = granted_model_turn_request_id(HOSTED_FIXTURE_SESSION_ID, prompt_b);
     let resource = "model:fixture/text";
     let action = "text.generate";
     let duration = "once";
@@ -3468,7 +3493,7 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
         "granted_at": granted_at,
     });
     assert_eq!(
-        stand_in.ra1_view(),
+        shell_live_grant_view(&grants),
         json!({
             "scope": SHELL_LIVE_GRANT_SCOPE,
             "capabilities": [expected_entry.clone()],
@@ -3476,15 +3501,10 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
         "the shared stand-in shell view must list the one live grant with every field"
     );
 
-    // Run B carries the same input with a new request id, and the one live
-    // grant reaches the model.
-    let settled_b = run_hosted_text_turn(
-        &mut provider,
-        &request_b,
-        "grant:ra1-granted",
-        prompt,
-        FIXTURE_EVENT_TIMEOUT,
-    );
+    // Run B carries a new request id, and the one live grant reaches the model
+    // through `granted_model_turn`.
+    let granted = granted_model_turn(Arc::clone(&grants), HOSTED_FIXTURE_SESSION_ID, prompt_b);
+    let settled_b = granted.settled;
     assert_eq!(
         settled_b["data"]["status"],
         "completed",
@@ -3506,7 +3526,11 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
         "the granted run must report the backend's usage: {}",
         run_status_and_error_code(&settled_b)
     );
-    match wait_for_relay_outcome(&stand_in, &settled_b) {
+    match granted
+        .relay
+        .clone()
+        .expect("the granted turn records the backend answer")
+    {
         RelayOutcome::Answered { status: 200, .. } => {}
         RelayOutcome::Answered {
             status,
@@ -3523,7 +3547,7 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
     // The shared stand-in has no seam that spends a grant and this lane adds
     // none, so the entry stays listed after run B.
     assert_eq!(
-        stand_in.ra1_view(),
+        shell_live_grant_view(&grants),
         json!({
             "scope": SHELL_LIVE_GRANT_SCOPE,
             "capabilities": [expected_entry],
@@ -3532,7 +3556,11 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
     );
 
     // Only run B reached the model: the backend counted exactly one request.
-    let backend_requests = backend.observe();
+    assert!(
+        denied.backend_requests.is_empty(),
+        "only the granted run may reach the model; run A must send it nothing"
+    );
+    let backend_requests = granted.backend_requests;
     assert_eq!(
         backend_requests.len(),
         1,
@@ -3545,22 +3573,26 @@ fn a_model_turn_is_reached_only_through_an_ra1_grant() {
 
     // Both runs reach the stand-in, and each request carries its own binding's
     // request id.
-    let (connections, requests) = stand_in.observe();
+    let connections = denied.connections + granted.connections;
+    let requests_a = denied.hosted_requests;
+    let requests_b = granted.hosted_requests;
     assert_eq!(
         connections, 2,
         "each run must open one connection to the Runtime socket stand-in"
     );
-    assert_eq!(requests.len(), 2, "each run must send one hosted request");
     assert_eq!(
-        requests[0].value("x-elastos-request-id"),
+        requests_a.len() + requests_b.len(),
+        2,
+        "each run must send one hosted request"
+    );
+    assert_eq!(
+        requests_a[0].value("x-elastos-request-id"),
         Some(request_a.as_str())
     );
     assert_eq!(
-        requests[1].value("x-elastos-request-id"),
+        requests_b[0].value("x-elastos-request-id"),
         Some(request_b.as_str())
     );
-
-    provider.shutdown();
 }
 
 /// A hosted model turn is reached only through a live grant for the session the
@@ -3592,35 +3624,13 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
         );
         return;
     }
-    let backend = LocalRelayBackend::bind();
     let grants = Arc::new(Mutex::new(StandIn::new()));
-    let root = test_support::temp_root_path("model-provider-process", "ra1-other-session");
-    std::fs::create_dir_all(&root).unwrap();
-    let root = std::fs::canonicalize(root).unwrap();
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let stand_in = HostedEffectStandIn::bind_granting(
-        "ra1-other-session",
-        backend.url(),
-        Arc::clone(&grants),
-        HOSTED_FIXTURE_SESSION_ID,
-    );
-    let init = hosted_effect_init(
-        &root,
-        &stand_in,
-        HOSTED_FIXTURE_MODEL,
-        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
-    );
-    let mut provider = ProviderProcess::start();
-    let started = provider.request(init);
-    assert_eq!(
-        started["status"], "ok",
-        "unexpected init response: {started}"
-    );
 
     // The shell seeds one `Live` grant for run C's request id, and it belongs
     // to another session than the one the stand-in serves. The values are this
     // test's fixture, and the shared stand-in decides liveness.
-    let request_c = test_support::fixture_model_request_id("request:ra1-other-session");
+    let prompt_c = "a turn whose grant belongs to another session";
+    let request_c = granted_model_turn_request_id(HOSTED_FIXTURE_SESSION_ID, prompt_c);
     let other_session = "session:other";
     let resource = "model:fixture/text";
     let action = "text.generate";
@@ -3645,7 +3655,7 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
         "granted_at": granted_at,
     });
     assert_eq!(
-        stand_in.ra1_view(),
+        shell_live_grant_view(&grants),
         json!({
             "scope": SHELL_LIVE_GRANT_SCOPE,
             "capabilities": [expected_c],
@@ -3655,15 +3665,9 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
 
     // Run C carries a non-empty `grant_id` and its own request id, so the live
     // entry exists but is for another session: the stand-in refuses C before
-    // any backend call.
-    let prompt = "a turn whose grant belongs to another session";
-    let settled_c = run_hosted_text_turn(
-        &mut provider,
-        &request_c,
-        "grant:ra1-other-session",
-        prompt,
-        FIXTURE_EVENT_TIMEOUT,
-    );
+    // any backend call. The turn goes through `granted_model_turn`.
+    let refused = granted_model_turn(Arc::clone(&grants), HOSTED_FIXTURE_SESSION_ID, prompt_c);
+    let settled_c = refused.settled;
     assert_eq!(
         settled_c["data"]["status"],
         "failed",
@@ -3683,7 +3687,7 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
         run_status_and_error_code(&settled_c)
     );
     assert_eq!(
-        stand_in.refusal_reasons(),
+        refused.refusal_reasons,
         vec![format!(
             "wrong capsule: expected {other_session}, got {HOSTED_FIXTURE_SESSION_ID}"
         )],
@@ -3691,8 +3695,9 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
     );
 
     // Run D's live entry is for the session the stand-in serves, so D reaches
-    // the model.
-    let request_d = test_support::fixture_model_request_id("request:ra1-served-session");
+    // the model. Its request id is not run C's, so C's grant does not hide it.
+    let prompt_d = "a turn whose grant belongs to the served session";
+    let request_d = granted_model_turn_request_id(HOSTED_FIXTURE_SESSION_ID, prompt_d);
     grants.lock().unwrap().seed_grant(
         &request_d,
         HOSTED_FIXTURE_SESSION_ID,
@@ -3703,13 +3708,8 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
         Life::Live,
         false,
     );
-    let settled_d = run_hosted_text_turn(
-        &mut provider,
-        &request_d,
-        "grant:ra1-served-session",
-        prompt,
-        FIXTURE_EVENT_TIMEOUT,
-    );
+    let served = granted_model_turn(Arc::clone(&grants), HOSTED_FIXTURE_SESSION_ID, prompt_d);
+    let settled_d = served.settled;
     assert_eq!(
         settled_d["data"]["status"],
         "completed",
@@ -3722,7 +3722,11 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
         "the served-session run must carry the streamed text: {}",
         run_status_and_error_code(&settled_d)
     );
-    match wait_for_relay_outcome(&stand_in, &settled_d) {
+    match served
+        .relay
+        .clone()
+        .expect("the served-session turn records the backend answer")
+    {
         RelayOutcome::Answered { status: 200, .. } => {}
         RelayOutcome::Answered {
             status,
@@ -3738,7 +3742,11 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
 
     // Only run D reached the model: the backend counted exactly one request,
     // and it is the model endpoint the relay posts to.
-    let backend_requests = backend.observe();
+    assert!(
+        refused.backend_requests.is_empty(),
+        "only the served-session run may reach the model; the other-session run must send it nothing"
+    );
+    let backend_requests = served.backend_requests;
     assert_eq!(
         backend_requests.len(),
         1,
@@ -3748,8 +3756,331 @@ fn an_ra1_grant_for_another_session_does_not_reach_the_model() {
         backend_requests[0].request_line, "POST /v1/chat/completions HTTP/1.1",
         "the one request must be run D's model turn"
     );
+}
 
+/// The provider journal schema (`RUN_JOURNAL_SCHEMA` in `src/journal.rs`).
+const PROVIDER_RUN_JOURNAL_SCHEMA: &str = "elastos.model.provider-run-journal/v1";
+
+const GRANTED_MODEL_TURN_GRANT_ID: &str = "grant:granted-model-turn";
+
+static GRANTED_MODEL_TURN_LABEL: AtomicUsize = AtomicUsize::new(0);
+
+/// The request id `granted_model_turn` sends for this session and prompt.
+/// A caller seeds a grant for this id before the call.
+fn granted_model_turn_request_id(session_id: &str, prompt: &str) -> String {
+    test_support::fixture_model_request_id(&format!(
+        "request:granted-model-turn:{session_id}:{prompt}"
+    ))
+}
+
+fn granted_model_turn_binding(session_id: &str, prompt: &str) -> RuntimeCreateBinding {
+    let request = hosted_text_create_request_for_session(
+        &granted_model_turn_request_id(session_id, prompt),
+        GRANTED_MODEL_TURN_GRANT_ID,
+        session_id,
+        prompt,
+    );
+    serde_json::from_value(request["runtime_binding"].clone()).unwrap()
+}
+
+fn seed_live_model_grant(grants: &Arc<Mutex<StandIn>>, request_id: &str, session_id: &str) {
+    grants.lock().unwrap().seed_grant(
+        request_id,
+        session_id,
+        "model:fixture/text",
+        "text.generate",
+        "once",
+        1_790_000_000,
+        Life::Live,
+        false,
+    );
+}
+
+/// The one run file under `<fixture-root>/journal/runs`. `hosted_effect_init`
+/// sets the journal root to `<fixture-root>/journal`, and the provider opens
+/// `runs` under that root (`src/journal.rs`). This reads the file the provider
+/// wrote. It does not hash the run id again.
+fn read_provider_run_journal(root: &Path) -> Value {
+    let runs = root.join("journal").join("runs");
+    let entries = std::fs::read_dir(&runs)
+        .unwrap_or_else(|error| panic!("the provider journal is at {}: {error}", runs.display()));
+    let mut paths = Vec::new();
+    for entry in entries {
+        let path = entry.expect("a provider journal entry").path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let Some(rest) = name.strip_prefix("sha256-") else {
+            continue;
+        };
+        let Some(hex) = rest.strip_suffix(".json") else {
+            continue;
+        };
+        if !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            paths.push(path);
+        }
+    }
+    assert_eq!(
+        paths.len(),
+        1,
+        "the provider writes one run journal under {}",
+        runs.display()
+    );
+    let bytes = std::fs::read(&paths[0]).expect("read the provider run journal");
+    serde_json::from_slice(&bytes).expect("the provider run journal is JSON")
+}
+
+/// One granted model turn: the recorded answer, the contract run id, and the
+/// provider journal when the turn completed. A refusal carries the stand-in's
+/// reason and no loopback request.
+struct GrantedModelTurn {
+    answer: Option<String>,
+    effect_id: String,
+    journal: Option<Value>,
+    binding: RuntimeCreateBinding,
+    hosted_run_id: Option<String>,
+    backend_requests: Vec<RecordedRequest>,
+    refusal_reasons: Vec<String>,
+    settled: Value,
+    relay: Option<RelayOutcome>,
+    connections: usize,
+    hosted_requests: Vec<RecordedRequest>,
+}
+
+/// One lab call on the Request flow in `docs/AGENT_ARCHITECTURE.md`
+/// ("Request flow"): the model request, then the same audit path as a human
+/// action. The turn reaches a recorded answer only through the `Granted` arm
+/// of `serve_hosted_effect`, which asks the shared stand-in before it relays.
+/// A granted session returns the recorded answer `ready`, the contract run id,
+/// and the provider journal `elastos.model.provider-run-journal/v1` read from
+/// `<fixture-root>/journal/runs`. A missing grant returns `no live grant for
+/// request <id>`. Agent A's grant on agent B's session returns `wrong capsule:
+/// expected <grant session>, got <served session>`. Each refusal leaves this
+/// call's loopback backend with no request. useful-task calls this read only.
+/// This task adds no caller under `lab/useful-task/`.
+///
+/// `session_id` is the session `bind_granting` serves and the session the
+/// request binding carries.
+fn granted_model_turn(
+    grants: Arc<Mutex<StandIn>>,
+    session_id: &str,
+    prompt: &str,
+) -> GrantedModelTurn {
+    let request_id = granted_model_turn_request_id(session_id, prompt);
+    let binding = granted_model_turn_binding(session_id, prompt);
+    let label = format!(
+        "gmt-{}",
+        GRANTED_MODEL_TURN_LABEL.fetch_add(1, Ordering::Relaxed)
+    );
+    let root = test_support::temp_root_path("model-provider-process", &label);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let backend = LocalRelayBackend::bind();
+    let stand_in =
+        HostedEffectStandIn::bind_granting(&label, backend.url(), Arc::clone(&grants), session_id);
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+    let settled = run_hosted_text_turn(
+        &mut provider,
+        &request_id,
+        GRANTED_MODEL_TURN_GRANT_ID,
+        session_id,
+        prompt,
+        FIXTURE_EVENT_TIMEOUT,
+    );
+    let completed = settled["data"]["status"] == "completed";
+    let relay = if completed {
+        Some(wait_for_relay_outcome(&stand_in, &settled))
+    } else {
+        None
+    };
+    let refusal_reasons = stand_in.refusal_reasons();
+    assert_eq!(
+        stand_in.ra1_view(),
+        shell_live_grant_view(&grants),
+        "the granting stand-in reads the shared stand-in's shell view"
+    );
+    let (connections, hosted_requests) = stand_in.observe();
+    let backend_requests = if completed {
+        backend.observe()
+    } else {
+        backend.take_requests()
+    };
+    let answer = settled["data"]["terminal"]["output"]["text"]
+        .as_str()
+        .map(str::to_string);
+    let effect_id = settled["data"]["run_id"]
+        .as_str()
+        .expect("runs_create returns the run id")
+        .to_string();
+    let hosted_run_id = hosted_requests
+        .first()
+        .and_then(|request| request.value("x-elastos-run-id"))
+        .map(str::to_string);
     provider.shutdown();
+    let journal = completed.then(|| read_provider_run_journal(&root));
+    GrantedModelTurn {
+        answer,
+        effect_id,
+        journal,
+        binding,
+        hosted_run_id,
+        backend_requests,
+        refusal_reasons,
+        settled,
+        relay,
+        connections,
+        hosted_requests,
+    }
+}
+
+fn assert_granted_model_turn(turn: &GrantedModelTurn, session_id: &str) {
+    assert_eq!(
+        turn.answer.as_deref(),
+        Some("ready"),
+        "a granted session returns the recorded answer"
+    );
+    assert_eq!(
+        turn.effect_id,
+        model_run_id(&turn.binding),
+        "the effect id is the contract run id"
+    );
+    assert_eq!(
+        turn.hosted_requests.len(),
+        1,
+        "the granted call records one hosted request"
+    );
+    assert_eq!(
+        turn.hosted_run_id.as_deref(),
+        Some(turn.effect_id.as_str()),
+        "the effect id is the x-elastos-run-id on the one recorded hosted request"
+    );
+    assert_eq!(
+        turn.backend_requests.len(),
+        1,
+        "the loopback backend records one request for the granted call"
+    );
+    let journal = turn
+        .journal
+        .as_ref()
+        .expect("a granted session returns the provider journal");
+    assert_eq!(
+        journal["schema"], PROVIDER_RUN_JOURNAL_SCHEMA,
+        "the journal schema is elastos.model.provider-run-journal/v1"
+    );
+    assert_eq!(
+        journal["run_id"], turn.effect_id,
+        "the journal run id is the effect id"
+    );
+    assert_eq!(
+        journal["runtime_binding"]["session_id"], session_id,
+        "the journal records the supplied session"
+    );
+    assert_eq!(
+        journal["output"]["text"], "ready",
+        "the journal output text is the recorded answer"
+    );
+    assert_eq!(
+        turn.binding.session_id, session_id,
+        "the request binding carries the supplied session"
+    );
+}
+
+/// A granted turn returns the recorded answer, the contract run id and the
+/// provider journal. The same call returns the existing refusal reason, and
+/// no loopback request, when the grant is missing or belongs to another
+/// session. A granted session other than `session:test` is carried in
+/// `bind_granting` and in the request binding. useful-task calls
+/// `granted_model_turn` read only.
+///
+/// This is Runtime-socket lab evidence. It books no M1 check.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn granted_model_turn_returns_the_answer_effect_and_audit() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider granted model turn: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let session_id = HOSTED_FIXTURE_SESSION_ID;
+    let prompt = "a granted turn returns the answer, the effect id and the journal";
+    let grants = Arc::new(Mutex::new(StandIn::new()));
+    seed_live_model_grant(
+        &grants,
+        &granted_model_turn_request_id(session_id, prompt),
+        session_id,
+    );
+    let granted = granted_model_turn(Arc::clone(&grants), session_id, prompt);
+    assert_granted_model_turn(&granted, session_id);
+
+    let missing_prompt = "a turn with no live grant";
+    let missing = granted_model_turn(
+        Arc::new(Mutex::new(StandIn::new())),
+        HOSTED_FIXTURE_SESSION_ID,
+        missing_prompt,
+    );
+    let missing_id = granted_model_turn_request_id(HOSTED_FIXTURE_SESSION_ID, missing_prompt);
+    assert_eq!(
+        missing.refusal_reasons,
+        vec![format!("no live grant for request {missing_id}")],
+        "a missing grant returns the stand-in's named reason"
+    );
+    assert!(
+        missing.backend_requests.is_empty(),
+        "a missing grant leaves the loopback backend with no request"
+    );
+
+    let other_prompt = "a grant for another session";
+    let other_session = "session:other";
+    let other_grants = Arc::new(Mutex::new(StandIn::new()));
+    seed_live_model_grant(
+        &other_grants,
+        &granted_model_turn_request_id(HOSTED_FIXTURE_SESSION_ID, other_prompt),
+        other_session,
+    );
+    let other = granted_model_turn(
+        Arc::clone(&other_grants),
+        HOSTED_FIXTURE_SESSION_ID,
+        other_prompt,
+    );
+    assert_eq!(
+        other.refusal_reasons,
+        vec![format!(
+            "wrong capsule: expected {other_session}, got {HOSTED_FIXTURE_SESSION_ID}"
+        )],
+        "another session's grant returns the stand-in's named reason"
+    );
+    assert!(
+        other.backend_requests.is_empty(),
+        "another session's grant leaves the loopback backend with no request"
+    );
+
+    let supplied = "session:lab-granted";
+    let supplied_prompt = "a granted turn for a non-default session";
+    let supplied_grants = Arc::new(Mutex::new(StandIn::new()));
+    seed_live_model_grant(
+        &supplied_grants,
+        &granted_model_turn_request_id(supplied, supplied_prompt),
+        supplied,
+    );
+    let supplied_turn = granted_model_turn(supplied_grants, supplied, supplied_prompt);
+    assert_granted_model_turn(&supplied_turn, supplied);
 }
 
 /// The relay records a provider socket that closed mid-stream as unreachable,
@@ -3931,4 +4262,1000 @@ fn opt_in_real_deepseek_turn_through_the_runtime_socket_completes_with_text_and_
     );
 
     provider.shutdown();
+}
+
+/// The run limit for `a_hosted_run_held_past_its_time_limit_fails_as_a_timeout`.
+/// The other hosted tests keep `HOSTED_FIXTURE_RUNTIME_MS_LIMIT`.
+const HOSTED_TIMEOUT_RUNTIME_MS_LIMIT: u64 = 2_000;
+
+/// How long past that limit `wait_for_run_terminal_within` may wait. A client
+/// that no longer stops at the limit stays open through this wait, so the
+/// wait's `model run did not settle` is what a dropped timeout must hit.
+const HOSTED_TIMEOUT_SETTLE_SLACK: Duration = Duration::from_secs(10);
+
+/// A hosted run whose answer never comes ends on its own time limit, as one
+/// `failed` terminal, and the offer's one run slot is then free.
+///
+/// The rule has three parts. `remaining_run_timeout`
+/// (`src/adapters.rs:132-141`) gives the hosted client its timeout
+/// (`src/adapters.rs:1894-1899`). The worker returns `true` on a
+/// `BackendTimeout` fault (`src/adapters.rs:1486-1490`). The coordinator's
+/// `Exited { timed_out: true }` arm (`src/execution.rs:399-403`) calls
+/// `settle_local_text_run_timeout` (`src/state.rs:832-844`), which uses
+/// `transition_timeout` (`src/state.rs:1419-1432`) and records `failed` with
+/// class and code `backend_timeout`. While that worker is alive, a read does
+/// not settle the run (`src/state.rs:1006-1009`), so only the worker's own
+/// timeout ends it.
+///
+/// The design lines this pins are "prompt and event privacy, bounded
+/// capacity, queues, tokens, time, and usage;" (`docs/MODEL_PROVIDER.md:536`)
+/// and "each request has one terminal state;" (`docs/MODEL_PROVIDER.md:556`).
+///
+/// The stand-in is `HostedEffectStandIn::bind`, and `hold_answer` keeps its
+/// refusal back. The offer limit is `HOSTED_TIMEOUT_RUNTIME_MS_LIMIT`. The
+/// create body is `hosted_text_create_request`. Off macOS the provider
+/// refuses every hosted run before any socket, so the test prints one `SKIP`
+/// line and returns.
+#[test]
+fn a_hosted_run_held_past_its_time_limit_fails_as_a_timeout() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted run held past its time limit: off macOS the \
+             provider refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-run-timeout");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind("hosted-run-timeout");
+    stand_in.hold_answer();
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_TIMEOUT_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let create_a = hosted_text_create_request(
+        &test_support::fixture_model_request_id("request:hosted-run-timeout-a"),
+        "grant:test",
+        "a hosted run held past its time limit",
+    );
+    let mut create_c = create_a.clone();
+    create_c["runtime_binding"]["request_id"] = json!(test_support::fixture_model_request_id(
+        "request:hosted-run-timeout-c"
+    ));
+    let binding_a: RuntimeCreateBinding =
+        serde_json::from_value(create_a["runtime_binding"].clone()).unwrap();
+    let binding_c: RuntimeCreateBinding =
+        serde_json::from_value(create_c["runtime_binding"].clone()).unwrap();
+    let run_a = model_run_id(&binding_a);
+    let run_c = model_run_id(&binding_c);
+    assert_ne!(run_a, run_c, "each request id must name its own run");
+
+    let opened_at = Instant::now();
+    let created_a = provider.request(create_a.clone());
+    assert_eq!(
+        created_a["status"], "ok",
+        "unexpected create response: {created_a}"
+    );
+    assert_eq!(
+        created_a["data"]["run_id"], run_a,
+        "runs_create must return the contract run id"
+    );
+    assert!(
+        matches!(
+            created_a["data"]["status"].as_str(),
+            Some("prepared" | "running")
+        ),
+        "the held hosted run must report an open status: {created_a}"
+    );
+    stand_in.wait_for_connections(1);
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "the held hosted run must open exactly one connection to the Runtime socket"
+    );
+
+    let settle_budget =
+        Duration::from_millis(HOSTED_TIMEOUT_RUNTIME_MS_LIMIT) + HOSTED_TIMEOUT_SETTLE_SLACK;
+    let settled_a = wait_for_run_terminal_within(
+        &mut provider,
+        &run_a,
+        &access_binding(&create_a),
+        settle_budget,
+    );
+    let elapsed = opened_at.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(HOSTED_TIMEOUT_RUNTIME_MS_LIMIT - 100),
+        "the run limit must be what ended the run: elapsed {elapsed:?}, limit {HOSTED_TIMEOUT_RUNTIME_MS_LIMIT} ms"
+    );
+    assert_eq!(
+        settled_a["data"]["status"], "failed",
+        "a run held past its time limit must fail: {settled_a}"
+    );
+    assert_eq!(
+        settled_a["data"]["terminal"]["error"]["class"], "backend_timeout",
+        "a time limit must record class backend_timeout: {settled_a}"
+    );
+    assert_eq!(
+        settled_a["data"]["terminal"]["error"]["code"], "backend_timeout",
+        "a time limit must record code backend_timeout: {settled_a}"
+    );
+    assert!(
+        settled_a["data"]["terminal"]["output"].is_null(),
+        "a timed-out run must carry no output: {settled_a}"
+    );
+    // `transition_timeout` passes no report (`src/state.rs:1421-1431`). A
+    // hosted terminal with no report stores `BackendReport::unknown()`
+    // (`src/state.rs:1354`). `unknown()` sets `usage` to `BackendFact::Unknown`
+    // with no reason and no count (`src/contract.rs:212-218`).
+    assert_eq!(
+        settled_a["data"]["terminal"]["backend_report"],
+        json!({
+            "schema": BACKEND_REPORT_SCHEMA,
+            "resolved_model": {"status": "unknown"},
+            "usage": {"status": "unknown"},
+            "cost": {"status": "unknown"},
+        }),
+        "a timed-out hosted run must record resolved_model, usage and cost as unknown, with no count: {settled_a}"
+    );
+
+    let events = read_hosted_run_events(&mut provider, &run_a, &access_binding(&create_a));
+    assert!(
+        events.iter().all(|event| event["kind"] != "text_delta"),
+        "a timed-out run must carry no text deltas: {events:?}"
+    );
+
+    let again = provider.request(json!({
+        "op": "runs_get",
+        "run_id": run_a,
+        "runtime_binding": access_binding(&create_a)
+    }));
+    assert_eq!(again["status"], "ok", "unexpected run response: {again}");
+    assert_eq!(
+        again["data"], settled_a["data"],
+        "a second read must return the same terminal: {again}"
+    );
+
+    stand_in.release_answer();
+    let created_c = provider.request(create_c.clone());
+    assert_eq!(
+        created_c["status"], "ok",
+        "unexpected create response: {created_c}"
+    );
+    assert_eq!(
+        created_c["data"]["run_id"], run_c,
+        "runs_create must return the contract run id"
+    );
+    assert_ne!(
+        created_c["data"]["terminal"]["error"]["code"], "model_busy",
+        "the timed-out run must free the one slot: {created_c}"
+    );
+    let settled_c = wait_for_run_terminal(&mut provider, &run_c, &access_binding(&create_c));
+    assert_eq!(
+        settled_c["data"]["terminal"]["error"]["code"], "hosted_effect_refused",
+        "the next run must be admitted and reach the Runtime socket: {settled_c}"
+    );
+    stand_in.wait_for_connections(2);
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 2,
+        "the timed-out run and the next run must open one connection each"
+    );
+    assert_eq!(
+        requests.len(),
+        2,
+        "the timed-out run must send one request and no retry"
+    );
+    for recorded in &requests {
+        assert_eq!(recorded.request_line, "POST /v1/hosted-effect HTTP/1.1");
+        assert_eq!(
+            recorded.value("authorization"),
+            None,
+            "a hosted run must carry no bearer key"
+        );
+    }
+
+    provider.shutdown();
+}
+
+/// Which three-frame fact sequence the hosted backend-fact journey sends.
+enum HostedBackendFactCase {
+    Repeated,
+    Conflict,
+    Malformed,
+}
+
+/// One Chat Completions frame. `text` is the delta; `None` is an empty delta.
+fn hosted_chat_fact_payload(model: Value, usage: &Value, text: Option<&str>) -> String {
+    let delta = match text {
+        Some(text) => json!({ "content": text }),
+        None => json!({}),
+    };
+    serde_json::to_string(&json!({
+        "model": model,
+        "choices": [{ "delta": delta }],
+        "usage": usage,
+    }))
+    .expect("a hosted fact frame is json")
+}
+
+fn hosted_fact_frames(model: Value, usage: &Value) -> [String; 3] {
+    [
+        hosted_chat_fact_payload(model.clone(), usage, Some("ready")),
+        hosted_chat_fact_payload(model.clone(), usage, Some(" set")),
+        hosted_chat_fact_payload(model, usage, None),
+    ]
+}
+
+/// The report a completed hosted run stores when every fact is unknown.
+/// Each fact is the bare `{"status":"unknown"}` object: usage has no reason
+/// and no count (`src/contract.rs`, `BackendFact::Unknown`).
+fn unknown_hosted_backend_report() -> Value {
+    json!({
+        "schema": BACKEND_REPORT_SCHEMA,
+        "resolved_model": {"status": "unknown"},
+        "usage": {"status": "unknown"},
+        "cost": {"status": "unknown"},
+    })
+}
+
+/// Fact set A, written once. Frames that repeat A share this object.
+fn hosted_fact_set_a() -> (Value, Value) {
+    (
+        json!("resolved-a"),
+        json!({
+            "prompt_tokens": 7,
+            "completion_tokens": 1,
+            "total_tokens": 8,
+            "cost": 0.1,
+            "cost_unit": "backend-credit",
+        }),
+    )
+}
+
+/// A hosted run's backend facts stay as `CapturedBackendFact::observe`
+/// recorded them (`src/adapters.rs`) through completion and a restart on the
+/// same journal. The design sections are "Selection policy" and "Request
+/// identity and session facts" in `docs/MODEL_PROVIDER.md`: the provider
+/// records the resolved model, usage and cost the backend reports, and a
+/// conflicting or malformed fact stays unknown through later frames.
+/// `HostedBackendReport::observe_chat_completions` feeds that collector, and
+/// `finish` reports it.
+///
+/// The run status is `completed`. The terminal event kind is `output`
+/// (`src/state.rs`, `synthesize_terminal_event`). The answer text is
+/// `ready set` for every fact sequence.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+fn hosted_backend_facts_through_completion_and_restart(case: HostedBackendFactCase) {
+    let (model_a, usage_a) = hosted_fact_set_a();
+    let (label, payloads, expected_report) = match case {
+        HostedBackendFactCase::Repeated => (
+            "hosted-facts-repeated",
+            hosted_fact_frames(model_a, &usage_a).to_vec(),
+            json!({
+                "schema": BACKEND_REPORT_SCHEMA,
+                "resolved_model": {"status": "reported", "value": "resolved-a"},
+                "usage": {
+                    "status": "reported",
+                    "value": {
+                        "input_tokens": 7,
+                        "output_tokens": 1,
+                        "total_tokens": 8,
+                    },
+                },
+                "cost": {
+                    "status": "reported",
+                    "value": {"value": "0.1", "unit": "backend-credit"},
+                },
+            }),
+        ),
+        HostedBackendFactCase::Conflict => {
+            let usage_b = json!({
+                "prompt_tokens": 8,
+                "completion_tokens": 1,
+                "total_tokens": 9,
+                "cost": 0.2,
+                "cost_unit": "backend-credit",
+            });
+            (
+                "hosted-facts-conflict",
+                vec![
+                    hosted_chat_fact_payload(model_a.clone(), &usage_a, Some("ready")),
+                    hosted_chat_fact_payload(json!("resolved-b"), &usage_b, Some(" set")),
+                    hosted_chat_fact_payload(model_a, &usage_a, None),
+                ],
+                unknown_hosted_backend_report(),
+            )
+        }
+        HostedBackendFactCase::Malformed => {
+            let usage_malformed = json!({
+                "prompt_tokens": "invalid",
+                "completion_tokens": 1,
+                "total_tokens": 8,
+                "cost": -0.1,
+                "cost_unit": "backend-credit",
+            });
+            (
+                "hosted-facts-malformed",
+                vec![
+                    hosted_chat_fact_payload(model_a.clone(), &usage_a, Some("ready")),
+                    hosted_chat_fact_payload(json!(17), &usage_malformed, Some(" set")),
+                    hosted_chat_fact_payload(model_a, &usage_a, None),
+                ],
+                unknown_hosted_backend_report(),
+            )
+        }
+    };
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted backend facts ({label}): off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+
+    let root = test_support::temp_root_path("model-provider-process", label);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind_streaming_frames(
+        label,
+        runtime_hosted_chat_frames_answer(&payloads),
+    );
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init.clone());
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let create_request = hosted_text_create_request(
+        &test_support::fixture_model_request_id(&format!("request:{label}")),
+        "grant:test",
+        "hosted backend facts",
+    );
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    assert_eq!(
+        create["data"]["run_id"], expected_run_id,
+        "runs_create must return the contract run id"
+    );
+
+    let access = access_binding(&create_request);
+    let settled = wait_for_run_terminal_within(
+        &mut provider,
+        &expected_run_id,
+        &access,
+        FIXTURE_EVENT_TIMEOUT,
+    );
+    assert_eq!(
+        settled["data"]["status"], "completed",
+        "the hosted fact run must complete: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["output"],
+        json!({"schema": RUN_OUTPUT_TEXT_SCHEMA, "text": "ready set"}),
+        "the answer text stays ready set: {settled}"
+    );
+    assert!(
+        settled["data"]["terminal"].get("error").is_none(),
+        "a completed fact run has no error: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["backend_report"], expected_report,
+        "the backend report must stay the collector's record through completion: {settled}"
+    );
+
+    let events = read_hosted_run_events(&mut provider, &expected_run_id, &access);
+    let mut joined = String::new();
+    for event in &events {
+        if event["kind"] == "text_delta" {
+            joined.push_str(event["data"]["text"].as_str().unwrap_or(""));
+        }
+    }
+    assert_eq!(
+        joined, "ready set",
+        "joined text deltas must be exactly the answer: {events:?}"
+    );
+    let terminal_event = events.last().expect("the run keeps a terminal event");
+    assert_eq!(
+        terminal_event["kind"], "output",
+        "the terminal event kind is output: {terminal_event}"
+    );
+    assert_eq!(
+        terminal_event["backend_report"], settled["data"]["terminal"]["backend_report"],
+        "the terminal event carries the same backend report: {terminal_event}"
+    );
+
+    let saved_terminal = settled["data"]["terminal"].clone();
+    let saved_events = events;
+    provider.shutdown();
+
+    let mut provider = ProviderProcess::start();
+    let restarted = provider.request(init);
+    assert_eq!(
+        restarted["status"], "ok",
+        "unexpected restart init response: {restarted}"
+    );
+    let replayed = wait_for_run_terminal_within(
+        &mut provider,
+        &expected_run_id,
+        &access,
+        FIXTURE_EVENT_TIMEOUT,
+    );
+    assert_eq!(
+        replayed["data"]["status"], "completed",
+        "the restarted provider must still show the completed run: {replayed}"
+    );
+    assert_eq!(
+        replayed["data"]["terminal"], saved_terminal,
+        "the restarted provider must replay the same terminal: {replayed}"
+    );
+    let replayed_events = read_hosted_run_events(&mut provider, &expected_run_id, &access);
+    assert_eq!(
+        replayed_events, saved_events,
+        "the restarted provider must replay the same event sequence"
+    );
+    provider.shutdown();
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "the journey must open exactly one connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "the journey must send exactly one request"
+    );
+    assert_eq!(requests[0].request_line, "POST /v1/hosted-effect HTTP/1.1");
+    assert_eq!(
+        requests[0].value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
+    );
+}
+
+#[test]
+fn hosted_backend_facts_repeated_values_stay_reported_after_restart() {
+    hosted_backend_facts_through_completion_and_restart(HostedBackendFactCase::Repeated);
+}
+
+#[test]
+fn hosted_backend_facts_conflicts_stay_unknown_after_restart() {
+    hosted_backend_facts_through_completion_and_restart(HostedBackendFactCase::Conflict);
+}
+
+#[test]
+fn hosted_backend_facts_malformed_values_stay_unknown_after_restart() {
+    hosted_backend_facts_through_completion_and_restart(HostedBackendFactCase::Malformed);
+}
+
+/// What an accepted retry of one hosted request must return.
+#[derive(Clone, Copy)]
+enum HostedIdentityReplay<'a> {
+    /// The answer is still held: the run is `prepared` or `running`.
+    Open,
+    /// The run has completed: the retry returns this saved `data`.
+    Saved(&'a Value),
+}
+
+/// The prompt the identity journey sends once. Conflict rows use another prompt.
+const HOSTED_IDENTITY_PROMPT: &str = "hosted request identity";
+
+/// The refusal `handle_runs_create` returns when a retained run's fingerprint
+/// differs (`src/state.rs`).
+const HOSTED_REQUEST_CONFLICT_MESSAGE: &str = "request_id conflicts with an existing model run";
+
+/// Reported model, usage and cost for 073's fact set A. The frames are
+/// `hosted_fact_frames` of `hosted_fact_set_a`, so every fact stays `reported`.
+fn reported_hosted_identity_facts() -> Value {
+    json!({
+        "schema": BACKEND_REPORT_SCHEMA,
+        "resolved_model": {"status": "reported", "value": "resolved-a"},
+        "usage": {
+            "status": "reported",
+            "value": {
+                "input_tokens": 7,
+                "output_tokens": 1,
+                "total_tokens": 8,
+            },
+        },
+        "cost": {
+            "status": "reported",
+            "value": {"value": "0.1", "unit": "backend-credit"},
+        },
+    })
+}
+
+fn hosted_request_with_audit(
+    request: &Value,
+    session_id: Option<&str>,
+    grant_id: Option<&str>,
+) -> Value {
+    let mut request = request.clone();
+    if let Some(session_id) = session_id {
+        request["runtime_binding"]["session_id"] = json!(session_id);
+    }
+    if let Some(grant_id) = grant_id {
+        request["runtime_binding"]["grant_id"] = json!(grant_id);
+    }
+    request
+}
+
+fn hosted_request_with_prompt(request: &Value, prompt: &str) -> Value {
+    let mut request = request.clone();
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": prompt
+    });
+    request["input"] = input.clone();
+    request["runtime_binding"]["input_hash"] = json!(model_input_hash(&input).unwrap());
+    request
+}
+
+fn hosted_request_with_field(request: &Value, field: &str, value: &str) -> Value {
+    let mut request = request.clone();
+    request[field] = json!(value);
+    request["runtime_binding"][field] = json!(value);
+    request
+}
+
+fn hosted_identity_rotations(original: &Value) -> Vec<(&'static str, Value)> {
+    vec![
+        ("unchanged binding", original.clone()),
+        (
+            "changed session only",
+            hosted_request_with_audit(original, Some("session:rotated"), None),
+        ),
+        (
+            "changed grant only",
+            hosted_request_with_audit(original, None, Some("grant:rotated")),
+        ),
+        (
+            "changed session and grant",
+            hosted_request_with_audit(original, Some("session:rotated"), Some("grant:rotated")),
+        ),
+    ]
+}
+
+fn hosted_identity_conflicts(original: &Value) -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "changed prompt",
+            hosted_request_with_prompt(original, "hosted request identity changed"),
+        ),
+        (
+            "changed offer id",
+            hosted_request_with_field(original, "offer_id", "other-offer"),
+        ),
+        (
+            "changed operation",
+            hosted_request_with_field(original, "operation", "image.generate"),
+        ),
+    ]
+}
+
+/// Sends one retry only after `RuntimeCreateBinding::validate` accepts it for
+/// its own request. Principal, capsule and request id stay the original values.
+fn send_hosted_identity_retry(
+    provider: &mut ProviderProcess,
+    stage: &str,
+    row: &str,
+    original: &Value,
+    request: &Value,
+) -> Value {
+    for field in ["principal_id", "capsule_id", "request_id"] {
+        assert_eq!(
+            request["runtime_binding"][field], original["runtime_binding"][field],
+            "{stage} / {row}: {field} stays the original value"
+        );
+    }
+    let binding: RuntimeCreateBinding = serde_json::from_value(request["runtime_binding"].clone())
+        .unwrap_or_else(|error| {
+            panic!("{stage} / {row}: the runtime binding is not JSON: {error}")
+        });
+    let offer_id = request["offer_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{stage} / {row}: offer_id must be a string"));
+    let operation = request["operation"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{stage} / {row}: operation must be a string"));
+    binding
+        .validate(offer_id, operation, &request["input"])
+        .unwrap_or_else(|error| {
+            panic!(
+                "{stage} / {row}: RuntimeCreateBinding::validate must accept this \
+                 request before the provider sees it: {error}"
+            )
+        });
+    provider.request(request.clone())
+}
+
+fn assert_hosted_identity_retry(
+    stage: &str,
+    row: &str,
+    response: &Value,
+    run_id: &str,
+    expected: HostedIdentityReplay<'_>,
+) {
+    assert_eq!(
+        response["status"], "ok",
+        "{stage} / {row}: the retained request must be accepted: {response}"
+    );
+    assert_eq!(
+        response["data"]["run_id"], run_id,
+        "{stage} / {row}: the retained request must return the original run id: {response}"
+    );
+    match expected {
+        HostedIdentityReplay::Open => {
+            assert!(
+                response["data"]["terminal"].is_null(),
+                "{stage} / {row}: the run must stay open: {response}"
+            );
+            assert!(
+                matches!(
+                    response["data"]["status"].as_str(),
+                    Some("prepared" | "running")
+                ),
+                "{stage} / {row}: the run must report an open status: {response}"
+            );
+        }
+        HostedIdentityReplay::Saved(data) => {
+            assert_eq!(
+                &response["data"], data,
+                "{stage} / {row}: the retained request must return the saved run data: {response}"
+            );
+        }
+    }
+}
+
+/// One refusal check for every conflict row. The stage and the row name the failure.
+fn assert_hosted_request_conflict(stage: &str, row: &str, response: &Value) {
+    assert_eq!(
+        response,
+        &json!({
+            "status": "error",
+            "code": "invalid_request",
+            "message": HOSTED_REQUEST_CONFLICT_MESSAGE,
+        }),
+        "{stage} / {row}: a changed request fact must be refused: {response}"
+    );
+}
+
+fn replay_hosted_request_identity(
+    provider: &mut ProviderProcess,
+    stage: &str,
+    original: &Value,
+    run_id: &str,
+    expected: HostedIdentityReplay<'_>,
+) {
+    for (row, request) in hosted_identity_rotations(original) {
+        let response = send_hosted_identity_retry(provider, stage, row, original, &request);
+        assert_hosted_identity_retry(stage, row, &response, run_id, expected);
+    }
+    for (row, request) in hosted_identity_conflicts(original) {
+        let response = send_hosted_identity_retry(provider, stage, row, original, &request);
+        assert_hosted_request_conflict(stage, row, &response);
+    }
+}
+
+fn assert_hosted_identity_record(
+    provider: &mut ProviderProcess,
+    stage: &str,
+    run_id: &str,
+    access: &Value,
+    saved_data: &Value,
+    saved_events: &[Value],
+) {
+    let owner = provider.request(json!({
+        "op": "runs_get",
+        "run_id": run_id,
+        "runtime_binding": access,
+    }));
+    assert_eq!(
+        owner["status"], "ok",
+        "{stage}: the owner read must succeed: {owner}"
+    );
+    assert_eq!(
+        &owner["data"], saved_data,
+        "{stage}: the owner run must stay the saved result: {owner}"
+    );
+    assert_eq!(
+        owner["data"]["status"], "completed",
+        "{stage}: the run status stays completed: {owner}"
+    );
+    let events = read_hosted_run_events(provider, run_id, access);
+    assert_eq!(
+        events, saved_events,
+        "{stage}: the event sequence must stay the saved sequence"
+    );
+    let terminal = events.last().expect("the run keeps a terminal event");
+    assert_eq!(
+        terminal["kind"], "output",
+        "{stage}: the final terminal event kind is output: {terminal}"
+    );
+}
+
+fn assert_one_hosted_identity_effect(
+    stand_in: HostedEffectStandIn,
+    request_id: &str,
+    run_id: &str,
+    prompt: &str,
+) {
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "the journey must open exactly one connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "the journey must send exactly one request"
+    );
+    let recorded = &requests[0];
+    assert_eq!(recorded.request_line, "POST /v1/hosted-effect HTTP/1.1");
+    assert!(
+        recorded.colonless.is_empty(),
+        "the Runtime refuses a header line with no colon: {:?}",
+        recorded.colonless
+    );
+    let mut names: Vec<String> = Vec::new();
+    for (name, _) in &recorded.headers {
+        let name = name.to_ascii_lowercase();
+        assert!(
+            RUNTIME_HOSTED_HEADER_NAMES.contains(&name.as_str()),
+            "the Runtime refuses every other header name: {name}"
+        );
+        assert!(
+            !names.contains(&name),
+            "the Runtime refuses a repeated header name: {name}"
+        );
+        names.push(name);
+    }
+    assert_eq!(recorded.value("host"), Some("runtime.invalid"));
+    assert_eq!(recorded.value("x-elastos-effect"), Some("text"));
+    assert_eq!(
+        recorded.value("x-elastos-offer-id"),
+        Some(HOSTED_EFFECT_OFFER)
+    );
+    assert_eq!(recorded.value("x-elastos-request-id"), Some(request_id));
+    assert_eq!(recorded.value("x-elastos-run-id"), Some(run_id));
+    assert_eq!(
+        recorded.value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
+    );
+    assert_eq!(
+        recorded.value("x-elastos-job-id"),
+        None,
+        "a text effect carries no job id"
+    );
+    assert!(
+        !recorded.head().contains("fixture-key"),
+        "the offer's key must appear nowhere in the recorded request head: {}",
+        recorded.head()
+    );
+    let body: Value = serde_json::from_slice(&recorded.body)
+        .expect("the hosted effect body is the JSON text request");
+    assert_eq!(
+        body["messages"][0]["content"], prompt,
+        "the hosted effect body must carry the original prompt: {body}"
+    );
+}
+
+/// A hosted model request keeps one result through session and grant rotation,
+/// and refuses a retry that changes the prompt, the offer or the operation.
+/// The run id is `model_run_id` (principal, capsule, request). The fingerprint
+/// in `request_fingerprint` binds principal, capsule, request, offer, operation
+/// and the input hash. Session and grant stay invocation audit facts
+/// (`docs/MODEL_PROVIDER.md`, "Request identity and session facts";
+/// `docs/AGENT_ARCHITECTURE.md`, "Session and interaction contract").
+/// The terminal event kind is `output` when the run status is `completed`
+/// (`synthesize_terminal_event`). This is the Runtime-socket lab proof for the
+/// provider side of the M1 A4/A7 unblock.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_request_identity_survives_rotation_and_refuses_conflicts() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted request identity: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-request-identity");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (model, usage) = hosted_fact_set_a();
+    let stand_in = HostedEffectStandIn::bind_streaming_frames(
+        "hosted-request-identity",
+        runtime_hosted_chat_frames_answer(&hosted_fact_frames(model, &usage)),
+    );
+    stand_in.hold_answer();
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init.clone());
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let request_id = test_support::fixture_model_request_id("request:hosted-request-identity");
+    let create_request =
+        hosted_text_create_request(&request_id, "grant:test", HOSTED_IDENTITY_PROMPT);
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+    let create = send_hosted_identity_retry(
+        &mut provider,
+        "create",
+        "original request",
+        &create_request,
+        &create_request,
+    );
+    assert_hosted_identity_retry(
+        "create",
+        "original request",
+        &create,
+        &expected_run_id,
+        HostedIdentityReplay::Open,
+    );
+    stand_in.wait_for_connections(1);
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "the hosted run must open exactly one connection to the Runtime socket"
+    );
+
+    replay_hosted_request_identity(
+        &mut provider,
+        "while the answer is held",
+        &create_request,
+        &expected_run_id,
+        HostedIdentityReplay::Open,
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "while the answer is held: a replay must not open another connection"
+    );
+
+    stand_in.release_answer();
+    let access = access_binding(&create_request);
+    let settled = wait_for_run_terminal_within(
+        &mut provider,
+        &expected_run_id,
+        &access,
+        FIXTURE_EVENT_TIMEOUT,
+    );
+    assert_eq!(
+        settled["data"]["status"], "completed",
+        "the hosted identity run must complete: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["output"],
+        json!({"schema": RUN_OUTPUT_TEXT_SCHEMA, "text": "ready set"}),
+        "the answer text stays ready set: {settled}"
+    );
+    assert!(
+        settled["data"]["terminal"].get("error").is_none(),
+        "a completed identity run has no error: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["backend_report"],
+        reported_hosted_identity_facts(),
+        "the backend facts stay reported: {settled}"
+    );
+    let saved_data = settled["data"].clone();
+    let saved_events = read_hosted_run_events(&mut provider, &expected_run_id, &access);
+    let mut joined = String::new();
+    for event in &saved_events {
+        if event["kind"] == "text_delta" {
+            joined.push_str(event["data"]["text"].as_str().unwrap_or(""));
+        }
+    }
+    assert_eq!(
+        joined, "ready set",
+        "joined text deltas must be exactly the answer: {saved_events:?}"
+    );
+    let terminal = saved_events.last().expect("the run keeps a terminal event");
+    assert_eq!(
+        terminal["kind"], "output",
+        "the final terminal event kind is output: {terminal}"
+    );
+    assert_eq!(
+        terminal["data"],
+        json!({"schema": RUN_OUTPUT_TEXT_SCHEMA, "text": "ready set"}),
+        "the terminal output is ready set: {terminal}"
+    );
+    assert_eq!(
+        terminal["backend_report"], saved_data["terminal"]["backend_report"],
+        "the terminal event carries the same backend report: {terminal}"
+    );
+
+    replay_hosted_request_identity(
+        &mut provider,
+        "after completion",
+        &create_request,
+        &expected_run_id,
+        HostedIdentityReplay::Saved(&saved_data),
+    );
+    assert_hosted_identity_record(
+        &mut provider,
+        "after completion",
+        &expected_run_id,
+        &access,
+        &saved_data,
+        &saved_events,
+    );
+    provider.shutdown();
+
+    let mut provider = ProviderProcess::start();
+    let restarted = provider.request(init);
+    assert_eq!(
+        restarted["status"], "ok",
+        "unexpected restart init response: {restarted}"
+    );
+    replay_hosted_request_identity(
+        &mut provider,
+        "after restart",
+        &create_request,
+        &expected_run_id,
+        HostedIdentityReplay::Saved(&saved_data),
+    );
+    assert_hosted_identity_record(
+        &mut provider,
+        "after restart",
+        &expected_run_id,
+        &access,
+        &saved_data,
+        &saved_events,
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "after restart: a replay must not open another connection"
+    );
+    provider.shutdown();
+
+    assert_one_hosted_identity_effect(
+        stand_in,
+        &request_id,
+        &expected_run_id,
+        HOSTED_IDENTITY_PROMPT,
+    );
 }
