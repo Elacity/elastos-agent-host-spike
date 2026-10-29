@@ -2,7 +2,7 @@
 //!
 //! [`verify_checked`] takes a [`CheckedBundle`] (the lab CID together with the
 //! bytes cc-capsule-identity's one walk read), its in-memory name signature,
-//! the accepted signer DIDs and the granted imports. Its checks, in order:
+//! and the accepted signer DIDs. Its checks, in order:
 //!
 //! 1. a bundle with no signature is refused as unsigned;
 //! 2. cc-capsule-identity's `verify_checked_signature` checks the signature
@@ -12,9 +12,8 @@
 //!    the Runtime's `CapsuleManifest`, names the module among the checked
 //!    entries;
 //! 4. the cx-wasm-audit crate's `audit` reads that module's checked bytes,
-//!    with the caller's granted imports passed to it unchanged;
-//! 5. each import the audit returned has a typed entry in
-//!    [`LAB_OPERATIONS`] (task 031).
+//!    with an empty declared list (task 065): the module may import nothing,
+//!    and its first import is refused by its own name.
 //!
 //! The value keeps which checked entry step 3 found, and
 //! [`VerifiedBundle::entrypoint`] returns it, so a caller such as the runner
@@ -33,33 +32,38 @@
 //! passes through unchanged. It reads no bundle file by path: the checked
 //! value already holds the bytes the name covers, so the module it audits is
 //! exactly the module that was signed, even if the folder changes later. The
-//! one file it reads by a path is the lab grants file (see wc-009a below).
+//! two files it reads by a path are the lab grants file (task 065) and the
+//! Runtime's Bus allowlist, `ALLOWED_BUS_IMPORTS` (task 070); both are lab
+//! stand-ins, not admission.
 //!
 //! It answers only "do these bytes match this signed name, did an accepted key
-//! sign it, and is every import granted". It never answers "may this run": it
-//! makes no admission, launch or publisher-trust decision, and the granted
-//! list is a lab stand-in, not admission.
+//! sign it, and does its module import nothing". It never answers "may this
+//! run": it makes no admission, launch or publisher-trust decision.
 //!
-//! wc-009a: the module's own import section in the signed `capsule.wasm` is the
-//! declaration (Rong's ruling (c)); the audit is its one reader. The granted
-//! list comes from the lab grants file, read by [`read_grants`], the one grants
-//! reader. It is the one place in this module that reads a file by a path: the
-//! grants file is the caller's input, outside the bundle, never part of the
-//! lab CID, and labelled "lab stand-in, not admission". An import is linked
-//! only if it is in the signed module and granted: [`VerifiedBundle::imports`]
-//! is the audit's own list, and [`VerifiedBundle::unused_grants`] the grants
-//! the module does not import, in file order, computed once from that list.
+//! The module's own import section in the signed `capsule.wasm` is the
+//! declaration (Rong's ruling (c)); the audit is its one reader. Task 065
+//! (Rong's WC-1 and WC-2): the Runtime refuses every core-module import, so
+//! the lab grants none. The audit gets an empty list, and a module with any
+//! core import is refused with the audit's own `undeclared import
+//! <module>.<name>`, before any engine starts.
 //!
-//! Task 031 (M1 B4 lab half, one permission model): each import the lab runner
-//! can link is listed once, typed, in [`LAB_OPERATIONS`]: its inputs and
-//! outputs (Wasm value type names), the one right a grant of it must name, and
-//! its effect. A grant names that right (`wc-009.lab-grants/v2`), and
-//! [`read_grants`] refuses a grant whose right is not the one its operation
-//! needs. [`verify_checked`] refuses a module import with no typed entry, even
-//! when it is granted. The table is lab input for a typed-operations model, a
-//! lab stand-in, not admission; no manifest field is added, and the module's
-//! own import section stays the declaration. Imports are not type-checked;
-//! see README's typed lab operations gap.
+//! Task 064 (wc-009b, first half): the Bus path, the only import path.
+//! The contract already exists: world `product-capsule-v1` of package
+//! `elastos:bus@1.0.0` (`elastos/wit/elastos-bus-v1.wit`). Task 070: the
+//! allowlist is the Runtime's own list, read from `ALLOWED_BUS_IMPORTS` in
+//! `elastos/crates/elastos-server/src/component.rs` by
+//! [`runtime_bus_interfaces`], the one allowlist read; the lab keeps no second
+//! copy. [`bus_imports`] passes a component to cx-wasm-audit's
+//! `audit_component` with exactly the names that read returned, with no check
+//! of its own. No Bus host exists in the lab, and no engine links or runs a
+//! component. A lab stand-in, not admission.
+//!
+//! Task 065: a lab grant names a `resource` and its `actions`, exactly as the
+//! WIT `capability-request` does (`elastos/wit/elastos-bus-v1.wit`), in the lab
+//! grants file `wc-009.lab-grants/v3`. [`read_grants`] is its one reader: the
+//! file is the caller's input, outside the bundle, never part of the lab CID,
+//! and labelled "lab stand-in, not admission". Nothing in the runner reads it:
+//! the lab has no Bus host, mints no grant and checks none at run time.
 
 use std::fmt;
 use std::fs;
@@ -72,76 +76,115 @@ use capsule_identity::{
 };
 use elastos_common::CapsuleManifest;
 use serde_json::{Map, Value};
-use wasm_capsule_audit::{audit, Refusal as AuditRefusal};
+use wasm_capsule_audit::{audit, audit_component, Refusal as AuditRefusal};
 
-/// One import, `module` and `name`: the audit's own type, which the grants
-/// reader returns and the verifier takes.
-pub use wasm_capsule_audit::DeclaredImport;
+/// The Runtime source that holds its `ALLOWED_BUS_IMPORTS` list, from the
+/// tools crate's manifest directory.
+const RUNTIME_COMPONENT_RS: &str = "../../../elastos/crates/elastos-server/src/component.rs";
 
-/// What a typed lab operation does outside the capsule.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Effect {
-    /// Nothing outside the capsule is read or changed.
-    None,
-    /// Something outside the capsule is read.
-    Read,
-    /// Something outside the capsule is changed.
-    Write,
+/// The line that opens the Runtime's list of allowed Bus imports, exactly.
+pub const ALLOWED_BUS_IMPORTS_HEAD: &str = "const ALLOWED_BUS_IMPORTS: &[&str] = &[";
+
+/// The Runtime's Bus allowlist, in file order: the names in the one
+/// `ALLOWED_BUS_IMPORTS` list in
+/// `elastos/crates/elastos-server/src/component.rs`, resolved from
+/// `CARGO_MANIFEST_DIR`, so the process current directory does not matter.
+/// This is the one allowlist read; [`bus_imports`] passes its names and
+/// nothing else. A lab stand-in, not admission.
+pub fn runtime_bus_interfaces() -> Result<Vec<String>, VerifyRefusal> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(RUNTIME_COMPONENT_RS);
+    runtime_bus_interfaces_at(&path)
 }
 
-impl fmt::Display for Effect {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            Effect::None => "none",
-            Effect::Read => "read",
-            Effect::Write => "write",
-        };
-        f.write_str(name)
-    }
-}
-
-/// One import the lab runner can link, typed: the import's `module` and
-/// `name`, its `inputs` and `outputs` as Wasm value type names, the one
-/// `right` a grant of it must name, and its `effect`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LabOperation {
-    pub module: &'static str,
-    pub name: &'static str,
-    pub inputs: &'static [&'static str],
-    pub outputs: &'static [&'static str],
-    pub right: &'static str,
-    pub effect: Effect,
-}
-
-/// The one table of typed lab operations: every import the lab runner can
-/// link has exactly one entry here, and an import with none is refused. A lab
+/// The names in the one `ALLOWED_BUS_IMPORTS` list in the Runtime source at
+/// `path`, in file order: [`runtime_bus_interfaces`]'s parser, over a path, so
+/// a lab-local fixture proves each refusal. One parser, one rule. A lab
 /// stand-in, not admission.
-pub const LAB_OPERATIONS: &[LabOperation] = &[LabOperation {
-    module: "env",
-    name: "f",
-    inputs: &[],
-    outputs: &[],
-    right: "call",
-    effect: Effect::None,
-}];
+pub fn runtime_bus_interfaces_at(path: &Path) -> Result<Vec<String>, VerifyRefusal> {
+    let refuse = |fault: String| VerifyRefusal::BusListUnreadable {
+        path: path.display().to_string(),
+        fault,
+    };
+    let source =
+        fs::read_to_string(path).map_err(|error| refuse(format!("read failed: {error}")))?;
+    let lines: Vec<&str> = source.lines().collect();
+    let heads: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| **line == ALLOWED_BUS_IMPORTS_HEAD)
+        .map(|(at, _)| at)
+        .collect();
+    if heads.len() != 1 {
+        return Err(refuse(format!(
+            "the head {ALLOWED_BUS_IMPORTS_HEAD:?} occurs {} times, not once",
+            heads.len()
+        )));
+    }
+    let body = &lines[heads[0] + 1..];
+    let end = body
+        .iter()
+        .position(|line| line.trim() == "];")
+        .ok_or_else(|| refuse("no closing `];` after the head".to_string()))?;
+    let mut names = Vec::with_capacity(end);
+    for (offset, line) in body[..end].iter().enumerate() {
+        let name = line
+            .trim()
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix("\","))
+            .filter(|name| !name.contains('"'));
+        let Some(name) = name else {
+            return Err(refuse(format!(
+                "line {} is not \"<name>\",: {line:?}",
+                heads[0] + 2 + offset
+            )));
+        };
+        names.push(name.to_string());
+    }
+    Ok(names)
+}
+
+/// The Bus interfaces the lab would link for `component`: cx-wasm-audit's
+/// `audit_component` with exactly the names [`runtime_bus_interfaces`] read
+/// from the Runtime, and nothing else. Its list is the component's own import
+/// names in section order; its refusal (an import outside Bus v1, or bytes
+/// that are not a component, a core module too) is returned as
+/// [`VerifyRefusal::Audit`], unchanged. No Bus host exists in the lab, so
+/// nothing is linked. A lab stand-in, not admission.
+pub fn bus_imports(component: &[u8]) -> Result<Vec<String>, VerifyRefusal> {
+    let allowed = runtime_bus_interfaces()?;
+    let allowed: Vec<&str> = allowed.iter().map(String::as_str).collect();
+    audit_component(component, &allowed).map_err(VerifyRefusal::Audit)
+}
 
 /// The lab grants file's `schema`, exactly.
-pub const GRANTS_SCHEMA: &str = "wc-009.lab-grants/v2";
+pub const GRANTS_SCHEMA: &str = "wc-009.lab-grants/v3";
 
 /// The lab grants file's `label`, exactly: the file is a lab stand-in for the
 /// Runtime's grant decision, never admission.
 pub const GRANTS_LABEL: &str = "lab stand-in, not admission";
 
 /// The grants file's top-level keys; no other key is allowed.
-const GRANTS_KEYS: [&str; 3] = ["schema", "label", "imports"];
+const GRANTS_KEYS: [&str; 3] = ["schema", "label", "grants"];
 
-/// The keys of one grant; an entry has exactly these three.
-const GRANT_KEYS: [&str; 3] = ["module", "name", "right"];
+/// The keys of one grant, as the WIT `capability-request` names them; an entry
+/// has exactly these two.
+const GRANT_KEYS: [&str; 2] = ["resource", "actions"];
+
+/// The keys of a v2 grant (task 031), retired by task 065: an entry holding
+/// one is refused by that key.
+const RETIRED_GRANT_KEYS: [&str; 3] = ["module", "name", "right"];
+
+/// One lab grant: a `resource` and its `actions`, as the WIT
+/// `capability-request` names them (`resource-uri` and `action` are strings).
+/// The lab mints and checks no grant: a lab stand-in, not admission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LabGrant {
+    pub resource: String,
+    pub actions: Vec<String>,
+}
 
 /// A bundle the verifier passed: the checked bundle, which of its entries is
-/// the entrypoint module the audit read, the import list the audit returned
-/// for that module (exactly the module's imports, in order, each granted), and
-/// the grants the module does not import, in the caller's order, and the
+/// the entrypoint module the audit read (it imports nothing), and the
 /// manifest's declared `resources.memory_mb`.
 ///
 /// Its fields are private, it has no public constructor and no `&mut`
@@ -152,8 +195,6 @@ const GRANT_KEYS: [&str; 3] = ["module", "name", "right"];
 pub struct VerifiedBundle {
     checked: CheckedBundle,
     entrypoint: usize,
-    imports: Vec<DeclaredImport>,
-    unused: Vec<DeclaredImport>,
     memory_mb: u32,
 }
 
@@ -173,18 +214,6 @@ impl VerifiedBundle {
     /// caller reads the manifest again.
     pub fn entrypoint(&self) -> &BundleEntry {
         &self.checked.entries()[self.entrypoint]
-    }
-
-    /// The audit's own import list for the entrypoint module: each import is
-    /// in the signed module and granted, so this is what is linked.
-    pub fn imports(&self) -> &[DeclaredImport] {
-        &self.imports
-    }
-
-    /// The grants the entrypoint module does not import, in the order the
-    /// caller gave them. They link nothing; they are reported.
-    pub fn unused_grants(&self) -> &[DeclaredImport] {
-        &self.unused
     }
 
     /// The manifest's declared `resources.memory_mb`, as the verifier's one
@@ -211,11 +240,13 @@ pub enum VerifyRefusal {
     ManifestUnreadable { reason: String },
     /// No checked entry has the manifest's `entrypoint` path.
     EntrypointMissing { entrypoint: String },
-    /// The cx-wasm-audit crate refused the entrypoint module.
+    /// The cx-wasm-audit crate refused the entrypoint module, or (from
+    /// [`bus_imports`]) a component.
     Audit(AuditRefusal),
-    /// The module imports, granted, an import with no entry in
-    /// [`LAB_OPERATIONS`].
-    UntypedImport { module: String, name: String },
+    /// The Runtime's `ALLOWED_BUS_IMPORTS` list could not be read: the file,
+    /// its one head line, a body line or its closing line is at fault. The
+    /// reason names the path and the fault.
+    BusListUnreadable { path: String, fault: String },
 }
 
 impl fmt::Display for VerifyRefusal {
@@ -237,66 +268,35 @@ impl fmt::Display for VerifyRefusal {
                 "the manifest's entrypoint {entrypoint:?} is not a file in the bundle"
             ),
             VerifyRefusal::Audit(refusal) => write!(f, "{refusal}"),
-            VerifyRefusal::UntypedImport { module, name } => {
-                write!(f, "no typed lab operation for import {module}.{name}")
-            }
+            VerifyRefusal::BusListUnreadable { path, fault } => write!(
+                f,
+                "the Runtime's Bus import list at {path} is unreadable: {fault}"
+            ),
         }
     }
 }
 
 impl std::error::Error for VerifyRefusal {}
 
-/// Verify the checked bundle `checked` against `signature`, the `accepted`
-/// signer DIDs and the `granted` imports. The checks and their order are in
-/// the module docs; the first refusal is the answer.
+/// Verify the checked bundle `checked` against `signature` and the `accepted`
+/// signer DIDs. The checks and their order are in the module docs; the first
+/// refusal is the answer. Task 065: no core-module import is granted, so the
+/// one `audit` call gets an empty list.
 pub fn verify_checked(
     checked: CheckedBundle,
     signature: Option<&NameSignature>,
     accepted: &[String],
-    granted: &[DeclaredImport],
 ) -> Result<VerifiedBundle, VerifyRefusal> {
     let signature = signature.ok_or(VerifyRefusal::Unsigned)?;
     verify_checked_signature(&checked, signature, accepted).map_err(VerifyRefusal::Identity)?;
     let (entrypoint, memory_mb) = entrypoint_index(&checked)?;
     let module = &checked.entries()[entrypoint].content;
-    let imports = audit(module, granted).map_err(VerifyRefusal::Audit)?;
-    if let Some(import) = imports
-        .iter()
-        .find(|import| lab_operation(import).is_none())
-    {
-        return Err(VerifyRefusal::UntypedImport {
-            module: import.module.clone(),
-            name: import.name.clone(),
-        });
-    }
-    let unused = grants_not_imported(granted, &imports);
+    audit(module, &[]).map_err(VerifyRefusal::Audit)?;
     Ok(VerifiedBundle {
         checked,
         entrypoint,
-        imports,
-        unused,
         memory_mb,
     })
-}
-
-/// The entry of [`LAB_OPERATIONS`] for `import`, if it has one.
-fn lab_operation(import: &DeclaredImport) -> Option<&'static LabOperation> {
-    LAB_OPERATIONS
-        .iter()
-        .find(|operation| operation.module == import.module && operation.name == import.name)
-}
-
-/// The grants in `granted` that are not in the audit's list `imports`, in
-/// `granted`'s order. No import is read again: `imports` is the audit's own.
-fn grants_not_imported(
-    granted: &[DeclaredImport],
-    imports: &[DeclaredImport],
-) -> Vec<DeclaredImport> {
-    granted
-        .iter()
-        .filter(|grant| !imports.contains(grant))
-        .cloned()
-        .collect()
 }
 
 /// Verify the bundle at `bundle`: cc-capsule-identity's `checked_bundle`, the
@@ -307,10 +307,9 @@ pub fn verify_bundle(
     bundle: &Path,
     signature: Option<&NameSignature>,
     accepted: &[String],
-    granted: &[DeclaredImport],
 ) -> Result<VerifiedBundle, VerifyRefusal> {
     let checked = checked_bundle(bundle).map_err(VerifyRefusal::Identity)?;
-    verify_checked(checked, signature, accepted, granted)
+    verify_checked(checked, signature, accepted)
 }
 
 /// Where, among the checked entries, the module the manifest's `entrypoint`
@@ -360,29 +359,32 @@ pub enum GrantsReason {
     NotJson { reason: String },
     /// The JSON document is not an object.
     NotAnObject,
-    /// The document has a key other than `schema`, `label` and `imports`.
+    /// The document has a key other than `schema`, `label` and `grants`.
     UnknownKey { key: String },
-    /// The document lacks one of `schema`, `label` and `imports`.
+    /// The document lacks one of `schema`, `label` and `grants`.
     MissingKey { key: &'static str },
     /// `schema` is not [`GRANTS_SCHEMA`]; the value found, as JSON.
     WrongSchema { schema: Value },
     /// `label` is not [`GRANTS_LABEL`]; the value found, as JSON.
     WrongLabel { label: Value },
-    /// `imports` is not a list.
-    ImportsNotAList,
-    /// The entry at `index` of `imports` is not an object of exactly three
-    /// strings, `module`, `name` and `right`.
-    EntryNotATriple { index: usize },
-    /// The same `module` and `name` are granted twice.
-    DuplicateGrant { module: String, name: String },
-    /// The grant of `module`.`name` names the right `granted`, but its typed
-    /// lab operation needs the right `needed`.
-    RightNotNeeded {
-        module: String,
-        name: String,
-        granted: String,
-        needed: &'static str,
-    },
+    /// `grants` is not a list.
+    GrantsNotAList,
+    /// The entry at `index` of `grants` holds `key`, a key of the retired v2
+    /// grant (`module`, `name` or `right`).
+    RetiredKey { index: usize, key: &'static str },
+    /// The entry at `index` of `grants` is not an object of exactly
+    /// `resource`, a string, and `actions`, a list of strings.
+    EntryNotAGrant { index: usize },
+    /// The entry at `index` of `grants` names an empty resource.
+    EmptyResource { index: usize },
+    /// The grant of `resource` names no action.
+    EmptyActions { resource: String },
+    /// The grant of `resource` names an empty action.
+    EmptyAction { resource: String },
+    /// The grant of `resource` names `action` twice.
+    RepeatedAction { resource: String, action: String },
+    /// The same `resource` is granted twice.
+    DuplicateResource { resource: String },
 }
 
 impl fmt::Display for GrantsReason {
@@ -409,25 +411,33 @@ impl fmt::Display for GrantsReason {
                 f,
                 "the grants file's label is {label}, not {GRANTS_LABEL:?}"
             ),
-            GrantsReason::ImportsNotAList => {
-                write!(f, "the grants file's imports is not a list")
+            GrantsReason::GrantsNotAList => {
+                write!(f, "the grants file's grants is not a list")
             }
-            GrantsReason::EntryNotATriple { index } => write!(
+            GrantsReason::RetiredKey { index, key } => write!(
                 f,
-                "grant {index} is not an object of exactly three strings, module, name and right"
+                "grant {index} has the retired key {key:?}: a lab grant names resource and actions, as capability-request"
             ),
-            GrantsReason::DuplicateGrant { module, name } => {
-                write!(f, "the grant {module}.{name} is listed twice")
+            GrantsReason::EntryNotAGrant { index } => write!(
+                f,
+                "grant {index} is not an object of exactly resource, a string, and actions, a list of strings"
+            ),
+            GrantsReason::EmptyResource { index } => {
+                write!(f, "grant {index} names an empty resource")
             }
-            GrantsReason::RightNotNeeded {
-                module,
-                name,
-                granted,
-                needed,
-            } => write!(
+            GrantsReason::EmptyActions { resource } => {
+                write!(f, "the grant of {resource:?} names no action")
+            }
+            GrantsReason::EmptyAction { resource } => {
+                write!(f, "the grant of {resource:?} names an empty action")
+            }
+            GrantsReason::RepeatedAction { resource, action } => write!(
                 f,
-                "the grant {module}.{name} names the right {granted:?}, but its typed lab operation needs {needed:?}"
+                "the grant of {resource:?} names the action {action:?} twice"
             ),
+            GrantsReason::DuplicateResource { resource } => {
+                write!(f, "the resource {resource:?} is granted twice")
+            }
         }
     }
 }
@@ -441,13 +451,13 @@ impl fmt::Display for GrantsRefusal {
 impl std::error::Error for GrantsRefusal {}
 
 /// Read the lab grants file at `path`: one read, then a parse from memory.
-/// The file is exactly `{"schema": "wc-009.lab-grants/v2", "label": "lab
-/// stand-in, not admission", "imports": [{"module": "...", "name": "...",
-/// "right": "..."}]}`; an empty `imports` list is valid. A grant of an import
-/// that has a typed lab operation must name that operation's right. The
-/// grants come back in file order, without their rights. The first refusal is
+/// The file is exactly `{"schema": "wc-009.lab-grants/v3", "label": "lab
+/// stand-in, not admission", "grants": [{"resource": "...", "actions":
+/// ["..."]}]}`; an empty `grants` list is valid. Each resource is a non-empty
+/// string granted once, and its actions a non-empty list of non-empty,
+/// distinct strings. The grants come back in file order. The first refusal is
 /// the answer, with the path and its own reason.
-pub fn read_grants(path: &Path) -> Result<Vec<DeclaredImport>, GrantsRefusal> {
+pub fn read_grants(path: &Path) -> Result<Vec<LabGrant>, GrantsRefusal> {
     let refusal = |reason| GrantsRefusal {
         path: path.to_path_buf(),
         reason,
@@ -457,9 +467,8 @@ pub fn read_grants(path: &Path) -> Result<Vec<DeclaredImport>, GrantsRefusal> {
 }
 
 /// The grants in `bytes`, checked by hand against the one file form: the
-/// document, its keys, the schema, the label, then each entry in order, and
-/// each entry's right against its typed lab operation.
-fn parse_grants(bytes: &[u8]) -> Result<Vec<DeclaredImport>, GrantsReason> {
+/// document, its keys, the schema, the label, then each entry in order.
+fn parse_grants(bytes: &[u8]) -> Result<Vec<LabGrant>, GrantsReason> {
     let document: Value = serde_json::from_slice(bytes).map_err(|error| GrantsReason::NotJson {
         reason: error.to_string(),
     })?;
@@ -472,7 +481,7 @@ fn parse_grants(bytes: &[u8]) -> Result<Vec<DeclaredImport>, GrantsReason> {
     }
     let schema = grants_key(document, "schema")?;
     let label = grants_key(document, "label")?;
-    let imports = grants_key(document, "imports")?;
+    let grants = grants_key(document, "grants")?;
     if schema.as_str() != Some(GRANTS_SCHEMA) {
         return Err(GrantsReason::WrongSchema {
             schema: schema.clone(),
@@ -483,36 +492,18 @@ fn parse_grants(bytes: &[u8]) -> Result<Vec<DeclaredImport>, GrantsReason> {
             label: label.clone(),
         });
     }
-    let entries = imports.as_array().ok_or(GrantsReason::ImportsNotAList)?;
-    let mut granted: Vec<DeclaredImport> = Vec::new();
+    let entries = grants.as_array().ok_or(GrantsReason::GrantsNotAList)?;
+    let mut granted: Vec<LabGrant> = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
-        let (grant, right) = grant_entry(entry).ok_or(GrantsReason::EntryNotATriple { index })?;
-        if granted.contains(&grant) {
-            return Err(GrantsReason::DuplicateGrant {
-                module: grant.module,
-                name: grant.name,
+        let grant = checked_grant(index, entry)?;
+        if granted.iter().any(|seen| seen.resource == grant.resource) {
+            return Err(GrantsReason::DuplicateResource {
+                resource: grant.resource,
             });
         }
-        check_right(&grant, right)?;
         granted.push(grant);
     }
     Ok(granted)
-}
-
-/// Refuse `right` for `grant` when `grant`'s typed lab operation needs
-/// another right. A grant with no typed operation is not refused here: it
-/// links nothing unless the module imports it, and then the verifier refuses
-/// the import as untyped.
-fn check_right(grant: &DeclaredImport, right: String) -> Result<(), GrantsReason> {
-    match lab_operation(grant) {
-        Some(operation) if operation.right != right => Err(GrantsReason::RightNotNeeded {
-            module: grant.module.clone(),
-            name: grant.name.clone(),
-            granted: right,
-            needed: operation.right,
-        }),
-        _ => Ok(()),
-    }
 }
 
 /// The value of the required top-level `key`.
@@ -523,17 +514,55 @@ fn grants_key<'a>(
     document.get(key).ok_or(GrantsReason::MissingKey { key })
 }
 
-/// One grant and the right it names: an object of exactly the three keys
-/// `module`, `name` and `right`, each a string. Anything else is no grant.
-fn grant_entry(entry: &Value) -> Option<(DeclaredImport, String)> {
+/// The entry at `index`, checked: no retired v2 key, the `capability-request`
+/// shape, a non-empty resource, and a non-empty list of non-empty, distinct
+/// actions, each refused with its own reason.
+fn checked_grant(index: usize, entry: &Value) -> Result<LabGrant, GrantsReason> {
+    if let Some(key) = entry.as_object().and_then(|entry| {
+        RETIRED_GRANT_KEYS
+            .into_iter()
+            .find(|key| entry.contains_key(*key))
+    }) {
+        return Err(GrantsReason::RetiredKey { index, key });
+    }
+    let grant = grant_entry(entry).ok_or(GrantsReason::EntryNotAGrant { index })?;
+    if grant.resource.is_empty() {
+        return Err(GrantsReason::EmptyResource { index });
+    }
+    if grant.actions.is_empty() {
+        return Err(GrantsReason::EmptyActions {
+            resource: grant.resource,
+        });
+    }
+    if grant.actions.iter().any(String::is_empty) {
+        return Err(GrantsReason::EmptyAction {
+            resource: grant.resource,
+        });
+    }
+    for (at, action) in grant.actions.iter().enumerate() {
+        if grant.actions[..at].contains(action) {
+            return Err(GrantsReason::RepeatedAction {
+                resource: grant.resource.clone(),
+                action: action.clone(),
+            });
+        }
+    }
+    Ok(grant)
+}
+
+/// One grant: an object of exactly the two keys `resource`, a string, and
+/// `actions`, a list of strings. Anything else is no grant.
+fn grant_entry(entry: &Value) -> Option<LabGrant> {
     let entry = entry.as_object()?;
     if entry.len() != GRANT_KEYS.len() {
         return None;
     }
-    let grant = DeclaredImport {
-        module: entry.get(GRANT_KEYS[0])?.as_str()?.to_owned(),
-        name: entry.get(GRANT_KEYS[1])?.as_str()?.to_owned(),
-    };
-    let right = entry.get(GRANT_KEYS[2])?.as_str()?.to_owned();
-    Some((grant, right))
+    let resource = entry.get(GRANT_KEYS[0])?.as_str()?.to_owned();
+    let actions = entry
+        .get(GRANT_KEYS[1])?
+        .as_array()?
+        .iter()
+        .map(|action| action.as_str().map(str::to_owned))
+        .collect::<Option<Vec<String>>>()?;
+    Some(LabGrant { resource, actions })
 }
