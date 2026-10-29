@@ -360,15 +360,17 @@ the checkout. Each run builds the command fresh there.
 
 ```rust
 wasm_capsule_tools::verify::verify_checked(checked: CheckedBundle, signature: Option<&NameSignature>,
-    accepted: &[String], granted: &[DeclaredImport]) -> Result<VerifiedBundle, VerifyRefusal>
+    accepted: &[String]) -> Result<VerifiedBundle, VerifyRefusal>
 wasm_capsule_tools::verify::verify_bundle(bundle: &Path, signature: Option<&NameSignature>,
-    accepted: &[String], granted: &[DeclaredImport]) -> Result<VerifiedBundle, VerifyRefusal>
+    accepted: &[String]) -> Result<VerifiedBundle, VerifyRefusal>
 ```
 
-**One call, five checks, in order.** `verify_checked` takes a
+**One call, four checks, in order.** `verify_checked` takes a
 `CheckedBundle` from cc-capsule-identity's `checked_bundle` (the lab CID with
-the bytes its one walk read), the bundle's in-memory `NameSignature`, the
-accepted signer DIDs and the granted imports. The first refusal is the answer:
+the bytes its one walk read), the bundle's in-memory `NameSignature` and the
+accepted signer DIDs. Task 065 removed its granted imports (Rong's WC-1 and
+WC-2; "Bus v1 import contract (wc-009b)", below). The first refusal is the
+answer:
 
 1. no signature (`None`): refused as unsigned;
 2. cc-capsule-identity's `verify_checked_signature` on the checked value: a
@@ -377,10 +379,9 @@ accepted signer DIDs and the granted imports. The first refusal is the answer:
 3. the manifest's `entrypoint`, read from the checked `capsule.json` with the
    Runtime's `CapsuleManifest` (the one reader of that file), names the module
    among the checked entries;
-4. the cx-wasm-audit crate's `audit(module, granted)` on that module's checked
-   bytes;
-5. since task 031, each import on the audit's returned list has a typed entry
-   in `LAB_OPERATIONS` ("Typed lab operations (M1 B4 lab half)", below).
+4. the cx-wasm-audit crate's `audit(module, &[])` on that module's checked
+   bytes: no core-module import is granted (task 065), so the module's first
+   import, if it has one, is refused by its own name.
 
 `verify_bundle` is `checked_bundle` and then `verify_checked`, with no check of
 its own, so the walk's refusals come first. The tools crate has exactly one
@@ -398,20 +399,18 @@ signature or import code of its own (no `wasmparser`).
   signature that does not verify), carried unchanged and printed exactly as
   that lane prints it;
 - every audit refusal (`undeclared import {module}.{name}`, `malformed module`,
-  `code in custom section`), carried unchanged;
-- a granted import with no typed lab operation (task 031):
-  `no typed lab operation for import <module>.<name>`.
+  `code in custom section`), carried unchanged.
 
 A fifth reason, `the Runtime's CapsuleManifest could not read the checked
 capsule.json: <reason>`, cannot happen for a value `checked_bundle` made: the
 walk runs the same parse and refuses first. It is kept so the verifier fails
 closed with a reason rather than a panic, and no test can reach it.
 
-**The value.** `VerifiedBundle` holds the checked bundle, which of its
-entries is the entrypoint (found by step 3, the one manifest read) and the
-audit's own import list, read through `cid()`, `entries()`, `entrypoint()` and
-`imports()`; since wc-009a also the grants the module does not import, through
-`unused_grants()`. `entrypoint()` returns the checked entry the manifest's
+**The value.** `VerifiedBundle` holds the checked bundle and which of its
+entries is the entrypoint (found by step 3, the one manifest read), read
+through `cid()`, `entries()` and `entrypoint()`, and the declared
+`memory_mb()`. Task 065 removed `imports()` and `unused_grants()`: the module
+imports nothing, and no grant is passed. `entrypoint()` returns the checked entry the manifest's
 `entrypoint` names, the module the audit read, so no caller reads the manifest
 again. Its fields are private, and it has no public constructor, no `&mut`
 access and no `Deserialize`, so a value exists only as `verify_checked` made
@@ -420,7 +419,7 @@ it. wc-005a's runner (task 014) writes `entrypoint()`'s bytes.
 **The checked bytes, never the folder again.** The audit reads the module
 bytes the signed name covers, from the checked value. The verifier reads no
 bundle file by a path; its one file read is the caller's lab grants file, in
-`read_grants` (wc-009a, below), which is never part of the bundle. If the
+`read_grants` (task 065: v3, below), which is never part of the bundle. If the
 folder changes after `checked_bundle`, `verify_checked`
 on the held value still judges the held bytes, and `verify_bundle` on the
 changed folder is refused with the identity lane's mismatch reason.
@@ -432,16 +431,14 @@ keep the signature in memory only. So there is no `tools/sign` or
 verifying are library calls, tested in process with keys made fresh in memory
 inside each test. If a file form is ever wanted, cc-capsule-identity owns it.
 
-**Granted imports.** The module's own import section is the declaration
-(Rong, 26 Oct, ruling (c)). The granted list goes to `audit` unchanged, and the
-result is exactly the module's imports. Since wc-009a (task 020) the two-engine
-`run` passes the list `read_grants` read from the lab grants file to this same
-call ("Granted imports only (wc-009a)", below). The granted list is a lab
-stand-in, not admission.
+**No core import.** The module's own import section is the declaration
+(Rong, 26 Oct, ruling (c)). Since task 065 the one `audit` call gets an empty
+list, so the module may import nothing; wc-009a's granted list (task 020) is
+retired ("Granted imports only (wc-009a)", below).
 
 **Claim scope.** An offline lab check, on this one Mac with test keys only,
 that a bundle's bytes match a signed lab CID, that an accepted test key signed
-it, and that every import of its entrypoint module is granted. It answers
+it, and that its entrypoint module imports nothing. It answers
 nothing about "may this run": it makes no admission, launch or
 publisher-trust decision and sits in no admission or launch path. The signed
 name is a lab CID, not the Runtime's CID.
@@ -622,7 +619,6 @@ pub struct RunInput<'a> {
     pub bundle: &'a Path,                       // the bundle folder
     pub signature: Option<&'a NameSignature>,   // in memory only
     pub accepted: &'a [String],                 // accepted signer DIDs
-    pub granted: &'a [DeclaredImport],          // wc-009a: from read_grants
     pub wasmtime: &'a Path,                     // absolute program paths
     pub wasmer: &'a Path,
     pub work_root: &'a Path,
@@ -637,9 +633,10 @@ first refusal is the answer:
 0. task 043: a zero budget in `input.control` is refused (the same check as
    `run_engine`'s) as `TwoEngineRefusal::Engine`, before verification and any
    `--version` query;
-1. wc-004's `verify_bundle(input.bundle, input.signature, input.accepted, input.granted)`
-   is called once, with the caller's granted imports unchanged (wc-009a). A
-   refusal comes back unchanged as `TwoEngineRefusal::Verify`, printing exactly
+1. wc-004's `verify_bundle(input.bundle, input.signature, input.accepted)`
+   is called once (task 065: no granted imports; wc-009a passed them). A
+   module with any core import is refused, `undeclared import
+   <module>.<name>`. A refusal comes back unchanged as `TwoEngineRefusal::Verify`, printing exactly
    as the verifier prints it; nothing is written and no engine is started;
    task 033: then the same `check_module_memory` `run_engine` calls checks the
    verified module's memory once; a refusal comes back as
@@ -669,9 +666,8 @@ outputs. Two successful runs with different stdout are refused with
 On success `TwoEngineRun` holds the verified `cid()` (the lab CID the signature
 was checked against, taken from the verified value, never by naming the folder
 again), both raw stdouts, `wasmtime()` and `wasmer()` (or `stdout(engine)`), and
-from task 016 each engine's observed `version(engine)` and `status(engine)`,
-and from task 020 `linked()` and `unused_grants()`, the verifier's own lists.
-Its fields are private, so only `run` makes one. `run` writes no receipt; the
+from task 016 each engine's observed `version(engine)` and `status(engine)`.
+Task 065 removed task 020's `linked()` and `unused_grants()`. Its fields are private, so only `run` makes one. `run` writes no receipt; the
 caller writes one with `receipt::write_receipt` (next section).
 
 **The claim.** On this Mac, the capsule `tools/build` makes, bundled, signed
@@ -932,6 +928,8 @@ The tests, in `tests/runtime_abi.rs`:
 
 ## Granted imports only (wc-009a)
 
+Retired by task 065 (Rong WC-1, WC-2): no core-module import is granted; see 'Bus v1 import contract (wc-009b)'.
+
 ```rust
 wasm_capsule_tools::verify::read_grants(path: &Path) -> Result<Vec<DeclaredImport>, GrantsRefusal>
 ```
@@ -1015,6 +1013,8 @@ publisher trust, and its lab name is not the Runtime's CID.
 
 ### Typed lab operations (M1 B4 lab half)
 
+Retired by task 065 (Rong WC-1, WC-2): no core-module import is granted; see 'Bus v1 import contract (wc-009b)'.
+
 Task 031 (Flint, INBOX 26 Oct 23:50, "one permission model"). Each import the
 lab runner can link is listed once as a typed operation in `pub const
 LAB_OPERATIONS` (`tools/src/verify.rs`): its module and name, its inputs and
@@ -1042,9 +1042,10 @@ Two refusals use it, both before any engine starts:
 
 No manifest field is added: the module's own import section stays the
 declaration (https://github.com/Elacity/elastos-runtime/issues/464).
-Gap: the lab does not check an import's Wasm type against its typed lab operation, so a typed lab operation is not a type check; this blocks the type half of M1 B4 (one permission model).
-The audit's v1 API returns each import's module and name only
-(`audit/INTERFACE.md`), so the check above matches by name; task 046 keeps
+Gap: the lab checks Bus interface names only, never their WIT types, so a linked Bus interface is not type-checked; this blocks the type half of M1 B4 (one permission model).
+Task 065 reworded task 046's gap from the typed table to the Bus path: the
+audit's `audit_component` returns each import's interface name only
+(`audit/INTERFACE.md`), so `bus_imports` matches by name; task 046 keeps
 this as ADOPTION's "Gaps for Anders" item 4, and
 `import_type_gap_is_a_named_row_and_nothing_claims_a_type_check` holds it.
 The table and the grants are a lab stand-in, not admission: input for
@@ -1665,8 +1666,68 @@ Not covered:
   markers (`env`, `wasi` and others). Neither is applied here.
 - The componentized capsule imports nothing and exports no `lifecycle`, so it
   does not implement `product-capsule-v1`.
-- `env.f` is still in `LAB_OPERATIONS`, and the grants file still names a
-  right per import, until task 065.
+- `env.f` is retired (task 065): no core-module import is granted, and the
+  grants file names resource and actions (below).
+
+### Core imports retired, grants name resource and actions (task 065)
+
+The second half of wc-009b, Rong's WC-1 (High) and WC-2 (Medium), relayed by
+Flint (INBOX 28 Oct 00:30). WC-2, in his words: "Grants file v2 names a
+`right` per import. In the Runtime the import is fixed and the grant is per
+resource and action, carried in `providers.invoke` ... Skip it and two grant
+models drift. Fix: lab grants name `resource` and `actions` exactly as
+`capability-request`, labelled 'lab stand-in, not admission'."
+
+- **No core import is granted.** The verifier's one `audit` call gets `&[]`,
+  and `verify_checked`, `verify_bundle` and `RunInput` take no granted list. A
+  module with any core import is refused with the audit's own `undeclared
+  import <module>.<name>`, before any `--version` query or module run
+  (`core_module_import_is_refused_before_any_engine_start`). The typed table,
+  its effect type, the per-import right and their two refusals are removed;
+  with `env.f` gone they had nothing left to type or check. The passed-run
+  receipt is unchanged: it never held the linked or unused-grant lines.
+- **Grants file v3**, read by `read_grants(path) -> Result<Vec<LabGrant>,
+  GrantsRefusal>`, the one grants reader, in file order. `LabGrant` is `{ pub
+  resource: String, pub actions: Vec<String> }`, the WIT `capability-request`'s
+  `resource` and `actions` (`elastos/wit/elastos-bus-v1.wit:24-28`; both
+  `resource-uri` and `action` are `string`). It has no `reason` and the lab
+  mints no grant record:
+
+  ```json
+  {"schema": "wc-009.lab-grants/v3", "label": "lab stand-in, not admission", "grants": [{"resource": "localhost://Users/self/Photos", "actions": ["read", "list"]}]}
+  ```
+
+  The top-level keys are exactly `schema`, `label` and `grants`; an empty
+  `grants` list is valid. Each entry is exactly `resource`, a non-empty
+  string, and `actions`, a non-empty list of non-empty, distinct strings, and
+  a resource is granted once. Task 020's refusals keep their text, with
+  `grants` in place of `imports` where they named it; the entry shape and
+  duplicate refusals now name a resource. Each refusal, after `<path>: `:
+  - `the grants file cannot be read: <OS error>`;
+  - `the grants file is not JSON: <serde_json's reason>`;
+  - `the grants file is not a JSON object`;
+  - `the grants file has an unknown key "<key>"` (a v2 file's `imports` too);
+  - `the grants file has no "<schema|label|grants>" key`;
+  - `the grants file's schema is <value as JSON>, not "wc-009.lab-grants/v3"`;
+  - `the grants file's label is <value as JSON>, not "lab stand-in, not admission"`;
+  - `the grants file's grants is not a list`;
+  - `grant <index> has the retired key "<module|name|right>": a lab grant names
+    resource and actions, as capability-request`;
+  - `grant <index> is not an object of exactly resource, a string, and
+    actions, a list of strings`;
+  - `grant <index> names an empty resource`;
+  - `the grant of "<resource>" names no action`;
+  - `the grant of "<resource>" names an empty action`;
+  - `the grant of "<resource>" names the action "<action>" twice`;
+  - `the resource "<resource>" is granted twice`.
+
+Nothing in `run` reads the grants file, because the lab has no Bus host: the file is a lab stand-in, not admission.
+
+A key written twice in one JSON object is still not refused (`serde_json`
+keeps its last value), the known limit of task 020's reader.
+`retired_core_grant_names_are_gone_from_the_tools` fails if any file under
+`tools/src/`, comments included, names `LAB_OPERATIONS`, `lab-grants/v2`,
+`UntypedImport` or `RightNotNeeded`.
 
 ## Cancel (M1 A10 lab half)
 
@@ -1891,18 +1952,16 @@ each a signed module with one `() -> ()` import from `wasi_snapshot_preview1`,
 built by the one module builder `importing(module, name)` in
 `tests/common/grants.rs` (`importing("env", "f")` is `IMPORTING_MODULE` byte
 for byte): `path_open`, `fd_read`, `fd_prestat_get`, `environ_get` and
-`environ_sizes_get`. Each goes through `run` (`run_with_grants`, counting
-stand-ins) twice:
+`environ_sizes_get`. Each goes through `run` (`run_counting` since task 065,
+counting stand-ins) and is refused as `undeclared import
+wasi_snapshot_preview1.<name>` (`VerifyRefusal::Audit(Undeclared)`). Task 041
+also refused each with a `call` grant, as an import with no typed lab
+operation; task 065 grants no core import, so that case is gone.
 
-- with no grant, refused as `undeclared import wasi_snapshot_preview1.<name>`
-  (`VerifyRefusal::Audit(Undeclared)`);
-- with a `call` grant, refused as `no typed lab operation for import
-  wasi_snapshot_preview1.<name>` (`VerifyRefusal::UntypedImport`).
-
-Either way no run folder is made and neither engine is asked `--version` or
-started for a module run. This rule is the verifier's, already held by
-F-WC-B4-UNTYPED-LINKED and the audit's undeclared refusal (F-WC9-LINK-ALL), so
-it gets no new falsifier.
+No run folder is made and neither engine is asked `--version` or started for a
+module run. This rule is the verifier's, already held by the audit's
+undeclared refusal (F-WC9-LINK-ALL, F-WC9B-CORE-IMPORT-GRANTED), so it gets no
+new falsifier.
 
 Falsifier F-WC-A8-HOME-PREOPEN (runner-caught, "## Falsifiers"):
 `start_engine` adds `--dir=<HOME>` after the memory cap arguments, a preopen
@@ -2005,9 +2064,9 @@ The verifier, in `tests/verify.rs`. "The fixture" is this capsule's manifest
 and the 8-byte module in a temp folder; every key is fresh in memory:
 
 - `signed_bundle_verifies_against_its_key` — the fixture, signed and verified
-  with its key's DID accepted and no grants, passes; `cid()` is
-  `bundle_identity` of the folder, `imports()` is empty, `entries()` hold
-  exactly the folder's two files.
+  with its key's DID accepted, passes; `cid()` is `bundle_identity` of the
+  folder and `entries()` hold exactly the folder's two files (task 065 dropped
+  its empty `imports()` check with the accessor).
 - `unsigned_bundle_is_refused` — `None` gets the unsigned reason, in both
   forms.
 - `bundle_signed_by_an_unlisted_key_is_refused` — key B signs, only key A is
@@ -2018,24 +2077,25 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
   refusal, naming both values.
 - `bundle_with_undeclared_import_is_refused_even_if_signed` — a module that
   imports `env.f`, validly signed, no grants: `undeclared import env.f`.
-- `a_grant_reaches_the_audit_unchanged` — `env.f` granted passes, and
-  `imports()` is the audit's own list, `[env.f]`.
 - `verifier_audits_the_checked_bytes` — a held `CheckedBundle` still passes
-  with no imports after `capsule.wasm` on disk becomes the importing module;
+  after `capsule.wasm` on disk becomes the importing module (an audit of the
+  disk would refuse `env.f`), and keeps the 8-byte module;
   `verify_bundle` on the changed folder gets the mismatch refusal.
 - `the_real_capsule_passes_the_verifier` — the capsule `tools/build` makes,
-  bundled with this capsule's manifest, signed and verified with no grants,
-  passes with no imports; its sha256 is the receipt's `artifact_sha256` and
+  bundled with this capsule's manifest, signed and verified, passes, and the
+  audit of its entrypoint lists no import; its sha256 is the receipt's `artifact_sha256` and
   the pinned `2002429e…` (task 032). One `PINNED_ARTIFACT_SHA256`, in
   `tests/common/mod.rs`, serves this test and the one above.
 - `missing_entrypoint_is_refused` — an entrypoint no entry has gets its own
   reason; `capsule.wasm` beside it does not stand in.
 - `verifier_uses_manifest_entrypoint` — with the entrypoint `main.wasm` (the
   importing module) beside the 8-byte `capsule.wasm`, the audit reads
-  `main.wasm`.
-- `verified_entrypoint_is_the_audited_module` — in that same layout,
-  `entrypoint()` is the checked `main.wasm` entry itself (its path, its bytes,
-  and the audit of it gives `imports()`), not `capsule.wasm`.
+  `main.wasm`: `undeclared import env.f` (task 065 dropped its granted pass).
+- `verified_entrypoint_is_the_audited_module` — with the entrypoint
+  `main.wasm`, a type-section-only module with no import (task 065; it was the
+  granted importing module), beside the 8-byte `capsule.wasm`: `entrypoint()`
+  is the checked `main.wasm` entry itself (its path and its bytes), not
+  `capsule.wasm`.
 - `verifier_preserves_upstream_refusals` — the walk's (no manifest, a link),
   the signature check's (a malformed DID, a name that is not a lab CID, a
   signature that does not verify) and the audit's (a malformed module, code in
@@ -2045,10 +2105,10 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
   before unsigned, unsigned before the audit, the signature before the
   entrypoint and the audit, the name before the audit.
 - `verified_bundle_is_sealed` — the source, comments stripped: no public
-  field, exactly ten public functions (`verify_checked`, `verify_bundle`,
-  `read_grants`, task 064's `bus_imports` and the six accessors,
-  `unused_grants()` and `memory_mb()` among them; this line said "eight" and
-  "five" before task 064, one behind the test), no
+  field, exactly eight public functions (`verify_checked`, `verify_bundle`,
+  `read_grants`, task 064's `bus_imports` and the four accessors, `cid()`,
+  `entries()`, `entrypoint()` and `memory_mb()`; task 065 removed `imports()`
+  and `unused_grants()`), no
   `&mut self`, no `Deserialize`, `Default` or trait impl for the value, and one
   literal that makes it, in `verify_checked`.
 - `verifier_has_one_check_path` — the tools crate calls
@@ -2056,7 +2116,7 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
   `from_slice` in `manifest_entrypoint`, one in `parse_grants`), calls
   `manifest_entrypoint` once, reads one file with `fs::read` (in
   `read_grants`), calls `parse_grants` once and `read_grants` never (the caller
-  does), does not use `verify_name_signature`, calls `audit_component` once
+  does; since task 065 `run` reads no grants), does not use `verify_name_signature`, calls `audit_component` once
   (task 064, in `bus_imports`; it held "never" before), `verify_checked`
   reads no grants, `verify_bundle` only walks and delegates,
   and `entrypoint()` reads no manifest.
@@ -2067,24 +2127,29 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
   has no `fs::read`, `File::open`, `OpenOptions`, `read_dir`, `metadata` or
   `read_to_end` outside `read_grants`, and `read_grants` has exactly one
   `fs::read` and none of the others.
-- `grants_file_refusals_keep_their_reason` (wc-009a; v2 since task 031) —
-  `GRANTS_SCHEMA` and `GRANTS_LABEL` are exactly `wc-009.lab-grants/v2` and
-  `lab stand-in, not admission`; an empty list and two grants read in file
-  order; a missing file keeps `NotFound` and its OS text; and 21 malformed
-  files (not JSON, a list or a string document, an unknown key, each missing
-  key, a v1 file or a number schema, another label and one with a trailing
-  space, imports as an object, eight bad entries among them the v1 pair with
-  no right and a number right, the same pair twice) each give their exact text.
-- `grant_naming_a_right_the_operation_does_not_need_is_refused` (task 031) —
-  `LAB_OPERATIONS` is exactly the one entry `env.f`, inputs and outputs none,
-  right `call`, effect `none`; `env.f` granted `call` reads, and `env.g` (no
-  typed operation) granted `write` reads; `env.f` granted `write`, `read`,
-  `Call`, `call ` or the empty string is refused as `RightNotNeeded` with the
-  import, the right granted and `call`, and its exact text after the path.
-- `unused_grants_excludes_linked_and_preserves_file_order` (wc-009a) — the
-  module that imports `env.f`, granted `z.last`, `env.f`, `a.first`:
-  `imports()` is `[env.f]`, `unused_grants()` is `[z.last, a.first]`, and the
-  lab CID and the entries are the bundle's own two files.
+- `grants_file_names_resource_and_actions_as_capability_request` (task 065) —
+  `GRANTS_SCHEMA` and `GRANTS_LABEL` are exactly `wc-009.lab-grants/v3` and
+  `lab stand-in, not admission`; an empty list reads as none, and a file
+  `grants_file` wrote with two entries, `resource` and `actions` as written in
+  it, reads back as two `LabGrant`s in file order.
+- `grants_file_refusals_keep_their_reason` (wc-009a; v3 since task 065) — a
+  missing file keeps `NotFound` and its OS text; and 21 malformed files (not
+  JSON, a list or a string document, an unknown key and a v2 file's `imports`,
+  each missing key, a v2 or a number schema, another label and one with a
+  trailing space, `grants` as an object, eight bad entries: a string, no
+  actions, a third key `reason`, another key, a number or null resource,
+  actions as a string, a number action) each give their exact text.
+- Task 065, one test per new refusal, each its variant and exact text after
+  the path: `grant_with_an_empty_resource_is_refused`,
+  `grant_with_no_actions_is_refused`, `grant_with_an_empty_action_is_refused`,
+  `grant_naming_an_action_twice_is_refused`, `resource_granted_twice_is_refused`
+  (with other actions and its keys in another order) and
+  `grant_with_a_retired_right_or_module_key_is_refused` (`right` beside a v3
+  grant, a whole v2 grant refused at `module`, and `name`).
+- `retired_core_grant_names_are_gone_from_the_tools` (task 065) — no line of
+  any file under `tools/src/`, comments included, names `LAB_OPERATIONS`,
+  `lab-grants/v2`, `UntypedImport` or `RightNotNeeded` (each built from two
+  parts, so the test file does not match itself).
 - `no_key_material_is_tracked_in_the_lane` — every file `git ls-files
   -z --cached --others --exclude-standard` lists in the lane, from the one
   shared lister, `lane_paths` in `tests/common/build.rs` (task 056): no `.key` or
@@ -2161,8 +2226,9 @@ puts it under the `/var` link):
 - `runner_uses_only_explicit_inputs` — the runner's source, comments
   stripped: no environment read, no file read, no manifest or module parse, no
   walk or lower-level verify call, no grants read or parse, exactly one
-  `verify_bundle` call (task 015's `run`, passing `input.granted`, task 020),
-  `input.granted` used nowhere else, and `entrypoint()` is its one source of
+  `verify_bundle` call (task 015's `run`; since task 065 exactly
+  `verify_bundle(input.bundle, input.signature, input.accepted)`, with no
+  granted list), and `entrypoint()` is its one source of
   module bytes. Task 033: `entrypoint()` is read twice, for the module write
   and the memory check; the audit crate is named once, in the import of
   `memories` and its `Refusal`; `memories(` is called once; and no `audit(` or
@@ -2262,40 +2328,28 @@ Task 019's two:
   differ. Since task 052 it also finds the one "outside the N" in that
   section and fails naming both numbers when N is not the total.
 
-wc-009a's run tests (task 020), in `tests/run.rs`. Each signs its bundle with a
-fresh key, writes a lab grants file beside the bundle, reads it with
-`read_grants` and runs `run` on task 019's counting stand-ins. "Each engine
-once" is exactly one `--version` query and one module run per engine; a refusal
-is zero of both:
+wc-009a's run tests (task 020), in `tests/run.rs`, as task 065 left them. Each
+signs its bundle with a fresh key and runs `run` on task 019's counting
+stand-ins through `run_counting` (task 020's `run_with_grants`, which read a
+lab grants file, before task 065). "Each engine once" is exactly one
+`--version` query and one module run per engine; a refusal is zero of both:
 
-- `zero_grants_zero_imports_runs` — the capsule `tools/build` makes, with an
-  empty grants file: it runs, each engine once, `linked()` and
-  `unused_grants()` are empty.
+- `zero_grants_zero_imports_runs` — the capsule `tools/build` makes: it runs,
+  each engine once, and no run folder is left.
 - `zero_grants_zero_imports_runs_on_both_real_engines` — the same on the real
-  `wasmtime` and `wasmer` found on PATH: both print `FIXED_OUTPUT`, nothing is
-  linked. If either is not found it prints `SKIPPED`, never a PASS.
-- `declared_not_granted_import_refuses_instantiation_by_name` — the signed
-  module that imports `env.f`, with an empty grants file: refused as
+  `wasmtime` and `wasmer` found on PATH: both print `FIXED_OUTPUT`. If either
+  is not found it prints `SKIPPED`, never a PASS.
+- `core_module_import_is_refused_before_any_engine_start` (task 065; task
+  020's `declared_not_granted_import_refuses_instantiation_by_name`, renamed) —
+  `IMPORTING_MODULE`, signed: refused as
   `TwoEngineRefusal::Verify(VerifyRefusal::Audit(Undeclared { module: "env",
   name: "f" }))`, text exactly `undeclared import env.f`; no run folder, and
   zero starts of either kind.
-- `valid_signature_with_empty_grants_file_links_nothing` — the zero-import
-  8-byte module, validly signed, with an empty grants file: `linked()` is empty.
-- `grant_for_an_import_the_module_does_not_have_links_nothing_and_is_reported`
-  (Rong's rename of `granted_but_undeclared_is_refused`) — the zero-import
-  module, grants `[env.f]` (right `call`): it runs, `linked()` is empty,
-  `unused_grants()` is exactly `[env.f]`.
-- `granted_import_is_linked` — the module that imports `env.f`, grants
-  `[env.f]` (right `call`): it passes verification, `linked()` is exactly
-  `[env.f]`, each engine once, each run folder held the verified module
-  (recorded by the stand-in during its run), and (task 039) the work root is
-  empty after the run.
-- `module_import_with_no_typed_operation_is_refused` (task 031) — the module
-  that imports `env.g` (no typed lab operation), granted `env.g`: refused as
-  `TwoEngineRefusal::Verify(VerifyRefusal::UntypedImport { module: "env", name:
-  "g" })`, text exactly `no typed lab operation for import env.g`; with no
-  grant, refused by the audit as `undeclared import env.g`. Both: no run
-  folder, and zero starts of either kind.
+
+Task 065 removed `valid_signature_with_empty_grants_file_links_nothing`,
+`grant_for_an_import_the_module_does_not_have_links_nothing_and_is_reported`,
+`granted_import_is_linked` and `module_import_with_no_typed_operation_is_refused`
+with their rules (LOG.md, task 065).
 
 Task 026's two, in `tests/docs.rs`. Each holds one of Rong's two rulings
 (26 Oct) as one exact sentence, read through `lane_file`:
@@ -2461,8 +2515,8 @@ Task 041, host secrets denied (`tests/run.rs`; README "Host secrets denied
   fixture path or the marker; both stdouts are `FIXED_OUTPUT` and a newline.
 - `host_secret_probe_imports_are_refused_before_any_engine_starts` — five
   `wasi_snapshot_preview1` file and environment imports, each refused by
-  `run` as undeclared with no grant and as untyped with a `call` grant (exact
-  text and variant), with no run folder and no engine start.
+  `run` as undeclared (exact text and variant; task 065 removed the `call`
+  grant case), with no run folder and no engine start.
 
 Task 043, the run budget (`tests/run.rs`; README "Run one engine (wc-005a)",
 "The run budget"). Every other test run passes one explicit control,
@@ -2533,7 +2587,7 @@ most 5 s for the answer (`cancel_once_live`); on any failed wait it runs
   `TwoEngineRefusal::Engine` with `Cancelled` for `wasmtime` within 5 s;
   `wasmer` was asked `--version` once and ran no module; the census is empty.
 - `refused_and_failed_runs_leave_nothing_under_the_scratch_root` — through
-  `run`: a verifier refusal (`env.f` not granted), an unpinned `wasmtime
+  `run`: a verifier refusal (`env.f`, a core import), an unpinned `wasmtime
   9.9.9` (stand-in), a failing `wasmtime` (stand-in, exit 3) and a 200 ms
   budget stop (stand-in sleeper, under the watchdog), each its own expected
   reason, each followed by an empty census.
@@ -2627,29 +2681,31 @@ each input run at most once per test binary):
 
 ## Falsifiers
 
-`falsifiers.json` holds 192 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 188 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
-21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
-wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
-seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
-031, two task 032, one task 035, three task 036, five task 038, three task
+20 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
+wc-005c (task 016), two task 019, 14 wc-009a (task 020), seven task 026,
+seven wc-010b (task 027), two wc-010c (task 028), one task 029, two task
+032, one task 035, three task 036, five task 038, three task
 039, one task 040, one task 041, two task 043, one task 044, one task
 033, two task 034, one task 045, two task 046, one task 050, three task
-052, one task 056, two task 062 and one task 064.
+052, one task 056, two task 062, one task 064 and three task 065. Task 065
+removed seven entries whose rule is gone (its section, at the end): one of
+wc-004's, three of wc-009a's, one of task 029's and both of task 031's.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 128, the sections below
-marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046, 050, 052, 056, 062 and 064: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
-+ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1 + 3 + 1 + 2 + 1), each run by the canonical runner with its summary
+Two kinds of evidence, kept apart. Runner-caught: 125, the sections below
+marked runner-caught, less task 065's removals (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
+029, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046, 050, 052, 056, 062, 064 and 065: 1 + 1 + 23 + 11 + 20 + 2 + 14 + 7 + 7
++ 2 + 1 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1 + 3 + 1 + 2 + 1 + 3), each run by the canonical runner with its summary
 line quoted.
-Hand-proven, pending R1: 69, each counted once: the 64 entries of the sections
-marked so (wc-001, tasks 010 and 009, wc-004 and wc-008: 9 + 7 + 23 + 21 + 4),
-and five proofs with no `falsifiers.json` entry, outside the 192 (task 036's
+Hand-proven, pending R1: 68, each counted once: the 63 entries of the sections
+marked so (wc-001, tasks 010 and 009, wc-004 and wc-008: 9 + 7 + 23 + 20 + 4),
+and five proofs with no `falsifiers.json` entry, outside the 188 (task 036's
 `/bin/bash` 3.2 guard in `tests/reproducible.rs`, task 042's killed-run
 stop and task 049's two environment record proofs in `tests/run.rs`, and task
 053's import-section refusal in `tests/common/wasm_shape.rs`; none of these
@@ -3563,3 +3619,66 @@ fails at its assertion:
 Task 064 also re-anchors F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT to the
 new total, each the same bug as before (LOG.md, task 064). This task changes no
 other label.
+
+Task 065's three, runner-caught (the canonical runner's summary line is in
+LOG.md, task 065). Rong's WC-1 and WC-2 ("Core imports retired, grants name
+resource and actions (task 065)", in "Bus v1 import contract (wc-009b)").
+Each anchor is in `tools/src/verify.rs`, a recovery target, found exactly
+once, and each named test fails at its assertion:
+
+- F-WC9B-CORE-IMPORT-GRANTED — the core audit gets `&[DeclaredImport { module:
+  "env".into(), name: "f".into() }]` (written as
+  `wasm_capsule_audit::DeclaredImport`, since `verify.rs` no longer imports the
+  type) in place of `&[]`, so the `env.f` module passes the verifier and both
+  engines start (`core_module_import_is_refused_before_any_engine_start`, at
+  its refusal).
+- F-WC9B-GRANT-ACTIONS-EMPTY — the reader skips the empty-actions refusal, so
+  a grant naming no action is read (`grant_with_no_actions_is_refused`).
+- F-WC9B-RETIRED-TABLE-BACK — a `LAB_OPERATIONS` table naming `env.f` comes
+  back in `tools/src/verify.rs`
+  (`retired_core_grant_names_are_gone_from_the_tools`, which names the file and
+  line).
+
+Task 065 removed seven entries, each because its rule is gone:
+
+- F-WC4e — the verifier passes `&[]` in place of the caller's grants: the
+  verifier takes no grants, and `&[]` is now the rule.
+- F-WC9-GRANT-INJECT — the linked list is the grants list: there is no linked
+  list (`imports()` and `linked()` are removed).
+- F-WC9-UNUSED-KEEPS-USED — the unused grants keep a linked one: there is no
+  unused-grant list (`unused_grants()` is removed).
+- F-WC9-UNUSED-REORDER — the unused grants come back reversed: the same.
+- F-WC9-RUN-DROPS-GRANTS — `run` passes `&[]` in place of `input.granted`:
+  `RunInput` has no granted list.
+- F-WC-B4-UNTYPED-LINKED — the typed-entry check is dropped: `LAB_OPERATIONS`
+  and `UntypedImport` are removed.
+- F-WC-B4-RIGHT-IGNORED — the right comparison is dropped: a grant names no
+  right, and `RightNotNeeded` is removed.
+
+Task 065 also re-anchors, each the same bug on the new code or text, and the
+canonical runner reports each CAUGHT (LOG.md, task 065):
+
+- on the one `audit(module, &[])` line: F-WC4c (the call is skipped),
+  F-WC4-AUDIT-REASON, F-WC4-ORDER-AUDIT-FIRST and F-WC9-LINK-ALL (now named
+  for `core_module_import_is_refused_before_any_engine_start`, task 020's
+  `declared_not_granted_import_refuses_instantiation_by_name` renamed);
+  F-WC4d and F-WC4-SECOND-AUDIT plant their second audit with `&[]`;
+- F-WC4-SEALED-NEW (its constructor fills the three fields left) and
+  F-WC4-SEALED-MUT (mutable access to `memory_mb`, since `imports()` is gone);
+- the v3 reader: F-WC9-GRANTS-IMPORTS-NOT-LIST (`grants` read as an empty list),
+  F-WC9-GRANTS-ENTRY-NOT-STRING (a number `resource` taken as its JSON text)
+  and F-WC9-GRANTS-DUPLICATE (now named for
+  `resource_granted_twice_is_refused`); the other nine F-WC9-GRANTS-* anchors
+  did not move and are re-run;
+- `tools/src/run.rs`: F-WC5a (three edits, no linked list to fill),
+  F-WC5-VERIFY-TWICE and F-WC5-QUERY-BEFORE-VERIFY (`verify_bundle` takes three
+  arguments), and F-WC-ENGINE-RUN-MODULE-DOC (the module doc after its label
+  line changed, so the plant now rewrites only the label line, in a wording
+  without the label, and no longer restores task 055's base wording);
+- `README.md`: F-WC-B4-TYPE-GAP-HIDDEN (the reworded gap sentence loses its
+  "not"), F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT (the new total).
+  F-WC-B4-TYPE-CHECK-CLAIMED's anchor did not move (this line says "not"): the
+  `env.f` line kept as history in "Typed lab operations (M1 B4 lab half)".
+
+No label changes: the re-anchored F-WC4 entries stay in wc-004's hand-proven
+count, the rest keep their runner-caught label.
