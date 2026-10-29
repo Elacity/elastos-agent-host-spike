@@ -1776,6 +1776,8 @@ class ReleasePolicyTests(unittest.TestCase):
             "update-hop-linux": ("update-hop-linux", "ubuntu-24.04"),
             # Anders decides whether this becomes a required check (#311 D2).
             "cargo-audit": ("cargo-audit", "ubuntu-24.04"),
+            # Sash decides whether this becomes a required check (lab stand-in contract).
+            "lab-standin": ("lab-standin", "ubuntu-24.04"),
         }
         self.assertEqual(set(JOBS), set(expected))
         for job, (name, runner) in expected.items():
