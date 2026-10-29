@@ -6,9 +6,11 @@ present is the one file-profile contract: `check_profile_contract`, run over
 `(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
 no network allow, only the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and
 `STORAGE_PARENT` tokens, and the three shared rules verbatim.
-This contract has partial Linux lab implementation. The seccomp allow list and
-the repaired Landlock file row each have a real Linux run, and both come from the
-same approved declared rights. `confine.sb` stays each provider's one oracle. The
+This contract has partial Linux lab implementation. The seccomp allow list has
+a real Linux run. The Landlock file row now requires execution-only authority
+for the bound binary and parent-entry durability during initialization; its
+Linux acceptance run remains pending. Both rows use the same declared rights.
+`confine.sb` stays each provider's one oracle. The
 contract is shared, so its Linux mapping is written once here, beside the one
 contract check (P10). The Linux policy that the Runtime would generate from the
 same approved declared rights must carry each oracle rule as this file maps it,
@@ -263,8 +265,8 @@ registered runner check remains with the supervisor.
 ## The Landlock file row
 
 The second Linux row, `wallet-provider` only, is a Landlock ruleset generated
-from the same declared rights as the seccomp list, with one real Linux run
-behind it.
+from the same declared rights as the seccomp list. The earlier run below records
+the prior candidate; the corrected policy requires a fresh Linux run.
 
 One function builds it: `landlock_path_rules(name, declared, bindings, abi,
 loader)` in `capsules/wallet-provider/tests/confine.rs` calls `generate_profile`,
@@ -284,7 +286,7 @@ not an omission:
 | --- | --- |
 | `(allow file-read* (literal (param "STORAGE_PARENT")))` | zero rights |
 | `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` | `READ_FILE`, `READ_DIR`, `WRITE_FILE`, `REMOVE_FILE`, `REMOVE_DIR`, `MAKE_DIR`, `MAKE_REG` |
-| `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` | `EXECUTE`, `READ_FILE` |
+| `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` | `EXECUTE` only |
 | `(allow file-read* (literal "/"))` | no right |
 | `(allow sysctl-read)` | no path right |
 
@@ -321,9 +323,13 @@ the file row would never apply.
 
 A Landlock directory grant covers its subtree. The parent form therefore grants
 zero rights. The launcher creates the storage root and syncs its parent before
-confinement. Wallet syncs parents when it creates directory entries; an existing
-root needs only its own directory sync. This keeps the durability work with the
-actor that creates the entry and permits startup with the parent rule absent.
+confinement. Wallet initialization also syncs the root's parent, including when
+another actor created the root. `wallet_initialization_requires_parent_sync_for_existing_and_new_roots`
+injects a parent-sync failure for both root states and requires initialization
+to refuse before publishing state or creating a key, then verifies recovery.
+The current Landlock policy denies the parent open needed by that sync. A
+verified preparation handoff or an approved policy change is required for this
+startup journey to succeed; the journey retains its success assertions.
 
 Both child paths use `PreparedLandlockRuleset`, which converts paths to C strings
 before fork. The probe also prepares its paths and fixture filter before fork.
@@ -336,11 +342,14 @@ On Linux it exercises those failures through both the launcher and probe.
 
 ### The bound-binary measurement
 
-The wallet binary needs `READ_FILE` as well as `EXECUTE` on the bound binary:
-`EXECUTE` alone produced `EACCES` (13) before its first instruction. The loader
-grants below come from that measurement, and the current candidate starts and
-serves under the repaired ruleset on the host above, which is what "The kernel
-proof" records.
+The earlier measurement reported `EACCES` (13) with `EXECUTE` alone. A startup
+measurement identifies a dependency; the declared `bound-executable` form
+authorizes execution only. The `(literal "/")` startup form refers to the root
+directory itself. The shared rights table therefore grants only `EXECUTE` on
+the binary. `landlock_allow_list_follows_the_declared_rights` also derives a
+policy retaining only `bound-executable` and requires exactly that right.
+The shared kernel probe opens the bound binary for reading, requiring success
+in the control and `EACCES` under Landlock. Its Linux execution remains pending.
 
 ### The loader departure
 
@@ -364,9 +373,11 @@ bound parameters **does not hold for the loader**, and it now says so.
 
 ### The kernel proof
 
-`linux_wallet_file_row_is_refused_outside_storage_root` ran on host
+The earlier candidate of `linux_wallet_file_row_is_refused_outside_storage_root` ran on host
 `spark1.local`: `aarch64`, Ubuntu 24.04.4, kernel `6.17.0-1029-nvidia`, Landlock
-ABI 7, unprivileged. The test reads the host ABI again. It starts the wallet
+ABI 7, unprivileged. That candidate included the excess binary read grant and
+omitted the final parent sync. These historical results do not establish
+acceptance of the corrected policy. The test reads the host ABI again. It starts the wallet
 through the shared launcher, requires `init` and a read-only call to succeed, and
 checks that an outside `init` is refused. The fixture contains
 `STORAGE_PARENT/sibling/private/marker`. The same uid runs these calls first
@@ -376,6 +387,7 @@ unconfined and then under the generated ruleset:
 | --- | --- | --- |
 | read inside `STORAGE_ROOT` | success | success |
 | write inside `STORAGE_ROOT` | success | success |
+| read the bound executable (added in this repair; run pending) | success | `EACCES` (13) |
 | read the sibling marker | success | `EACCES` (13) |
 | write beside `STORAGE_ROOT` | success | `EACCES` (13) |
 | truncate beside `STORAGE_ROOT` | success | `EACCES` (13) |
@@ -391,7 +403,7 @@ requires them unchanged, so the refusal shows in the fixture as well as in the
 probe's answer. That omission is the round-2 review's finding, and WP207 below
 shows the journey catches it.
 
-The run printed these lines, in this order:
+The earlier run printed these lines, before the executable-read probe was added:
 
 ```text
 linux landlock file row: applicable, host linux/aarch64, kernel 6.17.0-1029-nvidia, Landlock ABI 7

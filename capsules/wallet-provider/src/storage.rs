@@ -139,7 +139,11 @@ fn ensure_directory(path: &Path, label: &str) -> Result<(), String> {
 #[cfg(unix)]
 fn sync_directory(path: &Path, label: &str) -> Result<(), String> {
     File::open(path)
-        .and_then(|directory| directory.sync_all())
+        .and_then(|directory| {
+            #[cfg(test)]
+            tests::before_directory_sync(path)?;
+            directory.sync_all()
+        })
         .map_err(|err| format!("failed to sync {label}: {err}"))
 }
 
@@ -194,9 +198,9 @@ pub(super) fn create_wallet_dir_durable(wallet_dir: &Path) -> Result<(), String>
         .parent()
         .ok_or_else(|| "wallet storage directory has no parent to synchronize".to_string())?;
     ensure_directory(parent, "wallet storage parent directory")?;
-    // The loop syncs each parent whose directory entry was created. An existing
-    // root has no new parent entry: its owner prepared it before confinement.
-    Ok(())
+    // An existing root may have been created by another actor without a parent
+    // sync. Initialization owns the durability guarantee for that entry too.
+    sync_directory(parent, "wallet storage parent directory")
 }
 
 pub(super) fn prune_store(mut store: WalletStore, now: u64) -> WalletStore {
@@ -454,6 +458,73 @@ fn read_storage_key_if_present(key_path: &Path) -> Result<Option<[u8; 32]>, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    std::thread_local! {
+        static REFUSE_DIRECTORY_SYNC: std::cell::RefCell<Option<std::path::PathBuf>> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
+
+    #[cfg(unix)]
+    pub(super) fn before_directory_sync(path: &Path) -> std::io::Result<()> {
+        REFUSE_DIRECTORY_SYNC.with(|refused| {
+            if refused.borrow().as_deref() == Some(path) {
+                Err(std::io::Error::other("injected directory sync failure"))
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    /// Both root states reach the same parent sync. Injecting its failure must
+    /// refuse Init before it creates a key or publishes initialized state.
+    #[cfg(unix)]
+    #[test]
+    fn wallet_initialization_requires_parent_sync_for_existing_and_new_roots() {
+        struct RestoreSync;
+        impl Drop for RestoreSync {
+            fn drop(&mut self) {
+                REFUSE_DIRECTORY_SYNC.with(|refused| *refused.borrow_mut() = None);
+            }
+        }
+
+        for precreated in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let parent = dir.path().join("ElastOS").join("SystemServices");
+            let wallet_dir = parent.join("Wallet");
+            fs::create_dir_all(&parent).unwrap();
+            if precreated {
+                fs::create_dir(&wallet_dir).unwrap();
+            }
+            let config = json!({ "base_path": dir.path() });
+            let mut provider = WalletProvider::new();
+
+            let restore = RestoreSync;
+            REFUSE_DIRECTORY_SYNC.with(|refused| *refused.borrow_mut() = Some(parent));
+            assert_eq!(
+                provider.init(config.clone()),
+                Response::error(
+                    "storage_error",
+                    "failed to sync wallet storage parent directory: injected directory sync failure"
+                ),
+                "Init must require parent-entry durability with precreated={precreated}"
+            );
+            assert!(provider.store_path.is_none());
+            assert!(provider.storage_key.is_none());
+            assert!(!wallet_dir.join(WALLET_KEY_FILE).exists());
+            drop(restore);
+
+            let initialized = provider.init(config);
+            assert_eq!(
+                serde_json::to_value(initialized).unwrap()["status"],
+                "ok",
+                "Init must recover after the parent sync succeeds"
+            );
+            assert!(provider.store_path.is_some());
+            assert!(wallet_dir.join(WALLET_KEY_FILE).is_file());
+        }
+    }
 
     #[test]
     fn storage_key_bootstrap_is_private_atomic_and_concurrent() {

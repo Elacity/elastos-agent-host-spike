@@ -6393,18 +6393,13 @@ const LANDLOCK_ACCESS_FS_IOCTL_DEV: u64 = 1 << 15;
 /// - the `STORAGE_ROOT` subpath form carries the rights a read and write of the
 ///   whole tree needs, because a path rule on that directory covers the tree
 ///   beneath it, which is what `subpath` names;
-/// - the `bound-executable` exec form carries `EXECUTE` **and `READ_FILE`**.
-///   `EXECUTE` on a file grants only that file, which is what `literal` names.
-///   The read is the second measurement: a dynamically linked program is mapped
-///   by its loader, so a rule with `EXECUTE` alone makes `execve` fail `EACCES`
-///   (13) before the provider's first instruction. The oracle's own
-///   `(allow file-read* (literal "/"))` already grants that read of the binary,
-///   so this row grants it on the one file instead of on the whole filesystem,
-///   which is narrower than the oracle and not wider;
+/// - the `bound-executable` exec form carries only `EXECUTE` on that file,
+///   which is what the declared `process-exec` permission authorizes. A startup
+///   dependency establishes a need, while a declaration supplies authority;
 /// - the `(literal (param "STORAGE_PARENT"))` read form carries no right:
 ///   a directory grant covers the entire subtree, including sibling providers.
-///   The launcher prepares the root before confinement. The provider syncs a
-///   parent only when it creates a directory entry in that parent;
+///   The provider owns parent-entry durability even for an existing root and
+///   refuses initialization when it cannot synchronize that parent;
 /// - the `(allow file-read* (literal "/"))` startup form carries **no right**,
 ///   for the design's reason: a read rule on `/` would grant the whole
 ///   filesystem and add a fourth path the design does not hold;
@@ -6431,10 +6426,7 @@ const LANDLOCK_RULE_RIGHTS: &[(&str, u64)] = &[
             | LANDLOCK_ACCESS_FS_MAKE_DIR
             | LANDLOCK_ACCESS_FS_MAKE_REG,
     ),
-    (
-        SHARED_RULES[0],
-        LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
-    ),
+    (SHARED_RULES[0], LANDLOCK_ACCESS_FS_EXECUTE),
     (SHARED_RULES[1], 0),
     (STARTUP_RULES[0], 0),
     (STARTUP_RULES[1], 0),
@@ -8443,8 +8435,8 @@ fn landlock_allow_list_follows_the_declared_rights() {
     );
     assert_eq!(
         rule("PROVIDER_EXECUTABLE").rights,
-        LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
-        "the bound-executable row must carry EXECUTE and the loader's read of that one file"
+        LANDLOCK_ACCESS_FS_EXECUTE,
+        "the bound-executable row must carry execution-only rights"
     );
 
     // Inspect the explicit table decision even though a zero row adds no rule.
@@ -8501,6 +8493,19 @@ fn landlock_allow_list_follows_the_declared_rights() {
             .any(|rule| rule.parameter == "PROVIDER_EXECUTABLE"),
         "the bound-executable right stays, so its rule stays: {reduced:?}"
     );
+
+    // Retain only bound-executable, including removal of the startup baseline.
+    // Its authority stays execution-only even without any file-read form.
+    without_storage["platform_baseline"]["rules"] = json!([]);
+    let execution_only = landlock_path_rules(WALLET_PROVIDER, &without_storage, &bindings, 7, &[])
+        .unwrap_or_else(|err| panic!("{err}"));
+    assert_eq!(execution_only.rules.len(), 1);
+    assert_eq!(execution_only.rules[0].parameter, "PROVIDER_EXECUTABLE");
+    assert_eq!(
+        execution_only.rules[0].path,
+        rule("PROVIDER_EXECUTABLE").path
+    );
+    assert_eq!(execution_only.rules[0].rights, LANDLOCK_ACCESS_FS_EXECUTE);
 
     // No allow form at all: no path rule, so a builder that added one of its
     // own beside the rows shows here.
@@ -10804,6 +10809,7 @@ fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
 enum LandlockProbeCall {
     ReadInside,
     WriteInside,
+    ReadExecutable,
     ReadBeneathParent,
     WriteBesideParent,
     TruncateBesideParent,
@@ -10815,9 +10821,10 @@ enum LandlockProbeCall {
 #[cfg(target_os = "linux")]
 impl LandlockProbeCall {
     /// Every call the journey requires, in report order.
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::ReadInside,
         Self::WriteInside,
+        Self::ReadExecutable,
         Self::ReadBeneathParent,
         Self::WriteBesideParent,
         Self::TruncateBesideParent,
@@ -10831,6 +10838,7 @@ impl LandlockProbeCall {
         match self {
             Self::ReadInside => "read-inside-storage-root",
             Self::WriteInside => "write-inside-storage-root",
+            Self::ReadExecutable => "read-bound-executable",
             Self::ReadBeneathParent => "read-beneath-storage-parent",
             Self::WriteBesideParent => "write-beside-storage-parent",
             Self::TruncateBesideParent => "truncate-beside-storage-parent",
@@ -10848,6 +10856,7 @@ impl LandlockProbeCall {
         match self {
             Self::ReadInside => root.join(LANDLOCK_PROBE_INSIDE_FILE),
             Self::WriteInside => root.join(LANDLOCK_PROBE_INSIDE_WRITE),
+            Self::ReadExecutable => resolved(Path::new(PROVIDER_BINARY)),
             Self::ReadBeneathParent => parent
                 .join(LANDLOCK_PROBE_PARENT_SIBLING)
                 .join("private")
@@ -10895,7 +10904,7 @@ const LANDLOCK_PROBE_REFUSED: &[u8] = b"landlock-probe-refused:";
 #[cfg(target_os = "linux")]
 type LandlockAnswer = SeccompAnswer;
 
-/// The eight answers one probe child recorded, in `LandlockProbeCall::ALL`
+/// The answers one probe child recorded, in `LandlockProbeCall::ALL`
 /// order.
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10907,10 +10916,10 @@ struct LandlockProbeReport {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LandlockProbeRun {
-    /// Install the ruleset through `install_landlock`, make the eight calls and
+    /// Install the ruleset through `install_landlock`, make the calls and
     /// report them.
     Confined,
-    /// Make the eight calls with no ruleset, which is the positive control.
+    /// Make the same calls with no ruleset, which is the positive control.
     Control,
     /// Run the confined case beneath an allow-all seccomp fixture filter, so a
     /// launcher that skipped only its own install is still visible here.
@@ -10929,9 +10938,9 @@ enum LandlockProbeRun {
 #[cfg(target_os = "linux")]
 fn landlock_probe_call(call: LandlockProbeCall, path: &CStr) -> LandlockAnswer {
     match call {
-        LandlockProbeCall::ReadInside | LandlockProbeCall::ReadBeneathParent => {
-            seccomp_answer(|| read_file_answer(path))
-        }
+        LandlockProbeCall::ReadInside
+        | LandlockProbeCall::ReadBeneathParent
+        | LandlockProbeCall::ReadExecutable => seccomp_answer(|| read_file_answer(path)),
         LandlockProbeCall::WriteInside | LandlockProbeCall::WriteBesideParent => {
             seccomp_answer(|| write_file_answer(path))
         }
@@ -10942,7 +10951,7 @@ fn landlock_probe_call(call: LandlockProbeCall, path: &CStr) -> LandlockAnswer {
     }
 }
 
-/// Reads the whole of `path` and answers its length, or `-1` with its errno.
+/// Opens `path` for reading and reads up to 256 bytes, or returns its errno.
 #[cfg(target_os = "linux")]
 fn read_file_answer(path: &CStr) -> i64 {
     let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
@@ -11151,7 +11160,7 @@ fn landlock_probe_allow_all() -> SeccompAllowList {
     }
 }
 
-/// Runs one Landlock probe child and returns its eight answers, or a refusal
+/// Runs one Landlock probe child and returns its answers, or a refusal
 /// naming what happened. The child is a fork of this process, so its ruleset
 /// reaches only itself. The child is reaped on every result, including a
 /// timeout, so a repeated journey leaves no probe behind.
@@ -11258,7 +11267,7 @@ fn landlock_file_probe(
         .map_err(|refusal| format!("landlock probe refused: {refusal}"))
 }
 
-/// The eight records the probe child wrote, each with its answer. A missing or
+/// The records the probe child wrote, each with its answer. A missing or
 /// unreadable record is a refusal that names the call, so a child that stopped
 /// early cannot pass the journey.
 #[cfg(target_os = "linux")]
@@ -11460,7 +11469,7 @@ fn linux_landlock_child_paths_reject_allocations() {
 /// `standin_spawn_confined_provider` with the `Landlock` policy, and requires
 /// `init` `ok` and one read-only wallet call `ok`. It then plants a readable file
 /// and a fixture beneath `STORAGE_PARENT`, outside `STORAGE_ROOT`, and runs the
-/// positive control first: the same eight calls under the same uid and the same
+/// positive control first: the same nine calls under the same uid and the same
 /// fixtures with no ruleset must all succeed, so a control that is already
 /// refused is reported as missing evidence with its cause and never as a kernel
 /// change.
@@ -11470,7 +11479,8 @@ fn linux_landlock_child_paths_reject_allocations() {
 /// planted file beneath `STORAGE_PARENT` refused `EACCES`, a write beside it
 /// refused `EACCES`, a truncation beside it refused `EACCES`, and listings of
 /// `STORAGE_PARENT`, `sibling` and `sibling/private` refused `EACCES`. The
-/// marker is planted at `STORAGE_PARENT/sibling/private/marker` before either
+/// bound executable is also opened for reading and must be refused `EACCES`.
+/// The marker is planted at `STORAGE_PARENT/sibling/private/marker` before either
 /// run, and the truncated file at `STORAGE_PARENT/landlock-beside-truncate.txt`
 /// is planted with its bytes before each run, so a permitted truncation shows
 /// in its length. The truncation is what proves the handled mask names
@@ -11622,6 +11632,7 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
         );
     }
     for call in [
+        LandlockProbeCall::ReadExecutable,
         LandlockProbeCall::ReadBeneathParent,
         LandlockProbeCall::WriteBesideParent,
         LandlockProbeCall::TruncateBesideParent,

@@ -560,15 +560,18 @@ document records `did-provider` or `wallet-provider` as confined on Linux (P10,
 P11). The status change lands when the Runtime side does.
 
 Most Linux enforcement rows are designed in `CONFINEMENT-LINUX.md` and remain
-unbuilt. Two rows exist today as source with a real Linux run behind them: a
+unbuilt. Two rows exist today as source: a
 seccomp allow list and a Landlock file row, each generated from this provider's
 declared rights through one generator. The seccomp side has the one builder, the
 one mapping table, the one step sequencer and the one install function that file
 names (`seccomp_allow_list_from_declared_rights`, `SECCOMP_RULE_SYSCALLS`,
 `install_seccomp_with`, `install_seccomp`); the Landlock side has
-`landlock_path_rules`, `LANDLOCK_RULE_RIGHTS` and `install_landlock`. Both rows
-have a real Linux run on host `spark1.local` (`aarch64`, Ubuntu 24.04.4, kernel
-`6.17.0-1029-nvidia`, Landlock ABI 7). The Landlock row grants zero rights on
+`landlock_path_rules`, `LANDLOCK_RULE_RIGHTS` and `install_landlock`. Earlier
+candidates ran on host `spark1.local` (`aarch64`, Ubuntu 24.04.4, kernel
+`6.17.0-1029-nvidia`, Landlock ABI 7). The corrected Landlock candidate requires
+a fresh Linux run: the bound binary now receives only `EXECUTE`, and wallet
+initialization requires parent synchronization for existing roots too.
+`CONFINEMENT-LINUX.md` records the resulting startup gate. The Landlock row grants zero rights on
 `STORAGE_PARENT` and requires kernel refusals for the parent listing, the sibling
 directory listings, and outside reads, writes and truncations. Its builder also
 refuses an ABI that cannot report `TRUNCATE` and `IOCTL_DEV`, so a kernel that
