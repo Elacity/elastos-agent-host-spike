@@ -1,13 +1,25 @@
-//! The one detector for a path dependency on this crate.
+//! The one detector for a path, git, or registry dependency on this crate.
 
-/// True only when the text names `grant-binding` and carries a `path` key.
+/// True when the decoded text is a path, git, or registry dependency on this crate.
 ///
-/// A manifest that names the crate without a path dependency is not a link
-/// to this crate's source.
+/// A manifest that only names the crate, including its own `version` field, is not a link.
+/// Dependency fields may be reordered, quoted, dotted, or in an explicit table.
 #[rustfmt::skip]
 pub fn cargo_toml_path_depends_on_grant_binding(cargo_toml: &str) -> bool {
     let cargo_toml = decode_toml_basic_strings(cargo_toml);
-    cargo_toml.contains("grant-binding") && cargo_toml.contains("path")
+    let packed: String = cargo_toml.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let unquoted = packed.replace(['"', '\''], "");
+    cargo_toml.contains("grant-binding")
+        && (cargo_toml.contains("path")
+            || packed.split("grant-binding").skip(1).any(|suffix| {
+                suffix.trim_start_matches(['"', '\'']).strip_prefix('=')
+                    .is_some_and(|value| value.starts_with(['"', '\'']))
+            })
+            || ((unquoted.contains("grant-binding={")
+                || unquoted.contains("grant-binding.")
+                || unquoted.contains(".grant-binding]")
+                || unquoted.contains("package=grant-binding"))
+                && (unquoted.contains("git=") || unquoted.contains("version="))))
 }
 
 /// Decode escapes in TOML basic strings, so an escaped link stays visible.
@@ -376,4 +388,97 @@ fn model_hash_inside_a_string_is_still_a_link() {
     assert!(literal.contains("grant-binding"));
     assert!(literal.contains("path"));
     assert!(cargo_toml_path_depends_on_grant_binding(literal));
+}
+
+#[test]
+fn model_git_or_registry_dependency_is_a_link() {
+    let git = "grant-binding = { git = \"https://example.com/gb.git\" }\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(git));
+    let git_tight = "grant-binding={git=\"https://example.com/gb.git\"}\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(git_tight));
+    let version = "grant-binding = { version = \"1.2.3\" }\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(version));
+    let version_tight = "grant-binding={version=\"1.2.3\"}\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(version_tight));
+    let inline = "grant-binding = \"1.2.3\"\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(inline));
+    let inline_tight = "grant-binding=\"1.2.3\"\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(inline_tight));
+    let package = "gb = { package = \"grant-binding\", version = \"1.2.3\" }\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(package));
+    let package_git =
+        "gb = { package = \"grant-binding\", git = \"https://example.com/gb.git\" }\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(package_git));
+    let version_after_options =
+        "[dependencies]\ngrant-binding = { default-features = false, version = \"1.2.3\" }\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(
+        version_after_options
+    ));
+    let git_after_options = "[dependencies]\ngrant-binding = { default-features = false, git = \"https://example.com/gb.git\" }\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(git_after_options));
+    let literal_version = "[dependencies]\ngrant-binding = '1.2.3'\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(literal_version));
+    let version_table = "[dependencies.grant-binding]\nversion = \"1.2.3\"\n";
+    assert!(cargo_toml_path_depends_on_grant_binding(version_table));
+    for manifest in [
+        "[dependencies.grant-binding]\ndefault-features = false\ngit = 'https://example.com/gb.git'\n",
+        "[dependencies]\ngrant-binding = { features = ['fixture'], registry = 'fixture', version = '1.2.3' }\n",
+        "[dependencies]\n'grant-binding' = '1.2.3'\n",
+        "[dependencies]\n\"grant-binding\" = \"1.2.3\"\n",
+        "[dependencies]\n\"grant-b\\u0069nding\" = '1.2.3'\n",
+        "[dependencies]\ngrant-binding = '''1.2.3'''\n",
+        "[dependencies]\ngrant-binding = \"\"\"1.2.3\"\"\"\n",
+        "[dependencies]\n'grant-binding' = { 'default-features' = false, 'version' = '1.2.3' }\n",
+        "[dependencies]\n\"grant-binding\" = { \"default-features\" = false, \"git\" = 'https://example.com/gb.git' }\n",
+        "['dependencies'.'grant-binding']\n'version' = '1.2.3'\n",
+        "[\"dependencies\".\"grant-binding\"]\n\"git\" = 'https://example.com/gb.git'\n",
+        "[dependencies]\ngrant-binding.version = '1.2.3'\n",
+        "[dependencies]\n'grant-binding'.'git' = 'https://example.com/gb.git'\n",
+        "dependencies.grant-binding.version = '1.2.3'\n",
+        "dependencies = { grant-binding = { default-features = false, git = 'https://example.com/gb.git' } }\n",
+        "[dependencies]\ngb = { default-features = false, package = 'grant-binding', version = '1.2.3' }\n",
+        "[dependencies]\ngb = { git = 'https://example.com/gb.git', 'package' = 'grant-binding' }\n",
+        "[dependencies]\ngb = { \"version\" = '1.2.3', \"package\" = \"grant-binding\" }\n",
+        "[dependencies]\ngb = { version = '1.2.3', package = '''grant-binding''' }\n",
+        "[dependencies]\ngb = { git = 'https://example.com/gb.git', package = \"\"\"grant-binding\"\"\" }\n",
+        "[dependencies.gb]\nversion = '1.2.3'\npackage = 'grant-binding'\n",
+        "[dependencies.gb]\npackage = 'grant-binding'\ngit = 'https://example.com/gb.git'\n",
+        "[dependencies]\ngb.package = 'grant-binding'\ngb.version = '1.2.3'\n",
+        "[dev-dependencies.grant-binding]\nversion = '1.2.3'\n",
+        "[build-dependencies.grant-binding]\ngit = 'https://example.com/gb.git'\n",
+        "[target.'cfg(unix)'.dependencies.grant-binding]\nversion = '1.2.3'\n",
+        "[workspace.dependencies.grant-binding]\nversion = '1.2.3'\n",
+    ] {
+        assert!(cargo_toml_path_depends_on_grant_binding(manifest), "{manifest}");
+    }
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        "name = \"grant-binding\"\n"
+    ));
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        "name = \"grant-binding\"\nversion = \"0.1.0\"\n"
+    ));
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        "package = \"grant-binding\"\n"
+    ));
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        "Grant-Binding = { git = \"https://example.com/gb.git\" }\n"
+    ));
+    assert!(!cargo_toml_path_depends_on_grant_binding(
+        "Grant-Binding = { version = \"1.2.3\" }\n"
+    ));
+    for manifest in [
+        "[package]\nname = 'grant-binding'\nversion = '1.2.3'\n",
+        "[package]\n\"name\" = \"grant-binding\"\n\"version\" = '1.2.3'\n",
+        "[dependencies]\ngb = { package = 'grant-binding' }\n",
+        "[dependencies]\n'Grant-Binding' = '1.2.3'\n",
+        "[dependencies.Grant-Binding]\nversion = '1.2.3'\n",
+        "[dependencies]\ngrant-binding = { Version = '1.2.3' }\n",
+        "[dependencies.grant-binding]\nGit = 'https://example.com/gb.git'\n",
+        "[dependencies]\n# grant-binding = '1.2.3'\n",
+    ] {
+        assert!(
+            !cargo_toml_path_depends_on_grant_binding(manifest),
+            "{manifest}"
+        );
+    }
 }
