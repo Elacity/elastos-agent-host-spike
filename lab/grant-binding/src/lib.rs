@@ -1391,3 +1391,33 @@ fn model_successful_child_keeps_next_ask_independent() {
         .expect("independent album stays");
     assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
 }
+
+#[test]
+fn model_revoke_child_journal_leaves_its_parent() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .ask_capability(photo, "UsersAI/photo/library", rights(), Asker::App)
+        .expect("library ask");
+    let photo_call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("roll journal");
+    let frame = verifier
+        .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/library/frame")
+        .expect("frame journal");
+    verifier.revoke_grant(roll);
+    let stopped = verifier
+        .use_grant(photo_call, &guest(roll))
+        .expect_err("revoked roll");
+    assert_eq!(stopped, Refuse::UnknownHandle);
+    assert_eq!(stopped.to_string(), "unknown handle");
+    let parent_kept = verifier
+        .use_grant(photo_call, &guest(library))
+        .expect("parent grant stays");
+    assert_eq!(parent_kept.owned_root, "UsersAI/photo/library");
+    let frame_kept = verifier
+        .use_grant(photo_call, &guest(frame))
+        .expect("sibling journal stays");
+    assert_eq!(frame_kept.owned_root, "UsersAI/photo/library/frame");
+}

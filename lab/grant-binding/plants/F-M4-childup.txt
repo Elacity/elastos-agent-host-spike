@@ -1,0 +1,21 @@
+id: F-M4-childup
+file: src/lib.rs
+test: model_revoke_child_journal_leaves_its_parent
+--- old
+        self.grants.remove(&handle);
+--- new
+        let minted_from = self.grants.get(&handle).and_then(|record| record.parent);
+        self.grants.remove(&handle);
+        if let Some(minted_from) = minted_from {
+            self.grants.remove(&minted_from);
+            let siblings: Vec<Handle> = self
+                .grants
+                .iter()
+                .filter(|(_, record)| record.parent == Some(minted_from))
+                .map(|(sibling, _)| *sibling)
+                .collect();
+            for sibling in siblings {
+                self.grants.remove(&sibling);
+            }
+        }
+--- end
