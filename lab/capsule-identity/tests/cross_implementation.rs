@@ -17,9 +17,10 @@ use capsule_identity::{
 use common::*;
 use ed25519_dalek::{Signature, Verifier};
 
-/// How many pinned bundles the check covers: seven fixtures, the recipe and
-/// the three bundles built for the profile tests.
-const PINNED_BUNDLES: usize = 11;
+/// How many pinned bundles the check covers: seven fixtures, the recipe,
+/// the three bundles built for the profile tests and the photo stand-in
+/// consumer copy (task 047).
+const PINNED_BUNDLES: usize = 12;
 
 /// How many committed fixtures have a pin: all but wc001-core.
 const PINNED_FIXTURES: usize = 7;
@@ -119,6 +120,11 @@ fn pinned_bundles() -> Vec<Pinned> {
         entries: content_sample_with(|entries| {
             entries.push(entry(&long_utf8_name(), b"long name\n"))
         }),
+    });
+    bundles.push(Pinned {
+        what: "consumer copy photo-stand-in-photo-set".to_owned(),
+        pin: PHOTO_STAND_IN_LAB_CID,
+        entries: photo_stand_in_entries(),
     });
     bundles
 }

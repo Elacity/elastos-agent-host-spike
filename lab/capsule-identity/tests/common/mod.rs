@@ -3,7 +3,8 @@
 //! that change a bundle while it is named, a driver for wc-001's own build,
 //! the library's code for tests that read it, the refusal asserts both
 //! signature checks share, the one key-material scan, the run of README's
-//! Python rule, the scan for lab crates that use this one, read through
+//! Python rule, the photo stand-in consumer copy and its pin, the scan for
+//! lab crates that use this one, read through
 //! `cargo metadata`, the scan of the lane's docs and code for what they
 //! claim about the lab CID, the check of the falsifier list's inventory, and
 //! the lab stand-in launcher (all six kept here, a file the falsifier runner
@@ -61,6 +62,39 @@ pub const EMPTY_FILE_LAB_CID: &str = "bafybeic2y3c3met6txd62reatxwqjnodhfejchfml
 /// protobuf lengths take two varint bytes.
 pub const LONG_UTF8_NAME_LAB_CID: &str =
     "bafybeih6g5cy7asndjexb7bazovwryqyj4faxvababcjrbe4jxayhzvgmy";
+
+/// The photo lane's PH6 stand-in photo set, a consumer copy and not a
+/// fixture: its five files, copied byte for byte from
+/// `examples/photo-viewer/host-test/fixtures/stand-in-photo-set/` at
+/// `d047a069a`. It sits outside `fixtures/` because its `capsule.json` has a
+/// `viewer` object, which the Runtime's manifest type refuses.
+pub const PHOTO_STAND_IN: &str = "consumer-fixtures/photo-stand-in-photo-set";
+pub const PHOTO_STAND_IN_FILES: [&str; 5] = [
+    "README.md",
+    "capsule.json",
+    "images/01.png",
+    "images/02.jpg",
+    "images/03.webp",
+];
+/// The lab CID of those five files. README pins the same value.
+pub const PHOTO_STAND_IN_LAB_CID: &str =
+    "bafybeiepelczjykxjbhpwaqjnmxx346l52alcxfzgg52ip2ejf5yijiuna";
+
+/// The committed bytes of the photo stand-in copy, one entry per file.
+pub fn photo_stand_in_entries() -> Vec<BundleEntry> {
+    PHOTO_STAND_IN_FILES
+        .iter()
+        .map(|file| {
+            let path = lane_dir().join(PHOTO_STAND_IN).join(file);
+            let content =
+                fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            BundleEntry {
+                path: (*file).to_owned(),
+                content,
+            }
+        })
+        .collect()
+}
 
 /// SHA-256 of `domain || 0x00 || content-sample's printed lab CID`. README
 /// pins the same digest.
