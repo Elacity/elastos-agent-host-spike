@@ -43,10 +43,12 @@ directories. This crate runs no Kubo, and no Kubo is installed on this Mac.
 So the lab CID follows the Kubo v0.40.1 profile, computed by the lab: no Kubo has
 computed any pin, and [Claim scope](#claim-scope) states the gate before the
 lab CID may be called more than that.
-The tests pin only the non-sharded subset of that profile with files of up to
-one tree level: a file of one raw leaf, a file of 2 to 174 raw leaves under one
-balanced file root (trickle off, `max-file-links` 174; task 048), and one
-block per directory. Anything bigger is refused, not named another way. The
+The tests pin only the non-sharded subset of that profile with one block per
+directory and the balanced file layout at one and two levels: a file of one raw
+leaf, a file of 2 to 174 raw leaves under one balanced file root (trickle off,
+`max-file-links` 174; task 048), and a file of 175 leaves under a two-level root
+(task 076). The same grouping gives the layout at any deeper depth, which no
+pin covers. The
 file root's bytes are the lab's reading of the profile, which no Kubo has
 checked (see [Claim scope](#claim-scope)).
 
@@ -60,19 +62,28 @@ To recompute a lab CID by hand:
    `0x55`, the multihash code `0x12` (sha2-256) and length `0x20` (32). Its
    Tsize is its length.
 3. A file of more than 262144 bytes is split into 262144-byte chunks, the
-   last one shorter, and each chunk is a raw leaf as in step 2. One dag-pb
-   **file root** links them all (the balanced layout, one level). Its block
-   is, for each leaf in order, field 2 (`0x12`, length) holding a link: field
-   1 (`0x0a`, length) the leaf's CID bytes, field 2 with an empty name
-   (`12 00`), field 3 (`0x18`) the leaf's length as a varint. Then field 1
+   last one shorter, and each chunk is a raw leaf as in step 2. The leaves
+   make a balanced dag-pb **file tree** (trickle off). Each level groups its
+   nodes left to right into groups of up to 174 (`max-file-links`), each full
+   before the next starts, so only a level's last group can be short, and
+   wraps each group in one **file node**; a group of one child is still a
+   node with one link. The depth is the smallest `d` with `174^d` at least
+   the leaf count: a file of 175 leaves is a root of two depth-1 nodes, the
+   first over 174 leaves and the second over one leaf. A file node's block
+   is, for each child in order, field 2 (`0x12`, length) holding a link:
+   field 1 (`0x0a`, length) the child's CID bytes, field 2 with an empty name
+   (`12 00`), field 3 (`0x18`) the child's Tsize as a varint. Then field 1
    (`0x0a`, length) holds the UnixFS data: `08 02` (type 2, a file), `18` and
-   the file's length as a varint (filesize, field 3), and for each leaf `20`
-   and its length as a varint (blocksizes, field 4, one tag per value, not
-   packed). There is no Data field (field 2). The root's CID is
-   `01 70 12 20` and the SHA-256 of its block, and the Tsize of a link to it
-   is its block's length plus its leaves' lengths. A file needing more than
-   174 leaves (`max-file-links`), so more than 45613056 bytes, would need a
-   second tree level and is refused with its path, its length and the limit.
+   the bytes under the node as a varint (filesize, field 3), and for each
+   child `20` and its file size as a varint (blocksizes, field 4, one tag per
+   value, not packed). A raw leaf's file size is its length; a file node's is
+   the bytes under it, not its Tsize. There is no Data field (field 2). A
+   node's CID is `01 70 12 20` and the SHA-256 of its block, and the Tsize of
+   a link to it is its block's length plus its children's Tsizes. A file of
+   one leaf stays that raw leaf, never a file node.
+   `file_past_174_leaves_keeps_a_second_tree_level` pins the 175-leaf bundle
+   (`SECOND_LEVEL_FILE_LAB_CID`) and catches F-CI76a (a one-child group
+   linked directly) and F-CI76b (a child's Tsize as its blocksize).
 4. Each path part but the last is a **directory**: `browser/app.js` is a
    directory `browser` with a link named `app.js`. The root is the directory
    of the bundle's entries. No empty directory is ever made.
@@ -133,16 +144,25 @@ def cid(codec, block):
 def file_node(data):  # a file's bytes; returns (CID bytes, Tsize)
     if len(data) <= 262144:
         return cid(0x55, data), len(data)
-    chunks = [data[at:at + 262144] for at in range(0, len(data), 262144)]
-    assert len(chunks) <= 174
-    links = b""
-    unixfs = b"\x08\x02\x18" + varint(len(data))
-    for chunk in chunks:
-        link = field(1, cid(0x55, chunk)) + field(2, b"")
-        links += field(2, link + b"\x18" + varint(len(chunk)))
-        unixfs += b"\x20" + varint(len(chunk))
-    block = links + field(1, unixfs)
-    return cid(0x70, block), len(block) + len(data)
+    level = []
+    for at in range(0, len(data), 262144):
+        chunk = data[at:at + 262144]
+        level.append((cid(0x55, chunk), len(chunk), len(chunk)))
+    while len(level) > 1:
+        groups = [level[at:at + 174] for at in range(0, len(level), 174)]
+        level = []
+        for group in groups:
+            filesize = sum(child[2] for child in group)
+            links = b""
+            unixfs = b"\x08\x02\x18" + varint(filesize)
+            for child in group:
+                link = field(1, child[0]) + field(2, b"")
+                links += field(2, link + b"\x18" + varint(child[1]))
+                unixfs += b"\x20" + varint(child[2])
+            block = links + field(1, unixfs)
+            tsize = len(block) + sum(child[1] for child in group)
+            level.append((cid(0x70, block), tsize, filesize))
+    return level[0][0], level[0][1]
 
 def directory(tree):  # {name: bytes or a dict}; returns (CID bytes, Tsize)
     links = b""
@@ -207,7 +227,7 @@ rules and not from the Rust code, in
 | Directory codec `0x70`, dag-pb | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18r (`0x71`) |
 | Chunk size 262144: a file of exactly that size is one block | `single_block_at_the_chunk_limit_has_the_pinned_cid` | F-CI18d (262143) |
 | A file over one leaf is a balanced root of raw leaves: empty link names, type 2, filesize, blocksizes, and a Tsize of its block and its leaves | `file_over_one_leaf_has_the_pinned_cid` | F-CI48a (no name field), F-CI48b (no blocksizes), F-CI48c (no filesize), F-CI48d (Tsize without the root block) |
-| At most 174 leaves; one more is refused | `file_of_174_leaves_is_named_and_one_byte_more_is_refused` | F-CI18e (no leaf-limit refusal), F-CI48e (the limit is 175) |
+| The file tree's depth is the smallest `d` with `174^d` at least the leaf count: each level groups up to 174 children, left to right, each group full before the next starts, one file node per group, and a group of one child is a one-link node | `file_past_174_leaves_keeps_a_second_tree_level` | F-CI18e (the level loop runs only once), F-CI48e (the limit is 175), F-CI76a (a one-child group linked directly), F-CI76b (a child's Tsize as its blocksize) |
 | The listing call names a file of at most one leaf; a listed file over one chunk is refused and named from its bytes instead | `listed_file_over_the_chunk_limit_is_refused`, `listed_file_over_one_leaf_names_the_bytes_call` | F-CI47c (`encode_listed_files` has no size refusal) |
 | Links sorted by name bytes | `lab_cid_matches_the_pinned_value_for_each_fixture`, `lab_cid_does_not_depend_on_listing_order` | F-CI18f (reverse), F-CI1a (no sort) |
 | Directory type 1 | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18g (5) |
@@ -240,8 +260,13 @@ leaves, 262144 and 1 bytes) is
 is `bafybeidpgwbsi22cbsmthqupvn37xphujhs6fnzyuy64uc6nsauc6bftqe`. Both were
 first computed by a `python3 -I` script written from the hand rules above,
 before any Rust code named them; that script used Python's own `base64` for
-the printed form and gave `content-sample`'s pin too. The 174-leaf test builds
-a 45613056-byte file and one of 45613057 bytes in memory and pins no value.
+the printed form and gave `content-sample`'s pin too. Task 076 adds one more,
+in memory and never committed: `content-sample` with `sample.example` as
+45613057 zero bytes (175 leaves, 174 of 262144 bytes and one of 1 byte, so a
+root of two depth-1 file nodes) is
+`bafybeifdbtqkw5q2ayypyajkbxd4wrctavgxpagjbugk5nddz53igm6xta`, first printed
+by README's Python rule before any Rust code named it. The 174-leaf file of
+45613056 zero bytes still encodes, with another CID, and is not pinned.
 The directory-block test builds 1100 empty files with 200-byte names in a temp
 dir.
 
@@ -268,22 +293,23 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    (`python3 -I could not run: <error>`), a non-zero exit (even after it
    printed a valid CID), no output, or more than one line is refused with its
    own reason, and the test asserts each of these reasons.
-5. For each of the 14 pins, the Python answer, the pin constant and the
+5. For each of the 15 pins, the Python answer, the pin constant and the
    printed `encode_entries` result for the same files must be equal, and the
-   test asserts that it checked exactly 14 bundles. The 14 are the seven
+   test asserts that it checked exactly 15 bundles. The 15 are the seven
    pinned fixtures (`content-sample`, `web-app`, `agent-host`, `provider`,
    `model`, `provider-variant-a`, `provider-variant-b`), the recipe, the
    chunk-limit, empty-file and long-name bundles above, which are built as
    entries in memory, the photo stand-in consumer copy (task 047, see
-   [naming a closure listing](#naming-a-closure-listing)), and the two-leaf
-   and three-leaf file bundles (task 048), also built in memory. `wc001-core` has no pin, because its `capsule.wasm` is
+   [naming a closure listing](#naming-a-closure-listing)), the two-leaf
+   and three-leaf file bundles (task 048) and the second-level file bundle
+   (task 076), also built in memory. `wc001-core` has no pin, because its `capsule.wasm` is
    built on each machine, so it is not checked here.
 
 | Rule | Named test | Falsifier |
 | --- | --- | --- |
 | README's rule agrees with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19a (the block's `0x55` becomes `0x70` before it runs) |
 | Rust agrees with README's rule, not only with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19b (the encoder's `RAW_CODEC` becomes `0x56`) |
-| A missing block is no pass: exactly 14 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
+| A missing block is no pass: exactly 15 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
 | An interpreter that cannot start fails the test | `readme_python_recomputes_every_lab_cid_pin` | F-CI19d (a program that does not exist) |
 | A non-zero exit is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19e (exit status not checked) |
 | No output is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19f (empty answer taken) |
@@ -1700,8 +1726,10 @@ README's Python block, written from the byte rules: the committed test
 `readme_python_recomputes_every_lab_cid_pin` runs it with `python3 -I` (Python
 3.9.6 on this Mac) and requires it to give every pin and the Rust encoder's
 value for the same files. The tests pin the non-sharded subset of the
-profile only, with files of up to one tree level (one raw leaf, or since task
-048 a balanced file root over 2 to 174 raw leaves). The file root's bytes are
+profile only, with files of the balanced layout at one and two levels (one raw
+leaf; a balanced file root over 2 to 174 raw leaves since task 048; and since
+task 076 a two-level root, such as the 175-leaf file of a 174-leaf node and a
+one-leaf node). The file root's bytes are
 the lab's reading of the profile, and Kubo has not checked them either.
 
 The claim is "Kubo v0.40.1 profile, computed by the lab", and nothing more.
@@ -1828,7 +1856,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 278 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 280 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1877,7 +1905,8 @@ F-CI49a to F-CI49c (see
 [the lab package record](#lab-package-record-outside-the-bundle)), and task
 059's F-CI59a to F-CI59c (F-CI59a: see
 [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1); F-CI59b and
-F-CI59c: see [what it is](#what-it-is-and-what-it-is-not)).
+F-CI59c: see [what it is](#what-it-is-and-what-it-is-not)), and task 076's
+F-CI76a and F-CI76b (see [the encoding](#the-encoding)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -2028,9 +2057,14 @@ see them. The root line F-CI47a anchors on is now in `encode_tree`, where no
 `ListedFile` is in scope, so its planted code lists the tree's files (path,
 the leaf CID's digest, Tsize) itself; its title, bug and tests are the same.
 The one-leaf refusal F-CI18e removed is now only the listing call's (F-CI47c
-removes it), so F-CI18e, keeping its id, now removes the 174-leaf refusal and
-names `file_of_174_leaves_is_named_and_one_byte_more_is_refused`; its title
-says so. F-CI47c also names `listed_file_over_one_leaf_names_the_bytes_call`.
+removes it). Task 076 removed the 174-leaf refusal and made the file tree any
+depth, so F-CI18e, keeping its id, is retargeted: it changes the level loop to
+run once (`if` in place of `while`) and names
+`file_past_174_leaves_keeps_a_second_tree_level`; its title says so. F-CI48e's
+`MAX_FILE_LINKS` edit stays and names that test. Task 076 moved
+`file_root_block`'s blocksize write from a leaf's Tsize to its file size, so
+F-CI48b's anchor is that loop. F-CI47c also names
+`listed_file_over_one_leaf_names_the_bytes_call`.
 Task 048 split `directory_block`'s link loop into `put_links` with the same
 lines, so F-CI1b, F-CI1p and F-CI1q keep their text, and every other older
 edit's text is still found exactly once.

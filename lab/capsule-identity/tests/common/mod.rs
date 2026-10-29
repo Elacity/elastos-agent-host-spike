@@ -68,6 +68,12 @@ pub const LONG_UTF8_NAME_LAB_CID: &str =
 /// bytes. Built in a temp dir and never committed.
 pub const TWO_LEAF_FILE_LAB_CID: &str =
     "bafybeidbd7gfhommypeks66twpnbbb3lwovdqe6iwtmdxptgcq5jqbaaby";
+/// content-sample with `sample.example` as 45613057 zero bytes, one leaf
+/// past 174: a root of two depth-1 file nodes, the first over 174 leaves and
+/// the second over one leaf. Built in a temp dir and never committed; task
+/// 076 printed it first with README's Python rule.
+pub const SECOND_LEVEL_FILE_LAB_CID: &str =
+    "bafybeifdbtqkw5q2ayypyajkbxd4wrctavgxpagjbugk5nddz53igm6xta";
 /// content-sample with one more file, `core/big.bin`, holding
 /// [`big_bin_bytes`]: a file root over three raw leaves (262144, 262144 and
 /// 75712 bytes) one directory down, so its Tsize reaches the root through

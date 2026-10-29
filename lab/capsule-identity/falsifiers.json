@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049 and 059). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049, 059 and 076). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -2778,18 +2778,18 @@
     },
     {
       "id": "F-CI18e",
-      "title": "the leaf-limit refusal is removed: a file of more than 174 leaves gets one file root (retargeted by task 048: the one-leaf refusal it once removed is no longer in the walk's path)",
+      "title": "the file tree's level loop runs once: a file past 174 leaves gets a one-level tree (retargeted by task 076 from the 174-leaf refusal task 048 removed)",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    if content.len().div_ceil(CHUNK_SIZE) > MAX_FILE_LINKS {\n        return Err(Refusal::FileOverLeafLimit {\n            path: path.to_owned(),\n            length: content.len(),\n        });\n    }\n",
-          "new": ""
+          "old": "    while level.len() > 1 {\n",
+          "new": "    if level.len() > 1 {\n"
         }
       ],
       "tests": [
-        "file_of_174_leaves_is_named_and_one_byte_more_is_refused"
+        "file_past_174_leaves_keeps_a_second_tree_level"
       ]
     },
     {
@@ -4451,13 +4451,13 @@
     },
     {
       "id": "F-CI48b",
-      "title": "the blocksizes are left out of a file root's UnixFS data",
+      "title": "the blocksizes are left out of a file node's UnixFS data",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    for leaf in leaves {\n        data.push(4 << 3);\n        put_varint(&mut data, leaf.tsize);\n    }\n",
+          "old": "    for child in children {\n        data.push(4 << 3);\n        put_varint(&mut data, child.filesize);\n    }\n",
           "new": ""
         }
       ],
@@ -4510,7 +4510,7 @@
         }
       ],
       "tests": [
-        "file_of_174_leaves_is_named_and_one_byte_more_is_refused"
+        "file_past_174_leaves_keeps_a_second_tree_level"
       ]
     },
     {
@@ -4608,6 +4608,38 @@
       ],
       "tests": [
         "the_lab_encoder_is_a_test_oracle"
+      ]
+    },
+    {
+      "id": "F-CI76a",
+      "title": "a one-child group links that child directly, without its one-link file node",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "                let block = file_root_block(group, filesize);\n",
+          "new": "                if group.len() == 1 {\n                    return group[0].clone();\n                }\n                let block = file_root_block(group, filesize);\n"
+        }
+      ],
+      "tests": [
+        "file_past_174_leaves_keeps_a_second_tree_level"
+      ]
+    },
+    {
+      "id": "F-CI76b",
+      "title": "a child's Tsize is written as its parent's blocksize",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        put_varint(&mut data, child.filesize);\n",
+          "new": "        put_varint(&mut data, child.tsize);\n"
+        }
+      ],
+      "tests": [
+        "file_past_174_leaves_keeps_a_second_tree_level"
       ]
     }
   ]
