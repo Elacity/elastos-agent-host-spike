@@ -702,3 +702,5 @@ Every `standin_` row is the lab stand-in in `standin-runtime/`, and a PASS there
 The new `standin_` rows are this stand-in, and a PASS there leaves the real Runtime's resident rows blocked.
 
 These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A6 credit.
+
+`completed_child_capture_refuses_a_sparse_file` is this harness, and a PASS there gives the Runtime no A12 credit and no C0 credit.

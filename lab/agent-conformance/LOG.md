@@ -7017,3 +7017,74 @@ The shell refusal is removed. `visible` was left as it is.
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `standin-runtime/mod.rs:146` decides from stored grants. This change adds no capsule import. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:2146` `standin_sibling_cannot_use_the_grant`. The planted `return Ok(())` fails that assertion and the restored test passes. |
 | 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:147` reads grants and does not read instances. `admit_resident` at `:166` still admits a path on its own. |
+
+## 101 — Bound finished-child capture on the clean base
+
+101: `capture` refuses a finished stdout or stderr whose logical length is above 16777216 before `read_to_end`, so a sparse file cannot fill the owner after the child has exited.
+
+HEAD before the first edit: `a823561c2e402633a27aeb5d0f60b8a71a2ef441`. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false. `git merge-base --is-ancestor b2eccab68f03ce9a0ced0c8afea96b496dbfd15f HEAD` is true. Before the edit, `fn capture` sought to the start and called `read_to_end`. `fn pull_stdout` is absent. HEAD is unchanged. `ThrowawayHome::launch` and `RunningChild::try_output` still call `capture` for both streams. `git diff -- lab/agent-conformance/src/harness.rs` is the length check in `capture` only. No real capture in the suite was longer than 16777216, so the cap stayed 16777216. `Cargo.toml` and `Cargo.lock` are unchanged. The forbidden paths, including `standin-runtime/`, `src/census.rs`, `src/report.rs`, `GAPS.md` and `falsifiers.json`, have an empty diff.
+
+Design, read only, `docs/AGENT_ARCHITECTURE.md` "Runtime and provider architecture": "Runtime verifies the principal and session, enforces capabilities, owns lifecycle and audit, and routes the operation." "They do not decide that an unverified caller is authorized."
+
+### F-harness-capture-cap
+
+Hand-run. No `falsifiers.json` id. The over-cap arm returns `Ok` of an empty vec and does not call `read_to_end`. The planted crate compiled. The test failed on the byte-limit assertion. Restored, the same test passed.
+
+Old:
+
+```text
+    if length > CAPTURE_BYTE_LIMIT {
+        return Err("child capture exceeds its byte limit");
+    }
+```
+
+New:
+
+```text
+    if length > CAPTURE_BYTE_LIMIT {
+        return Ok(Vec::new());
+    }
+```
+
+Planted exit 101 in 1.37 seconds. Assertion: `tests/harness.rs:420:5` `the harness refused a sparse stdout capture past its byte limit`, left `None`, right `Some("child capture exceeds its byte limit")`. Restored proof exit 0 in 3.11 seconds (`completed_child_capture_refuses_a_sparse_file` finished in 1.85 seconds).
+
+### Hand-run boundary plants
+
+These have no `falsifiers.json` id. Each was restored before the next.
+
+`>` changed to `>=`. A capture whose length equals 16777216 is refused. The `1 << 30` refusals still match, so only the exact-cap case catches this.
+
+Old: `if length > CAPTURE_BYTE_LIMIT {`
+
+New: `if length >= CAPTURE_BYTE_LIMIT {`
+
+Planted exit 101 in 1.32 seconds. Assertion: `tests/harness.rs:447:5` `the harness copied a finished capture at its byte limit`, left `Err("child capture exceeds its byte limit")`, right `Ok((true, 16777216))`.
+
+Cap raised from 16777216 to 33554432, with `>` left as it is. The `1 << 30` refusals still match. A length of 16777217 is copied, so only the cap-plus-one case catches this.
+
+Old: `const CAPTURE_BYTE_LIMIT: u64 = 16_777_216;`
+
+New: `const CAPTURE_BYTE_LIMIT: u64 = 33_554_432;`
+
+Planted exit 101 in 2.26 seconds. Assertion: `tests/harness.rs:477:5` `the harness refused a finished capture one byte past its limit`, left `None`, right `Some("child capture exceeds its byte limit")`.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`. Both commands stayed inside 600 seconds. The locked suite passed on the first run, so there was no census rerun.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.12 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 275.66 seconds. 143 passed, 0 failed, 14 ignored. The lib target passed 31 tests. The effects target passed 57 tests, with 12 ignored, in 206.06 seconds. The harness target passed 10 tests in 3.26 seconds. The runtime target passed 10 tests, with 2 ignored, in 15.88 seconds.
+- Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness completed_child_capture_refuses_a_sparse_file -- --nocapture` exit 0, real 3.11 seconds. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `src/harness.rs:623` `CAPTURE_BYTE_LIMIT` is a byte count. The check does not name code or content by a URL. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `src/harness.rs:632` returns before `read_to_end` when the logical length is above the cap. The edit opens no network, clock, or `wasi` import. |
+| 3. A second path or a second copy of one rule? | No | `src/harness.rs:284` and `:428` both call `capture`. `fn pull_stdout` is absent. |
+| 4. Runtime core grows? | No | The edit is `src/harness.rs`, `tests/harness.rs`, `RUNBOOK.md` and `LOG.md`. `elastos/` is unchanged. |
+| 5. Refusals deny by default with a clear reason? | Yes | `src/harness.rs:633` returns `child capture exceeds its byte limit` and copies nothing. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `src/harness.rs:625` is the harness read of a finished child file. This change adds no capsule import. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/harness.rs:392` `completed_child_capture_refuses_a_sparse_file`. The empty-vec plant fails `:420`, the `>=` plant fails `:447`, and the raised cap fails `:477`. |
+| 8. Identity, admission and allowance stay separate? | Yes | `src/harness.rs:632` compares the logical length only. `RUNBOOK.md:706` says a PASS gives the Runtime no A12 credit and no C0 credit. |

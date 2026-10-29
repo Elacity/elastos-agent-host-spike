@@ -1,5 +1,6 @@
 use agent_conformance::harness::{data_dir, Launch, RunningChild, RunningInstances, ThrowawayHome};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -360,4 +361,138 @@ fn parallel_collection_refuses_live_descendants() {
         Err("keep the root after an unstopped child or failed stop")
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+const CAPTURE_BYTE_LIMIT: u64 = 16_777_216;
+
+fn write_executable(home: &ThrowawayHome, name: &str, body: &str) -> PathBuf {
+    let path = home.home().join(name);
+    fs::write(&path, body).unwrap();
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).unwrap();
+    path
+}
+
+fn harness_reaped(home: &ThrowawayHome, pid_file: &str) {
+    let text = fs::read_to_string(home.home().join(pid_file))
+        .unwrap_or_else(|_| panic!("setup failed: missing {pid_file}"));
+    let pid: u32 = text
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("setup failed: {pid_file} is not a pid"));
+    assert_eq!(
+        home.group_is_alive(pid),
+        Ok(false),
+        "the harness reaped the refused child"
+    );
+}
+
+#[test]
+fn completed_child_capture_refuses_a_sparse_file() {
+    assert!(
+        Path::new("/usr/bin/perl").is_file(),
+        "setup failed: /usr/bin/perl is missing"
+    );
+    let home = ThrowawayHome::new().expect("setup failed: throwaway home");
+    let ok_program = write_executable(&home, "show-ok", "#!/bin/sh\nprintf 'ok\\n'\nexit 0\n");
+    let ok = home
+        .launch(&ok_program, &[], Duration::from_secs(5))
+        .expect("the harness captured a short finished child");
+    assert_eq!(
+        ok.stdout, b"ok\n",
+        "the harness returned the finished child's stdout"
+    );
+    assert!(
+        ok.status.success(),
+        "the harness returned the finished child's successful status"
+    );
+    assert!(
+        ok.stderr.is_empty(),
+        "the harness returned the finished child's empty stderr"
+    );
+
+    let sparse_stdout = write_executable(
+        &home,
+        "sparse-stdout",
+        "#!/usr/bin/perl\nuse strict;\nuse warnings;\nopen my $pid, '>', 'sparse-stdout.pid' or die $!;\nprint {$pid} \"$$\\n\";\nclose $pid;\nseek STDOUT, 1 << 30, 0 or die $!;\nsyswrite STDOUT, 'x', 1 or die $!;\nexit 0;\n",
+    );
+    assert_eq!(
+        home.launch(&sparse_stdout, &[], Duration::from_secs(5))
+            .err(),
+        Some("child capture exceeds its byte limit"),
+        "the harness refused a sparse stdout capture past its byte limit"
+    );
+    harness_reaped(&home, "sparse-stdout.pid");
+
+    let sparse_stderr = write_executable(
+        &home,
+        "sparse-stderr",
+        "#!/usr/bin/perl\nuse strict;\nuse warnings;\nopen my $pid, '>', 'sparse-stderr.pid' or die $!;\nprint {$pid} \"$$\\n\";\nclose $pid;\nseek STDERR, 1 << 30, 0 or die $!;\nsyswrite STDERR, 'x', 1 or die $!;\nexit 0;\n",
+    );
+    assert_eq!(
+        home.launch(&sparse_stderr, &[], Duration::from_secs(5))
+            .err(),
+        Some("child capture exceeds its byte limit"),
+        "the harness refused a sparse stderr capture past its byte limit"
+    );
+    harness_reaped(&home, "sparse-stderr.pid");
+
+    let at_cap = write_executable(
+        &home,
+        "at-cap",
+        "#!/usr/bin/perl\nuse strict;\nuse warnings;\nseek STDOUT, 16777215, 0 or die $!;\nsyswrite STDOUT, 'Z', 1 or die $!;\nexit 0;\n",
+    );
+    let exact = home.launch(&at_cap, &[], Duration::from_secs(5));
+    assert_eq!(
+        exact
+            .as_ref()
+            .map(|output| (output.status.success(), output.stdout.len() as u64))
+            .map_err(|reason| *reason),
+        Ok((true, CAPTURE_BYTE_LIMIT)),
+        "the harness copied a finished capture at its byte limit"
+    );
+    let exact = exact.expect("the harness copied a finished capture at its byte limit");
+    assert_eq!(
+        exact.stdout.last().copied(),
+        Some(b'Z'),
+        "the harness copied the last byte of a capture at its byte limit"
+    );
+    assert!(
+        exact.stdout[..CAPTURE_BYTE_LIMIT as usize - 1]
+            .iter()
+            .all(|byte| *byte == 0),
+        "the harness copied the leading bytes of a capture at its byte limit"
+    );
+    assert!(
+        exact.stderr.is_empty(),
+        "the harness copied an empty finished stderr"
+    );
+
+    let over_cap = write_executable(
+        &home,
+        "over-cap",
+        "#!/usr/bin/perl\nuse strict;\nuse warnings;\nopen my $pid, '>', 'over-cap.pid' or die $!;\nprint {$pid} \"$$\\n\";\nclose $pid;\nseek STDOUT, 16777216, 0 or die $!;\nsyswrite STDOUT, 'Z', 1 or die $!;\nexit 0;\n",
+    );
+    assert_eq!(
+        home.launch(&over_cap, &[], Duration::from_secs(5)).err(),
+        Some("child capture exceeds its byte limit"),
+        "the harness refused a finished capture one byte past its limit"
+    );
+    harness_reaped(&home, "over-cap.pid");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("setup failed: census port");
+    let port = listener
+        .local_addr()
+        .expect("setup failed: census port")
+        .port();
+    drop(listener);
+    let census = agent_conformance::census::cleanup(&home, port)
+        .expect("the harness census of the finished children");
+    assert!(
+        census.contains("root checks PASS"),
+        "the harness census found no leftover from the refused children"
+    );
+    home.finish()
+        .expect("the harness removed the throwaway root");
 }
