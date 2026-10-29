@@ -1,8 +1,0 @@
-id: F-GB-newline
-file: src/link.rs
-test: link::model_newline_escape_is_not_a_link
---- old
-    metadata_names(manifest).iter().any(|name| name == "grant-binding")
---- new
-    true
---- end

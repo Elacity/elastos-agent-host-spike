@@ -202,6 +202,145 @@ fn standin_matches_ra1_fields() {
 }
 
 #[test]
+fn standin_settles_a_killed_agents_request() {
+    let mut standin = StandIn::new();
+    standin
+        .admit_resident(SHARED_PATH, SHARED_NAME, Start::Ok)
+        .expect("the stand-in admits read-shared");
+    let mut launched = Vec::new();
+    for _ in 0..2 {
+        let launch = standin
+            .post_capsules(Caller::Shell, &json!({ "path": SHARED_PATH }))
+            .expect("the stand-in launches the admitted path");
+        let id = launch["id"]
+            .as_str()
+            .expect("the stand-in names each launch")
+            .to_owned();
+        standin
+            .finish_start(&id)
+            .expect("the stand-in finishes start");
+        launched.push(id);
+    }
+    assert_eq!(
+        launched,
+        vec!["component-1".to_owned(), "component-2".to_owned()],
+        "the stand-in numbers agent 1 and agent 2"
+    );
+    for (request_id, session_id) in [("request-1", "component-1"), ("request-2", "component-2")] {
+        let posted = standin
+            .post_capability_request(
+                Caller::Client { session_id },
+                &json!({
+                    "resource": SHARED_RESOURCE,
+                    "action": "read",
+                    "reason": "read shared",
+                }),
+            )
+            .expect("the agent's own route stores one pending request");
+        assert_eq!(
+            posted,
+            json!({ "status": "pending", "request_id": request_id }),
+            "the stand-in mints this request for this agent"
+        );
+    }
+    standin
+        .delete_capsule(
+            Caller::Shell,
+            "component-1",
+            &json!({ "reason": "worker killed" }),
+        )
+        .expect("the stand-in stops agent 1 as a worker kill");
+
+    let settlement = standin
+        .get_capability_requests(Caller::Shell, Some("component-1"))
+        .expect("the stand-in lists agent 1's records");
+    assert_eq!(
+        settlement,
+        json!({
+            "requests": [{
+                "request_id": "request-1",
+                "session_id": "component-1",
+                "resource": SHARED_RESOURCE,
+                "action": "read",
+                "reason": "read shared",
+                "status": "denied",
+                "decision_reason": "stopped: worker killed",
+                "settled_by": "runtime",
+            }],
+        }),
+        "the stand-in settles agent 1's pending request with the kill cause and the runtime as settler"
+    );
+    assert_eq!(
+        standin.get_capability_request(
+            Caller::Client {
+                session_id: "component-1"
+            },
+            "request-1"
+        ),
+        Ok(json!({ "status": "denied", "reason": "stopped: worker killed" })),
+        "the kill route answers agent 1's owner that its request settled"
+    );
+    assert_eq!(
+        standin.get_capability_requests(Caller::Shell, Some("component-2")),
+        Ok(json!({
+            "requests": [{
+                "request_id": "request-2",
+                "session_id": "component-2",
+                "resource": SHARED_RESOURCE,
+                "action": "read",
+                "reason": "read shared",
+                "status": "pending",
+                "decision_reason": "",
+                "settled_by": Value::Null,
+            }],
+        })),
+        "the stand-in leaves agent 2's pending request untouched"
+    );
+    let capsules = standin
+        .get_capsules(Caller::Shell)
+        .expect("the stand-in lists both agents");
+    let statuses = capsules["capsules"]
+        .as_array()
+        .expect("the stand-in returns a capsule list")
+        .iter()
+        .map(|capsule| {
+            (
+                capsule["id"].as_str().unwrap_or("").to_owned(),
+                capsule["status"].as_str().unwrap_or("").to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        statuses,
+        vec![
+            ("component-1".to_owned(), "stopped".to_owned()),
+            ("component-2".to_owned(), "running".to_owned()),
+        ],
+        "the stand-in leaves agent 2 running when agent 1 is killed"
+    );
+    let retry = standin.post_capability_request(
+        Caller::Client {
+            session_id: "component-1",
+        },
+        &json!({
+            "resource": SHARED_RESOURCE,
+            "action": "read",
+            "reason": "again",
+        }),
+    );
+    assert_eq!(
+        retry,
+        Err((400, "instance is not live: stopped".to_owned())),
+        "the stand-in refuses a silent retry that would reopen the settled request"
+    );
+    assert_eq!(
+        standin.get_capability_requests(Caller::Shell, Some("component-1")),
+        Ok(settlement),
+        "the refused retry leaves the settled record and its settler"
+    );
+}
+
+#[test]
 fn standin_matches_ra6_states() {
     let mut standin = StandIn::new();
 
@@ -345,5 +484,250 @@ fn standin_matches_ra6_states() {
     assert!(
         matches!(&client_list, Err((403, reason)) if reason == SHELL_REASON),
         "the stand-in did the work: a client list is refused: {client_list:?}"
+    );
+}
+/// Two residents run through the routes. Each one asks for the shared
+/// resource and gets a `once` grant from the shell. Cancelling the first
+/// resident closes only its own request and its own grant; the second resident
+/// keeps a live grant and completes its request.
+#[test]
+fn standin_cancelled_resident_leaves_the_second_resident_to_complete() {
+    const SECOND_PATH: &str = "/capsules/write-shared";
+    const SECOND_NAME: &str = "write-shared";
+    const SECOND_RESOURCE: &str = "localhost://Public/resident-instances/second.txt";
+    const STOP_REASON: &str = "stopped: stop one";
+
+    let mut standin = StandIn::new();
+    for (path, name) in [(SHARED_PATH, SHARED_NAME), (SECOND_PATH, SECOND_NAME)] {
+        standin
+            .admit_resident(path, name, Start::Ok)
+            .expect("the stand-in admits both residents");
+    }
+
+    let mut started = Vec::new();
+    for (path, name) in [(SHARED_PATH, SHARED_NAME), (SECOND_PATH, SECOND_NAME)] {
+        let launched = standin
+            .post_capsules(Caller::Shell, &json!({ "path": path }))
+            .expect("the stand-in launches the admitted path");
+        assert_eq!(
+            launched["name"], name,
+            "the stand-in launches the admitted name"
+        );
+        let id = launched["id"]
+            .as_str()
+            .expect("the stand-in names the launch")
+            .to_owned();
+        standin
+            .finish_start(&id)
+            .expect("the stand-in applies the admitted Start::Ok");
+        started.push(id);
+    }
+    let (first, second) = (started[0].as_str(), started[1].as_str());
+    assert_ne!(first, second, "the stand-in names two sessions");
+
+    let mut requested = Vec::new();
+    for (session_id, action) in [(first, "read"), (second, "write")] {
+        let pending = standin
+            .post_capability_request(
+                Caller::Client { session_id },
+                &json!({
+                    "resource": SHARED_RESOURCE,
+                    "action": action,
+                    "reason": "shared access",
+                }),
+            )
+            .expect("the stand-in stores that resident's pending request");
+        assert_eq!(
+            pending["status"], "pending",
+            "the stand-in answers pending for {session_id}"
+        );
+        let request_id = pending["request_id"]
+            .as_str()
+            .expect("the stand-in names the pending request")
+            .to_owned();
+        standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({ "request_id": request_id, "duration": "once" }),
+            )
+            .expect("the stand-in grants that resident's request once");
+        requested.push(request_id);
+    }
+    let (first_request, second_request) = (requested[0].as_str(), requested[1].as_str());
+    assert_ne!(
+        first_request, second_request,
+        "the stand-in names two granted requests"
+    );
+
+    let survivor_pending = {
+        let pending = standin
+            .post_capability_request(
+                Caller::Client { session_id: second },
+                &json!({
+                    "resource": SECOND_RESOURCE,
+                    "action": "write",
+                    "reason": "second write",
+                }),
+            )
+            .expect("the stand-in stores the surviving resident's second request");
+        pending["request_id"]
+            .as_str()
+            .expect("the stand-in names the surviving resident's second request")
+            .to_owned()
+    };
+    let first_pending = {
+        let pending = standin
+            .post_capability_request(
+                Caller::Client { session_id: first },
+                &json!({
+                    "resource": SECOND_RESOURCE,
+                    "action": "write",
+                    "reason": "first write",
+                }),
+            )
+            .expect("the stand-in stores the cancelled resident's pending request");
+        pending["request_id"]
+            .as_str()
+            .expect("the stand-in names the cancelled resident's pending request")
+            .to_owned()
+    };
+    assert_ne!(
+        (first_pending.as_str(), survivor_pending.as_str()),
+        (first_request, second_request),
+        "the stand-in names the pending requests apart from the granted ones"
+    );
+
+    let both_live = standin
+        .get_capability_list(Caller::Shell, None)
+        .expect("the stand-in lists both live grants before the cancel");
+    assert_eq!(
+        request_ids(&both_live),
+        BTreeSet::from([first_request.to_owned(), second_request.to_owned()]),
+        "the stand-in lists one live grant per resident before the cancel"
+    );
+
+    let stopped = standin
+        .delete_capsule(Caller::Shell, first, &json!({ "reason": "stop one" }))
+        .expect("the stand-in cancels the first resident mid-run");
+    assert_eq!(
+        stopped,
+        Value::Null,
+        "the stand-in did the work: the cancel answers null"
+    );
+
+    let cancelled_requests = standin
+        .get_capability_requests(Caller::Shell, Some(first))
+        .expect("the stand-in returns the cancelled resident's request records");
+    assert_eq!(
+        cancelled_requests["requests"],
+        json!([{
+            "request_id": first_request,
+            "session_id": first,
+            "resource": SHARED_RESOURCE,
+            "action": "read",
+            "reason": "shared access",
+            "status": "granted",
+            "decision_reason": "Shell auto-grant",
+            "settled_by": "shell",
+        }, {
+            "request_id": first_pending,
+            "session_id": first,
+            "resource": SECOND_RESOURCE,
+            "action": "write",
+            "reason": "first write",
+            "status": "denied",
+            "decision_reason": STOP_REASON,
+            "settled_by": "runtime",
+        }]),
+        "the stand-in denies the cancelled resident's pending request and leaves its granted record alone"
+    );
+    let survivor_requests = standin
+        .get_capability_requests(Caller::Shell, Some(second))
+        .expect("the stand-in returns the surviving resident's request records");
+    assert_eq!(
+        survivor_requests["requests"],
+        json!([{
+            "request_id": second_request,
+            "session_id": second,
+            "resource": SHARED_RESOURCE,
+            "action": "write",
+            "reason": "shared access",
+            "status": "granted",
+            "decision_reason": "Shell auto-grant",
+            "settled_by": "shell",
+        }, {
+            "request_id": survivor_pending,
+            "session_id": second,
+            "resource": SECOND_RESOURCE,
+            "action": "write",
+            "reason": "second write",
+            "status": "pending",
+            "decision_reason": "",
+            "settled_by": Value::Null,
+        }]),
+        "the stand-in leaves the surviving resident's pending and granted records alone"
+    );
+
+    let after_cancel = standin
+        .get_capability_list(Caller::Shell, None)
+        .expect("the stand-in lists the live grants after the cancel");
+    assert_eq!(
+        request_ids(&after_cancel),
+        BTreeSet::from([second_request.to_owned()]),
+        "the stand-in revokes only the cancelled resident's grant"
+    );
+
+    let survivor = Caller::Client { session_id: second };
+    let survivor_view = standin
+        .get_capability_list(survivor, None)
+        .expect("the stand-in lists the surviving resident's own view");
+    assert_eq!(
+        request_ids(&survivor_view),
+        BTreeSet::from([second_request.to_owned()]),
+        "the stand-in keeps the surviving resident's grant in its own view"
+    );
+    let cancelled = Caller::Client { session_id: first };
+    let cancelled_view = standin
+        .get_capability_list(cancelled, None)
+        .expect("the stand-in lists the cancelled resident's own view");
+    assert_eq!(
+        cancelled_view["capabilities"],
+        json!([]),
+        "the stand-in leaves no live grant in the cancelled resident's view"
+    );
+
+    standin
+        .post_capability_validate(survivor, &json!({ "request_id": second_request }))
+        .expect("the stand-in lets the surviving resident complete its request");
+    let spent = standin
+        .get_capability_list(survivor, None)
+        .expect("the stand-in lists the surviving resident's view after use");
+    assert_eq!(
+        request_ids(&spent),
+        BTreeSet::new(),
+        "the stand-in lists the spent once grant no more"
+    );
+
+    let capsules = standin
+        .get_capsules(Caller::Shell)
+        .expect("the stand-in returns the capsule list");
+    let listed = capsules["capsules"]
+        .as_array()
+        .expect("the stand-in returns capsules");
+    assert_eq!(
+        listed
+            .iter()
+            .find(|entry| entry["id"] == first)
+            .map(|entry| (entry["status"].as_str(), entry["cause"].as_str())),
+        Some((Some("stopped"), Some(STOP_REASON))),
+        "the stand-in stores the cancelled resident stopped with its reason"
+    );
+    assert_eq!(
+        listed
+            .iter()
+            .find(|entry| entry["id"] == second)
+            .map(|entry| (entry["status"].as_str(), entry["cause"].as_str())),
+        Some((Some("running"), Some(""))),
+        "the stand-in leaves the surviving resident running"
     );
 }
