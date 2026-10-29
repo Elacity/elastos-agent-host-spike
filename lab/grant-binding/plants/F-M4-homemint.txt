@@ -1,0 +1,12 @@
+id: F-M4-homemint
+file: src/lib.rs
+test: model_home_ask_for_another_app_is_refused
+--- old
+        if asker == Asker::Home {
+            return Err(Refuse::HomeMint);
+        }
+--- new
+        if asker == Asker::Home {
+            return self.bind_grant(instance, resource, rights);
+        }
+--- end

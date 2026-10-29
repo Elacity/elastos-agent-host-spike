@@ -323,11 +323,17 @@ fn signature_paths_share_one_implementation() {
         1
     );
     assert_eq!(
-        library_item(&code, "pub fn encode_entries(")
+        library_item(&code, "fn naming_hash(")
             .matches("Sha256::new()")
             .count(),
         1
     );
+    // Task 048: the file rule hashes leaves and file root blocks with
+    // naming_hash, never a hasher of its own.
+    for item in ["fn file_node(", "fn file_root(", "fn raw_leaf("] {
+        let body = library_item(&code, item);
+        assert!(!body.contains("Sha256"), "{body}");
+    }
     let message = library_item(&code, "pub fn name_signature_message(");
     assert_eq!(
         message.matches("domain_separated_digest(").count(),

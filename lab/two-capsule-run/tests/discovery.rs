@@ -1528,7 +1528,7 @@ fn falsify_command_matches_the_complete_manifest() {
 
 #[test]
 #[should_panic(
-    expected = "field falsify_command: record says \"absent\", tree says \"table-not-brace\"\nthe record is stale; this task does not start activations."
+    expected = "field falsify_command: record says \"two-capsule-run\", tree says \"table-not-brace\"\nthe record is stale; this task does not start activations."
 )]
 fn non_brace_runner_table_stales_the_record() {
     let repo = repo_root();
@@ -1547,7 +1547,7 @@ fn non_brace_runner_table_stales_the_record() {
 
 #[test]
 #[should_panic(
-    expected = "field falsify_command: record says \"absent\", tree says \"table-not-found\"\nthe record is stale; this task does not start activations."
+    expected = "field falsify_command: record says \"two-capsule-run\", tree says \"table-not-found\"\nthe record is stale; this task does not start activations."
 )]
 fn missing_runner_table_stales_the_record() {
     let repo = repo_root();
@@ -1564,7 +1564,7 @@ fn missing_runner_table_stales_the_record() {
 
 #[test]
 #[should_panic(
-    expected = "field falsify_command: record says \"absent\", tree says \"two\"\nthe record is stale; this task does not start activations."
+    expected = "field falsify_command: record says \"two-capsule-run\", tree says \"two\"\nthe record is stale; this task does not start activations."
 )]
 fn multiline_runner_registration_stales_the_record() {
     let repo = repo_root();
@@ -1581,7 +1581,10 @@ fn multiline_runner_registration_stales_the_record() {
 }
 
 #[test]
-fn unrelated_runner_manifest_keeps_the_record_current() {
+#[should_panic(
+    expected = "field falsify_command: record says \"two-capsule-run\", tree says \"absent\"\nthe record is stale; this task does not start activations."
+)]
+fn unrelated_runner_manifest_stales_the_record() {
     let repo = repo_root();
     let source = "PROVIDER_CRATES = {\n    \"wrong\": (REPO / \"other\" / \"two-capsule-run\" / \"Cargo.toml\", ()),\n}\n";
     let tree = observe_sources(&repo, |path| {
