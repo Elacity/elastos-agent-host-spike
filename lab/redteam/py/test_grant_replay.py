@@ -588,12 +588,10 @@ def timeout_shape(ledger_text):
     and ``reservation``. The four-argument form adds ``now: u64``. Any other
     signature is a probe error.
     """
-    start = ledger_text.find("pub fn timeout_hold")
-    if start < 0:
+    signature = re.search(r"\bpub\s+fn\s+timeout_hold\s*\(", ledger_text)
+    if signature is None:
         raise ProbeError(TIMEOUT_SIGNATURE)
-    opened = ledger_text.find("(", start)
-    if opened < 0:
-        raise ProbeError(TIMEOUT_SIGNATURE)
+    opened = signature.end() - 1
     depth = 0
     for index in range(opened, len(ledger_text)):
         char = ledger_text[index]
@@ -608,26 +606,17 @@ def timeout_shape(ledger_text):
 
 def _shape_from_parameters(parameters):
     """The shape for one parameter list. Any other form is a probe error."""
-    parts = [part.strip() for part in parameters.split(",")]
-    while parts and not parts[-1]:
-        parts.pop()
-    if any(not part for part in parts):
+    signature = re.fullmatch(
+        r"\s*&\s*self\s*,\s*"
+        r"call\s*:\s*&\s*Call\s*,\s*"
+        r"request\s*:\s*&\s*GuestRequest\s*,\s*"
+        r"reservation\s*:\s*Reservation"
+        r"(?P<now>\s*,\s*now\s*:\s*u64)?\s*,?\s*",
+        parameters,
+    )
+    if signature is None:
         raise ProbeError(TIMEOUT_SIGNATURE)
-    names = []
-    types = {}
-    for part in parts:
-        name, sep, kind = part.partition(":")
-        name = name.strip()
-        names.append(name)
-        if sep:
-            types[name] = kind.strip()
-    if names[:4] != ["&self", "call", "request", "reservation"]:
-        raise ProbeError(TIMEOUT_SIGNATURE)
-    if names[4:] == [] and "now" not in types:
-        return TimeoutShape(False)
-    if names[4:] == ["now"] and types.get("now") == "u64":
-        return TimeoutShape(True)
-    raise ProbeError(TIMEOUT_SIGNATURE)
+    return TimeoutShape(signature.group("now") is not None)
 
 
 def apply_timeout_shape(source, shape):
@@ -1320,7 +1309,7 @@ class GrantReplayProbe(unittest.TestCase):
 
         ``release`` does not occur. The rendered call follows the live
         signature read once at import. The three-argument and four-argument
-        texts and five unsupported texts are read here without cargo. This
+        texts and unsupported declarations are read here without cargo. This
         test launches nothing and does not read the ledger for a deadline.
         """
         source = inspect.getsource(
@@ -1377,6 +1366,14 @@ class GrantReplayProbe(unittest.TestCase):
             four_shape.observed,
             "timeout_hold returned Ok because no deadline was set",
         )
+        for text, expected in ((three, three_shape), (four, four_shape)):
+            for supported in (
+                text.replace(",\n)", "\n)", 1),
+                " ".join(text.split()),
+                text.replace("&", "& ").replace(":", " : "),
+            ):
+                with self.subTest(supported=supported):
+                    self.assertEqual(vars(timeout_shape(supported)), vars(expected))
         for shape in (three_shape, four_shape):
             rendered = apply_timeout_shape(REPLAY_TEMPLATE, shape)
             for marker in (
@@ -1400,11 +1397,56 @@ class GrantReplayProbe(unittest.TestCase):
             " reservation: Reservation, now: u64, extra: u8)"
             " -> Result<TimeoutRecord, TimeoutRefuse> { Ok(record) }",
             "fn not_timeout_hold(&self) {}",
+            "pub fn timeout_hold(&self, call: u64, request: bool,"
+            " reservation: String) {}",
+        )
+        unsupported += tuple(
+            text.replace(old, new, 1)
+            for text in (three, four)
+            for old, new in (
+                ("timeout_hold(", "timeout_hold_extra("),
+                ("timeout_hold(", "timeout_hold0("),
+                ("timeout_hold(", "not_timeout_hold("),
+                ("timeout_hold(", "timeout_hold<T>("),
+                ("timeout_hold(", "timeout_hold garbage("),
+                ("&self", "self"),
+                ("&self", "&mut self"),
+                ("&self", "&self: Self"),
+                ("call: &Call", "call"),
+                ("call: &Call", "call:"),
+                ("call: &Call", "call: u64"),
+                ("call: &Call", "call: Call"),
+                ("call: &Call", "call: &CallExtra"),
+                ("request: &GuestRequest", "request"),
+                ("request: &GuestRequest", "request:"),
+                ("request: &GuestRequest", "request: bool"),
+                ("request: &GuestRequest", "request: GuestRequest"),
+                ("request: &GuestRequest", "request: &GuestRequestExtra"),
+                ("reservation: Reservation", "reservation"),
+                ("reservation: Reservation", "reservation:"),
+                ("reservation: Reservation", "reservation: String"),
+                ("reservation: Reservation", "reservation: &Reservation"),
+                ("reservation: Reservation", "reservation: ReservationExtra"),
+                ("&self,", ",&self,"),
+                ("&self,", "&self,,"),
+                (",\n)", ",,\n)"),
+                (",\n)", ", , ,\n)"),
+                ("call: &Call", "call: (&Call)"),
+                ("call: &Call", "call: fn(&Call)"),
+                ("call: &Call", "call: &C all"),
+                ("&self", "&s elf"),
+                ("\n) ->", "\n ->"),
+            )
+        )
+        unsupported += tuple(
+            four.replace("now: u64", declaration, 1)
+            for declaration in ("now", "now:", "now: &u64", "now: u 64", "now: u64Extra")
         )
         for text in unsupported:
-            with self.assertRaises(ProbeError) as caught:
-                timeout_shape(text)
-            self.assertEqual(str(caught.exception), TIMEOUT_SIGNATURE)
+            with self.subTest(unsupported=text):
+                with self.assertRaises(ProbeError) as caught:
+                    timeout_shape(text)
+                self.assertEqual(str(caught.exception), TIMEOUT_SIGNATURE)
         start = REPLAY_RS.find("fn test_immediate_timeout_after_unknown_is_refused")
         identity = REPLAY_RS.find("fn test_stale_call_identity_replay_is_refused")
         self.assertGreater(start, identity)
