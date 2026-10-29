@@ -34,7 +34,7 @@ fn inside(path: &Path, root: &Path) -> bool {
 
 // Examine each in-root component before going further. In particular, never
 // canonicalize an outside path or follow a symlink to learn where it leads.
-fn directories_only(path: &Path, root: &Path) -> bool {
+pub(crate) fn directories_only(path: &Path, root: &Path) -> bool {
     let Ok(relative) = path.strip_prefix(root) else {
         return false;
     };
