@@ -1,8 +1,0 @@
-id: F-A7-rqappend
-file: src/ask.rs
-test: ask::model_forged_append_does_not_replace_the_asked_amount
---- old
-                asked: ask.amount,
---- new
-                asked: if request.forged_append { 0 } else { ask.amount },
---- end
