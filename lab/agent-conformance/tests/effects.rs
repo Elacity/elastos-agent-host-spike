@@ -1122,18 +1122,40 @@ fn instance_writes_only_under_own_storage_root() {
     exercise_owned_roots().expect("Runtime refuses a sibling write under the other owned root");
 }
 
-fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Result<(), String> {
-    let view = standin
-        .get_capability_list(StandInCaller::Shell, Some("all_sessions_live"))
-        .map_err(|(_, reason)| reason)?;
-    match grants::live_grant_state(&view) {
-        Ok("pending:0 grants:0") => {}
-        Ok(state) => return Err(state.to_owned()),
-        Err(reason) => return Err(reason.to_owned()),
+fn route_error<T>(result: Result<T, (u16, String)>) -> Result<T, String> {
+    match result {
+        Ok(value) => Ok(value),
+        Err((status, reason)) => Err(format!("{status} {reason}")),
     }
-    let listed = standin
-        .get_capsules(StandInCaller::Shell)
-        .map_err(|(_, reason)| reason)?;
+}
+
+fn grade_live_grants(view: &serde_json::Value) -> Result<(), String> {
+    match grants::live_grant_state(view) {
+        Ok("pending:0 grants:0") => Ok(()),
+        Ok(state) => Err(state.to_owned()),
+        Err(reason) => Err(reason.to_owned()),
+    }
+}
+
+fn grade_instance_status(status: &str) -> Result<(), String> {
+    match status {
+        "stopped" | "failed" => Ok(()),
+        other => Err(format!("instance still live: {other}")),
+    }
+}
+
+fn grade_cleanup_line(line: Result<String, String>) -> Result<(), String> {
+    match line {
+        Ok(line) if line.contains("root checks PASS") => Ok(()),
+        Ok(line) | Err(line) => Err(line),
+    }
+}
+
+fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Result<(), String> {
+    let view =
+        route_error(standin.get_capability_list(StandInCaller::Shell, Some("all_sessions_live")))?;
+    grade_live_grants(&view)?;
+    let listed = route_error(standin.get_capsules(StandInCaller::Shell))?;
     let capsules = listed["capsules"]
         .as_array()
         .ok_or("capsule list requires a capsule array")?;
@@ -1141,15 +1163,12 @@ fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Res
         let status = capsule["status"]
             .as_str()
             .ok_or("capsule entry requires a status")?;
-        if status == "starting" || status == "running" || status == "stopping" {
-            return Err(format!("instance still live: {status}"));
-        }
+        grade_instance_status(status)?;
         let session_id = capsule["session_id"]
             .as_str()
             .ok_or("capsule entry requires a session")?;
-        let pending = standin
-            .get_capability_requests(StandInCaller::Shell, Some(session_id))
-            .map_err(|(_, reason)| reason)?;
+        let pending =
+            route_error(standin.get_capability_requests(StandInCaller::Shell, Some(session_id)))?;
         let requests = pending["requests"]
             .as_array()
             .ok_or("request list requires a request array")?;
@@ -1159,11 +1178,7 @@ fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Res
             }
         }
     }
-    match census::cleanup(home, port) {
-        Ok(line) if line.contains("root checks PASS") => Ok(()),
-        Ok(line) => Err(line),
-        Err(line) => Err(line),
-    }
+    grade_cleanup_line(census::cleanup(home, port))
 }
 
 #[test]
@@ -1381,6 +1396,89 @@ fn standin_stopped_run_leaves_no_live_grant() {
     );
     home.finish()
         .expect("the stand-in run removes its throwaway home");
+}
+
+#[test]
+fn standin_a12_census_checks_all_statuses() {
+    for status in ["starting", "running", "stopping", "paused"] {
+        let graded = grade_instance_status(status);
+        let expected = format!("instance still live: {status}");
+        assert!(
+            matches!(&graded, Err(reason) if reason.contains(expected.as_str())),
+            "the stand-in treats {status} as a live instance: {graded:?}"
+        );
+    }
+    assert!(
+        grade_instance_status("stopped").is_ok(),
+        "the stand-in treats a stopped entry as not live"
+    );
+    assert!(
+        grade_instance_status("failed").is_ok(),
+        "the stand-in treats a failed entry as not live"
+    );
+}
+
+#[test]
+fn standin_a12_census_requires_complete_evidence() {
+    let blocked = grade_live_grants(&json!({ "capabilities": [] }));
+    assert!(
+        matches!(&blocked, Err(reason) if reason.contains("pending:0 grants:BLOCKED(AC-021-GRANTS)")),
+        "the stand-in refuses a grant body with no live scope: {blocked:?}"
+    );
+    assert!(
+        grade_live_grants(&json!({
+            "scope": "all_sessions_live",
+            "capabilities": []
+        }))
+        .is_ok(),
+        "the stand-in accepts an empty live grant view"
+    );
+    let leftover = grade_live_grants(&json!({
+        "scope": "all_sessions_live",
+        "capabilities": [{ "request_id": "req-1" }]
+    }));
+    assert!(
+        matches!(&leftover, Err(reason) if reason.contains("live grant leftover")),
+        "the stand-in refuses a live grant leftover: {leftover:?}"
+    );
+    let fail_line = "cleanup census: FAIL retained:target/x; process leftover".to_owned();
+    assert_eq!(
+        grade_cleanup_line(Ok(fail_line.clone())),
+        Err(fail_line),
+        "the stand-in refuses a cleanup line that is not a root pass"
+    );
+    assert!(
+        grade_cleanup_line(Ok(
+            "cleanup census: root checks PASS; processes:0".to_owned()
+        ))
+        .is_ok(),
+        "the stand-in accepts a cleanup line that contains root checks PASS"
+    );
+    let err_line = "cleanup census: FAIL retained:target/x; temp leftover".to_owned();
+    assert_eq!(
+        grade_cleanup_line(Err(err_line.clone())),
+        Err(err_line),
+        "the stand-in returns an error cleanup line unchanged"
+    );
+}
+
+#[test]
+fn standin_a12_census_preserves_route_errors() {
+    let refused = route_error::<()>(Err((
+        403,
+        "This endpoint requires shell privileges".to_owned(),
+    )));
+    assert_eq!(
+        refused,
+        Err("403 This endpoint requires shell privileges".to_owned()),
+        "the stand-in census returns the route status and reason and does not continue"
+    );
+    let refused = route_error::<()>(Err((400, "requests need a session".to_owned())));
+    assert_eq!(
+        refused,
+        Err("400 requests need a session".to_owned()),
+        "the stand-in census returns the route status and reason and does not continue"
+    );
 }
 
 const STANDIN_SHARED_PATH: &str = "/capsules/read-shared";
