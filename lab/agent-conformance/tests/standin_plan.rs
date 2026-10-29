@@ -409,3 +409,118 @@ fn standin_grant_refuses_a_plan_hash_for_a_request_with_none() {
         "the refused grant leaves the request pending"
     );
 }
+
+#[test]
+fn standin_use_of_another_plans_grant_is_refused_and_both_grants_stay_live() {
+    let mut standin = StandIn::new();
+    let (_bundle, id) = running_agent(&mut standin);
+    let request_a = pending_request(&mut standin, &id);
+    let request_b = standin
+        .post_capability_request(
+            Caller::Client { session_id: &id },
+            &json!({
+                "resource": RESOURCE,
+                "action": "read",
+                "plan": sha256(CHANGED),
+            }),
+        )
+        .expect("the agent's second request stores one pending request")["request_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(request_a, request_b, "two plans are two requests");
+
+    // The owner approves plan A with grant G1 and plan B with grant G2.
+    approve(&mut standin, &request_a, &sha256(PLAN));
+    approve(&mut standin, &request_b, &sha256(CHANGED));
+    let both = live_rows(&standin, &id)["capabilities"].clone();
+    assert_eq!(
+        both.as_array().map(Vec::len),
+        Some(2),
+        "both bound grants are live: {both}"
+    );
+
+    // Executing plan A with grant G2 is refused and spends nothing.
+    let wrong = standin.post_capability_validate(
+        Caller::Client { session_id: &id },
+        &use_body(&request_b, PLAN),
+    );
+    assert_eq!(
+        wrong,
+        Err((403, "grant is not bound to this plan".to_owned())),
+        "grant G2 is bound to plan B, not plan A"
+    );
+    assert_eq!(
+        live_rows(&standin, &id)["capabilities"],
+        both,
+        "the refused wrong-grant use leaves both grants live, byte for byte"
+    );
+
+    // Executing plan A with grant G1 spends exactly G1.
+    assert_eq!(
+        standin.post_capability_validate(
+            Caller::Client { session_id: &id },
+            &use_body(&request_a, PLAN),
+        ),
+        Ok(json!({ "valid": true })),
+        "grant G1 authorises plan A's one use"
+    );
+    assert_eq!(
+        live_rows(&standin, &id)["capabilities"],
+        json!([both[1]]),
+        "the once grant G1 is spent and grant G2 is still live"
+    );
+}
+
+/// M1 check A15b: a short or empty approved hash is not the requested one.
+/// The requested hash is 64 hex chars. An empty approved hash and its first 63
+/// chars are each refused as a mismatch, mint nothing and leave the request
+/// pending. The whole hash then mints the bound grant.
+#[test]
+fn standin_grant_refuses_an_empty_or_truncated_plan_hash() {
+    let mut standin = StandIn::new();
+    let (_bundle, id) = running_agent(&mut standin);
+    let request_id = pending_request(&mut standin, &id);
+    let requested = sha256(PLAN);
+    assert_eq!(requested.len(), 64, "a plan hash is 64 hex chars");
+    let truncated = &requested[..63];
+
+    for short in ["", truncated] {
+        let refused = standin.post_capability_grant(
+            Caller::Shell,
+            &json!({
+                "request_id": request_id,
+                "duration": "once",
+                "rationale": "owner approved",
+                "plan_sha256": short,
+            }),
+        );
+        assert_eq!(
+            refused,
+            Err((
+                403,
+                "approved plan does not match the requested plan".to_owned()
+            )),
+            "approving with the short hash {short:?} is refused"
+        );
+        assert_eq!(
+            live_rows(&standin, &id)["capabilities"],
+            json!([]),
+            "the refused short hash {short:?} mints nothing"
+        );
+        assert_eq!(
+            standin.get_capability_request(Caller::Client { session_id: &id }, &request_id),
+            Ok(json!({ "status": "pending" })),
+            "the refused short hash {short:?} leaves the request pending"
+        );
+    }
+
+    approve(&mut standin, &request_id, &requested);
+    assert_eq!(
+        live_rows(&standin, &id)["capabilities"]
+            .as_array()
+            .map(Vec::len),
+        Some(1),
+        "the owner's approval of the whole hash mints the bound grant"
+    );
+}
