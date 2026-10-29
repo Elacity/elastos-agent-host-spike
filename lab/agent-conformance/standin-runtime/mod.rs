@@ -7435,7 +7435,7 @@ mod tests {
         std::fs::write(&outsider, b"outsider bytes").expect("the test writes a different file");
         std::fs::rename(&outsider, &entry).expect("the test puts it at the recorded name");
         let stat = rustix::fs::fstat(
-            &std::fs::File::open(&entry).expect("the swapped file stays readable"),
+            std::fs::File::open(&entry).expect("the swapped file stays readable"),
         )
         .expect("the swapped file has a status");
         assert_eq!(
