@@ -102,6 +102,10 @@ struct Grant {
 /// One admitted row. It keeps what launch needs to re-run the same check:
 /// the bundle path, the publisher's signature and the accepted list, beside
 /// the CID it was admitted under.
+///
+/// It also keeps the asks the signed bundle declares. They come from
+/// `asks.json` inside the bytes the admitted lab CID covers, read by the one
+/// walk, so they hold only when that signature verifies (M1 check B2).
 struct Admitted {
     cid: LabCid,
     name: String,
@@ -110,6 +114,21 @@ struct Admitted {
     bundle: PathBuf,
     sig: NameSignature,
     accepted: Vec<String>,
+    asks: Vec<Ask>,
+}
+
+/// One ask a signed bundle declares, as `asks.json` gives it.
+///
+/// Provisional: this schema mirrors the #464 draft and is not that draft's
+/// final form. The file is `{"schema": "elastos.agent-host.asks/v1", "asks":
+/// [{"kind": <kind>, "resource": <resource>}]}`. It sits in the bundle beside
+/// `capsule.json`, so the signed lab CID covers it. `kind` is the request's
+/// action, lowercased as the request route lowercases it, and `resource` is
+/// the request's resource: the route stores a request only when both match
+/// one ask exactly.
+struct Ask {
+    kind: String,
+    resource: String,
 }
 
 struct Instance {
@@ -119,6 +138,9 @@ struct Instance {
     phase: ResidentStatus,
     cause: String,
     ended_at: Option<u64>,
+    /// The lab CID of the admitted row this launch started. The request route
+    /// reads that row's signed asks (M1 check B2).
+    started_cid: LabCid,
 }
 
 /// Four request statuses this slice stores.
@@ -342,7 +364,14 @@ impl StandIn {
     /// A client instance that is `starting` or `running` stores one pending
     /// request through `seed_request`. A shell is refused before the body is
     /// read. A `stopped` or `failed` instance is not live and stores nothing.
-    /// Ok is `{"status": "pending", "request_id": ...}` and carries no token.
+    /// After the scheme and action checks, and before anything is stored, the
+    /// live instance's session is traced to the admitted row of the guest its
+    /// launch started, and the request must be declared in that bundle's
+    /// signed asks (M1 check B2): status 403 with `ask not declared in the
+    /// signed manifest: <resource> <action>` otherwise. Coverage is an exact
+    /// match on the resource and the lowercased action, so no prefix and no
+    /// other action covers it. Ok is `{"status": "pending", "request_id":
+    /// ...}` and carries no token.
     pub fn post_capability_request(
         &mut self,
         caller: Caller<'_>,
@@ -382,6 +411,7 @@ impl StandIn {
         if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
             return Err(not_live(phase));
         }
+        self.declared_ask(session_id, resource, &action)?;
         let request_id = format!("request-{}", self.next_request);
         self.seed_request(&request_id, session_id, resource, &action, reason)?;
         self.next_request += 1;
@@ -635,6 +665,12 @@ impl StandIn {
     /// explicit `accepted` publisher list. A walk refusal is status 400 with
     /// its own text; a signature or name refusal is status 403 with its own
     /// text. A refused admission stores nothing. `Ok(())` grants nothing.
+    ///
+    /// The asks that request route checks come from `asks.json` in those same
+    /// checked bytes (M1 check B2): the row takes `CheckedBundle::entry` of
+    /// the walked file, and a schema it does not read, or no such file, is
+    /// status 400 with its own text. No asks are taken from disk a second
+    /// time and none come from this call's arguments.
     pub fn admit_resident(
         &mut self,
         bundle: &Path,
@@ -647,6 +683,7 @@ impl StandIn {
         if self.admitted.iter().any(|row| row.cid == cid) {
             return Err((403, format!("bundle already admitted: {cid}")));
         }
+        let asks = admitted_asks(&checked)?;
         self.admitted.push(Admitted {
             cid,
             name: checked.manifest_name().to_owned(),
@@ -655,6 +692,7 @@ impl StandIn {
             bundle: bundle.to_path_buf(),
             sig: sig.clone(),
             accepted: accepted.to_vec(),
+            asks,
         });
         Ok(())
     }
@@ -714,6 +752,12 @@ impl StandIn {
     /// is refused there with `Refusal::NameMismatch`, before any other
     /// compare. The launch names the instance from the row's checked manifest
     /// name. A launch adds one `Starting` instance and no grant.
+    ///
+    /// Those bytes carry the asks too (M1 check B2). Any changed byte, the
+    /// `asks.json` bytes included, leaves the bundle under a new lab CID, so
+    /// this walk's `check_name` refuses it with the row's name and no ask is
+    /// read from a bundle other than the one admitted. A refusal keeps the
+    /// launch, its instance and its grants out.
     pub fn post_capsules(
         &mut self,
         caller: Caller<'_>,
@@ -734,6 +778,7 @@ impl StandIn {
             phase,
             cause: String::new(),
             ended_at: None,
+            started_cid: cid,
         });
         Ok(launch_body(&id, &name, phase))
     }
@@ -874,6 +919,40 @@ impl StandIn {
             return Ok(row);
         }
         Err(self.not_admitted(cid))
+    }
+
+    /// The one declared-ask check. `post_capability_request` is its route.
+    ///
+    /// Traces the live instance's session to the lab CID its launch started,
+    /// then to that admitted row's signed asks. `resource` is the body's
+    /// resource unchanged; `action` is already lowercased by the route, as an
+    /// ask's `kind` is when the row is admitted. One ask covers the request
+    /// when both fields are equal, so no prefix and no other action covers
+    /// it. A request that matches no such ask is status 403 with one reason; this
+    /// method reads no disk and stores nothing.
+    fn declared_ask(
+        &self,
+        session_id: &str,
+        resource: &str,
+        action: &str,
+    ) -> Result<(), (u16, String)> {
+        let cid = self
+            .instances
+            .iter()
+            .find(|instance| instance.id == session_id)
+            .map(|instance| instance.started_cid)
+            .ok_or_else(|| unknown_instance(session_id))?;
+        let asks = &self.admit_row(cid)?.asks;
+        if asks
+            .iter()
+            .any(|ask| ask.kind == action && ask.resource == resource)
+        {
+            return Ok(());
+        }
+        Err((
+            403,
+            format!("ask not declared in the signed manifest: {resource} {action}"),
+        ))
     }
 
     fn not_admitted(&self, cid: LabCid) -> (u16, String) {
@@ -1075,6 +1154,48 @@ fn check_bundle(
     let checked = checked_bundle(bundle).map_err(|refusal| (400, said(&refusal)))?;
     verify_checked_signature(&checked, sig, accepted).map_err(|refusal| (403, said(&refusal)))?;
     Ok(checked)
+}
+
+/// The asks of one checked bundle, from the `asks.json` the walk read.
+///
+/// Provisional, mirrors the #464 draft: the schema is
+/// `elastos.agent-host.asks/v1` and each ask is `{"kind": ..., "resource":
+/// ...}`. This reads only `CheckedBundle::entry`, so it judges the bytes the
+/// one walk named and the name signature covers, and it reads no folder. Each
+/// `kind` is lowercased exactly as the request route lowercases an action, so
+/// coverage is the route's own compare. A missing file, another schema, a
+/// missing field, another field or no ask at all is status 400 with its own
+/// text.
+fn admitted_asks(checked: &CheckedBundle) -> Result<Vec<Ask>, (u16, String)> {
+    const ASKS_FILE: &str = "asks.json";
+    const ASKS_SCHEMA: &str = "elastos.agent-host.asks/v1";
+    const BAD_ASKS: &str = "asks.json does not follow the provisional ask schema";
+
+    let bytes = checked
+        .entry(ASKS_FILE)
+        .ok_or_else(|| (400, format!("bundle declares no {ASKS_FILE}")))?;
+    let listed = serde_json::from_slice::<Value>(bytes)
+        .ok()
+        .and_then(|file| {
+            let schema = file.get("schema")?.as_str()?;
+            let asks = file.get("asks")?.as_array()?;
+            if schema != ASKS_SCHEMA {
+                return None;
+            }
+            asks.iter()
+                .map(|ask| {
+                    Some(Ask {
+                        kind: ask.get("kind")?.as_str()?.to_lowercase(),
+                        resource: ask.get("resource")?.as_str()?.to_owned(),
+                    })
+                })
+                .collect::<Option<Vec<_>>>()
+        })
+        .ok_or_else(|| (400, BAD_ASKS.to_owned()))?;
+    if listed.is_empty() {
+        return Err((400, BAD_ASKS.to_owned()));
+    }
+    Ok(listed)
 }
 
 /// The launch body is an object whose only key is a string `cid`, parsed as
@@ -1480,6 +1601,27 @@ mod tests {
             }
             fs::write(&target, bytes).expect("write a bundle file");
         }
+        declare_asks(
+            root,
+            &[(SHARED_RESOURCE, "read"), (SHARED_RESOURCE, "write")],
+        );
+    }
+
+    /// Replaces the fixture's `asks.json` with exactly `asks`, in that order,
+    /// before the bundle is signed. A test that needs another declared set
+    /// gives it here; the committed file stays the fixture the other lanes
+    /// read.
+    fn declare_asks(root: &Path, asks: &[(&str, &str)]) {
+        let listed = asks
+            .iter()
+            .map(|(resource, kind)| json!({ "kind": kind, "resource": resource }))
+            .collect::<Vec<_>>();
+        let file = json!({ "schema": "elastos.agent-host.asks/v1", "asks": listed });
+        fs::write(
+            root.join("asks.json"),
+            serde_json::to_vec_pretty(&file).expect("encode the fixture asks"),
+        )
+        .expect("write the fixture asks");
     }
 
     /// A fresh Ed25519 test key. Nothing writes it or keeps a seed.

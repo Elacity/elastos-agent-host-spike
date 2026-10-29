@@ -4,6 +4,12 @@
 //! name signature, so a caller needs the bundle bytes, a key and the accepted
 //! publisher list. This one fixture gives those through the crate's own
 //! `capsule_identity` and `elastos_identity` calls; it mints no grant.
+//!
+//! The bundle also declares its asks in `asks.json`, inside the signed bytes
+//! (M1 check B2). The fixture replaces the committed file with one set: a
+//! `read` and a `write` of `localhost://Public/resident-instances/shared.txt`,
+//! the resource these journeys request, beside the committed file's asks. A
+//! test that needs another declared set writes `asks.json` before it signs.
 
 #![allow(dead_code)]
 
@@ -14,6 +20,9 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
+
+/// The resource the shared journeys request through the route.
+const SHARED_ASKS_RESOURCE: &str = "localhost://Public/resident-instances/shared.txt";
 
 /// The committed `agent-host` fixture: a real bundle the walk accepts.
 const AGENT_HOST_FILES: [(&str, &[u8]); 2] = [
@@ -106,4 +115,17 @@ fn write_agent_host(root: &Path) {
         }
         fs::write(&target, bytes).expect("write a bundle file");
     }
+    let committed = fs::read(root.join("asks.json")).expect("read the committed asks");
+    let mut asks: Value = serde_json::from_slice(&committed).expect("parse the committed asks");
+    let listed = asks["asks"]
+        .as_array_mut()
+        .expect("the committed asks list asks");
+    for kind in ["read", "write"] {
+        listed.push(json!({ "kind": kind, "resource": SHARED_ASKS_RESOURCE }));
+    }
+    fs::write(
+        root.join("asks.json"),
+        serde_json::to_vec_pretty(&asks).expect("encode the fixture asks"),
+    )
+    .expect("write the fixture asks");
 }

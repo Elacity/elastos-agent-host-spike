@@ -105,14 +105,17 @@ fn valid_signature_grants_nothing_by_itself() {
 /// is listed twice: the free function and `CheckedBundle`'s checked form.
 /// `manifest_name` is task 036's: the checked manifest's `name`, identity
 /// data read from the one manifest check, not a decision.
+/// `entry` is the checked read of one walked file, so a caller needs no
+/// second folder read.
 /// `encode_listed_files` is task 047's: the one encoder, for a caller whose
 /// walk lists each file's path, size and SHA-256. The next five are task 011's package record: its digest, its payload, its
 /// signer and its two verifiers. The last four are task 015's variant
 /// binding: its payload, its signer and its two verifiers. The last two are
 /// task 049's: the package record's one signer and one verifier over a lab
-/// CID, which the folder and checked record calls use. None admits, grants
-/// or launches.
-const IDENTITY_FUNCTIONS: [&str; 28] = [
+/// CID, which the folder and checked record calls use. `CheckedBundle::entry`
+/// reads one file's bytes from the walk the bundle already holds. None
+/// admits, grants or launches.
+const IDENTITY_FUNCTIONS: [&str; 29] = [
     "lab_cid",
     "lab_cid_observed",
     "checked_bundle",
@@ -121,6 +124,7 @@ const IDENTITY_FUNCTIONS: [&str; 28] = [
     "cid",
     "entries",
     "manifest_name",
+    "entry",
     "check_name",
     "encode_entries",
     "encode_listed_files",

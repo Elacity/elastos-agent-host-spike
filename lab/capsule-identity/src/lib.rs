@@ -715,6 +715,21 @@ impl CheckedBundle {
         &self.name
     }
 
+    /// The bytes of one bundle file, as the one walk read them from their
+    /// checked handle.
+    ///
+    /// `path` is a bundle-relative, `/`-separated path. A caller that needs a
+    /// file takes these bytes, so a change on disk after the walk cannot reach
+    /// them and no second folder read runs. `None` means the walk read no such
+    /// file. The bytes are identity data under the signed lab CID, not a
+    /// decision.
+    pub fn entry(&self, path: &str) -> Option<&[u8]> {
+        self.entries
+            .iter()
+            .find(|entry| entry.path == path)
+            .map(|entry| entry.content.as_slice())
+    }
+
     /// Check the name `claimed` against this bundle's lab CID.
     ///
     /// The checked form of [`check_name`]: the same claim check, then the
