@@ -2143,6 +2143,364 @@ fn model_later_deadline_does_not_move_the_hold() {
 }
 
 #[test]
+fn model_forged_append_does_not_set_the_timeout_deadline() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    verifier.set_verifier_deadline(100);
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let early = verifier
+        .timeout_hold(&call, &request, reservation, 50)
+        .expect_err("forged append does not set the deadline");
+    assert_eq!(early, TimeoutRefuse::Early);
+    assert_eq!(early.to_string(), "timeout is before the verifier deadline");
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert!(!stayed.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_overwrite_does_not_set_the_timeout_deadline() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    verifier.set_verifier_deadline(100);
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_overwrite);
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let early = verifier
+        .timeout_hold(&call, &request, reservation, 50)
+        .expect_err("forged overwrite does not set the deadline");
+    assert_eq!(early, TimeoutRefuse::Early);
+    assert_eq!(early.to_string(), "timeout is before the verifier deadline");
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert!(!stayed.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_child_journal_does_not_set_the_timeout_deadline() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    verifier.set_verifier_deadline(100);
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let early = verifier
+        .timeout_hold(&call, &request, reservation, 50)
+        .expect_err("forged child journal does not set the deadline");
+    assert_eq!(early, TimeoutRefuse::Early);
+    assert_eq!(early.to_string(), "timeout is before the verifier deadline");
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert!(!stayed.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_identity_does_not_set_the_timeout_deadline() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    verifier.set_verifier_deadline(100);
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let early = verifier
+        .timeout_hold(&call, &request, reservation, 50)
+        .expect_err("forged identity does not set the deadline");
+    assert_eq!(early, TimeoutRefuse::Early);
+    assert_eq!(early.to_string(), "timeout is before the verifier deadline");
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert!(!stayed.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_session_does_not_set_the_timeout_deadline() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    verifier.set_verifier_deadline(100);
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let early = verifier
+        .timeout_hold(&call, &request, reservation, 50)
+        .expect_err("forged session does not set the deadline");
+    assert_eq!(early, TimeoutRefuse::Early);
+    assert_eq!(early.to_string(), "timeout is before the verifier deadline");
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert!(!stayed.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_instance_does_not_set_the_timeout_deadline() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    verifier.set_verifier_deadline(100);
+    let request = GuestRequest {
+        forged_instance: Some(sibling),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_instance, Some(sibling));
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let early = verifier
+        .timeout_hold(&call, &request, reservation, 50)
+        .expect_err("forged instance does not set the deadline");
+    assert_eq!(early, TimeoutRefuse::Early);
+    assert_eq!(early.to_string(), "timeout is before the verifier deadline");
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert!(!stayed.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_append_does_not_skip_the_uncertain_mark() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
+    let blocked = verifier
+        .release(&call, &request, reservation)
+        .expect_err("forged append does not skip the uncertain mark");
+    assert_eq!(blocked, ReleaseRefuse::Uncertain);
+    assert_eq!(blocked.to_string(), "uncertain hold is not released");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_overwrite_does_not_skip_the_uncertain_mark() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_overwrite);
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
+    let blocked = verifier
+        .release(&call, &request, reservation)
+        .expect_err("forged overwrite does not skip the uncertain mark");
+    assert_eq!(blocked, ReleaseRefuse::Uncertain);
+    assert_eq!(blocked.to_string(), "uncertain hold is not released");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_child_journal_does_not_skip_the_uncertain_mark() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
+    let blocked = verifier
+        .release(&call, &request, reservation)
+        .expect_err("forged child journal does not skip the uncertain mark");
+    assert_eq!(blocked, ReleaseRefuse::Uncertain);
+    assert_eq!(blocked.to_string(), "uncertain hold is not released");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_identity_does_not_skip_the_uncertain_mark() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
+    let blocked = verifier
+        .release(&call, &request, reservation)
+        .expect_err("forged identity does not skip the uncertain mark");
+    assert_eq!(blocked, ReleaseRefuse::Uncertain);
+    assert_eq!(blocked.to_string(), "uncertain hold is not released");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_session_does_not_skip_the_uncertain_mark() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
+    let blocked = verifier
+        .release(&call, &request, reservation)
+        .expect_err("forged session does not skip the uncertain mark");
+    assert_eq!(blocked, ReleaseRefuse::Uncertain);
+    assert_eq!(blocked.to_string(), "uncertain hold is not released");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_instance_does_not_skip_the_uncertain_mark() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    let request = GuestRequest {
+        forged_instance: Some(sibling),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_instance, Some(sibling));
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
+    let blocked = verifier
+        .release(&call, &request, reservation)
+        .expect_err("forged instance does not skip the uncertain mark");
+    assert_eq!(blocked, ReleaseRefuse::Uncertain);
+    assert_eq!(blocked.to_string(), "uncertain hold is not released");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
 fn model_forged_instance_does_not_move_the_settle() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
