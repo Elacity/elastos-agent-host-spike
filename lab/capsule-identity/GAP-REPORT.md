@@ -869,6 +869,10 @@ not run the tests.
   above, as the 041 second review's FOLLOWUP found (`SECOND-REVIEW.md`, the #730 section). That stub now fails too
   (`standin_takes_the_asks_from_the_walk_not_the_folder`, F-CI44a), through a lab test seam, not a route, that
   changes the stored bytes between the walk and the launch.
+  29 Oct, task 078: the journey reads the provisional declaration from the checked `asks.json` bytes before the
+  shared launch (`provisional_asks`, one parse in `commit_launch`; `declared_asks_of` answers the stored list).
+  The library encoder still does not parse those bytes for the lab CID, and the ask-to-operation mapping stays in
+  `lab/bus-v2-proposal/`. A matching signature admits the artifact and adds no grant.
 
 ### B1 through a lab stand-in (27 Oct, tasks 032 and 033)
 

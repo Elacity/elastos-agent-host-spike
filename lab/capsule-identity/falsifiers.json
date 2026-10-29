@@ -1,5 +1,5 @@
 {
- "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049, 059, 076, 077, 071 and 072). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+ "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049, 059, 076, 077, 071, 072 and 078). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
  "falsifiers": [
   {
    "id": "F-CI1a",
@@ -4933,6 +4933,182 @@
    ],
    "tests": [
     "file_past_174_squared_leaves_keeps_a_third_tree_level"
+   ]
+  },
+  {
+   "id": "F-CI78a",
+   "title": "the declaration takes any schema string, not elastos.agent-host.asks/v1 (anchor: the schema compare)",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/tests/common/mod.rs",
+     "old": "    if schema != ASKS_SCHEMA {\n",
+     "new": "    if false {\n"
+    }
+   ],
+   "tests": [
+    "standin_reads_declared_asks_from_the_signed_manifest"
+   ]
+  },
+  {
+   "id": "F-CI78b",
+   "title": "the declaration treats an empty kind as present (anchor: the empty-kind check)",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/tests/common/mod.rs",
+     "old": "        if kind.is_empty() {\n",
+     "new": "        if false && kind.is_empty() {\n"
+    }
+   ],
+   "tests": [
+    "standin_reads_declared_asks_from_the_signed_manifest"
+   ]
+  },
+  {
+   "id": "F-CI78c",
+   "title": "the declaration skips the unknown-field check, on the root and on an ask (anchor: the one unknown-field rule)",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/tests/common/mod.rs",
+     "old": "    if let Some(name) = object.keys().find(|key| !allowed.contains(&key.as_str())) {\n",
+     "new": "    if let Some(name) = object.keys().find(|_key| allowed.contains(&\"__never__\")) {\n"
+    }
+   ],
+   "tests": [
+    "standin_reads_declared_asks_from_the_signed_manifest"
+   ]
+  },
+  {
+   "id": "F-CI78d",
+   "title": "the declaration skips the unknown-field check on an ask object (anchor: the ask call of the one rule)",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/tests/common/mod.rs",
+     "old": "        refuse_unknown_fields(ask, &[\"kind\", \"resource\"])?;\n",
+     "new": ""
+    }
+   ],
+   "tests": [
+    "standin_reads_declared_asks_from_the_signed_manifest"
+   ]
+  },
+  {
+   "id": "F-CI78e",
+   "title": "the declaration reads a root that is not an object as an empty object (anchor: the root-object check)",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/tests/common/mod.rs",
+     "old": "    let root = value\n        .as_object()\n        .ok_or(\"asks declaration: the root is not an object\")?;\n",
+     "new": "    let empty = serde_json::Map::new();\n    let root = value.as_object().unwrap_or(&empty);\n"
+    }
+   ],
+   "tests": [
+    "standin_reads_declared_asks_from_the_signed_manifest"
+   ]
+  },
+  {
+   "id": "F-CI78f",
+   "title": "the declaration treats an empty resource as present (anchor: the empty-resource check)",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/tests/common/mod.rs",
+     "old": "        if resource.is_empty() {\n",
+     "new": "        if false && resource.is_empty() {\n"
+    }
+   ],
+   "tests": [
+    "standin_reads_declared_asks_from_the_signed_manifest"
+   ]
+  },
+  {
+   "id": "F-CI78g",
+   "title": "the declaration reverses the file order of its asks (anchor: the one collected list)",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/tests/common/mod.rs",
+     "old": "        asks.push((kind.to_owned(), resource.to_owned()));\n    }\n    Ok(asks)\n",
+     "new": "        asks.push((kind.to_owned(), resource.to_owned()));\n    }\n    asks.reverse();\n    Ok(asks)\n"
+    }
+   ],
+   "tests": [
+    "standin_reads_declared_asks_from_the_signed_manifest"
+   ]
+  },
+  {
+   "id": "F-CI78h",
+   "title": "the declaration refuses a kind outside an allow-list, so an unknown kind cannot launch (anchor: the empty-resource check's block)",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/tests/common/mod.rs",
+     "old": "        if resource.is_empty() {\n            return Err(\"asks declaration: an ask has an empty resource\".to_owned());\n        }\n        asks.push((kind.to_owned(), resource.to_owned()));\n",
+     "new": "        if resource.is_empty() {\n            return Err(\"asks declaration: an ask has an empty resource\".to_owned());\n        }\n        if kind == \"sing\" {\n            return Err(\"asks declaration: an ask has an unknown kind\".to_owned());\n        }\n        asks.push((kind.to_owned(), resource.to_owned()));\n"
+    }
+   ],
+   "tests": [
+    "standin_reads_declared_asks_from_the_signed_manifest"
+   ]
+  },
+  {
+   "id": "F-CI78i",
+   "title": "the declaration seam ignores the session id and answers the first stored list (anchor: the stored-list lookup)",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/tests/common/mod.rs",
+     "old": "        self.declared.get(session_id).cloned().flatten()\n",
+     "new": "        let _ = session_id;\n        self.declared.values().next().cloned().flatten()\n"
+    }
+   ],
+   "tests": [
+    "standin_reads_declared_asks_from_the_signed_manifest"
+   ]
+  },
+  {
+   "id": "F-CI78j",
+   "title": "the declaration seam parses the stored bytes again instead of answering the stored list (anchor: the stored-list lookup)",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/tests/common/mod.rs",
+     "old": "        self.declared.get(session_id).cloned().flatten()\n",
+     "new": "        self.asks\n            .get(session_id)?\n            .as_deref()\n            .and_then(|bytes| provisional_asks(bytes).ok())\n"
+    }
+   ],
+   "tests": [
+    "standin_declares_asks_once_and_from_the_store"
+   ]
+  },
+  {
+   "id": "F-CI78k",
+   "title": "a second declaration parse runs in commit_launch beside the one (anchor: the one checked launch line)",
+   "command": "capsule-identity",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "../../lab/capsule-identity/tests/common/mod.rs",
+     "old": "        let (path, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;\n",
+     "new": "        let (path, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;\n        let _again = asks.as_deref().map(provisional_asks);\n"
+    }
+   ],
+   "tests": [
+    "standin_declares_asks_once_and_from_the_store"
    ]
   }
  ]

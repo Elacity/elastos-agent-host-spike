@@ -564,8 +564,8 @@ The agent-host lane may change its files later; these copies stay as they are,
 so the pin holds. The manifest's entrypoint, `agent-host.component.wasm`, is
 build output and is never committed (HANDOFF rule 7), so the module is not in
 the fixture: this lab CID covers the two files only and is not the whole
-capsule's name. The lab never parses `asks.json`: to the lab CID it is one more
-payload file. The manifest is a component manifest, so the Runtime's
+capsule's name. The library's encoder does not parse `asks.json`: to the lab
+CID it is one more payload file. The manifest is a component manifest, so the Runtime's
 `validate()` also requires its `wit_world_sha256` to equal the SHA-256 of
 `elastos/wit/elastos-bus-v1.wit`, which `elastos-common` compiles in
 (`elastos/crates/elastos-common/src/manifest.rs:412` and `:794-800`).
@@ -1812,7 +1812,7 @@ Not shown:
 Claim scope: one Mac, the `agent-host` fixture, test keys only, records in
 memory.
 
-### Asks come only from the signed bytes (M1 check B2, no-schema part)
+### Asks come only from the signed bytes (M1 check B2)
 
 A launched instance is handed its asks only as the `asks.json` bytes of the
 checked bundle that passed every check above. `checked_launch` takes the
@@ -1828,6 +1828,42 @@ between the walk and the launch. With no hook set, nothing is called.
 any route), answers that snapshot, and `None` for an unknown session.
 The launch answer, the shared list entry and the grant view keep exactly the
 keys above, with no asks key, and the CID launch body stays `{"cid"}`.
+
+The journey now parses the provisional declaration from those checked bytes.
+`provisional_asks(bytes)` is the one parse: it reads `asks.json` with
+`serde_json::from_slice` into one `Value`, requires the root object's only keys
+to be `schema` and `asks`, requires `schema` to be
+`elastos.agent-host.asks/v1`, and requires each ask object's only keys to be
+`kind` and `resource`, both non-empty strings, keeping file order. A kind has
+no allow-list, and `<principal>` stays text. `commit_launch` calls it once on
+the bytes `checked_launch` returned, after the name and record checks and
+before the shared launch runs, so a declaration that does not meet the schema
+refuses the launch with status 400 and its own reason and leaves the shared
+instance and grant lists unchanged. `declared_asks_of(session_id)`, a lab test
+seam, not a route, answers the stored list, or `None` when the bundle has no
+`asks.json` or the session is unknown; it parses nothing and reads no folder.
+The library encoder still does not parse `asks.json`: to the lab CID it is one
+more payload file. A matching signature admits the artifact and adds no grant.
+
+`standin_reads_declared_asks_from_the_signed_manifest` launches the signed
+`agent-host` bundle as above: the answer is `starting`, the session's
+declaration equals the pairs read from the committed `asks.json` with the one
+JSON reader, in file order (first `read` and `<principal>/`), its bytes equal
+that file, and the grant view holds no entry. Changing the stored `read` to
+`reed` makes the next launch of the original CID fail at (e) with the name
+compare's text, while the first session still declares `read`. A second folder
+with schema `not-the-provisional-schema`, a third with an extra root field, a
+fourth with an empty kind and a fifth with an empty resource are each refused
+with their own declaration reason and leave no instance. The test also refuses
+a root that is not an object, a missing `schema` or `asks`, a wrong type, an
+ask that is not an object, a missing field, malformed JSON and an extra key on
+an ask. A signed `web-app` bundle, which has no `asks.json`, launches and
+declares nothing; a signed bundle with the unknown kind `sing` launches and
+declares it; an unknown session declares nothing.
+`standin_declares_asks_once_and_from_the_store` reads this file's source: one
+`serde_json::from_slice` in `provisional_asks`, one call in `commit_launch`
+between the anchored checked-launch line and the shared launch, and no parse
+in `asks_of` or `declared_asks_of`.
 
 `standin_hands_an_instance_only_its_signed_asks_bytes` launches the signed
 `agent-host` bundle as in the journey above: its session answers the
@@ -1856,12 +1892,14 @@ neither changes the folder between the walk and the launch.
 
 Not shown:
 
-- No ask schema, provisional or not, and no parse or field read of
-  `asks.json`: to the lane it is bytes.
+- The provisional schema is the lab stand-in's, not the Runtime manifest's:
+  the Runtime manifest type has no asks field. No ask kind has an allow-list,
+  and `<principal>` is text, not a substituted principal.
 - No mapping of an ask to an operation; that is `lab/bus-v2-proposal/`, and
   this lane writes no B2 encoding.
 - No grant from an ask: a launch still adds none (the grant view above).
-- The Runtime hands no asks to anything here; `asks_of` is the lane's.
+- The Runtime hands no asks to anything here; `asks_of` and
+  `declared_asks_of` are the lane's.
 
 ## Why a lab CID and not the Runtime's CID
 
@@ -2028,7 +2066,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 298 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 309 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -2069,7 +2107,7 @@ and F-CI36b (see [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)),
 and task 037's F-CI37a to F-CI37c (see
 [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)), and task 044's
 F-CI44a to F-CI44c (see
-[asks come only from the signed bytes](#asks-come-only-from-the-signed-bytes-m1-check-b2-no-schema-part)),
+[asks come only from the signed bytes](#asks-come-only-from-the-signed-bytes-m1-check-b2)),
 and task 047's F-CI47a to F-CI47c (see
 [naming a closure listing](#naming-a-closure-listing)), and task 048's
 F-CI48a to F-CI48e (see [the encoding](#the-encoding)), and task 049's
@@ -2084,7 +2122,9 @@ see [the cross-implementation check](#the-cross-implementation-check)), and
 task 071's F-CI71a and F-CI71b (see [the encoding](#the-encoding)) and
 F-CI71c to F-CI71e (see
 [the cross-implementation check](#the-cross-implementation-check)), and task
-072's F-CI72a (see [the encoding](#the-encoding)).
+072's F-CI72a (see [the encoding](#the-encoding)), and task 078's F-CI78a to
+F-CI78k (see
+[asks come only from the signed bytes](#asks-come-only-from-the-signed-bytes-m1-check-b2)).
 Task 077 moves F-CI18h to the links estimate, F-CI18m to the shared Tsize
 rule, F-CI19c to the missing-block empty result caught by the 20-bundle count,
 F-CI23b to the new module-doc sentence,

@@ -7,8 +7,9 @@
 //! lab crates that use this one, read through
 //! `cargo metadata`, the scan of the lane's docs and code for what they
 //! claim about the lab CID, the check of the falsifier list's inventory, and
-//! the lab stand-in launcher (all six kept here, a file the falsifier runner
-//! restores after a killed run).
+//! the lab stand-in launcher and its one provisional declaration parse (all
+//! seven seams kept here, a file the falsifier runner restores after a killed
+//! run).
 //! Each test file includes this with `mod common;` and uses only part of it,
 //! so dead-code warnings for the rest are silenced.
 #![allow(dead_code)]
@@ -1746,6 +1747,8 @@ pub fn published(folder: &Path) -> (String, PathBuf) {
 /// - [`grant_request_id`]: the request id for one seeded grant;
 /// - [`StandInRuntime::apply_stop`]: the one shared stop;
 /// - [`StandInRuntime::asks_of`]: the signed asks of one launch;
+/// - [`StandInRuntime::declared_asks_of`]: the provisional declaration of one
+///   launch;
 /// - [`StandInRuntime::set_after_walk`]: the after-walk hook.
 ///
 /// The shared launch body's only field is `path`; this lane's launch body's
@@ -1758,8 +1761,10 @@ pub fn published(folder: &Path) -> (String, PathBuf) {
 /// A launch is handed its asks only as the `asks.json` bytes of the checked
 /// bundle, kept under the shared `session_id` it answers, through
 /// [`StandInRuntime::asks_of`]: a change on disk after launch does not reach
-/// it. The bytes are never parsed, and the shared routes have no asks field.
-/// A change on disk between the walk and the launch does not reach it either,
+/// it. The one provisional declaration is parsed from those same bytes before
+/// the shared launch runs, and kept beside them for
+/// [`StandInRuntime::declared_asks_of`]. The shared routes have no asks field.
+/// A change on disk between the walk and the launch does not reach either,
 /// shown through [`StandInRuntime::set_after_walk`].
 pub struct StandInRuntime {
     store: BTreeMap<String, PathBuf>,
@@ -1769,6 +1774,9 @@ pub struct StandInRuntime {
     /// session id of the launch that created the instance. It holds no
     /// status, grant or independent session id.
     asks: BTreeMap<String, Option<Vec<u8>>>,
+    /// The provisional declaration parsed once from those same bytes, beside
+    /// them under the same key. It holds no folder path and no parsed bytes.
+    declared: BTreeMap<String, Option<Vec<(String, String)>>>,
     after_walk: Option<fn(&Path)>,
 }
 
@@ -1785,29 +1793,36 @@ impl StandInRuntime {
             records,
             accepted,
             asks: BTreeMap::new(),
+            declared: BTreeMap::new(),
             after_walk: None,
         }
     }
 
     /// Lab test seam, not a route: run the checks of
-    /// [`StandInRuntime::checked_launch`], then call `launch` with the shared
-    /// launch body `{"path": <the stored folder>}`. The answer is the
+    /// [`StandInRuntime::checked_launch`], parse the one provisional
+    /// declaration from the checked asks bytes, then call `launch` with the
+    /// shared launch body `{"path": <the stored folder>}`. The answer is the
     /// closure's, unchanged, and the checked asks are kept under its
-    /// `session_id`. A refusal is status 400 with the check's own reason, and
-    /// the closure is not called, so the shared instance and grant lists do
-    /// not change.
+    /// `session_id`, with their parsed declaration beside them. A refusal is
+    /// status 400 with the check's own reason, and the closure is not called,
+    /// so the shared instance and grant lists do not change.
     pub fn commit_launch(
         &mut self,
         body: &Value,
         mut launch: impl FnMut(&Value) -> Result<Value, (u16, String)>,
     ) -> Result<Value, (u16, String)> {
         let (path, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;
+        let declared = match asks.as_deref() {
+            Some(bytes) => Some(provisional_asks(bytes).map_err(|reason| (400, reason))?),
+            None => None,
+        };
         let answer = launch(&json!({ "path": path }))?;
         let session = answer["session_id"]
             .as_str()
             .expect("the shared launch answers a session_id")
             .to_owned();
-        self.asks.insert(session, asks);
+        self.asks.insert(session.clone(), asks);
+        self.declared.insert(session, declared);
         Ok(answer)
     }
 
@@ -1833,6 +1848,14 @@ impl StandInRuntime {
     /// have no asks field, and nothing here parses the bytes.
     pub fn asks_of(&self, session_id: &str) -> Option<Vec<u8>> {
         self.asks.get(session_id).cloned().flatten()
+    }
+
+    /// Lab test seam, not a route: the provisional declaration parsed once at
+    /// launch from the asks bytes of `session_id`. `None` when that bundle has
+    /// no `asks.json`, or when no launch has that session. It answers the
+    /// stored list: it parses nothing and reads no folder.
+    pub fn declared_asks_of(&self, session_id: &str) -> Option<Vec<(String, String)>> {
+        self.declared.get(session_id).cloned().flatten()
     }
 
     /// Lab test seam, not a route: every later launch calls `hook` once, on
@@ -1924,8 +1947,83 @@ fn said(refusal: Refusal) -> String {
     refusal.to_string()
 }
 
-/// The asks file of a bundle, which the lab never parses.
+/// The asks file of a bundle; the lab's encoder does not parse it.
 const ASKS_FILE: &str = "asks.json";
+
+/// The schema of the provisional lab stand-in declaration. The Runtime
+/// manifest has no asks field, so this schema is the lab stand-in's alone.
+const ASKS_SCHEMA: &str = "elastos.agent-host.asks/v1";
+
+/// Provisional lab stand-in schema, not the Runtime manifest: the `asks`
+/// declaration in a bundle's `asks.json`, one `(kind, resource)` pair per ask
+/// in file order. The root object's only keys are `schema` (the string
+/// [`ASKS_SCHEMA`]) and `asks` (an array); each ask object's only keys are
+/// `kind` and `resource`, both non-empty strings. A kind has no allow-list,
+/// and `<principal>` is read as text and never substituted.
+///
+/// The one parse: it reads `bytes`, which must be the checked bundle's
+/// `asks.json` entry, with `serde_json::from_slice` into one `Value`. Each
+/// refusal is its own text and denies by default.
+pub fn provisional_asks(bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
+    let value: Value =
+        serde_json::from_slice(bytes).map_err(|error| format!("asks declaration: {error}"))?;
+    let root = value
+        .as_object()
+        .ok_or("asks declaration: the root is not an object")?;
+    refuse_unknown_fields(root, &["schema", "asks"])?;
+    let schema = root
+        .get("schema")
+        .ok_or("asks declaration: the root has no schema")?
+        .as_str()
+        .ok_or("asks declaration: schema is not a string")?;
+    if schema != ASKS_SCHEMA {
+        return Err(format!(
+            "asks declaration: schema is {schema}, not {ASKS_SCHEMA}"
+        ));
+    }
+    let declared = root
+        .get("asks")
+        .ok_or("asks declaration: the root has no asks")?
+        .as_array()
+        .ok_or("asks declaration: asks is not an array")?;
+    let mut asks = Vec::with_capacity(declared.len());
+    for ask in declared {
+        let ask = ask
+            .as_object()
+            .ok_or("asks declaration: an ask is not an object")?;
+        refuse_unknown_fields(ask, &["kind", "resource"])?;
+        let kind = ask
+            .get("kind")
+            .ok_or("asks declaration: an ask has no kind")?
+            .as_str()
+            .ok_or("asks declaration: a kind is not a string")?;
+        let resource = ask
+            .get("resource")
+            .ok_or("asks declaration: an ask has no resource")?
+            .as_str()
+            .ok_or("asks declaration: a resource is not a string")?;
+        if kind.is_empty() {
+            return Err("asks declaration: an ask has an empty kind".to_owned());
+        }
+        if resource.is_empty() {
+            return Err("asks declaration: an ask has an empty resource".to_owned());
+        }
+        asks.push((kind.to_owned(), resource.to_owned()));
+    }
+    Ok(asks)
+}
+
+/// Refuse the first key of `object` that `allowed` does not name, with the
+/// key's name. One rule for the root object and for each ask object.
+fn refuse_unknown_fields(
+    object: &serde_json::Map<String, Value>,
+    allowed: &[&str],
+) -> Result<(), String> {
+    if let Some(name) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(format!("asks declaration: unknown field {name}"));
+    }
+    Ok(())
+}
 
 /// The content of the checked bundle's `asks.json` entry, or `None` when it
 /// has none: the bytes the walk read, never read from the folder again.

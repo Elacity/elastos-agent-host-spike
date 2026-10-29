@@ -823,6 +823,374 @@ fn standin_shared_stop_updates_the_same_instances_and_grants() {
     );
 }
 
+/// The `agent-host` fixture assembled at `parent/name`, with `asks` as its
+/// `asks.json`, so a test can publish a declaration of its own.
+fn agent_host_with_asks(parent: &Path, name: &str, asks: &[u8]) -> PathBuf {
+    let folder = parent.join(name);
+    assemble_at(&AGENT_HOST, &folder);
+    fs::write(folder.join("asks.json"), asks).expect("write asks.json");
+    folder
+}
+
+/// The committed declaration with `edit` applied, as compact JSON bytes.
+fn edited_asks(edit: impl FnOnce(&mut Value)) -> Vec<u8> {
+    let mut value: Value = serde_json::from_slice(&read_fixture(&AGENT_HOST, "asks.json"))
+        .expect("the committed asks.json is JSON");
+    edit(&mut value);
+    serde_json::to_vec(&value).expect("the edited declaration is JSON")
+}
+
+/// One lane over every folder in `folders`, each signed by its own fresh test
+/// key whose DID is accepted, and one shared stand-in that registered each
+/// folder once.
+fn signed_bundles(folders: &[PathBuf]) -> (StandInRuntime, StandIn) {
+    let mut entries = Vec::new();
+    let mut records = Vec::new();
+    let mut accepted = Vec::new();
+    for folder in folders {
+        let key = fresh_signing_key();
+        records.push(sign(&key, folder));
+        accepted.push(did_of(&key));
+        entries.push(published(folder));
+    }
+    let lane = StandInRuntime::new(entries, records, accepted);
+    let mut shared = StandIn::new();
+    for folder in folders {
+        register(&mut shared, folder);
+    }
+    (lane, shared)
+}
+
+/// The `(kind, resource)` pairs of `bytes`, read with the one JSON reader and
+/// not with the parse under test, in file order.
+fn pairs_of(bytes: &[u8]) -> Vec<(String, String)> {
+    let value: Value = serde_json::from_slice(bytes).expect("the declaration is JSON");
+    value["asks"]
+        .as_array()
+        .expect("an asks array")
+        .iter()
+        .map(|ask| {
+            (
+                ask["kind"].as_str().expect("a kind").to_owned(),
+                ask["resource"].as_str().expect("a resource").to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// The launch of `cid` is refused with status 400 and exactly `reason`, the
+/// shared list still holds `before` instances and the grant view stays empty.
+fn assert_declaration_refused(
+    lane: &mut StandInRuntime,
+    shared: &mut StandIn,
+    cid: &str,
+    reason: &str,
+    before: usize,
+) {
+    assert_eq!(
+        launch_cid(lane, shared, cid),
+        Err((400, reason.to_owned())),
+        "{cid}: {reason}"
+    );
+    assert_eq!(
+        listed_instances(shared).len(),
+        before,
+        "{cid}: a refused declaration leaves no new instance"
+    );
+    assert_eq!(
+        grant_view(lane, shared),
+        Vec::<Value>::new(),
+        "{cid}: a refused declaration yields no grant"
+    );
+}
+
+#[test]
+fn standin_reads_declared_asks_from_the_signed_manifest() {
+    let published = publish_agent_host();
+    let parent = temp_dir();
+    let malformed_bytes = b"{\"schema\": ".to_vec();
+    let malformed_reason = format!(
+        "asks declaration: {}",
+        serde_json::from_slice::<Value>(&malformed_bytes).expect_err("the bytes are not JSON")
+    );
+    let variants: Vec<(&str, Vec<u8>, String)> = vec![
+        (
+            "schema-bad",
+            edited_asks(|value| value["schema"] = json!("not-the-provisional-schema")),
+            "asks declaration: schema is not-the-provisional-schema, not elastos.agent-host.asks/v1"
+                .to_owned(),
+        ),
+        (
+            "extra-root",
+            edited_asks(|value| value["extra"] = json!(1)),
+            "asks declaration: unknown field extra".to_owned(),
+        ),
+        (
+            "extra-ask",
+            edited_asks(|value| value["asks"][0]["extra"] = json!(1)),
+            "asks declaration: unknown field extra".to_owned(),
+        ),
+        (
+            "empty-kind",
+            edited_asks(|value| value["asks"][0]["kind"] = json!("")),
+            "asks declaration: an ask has an empty kind".to_owned(),
+        ),
+        (
+            "empty-resource",
+            edited_asks(|value| value["asks"][0]["resource"] = json!("")),
+            "asks declaration: an ask has an empty resource".to_owned(),
+        ),
+        (
+            "root-not-object",
+            b"[]".to_vec(),
+            "asks declaration: the root is not an object".to_owned(),
+        ),
+        (
+            "missing-schema",
+            edited_asks(|value| {
+                value
+                    .as_object_mut()
+                    .expect("an object")
+                    .remove("schema");
+            }),
+            "asks declaration: the root has no schema".to_owned(),
+        ),
+        (
+            "missing-asks",
+            edited_asks(|value| {
+                value.as_object_mut().expect("an object").remove("asks");
+            }),
+            "asks declaration: the root has no asks".to_owned(),
+        ),
+        (
+            "schema-not-string",
+            edited_asks(|value| value["schema"] = json!([])),
+            "asks declaration: schema is not a string".to_owned(),
+        ),
+        (
+            "asks-not-array",
+            edited_asks(|value| value["asks"] = json!({})),
+            "asks declaration: asks is not an array".to_owned(),
+        ),
+        (
+            "ask-not-object",
+            edited_asks(|value| value["asks"][0] = json!(5)),
+            "asks declaration: an ask is not an object".to_owned(),
+        ),
+        (
+            "kind-not-string",
+            edited_asks(|value| value["asks"][0]["kind"] = json!(5)),
+            "asks declaration: a kind is not a string".to_owned(),
+        ),
+        (
+            "resource-not-string",
+            edited_asks(|value| value["asks"][0]["resource"] = json!(5)),
+            "asks declaration: a resource is not a string".to_owned(),
+        ),
+        (
+            "missing-kind",
+            edited_asks(|value| {
+                value["asks"][0]
+                    .as_object_mut()
+                    .expect("an object")
+                    .remove("kind");
+            }),
+            "asks declaration: an ask has no kind".to_owned(),
+        ),
+        (
+            "missing-resource",
+            edited_asks(|value| {
+                value["asks"][0]
+                    .as_object_mut()
+                    .expect("an object")
+                    .remove("resource");
+            }),
+            "asks declaration: an ask has no resource".to_owned(),
+        ),
+        (
+            "malformed",
+            malformed_bytes,
+            malformed_reason.clone(),
+        ),
+    ];
+    let unknown_kind = agent_host_with_asks(
+        parent.path(),
+        "unknown-kind",
+        &edited_asks(|value| value["asks"][0]["kind"] = json!("sing")),
+    );
+    let web_app = parent.path().join("web-app");
+    assemble_at(&WEB_APP, &web_app);
+
+    let folders: Vec<PathBuf> = variants
+        .iter()
+        .map(|(name, bytes, _)| agent_host_with_asks(parent.path(), name, bytes))
+        .collect();
+    let mut all = vec![published.folder.clone()];
+    all.extend(folders.iter().cloned());
+    all.push(unknown_kind.clone());
+    all.push(web_app.clone());
+    let (mut lane, mut shared) = signed_bundles(&all);
+
+    let signed = read_fixture(&AGENT_HOST, "asks.json");
+    let expected = pairs_of(&signed);
+    assert_eq!(
+        expected.first(),
+        Some(&("read".to_owned(), "<principal>/".to_owned())),
+        "the first committed ask"
+    );
+
+    let answer = launch_cid(&mut lane, &mut shared, AGENT_HOST_LAB_CID)
+        .unwrap_or_else(|(status, reason)| panic!("refused with {status}: {reason}"));
+    assert_eq!(keys(&answer), ["id", "name", "session_id", "status"]);
+    assert_eq!(answer["status"], "starting", "the shared launch's status");
+    let session = answer["session_id"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+    assert_eq!(
+        lane.declared_asks_of(&session),
+        Some(expected.clone()),
+        "the journey parses the committed declaration in file order"
+    );
+    assert_eq!(
+        lane.asks_of(&session),
+        Some(signed.clone()),
+        "the session keeps the committed asks bytes"
+    );
+    assert_eq!(
+        grant_view(&lane, &shared),
+        Vec::<Value>::new(),
+        "a matching signature adds no grant"
+    );
+
+    // The read kind on disk becomes reed: (e) refuses with the name compare,
+    // and the first session still declares the signed list.
+    let stored = String::from_utf8(signed.clone()).expect("UTF-8 asks");
+    let mutated = stored.replacen("\"read\"", "\"reed\"", 1);
+    fs::write(published.folder.join("asks.json"), &mutated).expect("write asks.json");
+    let now = named(&published.folder).to_string();
+    assert_ne!(now, AGENT_HOST_LAB_CID);
+    let compare = checked(&published.folder)
+        .check_name(AGENT_HOST_LAB_CID)
+        .expect_err("the bytes changed")
+        .to_string();
+    assert!(compare.contains(AGENT_HOST_LAB_CID) && compare.contains(&now));
+    assert_declaration_refused(&mut lane, &mut shared, AGENT_HOST_LAB_CID, &compare, 1);
+    assert_eq!(
+        lane.declared_asks_of(&session),
+        Some(expected.clone()),
+        "the first session still declares read"
+    );
+    assert_eq!(
+        lane.declared_asks_of(&session)
+            .and_then(|asks| asks.first().cloned()),
+        Some(("read".to_owned(), "<principal>/".to_owned()))
+    );
+
+    // No kind allow-list: an unknown kind launches and declares itself.
+    let unknown_cid = named(&unknown_kind).to_string();
+    let answer = launch_cid(&mut lane, &mut shared, &unknown_cid)
+        .unwrap_or_else(|(status, reason)| panic!("refused with {status}: {reason}"));
+    assert_eq!(answer["status"], "starting");
+    let unknown_session = answer["session_id"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+    let mut declared_unknown = expected.clone();
+    declared_unknown[0].0 = "sing".to_owned();
+    assert_eq!(
+        lane.declared_asks_of(&unknown_session),
+        Some(declared_unknown),
+        "an unknown kind is read as text"
+    );
+
+    // A bundle with no asks.json launches and declares nothing.
+    let web_cid = named(&web_app).to_string();
+    let answer = launch_cid(&mut lane, &mut shared, &web_cid)
+        .unwrap_or_else(|(status, reason)| panic!("refused with {status}: {reason}"));
+    assert_eq!(answer["status"], "starting");
+    let web_session = answer["session_id"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+    assert_eq!(lane.declared_asks_of(&web_session), None);
+    assert_eq!(lane.asks_of(&web_session), None);
+    assert_eq!(listed_instances(&shared).len(), 3);
+    assert_eq!(
+        lane.declared_asks_of("no-such-session"),
+        None,
+        "an unknown session declares nothing"
+    );
+
+    // Every declaration that does not meet the provisional schema refuses the
+    // launch with its own reason, before the shared launch runs.
+    for ((name, _, reason), folder) in variants.iter().zip(folders.iter()) {
+        let cid = named(folder).to_string();
+        assert_declaration_refused(&mut lane, &mut shared, &cid, reason, 3);
+        assert_eq!(
+            lane.declared_asks_of("no-such-session"),
+            None,
+            "{name}: no session appears for a refused declaration"
+        );
+    }
+    assert_eq!(
+        listed_instances(&shared).len(),
+        3,
+        "the three launches stayed"
+    );
+    assert_eq!(
+        grant_view(&lane, &shared),
+        Vec::<Value>::new(),
+        "no launch adds a grant"
+    );
+}
+
+#[test]
+fn standin_declares_asks_once_and_from_the_store() {
+    let common = include_str!("common/mod.rs");
+    let parse = library_item(common, "pub fn provisional_asks(");
+    assert_eq!(
+        occurrences(parse, "serde_json::from_slice"),
+        1,
+        "the declaration holds one JSON parse"
+    );
+    let commit = library_item(common, "pub fn commit_launch(");
+    assert_eq!(
+        occurrences(commit, "provisional_asks"),
+        1,
+        "commit_launch runs the one declaration parse"
+    );
+    let anchored = "let (path, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;";
+    let checked_at = commit.find(anchored).expect("the one checked launch line");
+    let parse_at = commit
+        .find("provisional_asks")
+        .expect("the one declaration parse");
+    let launch_at = commit
+        .find("launch(&json!")
+        .expect("the one shared launch call");
+    assert!(
+        checked_at < parse_at,
+        "the declaration parses the bytes the checks returned"
+    );
+    assert!(
+        parse_at < launch_at,
+        "the declaration parses before the shared launch runs"
+    );
+    for head in ["pub fn declared_asks_of(", "pub fn asks_of("] {
+        let body = library_item(common, head);
+        assert_eq!(
+            occurrences(body, "provisional_asks"),
+            0,
+            "{head} parses nothing"
+        );
+        assert_eq!(
+            occurrences(body, "serde_json"),
+            0,
+            "{head} holds no JSON reader"
+        );
+    }
+}
+
 /// Every `.rs` file under `root`: the linked harness must not bring a second
 /// copy of its storage rule into this crate.
 fn rust_files(root: &Path, out: &mut Vec<PathBuf>) {
