@@ -2823,6 +2823,38 @@
       "tests": [
         "hosted_request_identity_survives_rotation_and_refuses_conflicts"
       ]
+    },
+    {
+      "id": "MP66",
+      "title": "granted_model_turn returns a completed ready result before bind_granting asks the stand-in, so the effect id is not the contract run id",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/tests/process.rs",
+          "old": "    let backend = LocalRelayBackend::bind();\n    let stand_in =\n        HostedEffectStandIn::bind_granting(&label, backend.url(), Arc::clone(&grants), session_id);",
+          "new": "    return GrantedModelTurn {\n        answer: Some(\"ready\".to_string()),\n        effect_id: \"ready\".to_string(),\n        journal: Some(json!({\"output\": {\"text\": \"ready\"}})),\n        binding: granted_model_turn_binding(session_id, prompt),\n        hosted_run_id: None,\n        backend_requests: Vec::new(),\n        refusal_reasons: Vec::new(),\n        settled: json!({\"data\": {\"status\": \"completed\"}}),\n        relay: None,\n        connections: 0,\n        hosted_requests: Vec::new(),\n    };\n    let backend = LocalRelayBackend::bind();\n    let stand_in =\n        HostedEffectStandIn::bind_granting(&label, backend.url(), Arc::clone(&grants), session_id);"
+        }
+      ],
+      "tests": [
+        "granted_model_turn_returns_the_answer_effect_and_audit"
+      ]
+    },
+    {
+      "id": "MP67",
+      "title": "the request binding hardcodes session:test, so a granted non-default session is recorded as the fixture session",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/tests/process.rs",
+          "old": "            \"principal_id\": \"person:local:test\",\n            \"session_id\": session_id,\n            \"capsule_id\": \"assistant\",",
+          "new": "            \"principal_id\": \"person:local:test\",\n            \"session_id\": HOSTED_FIXTURE_SESSION_ID,\n            \"capsule_id\": \"assistant\","
+        }
+      ],
+      "tests": [
+        "granted_model_turn_returns_the_answer_effect_and_audit"
+      ]
     }
   ]
 }
