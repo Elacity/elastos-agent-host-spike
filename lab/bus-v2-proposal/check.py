@@ -805,6 +805,45 @@ def resident_export_quote(text, root=None, sha=None, pinned=None):
     return _pinned_quote(text, RESIDENT_EXPORT_SPAN, RESIDENT_EXPORT_MARKER, root, sha, pinned)
 
 
+# The 33 line spans this task re-quotes, in draft source order. Each names its
+# own line, and its own paragraph indents a block that holds that line. The
+# target entries above and the block rule below both read this one list.
+REQUOTED_SPANS = (
+    "elastos/crates/elastos-server/src/resource_bridge.rs:43",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:925",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:984",
+    "elastos/crates/elastos-compute/src/providers/component.rs:352",
+    "elastos/crates/elastos-server/src/api/handlers/capability.rs:182",
+    "elastos/crates/elastos-server/src/api/handlers/capability.rs:339",
+    "elastos/crates/elastos-server/src/api/handlers/capability.rs:341",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:40",
+    "elastos/crates/elastos-runtime/src/capability/manager.rs:326",
+    "elastos/crates/elastos-runtime/src/capability/token.rs:203",
+    "elastos/crates/elastos-runtime/src/capability/manager.rs:409",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:394",
+    "elastos/crates/elastos-compute/src/providers/component.rs:384",
+    "elastos/wit/elastos-bus-v1.wit:10",
+    "examples/agent-host/asks.json:10",
+    "examples/agent-host/asks.json:11",
+    "capsules/model-provider/src/adapters.rs:42",
+    "capsules/model-provider/src/adapters.rs:1670",
+    "capsules/model-provider/src/config.rs:111",
+    "capsules/model-provider/src/config.rs:113",
+    "elastos/crates/elastos-runtime/src/provider/bridge.rs:774",
+    "elastos/crates/elastos-runtime/src/provider/registry.rs:841",
+    "capsules/model-provider/src/adapters.rs:125",
+    "elastos/crates/elastos-server/src/api/model_provider_egress.rs:493",
+    "elastos/crates/elastos-server/src/api/model_provider_egress.rs:503",
+    "elastos/crates/elastos-server/src/api/model_provider_egress.rs:509",
+    "elastos/crates/elastos-server/src/api/gateway_model_service.rs:32",
+    "lab/grant-binding/src/lib.rs:162",
+    "lab/grant-binding/src/lib.rs:244",
+    "lab/grant-binding/src/ledger.rs:222",
+    "lab/grant-binding/src/ledger.rs:288",
+    "lab/grant-binding/src/ledger.rs:273",
+    "lab/grant-binding/src/ledger.rs:334",
+)
+
 # The only target list: one entry per line decision, in source order. A range's
 # two endpoints share one marker. The quoter name is looked up at call time so a
 # test can plant a neighbouring remainder through the production path.
@@ -927,7 +966,18 @@ QUOTE_TARGETS = (
     ("lab/grant-binding/src/lib.rs:280", "`lab/grant-binding/src/lib.rs:280`", None),
     ("lab/grant-binding/src/lib.rs:23", "`lab/grant-binding/src/lib.rs:23`", None),
     ("lab/grant-binding/src/lib.rs:25", "`lab/grant-binding/src/lib.rs:25`", None),
+    # The 33 entries this task adds, in draft source order. Each reads its own
+    # span through the shared window rule, as the aligned entries do. One list
+    # names them, so the target entries and the block rule cannot drift apart.
+    *((span, "`" + span + "`", None) for span in REQUOTED_SPANS),
 )
+
+
+# The spans whose own paragraph must indent a block. Each one has its own
+# paragraph, so a marker with no block under it would be silently unchecked.
+# The older spans keep the skip, because several of them share one paragraph
+# and only the first of them can own the block.
+BLOCK_REQUIRED = frozenset(REQUOTED_SPANS)
 
 
 def quoted_line_matches(quoted, source):
@@ -951,15 +1001,20 @@ def _target_quotation(text, target, root, sha):
 def _quote_refusal(root, text, sha, target):
     """Return the refusal for one target, or None when it matches or is absent.
 
-    The walk has no remainder for MARKER: no refusal, and the next target runs.
-    The marker is not one line: refused before the line read. The pinned line is
-    absent, or no window holds the cited line: the quotation is not in the pin.
-    The comparison fails, including a zero score: the quotation does not match.
+    The walk has no remainder for MARKER: no refusal, and the next target runs,
+    unless SPAN is one whose own paragraph must indent a block. The marker is
+    not one line: refused before the line read. The pinned line is absent, or
+    no window holds the cited line: the quotation is not in the pin. The
+    comparison fails, including a zero score: the quotation does not match.
     """
     span, marker, quoter = target
     if text.count(marker) > 1:
         return "refuse: quoted line is not one line: " + marker.strip("`")
     if not _remainders(text, marker):
+        # A draft that does not cite SPAN adds no refusal. A draft that cites it
+        # leaves the line unchecked unless its own paragraph indents a block.
+        if marker in text and span in BLOCK_REQUIRED:
+            return "refuse: quoted line has no block: " + span
         return None
     rel, number = _span_target(span)
     source = pinned_line(root, sha, rel, number)

@@ -4,6 +4,7 @@ The tests call ``check.problems``. They do not compile a citation expression.
 """
 
 import contextlib
+import hashlib
 import io
 import os
 import subprocess
@@ -2440,6 +2441,627 @@ ALIGNED_SHARED = tuple(
     for markers, start, lines in ALIGNED_GROUPS
     if len(markers) > 1
 )
+
+
+# --- 139: the 33 requoted line citations -------------------------------
+#
+# Each span names one line, and its own paragraph indents a block that holds
+# that line. Several paragraphs cite two or three lines of one run, so a
+# group's markers share one block and each marker reads its own line from it.
+# The group is (rel, first pinned line, last pinned line, markers).
+REQUOTED_GROUPS = (
+    (
+        'elastos/crates/elastos-server/src/resource_bridge.rs',
+        42,
+        43,
+        (
+            'elastos/crates/elastos-server/src/resource_bridge.rs:43',
+        ),
+    ),
+    (
+        'elastos/crates/elastos-server/src/resource_bridge.rs',
+        924,
+        938,
+        (
+            'elastos/crates/elastos-server/src/resource_bridge.rs:925',
+        ),
+    ),
+    (
+        'elastos/crates/elastos-server/src/resource_bridge.rs',
+        978,
+        989,
+        (
+            'elastos/crates/elastos-server/src/resource_bridge.rs:984',
+        ),
+    ),
+    (
+        'elastos/crates/elastos-compute/src/providers/component.rs',
+        352,
+        352,
+        (
+            'elastos/crates/elastos-compute/src/providers/component.rs:352',
+        ),
+    ),
+    (
+        'elastos/crates/elastos-server/src/api/handlers/capability.rs',
+        178,
+        184,
+        (
+            'elastos/crates/elastos-server/src/api/handlers/capability.rs:182',
+        ),
+    ),
+    (
+        'elastos/crates/elastos-server/src/api/handlers/capability.rs',
+        339,
+        346,
+        (
+            'elastos/crates/elastos-server/src/api/handlers/capability.rs:339',
+            'elastos/crates/elastos-server/src/api/handlers/capability.rs:341',
+        ),
+    ),
+    (
+        'elastos/crates/elastos-server/src/resource_bridge.rs',
+        40,
+        41,
+        (
+            'elastos/crates/elastos-server/src/resource_bridge.rs:40',
+        ),
+    ),
+    (
+        'elastos/crates/elastos-runtime/src/capability/manager.rs',
+        308,
+        346,
+        (
+            'elastos/crates/elastos-runtime/src/capability/manager.rs:326',
+        ),
+    ),
+    (
+        'elastos/crates/elastos-runtime/src/capability/token.rs',
+        203,
+        204,
+        (
+            'elastos/crates/elastos-runtime/src/capability/token.rs:203',
+        ),
+    ),
+    (
+        'elastos/crates/elastos-runtime/src/capability/manager.rs',
+        408,
+        415,
+        (
+            'elastos/crates/elastos-runtime/src/capability/manager.rs:409',
+        ),
+    ),
+    (
+        'elastos/crates/elastos-server/src/resource_bridge.rs',
+        390,
+        409,
+        (
+            'elastos/crates/elastos-server/src/resource_bridge.rs:394',
+        ),
+    ),
+    (
+        'elastos/crates/elastos-compute/src/providers/component.rs',
+        359,
+        389,
+        (
+            'elastos/crates/elastos-compute/src/providers/component.rs:384',
+        ),
+    ),
+    (
+        'elastos/wit/elastos-bus-v1.wit',
+        10,
+        10,
+        (
+            'elastos/wit/elastos-bus-v1.wit:10',
+        ),
+    ),
+    (
+        'examples/agent-host/asks.json',
+        10,
+        11,
+        (
+            'examples/agent-host/asks.json:10',
+            'examples/agent-host/asks.json:11',
+        ),
+    ),
+    (
+        'capsules/model-provider/src/adapters.rs',
+        42,
+        70,
+        (
+            'capsules/model-provider/src/adapters.rs:42',
+        ),
+    ),
+    (
+        'capsules/model-provider/src/adapters.rs',
+        1648,
+        1674,
+        (
+            'capsules/model-provider/src/adapters.rs:1670',
+        ),
+    ),
+    (
+        'capsules/model-provider/src/config.rs',
+        111,
+        113,
+        (
+            'capsules/model-provider/src/config.rs:111',
+            'capsules/model-provider/src/config.rs:113',
+        ),
+    ),
+    (
+        'elastos/crates/elastos-runtime/src/provider/bridge.rs',
+        774,
+        774,
+        (
+            'elastos/crates/elastos-runtime/src/provider/bridge.rs:774',
+        ),
+    ),
+    (
+        'elastos/crates/elastos-runtime/src/provider/registry.rs',
+        839,
+        842,
+        (
+            'elastos/crates/elastos-runtime/src/provider/registry.rs:841',
+        ),
+    ),
+    (
+        'capsules/model-provider/src/adapters.rs',
+        111,
+        127,
+        (
+            'capsules/model-provider/src/adapters.rs:125',
+        ),
+    ),
+    (
+        'elastos/crates/elastos-server/src/api/model_provider_egress.rs',
+        493,
+        509,
+        (
+            'elastos/crates/elastos-server/src/api/model_provider_egress.rs:493',
+            'elastos/crates/elastos-server/src/api/model_provider_egress.rs:503',
+            'elastos/crates/elastos-server/src/api/model_provider_egress.rs:509',
+        ),
+    ),
+    (
+        'elastos/crates/elastos-server/src/api/gateway_model_service.rs',
+        32,
+        38,
+        (
+            'elastos/crates/elastos-server/src/api/gateway_model_service.rs:32',
+        ),
+    ),
+    (
+        'lab/grant-binding/src/lib.rs',
+        162,
+        188,
+        (
+            'lab/grant-binding/src/lib.rs:162',
+        ),
+    ),
+    (
+        'lab/grant-binding/src/lib.rs',
+        244,
+        254,
+        (
+            'lab/grant-binding/src/lib.rs:244',
+        ),
+    ),
+    (
+        'lab/grant-binding/src/ledger.rs',
+        196,
+        244,
+        (
+            'lab/grant-binding/src/ledger.rs:222',
+        ),
+    ),
+    (
+        'lab/grant-binding/src/ledger.rs',
+        288,
+        288,
+        (
+            'lab/grant-binding/src/ledger.rs:288',
+        ),
+    ),
+    (
+        'lab/grant-binding/src/ledger.rs',
+        273,
+        273,
+        (
+            'lab/grant-binding/src/ledger.rs:273',
+        ),
+    ),
+    (
+        'lab/grant-binding/src/ledger.rs',
+        334,
+        334,
+        (
+            'lab/grant-binding/src/ledger.rs:334',
+        ),
+    ),
+)
+
+# The 33 spans this task decides, in draft order.
+REQUOTED_SPANS = (
+    'elastos/crates/elastos-server/src/resource_bridge.rs:43',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:925',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:984',
+    'elastos/crates/elastos-compute/src/providers/component.rs:352',
+    'elastos/crates/elastos-server/src/api/handlers/capability.rs:182',
+    'elastos/crates/elastos-server/src/api/handlers/capability.rs:339',
+    'elastos/crates/elastos-server/src/api/handlers/capability.rs:341',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:40',
+    'elastos/crates/elastos-runtime/src/capability/manager.rs:326',
+    'elastos/crates/elastos-runtime/src/capability/token.rs:203',
+    'elastos/crates/elastos-runtime/src/capability/manager.rs:409',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:394',
+    'elastos/crates/elastos-compute/src/providers/component.rs:384',
+    'elastos/wit/elastos-bus-v1.wit:10',
+    'examples/agent-host/asks.json:10',
+    'examples/agent-host/asks.json:11',
+    'capsules/model-provider/src/adapters.rs:42',
+    'capsules/model-provider/src/adapters.rs:1670',
+    'capsules/model-provider/src/config.rs:111',
+    'capsules/model-provider/src/config.rs:113',
+    'elastos/crates/elastos-runtime/src/provider/bridge.rs:774',
+    'elastos/crates/elastos-runtime/src/provider/registry.rs:841',
+    'capsules/model-provider/src/adapters.rs:125',
+    'elastos/crates/elastos-server/src/api/model_provider_egress.rs:493',
+    'elastos/crates/elastos-server/src/api/model_provider_egress.rs:503',
+    'elastos/crates/elastos-server/src/api/model_provider_egress.rs:509',
+    'elastos/crates/elastos-server/src/api/gateway_model_service.rs:32',
+    'lab/grant-binding/src/lib.rs:162',
+    'lab/grant-binding/src/lib.rs:244',
+    'lab/grant-binding/src/ledger.rs:222',
+    'lab/grant-binding/src/ledger.rs:288',
+    'lab/grant-binding/src/ledger.rs:273',
+    'lab/grant-binding/src/ledger.rs:334',
+)
+
+# The 115 line-form spans that stood before this change.
+BEFORE_REQUOTE = (
+    'capsules/model-provider/src/adapters.rs:58',
+    'capsules/model-provider/src/contract.rs:134',
+    'capsules/model-provider/src/journal.rs:391',
+    'capsules/model-provider/src/journal.rs:397',
+    'capsules/model-provider/src/journal.rs:921',
+    'capsules/model-provider/src/state.rs:530',
+    'capsules/model-provider/src/state.rs:609',
+    'docs/AGENT_ARCHITECTURE.md:19',
+    'docs/AGENT_ARCHITECTURE.md:21',
+    'docs/AGENT_ARCHITECTURE.md:24',
+    'docs/AGENT_ARCHITECTURE.md:332',
+    'elastos/crates/elastos-compute/src/exec_vm.rs:130',
+    'elastos/crates/elastos-compute/src/exec_vm.rs:43',
+    'elastos/crates/elastos-compute/src/exec_vm.rs:49',
+    'elastos/crates/elastos-compute/src/providers/component.rs:218',
+    'elastos/crates/elastos-compute/src/providers/component.rs:232',
+    'elastos/crates/elastos-compute/src/providers/component.rs:350',
+    'elastos/crates/elastos-server/src/api/gateway_model_service.rs:1',
+    'elastos/crates/elastos-server/src/api/gateway_model_service.rs:1444',
+    'elastos/crates/elastos-server/src/api/gateway_model_service.rs:1446',
+    'elastos/crates/elastos-server/src/api/gateway_model_service.rs:355',
+    'elastos/crates/elastos-server/src/api/gateway_model_service.rs:4',
+    'elastos/crates/elastos-server/src/provider_resource.rs:123',
+    'elastos/crates/elastos-server/src/provider_resource.rs:163',
+    'elastos/crates/elastos-server/src/provider_resource.rs:164',
+    'elastos/crates/elastos-server/src/provider_resource.rs:165',
+    'elastos/crates/elastos-server/src/provider_resource.rs:174',
+    'elastos/crates/elastos-server/src/provider_resource.rs:176',
+    'elastos/crates/elastos-server/src/provider_resource.rs:189',
+    'elastos/crates/elastos-server/src/provider_resource.rs:190',
+    'elastos/crates/elastos-server/src/provider_resource.rs:192',
+    'elastos/crates/elastos-server/src/provider_resource.rs:379',
+    'elastos/crates/elastos-server/src/provider_resource.rs:382',
+    'elastos/crates/elastos-server/src/provider_resource.rs:422',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:564',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:565',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:576',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:577',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:597',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:600',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:696',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:697',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:698',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:699',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:814',
+    'elastos/wit/elastos-bus-v1.wit:87',
+    'examples/agent-host/asks.json:12',
+    'examples/agent-host/asks.json:4',
+    'examples/agent-host/asks.json:5',
+    'examples/agent-host/asks.json:6',
+    'examples/agent-host/asks.json:7',
+    'examples/agent-host/asks.json:8',
+    'examples/agent-host/asks.json:9',
+    'examples/agent-host/src/lib.rs:2067',
+    'examples/agent-host/src/lib.rs:2421',
+    'examples/agent-host/src/lib.rs:2422',
+    'examples/agent-host/src/lib.rs:2720',
+    'examples/agent-host/src/lib.rs:2741',
+    'examples/agent-host/src/lib.rs:2749',
+    'examples/agent-host/src/lib.rs:2958',
+    'examples/agent-host/src/lib.rs:2981',
+    'examples/agent-host/src/lib.rs:3290',
+    'examples/agent-host/src/lib.rs:3308',
+    'examples/agent-host/src/lib.rs:3339',
+    'examples/agent-host/src/lib.rs:3360',
+    'examples/agent-host/src/lib.rs:3370',
+    'examples/agent-host/src/lib.rs:3382',
+    'examples/agent-host/src/lib.rs:3387',
+    'examples/agent-host/src/lib.rs:3403',
+    'examples/agent-host/src/lib.rs:3449',
+    'examples/agent-host/src/lib.rs:3455',
+    'examples/agent-host/src/lib.rs:3470',
+    'examples/agent-host/src/lib.rs:3471',
+    'examples/agent-host/src/lib.rs:3474',
+    'examples/agent-host/src/lib.rs:3482',
+    'examples/agent-host/src/lib.rs:3526',
+    'examples/agent-host/src/lib.rs:3549',
+    'examples/agent-host/src/lib.rs:3754',
+    'examples/agent-host/src/lib.rs:3755',
+    'examples/agent-host/src/lib.rs:3757',
+    'examples/agent-host/src/lib.rs:3767',
+    'examples/agent-host/src/lib.rs:3849',
+    'examples/agent-host/src/lib.rs:3850',
+    'examples/agent-host/src/lib.rs:3935',
+    'examples/agent-host/src/lib.rs:3936',
+    'examples/agent-host/src/lib.rs:3947',
+    'examples/agent-host/src/lib.rs:3961',
+    'examples/agent-host/src/lib.rs:3966',
+    'examples/agent-host/src/lib.rs:3967',
+    'examples/agent-host/src/lib.rs:4023',
+    'examples/agent-host/src/lib.rs:4032',
+    'examples/agent-host/src/lib.rs:4033',
+    'examples/agent-host/src/lib.rs:4061',
+    'examples/agent-host/src/lib.rs:471',
+    'examples/agent-host/src/lib.rs:476',
+    'examples/agent-host/src/lib.rs:532',
+    'examples/agent-host/src/lib.rs:754',
+    'examples/agent-host/src/lib.rs:8149',
+    'examples/agent-host/src/lib.rs:8162',
+    'examples/agent-host/src/lib.rs:8168',
+    'examples/agent-host/src/lib.rs:8187',
+    'examples/agent-host/src/lib.rs:8188',
+    'examples/agent-host/src/lib.rs:8189',
+    'examples/agent-host/src/lib.rs:8190',
+    'examples/agent-host/src/lib.rs:8191',
+    'examples/agent-host/src/lib.rs:8192',
+    'examples/agent-host/src/lib.rs:8193',
+    'examples/agent-host/src/lib.rs:8194',
+    'examples/agent-host/src/lib.rs:8488',
+    'lab/capsule-identity/README.md:807',
+    'lab/capsule-identity/src/lib.rs:1252',
+    'lab/grant-binding/README.md:12',
+    'lab/grant-binding/src/lib.rs:23',
+    'lab/grant-binding/src/lib.rs:25',
+    'lab/grant-binding/src/lib.rs:280',
+)
+
+# Every line-form span the target list must hold after this change, as
+# one literal list: the 115 entries before it plus these 33. A missing
+# span and an extra span both fail the comparison against it.
+QUOTE_TARGET_SET = (
+    'capsules/model-provider/src/adapters.rs:125',
+    'capsules/model-provider/src/adapters.rs:1670',
+    'capsules/model-provider/src/adapters.rs:42',
+    'capsules/model-provider/src/adapters.rs:58',
+    'capsules/model-provider/src/config.rs:111',
+    'capsules/model-provider/src/config.rs:113',
+    'capsules/model-provider/src/contract.rs:134',
+    'capsules/model-provider/src/journal.rs:391',
+    'capsules/model-provider/src/journal.rs:397',
+    'capsules/model-provider/src/journal.rs:921',
+    'capsules/model-provider/src/state.rs:530',
+    'capsules/model-provider/src/state.rs:609',
+    'docs/AGENT_ARCHITECTURE.md:19',
+    'docs/AGENT_ARCHITECTURE.md:21',
+    'docs/AGENT_ARCHITECTURE.md:24',
+    'docs/AGENT_ARCHITECTURE.md:332',
+    'elastos/crates/elastos-compute/src/exec_vm.rs:130',
+    'elastos/crates/elastos-compute/src/exec_vm.rs:43',
+    'elastos/crates/elastos-compute/src/exec_vm.rs:49',
+    'elastos/crates/elastos-compute/src/providers/component.rs:218',
+    'elastos/crates/elastos-compute/src/providers/component.rs:232',
+    'elastos/crates/elastos-compute/src/providers/component.rs:350',
+    'elastos/crates/elastos-compute/src/providers/component.rs:352',
+    'elastos/crates/elastos-compute/src/providers/component.rs:384',
+    'elastos/crates/elastos-runtime/src/capability/manager.rs:326',
+    'elastos/crates/elastos-runtime/src/capability/manager.rs:409',
+    'elastos/crates/elastos-runtime/src/capability/token.rs:203',
+    'elastos/crates/elastos-runtime/src/provider/bridge.rs:774',
+    'elastos/crates/elastos-runtime/src/provider/registry.rs:841',
+    'elastos/crates/elastos-server/src/api/gateway_model_service.rs:1',
+    'elastos/crates/elastos-server/src/api/gateway_model_service.rs:1444',
+    'elastos/crates/elastos-server/src/api/gateway_model_service.rs:1446',
+    'elastos/crates/elastos-server/src/api/gateway_model_service.rs:32',
+    'elastos/crates/elastos-server/src/api/gateway_model_service.rs:355',
+    'elastos/crates/elastos-server/src/api/gateway_model_service.rs:4',
+    'elastos/crates/elastos-server/src/api/handlers/capability.rs:182',
+    'elastos/crates/elastos-server/src/api/handlers/capability.rs:339',
+    'elastos/crates/elastos-server/src/api/handlers/capability.rs:341',
+    'elastos/crates/elastos-server/src/api/model_provider_egress.rs:493',
+    'elastos/crates/elastos-server/src/api/model_provider_egress.rs:503',
+    'elastos/crates/elastos-server/src/api/model_provider_egress.rs:509',
+    'elastos/crates/elastos-server/src/provider_resource.rs:123',
+    'elastos/crates/elastos-server/src/provider_resource.rs:163',
+    'elastos/crates/elastos-server/src/provider_resource.rs:164',
+    'elastos/crates/elastos-server/src/provider_resource.rs:165',
+    'elastos/crates/elastos-server/src/provider_resource.rs:174',
+    'elastos/crates/elastos-server/src/provider_resource.rs:176',
+    'elastos/crates/elastos-server/src/provider_resource.rs:189',
+    'elastos/crates/elastos-server/src/provider_resource.rs:190',
+    'elastos/crates/elastos-server/src/provider_resource.rs:192',
+    'elastos/crates/elastos-server/src/provider_resource.rs:379',
+    'elastos/crates/elastos-server/src/provider_resource.rs:382',
+    'elastos/crates/elastos-server/src/provider_resource.rs:422',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:394',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:40',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:43',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:564',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:565',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:576',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:577',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:597',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:600',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:696',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:697',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:698',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:699',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:814',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:925',
+    'elastos/crates/elastos-server/src/resource_bridge.rs:984',
+    'elastos/wit/elastos-bus-v1.wit:10',
+    'elastos/wit/elastos-bus-v1.wit:87',
+    'examples/agent-host/asks.json:10',
+    'examples/agent-host/asks.json:11',
+    'examples/agent-host/asks.json:12',
+    'examples/agent-host/asks.json:4',
+    'examples/agent-host/asks.json:5',
+    'examples/agent-host/asks.json:6',
+    'examples/agent-host/asks.json:7',
+    'examples/agent-host/asks.json:8',
+    'examples/agent-host/asks.json:9',
+    'examples/agent-host/src/lib.rs:2067',
+    'examples/agent-host/src/lib.rs:2421',
+    'examples/agent-host/src/lib.rs:2422',
+    'examples/agent-host/src/lib.rs:2720',
+    'examples/agent-host/src/lib.rs:2741',
+    'examples/agent-host/src/lib.rs:2749',
+    'examples/agent-host/src/lib.rs:2958',
+    'examples/agent-host/src/lib.rs:2981',
+    'examples/agent-host/src/lib.rs:3290',
+    'examples/agent-host/src/lib.rs:3308',
+    'examples/agent-host/src/lib.rs:3339',
+    'examples/agent-host/src/lib.rs:3360',
+    'examples/agent-host/src/lib.rs:3370',
+    'examples/agent-host/src/lib.rs:3382',
+    'examples/agent-host/src/lib.rs:3387',
+    'examples/agent-host/src/lib.rs:3403',
+    'examples/agent-host/src/lib.rs:3449',
+    'examples/agent-host/src/lib.rs:3455',
+    'examples/agent-host/src/lib.rs:3470',
+    'examples/agent-host/src/lib.rs:3471',
+    'examples/agent-host/src/lib.rs:3474',
+    'examples/agent-host/src/lib.rs:3482',
+    'examples/agent-host/src/lib.rs:3526',
+    'examples/agent-host/src/lib.rs:3549',
+    'examples/agent-host/src/lib.rs:3754',
+    'examples/agent-host/src/lib.rs:3755',
+    'examples/agent-host/src/lib.rs:3757',
+    'examples/agent-host/src/lib.rs:3767',
+    'examples/agent-host/src/lib.rs:3849',
+    'examples/agent-host/src/lib.rs:3850',
+    'examples/agent-host/src/lib.rs:3935',
+    'examples/agent-host/src/lib.rs:3936',
+    'examples/agent-host/src/lib.rs:3947',
+    'examples/agent-host/src/lib.rs:3961',
+    'examples/agent-host/src/lib.rs:3966',
+    'examples/agent-host/src/lib.rs:3967',
+    'examples/agent-host/src/lib.rs:4023',
+    'examples/agent-host/src/lib.rs:4032',
+    'examples/agent-host/src/lib.rs:4033',
+    'examples/agent-host/src/lib.rs:4061',
+    'examples/agent-host/src/lib.rs:471',
+    'examples/agent-host/src/lib.rs:476',
+    'examples/agent-host/src/lib.rs:532',
+    'examples/agent-host/src/lib.rs:754',
+    'examples/agent-host/src/lib.rs:8149',
+    'examples/agent-host/src/lib.rs:8162',
+    'examples/agent-host/src/lib.rs:8168',
+    'examples/agent-host/src/lib.rs:8187',
+    'examples/agent-host/src/lib.rs:8188',
+    'examples/agent-host/src/lib.rs:8189',
+    'examples/agent-host/src/lib.rs:8190',
+    'examples/agent-host/src/lib.rs:8191',
+    'examples/agent-host/src/lib.rs:8192',
+    'examples/agent-host/src/lib.rs:8193',
+    'examples/agent-host/src/lib.rs:8194',
+    'examples/agent-host/src/lib.rs:8488',
+    'lab/capsule-identity/README.md:807',
+    'lab/capsule-identity/src/lib.rs:1252',
+    'lab/grant-binding/README.md:12',
+    'lab/grant-binding/src/ledger.rs:222',
+    'lab/grant-binding/src/ledger.rs:273',
+    'lab/grant-binding/src/ledger.rs:288',
+    'lab/grant-binding/src/ledger.rs:334',
+    'lab/grant-binding/src/lib.rs:162',
+    'lab/grant-binding/src/lib.rs:23',
+    'lab/grant-binding/src/lib.rs:244',
+    'lab/grant-binding/src/lib.rs:25',
+    'lab/grant-binding/src/lib.rs:280',
+)
+
+# The SHA-256 of every prose sentence of the draft, with the four
+# retargeted spans written the way this change writes them. A changed,
+# dropped or added sentence moves it, so the prose is the prose HEAD kept.
+PROSE_DIGEST = 'a1f67aefd0e4e69dbfb5021d2840bb054484777f9de62c31cc8b14966a456e99'
+
+
+# The four spans whose named line holds none of the named text, written the way
+# this change writes them. The prose digest substitutes them first, so it reads
+# the claim text and not the citation number.
+RETARGETED_SPANS = (
+    ("`lab/grant-binding/src/ledger.rs:167`", "`lab/grant-binding/src/ledger.rs:222`"),
+    ("`lab/grant-binding/src/ledger.rs:234`", "`lab/grant-binding/src/ledger.rs:273`"),
+    ("`lab/grant-binding/src/ledger.rs:249`", "`lab/grant-binding/src/ledger.rs:288`"),
+    ("`lab/grant-binding/src/ledger.rs:295`", "`lab/grant-binding/src/ledger.rs:334`"),
+)
+
+# The pin the draft cites. It does not move in this change.
+PIN_SHA = "2fb2c25d630cf47a5baa108eca21c1eecc9f83d8"
+
+# The three ledger lines the settle paragraph names inline. Each one owns a
+# paragraph and a block after this change.
+LEDGER_INLINE = (
+    "lab/grant-binding/src/ledger.rs:288",
+    "lab/grant-binding/src/ledger.rs:273",
+    "lab/grant-binding/src/ledger.rs:334",
+)
+
+
+def _prose_sentences(text):
+    """Every prose sentence of TEXT, in order, with the indented blocks left out."""
+    out = []
+    for line in text.splitlines():
+        if not line or line.startswith("    "):
+            continue
+        rest = line.strip()
+        while rest:
+            cut, quoted = -1, False
+            for index, char in enumerate(rest):
+                if char == "`":
+                    quoted = not quoted
+                elif char == "." and not quoted and rest[index + 1:index + 2] == " ":
+                    cut = index + 1
+                    break
+            if cut < 0:
+                out.append(rest)
+                break
+            out.append(rest[:cut])
+            rest = rest[cut:].lstrip()
+    return out
+
+
+def _propose_lines():
+    """The draft's propose lines, read from the committed HEAD draft."""
+    result = subprocess.run(
+        ["git", "show", "HEAD:lab/bus-v2-proposal/CORE-CALLS-PROPOSAL.md"],
+        cwd=str(check.worktree_root()),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return []
+    return [line for line in result.stdout.splitlines() if line.startswith("propose:")]
+
+
+def _prose_digest(text):
+    """The SHA-256 of every prose sentence of TEXT at the retargeted spans."""
+    for old, new in RETARGETED_SPANS:
+        text = text.replace(old, new)
+    joined = "\n".join(_prose_sentences(text))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
 
 class CitationCheckTests(unittest.TestCase):
     def _temp_root(self):
@@ -9931,7 +10553,8 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(len(ALIGNED_ENDPOINTS), 68)
         self.assertEqual(len(ALIGNED_ALREADY_DECIDED), 12)
         self.assertEqual(len(ALIGNED_NEW_ENDPOINTS), 56)
-        self.assertEqual(len(check.QUOTE_TARGETS), 115)
+        # 115 entries stood before 139; that change added its 33 spans.
+        self.assertEqual(len(check.QUOTE_TARGETS), 148)
         self.assertEqual(set(ALIGNED_ALREADY_DECIDED) - ALIGNED_ENDPOINT_SET, set())
 
     def test_live_draft_aligned_quotes_match_their_pinned_lines(self):
@@ -9963,7 +10586,13 @@ class CitationCheckTests(unittest.TestCase):
         # The target list names each of the 68 endpoint decisions exactly once,
         # so a dropped span, an extra span and a duplicated span all fail here
         # before any file is read.
-        entries = [target[0] for target in check.QUOTE_TARGETS]
+        # 139 added its own 33 spans after these, and its test compares the whole
+        # list, so this one reads the aligned entries alone.
+        entries = [
+            target[0]
+            for target in check.QUOTE_TARGETS
+            if target[0] not in set(REQUOTED_SPANS)
+        ]
         for endpoint in ALIGNED_ENDPOINTS:
             self.assertEqual(entries.count(endpoint), 1, endpoint)
         for endpoint in BASELINE_TARGETS:
@@ -10138,3 +10767,262 @@ class CitationCheckTests(unittest.TestCase):
             self.test_range_second_endpoint_is_decided,
             "CAUGHT range-endpoint-dropped",
         )
+
+    # --- 139: the 33 requoted line citations ---------------------------------
+    #
+    # Each group's block is read from the pin and laid at the line the prose
+    # names, and the window rule must return that line from it.
+
+    def _requote_pin(self):
+        """The draft pin, read from the live draft."""
+        text = check.load_draft(check.worktree_root())
+        return check.pin_sha(text)
+
+    def _requote_lines(self, rel):
+        """The pinned lines of REL at the draft pin."""
+        return check._pinned_lines(check.worktree_root(), self._requote_pin(), rel)
+
+    def _requote_files(self, changes=None):
+        """A committed file set that lays each group's block at its pinned line."""
+        changes = changes or {}
+        rows = {}
+        for index, (rel, first, last, _) in enumerate(REQUOTED_GROUPS):
+            pinned = self._requote_lines(rel)
+            store = rows.setdefault(rel, {})
+            for number in range(first, last + 1):
+                store[number] = changes.get((index, number), pinned[number - 1])
+        return {
+            rel: (
+                "\n".join(store.get(number, "// filler") for number in range(1, max(store) + 1))
+                + "\n"
+            ).encode("utf-8")
+            for rel, store in rows.items()
+        }
+
+    def _requote_body(self, changes=None, copies=None, groups=None, blank=()):
+        """A draft that cites each requoted marker and indents its one block.
+
+        A span in BLANK keeps its marker and indents no block, which is the draft
+        that cites a line and leaves it unchecked.
+        """
+        changes = changes or {}
+        copies = copies or {}
+        blank = set(blank)
+        parts = []
+        for index, (rel, first, last, markers) in enumerate(groups or REQUOTED_GROUPS):
+            prose = " ".join(self._cited(marker, copies.get(marker, 1)) for marker in markers)
+            pinned = self._requote_lines(rel)
+            block = [
+                changes.get((index, number), pinned[number - 1])
+                for number in range(first, last + 1)
+            ]
+            parts.append(prose + "\n")
+            if not blank & set(markers):
+                parts.append("".join("    " + line + "\n" for line in block if line))
+            parts.append("\n")
+        return "".join(parts)
+
+    def _requote_root(self, files=None):
+        """A committed fixture whose draft can be rewritten without a new pin."""
+        root = self._temp_root()
+        self._write(root, "", files if files is not None else self._requote_files())
+        return root, self._commit_all(root)
+
+    def _requote_reads(self, root, sha, body):
+        """Return the problems and the numbers read, for BODY at the fixture pin."""
+        reads = []
+        original = check.pinned_line
+
+        def record(read_root, read_sha, rel, number):
+            reads.append(number)
+            return original(read_root, read_sha, rel, number)
+
+        check.pinned_line = record
+        try:
+            (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
+                "Pinned commit: " + sha + "\n" + body, encoding="utf-8"
+            )
+            got = check.problems(root)
+        finally:
+            check.pinned_line = original
+        return got, reads
+
+    def _requote_place(self, span):
+        """The group index of SPAN and the pinned line it reads."""
+        for index, (_, first, last, markers) in enumerate(REQUOTED_GROUPS):
+            if span in markers:
+                return index, int(span.rpartition(":")[2])
+        raise AssertionError(span)
+
+    def _requote_order(self, body):
+        """The requoted decisions BODY cites, in target-list order."""
+        spans = set(REQUOTED_SPANS)
+        return [
+            target[0]
+            for target in check.QUOTE_TARGETS
+            if target[0] in spans and check._remainders(body, target[1])
+        ]
+
+    def test_requoted_span_set_is_the_33_this_task_decides(self):
+        # The 33 spans make 33 line decisions, and the target list holds exactly
+        # the 115 entries before them plus these 33. A missing span and an extra
+        # span both fail the literal comparison. Each of the 33 needs a block and
+        # no older span does, so the two sets are the same set.
+        self.assertEqual(len(REQUOTED_SPANS), 33)
+        self.assertEqual(len(BEFORE_REQUOTE), 115)
+        self.assertEqual(set(REQUOTED_SPANS) & set(BEFORE_REQUOTE), set())
+        self.assertEqual(len(QUOTE_TARGET_SET), 148)
+        self.assertEqual(
+            sorted(target[0] for target in check.QUOTE_TARGETS),
+            sorted(QUOTE_TARGET_SET),
+        )
+        self.assertEqual(set(check.BLOCK_REQUIRED), set(REQUOTED_SPANS))
+
+    def test_live_draft_requoted_quotes_match_their_pinned_lines(self):
+        # Every one of the 33 markers stands once, its block is the pinned run,
+        # and the window rule reads the cited line from it.
+        root = check.worktree_root()
+        text = check.load_draft(root)
+        if text is None:
+            self.skipTest("no draft in this worktree")
+        sha = check.pin_sha(text)
+        self.assertIsNotNone(sha)
+        for span in REQUOTED_SPANS:
+            marker = "`" + span + "`"
+            self.assertEqual(text.count(marker), 1, span)
+            remainders = check._remainders(text, marker)
+            self.assertTrue(remainders, span)
+            rel, _, number = span.rpartition(":")
+            pinned = check._pinned_lines(root, sha, rel)
+            self.assertEqual(
+                check.quote_for(remainders, pinned, int(number)),
+                check.pinned_line(root, sha, rel, int(number)),
+                span,
+            )
+        self.assertEqual(check.problems(root), [])
+
+    def test_prose_claims_unchanged(self):
+        # Every prose sentence of the draft is the sentence HEAD holds, in the
+        # same order, with the four retargeted spans written the new way. One
+        # changed, dropped or added sentence moves the digest. The pin and the
+        # propose lines are unchanged too.
+        text = check.load_draft(check.worktree_root())
+        self.assertIsNotNone(text)
+        self.assertEqual(_prose_digest(text), PROSE_DIGEST)
+        self.assertEqual(check.pin_sha(text), PIN_SHA)
+        self.assertEqual(
+            [line for line in text.splitlines() if line.startswith("propose:")],
+            _propose_lines(),
+        )
+
+    def test_requoted_span_mismatch_is_refused(self):
+        # A one-character change in the cited remainder is refused on that
+        # line, for all 33, and the walk stops before a later cited line is read.
+        files = self._requote_files()
+        root, sha = self._requote_root(files)
+        body = self._requote_body()
+        got, reads = self._requote_reads(root, sha, body)
+        self.assertEqual(got, [])
+        order = self._requote_order(body)
+        self.assertEqual(reads, [int(span.rpartition(":")[2]) for span in order])
+        for span in REQUOTED_SPANS:
+            index, number = self._requote_place(span)
+            rel, first, last, _ = REQUOTED_GROUPS[index]
+            changed = self._requote_lines(rel)[number - 1] + "x"
+            got, reads = self._requote_reads(
+                root, sha, self._requote_body(changes={(index, number): changed})
+            )
+            self.assertEqual(got, ["refuse: quoted line does not match " + span], span)
+            stopped = order[: order.index(span) + 1]
+            self.assertEqual(
+                reads, [int(other.rpartition(":")[2]) for other in stopped], span
+            )
+
+    def test_ledger_inline_lines_are_quoted(self):
+        # The three ledger lines the settle paragraph names inline each own a
+        # paragraph and a block. Removing one block leaves its marker with no
+        # block, and the checker refuses that marker instead of skipping it.
+        text = check.load_draft(check.worktree_root())
+        self.assertIsNotNone(text)
+        for span in LEDGER_INLINE:
+            marker = "`" + span + "`"
+            self.assertEqual(text.count(marker), 1, span)
+            self.assertTrue(check._remainders(text, marker), span)
+        root, sha = self._requote_root()
+        for span in LEDGER_INLINE:
+            body = self._requote_body(blank=(span,))
+            self.assertIn("`" + span + "`", body, span)
+            self.assertEqual(check._remainders(body, "`" + span + "`"), [], span)
+            got, _ = self._requote_reads(root, sha, body)
+            self.assertEqual(got, ["refuse: quoted line has no block: " + span], span)
+        # The full draft passes, so each refusal above is the missing block.
+        got, _ = self._requote_reads(root, sha, self._requote_body())
+        self.assertEqual(got, [])
+
+    def test_requoted_draft_without_a_span_adds_no_refusal(self):
+        # A draft that does not cite a span adds no refusal for it, so the block
+        # rule refuses a present marker and never an absent one.
+        for span in REQUOTED_SPANS[:4]:
+            groups = [group for group in REQUOTED_GROUPS if span not in group[3]]
+            self.assertEqual(len(groups), len(REQUOTED_GROUPS) - 1, span)
+            body = self._requote_body(groups=groups)
+            self.assertNotIn("`" + span + "`", body)
+            got, _ = self._pinned_reads(body, self._requote_files())
+            self.assertEqual(got, [], span)
+
+    def test_requoted_quote_refusal_waits_for_a_known_pin(self):
+        body = self._requote_body()
+        self.assertEqual(
+            check.problems(self._raw_draft(body, self._requote_files())),
+            ["refuse: draft has no pinned commit"],
+        )
+
+    def test_falsifier_requoted_quoted_line_is_caught(self):
+        # A comparison that accepts anything leaves every mismatch unchecked.
+        self._caught(
+            "quoted_line_matches",
+            lambda quoted, source: True,
+            self.test_requoted_span_mismatch_is_refused,
+            "refuse: quoted line does not match",
+            "CAUGHT requoted-quoted-line",
+        )
+
+    def test_falsifier_ledger_inline_quoted_is_caught(self):
+        # A walk that skips a present marker with no block leaves the removed
+        # ledger block unchecked, so the named test sees no refusal.
+        original = check._quote_refusal
+
+        def planted(root, text, sha, target):
+            if not check._remainders(text, target[1]):
+                return None
+            return original(root, text, sha, target)
+
+        self._caught(
+            "_quote_refusal",
+            planted,
+            self.test_ledger_inline_lines_are_quoted,
+            "quoted line has no block",
+            "CAUGHT ledger-inline-quoted",
+        )
+
+    def test_falsifier_prose_digest_is_caught(self):
+        # A draft that changes one sentence of another paragraph keeps every
+        # paragraph count and every propose line, and the named test still fails
+        # because it reads the prose itself and not those counts.
+        self.test_prose_claims_unchanged()
+        text = check.load_draft(check.worktree_root())
+        sentences = _prose_sentences(text)
+        target = [sentence for sentence in sentences if "A7 stays open." not in sentence]
+        self.assertTrue(target)
+        changed = text.replace(target[1], target[1] + " x", 1)
+        self.assertNotEqual(changed, text)
+        self.assertEqual(len(_prose_sentences(changed)), len(sentences))
+        self.assertNotEqual(_prose_digest(changed), PROSE_DIGEST)
+        original = check.load_draft
+        try:
+            check.load_draft = lambda root: changed
+            with self.assertRaises(AssertionError):
+                self.test_prose_claims_unchanged()
+        finally:
+            check.load_draft = original
+        print("CAUGHT prose-digest-changed")

@@ -316,26 +316,26 @@ For the agent identity, a capability request calls `scope_current_user_alias` wi
 
 `elastos/crates/elastos-server/src/resource_bridge.rs:43` is the `principal_id` field on `BridgeContext`. The field holds the Runtime principal used to resolve a capsule-facing `Users/self` alias.
 
-    /// Runtime principal used to resolve capsule-facing `Users/self` aliases.
-    pub principal_id: Option<String>,
+        /// Runtime principal used to resolve capsule-facing `Users/self` aliases.
+        pub principal_id: Option<String>,
 
 `elastos/crates/elastos-server/src/resource_bridge.rs:925` is the call in `handle_request`. The body handles a `request_capability` request. It calls `scope_current_user_alias` with the requested resource and `ctx.principal_id.as_deref()`. When the call returns an error, the body returns `principal_context_required` before it stores a pending request. When the call returns a name, the body runs `agents_area_capability_refusal`, parses the action, runs the wallet check, and runs the manifest check on that name. The body stores a pending request only after those checks pass, and the stored resource is the returned name.
 
-                let scoped_resource =
-                    match scope_current_user_alias(resource, ctx.principal_id.as_deref()) {
-                        Ok(resource) => resource,
-                        Err(message) => {
-                            return Ok(serde_json::json!({
-                                "id": id,
-                                "response": {
-                                    "type": "error",
-                                    "code": "principal_context_required",
-                                    "message": message,
-                                },
-                            }));
-                        }
-                    };
-                let resource = scoped_resource.as_str();
+                    let scoped_resource =
+                        match scope_current_user_alias(resource, ctx.principal_id.as_deref()) {
+                            Ok(resource) => resource,
+                            Err(message) => {
+                                return Ok(serde_json::json!({
+                                    "id": id,
+                                    "response": {
+                                        "type": "error",
+                                        "code": "principal_context_required",
+                                        "message": message,
+                                    },
+                                }));
+                            }
+                        };
+                    let resource = scoped_resource.as_str();
 
 `elastos/crates/elastos-compute/src/providers/component.rs:350` is the identity host `context`. The body returns an `IdentityContext` whose `principal` is `self.principal_id.clone()`.
 
@@ -354,22 +354,22 @@ For the session, the pending request's session id is the bridge capsule id. The 
 
 `elastos/crates/elastos-server/src/resource_bridge.rs:984` is the session id stored by that same `handle_request` body. The body builds a resource id from the scoped name and calls `create_request_with_reason`. The session argument is `SessionId` of `ctx.capsule_id.clone()`.
 
-                let resource_id = elastos_runtime::capability::ResourceId::new(resource);
+                    let resource_id = elastos_runtime::capability::ResourceId::new(resource);
 
-                // Create a pending request — the shell decides whether to grant.
-                let pending = ctx
-                    .pending_store
-                    .create_request_with_reason(
-                        elastos_runtime::session::SessionId(ctx.capsule_id.clone()),
-                        resource_id.clone(),
-                        action,
-                        reason,
-                    )
-                    .await;
+                    // Create a pending request — the shell decides whether to grant.
+                    let pending = ctx
+                        .pending_store
+                        .create_request_with_reason(
+                            elastos_runtime::session::SessionId(ctx.capsule_id.clone()),
+                            resource_id.clone(),
+                            action,
+                            reason,
+                        )
+                        .await;
 
 `elastos/crates/elastos-compute/src/providers/component.rs:352` is the `session` field in that same `context` body. The body sets `session` to `self.capsule_id.clone()`.
 
-            session: self.capsule_id.clone(),
+                session: self.capsule_id.clone(),
 
 This citation is design input for resident A3. The `start` body sets the activation running, starts the host call, and removes the activation when the run finishes, whether that run succeeded, failed, or panicked. `elastos/crates/elastos-compute/src/providers/component.rs:218` is that removal.
             self.instances.write().await.remove(&handle.id);
@@ -381,108 +381,89 @@ Resident A3 credit depends on the RA-6 path. `lab/agent-conformance/standin-runt
 
 `elastos/crates/elastos-server/src/api/handlers/capability.rs:182` is the refusal in `request_status`. The body loads the pending request by id. When `request.session_id` differs from the caller session id, the body returns Forbidden and the text Cannot access another session's request. Otherwise the body returns that request's status.
 
-    // Verify the request belongs to this session
-    if request.session_id != session.id {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Cannot access another session's request".to_string(),
-        ));
-    }
+        // Verify the request belongs to this session
+        if request.session_id != session.id {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Cannot access another session's request".to_string(),
+            ));
+        }
 
 `elastos/crates/elastos-server/src/api/handlers/capability.rs:339` is the comment on the shell grant. `elastos/crates/elastos-server/src/api/handlers/capability.rs:341` is the capsule id passed into `grant`. `grant_request` loads the pending request, requires it to be pending, and calls `capability_manager.grant`. The capsule id argument is `request.session_id.to_string()`. The resource argument is `request.resource`. The body then marks that pending request granted with the token `grant` returns.
 
-    // Use session ID as capsule ID for now
-    let token = state.capability_manager.grant(
-        &request.session_id.to_string(),
-        request.resource.clone(),
-        request.action,
-        constraints,
-        None, // No expiry for now (session-scoped)
-    );
+        // Use session ID as capsule ID for now
+        let token = state.capability_manager.grant(
+            &request.session_id.to_string(),
+            request.resource.clone(),
+            request.action,
+            constraints,
+            None, // No expiry for now (session-scoped)
+        );
 
 For the capsule instance, `grant` stores its capsule id argument on the token. `validate` refuses a caller whose capsule id differs, and `test_wrong_capsule` shows that refusal. The component invoke passes `BridgeContext.capsule_id` as that caller. The bridge comment says this field is the capsule identity for token minting, a session id or a capsule name.
 
 `elastos/crates/elastos-server/src/resource_bridge.rs:40` is that comment on `BridgeContext.capsule_id`.
 
-    /// Capsule identity for token minting (session ID or capsule name)
-    pub capsule_id: String,
+        /// Capsule identity for token minting (session ID or capsule name)
+        pub capsule_id: String,
 
 `elastos/crates/elastos-runtime/src/capability/manager.rs:326` is the capsule argument in `grant`. The body passes `capsule_id.to_string()` to `CapabilityToken::new`, signs the token, and returns the token.
 
-    /// Grant a new capability token
-    pub fn grant(
-        &self,
-        capsule_id: &str,
-        resource: ResourceId,
-        action: Action,
-        constraints: TokenConstraints,
-        expiry: Option<SecureTimestamp>,
-    ) -> CapabilityToken {
-        let issued_at = SecureTimestamp::now();
+        /// Grant a new capability token
+        pub fn grant(
+            &self,
+            capsule_id: &str,
+            resource: ResourceId,
+            action: Action,
+            constraints: TokenConstraints,
+            expiry: Option<SecureTimestamp>,
+        ) -> CapabilityToken {
+            let issued_at = SecureTimestamp::now();
 
-        // Ensure token epoch is at least current epoch
-        let mut constraints = constraints;
-        if constraints.epoch < self.store.current_epoch() {
-            constraints.epoch = self.store.current_epoch();
+            // Ensure token epoch is at least current epoch
+            let mut constraints = constraints;
+            if constraints.epoch < self.store.current_epoch() {
+                constraints.epoch = self.store.current_epoch();
+            }
+
+            let mut token = CapabilityToken::new(
+                capsule_id.to_string(),
+                self.public_key_bytes(),
+                resource.clone(),
+                action,
+                constraints,
+                issued_at,
+                expiry,
+            );
+
+            // Sign the token
+            token.sign(&self.signing_key);
+
+            // Record metrics
+            self.metrics.record_capability_request(capsule_id);
+
+            // Audit log
+            self.audit_log
+                .capability_grant(&token.id, capsule_id, &resource, action, expiry);
+
+            token
         }
-
-        let mut token = CapabilityToken::new(
-            capsule_id.to_string(),
-            self.public_key_bytes(),
-            resource.clone(),
-            action,
-            constraints,
-            issued_at,
-            expiry,
-        );
-
-        // Sign the token
-        token.sign(&self.signing_key);
-
-        // Record metrics
-        self.metrics.record_capability_request(capsule_id);
-
-        // Audit log
-        self.audit_log
-            .capability_grant(&token.id, capsule_id, &resource, action, expiry);
-
-        token
-    }
 
 `elastos/crates/elastos-runtime/src/capability/token.rs:203` is the token field that holds the capsule id. The field is the capsule that can use the token.
 
-    /// Who can use this token (capsule ID)
-    pub(crate) capsule: String,
+        /// Who can use this token (capsule ID)
+        pub(crate) capsule: String,
 
 `elastos/crates/elastos-runtime/src/capability/manager.rs:409` is the caller check. `validate` passes the caller capsule id to `validate_recurring`. That body returns WrongCapsule when `token.capsule` differs from `caller_capsule_id`, and it audits the failure as wrong_capsule.
 
-    pub async fn validate(
-        &self,
-        token: &CapabilityToken,
-        caller_capsule_id: &str,
-        requested_action: Action,
-        requested_resource: &ResourceId,
-        resource_classification: Option<u8>,
-    ) -> Result<(), ValidationError> {
-        self.validate_recurring(
-            token,
-            caller_capsule_id,
-            requested_action,
-            requested_resource,
-            resource_classification,
-            true,
-        )
-        .await
-    }
-
-        // 4. Caller verification
-        if token.capsule != caller_capsule_id {
-            self.audit_validation_failure(token, caller_capsule_id, "wrong_capsule");
-            return Err(ValidationError::WrongCapsule {
-                expected: token.capsule.clone(),
-                got: caller_capsule_id.to_string(),
-            });
-        }
+            // 4. Caller verification
+            if token.capsule != caller_capsule_id {
+                self.audit_validation_failure(token, caller_capsule_id, "wrong_capsule");
+                return Err(ValidationError::WrongCapsule {
+                    expected: token.capsule.clone(),
+                    got: caller_capsule_id.to_string(),
+                });
+            }
 
 `elastos/crates/elastos-runtime/src/capability/manager.rs::test_wrong_capsule` shows that refusal. The body grants a token for capsule-a, calls `validate` with capsule-b, and requires WrongCapsule.
 
@@ -514,26 +495,26 @@ For the capsule instance, `grant` stores its capsule id argument on the token. `
 
 `elastos/crates/elastos-server/src/resource_bridge.rs:394` is the caller in `authorize_and_dispatch_resource_invoke`. The body decodes the presented token and calls `validate` with `&bridge_ctx.capsule_id`. When `validate` returns an error, the body denies the invoke with `capability_denied`.
 
-    if bridge_ctx
-        .capability_manager
-        .validate(
-            &token,
-            &bridge_ctx.capsule_id,
-            dispatch.required_action,
-            &resource_id,
-            None,
-        )
-        .await
-        .is_err()
-    {
-        return finish_component_invoke(
-            bridge_ctx,
-            &audit_id,
-            &dispatch,
-            "denied",
-            resource_error_response("capability_denied", "Capability validation failed"),
-        );
-    }
+        if bridge_ctx
+            .capability_manager
+            .validate(
+                &token,
+                &bridge_ctx.capsule_id,
+                dispatch.required_action,
+                &resource_id,
+                None,
+            )
+            .await
+            .is_err()
+        {
+            return finish_component_invoke(
+                bridge_ctx,
+                &audit_id,
+                &dispatch,
+                "denied",
+                resource_error_response("capability_denied", "Capability validation failed"),
+            );
+        }
 
 For the owned storage root, the same scope call rewrites `Users/self` onto the principal root before the request is stored, so the resource on the grant is that scoped name. The guest's `JournalGrant` is one id, held in memory, for its own journal. `request_journal_grants` asks write, then read, on that resource.
 
@@ -581,48 +562,65 @@ The body of `scope_current_user_alias`, quoted in section 1, returns the princip
         JournalGrants { write, read }
     }
 
-The required binding is a grant bound to the verified agent identity, the session, the capsule instance, and the owned storage root, and a host-side handle bound to the capsule instance and the session. The guest presents a handle. The host binds that handle to the verified agent identity, the session, the capsule instance, and the owned storage root. Identity, session, and instance come from the host record of the handle. `elastos/crates/elastos-compute/src/providers/component.rs:384` sets `CapabilityGrant.id` to the token string. The body of `request` on the capabilities host requires one action, asks the bridge, and returns a `CapabilityGrant` whose id is the token string from that response. `elastos/wit/elastos-bus-v1.wit:10` defines `grant-id` as a string, and the capability-grant record uses that type for its id. The cited functions return the token string as the grant id. The cited functions do not show a separate handle table. A5 stays open.
+The required binding is a grant bound to the verified agent identity, the session, the capsule instance, and the owned storage root, and a host-side handle bound to the capsule instance and the session. The guest presents a handle. The host binds that handle to the verified agent identity, the session, the capsule instance, and the owned storage root. Identity, session, and instance come from the host record of the handle. `elastos/crates/elastos-compute/src/providers/component.rs:384` sets `CapabilityGrant.id` to the token string. The body of `request` on the capabilities host requires one action, asks the bridge, and returns a `CapabilityGrant` whose id is the token string from that response.
 
-    fn request(
-        &mut self,
-        request: elastos::bus::types::CapabilityRequest,
-    ) -> std::result::Result<elastos::bus::types::CapabilityGrant, elastos::bus::types::BusError>
-    {
-        if request.actions.len() != 1 {
-            return Err(elastos::bus::types::BusError::Invalid(
-                "component capability requests currently require exactly one action".into(),
-            ));
-        }
-        let resource = request.resource;
-        let action = request.actions[0].clone();
-        let response = self.call_bridge(
-            guest_bus::capability_request(guest_bus::CapabilityRequest {
-                resource: resource.clone(),
-                actions: vec![action.clone()],
-                reason: request.reason,
+        fn request(
+            &mut self,
+            request: elastos::bus::types::CapabilityRequest,
+        ) -> std::result::Result<elastos::bus::types::CapabilityGrant, elastos::bus::types::BusError>
+        {
+            if request.actions.len() != 1 {
+                return Err(elastos::bus::types::BusError::Invalid(
+                    "component capability requests currently require exactly one action".into(),
+                ));
+            }
+            let resource = request.resource;
+            let action = request.actions[0].clone();
+            let response = self.call_bridge(
+                guest_bus::capability_request(guest_bus::CapabilityRequest {
+                    resource: resource.clone(),
+                    actions: vec![action.clone()],
+                    reason: request.reason,
+                })
+                .map_err(|err| bus_error("invalid", err))?,
+            )?;
+            let token = match response {
+                RuntimeResponse::CapabilityToken { token } => token,
+                response => return Err(response_error(&response)),
+            };
+            Ok(elastos::bus::types::CapabilityGrant {
+                id: token,
+                resource,
+                actions: vec![action],
+                expires_at_ms: None,
             })
-            .map_err(|err| bus_error("invalid", err))?,
-        )?;
-        let token = match response {
-            RuntimeResponse::CapabilityToken { token } => token,
-            response => return Err(response_error(&response)),
-        };
-        Ok(elastos::bus::types::CapabilityGrant {
-            id: token,
-            resource,
-            actions: vec![action],
-            expires_at_ms: None,
-        })
-    }
+        }
 
-    type grant-id = string;
+`elastos/wit/elastos-bus-v1.wit:10` defines `grant-id` as a string, and the capability-grant record uses that type for its id. The cited functions return the token string as the grant id. The cited functions do not show a separate handle table. A5 stays open.
 
-    record capability-grant {
-      id: grant-id,
-      %resource: resource-uri,
-      actions: list<action>,
-      expires-at-ms: option<u64>,
-    }
+      type grant-id = string;
+      record runtime-info {
+        abi: string,
+        runtime-version: string,
+      }
+      record identity-context {
+        principal: option<string>,
+        capsule: string,
+        session: string,
+        device: option<string>,
+      }
+      record capability-request {
+        %resource: resource-uri,
+        actions: list<action>,
+        reason: string,
+      }
+      record capability-grant {
+        id: grant-id,
+        %resource: resource-uri,
+        actions: list<action>,
+        expires-at-ms: option<u64>,
+      }
+
 
 This citation is design input for A5. For the identity, `lab/grant-binding/src/lib.rs::model_different_identity_is_refused` changes the registry identity after the bind and expects the use to fail. The body calls bind_grant, then host_set_identity, then use_grant. The expect_err line is `expect_err("different identity")` and the assert_eq of the refusal string is `identity does not match the grant`. For the session, `lab/grant-binding/src/lib.rs::model_new_session_is_refused` changes the registry session after the bind and expects the use to fail. The body calls bind_grant, then host_set_session, then use_grant. The expect_err line is `expect_err("new session")` and the assert_eq of the refusal string is `session does not match the grant`. For the capsule instance, `lab/grant-binding/src/lib.rs::model_sibling_instance_is_refused` binds the first instance and opens the call on the other instance. The body calls bind_grant and use_grant. The expect_err line is `expect_err("sibling instance")` and the assert_eq of the refusal string is `instance does not match the grant`. For the owned storage root, `lab/grant-binding/src/lib.rs::model_owned_root_must_sit_under_the_agent` binds `UsersAI/other/notes` and expects the bind to fail. The body calls bind_grant. The expect_err line is `expect_err("outside principal")` and the assert_eq of the refusal string is `owned root is outside the agent principal`. These four functions are the lab reference model, and the lab model is not the Runtime. A5 stays open.
 
@@ -675,11 +673,13 @@ The guest proposes. `examples/agent-host/src/lib.rs::propose_hosted` records a h
 
 The asks file declares two hosted resources. `examples/agent-host/asks.json:10` declares `Models/`. `examples/agent-host/asks.json:11` declares `<principal>/.AppData/Models/`.
 
-    {"kind": "hosted", "resource": "Models/"},
-    {"kind": "hosted", "resource": "<principal>/.AppData/Models/"},
+        {"kind": "hosted", "resource": "Models/"},
+        {"kind": "hosted", "resource": "<principal>/.AppData/Models/"},
 
 The caller opens the model URL. `capsules/model-provider/src/adapters.rs::effect_request` is the one function that chooses the URL. A present `runtime_socket` uses `RUNTIME_HOSTED_EFFECT_URL`. The other branch uses `direct_url`. `capsules/model-provider/src/adapters.rs:42` sets that constant to `http://runtime.invalid/v1/hosted-effect`. `capsules/model-provider/src/adapters.rs:58` is the `direct_url` branch. That branch is request construction.
 
+    const RUNTIME_HOSTED_EFFECT_URL: &str = "http://runtime.invalid/v1/hosted-effect";
+    #[allow(clippy::too_many_arguments)]
     fn effect_request(
         client: &reqwest::Client,
         method: reqwest::Method,
@@ -709,52 +709,52 @@ The caller opens the model URL. `capsules/model-provider/src/adapters.rs::effect
 
 The artifact-create worker, `run_http_artifact_create_worker_inner`, calls `require_external_http_containment` before `effect_request`. A production call with no Runtime socket is refused there, and `queued_external_workers_refuse_before_create_status_cancel_or_text_sockets` asserts zero requests in that case. The Runtime hosted transport is the production path. `capsules/model-provider/src/adapters.rs:1670` adds the authorization bearer. That line sits inside `if hosted_socket.is_none()`. The bearer is request construction on the `direct_url` branch.
 
-    require_external_http_containment(hosted_socket)?;
-    let client = backend_client_with_socket(offer.policy.runtime_ms_limit, hosted_socket)?;
-    let request = {
-        let mut builder = effect_request(
-            &client,
-            reqwest::Method::POST,
-            create_url,
-            hosted_socket,
-            &offer.id,
-            &deterministic_run_id(binding),
-            &binding.request_id,
-            "job_create",
-        )
-        .header("content-type", "application/json")
-        .json(&json!({
-            "request_id": binding.request_id,
-            "offer_id": offer.id,
-            "operation": offer.operation,
-            "input": input,
-        }));
-        if hosted_socket.is_none() {
-            if let Some(bearer_token) = bearer_token {
-                builder = builder.header("authorization", format!("Bearer {bearer_token}"));
+        require_external_http_containment(hosted_socket)?;
+        let client = backend_client_with_socket(offer.policy.runtime_ms_limit, hosted_socket)?;
+        let request = {
+            let mut builder = effect_request(
+                &client,
+                reqwest::Method::POST,
+                create_url,
+                hosted_socket,
+                &offer.id,
+                &deterministic_run_id(binding),
+                &binding.request_id,
+                "job_create",
+            )
+            .header("content-type", "application/json")
+            .json(&json!({
+                "request_id": binding.request_id,
+                "offer_id": offer.id,
+                "operation": offer.operation,
+                "input": input,
+            }));
+            if hosted_socket.is_none() {
+                if let Some(bearer_token) = bearer_token {
+                    builder = builder.header("authorization", format!("Bearer {bearer_token}"));
+                }
             }
-        }
-        builder
-    };
+            builder
+        };
 
 The Runtime names the socket. `capsules/model-provider/src/config.rs:111` says the Runtime-owned hosted HTTPS effect socket carries no provider key. `capsules/model-provider/src/config.rs:113` is the field `runtime_hosted_socket`.
 
-    /// Runtime-owned hosted HTTPS effect socket. It carries no provider key.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_hosted_socket: Option<String>,
+        /// Runtime-owned hosted HTTPS effect socket. It carries no provider key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub runtime_hosted_socket: Option<String>,
 
 The macOS bridge writes that field into the provider config in `spawn_confined_model_with_engine_bundle`. `elastos/crates/elastos-runtime/src/provider/bridge.rs:774` is that write.
 
-        config.extra["runtime_hosted_socket"] = serde_json::json!(hosted_socket);
+            config.extra["runtime_hosted_socket"] = serde_json::json!(hosted_socket);
 
 On macOS, apply_local_model_sockets copies the stored hosted socket into the same field. `elastos/crates/elastos-runtime/src/provider/registry.rs:841` is that copy.
 
-        #[cfg(target_os = "macos")]
-        if let Some(socket) = self.hosted_model_socket.read().await.as_deref() {
-            config.extra["runtime_hosted_socket"] = serde_json::json!(socket);
-        }
+            #[cfg(target_os = "macos")]
+            if let Some(socket) = self.hosted_model_socket.read().await.as_deref() {
+                config.extra["runtime_hosted_socket"] = serde_json::json!(socket);
+            }
 
-`capsules/model-provider/src/adapters.rs:125` is the error in require_external_http_containment: Hosted external HTTPS is paused. On macOS, a present runtime socket returns `Ok(())`. The error arm also says Runtime network authority is not available.
+`capsules/model-provider/src/adapters.rs:125` is the error in require_external_http_containment: Hosted external HTTPS is paused. On macOS, a present runtime socket returns `Ok(())`. The error arm also says Runtime network authority is not available. The error arm is this fault.
 
     fn require_external_http_containment(
         runtime_socket: Option<&str>,
@@ -763,58 +763,46 @@ On macOS, apply_local_model_sockets copies the stored hosted socket into the sam
         if runtime_socket.is_some() {
             return Ok(());
         }
+        #[cfg(not(target_os = "macos"))]
+        let _ = runtime_socket;
+        #[cfg(test)]
+        if TEST_EXTERNAL_HTTP_ALLOWED.with(|allowed| allowed.get()) {
+            return Ok(());
+        }
+        Err(AdapterFault::context(
+            "Hosted external HTTPS is paused.",
+            "Runtime network authority is not available",
+        ))
 
-The error arm is this fault.
+The Runtime grants the call and carries it. `elastos/crates/elastos-server/src/api/model_provider_egress.rs::handle` calls `create_grant_after_decision` and `current_grant`. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:493` is the `create_grant_after_decision` call. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:503` is the `current_grant` check. An error denies the stream. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:509` calls `forward`, and that call is the carry. The grant check denies the stream, and `forward` carries the call.
 
-    Err(AdapterFault::context(
-        "Hosted external HTTPS is paused.",
-        "Runtime network authority is not available",
-    ))
-
-The Runtime grants the call and carries it. `elastos/crates/elastos-server/src/api/model_provider_egress.rs::handle` calls `create_grant_after_decision` and `current_grant`. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:493` is the `create_grant_after_decision` call. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:503` is the `current_grant` check. An error denies the stream. `elastos/crates/elastos-server/src/api/model_provider_egress.rs:509` calls `forward`, and that call is the carry.
-
-    async fn handle(
-        mut stream: UnixStream,
-        bridge: &ProviderBridge,
-        provider_pid: u32,
-        data_dir: &Path,
-    ) -> io::Result<()> {
-
-The grant check denies the stream, and `forward` carries the call.
-
-    if !operator_route
-        && create_grant_after_decision(
-            data_dir,
-            &request.offer_id,
-            &request.effect,
-            request.method.as_str(),
-            &destination,
-            None,
-            Some((&request.run_id, &request.request_id)),
-        )
-        .is_err()
-        || current_grant(data_dir, &request, &destination).is_err()
-    {
-        return deny(&mut stream).await;
-    }
-    let result = {
-        let mut monitor = tokio::time::interval(Duration::from_millis(250));
-        let outbound = forward(&mut stream, data_dir, &request, &destination, || {
-            bridge.confined_model_run_matches(
+        if !operator_route
+            && create_grant_after_decision(
+                data_dir,
                 &request.offer_id,
-                &request.run_id,
-                &request.request_id,
+                &request.effect,
+                request.method.as_str(),
+                &destination,
+                None,
+                Some((&request.run_id, &request.request_id)),
             )
-        });
+            .is_err()
+            || current_grant(data_dir, &request, &destination).is_err()
+        {
+            return deny(&mut stream).await;
+        }
+        let result = {
+            let mut monitor = tokio::time::interval(Duration::from_millis(250));
+            let outbound = forward(&mut stream, data_dir, &request, &destination, || {
 
-The model service is a separate Runtime path. `elastos/crates/elastos-server/src/api/gateway_model_service.rs:1` calls it the remote model service, the destination side of a `remote_model` grant. `elastos/crates/elastos-server/src/api/gateway_model_service.rs:4` says this Runtime owns the decision and verifies the grant. `elastos/crates/elastos-server/src/api/gateway_model_service.rs:32` names `MODEL_OPERATIONS`. The five strings are `offers_list`, `runs_create`, `runs_get`, `runs_events` and `runs_cancel`.
+The model service is a separate Runtime path. `elastos/crates/elastos-server/src/api/gateway_model_service.rs:1` calls it the remote model service, the destination side of a `remote_model` grant. `elastos/crates/elastos-server/src/api/gateway_model_service.rs:4` says this Runtime owns the decision and verifies the grant.
 
     //! Remote model service: the destination side of a `remote_model` grant.
     //!
     //! A seed Runtime routes typed model operations over Carrier `provider_invoke`
     //! with target `model`. This Runtime owns the decision. It verifies the grant
 
-`MODEL_OPERATIONS` names the five strings.
+`elastos/crates/elastos-server/src/api/gateway_model_service.rs:32` names `MODEL_OPERATIONS`. The five strings are `offers_list`, `runs_create`, `runs_get`, `runs_events` and `runs_cancel`. `MODEL_OPERATIONS` names the five strings.
 
     pub(crate) const MODEL_OPERATIONS: [&str; 5] = [
         "offers_list",
@@ -1884,47 +1872,47 @@ Section 3 shows the cited functions return the token string as the grant id. gra
 
 `lab/grant-binding/src/lib.rs::bind_grant` binds the instance's identity and session, the owned root, and the rights to a fresh handle. `lab/grant-binding/src/lib.rs:162` is the doc line for that binding. The body loads the instance record, asks resource_name for the owned root, and stores the identity, the session, the instance, the owned root, and the rights on a new handle.
 
-    /// Binds the instance's identity and session, the owned root and the rights
-    /// to a fresh handle.
-    pub fn bind_grant(
-        &mut self,
-        instance: InstanceId,
-        resource: &str,
-        rights: Rights,
-    ) -> Result<Handle, Refuse> {
-        let record = self
-            .registry
-            .get(&instance)
-            .ok_or(Refuse::UnknownInstance)?;
-        let owned_root = resource_name(&record.identity, resource, None)?;
-        self.next_handle += 1;
-        let handle = Handle(self.next_handle);
-        self.grants.insert(
-            handle,
-            GrantRecord {
-                identity: record.identity.clone(),
-                session: record.session.clone(),
-                instance,
-                owned_root,
-                rights,
-            },
-        );
-        Ok(handle)
-    }
+        /// Binds the instance's identity and session, the owned root and the rights
+        /// to a fresh handle.
+        pub fn bind_grant(
+            &mut self,
+            instance: InstanceId,
+            resource: &str,
+            rights: Rights,
+        ) -> Result<Handle, Refuse> {
+            let record = self
+                .registry
+                .get(&instance)
+                .ok_or(Refuse::UnknownInstance)?;
+            let owned_root = resource_name(&record.identity, resource, None)?;
+            self.next_handle += 1;
+            let handle = Handle(self.next_handle);
+            self.grants.insert(
+                handle,
+                GrantRecord {
+                    identity: record.identity.clone(),
+                    session: record.session.clone(),
+                    instance,
+                    owned_root,
+                    rights,
+                },
+            );
+            Ok(handle)
+        }
 
 `lab/grant-binding/src/lib.rs::use_grant` uses the handle. The guest's claims are not read. `lab/grant-binding/src/lib.rs:244` says the call uses a grant and the guest's claims are not read. The body resolves the handle and returns the stored identity, session, instance, owned root, and rights.
 
-    /// Uses a grant. The guest's claims are not read.
-    pub fn use_grant(&self, call: Call, request: &GuestRequest) -> Result<Decision, Refuse> {
-        let record = self.resolve(call, request.handle)?;
-        Ok(Decision {
-            identity: record.identity,
-            session: record.session,
-            instance: record.instance,
-            owned_root: record.owned_root,
-            rights: record.rights,
-        })
-    }
+        /// Uses a grant. The guest's claims are not read.
+        pub fn use_grant(&self, call: Call, request: &GuestRequest) -> Result<Decision, Refuse> {
+            let record = self.resolve(call, request.handle)?;
+            Ok(Decision {
+                identity: record.identity,
+                session: record.session,
+                instance: record.instance,
+                owned_root: record.owned_root,
+                rights: record.rights,
+            })
+        }
 
 Is the Bus v2 host-side handle the token string, or an opaque handle whose binding the guest does not read?
 
@@ -1938,47 +1926,47 @@ propose: the model operation uses the hosted-effect socket, and the five model o
 
 Section 5 shows the guest writes zeros, the journal check is room for history, the concurrency check counts non-terminal runs, the slot stores a time, and the usage function refuses an empty report. Section 5 states the account A7 asks for and cites no lab/grant-binding test.
 
-`lab/grant-binding/src/ledger.rs::reserve` holds an amount when the outstanding total plus the amount stays at or under the ceiling. `lab/grant-binding/src/ledger.rs:167` is the line that states that hold. The comparison is `total <= ledger.ceiling`.
+`lab/grant-binding/src/ledger.rs::reserve` holds an amount when the outstanding total plus the amount stays at or under the ceiling. `lab/grant-binding/src/ledger.rs:222` is the line that states that hold. The comparison is `total <= ledger.ceiling`.
 
-    /// Holds `amount` on the ledger when the outstanding total plus `amount`
-    /// stays at or under the ceiling. A binding refusal records nothing, a sum
-    /// that does not fit in `u64` is over the ceiling, and the request's
-    /// reported usage does not lower the hold.
-    pub fn reserve(
-        &self,
-        call: &Call,
-        request: &GuestRequest,
-        amount: u64,
-    ) -> Result<Reservation, ReserveRefuse> {
-        self.resolve(*call, request.handle)
-            .map_err(ReserveRefuse::Binding)?;
-        let mut ledger = self.ledger.lock().expect("ledger lock");
-        let held = ledger.held;
-        let ledger: &mut Ledger = &mut ledger;
-        let total = match held.checked_add(amount) {
-            Some(total) if total <= ledger.ceiling => total,
-            _ => {
-                return Err(ReserveRefuse::OverCeiling {
-                    ceiling: ledger.ceiling,
-                    held,
-                    asked: amount,
-                })
-            }
-        };
-        ledger.held = total;
-        ledger.next_reservation += 1;
-        ledger.open.insert(
-            ledger.next_reservation,
-            OpenHold {
-                handle: request.handle,
-                amount,
-                uncertain: false,
-            },
-        );
-        Ok(Reservation {
-            id: ledger.next_reservation,
-        })
-    }
+        /// Holds `amount` on the ledger when the outstanding total plus `amount`
+        /// stays at or under the ceiling. A binding refusal records nothing, a sum
+        /// that does not fit in `u64` is over the ceiling, and the request's
+        /// reported usage does not lower the hold.
+        pub fn reserve(
+            &self,
+            call: &Call,
+            request: &GuestRequest,
+            amount: u64,
+        ) -> Result<Reservation, ReserveRefuse> {
+            self.resolve(*call, request.handle)
+                .map_err(ReserveRefuse::Binding)?;
+            let mut ledger = self.ledger.lock().expect("ledger lock");
+            let held = ledger.held;
+            let ledger: &mut Ledger = &mut ledger;
+            let total = match held.checked_add(amount) {
+                Some(total) if total <= ledger.ceiling => total,
+                _ => {
+                    return Err(ReserveRefuse::OverCeiling {
+                        ceiling: ledger.ceiling,
+                        held,
+                        asked: amount,
+                    })
+                }
+            };
+            ledger.held = total;
+            ledger.next_reservation += 1;
+            ledger.open.insert(
+                ledger.next_reservation,
+                OpenHold {
+                    handle: request.handle,
+                    amount,
+                    uncertain: false,
+                },
+            );
+            Ok(Reservation {
+                id: ledger.next_reservation,
+            })
+        }
 
 `lab/grant-binding/src/ledger.rs::model_reserve_over_the_ceiling_is_refused` expects the refusal when the asked amount is past the ceiling, and the held total stays unchanged. The body admits a ceiling of 5, asks for 6, and the held total stays 0.
 
@@ -2025,7 +2013,20 @@ What unit does the Runtime reserve before each dispatch, and does a cancellation
 
 propose: the Runtime reserves one bounded usage amount before each dispatch, a cancellation releases the unused hold, and an uncertain outcome keeps the hold until a measured settle or a verifier deadline. Name: usage reservation. Inputs: the admitted ceiling and the dispatch. Refusal: a reserve above the ceiling. Owner: Runtime. A7 stays open.
 
-`lab/grant-binding/src/ledger.rs::settle` resolves the call first, then charges the measured figure. A known SettleOutcome uses that measured figure as the charge. `lab/grant-binding/src/ledger.rs:249` contains `let charge = measured;`. `lab/grant-binding/src/ledger.rs::model_settle_known_outcome_charges_the_measured_figure` expects that charge to equal the measured figure, the charged total to gain it, and the held total to return to zero. `lab/grant-binding/src/ledger.rs::model_reported_usage_does_not_lower_the_settled_charge` sets reported_usage to 1 and still expects the charge to equal the measured figure. The unknown arm of settle returns before it changes the held total or the charged total. `lab/grant-binding/src/ledger.rs:234` contains `return Err(SettleRefuse::UnknownOutcome);`. `lab/grant-binding/src/ledger.rs::model_unknown_outcome_keeps_the_hold` expects that refusal, with `expect_err("unknown outcome")` and `unknown outcome keeps the hold`. The held total stays at the reserved amount. `lab/grant-binding/src/ledger.rs::release` resolves the call first, removes the open hold, and subtracts the stored amount from the held total. It does not change the charged total. `lab/grant-binding/src/ledger.rs:295` contains `ledger.held -= amount;`. `lab/grant-binding/src/ledger.rs::model_release_returns_the_unused_hold` expects `Ok(())`, a held total of zero, and a charged total of zero. This citation is design input for A7. These settle and release functions are the lab reference model, and the lab model is not the Runtime. An unknown outcome in this lab model keeps the hold. Release in this lab model returns the unused hold and charges nothing. This paragraph does not answer the question above. A7 stays open.
+`lab/grant-binding/src/ledger.rs::settle` resolves the call first, then charges the measured figure. A known SettleOutcome uses that measured figure as the charge. `lab/grant-binding/src/ledger.rs:288` contains `let charge = measured;`.
+
+            let charge = measured;
+
+`lab/grant-binding/src/ledger.rs::model_settle_known_outcome_charges_the_measured_figure` expects that charge to equal the measured figure, the charged total to gain it, and the held total to return to zero. `lab/grant-binding/src/ledger.rs::model_reported_usage_does_not_lower_the_settled_charge` sets reported_usage to 1 and still expects the charge to equal the measured figure. The unknown arm of settle returns before it changes the held total or the charged total. `lab/grant-binding/src/ledger.rs:273` contains `return Err(SettleRefuse::UnknownOutcome);`.
+
+                    return Err(SettleRefuse::UnknownOutcome);
+
+`lab/grant-binding/src/ledger.rs::model_unknown_outcome_keeps_the_hold` expects that refusal, with `expect_err("unknown outcome")` and `unknown outcome keeps the hold`. The held total stays at the reserved amount. `lab/grant-binding/src/ledger.rs::release` resolves the call first, removes the open hold, and subtracts the stored amount from the held total. It does not change the charged total. `lab/grant-binding/src/ledger.rs:334` contains `ledger.held -= amount;`. `lab/grant-binding/src/ledger.rs::model_release_returns_the_unused_hold` expects `Ok(())`, a held total of zero, and a charged total of zero.
+
+            ledger.held -= amount;
+
+This citation is design input for A7. These settle and release functions are the lab reference model, and the lab model is not the Runtime. An unknown outcome in this lab model keeps the hold. Release in this lab model returns the unused hold and charges nothing. This paragraph does not answer the question above. A7 stays open.
+
 
 `lab/grant-binding/src/ledger.rs::admit` sets the ledger ceiling and leaves outstanding holds as they are. The fn line is `pub fn admit(&self, ceiling: u64) {`. The doc line is `Sets the allowance ceiling. Outstanding holds stay as they are.` The assignment is `.ceiling = ceiling`. The function returns no refusal. `lab/grant-binding/src/ledger.rs::model_reserve_before_admit_is_refused` reserves 1 before any admit. The fn line is `fn model_reserve_before_admit_is_refused() {`. The expect_err line is `expect_err("reserve before admit")`. The refusal is OverCeiling with ceiling 0, held 0, and asked 1. The fields are `ReserveRefuse::OverCeiling { ceiling: 0, held: 0, asked: 1 }`. The text is `reservation exceeds the ceiling`. The held total stays 0 and the open set stays empty. The assert is `assert!(after_refusal.open.is_empty());`. admit of 1 then lets a reserve of 1 succeed, and the held total is 1. The admit line is `verifier.admit(1);`. The expect line is `expect("admit opens the ceiling")`. The held assert is `assert_eq!(books(&verifier).held, 1);`. `lab/grant-binding/src/ledger.rs::model_lower_ceiling_leaves_the_hold` admits 10, reserves 8, then admits 4. The fn line is `fn model_lower_ceiling_leaves_the_hold() {`. The admit line is `verifier.admit(10);`. The reserve of 8 is `verifier.reserve(&call, &guest(handle), 8).expect("reserve");`. The later admit is `verifier.admit(4);`. The held total stays 8. The assert is `assert_eq!(after.held, 8);`. A further reserve of 1 is refused with OverCeiling ceiling 4, held 8, and asked 1, and the held total stays 8. The expect_err line is `expect_err("lower ceiling")`. The fields are `ReserveRefuse::OverCeiling { ceiling: 4, held: 8, asked: 1 }`. The text is `reservation exceeds the ceiling`. This citation is design input for A7. These admit functions are the lab reference model, and the lab model is not the Runtime. A reserve before admit meets a ceiling of zero. A later admit leaves an outstanding hold in place. This paragraph does not answer the budget question. A7 stays open.
 
