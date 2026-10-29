@@ -70,7 +70,8 @@ for (const gone of ["mock-agent-provider.js", "agent-grants.js", "agent-studio.j
 }
 
 assert.ok(
-  agentLive.includes("You have no tools and no capsule authority in this session"),
+  agentLive.includes("This chat has no tools ") &&
+    agentLive.includes("and no capsule authority"),
   "the live prompt still has no tools and no capsule authority",
 );
 assert.ok(agentLive.includes('from "./model-contract.js"'), "agent-live speaks the typed contract module");

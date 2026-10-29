@@ -297,7 +297,7 @@ fn canonical_bindings(storage: &Storage, executable: &Path) -> [(&'static str, P
 }
 
 thread_local! {
-    static APPLIED_PROFILE: RefCell<Option<PathBuf>> = RefCell::new(None);
+    static APPLIED_PROFILE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
 /// Records the profile path the one launch builder applies on this thread.
@@ -917,16 +917,10 @@ fn operations_section_cites_existing_tests() {
     // report, so dropping either acceptance is this test's failure.
     fn require_cited_tests(section: &str, source: &str) {
         let missing = missing_cited_tests(&cited_test_names(section), source);
-        if missing
-            .iter()
-            .any(|name| *name == "generated_profile_denies_the_hosted_connect")
-        {
+        if missing.contains(&"generated_profile_denies_the_hosted_connect") {
             panic!("the stand-in citation must be a required test name");
         }
-        if missing
-            .iter()
-            .any(|name| *name == "allow_rules_trace_to_declared_rights")
-        {
+        if missing.contains(&"allow_rules_trace_to_declared_rights") {
             panic!("the trace citation must be a required test name");
         }
         assert!(missing.is_empty(), "missing test: {}", missing.join(", "));
@@ -1777,6 +1771,7 @@ fn model_outside_read_denied() {
     /// refused with EPERM, the outside tree unchanged, `offers_list` answered,
     /// and the record read back from `STORAGE_ROOT` after the move. `case`
     /// names a failure.
+    #[allow(clippy::too_many_arguments)]
     fn assert_outside_content_read_denied(
         case: &str,
         provider: &mut Provider,
@@ -4540,10 +4535,10 @@ fn allow_rules_trace_to_declared_rights() {
         }
     }
 
-    for line in allow_lines.iter().copied() {
+    for line in allow_lines.iter() {
         let mut claimants = Vec::new();
         for entry in rights.iter().chain(baseline.iter()) {
-            if rule_strings(entry).iter().any(|rule| *rule == line) {
+            if rule_strings(entry).contains(line) {
                 claimants.push(entry_id(entry));
             }
         }

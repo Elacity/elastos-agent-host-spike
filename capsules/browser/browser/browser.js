@@ -9,7 +9,7 @@ import {
 } from "./browser-runtime-api.js?v=browser-20260907c";
 import {
   createBrowserClipboardBridge,
-} from "./browser-clipboard.js?v=browser-20260725b";
+} from "./browser-clipboard.js?v=browser-20261022d";
 import {
   createHomeClipboardClient,
 } from "/apps/home/home-clipboard-client.js?v=home-20260726a";
@@ -18,8 +18,8 @@ import {
   runtimePageOwner,
   sameRuntimePageOwner,
 } from "./browser-page-cleanup.js?v=browser-20260727a";
-import { selkiesMessagesForInput } from "./browser-input.js?v=browser-20260520e";
-import { bindBrowserInputSurface } from "./browser-input-surface.js?v=browser-20260725b";
+import { DATACHANNEL_INPUT_SETTLE_MS, selkiesMessagesForInput } from "./browser-input.js?v=browser-20261022b";
+import { bindBrowserInputSurface } from "./browser-input-surface.js?v=browser-20261022e";
 import {
   browserMetricsText,
   friendlyOpenError,
@@ -27,7 +27,7 @@ import {
   isMissingRuntimePageError,
   requestedDisplayMode,
 } from "./browser-status.js?v=browser-20260907c";
-import { createBrowserRemoteDisplay } from "./browser-remote-display.js?v=browser-20260915d";
+import { createBrowserRemoteDisplay } from "./browser-remote-display.js?v=browser-20261022e";
 import { engineChoiceHidden, renderServiceSelection } from "./browser-service-selection.js?v=browser-20261015a";
 
 const STATUS_TTL_MS = 4200;
@@ -107,7 +107,12 @@ let currentPage = null;
 let currentPageGeneration = 0;
 let nextPageGeneration = 1;
 const MAX_PENDING_BROWSER_INPUTS = 128;
+const DATACHANNEL_INPUT_BARRIER_TIMEOUT_MS = 3_000;
 let browserInputQueue = null;
+let lastDatachannelInputAt = 0;
+let datachannelDrainedAt = 0;
+let datachannelSendGeneration = 0;
+let datachannelSendDisplay = null;
 let restoredViewerOwner = null;
 let currentView = null;
 let currentDisplayMode = "";
@@ -117,8 +122,11 @@ let statusTimer = 0;
 let canGoBack = false;
 let canGoForward = false;
 let pageStatusTimer = 0;
+let pageStatusPollingRun = null;
 let pageStatusRefreshTimers = [];
+let pageStatusRefreshRun = null;
 let pageHeartbeatTimer = 0;
+let pageHeartbeatRun = null;
 let lastPageStatus = null;
 let unloadCleanupStarted = false;
 let recoverableDisplayAttachStarted = false;
@@ -398,12 +406,14 @@ function setLoading(loading) {
 }
 
 function stopPageStatusPolling() {
+  pageStatusPollingRun = null;
   window.clearTimeout(pageStatusTimer);
   pageStatusTimer = 0;
   stopPageStatusRefresh();
 }
 
 function stopPageStatusRefresh() {
+  pageStatusRefreshRun = null;
   for (const timer of pageStatusRefreshTimers) {
     window.clearTimeout(timer);
   }
@@ -411,6 +421,7 @@ function stopPageStatusRefresh() {
 }
 
 function stopPageHeartbeat() {
+  pageHeartbeatRun = null;
   window.clearTimeout(pageHeartbeatTimer);
   pageHeartbeatTimer = 0;
 }
@@ -1249,8 +1260,9 @@ async function fetchPageStatus({
   history = "replace",
   forceAddress = false,
   fast = false,
+  isCurrent = () => true,
 } = {}) {
-  if (!currentPage?.page_id) {
+  if (!isCurrent() || !currentPage?.page_id) {
     return null;
   }
   const owner = currentRuntimePageOwner();
@@ -1259,7 +1271,7 @@ async function fetchPageStatus({
     `/api/apps/browser/pages/${encodeURIComponent(currentPage.page_id)}/status${query}`,
     { method: "GET" },
   );
-  if (!runtimeViewerOwnerActive(owner)) return null;
+  if (!isCurrent() || !runtimeViewerOwnerActive(owner)) return null;
   if (
     status?.schema !== "elastos.browser.page-status/v1" ||
     status.page_id !== currentPage.page_id
@@ -1414,12 +1426,16 @@ function schedulePageStatusRefresh({
     ),
   ];
   stopPageStatusRefresh();
+  const run = {};
+  pageStatusRefreshRun = run;
+  const isCurrent = () => pageStatusRefreshRun === run;
   pageStatusRefreshTimers = delays.map((nextDelay) => {
     const timer = window.setTimeout(async () => {
       pageStatusRefreshTimers = pageStatusRefreshTimers.filter(
         (candidate) => candidate !== timer,
       );
       if (
+        !isCurrent() ||
         unloadCleanupStarted ||
         !currentPage ||
         document.hidden ||
@@ -1429,9 +1445,9 @@ function schedulePageStatusRefresh({
       }
       const owner = currentRuntimePageOwner();
       try {
-        await fetchPageStatus({ history, forceAddress });
+        await fetchPageStatus({ history, forceAddress, isCurrent });
       } catch (error) {
-        await handlePageObservationFailure(error, owner);
+        if (isCurrent()) await handlePageObservationFailure(error, owner);
       }
     }, nextDelay);
     return timer;
@@ -1440,8 +1456,11 @@ function schedulePageStatusRefresh({
 
 function startPageStatusPolling() {
   stopPageStatusPolling();
+  const run = {};
+  pageStatusPollingRun = run;
+  const isCurrent = () => pageStatusPollingRun === run;
   const poll = async () => {
-    if (unloadCleanupStarted || !currentPage) {
+    if (!isCurrent() || unloadCleanupStarted || !currentPage) {
       return;
     }
     if (document.hidden) {
@@ -1454,11 +1473,12 @@ function startPageStatusPolling() {
     }
     const owner = currentRuntimePageOwner();
     try {
-      await fetchPageStatus({ fast: true });
+      await fetchPageStatus({ fast: true, isCurrent });
     } catch (error) {
-      await handlePageObservationFailure(error, owner);
+      if (isCurrent()) await handlePageObservationFailure(error, owner);
     } finally {
       if (
+        isCurrent() &&
         sameRuntimePageOwner(currentRuntimePageOwner(), owner) &&
         !unloadCleanupStarted &&
         !relaunchRequested &&
@@ -1473,8 +1493,11 @@ function startPageStatusPolling() {
 
 function startPageHeartbeat() {
   stopPageHeartbeat();
+  const run = {};
+  pageHeartbeatRun = run;
+  const isCurrent = () => pageHeartbeatRun === run;
   const beat = async () => {
-    if (unloadCleanupStarted || !currentPage?.page_id) {
+    if (!isCurrent() || unloadCleanupStarted || !currentPage?.page_id) {
       return;
     }
     const owner = currentRuntimePageOwner();
@@ -1485,9 +1508,10 @@ function startPageHeartbeat() {
         { method: "POST" },
       );
     } catch (error) {
-      if (await handlePageObservationFailure(error, owner)) nextDelay = PAGE_STATUS_INTERVAL_MS;
+      if (isCurrent() && await handlePageObservationFailure(error, owner)) nextDelay = PAGE_STATUS_INTERVAL_MS;
     } finally {
       if (
+        isCurrent() &&
         sameRuntimePageOwner(currentRuntimePageOwner(), owner) &&
         !unloadCleanupStarted &&
         !relaunchRequested &&
@@ -1582,7 +1606,7 @@ function encodeDatachannelInput(event) {
 
 async function sendBrowserInput(
   event,
-  { focus = true, history = "push" } = {},
+  { focus = true, history = "push", isStale = null } = {},
 ) {
   const owner = currentRuntimePageOwner();
   if (!owner) {
@@ -1604,6 +1628,10 @@ async function sendBrowserInput(
     if (queue.failed) {
       throw new Error("Browser input was canceled after a failed operation.");
     }
+    // Moves of a drag that already ended must not re-press the guest button.
+    if (isStale?.()) {
+      return;
+    }
     return dispatchBrowserInput(event, { focus, history }, owner);
   });
   queue.tail = pending.catch(() => {
@@ -1617,6 +1645,70 @@ async function sendBrowserInput(
     return await pending;
   } finally {
     queue.pending -= 1;
+  }
+}
+
+function noteDatachannelSend() {
+  const now = Date.now();
+  lastDatachannelInputAt = now;
+  datachannelSendDisplay = remoteDisplay;
+  datachannelSendGeneration = remoteDisplay?.currentInputChannelGeneration?.() ?? 0;
+  datachannelDrainedAt = Number(remoteDisplay?.inputBufferedAmount?.() || 0) === 0 ? now : 0;
+}
+
+// The guest must always get the button release that ends a drag, even while
+// a Runtime request is pending: it goes straight to the datachannel, after
+// the drag's own moves on that channel. The caller marks the drag ended so
+// its still-queued moves send nothing. A drag belongs to the page it started
+// on: once that page is replaced, the release is dropped rather than pressed
+// into the replacement's guest.
+function releaseDragButton(event, dragOwner) {
+  if (
+    !sameRuntimePageOwner(currentRuntimePageOwner(), dragOwner) ||
+    !remoteDisplay?.inputChannelOpen()
+  ) {
+    return;
+  }
+  remoteDisplay.sendInputMessages(encodeDatachannelInput(event));
+  noteDatachannelSend();
+}
+
+// The datachannel has no guest ack, so Runtime-route input that follows a
+// datachannel send waits until the drain is observed and the guest has had
+// the settle delay after it. It fails rather than reorder.
+async function awaitDatachannelInputSettled() {
+  if (!lastDatachannelInputAt) {
+    return;
+  }
+  const deadline = Date.now() + DATACHANNEL_INPUT_BARRIER_TIMEOUT_MS;
+  for (;;) {
+    const now = Date.now();
+    // A closed or rebound channel says nothing about the earlier bytes: refuse
+    // rather than treat its empty buffer as delivery.
+    if (
+      remoteDisplay !== datachannelSendDisplay ||
+      !remoteDisplay?.inputChannelOpen() ||
+      (remoteDisplay?.currentInputChannelGeneration?.() ?? 0) !== datachannelSendGeneration
+    ) {
+      lastDatachannelInputAt = 0;
+      throw new Error("Browser input is still being delivered. Check the page before typing again.");
+    }
+    if (Number(remoteDisplay?.inputBufferedAmount?.() || 0) > 0) {
+      datachannelDrainedAt = 0;
+    } else if (!datachannelDrainedAt) {
+      // Prefer the bufferedamountlow time; without it, the first poll that
+      // sees an empty buffer is the conservative drain time.
+      const eventAt = Number(remoteDisplay?.lastInputDrainAt?.() || 0);
+      datachannelDrainedAt = eventAt >= lastDatachannelInputAt ? eventAt : now;
+    }
+    if (datachannelDrainedAt && now >= datachannelDrainedAt + DATACHANNEL_INPUT_SETTLE_MS) {
+      lastDatachannelInputAt = 0;
+      return;
+    }
+    if (now >= deadline) {
+      throw new Error("Browser input is still being delivered. Check the page before typing again.");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
 
@@ -1645,6 +1737,7 @@ async function dispatchBrowserInput(
       throw new Error("Browser remote-display input channel is not open.");
     }
     remoteDisplay.sendInputMessages(encodeDatachannelInput(event));
+    noteDatachannelSend();
     schedulePageStatusRefresh({
       history,
       forceAddress: true,
@@ -1658,6 +1751,10 @@ async function dispatchBrowserInput(
     }
   } else {
     const inputPageId = inputOwner.page_id;
+    await awaitDatachannelInputSettled();
+    if (!sameRuntimePageOwner(currentRuntimePageOwner(), inputOwner)) {
+      return;
+    }
     let response;
     try {
       response = await fetchJson(
@@ -2566,14 +2663,22 @@ bindBrowserInputSurface({
   copyRemoteClipboardToHost,
   friendlyOpenError,
   getCurrentPage: () => currentPage,
+  getInputOwner: currentRuntimePageOwner,
+  sameInputOwner: sameRuntimePageOwner,
   getCurrentView: () => currentView,
   keyboardCapture,
   pasteHostClipboardIntoRemote,
   readHostClipboardText: homeClipboard.readText,
   remoteVideo,
   renderPanel,
+  releaseDragButton,
   sendBrowserInput,
   showStatus,
+  // Held-button drags exist only as Selkies datachannel mouse messages.
+  streamsPointerDrag: () =>
+    currentDisplayMode === "webrtc_remote_display" &&
+    currentInputTransport() === "datachannel" &&
+    currentInputProtocol() === "selkies_v1",
   unlockRemoteAudioFromGesture,
 });
 
