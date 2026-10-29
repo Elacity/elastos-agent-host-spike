@@ -9627,3 +9627,227 @@ New:
 
 A passing row gives the real Runtime no A11 credit for this later call.
 
+## 103
+
+103 binds each new stand-in instance to the component hash the verified launch supplied. `bind_verified_component` stores that hash on the admitted path, `post_capsules` copies it onto the new instance, and `component_hash` reads the instance. The launch body and the list JSON do not carry it.
+
+HEAD before the first edit, and still HEAD: `0b211244d29994ce39465b65f3c4b89d5e0f81d9`. `git merge-base --is-ancestor b2eccab68f03ce9a0ced0c8afea96b496dbfd15f HEAD` is true. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false.
+
+### Quotes
+
+Decision summary, `docs/AGENT_ARCHITECTURE.md`:
+
+> A capsule instance acts only in the context of its capsule identity, principal, session, granted capabilities, resources, and lifecycle.
+
+Request flow, step 2, `docs/AGENT_ARCHITECTURE.md`:
+
+> Runtime resolves and binds the human principal, agent principal, proof, Agent Host capsule identity, session, and launch authority.
+
+Capsule identity here is the component hash the verified launch supplied.
+
+Lane backlog item 22, the piece cell. The repository file `examples/agent-host/handoff/BACKLOG.md` has items 1–8 only. The sentence is the lane backlog item supplied with this task:
+
+> Bind a stand-in instance to the component hash it was launched from, before any A3 bytes credit. two-capsule-run owns the real-bytes run. This lane does not build a second runner.
+
+### Hand-run falsifiers
+
+Each plant ran alone and was restored before the next. The command was `env RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_instance_stores_the_verified_component_hash -- --exact`. The planted crate compiled every time (`Finished`), and every planted run exited 101 with that test failed on its assertion. After the last restore the file bytes matched the pre-plant candidate. No `falsifiers.json` id was added.
+
+F-standin-hash-constant. Assertion `src/../standin-runtime/mod.rs:2434:9`: `the stand-in did the work: component-2 stores hash_b`, left `Ok` of 64 `a` characters, right `Ok` of 64 `b` characters.
+
+Old:
+
+```text
+            ended_at: None,
+            component_hash,
+```
+
+New:
+
+```text
+            ended_at: None,
+            component_hash: Some("a".repeat(64)),
+```
+
+F-standin-hash-name. Assertion `src/../standin-runtime/mod.rs:2429:9`: `the stand-in did the work: component-1 stores hash_a`, left `Ok("agent-a")`, right `Ok` of 64 `a` characters.
+
+Old:
+
+```text
+            ended_at: None,
+            component_hash,
+```
+
+New:
+
+```text
+            ended_at: None,
+            component_hash: Some(name.clone()),
+```
+
+F-standin-hash-stub. Assertion `src/../standin-runtime/mod.rs:2435:9`: `the stand-in did the work: component-2 stores hash_b`, left `Ok` of 64 `a` characters, right `Ok` of 64 `b` characters.
+
+Old:
+
+```text
+    pub fn component_hash(&self, instance_id: &str) -> Result<String, (u16, String)> {
+        let Some(instance) = self
+```
+
+New:
+
+```text
+    pub fn component_hash(&self, instance_id: &str) -> Result<String, (u16, String)> {
+        return Ok("a".repeat(64));
+        let Some(instance) = self
+```
+
+F-standin-hash-retro. Assertion `src/../standin-runtime/mod.rs:2499:9`: `the stand-in did the work: a later bind does not change component-4`, left `Ok` of 64 `b` characters, right `Err((400, "instance has no verified component hash"))`.
+
+Old:
+
+```text
+        row.component_hash = Some(hash.to_owned());
+        Ok(())
+```
+
+New:
+
+```text
+        let name = row.name.clone();
+        let bound = hash.to_owned();
+        row.component_hash = Some(bound.clone());
+        for instance in &mut self.instances {
+            if instance.name == name {
+                instance.component_hash = Some(bound.clone());
+            }
+        }
+        Ok(())
+```
+
+F-standin-hash-length. Assertion `src/../standin-runtime/mod.rs:2346:9`: `the stand-in did the work: a 63-character string is not a component hash`, left `Ok(())`, right `Err((400, "component hash must be 64 lowercase hex characters"))`.
+
+Old:
+
+```text
+crate::report::hex(hash, 64)
+```
+
+New:
+
+```text
+crate::report::hex(hash, hash.len())
+```
+
+F-standin-hash-skip-empty. Assertion `src/../standin-runtime/mod.rs:2362:9`: `the stand-in did the work: an empty hash on an unknown path is still the empty-hash reason`, left `Err((400, "unknown resident path: /capsules/missing"))`, right `Err((400, "verified launch needs a component hash"))`.
+
+Old:
+
+```text
+        if hash.is_empty() {
+            return Err((400, "verified launch needs a component hash".to_owned()));
+        }
+        if !crate::report::hex(hash, 64) {
+```
+
+New:
+
+```text
+        if hash.is_empty() {
+            if self.admitted.iter().any(|row| row.path == path) {
+                return Err((400, "verified launch needs a component hash".to_owned()));
+            }
+        } else if !crate::report::hex(hash, 64) {
+```
+
+F-standin-hash-skip-malformed. Assertion `src/../standin-runtime/mod.rs:2391:9`: `the stand-in did the work: a short hash on a bound path is still the hex reason`, left `Err((400, "verified component hash already bound"))`, right `Err((400, "component hash must be 64 lowercase hex characters"))`.
+
+Old:
+
+```text
+        if !crate::report::hex(hash, 64) {
+            return Err((
+                400,
+                "component hash must be 64 lowercase hex characters".to_owned(),
+            ));
+        }
+```
+
+New:
+
+```text
+        if !crate::report::hex(hash, 64) {
+            if self
+                .admitted
+                .iter()
+                .any(|row| row.path == path && row.component_hash.is_some())
+            {
+                return Err((400, "verified component hash already bound".to_owned()));
+            }
+            return Err((
+                400,
+                "component hash must be 64 lowercase hex characters".to_owned(),
+            ));
+        }
+```
+
+F-standin-hash-skip-unknown. Assertion `src/../standin-runtime/mod.rs:2371:9`: `the stand-in did the work: an unknown path is refused after the hash checks`, left `Ok(())`, right `Err((400, "unknown resident path: /capsules/missing"))`.
+
+Old:
+
+```text
+            return Err((400, format!("unknown resident path: {path}")));
+```
+
+New:
+
+```text
+            return Ok(());
+```
+
+F-standin-hash-skip-rebind. Assertion `src/../standin-runtime/mod.rs:2430:9`: `the stand-in did the work: component-1 stores hash_a`, left `Ok` of 64 `b` characters, right `Ok` of 64 `a` characters.
+
+Old:
+
+```text
+        if row.component_hash.is_some() {
+            return Err((400, "verified component hash already bound".to_owned()));
+        }
+```
+
+New:
+
+```text
+        if row.component_hash.is_some() {
+            row.component_hash = Some(hash.to_owned());
+            return Err((400, "verified component hash already bound".to_owned()));
+        }
+```
+
+### Docs
+
+`standin-runtime/README.md` adds one paragraph after the `authorise` paragraph. `bind_verified_component` stores the component hash the launch verified, `post_capsules` copies that hash onto the new instance, and `component_hash` reads it. The launch body still rejects `component_hash`. The list JSON does not carry it. A name is not a hash. A 63-character or 65-character string is not a hash. A later bind does not change an instance already created. `agent-a` and `agent-b` stay the residency row already in this tree. A PASS gives the Runtime no A3 credit. two-capsule-run owns the bytes. `session_id` still equals the instance id. `RUNBOOK.md` adds one paragraph after the last stand-in paragraph: `standin_instance_stores_the_verified_component_hash` is this stand-in, two-capsule-run owns the bytes, and a PASS here gives the Runtime no A3 credit.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged. `git diff` for `src/harness.rs`, `src/census.rs`, `src/identity.rs`, `tests/effects.rs`, `tests/common/grants.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. `git diff` for `src/report.rs` is only `fn hex` becoming `pub(crate) fn hex` with the same body. The other changed files are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.25 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, real 286.94 seconds. Lib 68 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; content_cid 2 passed; effects 59 passed, 2 failed, 12 ignored. The effects failures are `no_policy_file_does_not_mean_allow` with census path `home/Library/Application Support/elastos/config.toml`, and `two_instances_overlap_with_separate_grants` with census path `stdout-232`. A path containing `config.toml` stops the task on the first run, so the command was not rerun. The later targets did not run.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.25 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_instance_stores_the_verified_component_hash -- --exact` exit 0, 1 passed, real 0.17 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_two_agent_components_stay_resident -- --exact` exit 0, 1 passed, real 0.06 seconds. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false (exit 1).
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The instance stores the verified hash at `standin-runtime/mod.rs:704-717`; a name fails `hex` at `:634`. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `bind_verified_component` at `:630-647` stores a hash string and opens no network, file, clock or hardware. |
+| 3. A second path or a second copy of one rule? | No | The one predicate is `crate::report::hex` at `:634` and `src/report.rs:350`; the one instance assignment is `post_capsules` at `:716`. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`. `src/report.rs` only changes `fn hex` to `pub(crate) fn hex`. |
+| 5. Refusals deny by default with a clear reason? | Yes | Empty hash `:631-632`, malformed hash `:634-639`, unknown path `:640-641`, rebind `:643-644`, unknown instance `:726-731`, missing hash `:733-736`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The seam is on `StandIn` at `:630` and `:725`. No capsule file, world import or Bus call is added. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin_instance_stores_the_verified_component_hash` at `:2311`. Each of the nine plants failed that test on its assertion, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | Admission still stores `component_hash: None` at `:621`. The bind at `:646` writes only the admitted hash and does not mint a grant. `authorise` at `:577` is unchanged. |
+
+A passing row gives the real Runtime no A3 credit. two-capsule-run owns the bytes.
+
