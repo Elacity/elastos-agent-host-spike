@@ -10302,8 +10302,20 @@ fn declaration_qualifier(text: &str) -> bool {
         .all(|word| word == "pub" || word.starts_with("pub(") || matches!(word, "struct" | "enum"))
 }
 
+/// One declaration's wire field names, or the reason the declaration cannot be
+/// read.
+#[derive(Debug, PartialEq)]
+enum WireFieldNames {
+    /// The source holds no such declaration.
+    NoDeclaration,
+    /// The declaration's field list cannot be read, with its reason.
+    Unsupported(&'static str),
+    /// The declaration's wire field names, in declaration order.
+    Names(Vec<String>),
+}
+
 /// The wire field names of one enum arm or struct `item` in `source`, in
-/// declaration order, or `None` when `source` holds no such declaration.
+/// declaration order, or why they cannot be read.
 ///
 /// A declaration starts at a line whose items before `item` are qualifier words
 /// and whose text after it is `{` or `,`; a longer name that merely starts with
@@ -10316,8 +10328,10 @@ fn declaration_qualifier(text: &str) -> bool {
 /// comma is optional. The source's
 /// comments are read as nothing, so no comment names an item or a field, and a
 /// declaration spelled inside a string literal, including one that spans lines,
-/// is text in that string and never the declaration.
-fn wire_field_names(source: &str, item: &str) -> Option<Vec<String>> {
+/// is text in that string and never the declaration. A field list whose
+/// delimiters do not balance is `Unsupported` with its reason, never a shorter
+/// list, so an unreadable declaration cannot pass by naming fewer fields.
+fn wire_field_names(source: &str, item: &str) -> WireFieldNames {
     let source = without_comments(source);
     let source = source.as_str();
     let mut from = 0;
@@ -10337,22 +10351,29 @@ fn wire_field_names(source: &str, item: &str) -> Option<Vec<String>> {
         match head.chars().next() {
             Some('{') => {
                 let body = &source[after_item + 1..];
-                return declaration_end(body).map(|end| field_names(&body[..end]));
+                let Some(end) = declaration_end(body) else {
+                    return WireFieldNames::NoDeclaration;
+                };
+                return match field_names(&body[..end]) {
+                    Ok(fields) => WireFieldNames::Names(fields),
+                    Err(reason) => WireFieldNames::Unsupported(reason),
+                };
             }
-            Some(',') => return Some(Vec::new()),
+            Some(',') => return WireFieldNames::Names(Vec::new()),
             _ => continue,
         }
     }
-    None
+    WireFieldNames::NoDeclaration
 }
 
-/// The wire names of the field items of one declaration body.
-fn field_names(body: &str) -> Vec<String> {
-    declaration_items(body)
+/// The wire names of the field items of one declaration body, or
+/// `UNBALANCED_FIELD_LIST` when the body's delimiters do not balance.
+fn field_names(body: &str) -> Result<Vec<String>, &'static str> {
+    Ok(declaration_items(body)?
         .into_iter()
         .filter(|field| !field.trim().is_empty())
         .map(field_wire_name)
-        .collect()
+        .collect())
 }
 
 /// Whether `index`, a byte offset into `text`, falls inside a `"..."` string
@@ -10610,12 +10631,22 @@ fn declaration_end(text: &str) -> Option<usize> {
     None
 }
 
+/// The one reason a field list whose delimiters do not balance is refused.
+const UNBALANCED_FIELD_LIST: &str =
+    "unbalanced parentheses, brackets, braces or angle brackets in the field list";
+
 /// The comma-separated items of one declaration body, split at the commas
 /// outside parentheses, brackets, braces and angle brackets, so a field type
 /// such as `Option<String>` and an attribute such as
 /// `#[serde(default, skip_serializing_if = "x")]` each stay one item. Delimiters
 /// inside a string literal, including after an escaped quote, do not count.
-fn declaration_items(text: &str) -> Vec<&str> {
+///
+/// A body whose delimiters do not balance is refused with
+/// `UNBALANCED_FIELD_LIST`, never read. An operator such as the `<<` of
+/// `[u8; 1 << 2]` is not a delimiter, so it opens one that never closes and
+/// every later field would join the item before it, which would drop a required
+/// field from the list.
+fn declaration_items(text: &str) -> Result<Vec<&str>, &'static str> {
     let mut items = Vec::new();
     let mut depth = 0usize;
     let mut start = 0;
@@ -10640,8 +10671,11 @@ fn declaration_items(text: &str) -> Vec<&str> {
             _ => {}
         }
     }
+    if depth != 0 {
+        return Err(UNBALANCED_FIELD_LIST);
+    }
     items.push(&text[start..]);
-    items
+    Ok(items)
 }
 
 /// The wire name of one field item: the `rename = "..."` of the active
@@ -10669,7 +10703,9 @@ fn field_wire_name(field: &str) -> String {
                 .trim_end()
                 .strip_suffix(')')
                 .expect("wire field reader: unterminated serde attribute");
-            for entry in declaration_items(arguments) {
+            for entry in declaration_items(arguments)
+                .unwrap_or_else(|reason| panic!("wire field reader: serde attribute: {reason}"))
+            {
                 let entry = entry.trim();
                 let entry = entry.strip_prefix("r#").unwrap_or(entry);
                 let key_end = entry
@@ -11015,7 +11051,9 @@ struct WireSources<'a> {
 /// cell that stops before a declared field.
 /// WP183 and WP184 change character-literal and raw-identifier handling.
 /// WP185 through WP197 change quoting, order, cell syntax, or source refusals.
-/// `operations_table_row_check_refuses_each_bad_table` fails on each.
+/// WP198 makes the field-list reader read a list whose delimiters do not
+/// balance as a shorter list. `operations_table_row_check_refuses_each_bad_table`
+/// fails on each.
 fn inputs_cell_problems(
     document_name: &str,
     rows: &[OperationsRow],
@@ -11050,15 +11088,28 @@ fn inputs_cell_problems(
             // rule names no second reason for it.
             continue;
         };
-        let Some(fields) = wire_field_names(&request_body, variant) else {
-            problems.push(format!(
-                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the Inputs \
-                 cell {}, and {} declares no {variant} arm",
-                row.operation,
-                row.inputs,
-                sources.declarations_path.display()
-            ));
-            continue;
+        let fields = match wire_field_names(&request_body, variant) {
+            WireFieldNames::Names(fields) => fields,
+            WireFieldNames::NoDeclaration => {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the Inputs \
+                     cell {}, and {} declares no {variant} arm",
+                    row.operation,
+                    row.inputs,
+                    sources.declarations_path.display()
+                ));
+                continue;
+            }
+            WireFieldNames::Unsupported(reason) => {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} holds the Inputs \
+                     cell {}, and the {variant} arm of {} cannot be read: {reason}",
+                    row.operation,
+                    row.inputs,
+                    sources.declarations_path.display()
+                ));
+                continue;
+            }
         };
         let expected = ordinary_row_inputs(&fields);
         let matched =
@@ -13139,7 +13190,9 @@ const FIXTURE_OPERATIONS: [&str; 5] = [
 /// WP181 also fails the passing table, because `init`'s renamed field then reads
 /// as its Rust name.
 /// WP183 through WP197 cover literal boundaries, raw identifiers, quoting,
-/// order, malformed cells and missing source or arm refusals.
+/// order, malformed cells and missing source or arm refusals. WP198 removes
+/// the field-list reader's balance refusal, so a shift expression hides the
+/// field after it.
 #[test]
 fn operations_table_row_check_refuses_each_bad_table() {
     let provider = tempfile::tempdir().expect("temporary provider folder");
@@ -13747,6 +13800,78 @@ fn operations_table_row_check_refuses_each_bad_table() {
         );
     }
 
+    // A field list whose delimiters do not balance is refused with its own
+    // reason, never read as a shorter list. The `<<` of a shift expression
+    // opens a delimiter that never closes, so every later field would join the
+    // item before it and a cell that omits one would pass.
+    for field_type in [
+        "[u8; 1 << 2]",
+        "[u8; 1 << 2 << 3]",
+        "[u8; (1 << 2) as usize]",
+        "Vec<[u8; 1 << 2]>",
+    ] {
+        let mut source = ROW_FIXTURE_PROVIDER.to_string();
+        source.replace_range(
+            init_start..init_end,
+            &format!(
+                "    Init {{\n        config: {field_type},\n        required: String,\n    }},\n"
+            ),
+        );
+        fs::write(&provider_source, source).expect("unbalanced field list fixture");
+        for cell in ["`op`, `config`", "`op`, `config`, `required`"] {
+            assert_eq!(
+                operations_table_row_problems(
+                    "fixture-provider",
+                    &passing.replacen(&fixture_inputs("init"), cell, 1),
+                    provider.path()
+                ),
+                vec![format!(
+                    "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds the \
+                     Inputs cell {cell}, and the Init arm of {provider_paths} cannot be read: \
+                     {UNBALANCED_FIELD_LIST}"
+                )],
+                "an unbalanced field list in {field_type} must be refused, not read"
+            );
+        }
+    }
+
+    // An arrow's `>` needs no opener of its own, so it does not unbalance a
+    // field list and the fields after it stay their own items.
+    for field_type in ["Box<dyn Fn() -> u8>", "[u8; 3 >> 1]", "[u8; 1 > 0]"] {
+        let mut source = ROW_FIXTURE_PROVIDER.to_string();
+        source.replace_range(
+            init_start..init_end,
+            &format!(
+                "    Init {{\n        config: {field_type},\n        required: String,\n    }},\n"
+            ),
+        );
+        fs::write(&provider_source, source).expect("balanced field list fixture");
+        let expected = "`op`, `config`, `required`";
+        assert_eq!(
+            operations_table_row_problems(
+                "fixture-provider",
+                &passing.replacen(&fixture_inputs("init"), expected, 1),
+                provider.path()
+            ),
+            Vec::<String>::new(),
+            "the complete field list must pass for {field_type}"
+        );
+        let stale = "`op`, `config`";
+        assert_eq!(
+            operations_table_row_problems(
+                "fixture-provider",
+                &passing.replacen(&fixture_inputs("init"), stale, 1),
+                provider.path()
+            ),
+            vec![format!(
+                "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init holds the Inputs \
+                 cell {stale}, and {provider_paths} names {expected}"
+            )],
+            "the field after {field_type} must still be required"
+        );
+    }
+    fs::write(&provider_source, ROW_FIXTURE_PROVIDER).expect("fixture provider source restore");
+
     // Serde removes r# from an identifier, while an explicit rename supplies
     // its literal wire name even when that name itself starts with r#.
     for (field, expected, stale) in [
@@ -13820,6 +13945,11 @@ fn operations_table_row_check_refuses_each_bad_table() {
         (
             "#[serde(rename = \"wire\", rename = \"other\")] field: String",
             "duplicate serde rename",
+        ),
+        (
+            "#[serde(rename = \"wire\", other = 1 << 2)] field: String",
+            "serde attribute: unbalanced parentheses, brackets, braces or angle brackets in the \
+             field list",
         ),
     ] {
         let refusal = std::panic::catch_unwind(|| field_wire_name(field))

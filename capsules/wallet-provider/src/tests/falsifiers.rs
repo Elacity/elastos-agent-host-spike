@@ -256,7 +256,9 @@ use std::process::Command;
 /// `operations_table_row_check_refuses_each_bad_table`.
 /// WP183 through WP197 exercise character and raw-identifier boundaries,
 /// quoting, order, malformed cells, and source or arm refusals in that test.
-const EXPECTED_FALSIFIERS: usize = 185;
+/// WP198 removes the field-list reader's balance refusal, so a shift expression
+/// hides the field after it and the same test fails on its shift case.
+const EXPECTED_FALSIFIERS: usize = 186;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

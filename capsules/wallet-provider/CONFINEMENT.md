@@ -1461,6 +1461,9 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `operations_table_row_check_refuses_each_bad_table` checks this rule.
 - WP197: An unreadable dispatch source loses its row refusal.
   `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP198: A field list whose delimiters do not balance is read as a shorter
+  list instead of being refused.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,
