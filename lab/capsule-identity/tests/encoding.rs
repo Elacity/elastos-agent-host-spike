@@ -218,27 +218,108 @@ fn file_past_174_leaves_keeps_a_second_tree_level() {
     assert_ne!(one_level.to_string(), pin, "174 leaves has another CID");
 }
 
+/// The bundle's links estimate: each direct child's name bytes plus 36.
+fn estimate(names: impl IntoIterator<Item = usize>) -> usize {
+    names.into_iter().map(|length| length + 36).sum()
+}
+
+/// The estimate of content-sample's own two files at a bundle root.
+fn content_sample_estimate() -> usize {
+    estimate(CONTENT_SAMPLE.files.iter().map(|name| name.len()))
+}
+
 #[test]
-fn directory_over_the_hamt_threshold_is_refused() {
-    // 1100 empty files with 200-byte names give the root about 270 KB of
-    // links: over the 262144-byte block limit, where Kubo would shard. The
-    // lab refuses it rather than name a HAMT, and returns no CID.
-    let bundle = assemble(&CONTENT_SAMPLE);
-    for number in 0..1100 {
-        write_file(bundle.path(), &format!("{number:0>200}"), b"");
-    }
-    let refusal = lab_cid(bundle.path()).expect_err("a root block over the limit must be refused");
-    let Refusal::DirectoryOverBlockLimit { path, length } = &refusal else {
-        panic!("another refusal: {refusal}");
-    };
-    assert_eq!(path, ".", "the refusal does not name the root");
-    assert!(*length > 262_144, "{refusal}");
+fn directory_at_the_hamt_threshold_stays_basic() {
+    // Kubo's estimate is the sum, over a directory's direct children, of the
+    // child's name plus 36. At exactly 262144 the directory stays one basic
+    // block, even though that block is 279500 bytes; only a greater estimate
+    // is a HAMT shard. The helper measures the one name it lengthens.
+    let (entries, names, extra) = flat_bundle_at("", 262_144);
     assert_eq!(
-        refusal.to_string(),
-        format!(
-            "the directory . encodes to {length} bytes, over the 262144-byte block limit: the lab names no HAMT-sharded directory"
-        )
+        content_sample_estimate() + estimate(names.iter().map(String::len)),
+        262_144,
+        "the bundle's links estimate"
     );
+    assert_eq!(
+        names.iter().map(String::len).max(),
+        Some(100 + extra),
+        "the helper measured the lengthened name"
+    );
+    let pin = HAMT_THRESHOLD_LAB_CID;
+    let bundle = bundled(&entries);
+    let encoded = encode_entries(&entries)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    assert_eq!(
+        (name(&bundle), encoded.as_str()),
+        (pin.to_owned(), pin),
+        "(lab_cid, encode_entries) against the at-threshold pin"
+    );
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
+}
+
+#[test]
+fn directory_over_the_hamt_threshold_is_a_shard() {
+    // One byte more in one name takes the estimate to 262145, so the same
+    // directory is a HAMT shard with another pin.
+    let (entries, names, extra) = flat_bundle_at("", 262_145);
+    assert_eq!(
+        content_sample_estimate() + estimate(names.iter().map(String::len)),
+        262_145,
+        "the bundle's links estimate"
+    );
+    assert_eq!(
+        names.iter().map(String::len).max(),
+        Some(100 + extra),
+        "the helper measured the lengthened name"
+    );
+    let pin = HAMT_OVER_THRESHOLD_LAB_CID;
+    let bundle = bundled(&entries);
+    let encoded = encode_entries(&entries)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    assert_eq!(
+        (name(&bundle), encoded.as_str()),
+        (pin.to_owned(), pin),
+        "(lab_cid, encode_entries) against the over-threshold pin"
+    );
+    assert_ne!(pin, HAMT_THRESHOLD_LAB_CID, "a shard names another value");
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
+}
+
+#[test]
+fn child_directory_over_the_hamt_threshold_is_a_shard() {
+    // The 262145 file set under `photos/`: the child is judged on its own
+    // estimate and is a shard, while the root counts only its three direct
+    // children and stays basic.
+    let (entries, names, _extra) = flat_bundle_at("photos/", 262_145);
+    assert_eq!(
+        estimate(names.iter().map(String::len)),
+        262_145,
+        "the child directory's estimate"
+    );
+    let root = content_sample_estimate() + estimate(["photos".len()]);
+    assert_eq!(root, 140, "the root's three direct children");
+    assert!(root < 262_144, "the root stays basic");
+    let pin = HAMT_CHILD_LAB_CID;
+    let bundle = bundled(&entries);
+    let encoded = encode_entries(&entries)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    assert_eq!(
+        (name(&bundle), encoded.as_str()),
+        (pin.to_owned(), pin),
+        "(lab_cid, encode_entries) against the child pin"
+    );
+    assert_ne!(
+        pin, HAMT_OVER_THRESHOLD_LAB_CID,
+        "the root adds three links"
+    );
+    assert_ne!(pin, HAMT_THRESHOLD_LAB_CID);
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
 }
 
 #[test]

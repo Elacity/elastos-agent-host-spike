@@ -14,6 +14,7 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -82,6 +83,83 @@ pub const THREE_LEAF_NESTED_LAB_CID: &str =
     "bafybeidpgwbsi22cbsmthqupvn37xphujhs6fnzyuy64uc6nsauc6bftqe";
 /// The path of the three-leaf file.
 pub const BIG_BIN: &str = "core/big.bin";
+
+/// content-sample plus empty files whose links estimate is exactly 262144:
+/// one basic directory block of 279500 bytes, larger than the threshold yet
+/// not sharded. Built in a temp dir and never committed; task 077 printed it
+/// first with README's Python rule.
+pub const HAMT_THRESHOLD_LAB_CID: &str =
+    "bafybeidofifnoh4qecocbt2qksv2bbvg5ocyggix6gdsr5wvnlxlw6erui";
+/// The same file set with an estimate of 262145: a HAMT shard. Built in a
+/// temp dir and never committed.
+pub const HAMT_OVER_THRESHOLD_LAB_CID: &str =
+    "bafybeiapjks5bqeaeeuhrestfwx3tskokvzjvy5kltdidb24gnyyzkn2rm";
+/// The 262145 file set under `photos/`, with content-sample's two files left
+/// at the root, whose own estimate is 140: the child directory is a shard and
+/// the root a basic directory. Built in a temp dir and never committed.
+pub const HAMT_CHILD_LAB_CID: &str = "bafybeihmck6tdzcctrlvqlyl35xkja36ogb2qwts7qofk5abrlzb7jr3zi";
+
+/// The empty file names whose links estimate alone is `estimate`, and the
+/// bytes one name was lengthened by. Each name is 100 bytes
+/// (`format!("{index:0>100}")`); the last is lengthened until the sum of
+/// (name bytes + 36) is exactly `estimate`. The length is measured here, never
+/// hardcoded.
+pub fn flat_file_names(estimate: usize) -> (Vec<String>, usize) {
+    const NAME_BYTES: usize = 100;
+    const LINK_OVERHEAD: usize = 36;
+    let mut count = estimate / (NAME_BYTES + LINK_OVERHEAD);
+    let mut extra = estimate - count * (NAME_BYTES + LINK_OVERHEAD);
+    while count > 1 && !(1..=255 - NAME_BYTES).contains(&extra) {
+        count -= 1;
+        extra = estimate - count * (NAME_BYTES + LINK_OVERHEAD);
+    }
+    let mut names: Vec<String> = (0..count - 1)
+        .map(|index| format!("{index:0>NAME_BYTES$}"))
+        .collect();
+    let mut longest = format!("{:0>NAME_BYTES$}", count - 1);
+    longest.push_str(&"x".repeat(extra));
+    names.push(longest);
+    (names, extra)
+}
+
+/// The entries of a flat bundle at `estimate`: content-sample's two files and
+/// the empty files of [`flat_file_names`]. With an empty `prefix` the empty
+/// files sit at the root, so the whole bundle's estimate is `estimate`; with
+/// a prefix they sit under it and are judged on their own estimate, while
+/// content-sample's two files stay at the root. The names returned are the
+/// empty files' link names, and `extra` is the measured lengthening.
+pub fn flat_bundle_at(prefix: &str, estimate: usize) -> (Vec<BundleEntry>, Vec<String>, usize) {
+    let mut entries: Vec<BundleEntry> = CONTENT_SAMPLE
+        .files
+        .iter()
+        .map(|name| BundleEntry {
+            path: (*name).to_owned(),
+            content: read_fixture(&CONTENT_SAMPLE, name),
+        })
+        .collect();
+    let fixed: usize = if prefix.is_empty() {
+        entries.iter().map(|entry| entry.path.len() + 36).sum()
+    } else {
+        0
+    };
+    let (names, extra) = flat_file_names(estimate - fixed);
+    for name in &names {
+        entries.push(BundleEntry {
+            path: format!("{prefix}{name}"),
+            content: Vec::new(),
+        });
+    }
+    (entries, names, extra)
+}
+
+/// A temp bundle folder holding `entries`.
+pub fn bundled(entries: &[BundleEntry]) -> TempDir {
+    let bundle = temp_dir();
+    for entry in entries {
+        write_file(bundle.path(), &entry.path, &entry.content);
+    }
+    bundle
+}
 
 /// The 600000 bytes of [`BIG_BIN`]: byte `i` is `i % 251`, so no two leaves
 /// hold the same bytes.
@@ -858,6 +936,37 @@ pub fn run_python_with(interpreter: &str, program: &str, stdin: &[u8]) -> Result
     }
 }
 
+/// The version the offline Kubo cross-check accepts.
+pub const KUBO_VERSION: &str = "0.40.1";
+
+/// The Kubo binary `named` must be: a path that prints `0.40.1` for
+/// `version --number`. A name that is absent, a binary that cannot run, and
+/// another version are each refused with their own reason. This runs only
+/// those two arguments: it reads no repository and no key.
+pub fn kubo_binary_from(named: Option<&OsStr>) -> Result<PathBuf, String> {
+    let named = named.ok_or("LAB_KUBO is unset: the Kubo cross-check names the binary to run")?;
+    let path = PathBuf::from(named);
+    let output = Command::new(&path)
+        .args(["version", "--number"])
+        .output()
+        .map_err(|error| format!("LAB_KUBO {} could not run: {error}", path.display()))?;
+    let printed = String::from_utf8_lossy(&output.stdout);
+    let version = printed.trim();
+    if !output.status.success() || version != KUBO_VERSION {
+        return Err(format!(
+            "LAB_KUBO {} printed {version:?} for version --number, not {KUBO_VERSION}",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
+/// [`kubo_binary_from`] with `LAB_KUBO`. The ignored cross-check test calls
+/// it and panics with its reason, so a missing or wrong Kubo is never a skip.
+pub fn kubo_binary() -> Result<PathBuf, String> {
+    kubo_binary_from(std::env::var_os("LAB_KUBO").as_deref())
+}
+
 /// The heading of README's consumer adoption note.
 pub const ADOPTION_HEADING: &str = "## For a lab that uses the lab CID\n";
 
@@ -1082,10 +1191,10 @@ pub const COMPUTED_BY_THE_LAB: &str = "Kubo v0.40.1 profile, computed by the lab
 pub const CLAIM_SCOPE_HEADING: &str = "## Claim scope\n";
 
 /// The gate README's "Claim scope" states, as written (white space aside):
-/// what must happen before the lab CID may be called anything more.
-pub const KUBO_GATE: &str = "No offline Kubo cross-check has been run (Kubo v0.40.1, the same \
-     profile flags, hash-only import, no network). Until one prints the same value as a \
-     committed pin, the lab CID is not called equal to the Runtime's CID or to Kubo's output.";
+/// what the lab's results cover after the offline cross-check.
+pub const KUBO_GATE: &str = "One offline Kubo v0.40.1 hash-only import, with the Runtime's \
+     profile flags, was run on this Mac and printed every committed pin, and the lab CID is \
+     not called equal to the Runtime's CID or to Kubo's output.";
 
 /// Words that would claim the lab CID equals the Runtime's CID or Kubo's
 /// output, in lowercase. No lane doc and no file under `src/` holds one, in

@@ -708,7 +708,7 @@ B2 (Anders, 26 Oct)", added by task 026, whose citations are at that revision's 
 - The profile: `lab/capsule-identity/README.md:33` `profile is Kubo v0.40.1's import flags as`
 - Tests: `lab/capsule-identity/tests/fixtures.rs:42` `fn lab_cid_matches_the_pinned_value_for_each_fixture() {`,
   `lab/capsule-identity/tests/encoding.rs:149` `fn file_over_the_chunk_limit_is_refused() {`,
-  `lab/capsule-identity/tests/encoding.rs:168` `fn directory_over_the_hamt_threshold_is_refused() {`
+  `lab/capsule-identity/tests/encoding.rs:168` `fn directory_over_the_hamt_threshold_is_a_shard() {`
   and `lab/capsule-identity/tests/cross_implementation.rs:127` `fn readme_python_recomputes_every_lab_cid_pin() {`
 - Archive hashes stay delivery checks: the lab names the bundle's files, not the Runtime's archive,
   `lab/capsule-identity/README.md:1200` `a delivery check of those archive bytes, not this CID.`
@@ -722,6 +722,9 @@ B2 (Anders, 26 Oct)", added by task 026, whose citations are at that revision's 
   Only the single-block, non-sharded subset of the profile is pinned:
   `lab/capsule-identity/README.md:40` `The tests pin only the single-block, non-sharded subset of that profile: one`
   The pins are reproduced on one Mac only, so no construction rule is frozen.
+- Task 077, on 2026-10-29, names a directory on both sides of the threshold: an estimate of at most 262144 is
+  one basic block, which may be larger than 262144 bytes, and a greater estimate is a HAMT shard; the refusal
+  and `DIRECTORY_BLOCK_LIMIT` are gone, and one offline Kubo v0.40.1 hash-only import printed every pin.
 - Runtime issue: none of 463, 464, 465 or 470 names a CID form (13.4, a2). 274, 285 and 213 were not read for
   this point.
 
@@ -983,15 +986,15 @@ Its value is a lab package CID: the 59-character CIDv1 `bafybei...` UnixFS direc
 and `lab/capsule-identity/tests/common/mod.rs:80` `assert_eq!((pin.len(), &pin[..7]), (59, "bafybei"), "{pin}");`),
 under the single-block, non-sharded subset of the model package profile
 (`lab/capsule-identity/README.md:40` `The tests pin only the single-block, non-sharded subset of that profile: one`).
-A file or a directory block over 262144 bytes is refused, not named another way
-(`lab/capsule-identity/src/lib.rs:224` `const CHUNK_SIZE: usize = 262_144;`
-and `lab/capsule-identity/src/lib.rs:230` `const DIRECTORY_BLOCK_LIMIT: usize = 262_144;`).
-Added by task 048, on 2026-10-28, and extended by task 076: since task 048, a file of 2 to 174 raw leaves (262145 to 45613056 bytes) is named
+A file block over 262144 bytes is not refused: it becomes a balanced file root.
+(`lab/capsule-identity/src/lib.rs` `const CHUNK_SIZE: usize = 262_144;`).
+Added by task 048, on 2026-10-28, and extended by task 076 and task 077: since task 048, a file of 2 to 174 raw leaves (262145 to 45613056 bytes) is named
 by its balanced file root (`fn file_root(` and `const MAX_FILE_LINKS: usize = 174;` in
 `lab/capsule-identity/src/lib.rs`); since task 076 the same grouping continues at any depth, so a file of more than
 174 leaves gets a balanced tree whose depth is the smallest `d` with `174^d` at least its leaf count (the
-`while level.len() > 1` loop in `file_root`), and a directory block over 262144 bytes is refused; the
-listing call `encode_listed_files` still refuses a listed file over 262144 bytes.
+`while level.len() > 1` loop in `file_root`); since task 077, on 2026-10-29, a directory's links estimate
+decides its block, so at most 262144 is one basic block (which may be larger) and a greater estimate is a HAMT
+shard, and the listing call `encode_listed_files` still refuses a listed file over 262144 bytes.
 At `c641bcff2` the value was a framed SHA-256 stream printed `lab-cid:sha256:`
 (`lab/capsule-identity/src/lib.rs:73` `pub const LAB_CID_PREFIX: &str = "lab-cid:sha256:";` at that commit).
 It is not the Runtime's CID: the Runtime names a release archive, and that archive's hash and CID stay delivery
