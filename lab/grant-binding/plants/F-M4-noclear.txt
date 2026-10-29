@@ -1,0 +1,7 @@
+id: F-M4-noclear
+file: src/ops.rs
+test: model_failed_child_keeps_next_ask_independent
+--- old
+                self.pending_parent = None;
+--- new
+--- end
