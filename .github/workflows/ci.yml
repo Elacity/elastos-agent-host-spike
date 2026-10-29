@@ -340,6 +340,24 @@ jobs:
             exit 1
           fi
 
+  # The lab stand-in is a separate cargo project, outside the elastos workspace.
+  # Without this job, tests/standin_contract.rs can stop compiling without a red check.
+  lab-standin:
+    name: lab-standin
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: source-gate
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+      - uses: dtolnay/rust-toolchain@72504271e02fb719eb4eb3eaece3a8e3d06f57c0 # 1.91.0
+      - name: stand-in contract journeys
+        working-directory: lab/agent-conformance
+        run: |
+          cargo test --locked --lib
+          cargo test --locked --test standin_contract
+
   test-elastos:
     name: test-elastos
     runs-on: ubuntu-24.04
