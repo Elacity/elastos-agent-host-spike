@@ -2,10 +2,13 @@ id: F-A7-ownsess
 file: src/ledger.rs
 test: ledger::model_same_identity_shares_one_ceiling
 --- old
-        if grant.identity != identity {
+        if open_hold.identity != identity {
             continue;
         }
 --- new
+        let Some(grant) = grants.get(&open_hold.handle) else {
+            continue;
+        };
         if grant.identity != identity || grant.session != "session-a" {
             continue;
         }

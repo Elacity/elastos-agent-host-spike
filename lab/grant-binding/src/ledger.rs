@@ -30,8 +30,6 @@ struct OpenHold {
     deadline: u64,
     deadline_set: bool,
     identity: String,
-    #[allow(dead_code)] // F-A7-ownsess reads this when it plants the session clause
-    session: String,
 }
 
 fn handles_match(bound: Handle, presented: Handle) -> bool {
@@ -47,10 +45,6 @@ fn held_for_identity(
     let mut sum: u64 = 0;
     for open_hold in open.values() {
         if open_hold.identity != identity {
-            continue;
-        }
-        let grant = open_hold;
-        if grant.identity != identity {
             continue;
         }
         sum = sum.saturating_add(open_hold.amount);
@@ -266,12 +260,6 @@ impl Verifier {
             .expect("resolved grant")
             .identity
             .clone();
-        let session = self
-            .grants
-            .get(&request.handle)
-            .expect("resolved grant")
-            .session
-            .clone();
         let mut ledger = self.ledger.lock().expect("ledger lock");
         let held = ledger.held;
         let shared = held;
@@ -327,7 +315,6 @@ impl Verifier {
                 deadline: 0,
                 deadline_set: false,
                 identity: identity.clone(),
-                session: session.clone(),
             },
         );
         Ok(Reservation {
