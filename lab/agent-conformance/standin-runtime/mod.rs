@@ -7,8 +7,10 @@
 //! `post_capsules`, `get_capsules` and `delete_capsule` answer the capsule
 //! routes for an admitted resident guest. Admission names a bundle by its lab
 //! CID and checks the publisher's name signature; launch names it by that lab
-//! CID only (M1 check B1). Launch answers `starting` with the Bus session
-//! before `finish_start`. A stop stores `stopped` and revokes
+//! CID only (M1 check B1). Admission refuses a `content` manifest with status
+//! 403: a content capsule opens by CID as content and never runs as code, so
+//! no row, instance or grant exists for it. Launch answers `starting` with
+//! the Bus session before `finish_start`. A stop stores `stopped` and revokes
 //! that session's `Live` grants; a failed start stores `failed` and revokes
 //! them too. One map names the five statuses. One age compare keeps a
 //! `failed` or `stopped` entry. One check refuses a client on a shell-only
@@ -139,6 +141,9 @@ struct Ask {
     resource: String,
 }
 
+/// One launched guest. `post_capsules` is the only writer of `instances`: it
+/// makes the `check_bundle` call over the row's admitted signature before the
+/// push, so every launch path re-verifies the signed bundle on disk now.
 struct Instance {
     id: String,
     name: String,
@@ -679,6 +684,10 @@ impl StandIn {
     /// the walked file, and a schema it does not read, or no such file, is
     /// status 400 with its own text. No asks are taken from disk a second
     /// time and none come from this call's arguments.
+    ///
+    /// A `content` manifest is content, never code: it opens by CID as
+    /// content and never runs as code, so it is refused here with status 403
+    /// and the one content reason, and nothing is stored.
     pub fn admit_resident(
         &mut self,
         bundle: &Path,
@@ -687,6 +696,7 @@ impl StandIn {
         start: Start,
     ) -> Result<(), (u16, String)> {
         let checked = check_bundle(bundle, sig, accepted)?;
+        refuse_content(&checked)?;
         let cid = checked.cid();
         if self.admitted.iter().any(|row| row.cid == cid) {
             return Err((403, format!("bundle already admitted: {cid}")));
@@ -1192,6 +1202,15 @@ fn check_bundle(
     Ok(checked)
 }
 
+/// The first key in `object` that is not one of `allowed`, in the object's
+/// own order. `None` means every key is known.
+fn unknown_key<'a>(object: &'a Map<String, Value>, allowed: &[&str]) -> Option<&'a str> {
+    object
+        .keys()
+        .map(String::as_str)
+        .find(|key| !allowed.contains(key))
+}
+
 /// The asks of one checked bundle, from the `asks.json` the walk read.
 ///
 /// Provisional, mirrors the #464 draft: the schema is
@@ -1199,39 +1218,85 @@ fn check_bundle(
 /// ...}`. This reads only `CheckedBundle::entry`, so it judges the bytes the
 /// one walk named and the name signature covers, and it reads no folder. Each
 /// `kind` is lowercased exactly as the request route lowercases an action, so
-/// coverage is the route's own compare. A missing file, another schema, a
-/// missing field, another field or no ask at all is status 400 with its own
-/// text.
+/// coverage is the route's own compare. A missing file, a file that is not
+/// JSON, another schema, a missing field or an empty list is status 400 with
+/// its own text. The file object may hold only `schema` and `asks`, and each
+/// ask only `kind` and `resource`: any other key is status 400 with
+/// `asks.json carries an unknown key: ` plus that key, and it stores nothing.
 fn admitted_asks(checked: &CheckedBundle) -> Result<Vec<Ask>, (u16, String)> {
     const ASKS_FILE: &str = "asks.json";
     const ASKS_SCHEMA: &str = "elastos.agent-host.asks/v1";
+    const ASKS_KEYS: [&str; 2] = ["schema", "asks"];
+    const ASK_KEYS: [&str; 2] = ["kind", "resource"];
     const BAD_ASKS: &str = "asks.json does not follow the provisional ask schema";
 
     let bytes = checked
         .entry(ASKS_FILE)
         .ok_or_else(|| (400, format!("bundle declares no {ASKS_FILE}")))?;
-    let listed = serde_json::from_slice::<Value>(bytes)
-        .ok()
-        .and_then(|file| {
-            let schema = file.get("schema")?.as_str()?;
-            let asks = file.get("asks")?.as_array()?;
-            if schema != ASKS_SCHEMA {
-                return None;
-            }
-            asks.iter()
-                .map(|ask| {
-                    Some(Ask {
-                        kind: ask.get("kind")?.as_str()?.to_lowercase(),
-                        resource: ask.get("resource")?.as_str()?.to_owned(),
-                    })
-                })
-                .collect::<Option<Vec<_>>>()
-        })
-        .ok_or_else(|| (400, BAD_ASKS.to_owned()))?;
-    if listed.is_empty() {
-        return Err((400, BAD_ASKS.to_owned()));
+    let file = serde_json::from_slice::<Value>(bytes).ok();
+    let refuse_unknown = |key: &str| (400, format!("asks.json carries an unknown key: {key}"));
+    if let Some(key) = file
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|object| unknown_key(object, &ASKS_KEYS))
+    {
+        return Err(refuse_unknown(key));
     }
-    Ok(listed)
+    let bad = || (400, BAD_ASKS.to_owned());
+    let schema = file
+        .as_ref()
+        .and_then(|file| file.get("schema"))
+        .and_then(Value::as_str);
+    let asks = file
+        .as_ref()
+        .and_then(|file| file.get("asks"))
+        .and_then(Value::as_array);
+    let (Some(schema), Some(asks)) = (schema, asks) else {
+        return Err(bad());
+    };
+    if schema != ASKS_SCHEMA {
+        return Err(bad());
+    }
+    for ask in asks {
+        let object = ask.as_object().ok_or_else(bad)?;
+        if let Some(key) = unknown_key(object, &ASK_KEYS) {
+            return Err(refuse_unknown(key));
+        }
+    }
+    if asks.is_empty() {
+        return Err(bad());
+    }
+    asks.iter()
+        .map(|ask| {
+            Some(Ask {
+                kind: ask.get("kind")?.as_str()?.to_lowercase(),
+                resource: ask.get("resource")?.as_str()?.to_owned(),
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(bad)
+}
+
+/// The role a manifest names for content. Content opens by CID as content
+/// and never runs as code (M2 exit (b)).
+const CONTENT_ROLE: &str = "content";
+
+/// The one content refusal. Admission calls it on the bundle it just checked,
+/// so the role and the bytes it names are one value: no second read of
+/// `capsule.json` and no path to re-resolve after the check. A bundle whose
+/// manifest role is [`CONTENT_ROLE`] is status 403 with a reason naming it.
+/// Any other role passes.
+fn refuse_content(checked: &CheckedBundle) -> Result<(), (u16, String)> {
+    if checked.manifest_role() == CONTENT_ROLE {
+        return Err((
+            403,
+            format!(
+                "bundle {cid} has role {CONTENT_ROLE}: content opens by CID and never runs as code",
+                cid = checked.cid()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// The launch body is an object whose only key is a string `cid`, parsed as
@@ -4209,6 +4274,162 @@ mod tests {
             request_ids(&own),
             BTreeSet::new(),
             "the stand-in failed session client sees no live grant after the deny"
+        );
+    }
+
+    #[test]
+    fn standin_deny_failure_settles_the_sibling_request_and_its_grant_is_refused_through_routes() {
+        let mut standin = StandIn::new();
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let failed = launch_starting(&shared, &mut standin);
+        let other = launch_starting(&shared, &mut standin);
+        let denied = standin
+            .post_capability_request(
+                Caller::Client {
+                    session_id: &failed,
+                },
+                &request_client_body(),
+            )
+            .expect("the stand-in stores the start-critical request of the failed session");
+        assert_eq!(
+            denied,
+            json!({ "status": "pending", "request_id": "request-1" }),
+            "the stand-in stores the start-critical request as pending"
+        );
+        let sibling = standin
+            .post_capability_request(
+                Caller::Client {
+                    session_id: &failed,
+                },
+                &request_client_body(),
+            )
+            .expect("the stand-in stores the sibling request of the failed session");
+        let sibling_id = sibling["request_id"]
+            .as_str()
+            .expect("the stand-in names the sibling request")
+            .to_owned();
+        assert_eq!(
+            sibling_id, "request-2",
+            "the stand-in names the second request of the failed session"
+        );
+        let bystander = standin
+            .post_capability_request(
+                Caller::Client { session_id: &other },
+                &request_client_body(),
+            )
+            .expect("the stand-in stores the request of the bystander session");
+        let bystander_id = bystander["request_id"]
+            .as_str()
+            .expect("the stand-in names the bystander request")
+            .to_owned();
+        assert_eq!(
+            bystander_id, "request-3",
+            "the stand-in names the request of the bystander session"
+        );
+
+        let denied = standin
+            .post_capability_deny(
+                Caller::Shell,
+                &json!({ "request_id": "request-1", "reason": "gate read denied" }),
+            )
+            .expect("the stand-in denies the start-critical request");
+        assert_eq!(
+            denied,
+            json!({ "success": true }),
+            "the stand-in answers success true for the deny that fails the starting session"
+        );
+
+        assert_eq!(
+            request_entries(&standin, &failed),
+            vec![
+                shell_denied_request("request-1", "component-1", "gate read denied"),
+                denied_request("request-2", "component-1", "gate read denied"),
+            ],
+            "the stand-in keeps the shell deny and settles the sibling request as the runtime"
+        );
+        assert_eq!(
+            request_entries(&standin, &other),
+            vec![pending_request("request-3", "component-2")],
+            "the stand-in keeps the bystander session's request pending"
+        );
+        assert_capsule(
+            &standin,
+            &failed,
+            "failed",
+            "gate read denied",
+            "the stand-in stores the failed session from the deny",
+        );
+        assert_capsule(
+            &standin,
+            &other,
+            "starting",
+            "",
+            "the stand-in keeps the bystander session starting",
+        );
+        let failed_view = standin
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
+            .expect("the stand-in shell live view for the failed session");
+        assert_eq!(
+            request_ids(&failed_view),
+            BTreeSet::new(),
+            "the stand-in shell live view has no grant for the failed session"
+        );
+
+        let refused = standin.post_capability_grant(
+            Caller::Shell,
+            &json!({ "request_id": sibling_id, "duration": "once" }),
+        );
+        assert_delete(
+            &refused,
+            400,
+            "request is not pending: request-2",
+            "the stand-in refuses a grant of the sibling request that the runtime settled",
+        );
+        let after = standin
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
+            .expect("the stand-in shell live view after the refused grant");
+        assert_eq!(
+            request_ids(&after),
+            BTreeSet::new(),
+            "the stand-in shell live view still has no grant for the failed session"
+        );
+        assert_eq!(
+            request_entries(&standin, &failed),
+            vec![
+                shell_denied_request("request-1", "component-1", "gate read denied"),
+                denied_request("request-2", "component-1", "gate read denied"),
+            ],
+            "the refused grant leaves both settlements of the failed session unchanged"
+        );
+
+        let granted = standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({ "request_id": bystander_id, "duration": "once" }),
+            )
+            .expect("the stand-in grants the bystander request");
+        assert_eq!(
+            granted,
+            json!({ "success": true }),
+            "the stand-in answers success true for the bystander grant"
+        );
+        let control = standin
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
+            .expect("the stand-in shell live view after the bystander grant");
+        assert_eq!(
+            request_ids(&control),
+            BTreeSet::from([bystander_id]),
+            "the stand-in live view carries only the bystander grant, so the refusal is specific"
+        );
+        assert_eq!(
+            request_entries(&standin, &other),
+            vec![granted_request(
+                "request-3",
+                "component-2",
+                "Shell auto-grant"
+            )],
+            "the stand-in stores the bystander grant through the grant route"
         );
     }
 

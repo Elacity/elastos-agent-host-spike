@@ -1514,6 +1514,38 @@
       ]
     },
     {
+      "id": "F-standin-m2-content",
+      "title": "admit a content-role bundle instead of refusing it",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/standin-runtime/mod.rs",
+          "old": "    if checked.manifest_role() == CONTENT_ROLE {",
+          "new": "    if false && checked.manifest_role() == CONTENT_ROLE {"
+        }
+      ],
+      "tests": [
+        "standin_refuses_a_content_bundle_at_the_admission_seam"
+      ]
+    },
+    {
+      "id": "F-standin-m2-content-unchecked",
+      "title": "drop the content refusal call after the bundle check",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/standin-runtime/mod.rs",
+          "old": "        let checked = check_bundle(bundle, sig, accepted)?;\n        refuse_content(&checked)?;",
+          "new": "        let checked = check_bundle(bundle, sig, accepted)?;"
+        }
+      ],
+      "tests": [
+        "standin_refuses_a_content_bundle_at_the_admission_seam"
+      ]
+    },
+    {
       "id": "F-net-undeclared",
       "title": "stage the declared manifest for the undeclared network refusal",
       "command": "agent-conformance",

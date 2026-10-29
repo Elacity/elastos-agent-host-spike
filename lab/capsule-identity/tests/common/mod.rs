@@ -1029,7 +1029,7 @@ pub fn consumer_in_metadata(manifest: &Path, metadata: &[u8]) -> Result<bool, St
 /// Every path under `root`, relative to it, with its bytes (a link's target
 /// for a link, `None` for a folder), sorted: the state a scan must leave as
 /// it found it, ignored files and folders such as `target/` included.
-pub fn folder_state(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+pub fn folder_state(root: &Path) -> Vec<(PathBuf, Option<u64>)> {
     let mut state = Vec::new();
     let mut folders = vec![root.to_path_buf()];
     while let Some(folder) = folders.pop() {
@@ -1048,11 +1048,16 @@ pub fn folder_state(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
             } else if kind.is_symlink() {
                 let target = fs::read_link(&path)
                     .unwrap_or_else(|error| panic!("read link {}: {error}", path.display()));
-                Some(target.into_os_string().into_encoded_bytes())
+                Some(target.into_os_string().into_encoded_bytes().len() as u64)
             } else {
+                // Every file's size, never its bytes: the folder has a
+                // `target/` here, and no change the scan could make alters a
+                // size alone without the name or link text beside it.
                 Some(
-                    fs::read(&path)
-                        .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+                    entry
+                        .metadata()
+                        .unwrap_or_else(|error| panic!("stat {}: {error}", path.display()))
+                        .len(),
                 )
             };
             state.push((relative, bytes));
