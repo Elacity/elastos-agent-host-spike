@@ -65,9 +65,39 @@ impl Verifier {
             Operation::ChildJournal => Ok(()),
             _ => {
                 #[rustfmt::skip]
+                macro_rules! end_allow_once {
+                    (#[rustfmt::skip] if $base:ident . $field:ident { $revoke:stmt; }) => {
+                        if $base.$field {
+                            $revoke
+                        }
+                    };
+                    (
+                        #[rustfmt::skip]
+                        if $base:ident . $field:ident && $operation:ident != $kind:ident :: $variant:ident {
+                            $revoke:stmt;
+                        }
+                    ) => {
+                        if $base.$field && $operation != $kind::$variant {
+                            $revoke
+                        }
+                    };
+                    (#[rustfmt::skip] let _ = $base:ident . $field:ident;) => {
+                        {
+                            let _ = $base.$field;
+                        }
+                    };
+                }
+                #[rustfmt::skip]
                 let _ = {
                     super::resource_name(&grant.identity, path, Some(&grant.owned_root))
                         .map_err(OperateRefuse::Binding)?;
+                };
+                #[rustfmt::skip]
+                let _ended = end_allow_once! {
+                #[rustfmt::skip]
+                if grant.once {
+                    self.revoke_grant(request.handle).map_err(OperateRefuse::Binding)?;
+                }
                 };
                 Ok(())
             }
@@ -1304,4 +1334,148 @@ fn model_owned_root_needs_a_resource_segment() {
         .use_grant(verifier.open_call(instance), &guest(handle))
         .expect("grant");
     assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
+}
+
+#[test]
+fn model_allow_once_ends_after_one_effect() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .ask_once(
+            photo,
+            "UsersAI/photo/library",
+            crate::rights(),
+            crate::Asker::App,
+        )
+        .expect("allow once");
+    let call = verifier.open_call(photo);
+    verifier
+        .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal does not end the grant");
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library/page",
+        )
+        .expect("one append");
+    let refusal = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library/page",
+        )
+        .expect_err("the allow-once grant has ended");
+    assert_eq!(refusal, OperateRefuse::Binding(Refuse::UnknownHandle));
+    assert_eq!(refusal.to_string(), "unknown handle");
+    let roll = verifier
+        .ask_once(
+            photo,
+            "UsersAI/photo/roll",
+            Rights {
+                append: true,
+                overwrite: true,
+                child_journal: false,
+            },
+            crate::Asker::App,
+        )
+        .expect("allow once for overwrite");
+    verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Overwrite,
+            "UsersAI/photo/roll/page",
+        )
+        .expect("one overwrite");
+    let ended = verifier
+        .operate(
+            &call,
+            &guest(roll),
+            Operation::Overwrite,
+            "UsersAI/photo/roll/page",
+        )
+        .expect_err("the allow-once grant has ended after overwrite");
+    assert_eq!(ended, OperateRefuse::Binding(Refuse::UnknownHandle));
+    assert_eq!(ended.to_string(), "unknown handle");
+}
+
+#[test]
+fn model_session_grant_allows_a_second_effect() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let refused = verifier
+        .ask_once(
+            photo,
+            "Public/photo/desk",
+            crate::rights(),
+            crate::Asker::App,
+        )
+        .expect_err("public storage does not bind");
+    assert_eq!(refused, Refuse::PublicRead);
+    assert_eq!(refused.to_string(), "public storage read does not bind");
+    let library = verifier
+        .ask_capability(
+            photo,
+            "UsersAI/photo/library",
+            Rights {
+                append: true,
+                overwrite: true,
+                child_journal: false,
+            },
+            crate::Asker::App,
+        )
+        .expect("session grant");
+    let call = verifier.open_call(photo);
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library/page",
+        )
+        .expect("first append");
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Overwrite,
+            "UsersAI/photo/library/page",
+        )
+        .expect("a session grant allows a second effect");
+}
+
+#[test]
+fn model_refused_effect_keeps_allow_once() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .ask_once(
+            photo,
+            "UsersAI/photo/library",
+            crate::rights(),
+            crate::Asker::App,
+        )
+        .expect("allow once");
+    let call = verifier.open_call(photo);
+    let refusal = verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/other",
+        )
+        .expect_err("outside the owned root");
+    assert_eq!(refusal, OperateRefuse::Binding(Refuse::OutsideRoot));
+    assert_eq!(refusal.to_string(), "use path leaves the owned root");
+    verifier
+        .operate(
+            &call,
+            &guest(library),
+            Operation::Append,
+            "UsersAI/photo/library/page",
+        )
+        .expect("a refused effect keeps the allow-once grant");
 }

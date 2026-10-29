@@ -1,0 +1,14 @@
+id: F-A5-onceover
+file: src/ops.rs
+test: ops::model_allow_once_ends_after_one_effect
+--- old
+                #[rustfmt::skip]
+                if grant.once {
+                    self.revoke_grant(request.handle).map_err(OperateRefuse::Binding)?;
+                }
+--- new
+                #[rustfmt::skip]
+                if grant.once && operation != Operation::Overwrite {
+                    self.revoke_grant(request.handle).map_err(OperateRefuse::Binding)?;
+                }
+--- end

@@ -68,6 +68,7 @@ pub(crate) struct GrantRecord {
     owned_root: String,
     rights: Rights,
     parent: Option<Handle>,
+    once: bool,
 }
 
 /// The binding copied out after a successful check.
@@ -134,6 +135,7 @@ pub struct Verifier {
     next_instance: u64,
     next_handle: u64,
     pending_parent: Option<Handle>,
+    pending_once: bool,
     #[allow(dead_code)] // later slices fill the ledger
     ledger: std::sync::Mutex<ledger::Ledger>,
 }
@@ -147,6 +149,7 @@ impl Verifier {
             next_instance: 0,
             next_handle: 0,
             pending_parent: None,
+            pending_once: false,
             ledger: std::sync::Mutex::new(ledger::Ledger::new()),
         }
     }
@@ -179,6 +182,8 @@ impl Verifier {
         rights: Rights,
     ) -> Result<Handle, Refuse> {
         let parent = self.pending_parent.take();
+        let once = self.pending_once;
+        self.pending_once = false;
         let record = self
             .registry
             .get(&instance)
@@ -198,6 +203,7 @@ impl Verifier {
                 owned_root,
                 rights,
                 parent,
+                once,
             },
         );
         Ok(handle)
@@ -212,6 +218,17 @@ impl Verifier {
     ) -> Result<Handle, Refuse> {
         let _claimed = claimed;
         self.bind_grant(instance, resource, rights)
+    }
+
+    pub fn ask_once(
+        &mut self,
+        instance: InstanceId,
+        resource: &str,
+        rights: Rights,
+        claimed: Asker,
+    ) -> Result<Handle, Refuse> {
+        self.pending_once = true;
+        self.ask_capability(instance, resource, rights, claimed)
     }
 
     /// Removes one grant from the one store.

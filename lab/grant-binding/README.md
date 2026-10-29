@@ -21,6 +21,8 @@ reference model, not the Runtime; counts toward no M1 check; the Runtime half is
 
 `Verifier::revoke_grant` on a handle that is not in the store is refused and removes nothing. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
 
+`Verifier::ask_once` stores an allow-once grant through the one `bind_grant`. One successful append or overwrite ends that grant through the one `revoke_grant`. A later effect is refused. `ask_capability` stays reusable. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
 `Verifier::admit_ask` caps one agent's budget ask and stores the granted amount through the one `admit`. This is a lab stand-in for that admission. It is not the Runtime. It does not count toward A7 or M1-R.
 
 A forged identity, session, instance, usage, ceiling or set of rights changes
