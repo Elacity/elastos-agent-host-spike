@@ -22,7 +22,9 @@ The status strings are `starting`, `running`, `stopping`, `stopped` and `failed`
 
 `admit_resident` stores one path with its name, its `Start`, and the world name `resident-capsule`. `admit_resident`, `finish_start` and `set_instant` are lab test seams, not routes. `finish_start` is the one call to `resident.start`. Launch answers `starting` before that call returns.
 
-`StandIn::delete_capsule` answers `DELETE /api/capsules/:id`. The body's only key is `reason`. The Ok value is null. `cause` is `stopped: ` joined with that reason. A `stopped` entry stays while the test-supplied instant is less than 60 seconds after the stop, and the list omits it at 60 seconds. Each `Live` grant whose session is that instance becomes `Revoked` and drops out through the one life filter. The sibling instance stays. Pending-request settlement is a later slice.
+`StandIn::delete_capsule` answers `DELETE /api/capsules/:id`. The body's only key is `reason`. The Ok value is null. `cause` is `stopped: ` joined with that reason. A `stopped` entry stays while the test-supplied instant is less than 60 seconds after the stop, and the list omits it at 60 seconds. Each `Live` grant whose session is that instance becomes `Revoked` and drops out through the one life filter. The sibling instance stays.
+
+An accepted stop and a failed start deny that session's pending requests through `settle_pending`. `settled_by` is `runtime`, and `decision_reason` is the stop cause or the failure cause. An `Ok` start does not settle. The request can be stored while the instance is `starting`. A PASS gives the Runtime no A10 credit and no A11 credit.
 
 `authorise` is a lab test seam, not a route. A sibling is refused with `wrong capsule`. A stop removes that session's live grant through the one filter. This value is the lab stand-in and the real route can replace it later because the refusal matches (M1-R). `instance_grant_does_not_authorise_sibling` stays the process-isolation row.
 
