@@ -44,6 +44,8 @@ const LIVE_SCOPE: &str = "all_sessions_live";
 const RESIDENT_WORLD: &str = "resident-capsule";
 const FAILED_KEEP_SECS: u64 = 60;
 const REQUEST_TIMEOUT_SECS: u64 = 300;
+const MAX_PENDING_REQUESTS: usize = 1024;
+const MAX_PENDING_PER_SESSION: usize = 32;
 const GRANT_LIFETIME_SECS: u64 = 3_600;
 
 /// Authenticated caller. A method argument, not a JSON field.
@@ -264,7 +266,10 @@ impl StandIn {
 
     /// Lab test seam, not a route.
     ///
-    /// Stores one pending request at the current instant. This method reads no
+    /// Stores one pending request at the current instant. Pending records stop
+    /// at `MAX_PENDING_REQUESTS` for the store and `MAX_PENDING_PER_SESSION`
+    /// for one session. The store count runs first. A granted, denied or
+    /// expired record does not count and is not removed. This method reads no
     /// clock and no disk.
     pub fn seed_request(
         &mut self,
@@ -290,6 +295,26 @@ impl StandIn {
             .any(|request| request.request_id == request_id)
         {
             return Err((400, format!("request already stored: {request_id}")));
+        }
+        if self
+            .requests
+            .iter()
+            .filter(|request| request.status == RequestStatus::Pending)
+            .count()
+            >= MAX_PENDING_REQUESTS
+        {
+            return Err((400, "Too many pending requests".to_owned()));
+        }
+        if self
+            .requests
+            .iter()
+            .filter(|request| {
+                request.status == RequestStatus::Pending && request.session_id == session_id
+            })
+            .count()
+            >= MAX_PENDING_PER_SESSION
+        {
+            return Err((400, "Too many pending requests for this session".to_owned()));
         }
         self.requests.push(Request {
             request_id: request_id.to_owned(),
@@ -7118,5 +7143,344 @@ mod tests {
             "the stand-in did the work: the reads leave the runtime denial record as it was"
         );
         assert_live_request_ids_empty(&standin, "the denial read leaves no live grant");
+    }
+
+    fn pending_count(standin: &StandIn) -> usize {
+        standin
+            .requests
+            .iter()
+            .filter(|request| request.status == RequestStatus::Pending)
+            .count()
+    }
+
+    fn has_request(standin: &StandIn, request_id: &str) -> bool {
+        standin
+            .requests
+            .iter()
+            .any(|request| request.request_id == request_id)
+    }
+
+    #[test]
+    fn standin_pending_cap_refuses_the_33rd() {
+        assert_eq!(
+            MAX_PENDING_PER_SESSION, 32,
+            "the stand-in did the work: one session holds 32 pending requests"
+        );
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        let first = launch_finished(&mut standin);
+        let second = launch_finished(&mut standin);
+        assert_eq!(
+            (first.as_str(), second.as_str()),
+            ("component-1", "component-2"),
+            "the stand-in did the work: the launches are component-1 and component-2"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: it lists component-1 running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: it lists component-2 running",
+        );
+        let client_1 = Caller::Client {
+            session_id: "component-1",
+        };
+        let client_2 = Caller::Client {
+            session_id: "component-2",
+        };
+        let body = request_client_body();
+        for n in 1..=32 {
+            let stored = standin.post_capability_request(client_1, &body);
+            assert_eq!(
+                stored,
+                Ok(json!({ "status": "pending", "request_id": format!("request-{n}") })),
+                "the stand-in did the work: request-{n} is pending"
+            );
+        }
+        let refused = standin.post_capability_request(client_1, &body);
+        assert_eq!(
+            refused,
+            Err((400, "Too many pending requests for this session".to_owned(),)),
+            "the stand-in did the work: the 33rd pending request of component-1 is refused"
+        );
+        assert!(
+            !has_request(&standin, "request-33"),
+            "the stand-in did the work: the refused call stores no request-33"
+        );
+        let sibling = standin.post_capability_request(client_2, &body);
+        assert_eq!(
+            sibling,
+            Ok(json!({ "status": "pending", "request_id": "request-33" })),
+            "the stand-in did the work: component-2 stores request-33"
+        );
+        let granted = standin.post_capability_grant(
+            Caller::Shell,
+            &json!({
+                "request_id": "request-1",
+                "duration": "session",
+                "rationale": "grant shared read",
+            }),
+        );
+        assert_eq!(
+            granted,
+            Ok(json!({ "success": true })),
+            "the stand-in did the work: the shell grants request-1"
+        );
+        let freed = standin.post_capability_request(client_1, &body);
+        assert_eq!(
+            freed,
+            Ok(json!({ "status": "pending", "request_id": "request-34" })),
+            "the stand-in did the work: a granted record does not count, so request-34 is stored"
+        );
+        let full_again = standin.post_capability_request(client_1, &body);
+        assert_eq!(
+            full_again,
+            Err((400, "Too many pending requests for this session".to_owned(),)),
+            "the stand-in did the work: the next component-1 request is the session cap"
+        );
+        assert!(
+            !has_request(&standin, "request-35"),
+            "the stand-in did the work: the refused call stores no request-35"
+        );
+        let owner_entries = request_entries(&standin, "component-1");
+        assert_eq!(
+            owner_entries
+                .iter()
+                .find(|entry| entry["request_id"] == "request-1")
+                .and_then(|entry| entry["status"].as_str()),
+            Some("granted"),
+            "the stand-in did the work: request-1 stays granted"
+        );
+        let pending = owner_entries
+            .iter()
+            .filter(|entry| entry["status"] == "pending")
+            .map(|entry| {
+                entry["request_id"]
+                    .as_str()
+                    .expect("the stand-in names request_id")
+                    .to_owned()
+            })
+            .collect::<BTreeSet<_>>();
+        let mut expected = (2..=32)
+            .map(|n| format!("request-{n}"))
+            .collect::<BTreeSet<_>>();
+        expected.insert("request-34".to_owned());
+        assert_eq!(
+            pending, expected,
+            "the stand-in did the work: component-1 pending is request-2 through request-32 plus request-34"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-2"),
+            vec![pending_request("request-33", "component-2")],
+            "the stand-in did the work: request-33 stays pending"
+        );
+        let live = standin
+            .get_capability_list(Caller::Shell, None)
+            .expect("the stand-in shell live-grant view");
+        assert_eq!(
+            request_ids(&live),
+            BTreeSet::from(["request-1".to_owned()]),
+            "the stand-in did the work: the shell live-grant set is exactly request-1"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 stays running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running",
+        );
+    }
+
+    #[test]
+    fn standin_pending_cap_refuses_the_1025th() {
+        assert_eq!(
+            MAX_PENDING_REQUESTS, 1024,
+            "the stand-in did the work: the store holds 1024 pending requests"
+        );
+        assert_eq!(
+            MAX_PENDING_PER_SESSION, 32,
+            "the stand-in did the work: one session holds 32 pending requests"
+        );
+        let mut standin = StandIn::new();
+        launch_two_running(&mut standin);
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: it lists component-1 running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: it lists component-2 running",
+        );
+        assert_eq!(
+            standin.seed_request("old", "s-old", SHARED_RESOURCE, "read", "read shared"),
+            Ok(()),
+            "the stand-in did the work: old is stored at instant 0"
+        );
+        standin.set_instant(300);
+        assert_eq!(
+            request_entries(&standin, "s-old"),
+            vec![expired_request("old", "s-old")],
+            "the stand-in did the work: old is expired at 300 seconds"
+        );
+        for n in 1..=32 {
+            let request_id = format!("pack-{n}");
+            assert_eq!(
+                standin.seed_request(&request_id, "packed", "res", "read", "bulk"),
+                Ok(()),
+                "the stand-in did the work: {request_id} is stored"
+            );
+        }
+        assert_eq!(
+            standin.seed_request("pack-33", "packed", "res", "read", "bulk"),
+            Err((400, "Too many pending requests for this session".to_owned(),)),
+            "the stand-in did the work: pack-33 is the session cap"
+        );
+        assert!(
+            !has_request(&standin, "pack-33"),
+            "the stand-in did the work: the refused call stores no pack-33"
+        );
+        for n in 1..=992 {
+            let request_id = format!("fill-{n}");
+            let session_id = format!("f-{n}");
+            assert_eq!(
+                standin.seed_request(&request_id, &session_id, "res", "read", "bulk"),
+                Ok(()),
+                "the stand-in did the work: {request_id} is stored while old stays expired"
+            );
+        }
+        assert_eq!(
+            pending_count(&standin),
+            1024,
+            "the stand-in did the work: the store holds 1024 pending records"
+        );
+        assert_eq!(
+            request_entries(&standin, "s-old"),
+            vec![expired_request("old", "s-old")],
+            "the stand-in did the work: old stays expired"
+        );
+        assert_eq!(
+            standin.seed_request("over", "s-over", "res", "read", "bulk"),
+            Err((400, "Too many pending requests".to_owned())),
+            "the stand-in did the work: over is the store cap"
+        );
+        assert!(
+            !has_request(&standin, "over"),
+            "the stand-in did the work: the refused call stores no over"
+        );
+        assert_eq!(
+            standin.seed_request("pack-34", "packed", "res", "read", "bulk"),
+            Err((400, "Too many pending requests".to_owned())),
+            "the stand-in did the work: pack-34 gets the store reason while that session is also at 32"
+        );
+        assert!(
+            !has_request(&standin, "pack-34"),
+            "the stand-in did the work: the refused call stores no pack-34"
+        );
+        let granted = standin.post_capability_grant(
+            Caller::Shell,
+            &json!({
+                "request_id": "fill-1",
+                "duration": "session",
+                "rationale": "grant one",
+            }),
+        );
+        assert_eq!(
+            granted,
+            Ok(json!({ "success": true })),
+            "the stand-in did the work: the shell grants fill-1"
+        );
+        assert_eq!(
+            standin.seed_request("room", "s-room", "res", "read", "bulk"),
+            Ok(()),
+            "the stand-in did the work: a granted record frees one store slot"
+        );
+        assert_eq!(
+            pending_count(&standin),
+            1024,
+            "the stand-in did the work: the store holds 1024 pending records again"
+        );
+        let client = Caller::Client {
+            session_id: "component-2",
+        };
+        let body = request_client_body();
+        let refused = standin.post_capability_request(client, &body);
+        assert_eq!(
+            refused,
+            Err((400, "Too many pending requests".to_owned())),
+            "the stand-in did the work: the client request is the store cap"
+        );
+        assert!(
+            !has_request(&standin, "request-1"),
+            "the stand-in did the work: the refused call stores no request-1"
+        );
+        let denied = standin.post_capability_deny(
+            Caller::Shell,
+            &json!({ "request_id": "room", "reason": "deny room" }),
+        );
+        assert_eq!(
+            denied,
+            Ok(json!({ "success": true })),
+            "the stand-in did the work: the shell denies room"
+        );
+        let stored = standin.post_capability_request(client, &body);
+        assert_eq!(
+            stored,
+            Ok(json!({ "status": "pending", "request_id": "request-1" })),
+            "the stand-in did the work: a denied record frees one store slot"
+        );
+        assert_eq!(
+            pending_count(&standin),
+            1024,
+            "the stand-in did the work: the store holds 1024 pending records after request-1"
+        );
+        let refused_again = standin.post_capability_request(client, &body);
+        assert_eq!(
+            refused_again,
+            Err((400, "Too many pending requests".to_owned())),
+            "the stand-in did the work: the next client request is the store cap"
+        );
+        assert!(
+            !has_request(&standin, "request-2"),
+            "the stand-in did the work: the refused call stores no request-2"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-2"),
+            vec![pending_request("request-1", "component-2")],
+            "the stand-in did the work: request-1 stays pending"
+        );
+        assert_capsule(
+            &standin,
+            "component-1",
+            "running",
+            "",
+            "the stand-in did the work: component-1 stays running",
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in did the work: component-2 stays running",
+        );
     }
 }
