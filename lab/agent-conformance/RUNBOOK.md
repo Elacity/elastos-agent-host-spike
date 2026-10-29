@@ -737,3 +737,5 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 `standin_ended_instance_request_is_refused` is this stand-in, and a PASS there gives the Runtime no A10 credit for a new request.
 
 `standin_guest_reads_its_request_later` is this stand-in, and a PASS there gives the Runtime no A11 credit for a later read.
+
+`standin_stopped_run_leaves_no_live_grant` is this stand-in, and a PASS there gives the Runtime no A12 credit.

@@ -9627,3 +9627,177 @@ New:
 
 A passing row gives the real Runtime no A11 credit for this later call.
 
+## 100 — A12 census covers live status and evidence
+
+HEAD before the first edit: `1cc3e47b9dcd965d003c504ac79d027b4f2a0d15`. That value is still HEAD at the end. `b2eccab68f03ce9a0ced0c8afea96b496dbfd15f` is an ancestor. `fff8f1761eb851f642f8e9b680ea1c6747974060` is not.
+
+100: `standin_a12_census` grades the shell live view, each listed instance status, and `census::cleanup` through `grade_live_grants`, `grade_instance_status` and `grade_cleanup_line`. `route_error` is the one route-error mapper and keeps the status with the reason. The pending-request read already in the census stays. `fn live_grant_state` was already `pub(super)`; its body and `tests/common/grants.rs` are unchanged. There is no new `falsifiers.json` id, no `Stopping` store, and no edit to `standin-runtime/mod.rs`, `src/census.rs`, `src/report.rs`, `GAPS.md`, `Cargo.toml` or `Cargo.lock`. A PASS gives the Runtime no A12 credit. `run_leaves_no_live_grant` stays `#[ignore = "blocked: AC-021-GRANTS"]`.
+
+The session contract requires "an explicit interrupt or cancel operation that reports its settlement" (`docs/AGENT_ARCHITECTURE.md`, "Session and interaction contract"). This task is the census after the stop the stand-in already stores. It adds no request store.
+
+From `git show 35697329be0aad89eb68d0adf78aa94d24751317:lab/resident-instances/SPEC.md`:
+
+> **A12.** Launch `read-shared` twice, grant both, and wait for both `running`. The pending view saw both requests, and the live-grant view shows a grant for each session. These are the census's positive controls. Stop both. The census then requires zero live grants as well.
+
+> **Census.** No launched instance is `starting`, `running` or `stopping`. No pending request comes from a journey session. In A6 and A12, no live grant belongs to a journey session. No process below the operator pid is new since the baseline. `GET /api/health` is still ok.
+
+This task takes the grant view, the instance-status check, and the socket and file census. The pending-request read already in `standin_a12_census` stays. The process-tree walk and `GET /api/health` stay out.
+
+### Plants
+
+Each plant ran alone and was restored before the next. The planted crate compiled. The named test failed on its assertion. Restored, the proof commands below passed. Environment: `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true CARGO_TARGET_DIR=lab/agent-conformance/target/host CARGO_BUILD_BUILD_DIR=lab/agent-conformance/target/host-build`.
+
+- F-standin-a12-stub. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects standin_stopped_run_leaves_no_live_grant -- --exact`. Exit 101. Assertion `tests/effects.rs:1266`: `the stand-in keeps the seeded grants live before the stops: Ok(())`.
+
+Old:
+
+```text
+fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Result<(), String> {
+    let view =
+```
+
+New:
+
+```text
+fn standin_a12_census(standin: &StandIn, home: &ThrowawayHome, port: u16) -> Result<(), String> {
+    return Ok(());
+    let view =
+```
+
+- F-standin-a12-skip-cleanup. Same command. Exit 101. Assertion `tests/effects.rs:1350`: `the stand-in refuses the temp leftover: Ok(())`.
+
+Old:
+
+```text
+    grade_cleanup_line(census::cleanup(home, port))
+```
+
+New:
+
+```text
+    grade_cleanup_line(Ok("root checks PASS".to_owned()))
+```
+
+- F-standin-a12-drop-starting. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects standin_a12_census_checks_all_statuses -- --exact`. Exit 101. Assertion `tests/effects.rs:1406`: `the stand-in treats starting as a live instance: Ok(())`.
+
+Old:
+
+```text
+        "stopped" | "failed" => Ok(()),
+```
+
+New:
+
+```text
+        "stopped" | "failed" | "starting" => Ok(()),
+```
+
+- F-standin-a12-drop-stopping. Same status command. Exit 101. Assertion `tests/effects.rs:1406`: `the stand-in treats stopping as a live instance: Ok(())`.
+
+Old:
+
+```text
+        "stopped" | "failed" => Ok(()),
+```
+
+New:
+
+```text
+        "stopped" | "failed" | "stopping" => Ok(()),
+```
+
+- F-standin-a12-failed-live. Same status command. Exit 101. Assertion `tests/effects.rs:1415`: `the stand-in treats a failed entry as not live`.
+
+Old:
+
+```text
+        "stopped" | "failed" => Ok(()),
+```
+
+New:
+
+```text
+        "stopped" => Ok(()),
+```
+
+- F-standin-a12-accept-blocked. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects standin_a12_census_requires_complete_evidence -- --exact`. Exit 101. Assertion `tests/effects.rs:1424`: `the stand-in refuses a grant body with no live scope`.
+
+Old:
+
+```text
+        Ok("pending:0 grants:0") => Ok(()),
+```
+
+New:
+
+```text
+        Ok("pending:0 grants:0") | Ok("pending:0 grants:BLOCKED(AC-021-GRANTS)") => Ok(()),
+```
+
+- F-standin-a12-any-ok-cleanup. Same evidence command. Exit 101. Assertion `tests/effects.rs:1445`: `the stand-in refuses a cleanup line that is not a root pass`.
+
+Old:
+
+```text
+        Ok(line) if line.contains("root checks PASS") => Ok(()),
+        Ok(line) | Err(line) => Err(line),
+```
+
+New:
+
+```text
+        Ok(_) => Ok(()),
+        Err(line) => Err(line),
+```
+
+- F-standin-a12-accept-paused. Same status command. Exit 101. Assertion `tests/effects.rs:1406`: `the stand-in treats paused as a live instance: Ok(())`.
+
+Old:
+
+```text
+        "stopped" | "failed" => Ok(()),
+```
+
+New:
+
+```text
+        "stopped" | "failed" | "paused" => Ok(()),
+```
+
+- F-standin-a12-drop-route-status. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects standin_a12_census_preserves_route_errors -- --exact`. Exit 101. Assertion `tests/effects.rs:1471`: `the stand-in census returns the route status and reason and does not continue`.
+
+Old:
+
+```text
+        Err((status, reason)) => Err(format!("{status} {reason}")),
+```
+
+New:
+
+```text
+        Err((_status, reason)) => Err(reason),
+```
+
+### Gates
+
+Same environment as the plants. `Cargo.toml` and `Cargo.lock` are unchanged. No listed flaky census failure, so the single-rerun rule did not apply.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.15 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 293.02 seconds, inside the 600-second bound. Lib 65 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 64 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 4 passed; probe 3 passed; doc-tests 0. `standin_stopped_run_leaves_no_live_grant`, `standin_a12_census_checks_all_statuses`, `standin_a12_census_requires_complete_evidence` and `standin_a12_census_preserves_route_errors` passed. `run_leaves_no_live_grant` stayed ignored on `AC-021-GRANTS`.
+- Proof after the plants were restored: fmt check exit 0, real 0.15 seconds; `standin_stopped_run_leaves_no_live_grant -- --exact` exit 0, real 1.28 seconds; `standin_a12_census_checks_all_statuses -- --exact` exit 0, real 0.07 seconds; `standin_a12_census_requires_complete_evidence -- --exact` exit 0, real 0.06 seconds. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false (exit 1).
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `tests/effects.rs:1154` grades shell JSON the stand-in already returns. It adds no capsule or content identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `tests/effects.rs:1156` reads the existing shell list. The graders grant nothing and open no socket of their own. |
+| 3. A second path or a second copy of one rule? | No | Status is `grade_instance_status` at `:1140`, grants call `live_grant_state` at `:1133`, cleanup is `grade_cleanup_line` at `:1147`, and route errors are `route_error` at `:1125`. |
+| 4. Runtime core grows? | No | The diff is `tests/effects.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this log. `elastos/` and `standin-runtime/mod.rs` are untouched. |
+| 5. Refusals deny by default with a clear reason? | Yes | `:1143` refuses every status other than `stopped` and `failed` as `instance still live:`. A route `Err` returns `{status} {reason}` at `:1128` and the census stops. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The census is a harness read of routes the stand-in already exposes. No guest, world or `wasi` import changes. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `:1185`, `:1402`, `:1422` and `:1466`. The nine plants above each fail the named assertion, and the restored tests pass. |
+| 8. Identity, admission and allowance stay separate? | Yes | `:1157` grades grants, `:1168` grades status, and `:1181` grades the physical census. An empty grant view does not make a `running` instance stopped. |
+
+A passing row gives the real Runtime no A12 credit.
+
