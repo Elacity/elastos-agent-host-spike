@@ -42,6 +42,7 @@ name = "agent-conformance"
 version = "0.1.0"
 dependencies = [
  "capsule-identity",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
