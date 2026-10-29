@@ -52,7 +52,7 @@ fn effect_request(
     offer_id: &str,
     run_id: &str,
     request_id: &str,
-    grant_id: &str,
+    _grant_id: &str,
     effect: &'static str,
 ) -> reqwest::RequestBuilder {
     let url = if runtime_socket.is_some() {
@@ -66,7 +66,6 @@ fn effect_request(
             .header("x-elastos-offer-id", offer_id)
             .header("x-elastos-run-id", run_id)
             .header("x-elastos-request-id", request_id)
-            .header("x-elastos-grant-id", grant_id)
             .header("x-elastos-effect", effect)
     } else {
         builder
@@ -5133,11 +5132,12 @@ mod tests {
         assert!(format!("{delivered}{result:?}").contains(" upon"));
     }
 
-    /// A hosted effect carries the Runtime-minted grant id as its own header,
-    /// separate from the request id that Runtime uses for freshness and replay.
+    /// A hosted effect sends no grant-id header: the Runtime egress refuses any
+    /// header outside its allowlist (model_provider_egress.rs read_request) and
+    /// authorises by its own (run_id, request_id) binding.
     #[cfg(unix)]
     #[test]
-    fn hosted_effect_sends_binding_grant_id_apart_from_request_id() {
+    fn hosted_effect_sends_no_grant_id_header() {
         use std::os::unix::net::UnixListener;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -5219,9 +5219,8 @@ mod tests {
                 .find_map(|line| line.strip_prefix(&format!("{name}:")))
                 .map(|value| value.trim().to_string())
         };
-        assert_eq!(header("x-elastos-grant-id").as_deref(), Some("grant:1"));
+        assert_eq!(header("x-elastos-grant-id"), None, "{outcome}");
         assert_eq!(header("x-elastos-request-id").as_deref(), Some("request:1"));
-        assert_ne!(header("x-elastos-grant-id"), header("x-elastos-request-id"));
     }
 
     #[test]
