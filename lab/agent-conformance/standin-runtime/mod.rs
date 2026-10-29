@@ -14,8 +14,10 @@
 //! `get_capability_requests` answers `GET /api/capability/requests?session=`
 //! from one request store beside the grants. `seed_request` is the test seam.
 //! An accepted stop denies that session's pending requests with the stop
-//! cause; a failed start denies them with the failure cause. One writer stores
-//! those three fields. `post_capability_deny` answers
+//! cause; a worker kill passes `stopped: worker killed`. A failed
+//! start denies them with the failure cause. One writer stores those three
+//! fields, so a request that outlives the guest call still records its
+//! settlement and settler. `post_capability_deny` answers
 //! `POST /api/capability/deny` through that writer with `shell` as settler,
 //! and a `starting` instance of that session ends `failed` with the reason.
 //! `post_capability_grant` answers `POST /api/capability/grant` through the
@@ -2797,6 +2799,168 @@ mod tests {
             "running",
             "",
             "the stand-in leaves the sibling running",
+        );
+    }
+
+    #[test]
+    fn standin_worker_kill_settles_the_outliving_request() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        launch_finished(&mut standin);
+        let owner = Caller::Client {
+            session_id: "component-1",
+        };
+        let posted = standin.post_capability_request(owner, &request_client_body());
+        assert_eq!(
+            posted,
+            Ok(json!({ "status": "pending", "request_id": "request-1" })),
+            "the agent's own route stores the pending request"
+        );
+        let answered = standin
+            .get_capability_request(owner, "request-1")
+            .expect("the stand-in answers the live request before the kill");
+        assert_eq!(
+            answered,
+            json!({ "status": "pending" }),
+            "the stand-in leaves the request pending while the worker runs"
+        );
+        let killed = json!({ "reason": "worker killed" });
+        standin
+            .delete_capsule(Caller::Shell, "component-1", &killed)
+            .expect("the stand-in stops component-1 as a worker kill");
+        assert_capsule(
+            &standin,
+            "component-1",
+            "stopped",
+            "stopped: worker killed",
+            "the stand-in stores the worker kill as the instance cause",
+        );
+        assert_eq!(
+            shell_requests(&standin, "component-1"),
+            json!({
+                "requests": [denied_request(
+                    "request-1",
+                    "component-1",
+                    "stopped: worker killed",
+                )],
+            }),
+            "the stand-in settles the request that outlived the killed worker, with the kill cause and the runtime as settler"
+        );
+        assert_eq!(
+            standin.get_capability_request(owner, "request-1"),
+            Ok(json!({ "status": "denied", "reason": "stopped: worker killed" })),
+            "the stand-in answers the owner that its request settled after the kill"
+        );
+        assert_live_request_ids_empty(&standin, "the kill settlement leaves no live grant");
+    }
+
+    #[test]
+    fn standin_settled_request_is_not_reposted() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        launch_finished(&mut standin);
+        let owner = Caller::Client {
+            session_id: "component-1",
+        };
+        standin
+            .post_capability_request(owner, &request_client_body())
+            .expect("the agent's own route stores request-1");
+        let killed = json!({ "reason": "worker killed" });
+        standin
+            .delete_capsule(Caller::Shell, "component-1", &killed)
+            .expect("the stand-in stops component-1 as a worker kill");
+        let settled = denied_request("request-1", "component-1", "stopped: worker killed");
+        assert_eq!(
+            standin.seed_request("request-1", "component-1", SHARED_RESOURCE, "read", "again"),
+            Err((400, "request already stored: request-1".to_owned())),
+            "the store seam refuses a second store of the settled id"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![settled],
+            "the stand-in keeps the settled record instead of a silent retry"
+        );
+        let launched = launch_finished(&mut standin);
+        assert_eq!(
+            standin
+                .get_capability_requests(Caller::Shell, Some(&launched))
+                .expect("the stand-in lists a fresh instance"),
+            json!({ "requests": [] }),
+            "the stand-in leaves a fresh live instance with no request whose id the kill already settled"
+        );
+    }
+
+    #[test]
+    fn standin_worker_kill_leaves_agent_two() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        let first = launch_finished(&mut standin);
+        let second = launch_finished(&mut standin);
+        assert_eq!(
+            (first.as_str(), second.as_str()),
+            ("component-1", "component-2"),
+            "the stand-in numbers agent 1 and agent 2"
+        );
+        let agent_one = Caller::Client {
+            session_id: "component-1",
+        };
+        let agent_two = Caller::Client {
+            session_id: "component-2",
+        };
+        for owner in [agent_one, agent_two] {
+            standin
+                .post_capability_request(owner, &request_client_body())
+                .expect("each agent posts through its own route");
+        }
+        standin
+            .delete_capsule(
+                Caller::Shell,
+                "component-1",
+                &json!({ "reason": "worker killed" }),
+            )
+            .expect("the stand-in stops agent 1 as a worker kill");
+        assert_eq!(
+            standin.get_capability_request(agent_two, "request-2"),
+            Ok(json!({ "status": "pending" })),
+            "the stand-in leaves agent 2's request pending after agent 1 was killed"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-2"),
+            vec![pending_request("request-2", "component-2")],
+            "the stand-in leaves agent 2's request record untouched"
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in leaves agent 2 running",
+        );
+        let agent_two_done = standin.post_capability_request(
+            agent_two,
+            &json!({ "resource": SHARED_RESOURCE, "action": "read", "reason": "still here" }),
+        );
+        assert_eq!(
+            agent_two_done,
+            Ok(json!({ "status": "pending", "request_id": "request-3" })),
+            "the dead agent's settlement frees no id agent 2 could take"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-2"),
+            vec![
+                pending_request("request-2", "component-2"),
+                json!({
+                    "request_id": "request-3",
+                    "session_id": "component-2",
+                    "resource": SHARED_RESOURCE,
+                    "action": "read",
+                    "reason": "still here",
+                    "status": "pending",
+                    "decision_reason": "",
+                    "settled_by": Value::Null,
+                }),
+            ],
+            "the stand-in stores agent 2's new request beside the untouched one"
         );
     }
 
