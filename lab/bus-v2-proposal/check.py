@@ -437,6 +437,15 @@ def _remainders(text, marker):
     return []
 
 
+def block_absent(text, marker):
+    """True when MARKER stands in TEXT with no indented block under it.
+
+    A marker the draft does not cite is not this rule: a short draft cites only
+    a few spans, so an absent marker leaves the next target to run.
+    """
+    return marker in text and not _remainders(text, marker)
+
+
 def _quote_window(remainders, pinned_lines, number):
     """Return the index inside the best window that holds NUMBER, or None.
 
@@ -951,14 +960,17 @@ def _target_quotation(text, target, root, sha):
 def _quote_refusal(root, text, sha, target):
     """Return the refusal for one target, or None when it matches or is absent.
 
-    The walk has no remainder for MARKER: no refusal, and the next target runs.
-    The marker is not one line: refused before the line read. The pinned line is
-    absent, or no window holds the cited line: the quotation is not in the pin.
-    The comparison fails, including a zero score: the quotation does not match.
+    The marker is not one line: refused before the block read. The marker stands
+    with no block under it: refused on the block. The draft does not cite
+    MARKER: no refusal, and the next target runs. The pinned line is absent, or
+    no window holds the cited line: the quotation is not in the pin. The
+    comparison fails, including a zero score: the quotation does not match.
     """
     span, marker, quoter = target
     if text.count(marker) > 1:
         return "refuse: quoted line is not one line: " + marker.strip("`")
+    if block_absent(text, marker):
+        return "refuse: quoted line has no block: " + span
     if not _remainders(text, marker):
         return None
     rel, number = _span_target(span)
