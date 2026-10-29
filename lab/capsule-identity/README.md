@@ -1659,8 +1659,10 @@ starting with `read` and `<principal>/`, while `asks_of` still answers the
 committed bytes. `provisional_asks` accepts one shape only: `schema`, exactly
 `elastos.agent-host.asks/v1`, and `asks`, an array of objects whose only
 fields are non-empty `kind` and `resource` strings. A changed stored kind is
-refused by (e); a wrong schema, an extra ask field, an empty kind and an empty
-resource are each refused with their own `asks declaration:` reason; a signed
+refused by (e). The declaration and each ask must be JSON objects. Positional
+arrays, extra or repeated fields, missing fields, wrong field types, invalid
+JSON, a wrong schema, an empty kind and an empty resource are refused with
+their exact `asks declaration:` reasons before an instance or grant is added. A signed
 unknown kind launches; a bundle with no `asks.json` declares none; and an
 unknown session answers none. A matching signature adds no grant: the grant
 view stays empty.
@@ -1671,7 +1673,8 @@ view stays empty.
 | Each session answers its own asks | `standin_gives_each_session_its_own_asks` | F-CI35b (`asks_of` ignores the session and answers the first snapshot's asks) |
 | A bundle with no `asks.json` is handed `None`, not empty bytes | `standin_gives_each_session_its_own_asks` | F-CI35c (`Some(Vec::new())` for a bundle with no `asks.json`) |
 | A change on disk between the walk and the launch does not reach the instance | `standin_takes_the_asks_from_the_walk_not_the_folder` | F-CI44a (the 041 review's stub: `checked_launch` reads `asks.json` from the stored folder at launch), F-CI44b (the hook is never called), F-CI44c (the hook runs before the walk, so (e) refuses) |
-| The launch reads the provisional declaration from the checked bytes; a wrong schema, an extra field, an empty kind and an empty resource are each refused | `standin_reads_declared_asks_from_the_signed_manifest` | F-CI74a (the schema-id comparison removed: any schema string is accepted) |
+| The launch reads the provisional declaration from the checked bytes; object shape, closed fields, schema and non-empty strings are enforced | `standin_reads_declared_asks_from_the_signed_manifest` | F-CI74a (schema comparison removed), F-CI74b-c (positional arrays accepted), F-CI74d-e (extra fields accepted), F-CI74f-g (empty strings accepted) |
+| Each session keeps its declaration in file order; unknown sessions and bundles without asks answer `None`; a signed unknown kind launches | `standin_reads_declared_asks_from_the_signed_manifest`, `standin_gives_each_session_its_own_asks` | F-CI74h (order reversed), F-CI74i (folder read again), F-CI74j (session ignored), F-CI74k (kind allow-list), F-CI74l (absent declaration becomes an empty list) |
 
 Not shown:
 
@@ -1849,7 +1852,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 279 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 290 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1899,7 +1902,7 @@ F-CI49a to F-CI49c (see
 059's F-CI59a to F-CI59c (F-CI59a: see
 [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1); F-CI59b and
 F-CI59c: see [what it is](#what-it-is-and-what-it-is-not)), and task 074's
-F-CI74a (see
+F-CI74a to F-CI74l (see
 [asks come only from the signed bytes](#asks-come-only-from-the-signed-bytes-m1-check-b2)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build

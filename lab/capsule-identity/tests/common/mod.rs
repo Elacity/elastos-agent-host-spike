@@ -1674,7 +1674,7 @@ const ASKS_SCHEMA: &str = "elastos.agent-host.asks/v1";
 /// `asks declaration: ` plus the serde error, a wrong schema names the value
 /// it found, and an empty kind or an empty resource has its own sentence.
 pub fn provisional_asks(bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
-    let declaration: AsksDeclaration =
+    let DeclarationObject(declaration): DeclarationObject<AsksDeclaration> =
         serde_json::from_slice(bytes).map_err(|error| format!("asks declaration: {error}"))?;
     if declaration.schema != ASKS_SCHEMA {
         return Err(format!(
@@ -1685,7 +1685,7 @@ pub fn provisional_asks(bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
     declaration
         .asks
         .into_iter()
-        .map(|ask| {
+        .map(|DeclarationObject(ask)| {
             if ask.kind.is_empty() {
                 return Err("asks declaration: an ask has an empty kind".to_owned());
             }
@@ -1702,7 +1702,7 @@ pub fn provisional_asks(bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
 #[serde(deny_unknown_fields)]
 struct AsksDeclaration {
     schema: String,
-    asks: Vec<AskDeclaration>,
+    asks: Vec<DeclarationObject<AskDeclaration>>,
 }
 
 /// One ask of the provisional declaration: `kind` and `resource`, nothing
@@ -1712,6 +1712,35 @@ struct AsksDeclaration {
 struct AskDeclaration {
     kind: String,
     resource: String,
+}
+
+/// Require a JSON object before delegating field checks to either derived
+/// declaration struct. Serde's derived structs also accept positional arrays;
+/// this shared visitor admits only maps, for both the body and each ask.
+struct DeclarationObject<T>(T);
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for DeclarationObject<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ObjectVisitor<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for ObjectVisitor<T> {
+            type Value = DeclarationObject<T>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                map: M,
+            ) -> Result<Self::Value, M::Error> {
+                T::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(DeclarationObject)
+            }
+        }
+
+        deserializer.deserialize_map(ObjectVisitor(std::marker::PhantomData))
+    }
 }
 
 /// The content of the checked bundle's `asks.json` entry, or `None` when it

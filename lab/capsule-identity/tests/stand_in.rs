@@ -3,8 +3,8 @@
 //! identity check runs before anything is launched, and the shared `StandIn`
 //! in `lab/agent-conformance/standin-runtime/mod.rs` owns the instance, its
 //! session id, its lifecycle and its grants. A launched instance is handed
-//! only the `asks.json` bytes of the checked, signed bundle (M1 check B2, the
-//! part with no schema and no parse). This is lab test code: it runs nothing,
+//! only the `asks.json` bytes of the checked, signed bundle and the provisional
+//! declaration parsed from them (M1 check B2). This is lab test code: it runs nothing,
 //! and these tests say nothing about what the Runtime does.
 mod common;
 
@@ -141,6 +141,7 @@ fn assert_refused(
         "{case}"
     );
     assert_none_listed(shared, case);
+    assert_eq!(grant_view(lane, shared), Vec::<Value>::new(), "{case}");
 }
 
 /// The keys of a JSON object, sorted.
@@ -740,6 +741,16 @@ fn standin_gives_each_session_its_own_asks() {
             "{case}: web-app has no asks.json, so its session answers none"
         );
         assert_eq!(
+            lane.declared_asks_of(&session_of(AGENT_HOST_LAB_CID)),
+            Some(committed_declared_asks()),
+            "{case}: agent-host's session answers its own declaration"
+        );
+        assert_eq!(
+            lane.declared_asks_of(&session_of(WEB_APP_LAB_CID)),
+            None,
+            "{case}: web-app has no declaration"
+        );
+        assert_eq!(
             lane.asks_of("no-such-session"),
             None,
             "{case}: an unknown session answers none"
@@ -860,6 +871,7 @@ fn standin_reads_declared_asks_from_the_signed_manifest() {
             .is_some_and(|declared| declared[0].0 == "read"),
         "the first session still declares read"
     );
+    assert_eq!(lane.declared_asks_of(&session), Some(declared.clone()));
     assert_eq!(listed_instances(&shared).len(), 1, "no new instance");
     assert_eq!(grant_view(&lane, &shared), Vec::<Value>::new(), "no grant");
 
@@ -888,16 +900,137 @@ fn standin_reads_declared_asks_from_the_signed_manifest() {
             });
         });
     let cid = extra_field.entry.0.clone();
-    let (status, reason) =
-        launch_cid(&mut lane, &mut shared, &cid).expect_err("an ask's extra field must be refused");
+    let launch = launch_cid(&mut lane, &mut shared, &cid);
+    assert!(
+        launch.is_err(),
+        "an ask's extra field is refused: {launch:?}"
+    );
+    let (status, reason) = launch.expect_err("an ask's extra field must be refused");
     assert_eq!(status, 400);
     assert!(reason.starts_with("asks declaration:"), "{reason}");
+    assert_eq!(
+        reason,
+        "asks declaration: unknown field `extra`, expected `kind` or `resource` at line 1 column 17"
+    );
     assert_ne!(
         reason,
         "asks declaration: schema is not-the-provisional-schema, not elastos.agent-host.asks/v1",
         "the extra-field refusal is not the schema sentence"
     );
     assert_none_listed(&shared, "an ask's extra field");
+    assert_eq!(grant_view(&lane, &shared), Vec::<Value>::new());
+
+    // Each shape refusal is tested on newly published and signed bytes. The
+    // exact reason, empty instance list and empty grant view prove that the
+    // shared launch was refused before it could create state.
+    for (case, bytes, reason) in [
+        (
+            "declaration-array",
+            r#"["elastos.agent-host.asks/v1",[{"kind":"read","resource":"<principal>/"}]]"#,
+            "asks declaration: invalid type: sequence, expected a JSON object at line 1 column 0",
+        ),
+        (
+            "ask-array",
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":[["read","<principal>/"]]}"#,
+            "asks declaration: invalid type: sequence, expected a JSON object at line 1 column 47",
+        ),
+        (
+            "declaration-null",
+            r#"null"#,
+            "asks declaration: invalid type: null, expected a JSON object at line 1 column 4",
+        ),
+        (
+            "ask-null",
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":[null]}"#,
+            "asks declaration: invalid type: null, expected a JSON object at line 1 column 51",
+        ),
+        (
+            "extra-declaration-field",
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":[],"extra":true}"#,
+            "asks declaration: unknown field `extra`, expected `schema` or `asks` at line 1 column 56",
+        ),
+        (
+            "missing-schema",
+            r#"{"asks":[]}"#,
+            "asks declaration: missing field `schema` at line 1 column 11",
+        ),
+        (
+            "missing-asks",
+            r#"{"schema":"elastos.agent-host.asks/v1"}"#,
+            "asks declaration: missing field `asks` at line 1 column 39",
+        ),
+        (
+            "schema-type",
+            r#"{"schema":7,"asks":[]}"#,
+            "asks declaration: invalid type: integer `7`, expected a string at line 1 column 11",
+        ),
+        (
+            "asks-type",
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":{}}"#,
+            "asks declaration: invalid type: map, expected a sequence at line 1 column 46",
+        ),
+        (
+            "missing-kind",
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":[{"resource":"<principal>/"}]}"#,
+            "asks declaration: missing field `kind` at line 1 column 74",
+        ),
+        (
+            "missing-resource",
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":[{"kind":"read"}]}"#,
+            "asks declaration: missing field `resource` at line 1 column 62",
+        ),
+        (
+            "kind-type",
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":[{"kind":7,"resource":"<principal>/"}]}"#,
+            "asks declaration: invalid type: integer `7`, expected a string at line 1 column 56",
+        ),
+        (
+            "resource-type",
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":[{"kind":"read","resource":7}]}"#,
+            "asks declaration: invalid type: integer `7`, expected a string at line 1 column 74",
+        ),
+        (
+            "duplicate-schema",
+            r#"{"schema":"elastos.agent-host.asks/v1","schema":"elastos.agent-host.asks/v1","asks":[]}"#,
+            "asks declaration: duplicate field `schema` at line 1 column 47",
+        ),
+        (
+            "duplicate-asks",
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":[],"asks":[]}"#,
+            "asks declaration: duplicate field `asks` at line 1 column 55",
+        ),
+        (
+            "duplicate-kind",
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":[{"kind":"read","kind":"edit","resource":"<principal>/"}]}"#,
+            "asks declaration: duplicate field `kind` at line 1 column 68",
+        ),
+        (
+            "duplicate-resource",
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":[{"kind":"read","resource":"<principal>/","resource":"<principal>/"}]}"#,
+            "asks declaration: duplicate field `resource` at line 1 column 98",
+        ),
+        (
+            "empty-body",
+            r#""#,
+            "asks declaration: EOF while parsing a value at line 1 column 0",
+        ),
+        (
+            "trailing-value",
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":[]} null"#,
+            "asks declaration: trailing characters at line 1 column 51",
+        ),
+    ] {
+        let (variant, mut lane, mut shared) = signed_variant(&AGENT_HOST, case, |folder| {
+            fs::write(folder.join("asks.json"), bytes).expect("write the declaration variant");
+        });
+        assert_refused(
+            &mut lane,
+            &mut shared,
+            &json!({ "cid": variant.entry.0 }),
+            reason,
+            case,
+        );
+    }
 
     // An empty kind and an empty resource each have their own sentence.
     let (empty_kind, mut lane, mut shared) = signed_variant(&AGENT_HOST, "empty-kind", |folder| {
@@ -937,8 +1070,10 @@ fn standin_reads_declared_asks_from_the_signed_manifest() {
             });
         });
     let cid = unknown_kind.entry.0.clone();
-    let answer = launch_cid(&mut lane, &mut shared, &cid)
-        .unwrap_or_else(|(status, reason)| panic!("refused with {status}: {reason}"));
+    let launch = launch_cid(&mut lane, &mut shared, &cid);
+    assert!(launch.is_ok(), "a signed unknown kind launches: {launch:?}");
+    let answer =
+        launch.unwrap_or_else(|(status, reason)| panic!("refused with {status}: {reason}"));
     assert_eq!(answer["status"], "starting");
     let session = answer["session_id"]
         .as_str()

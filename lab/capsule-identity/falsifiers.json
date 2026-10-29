@@ -4214,7 +4214,7 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        self.asks.get(session_id).cloned().flatten()\n",
+          "old": "        self.asks\n            .get(session_id)\n            .cloned()\n            .flatten()\n            .map(|asks| asks.bytes)\n",
           "new": "        fs::read(self.store.values().next()?.join(ASKS_FILE)).ok()\n"
         }
       ],
@@ -4230,8 +4230,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        self.asks.get(session_id).cloned().flatten()\n",
-          "new": "        self.asks.values().next().cloned().flatten()\n"
+          "old": "        self.asks\n            .get(session_id)\n            .cloned()\n            .flatten()\n            .map(|asks| asks.bytes)\n",
+          "new": "        self.asks\n            .values().next()\n            .cloned()\n            .flatten()\n            .map(|asks| asks.bytes)\n"
         }
       ],
       "tests": [
@@ -4246,8 +4246,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        .map(|entry| entry.content.clone())\n",
-          "new": "        .map(|entry| entry.content.clone())\n        .or(Some(Vec::new()))\n"
+          "old": "        self.asks\n            .get(session_id)\n            .cloned()\n            .flatten()\n            .map(|asks| asks.bytes)\n",
+          "new": "        self.asks\n            .get(session_id)\n            .cloned()\n            .flatten()\n            .map(|asks| asks.bytes)\n            .or(Some(Vec::new()))\n"
         }
       ],
       "tests": [
@@ -4337,14 +4337,14 @@
     },
     {
       "id": "F-CI44a",
-      "title": "the 041 review's stub: checked_launch reads asks.json from the stored folder at launch, after the walk, instead of taking it from the checked entries",
+      "title": "checked_launch parses the checked declaration but takes its byte snapshot from the folder after the walk",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        Ok((folder.to_string_lossy().into_owned(), signed_asks(&checked)))\n",
-          "new": "        Ok((folder.to_string_lossy().into_owned(), fs::read(folder.join(ASKS_FILE)).ok()))\n"
+          "old": "                Ok::<SignedAsks, String>(SignedAsks { bytes, declared })\n",
+          "new": "                Ok::<SignedAsks, String>(SignedAsks {\n                    bytes: fs::read(folder.join(ASKS_FILE)).unwrap_or_default(),\n                    declared,\n                })\n"
         }
       ],
       "tests": [
@@ -4620,6 +4620,188 @@
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
           "old": "    if declaration.schema != ASKS_SCHEMA {\n        return Err(format!(\n            \"asks declaration: schema is {}, not {ASKS_SCHEMA}\",\n            declaration.schema\n        ));\n    }\n",
           "new": ""
+        }
+      ],
+      "tests": [
+        "standin_reads_declared_asks_from_the_signed_manifest"
+      ]
+    },
+    {
+      "id": "F-CI74b",
+      "title": "the declaration bypasses the object wrapper and accepts a positional array",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    let DeclarationObject(declaration): DeclarationObject<AsksDeclaration> =\n",
+          "new": "    let declaration: AsksDeclaration =\n"
+        }
+      ],
+      "tests": [
+        "standin_reads_declared_asks_from_the_signed_manifest"
+      ]
+    },
+    {
+      "id": "F-CI74c",
+      "title": "individual asks bypass the object wrapper and accept positional arrays",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    asks: Vec<DeclarationObject<AskDeclaration>>,\n",
+          "new": "    asks: Vec<AskDeclaration>,\n"
+        },
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        .map(|DeclarationObject(ask)| {\n",
+          "new": "        .map(|ask| {\n"
+        }
+      ],
+      "tests": [
+        "standin_reads_declared_asks_from_the_signed_manifest"
+      ]
+    },
+    {
+      "id": "F-CI74d",
+      "title": "the declaration accepts fields beyond schema and asks",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "#[serde(deny_unknown_fields)]\nstruct AsksDeclaration {",
+          "new": "struct AsksDeclaration {"
+        }
+      ],
+      "tests": [
+        "standin_reads_declared_asks_from_the_signed_manifest"
+      ]
+    },
+    {
+      "id": "F-CI74e",
+      "title": "an ask accepts fields beyond kind and resource",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "#[serde(deny_unknown_fields)]\nstruct AskDeclaration {",
+          "new": "struct AskDeclaration {"
+        }
+      ],
+      "tests": [
+        "standin_reads_declared_asks_from_the_signed_manifest"
+      ]
+    },
+    {
+      "id": "F-CI74f",
+      "title": "an empty kind is accepted",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "            if ask.kind.is_empty() {\n                return Err(\"asks declaration: an ask has an empty kind\".to_owned());\n            }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "standin_reads_declared_asks_from_the_signed_manifest"
+      ]
+    },
+    {
+      "id": "F-CI74g",
+      "title": "an empty resource is accepted",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "            if ask.resource.is_empty() {\n                return Err(\"asks declaration: an ask has an empty resource\".to_owned());\n            }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "standin_reads_declared_asks_from_the_signed_manifest"
+      ]
+    },
+    {
+      "id": "F-CI74h",
+      "title": "the parsed declaration reverses file order",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    declaration\n        .asks\n        .into_iter()\n",
+          "new": "    declaration\n        .asks\n        .into_iter()\n        .rev()\n"
+        }
+      ],
+      "tests": [
+        "standin_reads_declared_asks_from_the_signed_manifest"
+      ]
+    },
+    {
+      "id": "F-CI74i",
+      "title": "declared_asks_of reads and parses changed folder bytes instead of the launch snapshot",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        self.asks\n            .get(session_id)\n            .cloned()\n            .flatten()\n            .map(|asks| asks.declared)\n",
+          "new": "        self.asks.get(session_id)?.as_ref()?;\n        provisional_asks(&fs::read(self.store.values().next()?.join(ASKS_FILE)).ok()?).ok()\n"
+        }
+      ],
+      "tests": [
+        "standin_reads_declared_asks_from_the_signed_manifest"
+      ]
+    },
+    {
+      "id": "F-CI74j",
+      "title": "declared_asks_of ignores the session and answers the first stored declaration even for an unknown session",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        self.asks\n            .get(session_id)\n            .cloned()\n            .flatten()\n            .map(|asks| asks.declared)\n",
+          "new": "        self.asks\n            .values().next()\n            .cloned()\n            .flatten()\n            .map(|asks| asks.declared)\n"
+        }
+      ],
+      "tests": [
+        "standin_reads_declared_asks_from_the_signed_manifest",
+        "standin_gives_each_session_its_own_asks"
+      ]
+    },
+    {
+      "id": "F-CI74k",
+      "title": "a kind allow-list refuses a signed unknown kind",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "            if ask.kind.is_empty() {\n",
+          "new": "            if ask.kind.is_empty() || ask.kind == \"teleport\" {\n"
+        }
+      ],
+      "tests": [
+        "standin_reads_declared_asks_from_the_signed_manifest"
+      ]
+    },
+    {
+      "id": "F-CI74l",
+      "title": "a session whose bundle has no asks.json declares an empty list instead of None",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        self.asks\n            .get(session_id)\n            .cloned()\n            .flatten()\n            .map(|asks| asks.declared)\n",
+          "new": "        self.asks\n            .get(session_id)\n            .cloned()\n            .map(|asks| asks.map(|asks| asks.declared).unwrap_or_default())\n"
         }
       ],
       "tests": [
