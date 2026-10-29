@@ -1,8 +1,21 @@
 id: F-GB-link
 file: src/link.rs
 test: model_detects_a_path_dependency_on_this_crate
+test: link::model_git_or_registry_dependency_is_a_link
 --- old
-    cargo_toml.contains("grant-binding") && cargo_toml.contains("path")
+    let packed: String = cargo_toml.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let unquoted = packed.replace(['"', '\''], "");
+    cargo_toml.contains("grant-binding")
+        && (cargo_toml.contains("path")
+            || packed.split("grant-binding").skip(1).any(|suffix| {
+                suffix.trim_start_matches(['"', '\'']).strip_prefix('=')
+                    .is_some_and(|value| value.starts_with(['"', '\'']))
+            })
+            || ((unquoted.contains("grant-binding={")
+                || unquoted.contains("grant-binding.")
+                || unquoted.contains(".grant-binding]")
+                || unquoted.contains("package=grant-binding"))
+                && (unquoted.contains("git=") || unquoted.contains("version="))))
 --- new
     let _ = cargo_toml;
     false
