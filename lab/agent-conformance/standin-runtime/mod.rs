@@ -99,6 +99,18 @@ struct Grant {
     expires_at: Option<u64>,
     life: Life,
     session_ended: bool,
+    /// The plan this grant was approved for (M1 check A15a). A private value:
+    /// the shell's grant route mints it from the plan hash the request stored,
+    /// and `authorise` compares it with the plan hash of the use. No caller
+    /// holds or constructs it.
+    plan: Option<PlanBinding>,
+}
+
+/// One approved-plan binding on a grant. Its one field is private, so only
+/// this module mints a value and no test or crate can name one.
+#[derive(Clone)]
+struct PlanBinding {
+    plan_sha256: String,
 }
 
 /// One admitted row. It keeps what launch needs to re-run the same check:
@@ -142,6 +154,9 @@ struct Request {
     status: RequestStatus,
     decision_reason: String,
     settled_by: Option<&'static str>,
+    /// The plan hash the requester stored (M1 check A15a). It is folded out of
+    /// the body, so no store field carries it back to the instance.
+    plan: Option<String>,
 }
 
 pub struct StandIn {
@@ -248,7 +263,9 @@ impl StandIn {
 
     /// Lab test seam, not a route.
     ///
-    /// `granted_at` is the seeded value. This method reads no clock.
+    /// `granted_at` is the seeded value. This method reads no clock. A seeded
+    /// grant is unbound: the plan binding is minted only by
+    /// `post_capability_grant`, so this seam can never create one.
     #[allow(clippy::too_many_arguments)]
     pub fn seed_grant(
         &mut self,
@@ -271,6 +288,7 @@ impl StandIn {
             expires_at: expiry_at(duration, granted_at),
             life,
             session_ended,
+            plan: None,
         });
     }
 
@@ -313,6 +331,7 @@ impl StandIn {
             status: RequestStatus::Pending,
             decision_reason: String::new(),
             settled_by: None,
+            plan: None,
         });
         Ok(())
     }
@@ -356,7 +375,8 @@ impl StandIn {
                 "capability request needs an instance session".to_owned(),
             ));
         };
-        let (resource, given_action, reason) = request_body(body)?;
+        let fields = request_body(body);
+        let (resource, given_action, reason, plan) = fields?;
         if !resource.starts_with("elastos://") && !resource.starts_with("localhost://") {
             return Err((
                 400,
@@ -384,8 +404,15 @@ impl StandIn {
         if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
             return Err(not_live(phase));
         }
+        let plan = plan.map(str::to_owned);
         let request_id = format!("request-{}", self.next_request);
         self.seed_request(&request_id, session_id, resource, &action, reason)?;
+        let stored = self
+            .requests
+            .iter_mut()
+            .find(|request| request.request_id == request_id)
+            .expect("seed_request just stored this request");
+        stored.plan = plan;
         self.next_request += 1;
         Ok(json!({ "status": "pending", "request_id": request_id }))
     }
@@ -494,13 +521,19 @@ impl StandIn {
     /// `{"success": true}` and carries no token. A client is refused before
     /// the body is read, so the requester and its sibling resident cannot
     /// approve their own pending request.
+    ///
+    /// A request that stored a plan hash (M1 check A15a) stores one grant
+    /// bound to that hash. The one mint helper `mint_plan_binding` reads the
+    /// hash from the folded record, not from the body, so the owner approves
+    /// exactly the plan the agent previewed.
     pub fn post_capability_grant(
         &mut self,
         caller: Caller<'_>,
         body: &Value,
     ) -> Result<Value, (u16, String)> {
         require_shell(caller)?;
-        let (request_id, duration, rationale) = grant_body(body)?;
+        let parsed = grant_body(body);
+        let (request_id, duration, rationale) = parsed?;
         let Some(request) = self
             .requests
             .iter()
@@ -515,6 +548,7 @@ impl StandIn {
         let session_id = request.session_id.clone();
         let resource = request.resource.clone();
         let action = request.action.clone();
+        let plan = request.plan.clone();
         self.settle_record(&request_id, RequestStatus::Granted, rationale, "shell");
         let instant = self.instant;
         self.seed_grant(
@@ -527,6 +561,15 @@ impl StandIn {
             Life::Live,
             false,
         );
+        let minted = mint_plan_binding(&plan);
+        if let Some(minted) = minted {
+            let stored = self
+                .grants
+                .iter_mut()
+                .find(|grant| grant.request_id == request_id.as_str())
+                .expect("the grant route just stored this request's grant");
+            stored.plan = Some(minted);
+        }
         Ok(json!({ "success": true }))
     }
 
@@ -585,26 +628,35 @@ impl StandIn {
 
     /// `POST /api/capability/validate`.
     ///
-    /// This is the one use path. The body's only key is `request_id`. A shell
-    /// is refused before the body is read, as on every other client route. A
-    /// `once` grant stores `Exhausted` on the first success, so the live view
-    /// omits it and a second use is not live.
+    /// This is the one use path. The body's keys are `request_id` and an
+    /// optional string `plan_sha256`, the hash of the canonical plan bytes the
+    /// instance means to run. A shell is refused before the body is read, as
+    /// on every other client route. A `once` grant stores `Exhausted` on the
+    /// first success, so the live view omits it and a second use is not live.
+    /// A grant bound to a plan authorises that plan's hash alone.
     pub fn post_capability_validate(
         &mut self,
         caller: Caller<'_>,
         body: &Value,
     ) -> Result<Value, (u16, String)> {
         require_client(caller)?;
-        let request_id = validate_body(body)?;
-        self.authorise(caller, request_id)?;
+        let (request_id, plan_sha256) = validate_body(body)?;
+        self.authorise(caller, request_id, plan_sha256)?;
         Ok(json!({ "valid": true }))
     }
 
     /// The one use check. `post_capability_validate` is its route.
     ///
-    /// `Ok(())` means the grant authorises that caller, and a `once` grant
-    /// stores `Exhausted`. This method reads no clock, no disk and no WIT file.
-    fn authorise(&mut self, caller: Caller<'_>, request_id: &str) -> Result<(), (u16, String)> {
+    /// `Ok(())` means the grant authorises that caller and, for a bound grant,
+    /// that exact plan hash, and a `once` grant stores `Exhausted`. Every
+    /// refusal runs before that store, so a refused use spends nothing. This
+    /// method reads no clock, no disk and no WIT file.
+    fn authorise(
+        &mut self,
+        caller: Caller<'_>,
+        request_id: &str,
+        plan_sha256: Option<&str>,
+    ) -> Result<(), (u16, String)> {
         let Some(index) = self
             .grants
             .iter()
@@ -621,6 +673,9 @@ impl StandIn {
         }
         if !session_authorises(grant, caller) {
             return Err(wrong_capsule(grant, caller));
+        }
+        if !plan_accepts(grant.plan.as_ref(), plan_sha256) {
+            return Err(plan_not_bound());
         }
         if grant.duration == "once" {
             self.grants[index].life = Life::Exhausted;
@@ -1033,24 +1088,55 @@ fn require_client(caller: Caller<'_>) -> Result<(), (u16, String)> {
     }
 }
 
-/// The validate body's only key is `request_id`.
-fn validate_body(body: &Value) -> Result<&str, (u16, String)> {
+/// The validate body's keys are `request_id` and an optional string
+/// `plan_sha256`. The use names the plan it runs, and the hash is compared
+/// with a bound grant's own hash.
+fn validate_body(body: &Value) -> Result<(&str, Option<&str>), (u16, String)> {
     const NEEDS_ID: &str = "validate body needs request_id";
 
     let Some(object) = body.as_object() else {
         return Err((400, NEEDS_ID.to_owned()));
     };
     let mut request_id = None;
+    let mut plan_sha256 = None;
     for (key, value) in object {
         match key.as_str() {
             "request_id" => match value {
                 Value::String(text) => request_id = Some(text.as_str()),
                 _ => return Err((400, "validate request_id must be a string".to_owned())),
             },
+            "plan_sha256" => match value {
+                Value::String(text) => plan_sha256 = Some(text.as_str()),
+                _ => return Err((400, "validate plan_sha256 must be a string".to_owned())),
+            },
             other => return Err((400, format!("validate body rejects {other}"))),
         }
     }
-    request_id.ok_or_else(|| (400, NEEDS_ID.to_owned()))
+    let request_id = request_id.ok_or_else(|| (400, NEEDS_ID.to_owned()))?;
+    Ok((request_id, plan_sha256))
+}
+
+/// The one mint helper for an approved-plan binding. Only
+/// `post_capability_grant` calls it, with the hash the request stored, so a
+/// binding exists only on a grant the shell approved.
+fn mint_plan_binding(plan: &Option<String>) -> Option<PlanBinding> {
+    plan.as_ref().map(|plan_sha256| PlanBinding {
+        plan_sha256: plan_sha256.clone(),
+    })
+}
+
+/// One binding compare. A grant with no binding accepts any use, as before. A
+/// bound grant accepts only a use that names its exact hash.
+fn plan_accepts(binding: Option<&PlanBinding>, plan_sha256: Option<&str>) -> bool {
+    match binding {
+        None => true,
+        Some(binding) => plan_sha256 == Some(binding.plan_sha256.as_str()),
+    }
+}
+
+/// The one bound-grant refusal (M1 check A15a).
+fn plan_not_bound() -> (u16, String) {
+    (403, "grant is not bound to this plan".to_owned())
 }
 
 /// The five status strings from the resident-instance list.
@@ -1310,11 +1396,15 @@ fn grant_body(body: &Value) -> Result<(&str, &str, &str), (u16, String)> {
     Ok((request_id, duration, rationale.unwrap_or(DEFAULT_RATIONALE)))
 }
 
-/// The request body's only keys are `resource`, `action` and a `reason`.
+/// The request body's only keys are `resource`, `action`, a `reason` and an
+/// optional plan preview (`plan`, the preview's `sha256`).
 ///
 /// The returned action is the given text; its lowercase form is checked by the
-/// caller. A missing reason is `""`.
-fn request_body(body: &Value) -> Result<(&str, &str, &str), (u16, String)> {
+/// caller. A missing reason is `""`. A `plan` that is not a string is status
+/// 400 with its own reason, and any other `plan*` key is `request body rejects
+/// ` plus that key, so a plan value is never silently dropped. A string `plan`
+/// is stored as given: it is the hash of the plan already previewed.
+fn request_body(body: &Value) -> Result<(&str, &str, &str, Option<&str>), (u16, String)> {
     const NEEDS_RESOURCE: &str = "request body needs resource";
     const NEEDS_ACTION: &str = "request body needs action";
 
@@ -1324,9 +1414,11 @@ fn request_body(body: &Value) -> Result<(&str, &str, &str), (u16, String)> {
     let mut resource = None;
     let mut action = None;
     let mut reason = "";
+    let mut plan = None;
     let mut resource_not_string = false;
     let mut action_not_string = false;
     let mut reason_not_string = false;
+    let mut plan_not_string = false;
     for (key, value) in object {
         match key.as_str() {
             "resource" => match value {
@@ -1340,6 +1432,10 @@ fn request_body(body: &Value) -> Result<(&str, &str, &str), (u16, String)> {
             "reason" => match value {
                 Value::String(text) => reason = text.as_str(),
                 _ => reason_not_string = true,
+            },
+            "plan" => match value {
+                Value::String(text) => plan = Some(text.as_str()),
+                _ => plan_not_string = true,
             },
             other => {
                 return Err((400, format!("request body rejects {other}")));
@@ -1361,7 +1457,10 @@ fn request_body(body: &Value) -> Result<(&str, &str, &str), (u16, String)> {
     if reason_not_string {
         return Err((400, "request reason must be a string".to_owned()));
     }
-    Ok((resource, action, reason))
+    if plan_not_string {
+        return Err((400, "request plan must be a string".to_owned()));
+    }
+    Ok((resource, action, reason, plan))
 }
 
 /// The stop body is an object whose only key is a non-empty string `reason`.
@@ -5458,6 +5557,7 @@ mod tests {
             status: RequestStatus::Denied,
             decision_reason: "denied earlier".to_owned(),
             settled_by: Some("shell"),
+            plan: None,
         });
         seed_shared_request(&mut standin, "req-1", "component-1");
         standin
@@ -5624,6 +5724,7 @@ mod tests {
             status: RequestStatus::Denied,
             decision_reason: "denied earlier".to_owned(),
             settled_by: Some("shell"),
+            plan: None,
         });
         standin.set_instant(300);
         assert_eq!(
