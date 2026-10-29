@@ -115,7 +115,12 @@ fn finding_uses_live_head_and_bytes() {
         .expect("digest")
         .to_string();
     assert_eq!(digest.len(), 64);
-    for finding_id in [FUNC_FINDING_ID, MODULE_FINDING_ID, TYPE_FINDING_ID] {
+    for finding_id in [
+        FUNC_FINDING_ID,
+        MODULE_FINDING_ID,
+        TYPE_FINDING_ID,
+        COMPONENT_FINDING_ID,
+    ] {
         let line = read_live_attribution(finding_id);
         assert_live_attribution(&line, finding_id, &commit, &digest);
         let frozen = attribution(finding_id, "frozen-commit", "frozen-digest");
@@ -209,6 +214,11 @@ fn clean_run_writes_no_finding() {
             TYPE_FINDING_FILE,
             accept_detail("type", "env"),
         ),
+        (
+            COMPONENT_FINDING_ID,
+            COMPONENT_FINDING_FILE,
+            accept_detail("component-kind", "env"),
+        ),
     ];
     for (finding_id, file_name, detail) in cases {
         let finding = dir.join(file_name);
@@ -225,6 +235,7 @@ fn clean_run_writes_no_finding() {
     assert_no_finding(&finding_path(FUNC_FINDING_FILE));
     assert_no_finding(&finding_path(MODULE_FINDING_FILE));
     assert_no_finding(&finding_path(TYPE_FINDING_FILE));
+    assert_no_finding(&finding_path(COMPONENT_FINDING_FILE));
     let _ = fs::remove_dir_all(&dir);
 }
 
