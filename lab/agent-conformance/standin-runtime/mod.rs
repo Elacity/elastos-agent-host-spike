@@ -114,6 +114,9 @@ struct Admitted {
     accepted: Vec<String>,
 }
 
+/// One launched guest. `post_capsules` is the only writer of `instances`: it
+/// makes the `check_bundle` call over the row's admitted signature before the
+/// push, so every launch path re-verifies the signed bundle on disk now.
 struct Instance {
     id: String,
     name: String,

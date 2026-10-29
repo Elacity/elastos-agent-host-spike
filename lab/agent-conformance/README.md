@@ -71,6 +71,11 @@ requires that named test to run and fail; a build or test-loading error does
 not count. Restore the source bytes before running the normal suite again.
 
 The [runbook](RUNBOOK.md) gives the one-command table and retained `VERSIONS.json` receipt: `lab/agent-conformance/run.sh`.
+The `contract` tests drive the stand-in through its routes only. `standin_tampered_bundle_is_refused_on_every_launch_path`
+admits a signed bundle, launches it, stops it through `DELETE /api/capsules/:id`, changes one payload byte, and requires
+every later `POST /api/capsules` for that admitted CID to answer the bundle library's name-mismatch refusal while the
+capsule list keeps its stopped instance. `post_capsules` is the stand-in's only writer of launched instances.
+
 The `harness` module owns fresh Homes and the one bounded launch primitive.
 The no-operator Runtime checks require the operator-lookup refusal. The effect
 checks use the ready operator recipe and require the guest lifecycle refusal. A decoy coordinates file proves which data
