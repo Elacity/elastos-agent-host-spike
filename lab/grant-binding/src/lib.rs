@@ -67,6 +67,7 @@ pub(crate) struct GrantRecord {
     instance: InstanceId,
     owned_root: String,
     rights: Rights,
+    parent: Option<Handle>,
 }
 
 /// The binding copied out after a successful check.
@@ -132,6 +133,7 @@ pub struct Verifier {
     grants: HashMap<Handle, GrantRecord>,
     next_instance: u64,
     next_handle: u64,
+    pending_parent: Option<Handle>,
     #[allow(dead_code)] // later slices fill the ledger
     ledger: std::sync::Mutex<ledger::Ledger>,
 }
@@ -144,6 +146,7 @@ impl Verifier {
             grants: HashMap::new(),
             next_instance: 0,
             next_handle: 0,
+            pending_parent: None,
             ledger: std::sync::Mutex::new(ledger::Ledger::new()),
         }
     }
@@ -175,6 +178,7 @@ impl Verifier {
         resource: &str,
         rights: Rights,
     ) -> Result<Handle, Refuse> {
+        let parent = self.pending_parent.take();
         let record = self
             .registry
             .get(&instance)
@@ -193,6 +197,7 @@ impl Verifier {
                 instance,
                 owned_root,
                 rights,
+                parent,
             },
         );
         Ok(handle)
@@ -212,6 +217,26 @@ impl Verifier {
     /// Removes one grant from the one store.
     pub fn revoke_grant(&mut self, handle: Handle) {
         self.grants.remove(&handle);
+        self.remove_derived_grants(handle);
+    }
+
+    fn remove_derived_grants(&mut self, handle: Handle) {
+        let mut removed = vec![handle];
+        let mut index = 0;
+        while index < removed.len() {
+            let parent = removed[index];
+            index += 1;
+            let children: Vec<Handle> = self
+                .grants
+                .iter()
+                .filter(|(_, record)| record.parent == Some(parent))
+                .map(|(child, _)| *child)
+                .collect();
+            for child in children {
+                self.grants.remove(&child);
+                removed.push(child);
+            }
+        }
     }
 
     /// Changes the registry identity for a live instance.
@@ -1266,4 +1291,103 @@ fn model_revoke_one_app_stops_only_that_app() {
         .expect("notes effect remains");
     assert_eq!(kept.identity, "notes");
     assert_eq!(kept.owned_root, "UsersAI/notes/pad");
+}
+
+#[test]
+fn model_revoke_stops_derived_child_journals() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let notes = verifier.register_instance("notes", "session-a");
+    let library = verifier
+        .ask_capability(photo, "UsersAI/photo/library", rights(), Asker::App)
+        .expect("library ask");
+    let album = verifier
+        .ask_capability(photo, "UsersAI/photo/album", rights(), Asker::App)
+        .expect("album ask");
+    let notes_handle = verifier
+        .ask_capability(notes, "UsersAI/notes/pad", rights(), Asker::App)
+        .expect("notes ask");
+    let photo_call = verifier.open_call(photo);
+    let notes_call = verifier.open_call(notes);
+    let roll = verifier
+        .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    assert_eq!(
+        verifier
+            .use_grant(photo_call, &guest(roll))
+            .expect("child effect")
+            .owned_root,
+        "UsersAI/photo/library/roll"
+    );
+    verifier.revoke_grant(library);
+    let stopped = verifier
+        .use_grant(photo_call, &guest(library))
+        .expect_err("revoked library");
+    assert_eq!(stopped, Refuse::UnknownHandle);
+    let child_stopped = verifier
+        .use_grant(photo_call, &guest(roll))
+        .expect_err("revoked child journal");
+    assert_eq!(child_stopped, Refuse::UnknownHandle);
+    assert_eq!(child_stopped.to_string(), "unknown handle");
+    let album_kept = verifier
+        .use_grant(photo_call, &guest(album))
+        .expect("album grant stays");
+    assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
+    let notes_kept = verifier
+        .use_grant(notes_call, &guest(notes_handle))
+        .expect("notes grant stays");
+    assert_eq!(notes_kept.identity, "notes");
+    assert_eq!(notes_kept.owned_root, "UsersAI/notes/pad");
+}
+
+#[test]
+fn model_failed_child_keeps_next_ask_independent() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .ask_capability(photo, "UsersAI/photo/library", rights(), Asker::App)
+        .expect("library ask");
+    let photo_call = verifier.open_call(photo);
+    let refusal = verifier
+        .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/other")
+        .expect_err("child outside the library");
+    assert_eq!(refusal, ops::OperateRefuse::Binding(Refuse::OutsideRoot));
+    assert_eq!(refusal.to_string(), "use path leaves the owned root");
+    let album = verifier
+        .ask_capability(photo, "UsersAI/photo/album", rights(), Asker::App)
+        .expect("album ask");
+    verifier.revoke_grant(library);
+    let stopped = verifier
+        .use_grant(photo_call, &guest(library))
+        .expect_err("revoked library");
+    assert_eq!(stopped, Refuse::UnknownHandle);
+    let album_kept = verifier
+        .use_grant(photo_call, &guest(album))
+        .expect("independent album stays");
+    assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
+}
+
+#[test]
+fn model_successful_child_keeps_next_ask_independent() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .ask_capability(photo, "UsersAI/photo/library", rights(), Asker::App)
+        .expect("library ask");
+    let photo_call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    let album = verifier
+        .ask_capability(photo, "UsersAI/photo/album", rights(), Asker::App)
+        .expect("album ask");
+    verifier.revoke_grant(library);
+    let child_stopped = verifier
+        .use_grant(photo_call, &guest(roll))
+        .expect_err("revoked child journal");
+    assert_eq!(child_stopped, Refuse::UnknownHandle);
+    let album_kept = verifier
+        .use_grant(photo_call, &guest(album))
+        .expect("independent album stays");
+    assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
 }

@@ -15,6 +15,8 @@ reference model, not the Runtime; counts toward no M1 check; the Runtime half is
 
 `Verifier::revoke_grant` removes one handle from the one grant store. That app's next effect is refused and another app's grant stays. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
 
+`Verifier::revoke_grant` also removes every child journal minted from that grant. A grant asked on its own stays. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
 `Verifier::admit_ask` caps one agent's budget ask and stores the granted amount through the one `admit`. This is a lab stand-in for that admission. It is not the Runtime. It does not count toward A7 or M1-R.
 
 A forged identity, session, instance, usage, ceiling or set of rights changes
