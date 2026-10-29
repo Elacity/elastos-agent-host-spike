@@ -641,6 +641,181 @@ fn model_forged_instance_does_not_move_the_reserve() {
 }
 
 #[test]
+fn model_forged_append_does_not_move_the_reserve() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    let reservation = verifier
+        .reserve(&call, &request, 4)
+        .expect("forged append does not move the reserve");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_overwrite_does_not_move_the_reserve() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_overwrite);
+    let reservation = verifier
+        .reserve(&call, &request, 4)
+        .expect("forged overwrite does not move the reserve");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_child_journal_does_not_move_the_reserve() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let reservation = verifier
+        .reserve(&call, &request, 4)
+        .expect("forged child journal does not move the reserve");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_identity_does_not_move_the_reserve() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    let reservation = verifier
+        .reserve(&call, &request, 4)
+        .expect("forged identity does not move the reserve");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_session_does_not_move_the_reserve() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    let reservation = verifier
+        .reserve(&call, &request, 4)
+        .expect("forged session does not move the reserve");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_ceiling_does_not_move_the_reserve() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_ceiling: 1,
+        ..guest(handle)
+    };
+    assert!(request.forged_ceiling > 0);
+    let reservation = verifier
+        .reserve(&call, &request, 4)
+        .expect("forged ceiling does not move the reserve");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_reported_usage_does_not_move_the_reserve() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(handle)
+    };
+    assert!(request.reported_usage > 0);
+    let reservation = verifier
+        .reserve(&call, &request, 4)
+        .expect("reported usage does not move the reserve");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
 fn model_settle_known_outcome_charges_the_measured_figure() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
