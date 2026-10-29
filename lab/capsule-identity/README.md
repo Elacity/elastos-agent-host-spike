@@ -1828,7 +1828,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 278 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 291 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1877,7 +1877,8 @@ F-CI49a to F-CI49c (see
 [the lab package record](#lab-package-record-outside-the-bundle)), and task
 059's F-CI59a to F-CI59c (F-CI59a: see
 [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1); F-CI59b and
-F-CI59c: see [what it is](#what-it-is-and-what-it-is-not)).
+F-CI59c: see [what it is](#what-it-is-and-what-it-is-not)), and task 073's
+F-CI73a to F-CI73m (see [dependency closure](#dependency-closure)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -1999,6 +2000,14 @@ still checks the rule, and this paragraph is the disposition, outside the
 count below. F-CI32b to F-CI32e, F-CI36b, F-CI35c and F-CI44a to F-CI44c keep
 their ids, bugs and named tests; F-CI44a's answer line text changed with the
 shared `path`, and F-CI35a's and F-CI35b's anchors changed with the asks map.
+Task 073's entries all edit `src/lib.rs`, in the dependency closure the task
+appends: F-CI73a on the open-stack arm, F-CI73b on the missing-entry return,
+F-CI73c on the depth compare, F-CI73d and F-CI73m on the one `LabCid` parse
+line (entries may share one anchor), F-CI73e on the finished arm's
+short-circuit, F-CI73f on the finished arm's remembered height, F-CI73g on
+the child loop, F-CI73h on the cycle path's start, and F-CI73i to F-CI73l on
+the four display arms. Each anchor is a line task 073 added, found exactly
+once. Task 073 changed no older edit's text.
 Task 047's entries all edit `src/lib.rs`, in `encode_listed_files`: F-CI47a on
 the root line (`encode_directory(&root, "", &naming_hash)`), F-CI47b on the
 leaf's `tsize` line, and F-CI47c on the size refusal. Each anchor is a line
@@ -2210,3 +2219,39 @@ The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
 030, 031 and 032 prove each of their falsifiers by break, named test fails, revert.
 
 The signature answers only whether this test key signed this lab CID.
+
+## Dependency closure
+
+`dependency_closure(root, deps, max_depth)` walks a caller-supplied map from
+one printed lab CID to the printed lab CIDs it declares. Every reachable node
+is returned once, in post-order: a node's dependencies come before it, and
+each child list is walked in the order the caller stores it. The walk reads no
+folder, no manifest and no network. It is identity data only: it admits no
+bundle, grants nothing and launches nothing, and P2-2's install and launch path
+stays the Runtime's.
+
+`deps` is a `BTreeMap<String, Vec<String>>`. Each node, the root and every
+child, is parsed with `LabCid`'s one `FromStr`, so the closure keeps one
+identity and adds no second parser, no `is_lab_cid` and no digest-prefix name.
+The root is visited at depth 0; a node deeper than `max_depth` is refused. A
+node on the current stack is a cycle, and its path starts and ends with that
+node. A finished node is not walked again, but the walk remembers the deepest
+path below it and still refuses a later, deeper path through it; without that
+remembered height a finished node would hide a chain past the cap.
+
+The refusals are `DependencyRefusal::NotALabCid(Refusal)` (the parse's own
+refusal and text; it wins over a missing entry), `Missing(name)`,
+`Cycle(path)` and `TooDeep(max_depth)`, with the texts `missing dependency:
+{name}`, `cycle: {path joined by " -> "}` and `dependency chain deeper than
+{max_depth}`. An error returns no partial closure.
+
+Five tests in `tests/dependency_closure.rs` mint each node with
+`encode_entries` over one distinct `BundleEntry`, so no fixture folder is
+read: `dependency_diamond_visits_the_shared_node_once` asserts the complete
+post-order, `dependency_cycle_names_its_path` asserts the complete cycle at
+and below the root, `missing_dependency_is_refused` covers a child and the
+root, `dependency_depth_cap_is_enforced` covers the cap, the empty root at cap
+0 and the path hidden behind a finished node, and
+`dependency_name_that_is_not_a_lab_cid_is_refused` covers the root, a child,
+the shared parser and the one identity. F-CI73a to F-CI73m plant the bugs
+these tests catch.

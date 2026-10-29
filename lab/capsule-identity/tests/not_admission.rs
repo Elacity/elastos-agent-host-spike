@@ -110,9 +110,10 @@ fn valid_signature_grants_nothing_by_itself() {
 /// signer and its two verifiers. The last four are task 015's variant
 /// binding: its payload, its signer and its two verifiers. The last two are
 /// task 049's: the package record's one signer and one verifier over a lab
-/// CID, which the folder and checked record calls use. None admits, grants
-/// or launches.
-const IDENTITY_FUNCTIONS: [&str; 28] = [
+/// CID, which the folder and checked record calls use. The last is task 073's
+/// dependency closure over printed lab CIDs, identity data only. None admits,
+/// grants or launches.
+const IDENTITY_FUNCTIONS: [&str; 29] = [
     "lab_cid",
     "lab_cid_observed",
     "checked_bundle",
@@ -141,6 +142,7 @@ const IDENTITY_FUNCTIONS: [&str; 28] = [
     "verify_variant_binding",
     "sign_cid_record",
     "verify_cid_record",
+    "dependency_closure",
 ];
 
 /// How many times each name occurs in `names`.

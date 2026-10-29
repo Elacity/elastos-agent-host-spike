@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049 and 059). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049, 059 and 073). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -4608,6 +4608,214 @@
       ],
       "tests": [
         "the_lab_encoder_is_a_test_oracle"
+      ]
+    },
+    {
+      "id": "F-CI73a",
+      "title": "the open-stack arm returns Ok, so a cycle is never refused",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            Some(DependencyMark::Open) => {\n                let start = self.stack.iter().position(|n| n == name).unwrap_or(0);\n                let mut path = self.stack[start..].to_vec();\n                path.push(name.to_owned());\n                return Err(DependencyRefusal::Cycle(path));\n            }\n",
+          "new": "            Some(DependencyMark::Open) => {\n                return Ok(());\n            }\n"
+        }
+      ],
+      "tests": [
+        "dependency_cycle_names_its_path"
+      ]
+    },
+    {
+      "id": "F-CI73b",
+      "title": "a missing dependency is walked as a node with no children instead of Missing",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        let Some(children) = self.deps.get(name).cloned() else {\n            return Err(DependencyRefusal::Missing(name.to_owned()));\n        };\n",
+          "new": "        let children = self.deps.get(name).cloned().unwrap_or_default();\n"
+        }
+      ],
+      "tests": [
+        "missing_dependency_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI73c",
+      "title": "the depth cap off by one lets a chain one level past it through",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        if depth > self.max_depth {\n",
+          "new": "        if depth > self.max_depth.saturating_add(1) {\n"
+        }
+      ],
+      "tests": [
+        "dependency_depth_cap_is_enforced"
+      ]
+    },
+    {
+      "id": "F-CI73d",
+      "title": "the walk drops LabCid::from_str, so a non-CID name is refused as missing",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        let _ = name\n            .parse::<LabCid>()\n            .map_err(DependencyRefusal::NotALabCid)?;\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "dependency_name_that_is_not_a_lab_cid_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI73e",
+      "title": "a finished node is walked again instead of stopping at its finished mark",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            Some(DependencyMark::Done) => {\n                if depth + self.heights.get(name).copied().unwrap_or(0) > self.max_depth {\n                    return Err(DependencyRefusal::TooDeep(self.max_depth));\n                }\n                return Ok(());\n            }\n",
+          "new": "            Some(DependencyMark::Done) => {}\n"
+        }
+      ],
+      "tests": [
+        "dependency_diamond_visits_the_shared_node_once"
+      ]
+    },
+    {
+      "id": "F-CI73f",
+      "title": "a finished node answers no remembered height, hiding a deeper path through it",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "                if depth + self.heights.get(name).copied().unwrap_or(0) > self.max_depth {\n                    return Err(DependencyRefusal::TooDeep(self.max_depth));\n                }\n                return Ok(());\n",
+          "new": "                return Ok(());\n"
+        }
+      ],
+      "tests": [
+        "dependency_depth_cap_is_enforced"
+      ]
+    },
+    {
+      "id": "F-CI73g",
+      "title": "each child list is walked in reverse order",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        for child in &children {\n",
+          "new": "        for child in children.iter().rev() {\n"
+        }
+      ],
+      "tests": [
+        "dependency_diamond_visits_the_shared_node_once"
+      ]
+    },
+    {
+      "id": "F-CI73h",
+      "title": "the cycle path starts at the stack root instead of the repeated node",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "                let start = self.stack.iter().position(|n| n == name).unwrap_or(0);\n",
+          "new": "                let start = 0;\n"
+        }
+      ],
+      "tests": [
+        "dependency_cycle_names_its_path"
+      ]
+    },
+    {
+      "id": "F-CI73i",
+      "title": "the missing-dependency message drops its colon",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            DependencyRefusal::Missing(name) => write!(f, \"missing dependency: {name}\"),\n",
+          "new": "            DependencyRefusal::Missing(name) => write!(f, \"missing dependency {name}\"),\n"
+        }
+      ],
+      "tests": [
+        "missing_dependency_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI73j",
+      "title": "the cycle message drops its colon",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            DependencyRefusal::Cycle(path) => write!(f, \"cycle: {}\", path.join(\" -> \")),\n",
+          "new": "            DependencyRefusal::Cycle(path) => write!(f, \"cycle {}\", path.join(\" -> \")),\n"
+        }
+      ],
+      "tests": [
+        "dependency_cycle_names_its_path"
+      ]
+    },
+    {
+      "id": "F-CI73k",
+      "title": "the too-deep refusal prints its own text instead of the cap sentence",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            DependencyRefusal::TooDeep(max_depth) => {\n                write!(f, \"dependency chain deeper than {max_depth}\")\n            }\n",
+          "new": "            DependencyRefusal::TooDeep(max_depth) => {\n                write!(f, \"chain too deep: {max_depth}\")\n            }\n"
+        }
+      ],
+      "tests": [
+        "dependency_depth_cap_is_enforced"
+      ]
+    },
+    {
+      "id": "F-CI73l",
+      "title": "a not-a-lab-CID refusal prints its own text instead of the parse's",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "            DependencyRefusal::NotALabCid(refusal) => refusal.fmt(f),\n",
+          "new": "            DependencyRefusal::NotALabCid(refusal) => write!(f, \"not a lab CID: {refusal}\"),\n"
+        }
+      ],
+      "tests": [
+        "dependency_name_that_is_not_a_lab_cid_is_refused"
+      ]
+    },
+    {
+      "id": "F-CI73m",
+      "title": "the walk replaces LabCid::from_str with a 59-character length check",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "        let _ = name\n            .parse::<LabCid>()\n            .map_err(DependencyRefusal::NotALabCid)?;\n",
+          "new": "        if name.len() != 59 {\n            return Err(DependencyRefusal::NotALabCid(Refusal::NotALabCid {\n                claimed: name.to_owned(),\n            }));\n        }\n"
+        }
+      ],
+      "tests": [
+        "dependency_name_that_is_not_a_lab_cid_is_refused"
       ]
     }
   ]

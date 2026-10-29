@@ -1927,3 +1927,134 @@ fn require_recipe_cid(binding: &VariantBinding, recipe: &[u8]) -> Result<(), Ref
     }
     Ok(())
 }
+
+/// Why a dependency closure was refused.
+///
+/// Each refusal has its own reason: a name that does not parse as a lab CID
+/// carries the one parse's [`Refusal`], so the caller gets the same text as a
+/// name check; a dependency with no map entry names itself; a cycle names the
+/// path from its first node back to itself; and a chain past the caller's cap
+/// names the cap. A refusal returns no partial closure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DependencyRefusal {
+    /// A name is not a lab CID. The [`Refusal`] is [`LabCid`]'s parse's own.
+    NotALabCid(Refusal),
+    /// A name parses but the caller's map holds no entry for it.
+    Missing(String),
+    /// The walk met a node already on its current stack. The path starts and
+    /// ends with that node.
+    Cycle(Vec<String>),
+    /// A reachable node sits deeper than the caller's cap. The value is the
+    /// cap.
+    TooDeep(usize),
+}
+
+impl fmt::Display for DependencyRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DependencyRefusal::NotALabCid(refusal) => refusal.fmt(f),
+            DependencyRefusal::Missing(name) => write!(f, "missing dependency: {name}"),
+            DependencyRefusal::Cycle(path) => write!(f, "cycle: {}", path.join(" -> ")),
+            DependencyRefusal::TooDeep(max_depth) => {
+                write!(f, "dependency chain deeper than {max_depth}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DependencyRefusal {}
+
+/// Every bundle CID reachable from `root` through the caller's `deps` map,
+/// once, dependencies before the node that declares them.
+///
+/// A node is a printed lab CID. `deps` maps each such node to the nodes it
+/// declares, in the order the caller stores them; the walk reads no folder,
+/// no manifest and no network. The root sits at depth 0, and a node is
+/// refused when its depth is over `max_depth`. Each name, the root and every
+/// child, is parsed with [`LabCid`]'s one `FromStr` before it is walked; text
+/// that does not parse is refused with that parse's [`Refusal`], before a
+/// missing map entry is considered. A node already on the current stack is a
+/// [`DependencyRefusal::Cycle`], and one already finished is not walked
+/// again, though its remembered height still answers whether a deeper path
+/// through it is over the cap. An error returns no partial list.
+///
+/// The result is identity data, not a decision: this call admits no bundle,
+/// grants nothing and launches nothing.
+pub fn dependency_closure(
+    root: &str,
+    deps: &std::collections::BTreeMap<String, Vec<String>>,
+    max_depth: usize,
+) -> Result<Vec<String>, DependencyRefusal> {
+    let mut walk = DependencyWalk {
+        deps,
+        max_depth,
+        marks: std::collections::BTreeMap::new(),
+        heights: std::collections::BTreeMap::new(),
+        out: Vec::new(),
+        stack: Vec::new(),
+    };
+    walk.visit(root, 0)?;
+    Ok(walk.out)
+}
+
+/// Where a node stands in the walk: on the current stack, or finished.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DependencyMark {
+    Open,
+    Done,
+}
+
+/// One depth-first walk over the caller's map.
+struct DependencyWalk<'a> {
+    deps: &'a std::collections::BTreeMap<String, Vec<String>>,
+    max_depth: usize,
+    marks: std::collections::BTreeMap<String, DependencyMark>,
+    heights: std::collections::BTreeMap<String, usize>,
+    out: Vec<String>,
+    stack: Vec<String>,
+}
+
+impl DependencyWalk<'_> {
+    /// Visit `name` at `depth`, adding it after its dependencies. The
+    /// remembered height is the deepest path below a finished node, relative
+    /// to that node, so a later encounter at a greater depth still resolves
+    /// its deepest descendant against the cap.
+    fn visit(&mut self, name: &str, depth: usize) -> Result<(), DependencyRefusal> {
+        let _ = name
+            .parse::<LabCid>()
+            .map_err(DependencyRefusal::NotALabCid)?;
+        if depth > self.max_depth {
+            return Err(DependencyRefusal::TooDeep(self.max_depth));
+        }
+        match self.marks.get(name) {
+            Some(DependencyMark::Done) => {
+                if depth + self.heights.get(name).copied().unwrap_or(0) > self.max_depth {
+                    return Err(DependencyRefusal::TooDeep(self.max_depth));
+                }
+                return Ok(());
+            }
+            Some(DependencyMark::Open) => {
+                let start = self.stack.iter().position(|n| n == name).unwrap_or(0);
+                let mut path = self.stack[start..].to_vec();
+                path.push(name.to_owned());
+                return Err(DependencyRefusal::Cycle(path));
+            }
+            None => {}
+        }
+        let Some(children) = self.deps.get(name).cloned() else {
+            return Err(DependencyRefusal::Missing(name.to_owned()));
+        };
+        self.marks.insert(name.to_owned(), DependencyMark::Open);
+        self.stack.push(name.to_owned());
+        let mut height = 0;
+        for child in &children {
+            self.visit(child, depth + 1)?;
+            height = height.max(self.heights.get(child).copied().unwrap_or(0) + 1);
+        }
+        self.stack.pop();
+        self.marks.insert(name.to_owned(), DependencyMark::Done);
+        self.heights.insert(name.to_owned(), height);
+        self.out.push(name.to_owned());
+        Ok(())
+    }
+}
