@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use useful_task::{judge, load_spec, sha256_hex, Schema, Verdict};
 
 const M1: &str = "A4: Each agent completes one useful task through real Runtime resources (model via a Runtime grant, DeepSeek on the Sparks); the permitted effect succeeds (granted_effect_succeeds).";
-const REASONS: [&str; 8] = [
+const REASONS: [&str; 9] = [
     "task",
     "input",
     "recorded",
@@ -12,6 +12,7 @@ const REASONS: [&str; 8] = [
     "echo",
     "fixed-string",
     "shape",
+    "duplicate",
     "mismatch",
 ];
 const FIXED_STRINGS: [&str; 4] = ["ok", "done", "TODO", "pass"];
@@ -349,6 +350,30 @@ fn checker_accepts_recorded_answer_and_refuses_stubs() {
             refused("shape"),
         ),
         (r#"["Oak Street","apples","13:00"]"#, refused("shape")),
+        (
+            r#"{"place":"Pine Street","goods":"apples","close":"13:00","place":"Oak Street"}"#,
+            refused("duplicate"),
+        ),
+        (
+            r#"{"place":"Pine Street","goods":"apples","close":"13:00","\u0070lace":"Oak Street"}"#,
+            refused("duplicate"),
+        ),
+        (
+            r#"{"place":"Oak Street","goods":"apples","close":"13:00","place":"Pine Street"}"#,
+            refused("duplicate"),
+        ),
+        (
+            r#"{"place":"Oak Street","goods":"apples","close":"13:00","owner":"stall","owner":"stall"}"#,
+            refused("duplicate"),
+        ),
+        (
+            r#"{"place":"Oak Street","goods":"apples \"place\"","close":"13:00"}"#,
+            refused("mismatch"),
+        ),
+        (
+            r#"{"place":"Oak Street","goods":"apples","close":"13:00"} x"#,
+            refused("shape"),
+        ),
     ];
     for (answer, verdict) in a_answers {
         assert_eq!(
@@ -383,6 +408,10 @@ fn checker_accepts_recorded_answer_and_refuses_stubs() {
         (
             r#"{"items":[{"date":"2026-03-14","text":"stall opens","extra":"value"}]}"#,
             refused("shape"),
+        ),
+        (
+            r#"{"items":[{"date":"2026-03-16","text":"stall opens","date":"2026-03-14"},{"date":"2026-03-15","text":"crate list due"}]}"#,
+            refused("duplicate"),
         ),
     ];
     for (answer, verdict) in b_answers {

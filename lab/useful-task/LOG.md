@@ -332,3 +332,68 @@ restored tree passes `cargo fmt --manifest-path lab/useful-task/Cargo.toml --
 tests). The live model turn stays held.
 
 - 004: Made `judge` refuse a spec that is not one of the two named task specs, added the eight-reason order with `task` first, extended the named test with the m1 and self-consistent substitute cases, and added `F-UT2`.
+
+## 005 — judge refuses an answer that repeats a JSON key
+
+`CHECK_ORDER` now names nine checks, with `duplicate` between `shape` and
+`mismatch`. `judge` keeps `    let trimmed = answer.trim();` as its first
+statement and reads the answer through one private `parse_answer`, which
+replaces `serde_json::from_str` on the answer. `parse_answer` uses
+`serde_json::Deserializer::from_str`, one `serde::de::Visitor` (`UniqueValue`),
+and `Deserializer::end` after the value, so trailing non-whitespace is
+`AnswerParse::Invalid` and a unique-key value is `AnswerParse::Value`.
+
+The visitor builds each object with `Map::insert`. A key that is already
+present sets a `Cell` flag and returns `Error::custom("duplicate key")`, and
+`parse_answer` reads that flag as `AnswerParse::Duplicate`. A key written with
+a `\u` escape decodes to the same key, so it is the same case; an object inside
+an array uses the same visitor. Truncated JSON and any other parse error stay
+`AnswerParse::Invalid`. The expected bytes still use `serde_json::from_str`.
+
+The `shape` check refuses `AnswerParse::Invalid` and a `Value` that fails
+`schema.matches`, and it passes `AnswerParse::Duplicate`, so the new one-line
+arm decides that case:
+`            Reason::Duplicate => matches!(parsed, AnswerParse::Duplicate),`.
+The `mismatch` check compares only a `Value`, so a repeated key has no value to
+compare. Hand-setting the duplicate arm to false makes the first Context answer
+`Accept`: the named test panicked at `tests/checker.rs:379:9` with
+`left: Accept { answer_sha256: "0e7900bc0d0567eb66d8637414f5b4e4bf0ab996fbb93fb629b81cbd4c1c7345" }`
+/ `right: Refuse { reason: "duplicate" }`. The `shape` check passes
+`AnswerParse::Duplicate` and `mismatch` matches only a `Value`, so the other
+three duplicate fixtures take the same `Accept` path; the source was restored
+to the SHA-256 below afterwards.
+
+`Cargo.toml` gains `serde = "=1.0.229"`, which the lock already carried as a
+`serde_json` dependency, and the lock's root entry gains `serde`. Both
+`accept.json` files change only their `reasons` arrays to the nine labels;
+`input.txt`, `recorded.json`, `F-UT1` and `F-UT2` keep their bytes.
+
+`checker_accepts_recorded_answer_and_refuses_stubs` now uses the nine labels
+and adds six refusals: the three Context answers, the reversed-key answer, and
+a repeated key beside an extra field are `duplicate`; a unique-key answer whose
+`goods` string contains the word `place` is `mismatch`; and a valid value with
+trailing non-whitespace is `shape`. The three Context answers are `Accept`
+without the duplicate arm, so the test fails without it.
+
+### Falsifiers
+
+`F-UT3` sets the duplicate arm to false and names the same test. The shared
+runner reports:
+
+```
+baseline: 1 named tests pass without an edit, 0 do not
+F-UT1  CAUGHT                             1s  accept every answer before the judge reads it
+F-UT2  CAUGHT                             1s  skip the named-task check
+F-UT3  CAUGHT                             1s  skip the duplicate-key check
+summary: 3 CAUGHT of 3
+```
+
+The command exited 0, `lab/useful-task/src/lib.rs.falsify-original` is absent,
+and `src/lib.rs` kept SHA-256
+`5ff9694e7362b1611eaac6967e4af6975965e6e08f7245ca3334545230d4e7d2` across the
+run. The restored tree passes
+`cargo fmt --manifest-path lab/useful-task/Cargo.toml -- --check`, the named
+test, and the full `cargo test --locked` run (one integration test and six
+doctests). The live model turn stays held.
+
+- 005: Made `parse_answer` refuse a repeated object key with one deserializer and one visitor, added the nine-reason order with `duplicate` between `shape` and `mismatch`, extended the named test with the duplicate and unique-key cases, and added `F-UT3`.

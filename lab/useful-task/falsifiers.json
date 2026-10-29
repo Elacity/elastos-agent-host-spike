@@ -28,6 +28,20 @@
         }
       ],
       "tests": ["checker_accepts_recorded_answer_and_refuses_stubs"]
+    },
+    {
+      "id": "F-UT3",
+      "title": "skip the duplicate-key check",
+      "command": "useful-task",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/useful-task/src/lib.rs",
+          "old": "            Reason::Duplicate => matches!(parsed, AnswerParse::Duplicate),\n",
+          "new": "            Reason::Duplicate => false,\n"
+        }
+      ],
+      "tests": ["checker_accepts_recorded_answer_and_refuses_stubs"]
     }
   ]
 }
