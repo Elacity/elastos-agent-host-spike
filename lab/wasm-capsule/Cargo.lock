@@ -127,6 +127,7 @@ dependencies = [
  "serde_json",
  "wasm-capsule-audit",
  "wasm-capsule-tools",
+ "wat",
 ]
 
 [[package]]
