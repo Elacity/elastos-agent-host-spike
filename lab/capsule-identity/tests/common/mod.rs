@@ -105,6 +105,13 @@ pub const HAMT_OVER_THRESHOLD_LAB_CID: &str =
 /// at the root, whose own estimate is 140: the child directory is a shard and
 /// the root a basic directory. Built in a temp dir and never committed.
 pub const HAMT_CHILD_LAB_CID: &str = "bafybeihmck6tdzcctrlvqlyl35xkja36ogb2qwts7qofk5abrlzb7jr3zi";
+/// The over-threshold bundle of [`flat_bundle_at`] at 262145 with its first
+/// name holding 262145 zero bytes: a file root over two raw leaves (262144
+/// and 1 bytes), whose one-child shard link stores that root's Tsize. Built
+/// in memory and never committed; task 082 printed it first with README's
+/// Python rule.
+pub const FILE_ROOT_SHARD_LAB_CID: &str =
+    "bafybeicrdybnddq2shvm5bwhjxdz2uvaup7ztqlxos7rlmtzp5emvkneqe";
 /// The shared six-byte row's bundle: the 261945 file set with two 100-byte
 /// fillers replaced by 200-byte names whose murmur3 digests share bytes 0
 /// through 5, so the estimate is 262145. Built in a temp dir and never
@@ -168,6 +175,26 @@ pub fn flat_bundle_at(prefix: &str, estimate: usize) -> (Vec<BundleEntry>, Vec<S
         });
     }
     (entries, names, extra)
+}
+
+/// The over-threshold bundle of [`flat_bundle_at`] at 262145 with the first
+/// name it returns holding 262145 zero bytes, and that name. The name stays,
+/// so the links estimate stays 262145, and every other file stays as it was.
+/// The replaced file is one over the chunk limit, so its node is a file root
+/// over two raw leaves (262144 zeros and 1 zero), and its shard link stores
+/// that root's Tsize, not its byte length.
+pub fn shard_with_a_file_root() -> (Vec<BundleEntry>, String) {
+    let (mut entries, names, _extra) = flat_bundle_at("", 262_145);
+    let first = names.into_iter().next().expect("the file set has names");
+    let at = entries
+        .iter()
+        .position(|entry| entry.path == first)
+        .expect("the first name is an empty file of the bundle");
+    assert!(entries[at].content.is_empty(), "the first name is empty");
+    entries[at].content = vec![0; 262_145];
+    let estimate: usize = entries.iter().map(|entry| entry.path.len() + 36).sum();
+    assert_eq!(estimate, 262_145, "the file set's links estimate");
+    (entries, first)
 }
 
 /// One row of [`shared_prefix_rows`]: two 200-byte names whose murmur3

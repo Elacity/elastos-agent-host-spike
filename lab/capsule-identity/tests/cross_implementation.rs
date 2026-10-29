@@ -23,9 +23,10 @@ use std::process::Command;
 /// How many pinned bundles the check covers: seven fixtures, the recipe,
 /// the three bundles built for the profile tests, the photo stand-in
 /// consumer copy (task 047), the three bundles with a file over one leaf
-/// (tasks 048 and 076), the three HAMT-threshold bundles (task 077) and the
-/// two shared-prefix bundles (task 071).
-const PINNED_BUNDLES: usize = 20;
+/// (tasks 048 and 076), the three HAMT-threshold bundles (task 077), the
+/// shard with a file root (task 082) and the two shared-prefix bundles
+/// (task 071).
+const PINNED_BUNDLES: usize = 21;
 
 /// How many committed fixtures have a pin: all but wc001-core.
 const PINNED_FIXTURES: usize = 7;
@@ -172,6 +173,11 @@ fn pinned_bundles() -> Vec<Pinned> {
         what: "child directory over the HAMT threshold".to_owned(),
         pin: HAMT_CHILD_LAB_CID,
         entries: flat_bundle_at("photos/", 262_145).0,
+    });
+    bundles.push(Pinned {
+        what: "shard with a file root".to_owned(),
+        pin: FILE_ROOT_SHARD_LAB_CID,
+        entries: shard_with_a_file_root().0,
     });
     for row in shared_prefix_rows() {
         bundles.push(Pinned {

@@ -111,7 +111,11 @@ To recompute a lab CID by hand:
    `n` is byte `n` of the name's murmur3 x64-128 digest (seed 0, its first
    64 bits big-endian; `hello` gives `cb d8 a7 b3 41 bd 9b 02`). A bucket
    with one child is one link whose name is the bucket's two uppercase hex
-   digits and then the child's own name, to that child. A bucket with two or
+   digits and then the child's own name, to that child. That link stores the
+   child's node Tsize, so a file over one leaf in a one-child bucket
+   contributes its file-root Tsize and not its byte length;
+   `shard_with_a_file_root_has_the_pinned_cid` pins one such shard and
+   catches F-CI82a (the one-child Tsize capped at 262144). A bucket with two or
    more children is one link whose name is only the prefix, to a child shard
    built the same way from the next digest byte; that child shard may itself
    hold one link. Links go out in bucket order, each as field 2 holding the
@@ -442,19 +446,20 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
    (`python3 -I could not run: <error>`), a non-zero exit (even after it
    printed a valid CID), no output, or more than one line is refused with its
    own reason, and the test asserts each of these reasons.
-5. For each of the 20 pins, the Python answer, the pin constant and the
+5. For each of the 21 pins, the Python answer, the pin constant and the
    printed `encode_entries` result for the same files must be equal, and the
-   test asserts that it checked exactly 20 bundles. The 20 are the seven
+   test asserts that it checked exactly 21 bundles. The 21 are the seven
    pinned fixtures (`content-sample`, `web-app`, `agent-host`, `provider`,
    `model`, `provider-variant-a`, `provider-variant-b`), the recipe, the
    chunk-limit, empty-file and long-name bundles above, which are built as
    entries in memory, the photo stand-in consumer copy (task 047, see
    [naming a closure listing](#naming-a-closure-listing)), the two-leaf
    and three-leaf file bundles (task 048), the second-level file bundle
-   (task 076), the three HAMT-threshold bundles (task 077) and the two
-   shared-prefix bundles (task 071), also built in memory. `wc001-core` has
-   no pin, because its `capsule.wasm` is built on each machine, so it is not
-   checked here. Task 072's third-level file is not one of the 20 either: it
+   (task 076), the three HAMT-threshold bundles (task 077), the shard with a
+   file root (task 082) and the two shared-prefix bundles (task 071), also
+   built in memory. `wc001-core` has no pin, because its `capsule.wasm` is
+   built on each machine, so it is not checked here. Task 072's third-level
+   file is not one of the 21 either: it
    is 7936671745 bytes and is never written, so
    `file_past_174_squared_leaves_keeps_a_third_tree_level` runs the second
    driver, `THREE_LEVEL_FILE_DRIVER`, which builds its 30277 leaves and calls
@@ -465,7 +470,7 @@ cross-implementation tests). The code that runs it is in `tests/common/mod.rs`:
 | --- | --- | --- |
 | README's rule agrees with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19a (the block's `0x55` becomes `0x70` before it runs) |
 | Rust agrees with README's rule, not only with the pins | `readme_python_recomputes_every_lab_cid_pin` | F-CI19b (the encoder's `RAW_CODEC` becomes `0x56`) |
-| A missing block is no pass: exactly 20 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
+| A missing block is no pass: exactly 21 bundles are checked | `readme_python_recomputes_every_lab_cid_pin` | F-CI19c (no block found, no answers) |
 | README states the count this test checks, and three sentences say one count | `readme_python_recomputes_every_lab_cid_pin` | F-CI71c (the pins sentence drifts), F-CI71d (the checked sentence drifts), F-CI71e (the rows sentence drifts) |
 | An interpreter that cannot start fails the test | `readme_python_recomputes_every_lab_cid_pin` | F-CI19d (a program that does not exist) |
 | A non-zero exit is refused | `readme_python_recomputes_every_lab_cid_pin` | F-CI19e (exit status not checked) |
@@ -515,8 +520,8 @@ test `kubo_hash_only_import_prints_every_lab_cid_pin` names the Kubo binary in
 `LAB_KUBO`, makes a fresh temp repo, writes the provider's `Import` HAMT
 values, and runs one `add --offline --only-hash --recursive=true
 --wrap-with-directory=false` with the profile flags for each pinned bundle.
-Kubo's root, the pin and `encode_entries` are one value for all 20, and the
-test asserts it checked 20. A missing `LAB_KUBO`, a binary that is not
+Kubo's root, the pin and `encode_entries` are one value for all 21, and the
+test asserts it checked 21. A missing `LAB_KUBO`, a binary that is not
 0.40.1, and any row that differs are refused with their reason;
 `kubo_helper_refuses_bad_setup` checks the setup refusals with local stubs,
 including a version command that prints `0.40.1` and then fails.
@@ -2058,7 +2063,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 301 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 302 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -2114,9 +2119,9 @@ see [the cross-implementation check](#the-cross-implementation-check)), and
 task 071's F-CI71a and F-CI71b (see [the encoding](#the-encoding)) and
 F-CI71c to F-CI71e (see
 [the cross-implementation check](#the-cross-implementation-check)), and task
-072's F-CI72a (see [the encoding](#the-encoding)).
+072's F-CI72a and task 082's F-CI82a (see [the encoding](#the-encoding)).
 Task 077 moves F-CI18h to the links estimate, F-CI18m to the shared Tsize
-rule, F-CI19c to the missing-block empty result caught by the 20-bundle count,
+rule, F-CI19c to the missing-block empty result caught by the 21-bundle count,
 F-CI23b to the new module-doc sentence,
 and F-CI48c and F-CI48d to the shared Tsize rule's one place.
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts

@@ -492,6 +492,70 @@ fn child_directory_over_the_hamt_threshold_is_a_shard() {
 }
 
 #[test]
+fn shard_with_a_file_root_has_the_pinned_cid() {
+    // The 262145-name set is a shard; its first name holds 262145 zero
+    // bytes, one over the chunk limit, so that name's link is a file root
+    // over two raw leaves (262144 and 1 bytes). A one-child shard link
+    // stores the child's node Tsize, so the file contributes its file-root
+    // Tsize and not its byte length. The name and the estimate stay those
+    // of the empty file it replaces.
+    let (entries, replaced) = shard_with_a_file_root();
+    assert_eq!(
+        estimate(entries.iter().map(|entry| entry.path.len())),
+        262_145,
+        "the bundle's links estimate"
+    );
+    let file = entries
+        .iter()
+        .find(|entry| entry.path == replaced)
+        .expect("the replaced file is in the bundle");
+    assert_eq!(file.content.len(), 262_145, "the replaced file");
+    let (_, names, _extra) = flat_bundle_at("", 262_145);
+    assert_eq!(
+        replaced, names[0],
+        "the replaced path is the first name the helper returns"
+    );
+    let pin = FILE_ROOT_SHARD_LAB_CID;
+    let bundle = bundled(&entries);
+    let encoded = encode_entries(&entries)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    assert_eq!(
+        (name(&bundle), encoded.as_str()),
+        (pin.to_owned(), pin),
+        "(lab_cid, encode_entries) against the file-root shard pin"
+    );
+    let chunked_files: Vec<ChunkedFile> = entries
+        .iter()
+        .map(|entry| ChunkedFile {
+            path: entry.path.clone(),
+            chunks: if entry.path == replaced {
+                vec![
+                    (Sha256::digest(&entry.content[..262_144]).into(), 262_144),
+                    (Sha256::digest(&entry.content[262_144..]).into(), 1),
+                ]
+            } else {
+                vec![(
+                    Sha256::digest(&entry.content).into(),
+                    entry.content.len() as u64,
+                )]
+            },
+        })
+        .collect();
+    let by_chunks = encode_chunked_files(&chunked_files)
+        .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+        .to_string();
+    assert_eq!(by_chunks, pin, "encode_chunked_files against the pin");
+    assert_ne!(
+        pin, HAMT_OVER_THRESHOLD_LAB_CID,
+        "a file root names another value"
+    );
+    assert_ne!(pin, TWO_LEAF_FILE_LAB_CID, "the shard adds a link");
+    assert!(pin.starts_with("bafybei"), "{pin}");
+    assert_eq!(pin.len(), 59, "{pin}");
+}
+
+#[test]
 fn empty_file_has_the_pinned_cid() {
     // A zero-byte file is a raw leaf whose block is empty, with Tsize 0,
     // never a dag-pb file node.
