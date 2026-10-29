@@ -879,8 +879,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "fn type_only_component(data: &[u8], validator: &mut Validator) -> Result<(), Refusal> {",
-          "new": "fn type_only_component(data: &[u8], validator: &mut Validator) -> Result<(), Refusal> {\n    let _ = (data, validator);\n    return Ok(());"
+          "old": "fn type_only_component(data: &[u8]) -> Result<(), Refusal> {",
+          "new": "fn type_only_component(data: &[u8]) -> Result<(), Refusal> {\n    let _ = data;\n    return Ok(());"
         }
       ],
       "tests": [
@@ -890,14 +890,14 @@
     },
     {
       "id": "F-CWA23c",
-      "title": "A component that parses is accepted whatever its payloads are",
+      "title": "Accept every payload kind except a non-type export",
       "command": "lab",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/wasm-capsule/audit/src/lib.rs",
-          "old": "fn type_only_payload(payload: Payload<'_>) -> Result<(), Refusal> {",
-          "new": "fn type_only_payload(payload: Payload<'_>) -> Result<(), Refusal> {\n    let _ = payload;\n    return Ok(());"
+          "old": "        _ => Err(Refusal::CodeInCustomSection),",
+          "new": "        _ => Ok(()),"
         }
       ],
       "tests": [
@@ -918,6 +918,118 @@
       ],
       "tests": [
         "component_type_section_inside_component_type_data_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA24a",
+      "title": "The one-section count never runs",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "component_type_sections += 1;",
+          "new": "component_type_sections += 0;"
+        }
+      ],
+      "tests": [
+        "second_component_type_section_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA24b",
+      "title": "The allowlist never runs, so a type-only name is enough",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    if type_imports\n        .iter()\n        .any(|name| !ALLOWED_BUS_IMPORTS.contains(&name.as_str()))\n    {",
+          "new": "    if false {"
+        }
+      ],
+      "tests": [
+        "type_level_wasi_or_env_import_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA24c",
+      "title": "A type-level name passes when it starts with a listed string",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "        .any(|name| !ALLOWED_BUS_IMPORTS.contains(&name.as_str()))",
+          "new": "        .any(|name| !ALLOWED_BUS_IMPORTS.iter().any(|allowed| name.starts_with(allowed)))"
+        }
+      ],
+      "tests": [
+        "type_level_wasi_or_env_import_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA24d",
+      "title": "The empty-import refusal is removed",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "    if type_imports.is_empty() {",
+          "new": "    if false {"
+        }
+      ],
+      "tests": [
+        "type_level_wasi_or_env_import_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA24e",
+      "title": "The ComponentTypeDeclaration::Type walk is removed",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "                    ComponentTypeDeclaration::Type(nested) => collect_type_imports(nested, names),",
+          "new": "                    ComponentTypeDeclaration::Type(_) => {}"
+        }
+      ],
+      "tests": [
+        "type_level_wasi_or_env_import_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA24f",
+      "title": "The ComponentType::Instance walk is removed",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "        ComponentType::Instance(declarations) => {\n            for declaration in declarations.iter() {\n                if let InstanceTypeDeclaration::Type(nested) = declaration {\n                    collect_type_imports(nested, names);\n                }\n            }\n        }",
+          "new": "        ComponentType::Instance(_) => {}"
+        }
+      ],
+      "tests": [
+        "type_level_wasi_or_env_import_is_refused"
+      ]
+    },
+    {
+      "id": "F-CWA24g",
+      "title": "Reject every unpinned section",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/audit/src/lib.rs",
+          "old": "ALLOWED_BUS_IMPORTS.contains(&name.as_str())",
+          "new": "ALLOWED_BUS_IMPORTS.contains(&\"\")"
+        }
+      ],
+      "tests": [
+        "unpinned_bus_type_imports_are_accepted"
       ]
     }
   ]

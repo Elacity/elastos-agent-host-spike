@@ -4,6 +4,10 @@ use wasm_capsule_audit::{
 };
 use wasmparser::{Parser, Payload, Validator, WasmFeatures};
 
+mod common;
+
+use common::{append_custom_section, with_custom_section, COMPONENT_TYPE_NAME};
+
 fn import(module: &str, name: &str) -> DeclaredImport {
     DeclaredImport {
         module: module.into(),
@@ -28,38 +32,6 @@ fn assert_undeclared(wasm: &[u8], declared: &[DeclaredImport], expected: &Declar
 
 fn read_source(relative: &str) -> String {
     fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)).unwrap()
-}
-
-const COMPONENT_TYPE_NAME: &[u8] =
-    b"component-type:wit-bindgen:0.57.1:elastos:bus@1.0.0:product-capsule-v1:encoded world";
-
-fn leb_u32(mut value: usize) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    loop {
-        let byte = (value & 0x7f) as u8;
-        value >>= 7;
-        if value == 0 {
-            bytes.push(byte);
-            return bytes;
-        }
-        bytes.push(byte | 0x80);
-    }
-}
-
-// A core module whose last section is a custom section with a multi-byte size.
-fn with_custom_section(name: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut wasm = wat::parse_str("(module)").unwrap();
-    append_custom_section(&mut wasm, name, data);
-    wasm
-}
-
-fn append_custom_section(wasm: &mut Vec<u8>, name: &[u8], data: &[u8]) {
-    let mut payload = leb_u32(name.len());
-    payload.extend_from_slice(name);
-    payload.extend_from_slice(data);
-    wasm.push(0);
-    wasm.extend_from_slice(&leb_u32(payload.len()));
-    wasm.extend_from_slice(&payload);
 }
 
 #[test]
@@ -400,6 +372,9 @@ fn custom_section_carrying_code_is_refused() {
     }
 }
 
+// The committed fixture's identity. The lab proposal records the same value.
+const FIXTURE_SHA256: &str = "439929eb565421a1de4791c7e5b278ae105687eb0f12d4a965d6a6adabce24a8";
+
 #[test]
 fn wit_bindgen_component_type_section_is_accepted() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -408,7 +383,111 @@ fn wit_bindgen_component_type_section_is_accepted() {
     assert_eq!(data.len(), 1382);
     assert_eq!(&data[..8], b"\0asm\x0d\0\x01\0");
     assert_eq!(COMPONENT_TYPE_NAME.len(), 84);
+    assert_eq!(
+        read_source("UPSTREAM-PROPOSAL-COMPONENT-TYPE.md")
+            .matches(FIXTURE_SHA256)
+            .count(),
+        1
+    );
 
+    let wasm = with_custom_section(COMPONENT_TYPE_NAME, &data);
+    Validator::new().validate_all(&wasm).unwrap();
+    assert_eq!(audit(&wasm, &[]), Ok(vec![]));
+}
+
+#[test]
+fn second_component_type_section_is_refused() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wit-bindgen-0.57.1-component-type.bin");
+    let data = fs::read(fixture).unwrap();
+    let second = wat::parse_str(
+        r#"(component
+            (type $t (component (import "elastos:bus/types@1.0.0" (instance)))))"#,
+    )
+    .unwrap();
+    Validator::new().validate_all(&second).unwrap();
+
+    let mut wasm = with_custom_section(COMPONENT_TYPE_NAME, &data);
+    append_custom_section(&mut wasm, b"component-type:second", &second);
+    Validator::new().validate_all(&wasm).unwrap();
+    let refusal = audit(&wasm, &[]).unwrap_err();
+    assert_eq!(refusal, Refusal::CodeInCustomSection);
+    assert_eq!(refusal.to_string(), "code in custom section");
+}
+
+#[test]
+fn type_level_wasi_or_env_import_is_refused() {
+    let cases = [
+        (
+            "wasi environment",
+            r#"(component
+                (type $t (component
+                    (import "wasi:cli/environment@0.2.0" (instance)))))"#,
+        ),
+        (
+            "env",
+            r#"(component (type $t (component (import "env" (instance)))))"#,
+        ),
+        (
+            "newer runtime",
+            r#"(component
+                (type $t (component
+                    (import "elastos:bus/runtime@2.0.0" (instance)))))"#,
+        ),
+        (
+            // A listed string as a prefix, so a prefix match cannot pass.
+            "pre-release runtime",
+            r#"(component
+                (type $t (component
+                    (import "elastos:bus/runtime@1.0.0-rc.1" (instance)))))"#,
+        ),
+        ("no import", r#"(component (type $t (component)))"#),
+        (
+            // The wasi name sits only under `ComponentTypeDeclaration::Type`;
+            // the allowed import stays outside that walk.
+            "nested type",
+            r#"(component
+                (type $t (component
+                    (import "elastos:bus/types@1.0.0" (instance))
+                    (type $n (component
+                        (import "wasi:cli/environment@0.2.0" (instance)))))))"#,
+        ),
+        (
+            // The wasi name sits only under `ComponentType::Instance`; the
+            // allowed import is a separate type, so only the instance walk
+            // reaches it.
+            "nested instance",
+            r#"(component
+                (type $a (component
+                    (import "elastos:bus/types@1.0.0" (instance))))
+                (type $i (instance
+                    (type $n (component
+                        (import "wasi:cli/environment@0.2.0" (instance)))))))"#,
+        ),
+    ];
+    for (label, source) in cases {
+        let data = wat::parse_str(source).unwrap();
+        Validator::new().validate_all(&data).unwrap();
+        let wasm = with_custom_section(COMPONENT_TYPE_NAME, &data);
+        let refusal = audit(&wasm, &[]).expect_err(label);
+        assert_eq!(refusal, Refusal::CodeInCustomSection, "{label}");
+        assert_eq!(refusal.to_string(), "code in custom section", "{label}");
+    }
+}
+
+#[test]
+fn unpinned_bus_type_imports_are_accepted() {
+    let data = wat::parse_str(
+        r#"(component
+            (type $t (component
+                (import "elastos:bus/types@1.0.0" (instance))
+                (import "elastos:bus/runtime@1.0.0" (instance))
+                (import "elastos:bus/identity@1.0.0" (instance))
+                (import "elastos:bus/capabilities@1.0.0" (instance))
+                (import "elastos:bus/providers@1.0.0" (instance)))))"#,
+    )
+    .unwrap();
+    Validator::new().validate_all(&data).unwrap();
     let wasm = with_custom_section(COMPONENT_TYPE_NAME, &data);
     Validator::new().validate_all(&wasm).unwrap();
     assert_eq!(audit(&wasm, &[]), Ok(vec![]));
@@ -433,6 +512,18 @@ fn component_type_section_with_a_core_module_is_refused() {
         (
             "instance export",
             wat::parse_str(r#"(component (instance $i) (export "i" (instance $i)))"#).unwrap(),
+        ),
+        (
+            // The type-level import is allowed, so only the payload rule can
+            // refuse the core module next to it.
+            "allowed import with core module",
+            wat::parse_str(
+                r#"(component
+                    (type $t (component
+                        (import "elastos:bus/types@1.0.0" (instance))))
+                    (core module))"#,
+            )
+            .unwrap(),
         ),
     ] {
         Validator::new().validate_all(&component).unwrap();
