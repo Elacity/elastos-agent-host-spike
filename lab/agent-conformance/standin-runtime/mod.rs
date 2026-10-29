@@ -4035,6 +4035,162 @@ mod tests {
     }
 
     #[test]
+    fn standin_deny_failure_settles_the_sibling_request_and_its_grant_is_refused_through_routes() {
+        let mut standin = StandIn::new();
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let failed = launch_starting(&shared, &mut standin);
+        let other = launch_starting(&shared, &mut standin);
+        let denied = standin
+            .post_capability_request(
+                Caller::Client {
+                    session_id: &failed,
+                },
+                &request_client_body(),
+            )
+            .expect("the stand-in stores the start-critical request of the failed session");
+        assert_eq!(
+            denied,
+            json!({ "status": "pending", "request_id": "request-1" }),
+            "the stand-in stores the start-critical request as pending"
+        );
+        let sibling = standin
+            .post_capability_request(
+                Caller::Client {
+                    session_id: &failed,
+                },
+                &request_client_body(),
+            )
+            .expect("the stand-in stores the sibling request of the failed session");
+        let sibling_id = sibling["request_id"]
+            .as_str()
+            .expect("the stand-in names the sibling request")
+            .to_owned();
+        assert_eq!(
+            sibling_id, "request-2",
+            "the stand-in names the second request of the failed session"
+        );
+        let bystander = standin
+            .post_capability_request(
+                Caller::Client { session_id: &other },
+                &request_client_body(),
+            )
+            .expect("the stand-in stores the request of the bystander session");
+        let bystander_id = bystander["request_id"]
+            .as_str()
+            .expect("the stand-in names the bystander request")
+            .to_owned();
+        assert_eq!(
+            bystander_id, "request-3",
+            "the stand-in names the request of the bystander session"
+        );
+
+        let denied = standin
+            .post_capability_deny(
+                Caller::Shell,
+                &json!({ "request_id": "request-1", "reason": "gate read denied" }),
+            )
+            .expect("the stand-in denies the start-critical request");
+        assert_eq!(
+            denied,
+            json!({ "success": true }),
+            "the stand-in answers success true for the deny that fails the starting session"
+        );
+
+        assert_eq!(
+            request_entries(&standin, &failed),
+            vec![
+                shell_denied_request("request-1", "component-1", "gate read denied"),
+                denied_request("request-2", "component-1", "gate read denied"),
+            ],
+            "the stand-in keeps the shell deny and settles the sibling request as the runtime"
+        );
+        assert_eq!(
+            request_entries(&standin, &other),
+            vec![pending_request("request-3", "component-2")],
+            "the stand-in keeps the bystander session's request pending"
+        );
+        assert_capsule(
+            &standin,
+            &failed,
+            "failed",
+            "gate read denied",
+            "the stand-in stores the failed session from the deny",
+        );
+        assert_capsule(
+            &standin,
+            &other,
+            "starting",
+            "",
+            "the stand-in keeps the bystander session starting",
+        );
+        let failed_view = standin
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
+            .expect("the stand-in shell live view for the failed session");
+        assert_eq!(
+            request_ids(&failed_view),
+            BTreeSet::new(),
+            "the stand-in shell live view has no grant for the failed session"
+        );
+
+        let refused = standin.post_capability_grant(
+            Caller::Shell,
+            &json!({ "request_id": sibling_id, "duration": "once" }),
+        );
+        assert_delete(
+            &refused,
+            400,
+            "request is not pending: request-2",
+            "the stand-in refuses a grant of the sibling request that the runtime settled",
+        );
+        let after = standin
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
+            .expect("the stand-in shell live view after the refused grant");
+        assert_eq!(
+            request_ids(&after),
+            BTreeSet::new(),
+            "the stand-in shell live view still has no grant for the failed session"
+        );
+        assert_eq!(
+            request_entries(&standin, &failed),
+            vec![
+                shell_denied_request("request-1", "component-1", "gate read denied"),
+                denied_request("request-2", "component-1", "gate read denied"),
+            ],
+            "the refused grant leaves both settlements of the failed session unchanged"
+        );
+
+        let granted = standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({ "request_id": bystander_id, "duration": "once" }),
+            )
+            .expect("the stand-in grants the bystander request");
+        assert_eq!(
+            granted,
+            json!({ "success": true }),
+            "the stand-in answers success true for the bystander grant"
+        );
+        let control = standin
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
+            .expect("the stand-in shell live view after the bystander grant");
+        assert_eq!(
+            request_ids(&control),
+            BTreeSet::from([bystander_id]),
+            "the stand-in live view carries only the bystander grant, so the refusal is specific"
+        );
+        assert_eq!(
+            request_entries(&standin, &other),
+            vec![granted_request(
+                "request-3",
+                "component-2",
+                "Shell auto-grant"
+            )],
+            "the stand-in stores the bystander grant through the grant route"
+        );
+    }
+
+    #[test]
     fn standin_shell_deny_refuses_a_bad_request() {
         let mut standin = StandIn::new();
         let shared = Shared::new();
