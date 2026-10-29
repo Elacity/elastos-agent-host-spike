@@ -8,7 +8,7 @@ A shell caller receives one body on both forms. The body's keys are `scope` and 
 
 A client caller with the plain route receives a body whose only key is `capabilities`. Entries are that session only, sorted by `request_id`. Each entry's keys are `request_id`, `resource`, `action`, `duration` and `granted_at`. A client session with no grant receives `capabilities: []`.
 
-`seed_grant` is a lab test seam, not a route. It stores `request_id`, `session_id`, `resource`, `action`, `duration`, the seeded `granted_at`, a life, and `session_ended`. The four lives are `Live`, `Exhausted`, `Revoked` and `Expired`. One filter keeps a grant whose life is `Live`. `session_ended` leaves that grant in the view.
+`seed_grant` is a lab test seam, not a route. The unit tests inside `mod.rs` are its only callers. A journey or contract test stores its grants through `post_capability_request` and `post_capability_grant`, which call this method; `capsules/model-provider/tests/process.rs` takes this file in by `#[path]` and reaches a grant by those routes only. The stand-in in `lab/capsule-identity/tests/stand_in.rs` is a separate type, and this note does not cover it. It stores `request_id`, `session_id`, `resource`, `action`, `duration`, the seeded `granted_at`, a life, and `session_ended`. The four lives are `Live`, `Exhausted`, `Revoked` and `Expired`. One filter keeps a grant whose life is `Live`. `session_ended` leaves that grant in the view.
 
 A scope other than `all_sessions_live` is status 400. The reason starts with `unknown capability list scope:` and contains that scope text. A client that asks for `all_sessions_live` is status 403 with the reason `This endpoint requires shell privileges`.
 

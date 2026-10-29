@@ -251,6 +251,15 @@ impl StandIn {
 
     /// Lab test seam, not a route.
     ///
+    /// The unit tests inside this file are its only callers. A journey or
+    /// contract test stores its grants through `post_capability_request` and
+    /// `post_capability_grant`, which call this method.
+    /// `capsules/model-provider/tests/process.rs` takes this file in by
+    /// `#[path]` and reaches a grant by those routes only.
+    ///
+    /// The stand-in that `lab/capsule-identity/tests/stand_in.rs` defines is a
+    /// separate type with a method of this name; this note does not cover it.
+    ///
     /// `granted_at` is the seeded value. This method reads no clock.
     #[allow(clippy::too_many_arguments)]
     pub fn seed_grant(
@@ -703,9 +712,9 @@ impl StandIn {
 
     /// Lab test seam, not a route.
     ///
-    /// Replaces the instant used for ended-entry age and request age. It then
-    /// expires the due pending requests through `expire_due`. This method reads
-    /// no clock.
+    /// Replaces the instant used for ended-entry age, request age and grant
+    /// expiry. It then expires the due pending requests through `expire_due`.
+    /// This method reads no clock.
     pub fn set_instant(&mut self, secs: u64) {
         self.instant = secs;
         self.expire_due();

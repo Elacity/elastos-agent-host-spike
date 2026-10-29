@@ -8,13 +8,15 @@
 #[path = "common/signed_bundle.rs"]
 mod signed_bundle;
 
-use agent_conformance::standin_runtime::{Caller, Life, StandIn, Start};
+use agent_conformance::standin_runtime::{Caller, StandIn, Start};
 use serde_json::{json, Value};
 use signed_bundle::{SignedBundle, SHARED_NAME};
 use std::collections::BTreeSet;
 
 const LIVE_SCOPE: &str = "all_sessions_live";
 const SHELL_REASON: &str = "This endpoint requires shell privileges";
+/// The stand-in's `once` life, in seconds from the grant instant.
+const GRANT_LIFETIME_SECS: u64 = 3_600;
 const SHARED_RESOURCE: &str = "localhost://Public/resident-instances/shared.txt";
 /// The manifest `name` of the second signed fixture.
 const SECOND_NAME: &str = "agent-host-second";
@@ -40,6 +42,60 @@ fn change_one_byte(bundle: &SignedBundle) {
     let mut bytes = std::fs::read(&asks).expect("read asks.json");
     bytes[0] ^= 0x01;
     std::fs::write(&asks, &bytes).expect("flip one byte of asks.json");
+}
+
+/// One launched resident for the routes that need a live session: the
+/// fixture is admitted once, launched, and its start applied.
+fn launch_one(standin: &mut StandIn, bundle: &SignedBundle) -> String {
+    standin
+        .admit_resident(
+            bundle.path(),
+            &bundle.signature(),
+            bundle.accepted(),
+            Start::Ok,
+        )
+        .expect("the stand-in admits the fixture bundle");
+    let launch = standin
+        .post_capsules(Caller::Shell, &bundle.launch_body())
+        .expect("the stand-in launches the admitted CID");
+    let id = launch["id"]
+        .as_str()
+        .expect("the launch route names the session")
+        .to_owned();
+    standin
+        .finish_start(&id)
+        .expect("the stand-in applies the admitted Start::Ok");
+    id
+}
+
+/// One live grant through the routes: the agent's own request, then the
+/// shell's grant of that request id as the request route minted it.
+fn grant_request(standin: &mut StandIn, session_id: &str, duration: &str) -> String {
+    let posted = standin
+        .post_capability_request(
+            Caller::Client { session_id },
+            &json!({
+                "resource": SHARED_RESOURCE,
+                "action": "read",
+                "reason": "ra1 fields",
+            }),
+        )
+        .expect("the agent's own route stores one pending request");
+    let request_id = posted["request_id"]
+        .as_str()
+        .expect("the request route names the request it stored")
+        .to_owned();
+    standin
+        .post_capability_grant(
+            Caller::Shell,
+            &json!({
+                "request_id": request_id,
+                "duration": duration,
+                "rationale": "shell approves the ra1 record",
+            }),
+        )
+        .expect("the shell grants the request");
+    request_id
 }
 
 fn request_ids(body: &Value) -> BTreeSet<String> {
@@ -121,34 +177,19 @@ fn standin_matches_ra1_fields() {
         "the stand-in did the work: an unknown scope is refused: {unknown:?}"
     );
 
-    standin.seed_grant(
-        "req-live",
-        "component-1",
-        SHARED_RESOURCE,
-        "read",
-        "session",
-        0,
-        Life::Live,
-        false,
-    );
-    standin.seed_grant(
-        "req-dead",
-        "component-1",
-        SHARED_RESOURCE,
-        "read",
-        "session",
-        0,
-        Life::Exhausted,
-        false,
-    );
+    let bundle = SignedBundle::new();
+    let session_id = launch_one(&mut standin, &bundle);
+    let live = grant_request(&mut standin, &session_id, "session");
+    let _dead = grant_request(&mut standin, &session_id, "once");
+    standin.set_instant(GRANT_LIFETIME_SECS);
 
     let shell = standin
         .get_capability_list(Caller::Shell, None)
-        .expect("the stand-in returns the seeded shell list");
+        .expect("the stand-in returns the granted shell list");
     assert_eq!(
         request_ids(&shell),
-        BTreeSet::from(["req-live".to_owned()]),
-        "the stand-in did the work: the shell list leaves the exhausted grant out"
+        BTreeSet::from([live.clone()]),
+        "the stand-in did the work: the shell list leaves the grant that ran out of uses out"
     );
     let entry = &shell["capabilities"][0];
     assert_keys(
@@ -164,20 +205,20 @@ fn standin_matches_ra1_fields() {
         "the stand-in did the work: the shell entry carries the six RA-1 fields",
     );
     assert_eq!(
-        entry["session_id"], "component-1",
+        entry["session_id"], session_id,
         "the stand-in did the work: the shell entry names the grant's session"
     );
     assert_eq!(
         *entry,
         json!({
-            "request_id": "req-live",
-            "session_id": "component-1",
+            "request_id": live,
+            "session_id": session_id,
             "resource": SHARED_RESOURCE,
             "action": "read",
             "duration": "session",
             "granted_at": 0,
         }),
-        "the stand-in did the work: the shell entry carries the seeded grant values"
+        "the stand-in did the work: the shell entry carries the granted values"
     );
 
     let sibling = standin
@@ -204,7 +245,7 @@ fn standin_matches_ra1_fields() {
         .expect("the stand-in returns the client's own list");
     assert_eq!(
         request_ids(&own),
-        BTreeSet::from(["req-live".to_owned()]),
+        BTreeSet::from([live.clone()]),
         "the stand-in did the work: the client lists its own live grant only"
     );
     assert_keys(
