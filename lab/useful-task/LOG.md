@@ -162,3 +162,131 @@ These runs used `RUST_TEST_THREADS=2`, `CARGO_INCREMENTAL=0`, and Cargo target
 and build directories under `lab/useful-task/target/`. The privacy-fault run
 used the default test thread count. The repair remains pending the supervisor's
 checks and fresh review.
+
+## 002 — the shared runner catches the unconditional accept
+
+Added `lab/useful-task/falsifiers.json` with one entry, `F-UT1`. Its `command`
+is `useful-task`, its `expect` is `caught`, and it names one test,
+`checker_accepts_recorded_answer_and_refuses_stubs`. Its single edit replaces
+the one line `    let trimmed = answer.trim();\n` in
+`../../lab/useful-task/src/lib.rs` with an early
+`return Verdict::Accept { answer_sha256: sha256_hex(answer.trim()) };` before
+that line. The entry carries a `title`, because the runner prints it on every
+result line. The list's paths are relative to `examples/agent-host`, the same
+way the agent-conformance list names its crate.
+
+This moves 001's hand plant onto the one shared runner. The edit and its
+restoration live in `examples/agent-host/falsify.py`; this task did not change
+that file, `src/lib.rs`, `tests/checker.rs`, the fixtures, `Cargo.toml` or
+`Cargo.lock`. `PROVIDER_TARGETS` still does not name this crate's source, so a
+killed run restores the file only from the finished run's own backup.
+
+Run from the repository root with `RUST_TEST_THREADS=2` and
+`CARGO_INCREMENTAL=0`:
+
+```
+python3 -I examples/agent-host/falsify.py --from lab/useful-task/falsifiers.json
+```
+
+```
+baseline: 1 named tests pass without an edit, 0 do not
+F-UT1  CAUGHT                             1s  accept every answer before the judge reads it
+summary: 1 CAUGHT of 1
+```
+
+The command exited 0. The word is `CAUGHT`, not `BUILD FAILED` and not
+`NOT RUN`. After it, `git diff -- lab/useful-task/src/lib.rs` was empty and
+`lab/useful-task/src/lib.rs.falsify-original` was absent. The committed `judge`
+still begins with `let trimmed = answer.trim();` and has no early return. On
+that restored tree:
+
+```
+cargo test --locked --manifest-path lab/useful-task/Cargo.toml -- checker_accepts_recorded_answer_and_refuses_stubs --exact
+```
+
+```
+test checker_accepts_recorded_answer_and_refuses_stubs ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+The measurement is only about the checker. The live model turn stays in
+BACKLOG and stays opt-in; this task reads no model endpoint and starts no
+agent.
+
+- 002: Added `lab/useful-task/falsifiers.json` with F-UT1 on the shared runner; the registered `useful-task` command catches the early-accept plant and restores `src/lib.rs`.
+
+## 003 — judge binds to the named fixture hashes
+
+`Spec` gained `recorded_sha256` and its read-only accessor. `CHECK_ORDER` is now
+the seven reasons `input`, `recorded`, `empty`, `echo`, `fixed-string`, `shape`,
+`mismatch`. `load_spec` requires `recorded_sha256` as a known key and refuses a
+missing key, a non-string, or a string that is not 64 lowercase hex characters
+for both `input_sha256` and `recorded_sha256`; the messages are
+`spec is missing <key>`, `spec <key> is not a string`, and
+`spec <key> is not a sha256 hex`. One new function, `sha256_field`, performs the
+format check; `sha256_hex` stays the only hasher.
+
+`judge(spec, input, expected, answer)` now takes the expected bytes as `&str`.
+Its first statement is still `    let trimmed = answer.trim();`. Inside the
+existing reasons loop, `input` refuses when `sha256_hex(input)` is not the
+spec's `input_sha256`, and `recorded` refuses when `sha256_hex(expected)` is not
+its `recorded_sha256`. Both hash the arguments exactly as given. The five later
+checks keep their meanings, with the expected value parsed from those bytes.
+
+Both `accept.json` files carry `recorded_sha256` and the seven-reason list. The
+input and recorded fixtures keep their bytes and hashes
+(`043eec2f...e3468` for agent-a, `c7209888...221a7` for agent-b).
+
+`checker_accepts_recorded_answer_and_refuses_stubs` now also checks the recorded
+hash accessors, a one-character input change with the real recorded bytes as
+both expected and answer (`input`), each agent's schema-valid substitute as both
+expected and answer (`recorded`), and both hash fields set to `abc`, `A`×64, and
+`g`×64, plus missing and `17`. The existing accept, empty, echo, fixed-string,
+shape, mismatch, spec-swap and malformed-spec checks use all seven reasons.
+
+### Planted faults
+
+Each fault was hand-applied to `src/lib.rs`, the named test ran alone, and the
+original bytes were restored before the next fault. The restored source SHA-256
+is `b30f53d23fafd545b3aa5878d180323cc3bf7adaf5d01e996151c61fc547ff4a`.
+Every run used
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked --manifest-path lab/useful-task/Cargo.toml -- checker_accepts_recorded_answer_and_refuses_stubs --exact`.
+
+1. `            Reason::Input => false,` failed at `tests/checker.rs:208:5`:
+   `assertion left == right failed: changed input is input`,
+   `left: Accept { answer_sha256: "be6bff0dff3b3ebdcd97da9db1cdbe24aaa194e90fef6ac158ff8b0b36eb5ba5" }`
+   / `right: Refuse { reason: "input" }`.
+2. `            Reason::Recorded => false,` failed at `tests/checker.rs:222:5`:
+   `assertion left == right failed: agent-a substitute against its own hash is recorded`,
+   `left: Accept { answer_sha256: "7f0fca5c7e7768cdcfa47fcc6990699ba0431582e99c5ddade2b99813e85a179" }`
+   / `right: Refuse { reason: "recorded" }`.
+3. Replacing the check with `if false {` (so `abc` loads) failed at
+   `tests/checker.rs:38:33`: `malformed spec: Spec { ... input_sha256: "abc",
+   recorded_sha256: "043eec2f...e3468", ... }`.
+4. Skipping only the input key:
+   `if key == "input_sha256" { return Ok(value); }` failed at
+   `tests/checker.rs:38:33` with `input_sha256: "abc"`.
+5. Skipping only the recorded key:
+   `if key == "recorded_sha256" { return Ok(value); }` failed at
+   `tests/checker.rs:38:33` with `recorded_sha256: "abc"`.
+6. Replacing the charset with `byte.is_ascii_hexdigit()` (so uppercase loads)
+   failed at `tests/checker.rs:38:33` with 64 `A` characters in
+   `input_sha256`.
+7. Replacing `b'a'..=b'f'` with `b'a'..=b'z'` (so a non-hex letter loads)
+   failed at `tests/checker.rs:38:33` with 64 `g` characters in
+   `input_sha256`.
+
+After the final restore, the same command passes:
+
+```
+test checker_accepts_recorded_answer_and_refuses_stubs ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+`cargo fmt --manifest-path lab/useful-task/Cargo.toml -- --check` passes. The
+full `cargo test --locked --manifest-path lab/useful-task/Cargo.toml` passes one
+integration test and six doctests. `F-UT1` in the existing `falsifiers.json`
+stays unchanged and the shared runner reports `CAUGHT`. The live model turn
+stays held.
+
+- 003: Bound `judge` to the spec's `input_sha256` and `recorded_sha256`, added the seven-reason order and strict hash-field loading, and extended the named test with the wrong-input and substitute refusals plus format plants.
