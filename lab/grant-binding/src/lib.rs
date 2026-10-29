@@ -211,6 +211,11 @@ impl Verifier {
         self.bind_grant(instance, resource, rights)
     }
 
+    /// Removes one grant from the one store.
+    pub fn revoke_grant(&mut self, handle: Handle) {
+        self.grants.remove(&handle);
+    }
+
     /// Changes the registry identity for a live instance.
     pub fn host_set_identity(
         &mut self,
@@ -1761,4 +1766,39 @@ fn model_home_ask_for_another_app_is_refused() {
         .use_grant(call, &guest(handle))
         .expect("app effect remains");
     assert_eq!(again.owned_root, "UsersAI/photo/library");
+}
+
+#[test]
+fn model_revoke_one_app_stops_only_that_app() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let notes = verifier.register_instance("notes", "session-a");
+    let photo_handle = verifier
+        .ask_capability(Asker::App, photo, "UsersAI/photo/library", rights())
+        .expect("photo ask");
+    let notes_handle = verifier
+        .ask_capability(Asker::App, notes, "UsersAI/notes/pad", rights())
+        .expect("notes ask");
+    let photo_call = verifier.open_call(photo);
+    let notes_call = verifier.open_call(notes);
+    let photo_effect = verifier
+        .use_grant(photo_call, &guest(photo_handle))
+        .expect("photo effect");
+    assert_eq!(photo_effect.identity, "photo");
+    assert_eq!(photo_effect.owned_root, "UsersAI/photo/library");
+    let notes_effect = verifier
+        .use_grant(notes_call, &guest(notes_handle))
+        .expect("notes effect");
+    assert_eq!(notes_effect.identity, "notes");
+    verifier.revoke_grant(photo_handle);
+    let stopped = verifier
+        .use_grant(photo_call, &guest(photo_handle))
+        .expect_err("revoked photo effect");
+    assert_eq!(stopped, Refuse::UnknownHandle);
+    assert_eq!(stopped.to_string(), "unknown handle");
+    let kept = verifier
+        .use_grant(notes_call, &guest(notes_handle))
+        .expect("notes effect remains");
+    assert_eq!(kept.identity, "notes");
+    assert_eq!(kept.owned_root, "UsersAI/notes/pad");
 }
