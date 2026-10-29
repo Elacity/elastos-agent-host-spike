@@ -824,8 +824,10 @@ The agent-host lane may change its files later; these copies stay as they are,
 so the pin holds. The manifest's entrypoint, `agent-host.component.wasm`, is
 build output and is never committed (HANDOFF rule 7), so the module is not in
 the fixture: this lab CID covers the two files only and is not the whole
-capsule's name. The lab never parses `asks.json`: to the lab CID it is one more
-payload file. The manifest is a component manifest, so the Runtime's
+capsule's name. The lab CID covers `asks.json`'s bytes as one more payload
+file. The lab stand-in parses its provisional asks declaration from the
+checked bytes; the library encoder still does not parse those bytes. The
+manifest is a component manifest, so the Runtime's
 `validate()` also requires its `wit_world_sha256` to equal the SHA-256 of
 `elastos/wit/elastos-bus-v1.wit`, which `elastos-common` compiles in
 (`elastos/crates/elastos-common/src/manifest.rs:412` and `:794-800`).
@@ -2090,22 +2092,35 @@ Not shown:
 Claim scope: one Mac, the `agent-host` fixture, test keys only, records in
 memory.
 
-### Asks come only from the signed bytes (M1 check B2, no-schema part)
+### Asks come only from the signed bytes (M1 check B2, provisional declaration)
 
 A launched instance is handed its asks only as the `asks.json` bytes of the
 checked bundle that passed every check above. `checked_launch` takes the
 manifest's `name` (`CheckedBundle::manifest_name()`) and the content of the
 `asks.json` entry (`CheckedBundle::entries()`) from the same `CheckedBundle`,
 the one walk (P10), and the launch keeps that content in the instance, once: `Some(bytes)`, or `None` when
-the bundle has no `asks.json`. Nothing reads the folder again. Task 044 shows
+the bundle has no `asks.json`. Nothing reads the folder again. The same bytes
+get their one provisional parse, `provisional_asks`, after the record check
+(g) and before any instance is added: the schema string is exactly
+`elastos.agent-host.asks/v1`, the declaration and every ask object are closed
+to unknown fields, every `kind` and every `resource` is non-empty, and file
+order is kept. There is no kind allow-list, and `<principal>` is read as any
+other text. A body that fails that parse refuses the launch with its own
+`asks declaration: ...` reason, status 400, no instance and an empty grant
+view. The instance stores the pairs beside the bytes, both from that one walk.
+The library encoder still does not parse these bytes for the lab CID. Task 044 shows
 that for the launch itself: `set_after_walk`, a lab test seam, not a route,
 gives `checked_launch` a hook that it calls once on the stored folder, right
 after the one walk and before (e), so a test can change the bytes on disk
 between the walk and the launch. With no hook set, nothing is called.
 `asks_of(session_id)`, a lab test seam, not a route (#309 has no asks field on
 any route), answers that instance's bytes, and `None` for an unknown session.
-The launch answer, the `get_capsules` entry and the grant view keep exactly
-the keys above, with no asks key, and the launch body stays `{"cid"}`.
+`declared_asks_of(session_id)`, the other lab test seam, answers the stored
+pairs in file order, without parsing again or reading the folder, and `None`
+for a bundle with no `asks.json` or an unknown session. The launch answer, the
+`get_capsules` entry and the grant view keep exactly
+the keys above, with no asks key, and the launch body stays `{"cid"}`. A
+matching signature adds no grant: a launch still adds none.
 
 `standin_hands_an_instance_only_its_signed_asks_bytes` launches the signed
 `agent-host` bundle as in the journey above: its session answers the
@@ -2125,8 +2140,27 @@ bytes, which the test reads itself. Before task 044, a launch that read
 `asks.json` from the folder after the walk passed both tests above, because
 neither changes the folder between the walk and the launch.
 
+`standin_reads_declared_asks_from_the_signed_manifest` launches the signed
+`agent-host` bundle: the launch answers `launched`, `declared_asks_of` answers
+the nine `(kind, resource)` pairs read from the committed
+`fixtures/agent-host/asks.json` with `serde_json::Value`, in file order, first
+pair `read` and `<principal>/`, and `asks_of` answers those bytes. Changing the
+stored first kind to `reed` makes the original CID's bytes differ, so a second
+launch is refused by (e), the first session still declares `read`, and no
+instance or grant is added. Then a signed wrong schema, a signed extra field
+on an ask, a signed empty `kind` and a signed empty `resource` are each refused
+with their own `asks declaration: ...` reason and no instance; a signed
+unknown kind launches and keeps its declaration; and a signed `web-app`
+bundle, which has no `asks.json`, launches and declares `None`.
+
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
+| The declaration is parsed once from the instance's signed `asks.json` bytes and stored beside them | `standin_reads_declared_asks_from_the_signed_manifest`, `declared_asks_of_answers_the_stored_list_and_none_for_an_unknown_session` | F-CI74d (file order reversed), F-CI74e (`declared_asks_of` answers the first instance) |
+| The schema string is exactly `elastos.agent-host.asks/v1` | `provisional_asks_refuses_a_wrong_schema`, `standin_reads_declared_asks_from_the_signed_manifest` | F-CI74a (schema comparison disabled) |
+| The declaration and each ask object are closed to unknown fields | `provisional_asks_refuses_a_closed_shape`, `standin_reads_declared_asks_from_the_signed_manifest` | F-CI74b (`struct Ask` accepts unknown fields) |
+| Every `kind` and every `resource` is non-empty, each with its own reason | `provisional_asks_refuses_an_empty_kind`, `provisional_asks_refuses_an_empty_resource`, `standin_reads_declared_asks_from_the_signed_manifest` | F-CI74c (both non-empty checks deleted) |
+| File order is kept | `provisional_asks_keeps_the_declared_file_order`, `provisional_asks_reads_the_committed_declaration_in_file_order`, `standin_reads_declared_asks_from_the_signed_manifest` | F-CI74d (the parsed list is reversed) |
+| There is no kind allow-list: a signed unknown kind launches and keeps its declaration | `standin_reads_declared_asks_from_the_signed_manifest` | F-CI74f (a planted `teleport` rejection) |
 | The instance keeps the signed bytes from launch; a change on disk after launch does not reach it | `standin_hands_an_instance_only_its_signed_asks_bytes` | F-CI35a (the planted accept-anything stub: `asks_of` reads `asks.json` from the stored folder at call time) |
 | Each session answers its own asks | `standin_gives_each_session_its_own_asks` | F-CI35b (`asks_of` ignores the session and answers the first instance's asks) |
 | A bundle with no `asks.json` is handed `None`, not empty bytes | `standin_gives_each_session_its_own_asks` | F-CI35c (`Some(Vec::new())` for a bundle with no `asks.json`) |
@@ -2134,8 +2168,9 @@ neither changes the folder between the walk and the launch.
 
 Not shown:
 
-- No ask schema, provisional or not, and no parse or field read of
-  `asks.json`: to the stand-in it is bytes.
+- No Runtime ask schema and no asks field on the Runtime manifest: the
+  declaration above is the lab stand-in's own provisional schema, and the
+  library encoder does not read `asks.json`.
 - No mapping of an ask to an operation; that is `lab/bus-v2-proposal/`, and
   this lane writes no B2 encoding.
 - No grant from an ask: a launch still adds none (the grant view above).
@@ -2300,10 +2335,13 @@ tests/name_signature.rs  a test key signs the printed lab CID; verification only
 tests/not_admission.rs   verify is not admit: a valid signature grants nothing
 tests/package_record.rs  the lab package record outside the bundle binds the CID
 tests/parse.rs           a printed lab CID is read with the one claim check
+tests/provisional_asks.rs the one provisional asks.json parse: schema, closed shape,
+                         non-empty kind and resource, file order
 tests/refusals.rs        each refusal and its reason
 tests/stand_in.rs        the lab stand-in launches by CID after the publisher check;
                          a valid signature alone yields no grant; an instance
-                         is handed only its signed asks.json bytes
+                         is handed only its signed asks.json bytes and their
+                         one provisional declaration parse
 tests/variant_binding.rs the signed variant binding outside the bundles
 tests/walk.rs            changes made while a bundle is named; one walk
 falsifiers.json          planted bugs, each caught by named tests
@@ -2311,7 +2349,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 316 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 322 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -2352,7 +2390,7 @@ and F-CI36b (see [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)),
 and task 037's F-CI37a to F-CI37c (see
 [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)), and task 044's
 F-CI44a to F-CI44c (see
-[asks come only from the signed bytes](#asks-come-only-from-the-signed-bytes-m1-check-b2-no-schema-part)),
+[asks come only from the signed bytes](#asks-come-only-from-the-signed-bytes-m1-check-b2-provisional-declaration)),
 and task 047's F-CI47a to F-CI47c (see
 [naming a closure listing](#naming-a-closure-listing)), and task 048's
 F-CI48a to F-CI48e (see [the encoding](#the-encoding)), and task 049's
@@ -2374,7 +2412,8 @@ is retargeted by it), and task 064's F-CI64a (see
 is retargeted by it too), and task 065's F-CI65a, task 066's F-CI66a,
 task 067's F-CI67a, task 068's F-CI68a, task 069's F-CI69a and task 070's
 F-CI70a and F-CI70b (all: see
-[the encoding](#the-encoding)).
+[the encoding](#the-encoding)), and task 074's F-CI74a to F-CI74f (see
+[asks come only from the signed bytes](#asks-come-only-from-the-signed-bytes-m1-check-b2-provisional-declaration)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its

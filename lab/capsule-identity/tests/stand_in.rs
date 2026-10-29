@@ -2,10 +2,10 @@
 //! `common`: a launch names the bundle by its lab CID only, and the stand-in
 //! recomputes the CID from the stored bytes and checks the publisher's
 //! signed package record before anything is launched. A launched instance is
-//! handed only the `asks.json` bytes of the checked, signed bundle (M1 check
-//! B2, the part with no schema and no parse). The stand-in is a lab
-//! stand-in for the Runtime's launch route, not the Runtime: it runs nothing,
-//! and these tests say nothing about what the Runtime does.
+//! handed only the `asks.json` bytes of the checked, signed bundle, and their
+//! one provisional parse (M1 check B2, the provisional declaration). The
+//! stand-in is a lab stand-in for the Runtime's launch route, not the Runtime:
+//! it runs nothing, and these tests say nothing about what the Runtime does.
 mod common;
 
 use std::collections::BTreeSet;
@@ -660,4 +660,256 @@ fn standin_gives_each_session_its_own_asks() {
         assert_eq!(listed_instances(&stand_in).len(), 2, "{case}");
         assert_eq!(grant_view(&stand_in), Vec::<Value>::new(), "{case}");
     }
+}
+
+/// The committed `asks.json` text with its first ask replaced by
+/// `replacement`: the committed object occurs once.
+fn asks_with_first_ask(replacement: &str) -> Vec<u8> {
+    let text = fixture_asks_text(&AGENT_HOST);
+    let changed = text.replacen(
+        r#"{"kind": "read", "resource": "<principal>/"}"#,
+        replacement,
+        1,
+    );
+    assert_ne!(changed, text, "the first ask is in the committed asks.json");
+    changed.into_bytes()
+}
+
+/// A fresh copy of the `agent-host` fixture in `parent` under `name`, with
+/// `asks` as its `asks.json`, signed by a fresh accepted test key: a stand-in
+/// for it and its lab CID.
+fn signed_asks_variant(parent: &Path, name: &str, asks: &[u8]) -> (StandInRuntime, String) {
+    let folder = parent.join(name);
+    assemble_at(&AGENT_HOST, &folder);
+    fs::write(folder.join("asks.json"), asks).expect("write asks.json");
+    let key = fresh_signing_key();
+    let record = sign(&key, &folder);
+    let entry = published(&folder);
+    let stand_in = StandInRuntime::new([entry.clone()], vec![record], vec![did_of(&key)]);
+    (stand_in, entry.0)
+}
+
+/// The first pair of a declared list, as two string slices.
+fn first_pair(asks: &Option<Vec<(String, String)>>) -> (&str, &str) {
+    let (kind, resource) = asks
+        .as_ref()
+        .and_then(|pairs| pairs.first())
+        .expect("a first declared ask");
+    (kind, resource)
+}
+
+#[test]
+fn standin_reads_declared_asks_from_the_signed_manifest() {
+    let agent_host = publish_agent_host();
+    let (mut stand_in, _) = signed_stand_in(&agent_host);
+    let signed = read_fixture(&AGENT_HOST, "asks.json");
+    let expected = value_asks(&signed);
+    assert_eq!(
+        first_pair(&Some(expected.clone())),
+        ("read", "<principal>/"),
+        "the committed declaration's first ask"
+    );
+
+    // The signed bundle launches, and its instance holds the declaration
+    // read from the checked bytes, in file order.
+    let answer = stand_in
+        .post_capsules(&launch_body())
+        .unwrap_or_else(|(status, reason)| panic!("refused with {status}: {reason}"));
+    assert_eq!(answer["status"], "launched");
+    let session = answer["session_id"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+    assert_eq!(
+        stand_in.declared_asks_of(&session),
+        Some(expected.clone()),
+        "the instance declares every ask, in file order"
+    );
+    assert_eq!(
+        stand_in.asks_of(&session),
+        Some(signed.clone()),
+        "the instance also keeps the one signed asks.json body"
+    );
+    assert_eq!(grant_view(&stand_in), Vec::<Value>::new(), "no grant");
+    assert_eq!(
+        stand_in.declared_asks_of("no-such-session"),
+        None,
+        "an unknown session declares none"
+    );
+
+    // The stored `read` kind becomes `reed`. The original CID's bytes no
+    // longer match, so the existing name compare (e) refuses the relaunch.
+    let changed = asks_with_first_ask(r#"{"kind": "reed", "resource": "<principal>/"}"#);
+    fs::write(agent_host.folder.join("asks.json"), &changed).expect("write asks.json");
+    let now = named(&agent_host.folder);
+    assert_ne!(now.to_string(), AGENT_HOST_LAB_CID);
+    let compare = checked(&agent_host.folder)
+        .check_name(AGENT_HOST_LAB_CID)
+        .expect_err("the bytes changed")
+        .to_string();
+    assert!(compare.contains(AGENT_HOST_LAB_CID) && compare.contains(&now.to_string()));
+    assert_eq!(
+        stand_in.post_capsules(&launch_body()),
+        Err((400, compare)),
+        "(e) after the stored kind changed"
+    );
+    assert_eq!(
+        listed_instances(&stand_in).len(),
+        1,
+        "a refused relaunch adds no instance"
+    );
+    assert_eq!(
+        first_pair(&stand_in.declared_asks_of(&session)),
+        ("read", "<principal>/"),
+        "the first session still declares the signed read"
+    );
+    assert_eq!(
+        stand_in.declared_asks_of(&session),
+        Some(expected.clone()),
+        "the first session's whole declaration is unchanged"
+    );
+    assert_eq!(grant_view(&stand_in), Vec::<Value>::new(), "no grant");
+
+    let parent = temp_dir();
+
+    // A second folder with another schema string is signed and refused.
+    let wrong_schema = fixture_asks_text(&AGENT_HOST).replacen(
+        r#""schema": "elastos.agent-host.asks/v1""#,
+        r#""schema": "not-the-provisional-schema""#,
+        1,
+    );
+    assert_ne!(wrong_schema, fixture_asks_text(&AGENT_HOST));
+    let (mut wrong, cid) =
+        signed_asks_variant(parent.path(), "wrong-schema", wrong_schema.as_bytes());
+    assert_refused(
+        &mut wrong,
+        &json!({ "cid": cid }),
+        "asks declaration: schema is not-the-provisional-schema, not elastos.agent-host.asks/v1",
+        "a signed wrong schema",
+    );
+    assert_eq!(grant_view(&wrong), Vec::<Value>::new(), "no grant");
+
+    // A third folder with an extra field on the first ask is refused by the
+    // closed shape, not by the schema check.
+    let extra =
+        asks_with_first_ask(r#"{"kind": "read", "resource": "<principal>/", "extra": "x"}"#);
+    let (mut closed, cid) = signed_asks_variant(parent.path(), "extra-field", &extra);
+    let refused = closed
+        .post_capsules(&json!({ "cid": cid }))
+        .expect_err("an ask with an extra field");
+    assert_eq!(refused.0, 400, "an extra ask field refuses the launch");
+    assert!(
+        refused.1.starts_with("asks declaration:"),
+        "the refusal is the declaration parse's: {}",
+        refused.1
+    );
+    assert_ne!(
+        refused.1,
+        "asks declaration: schema is not-the-provisional-schema, not elastos.agent-host.asks/v1",
+        "the extra field is refused by the shape, not the schema check"
+    );
+    assert_none_listed(&closed, "an extra ask field");
+    assert_eq!(grant_view(&closed), Vec::<Value>::new(), "no grant");
+
+    // A fourth folder with an empty kind is refused.
+    let empty_kind = asks_with_first_ask(r#"{"kind": "", "resource": "<principal>/"}"#);
+    let (mut kind, cid) = signed_asks_variant(parent.path(), "empty-kind", &empty_kind);
+    assert_refused(
+        &mut kind,
+        &json!({ "cid": cid }),
+        "asks declaration: an ask has an empty kind",
+        "a signed empty kind",
+    );
+    assert_eq!(grant_view(&kind), Vec::<Value>::new(), "no grant");
+
+    // A fifth folder with an empty resource is refused by its own reason.
+    let empty_resource = asks_with_first_ask(r#"{"kind": "read", "resource": ""}"#);
+    let (mut resource, cid) = signed_asks_variant(parent.path(), "empty-resource", &empty_resource);
+    assert_refused(
+        &mut resource,
+        &json!({ "cid": cid }),
+        "asks declaration: an ask has an empty resource",
+        "a signed empty resource",
+    );
+    assert_eq!(grant_view(&resource), Vec::<Value>::new(), "no grant");
+
+    // A signed unknown kind launches: there is no kind allow-list. The
+    // unknown kind stays the first declared pair, and the rest keeps file
+    // order.
+    let unknown = asks_with_first_ask(r#"{"kind": "teleport", "resource": "<principal>/"}"#);
+    let (mut unknown_kind, cid) = signed_asks_variant(parent.path(), "unknown-kind", &unknown);
+    let answer = unknown_kind
+        .post_capsules(&json!({ "cid": cid }))
+        .unwrap_or_else(|(status, reason)| panic!("refused with {status}: {reason}"));
+    assert_eq!(answer["status"], "launched", "an unknown kind is admitted");
+    let session = answer["session_id"].as_str().expect("a session id");
+    assert_eq!(
+        first_pair(&unknown_kind.declared_asks_of(session)),
+        ("teleport", "<principal>/"),
+        "the unknown kind is kept as declared"
+    );
+    assert_eq!(
+        unknown_kind
+            .declared_asks_of(session)
+            .map(|pairs| pairs.len()),
+        Some(expected.len()),
+        "every ask is kept"
+    );
+    assert_eq!(
+        grant_view(&unknown_kind),
+        Vec::<Value>::new(),
+        "an unknown kind yields no grant"
+    );
+
+    // A signed web-app bundle has no asks.json, so it declares none.
+    let web_app = parent.path().join("web-app");
+    assemble_at(&WEB_APP, &web_app);
+    let key = fresh_signing_key();
+    let record = sign(&key, &web_app);
+    let entry = published(&web_app);
+    let mut web = StandInRuntime::new([entry], vec![record], vec![did_of(&key)]);
+    let answer = web
+        .post_capsules(&json!({ "cid": WEB_APP_LAB_CID }))
+        .unwrap_or_else(|(status, reason)| panic!("refused with {status}: {reason}"));
+    assert_eq!(answer["status"], "launched");
+    let session = answer["session_id"].as_str().expect("a session id");
+    assert_eq!(
+        web.declared_asks_of(session),
+        None,
+        "a bundle with no asks.json declares none"
+    );
+    assert_eq!(
+        web.declared_asks_of("no-such-session"),
+        None,
+        "an unknown session declares none"
+    );
+    assert_eq!(grant_view(&web), Vec::<Value>::new(), "no grant");
+}
+
+#[test]
+fn declared_asks_of_answers_the_stored_list_and_none_for_an_unknown_session() {
+    let published = publish_agent_host();
+    let (mut stand_in, _) = signed_stand_in(&published);
+    let signed = read_fixture(&AGENT_HOST, "asks.json");
+    let expected = value_asks(&signed);
+
+    let answer = stand_in
+        .post_capsules(&launch_body())
+        .unwrap_or_else(|(status, reason)| panic!("refused with {status}: {reason}"));
+    let session = answer["session_id"].as_str().expect("a session id");
+    assert_eq!(stand_in.declared_asks_of(session), Some(expected.clone()));
+
+    // A change on disk after launch does not reach the stored declaration.
+    let changed = change_stored_asks(&published.folder);
+    assert_ne!(changed, signed);
+    assert_eq!(
+        stand_in.declared_asks_of(session),
+        Some(expected),
+        "the stored declaration is the one read at launch"
+    );
+    assert_eq!(
+        stand_in.declared_asks_of("no-such-session"),
+        None,
+        "an unknown session declares none"
+    );
 }

@@ -1,0 +1,104 @@
+//! The one provisional `asks.json` parse, `provisional_asks` in `common`: the
+//! lab stand-in schema, a closed declaration and ask shape, a non-empty `kind`
+//! and `resource`, and file order. The stand-in's launch that reads this parse
+//! is checked in `tests/stand_in.rs`.
+mod common;
+
+use common::*;
+
+#[test]
+fn provisional_asks_reads_the_committed_declaration_in_file_order() {
+    let signed = read_fixture(&AGENT_HOST, "asks.json");
+    let parsed = provisional_asks(&signed).expect("the committed declaration parses");
+    assert_eq!(parsed, value_asks(&signed));
+    assert_eq!(
+        parsed
+            .first()
+            .map(|(kind, resource)| (kind.as_str(), resource.as_str())),
+        Some(("read", "<principal>/"))
+    );
+    assert_eq!(parsed.len(), 9, "every committed ask is read");
+}
+
+#[test]
+fn provisional_asks_refuses_a_wrong_schema() {
+    let wrong = fixture_asks_text(&AGENT_HOST).replacen(
+        r#""schema": "elastos.agent-host.asks/v1""#,
+        r#""schema": "not-the-provisional-schema""#,
+        1,
+    );
+    assert_eq!(
+        provisional_asks(wrong.as_bytes()),
+        Err(
+            "asks declaration: schema is not-the-provisional-schema, not elastos.agent-host.asks/v1"
+                .to_owned()
+        )
+    );
+}
+
+#[test]
+fn provisional_asks_refuses_a_closed_shape() {
+    for (body, case) in [
+        (
+            r#"{"schema": "elastos.agent-host.asks/v1", "asks": [], "extra": 1}"#,
+            "declaration field",
+        ),
+        (
+            r#"{"schema": "elastos.agent-host.asks/v1", "asks": [{"kind": "read", "resource": "r", "extra": "x"}]}"#,
+            "ask field",
+        ),
+        (r#"{"schema": "elastos.agent-host.asks/v1"}"#, "no asks"),
+        (
+            r#"{"schema": "elastos.agent-host.asks/v1", "asks": [{"resource": "r"}]}"#,
+            "no kind",
+        ),
+        (
+            r#"{"schema": "elastos.agent-host.asks/v1", "asks": [{"kind": 5, "resource": "r"}]}"#,
+            "kind not a string",
+        ),
+        (r#"[]"#, "not an object"),
+        (
+            r#"{"schema": "elastos.agent-host.asks/v1", "asks": {}}"#,
+            "asks not an array",
+        ),
+        (r#"not json"#, "not JSON"),
+    ] {
+        let reason = provisional_asks(body.as_bytes()).expect_err(case);
+        assert!(
+            reason.starts_with("asks declaration: "),
+            "{case}: the shape refusal is its own text: {reason}"
+        );
+    }
+}
+
+#[test]
+fn provisional_asks_refuses_an_empty_kind() {
+    let body =
+        r#"{"schema": "elastos.agent-host.asks/v1", "asks": [{"kind": "", "resource": "r"}]}"#;
+    assert_eq!(
+        provisional_asks(body.as_bytes()),
+        Err("asks declaration: an ask has an empty kind".to_owned())
+    );
+}
+
+#[test]
+fn provisional_asks_refuses_an_empty_resource() {
+    let body =
+        r#"{"schema": "elastos.agent-host.asks/v1", "asks": [{"kind": "read", "resource": ""}]}"#;
+    assert_eq!(
+        provisional_asks(body.as_bytes()),
+        Err("asks declaration: an ask has an empty resource".to_owned())
+    );
+}
+
+#[test]
+fn provisional_asks_keeps_the_declared_file_order() {
+    let body = r#"{"schema": "elastos.agent-host.asks/v1", "asks": [{"kind": "b", "resource": "2"}, {"kind": "a", "resource": "1"}]}"#;
+    assert_eq!(
+        provisional_asks(body.as_bytes()),
+        Ok(vec![
+            ("b".to_owned(), "2".to_owned()),
+            ("a".to_owned(), "1".to_owned()),
+        ])
+    );
+}
