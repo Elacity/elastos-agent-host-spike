@@ -13,6 +13,7 @@
 //! why it did not run and returns.
 
 use serde_json::{json, Value};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -472,6 +473,206 @@ fn confined_provider_serves_did_operations_under_its_root() {
         persona
     );
     reopened.shutdown();
+}
+
+/// The calls that name no granted resource answer under the profile and leave
+/// the storage tree as `init` and `set_nickname` left it.
+///
+/// `get_did`, `resolve`, `sign_chat_message`, `verify`, `verify_did_recovery`,
+/// `get_nickname` and `shutdown` name no granted resource: after `init` and
+/// `set_nickname` the storage root holds `did/nickname.enc`, and each call
+/// leaves those names and each file's bytes exactly as `init` and
+/// `set_nickname` left them. The case compares the names under `did/` and the
+/// bytes of `did/nickname.enc`, so a rewrite of that file to the same bytes
+/// would pass it; it counts no syscalls and changes no grant.
+///
+/// Honesty limit: the profile grants `file-read*` on the literal
+/// `STORAGE_PARENT`, so the parent directory itself can be stat'ed. This case
+/// shows each call answers `ok`, or its settled refusal, under the kernel's
+/// enforcement.
+///
+/// Falsifiers: `DID31` reads `/etc/hosts`, outside every grant, in `get_did`'s
+/// ok arm, and `DID32` writes one file into the storage root in the
+/// `Request::Shutdown` arm of `fn handle`, so `get_did` fails on its first
+/// answer and `shutdown` fails on the final compare that follows it; the five
+/// calls between them have no plant of their own.
+#[test]
+fn no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged() {
+    if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
+        return;
+    }
+    let fixture = tempfile::tempdir().expect("temporary identity root");
+    let root = resolved(fixture.path());
+    let mut provider = ConfinedProvider::start(&root);
+    provider.init(&root);
+    provider.ok(json!({ "op": "set_nickname", "nickname": "Confined" }));
+
+    // The storage tree the setup left: one directory entry holding the
+    // encrypted nickname.
+    let did_dir = root.join("did");
+    let nickname_path = did_dir.join("nickname.enc");
+    let setup = (
+        fs::read_dir(&did_dir)
+            .expect("did directory after set_nickname")
+            .map(|entry| entry.expect("did directory entry").file_name())
+            .collect::<Vec<OsString>>(),
+        fs::read(&nickname_path).expect("did/nickname.enc after set_nickname"),
+    );
+    assert_eq!(
+        setup.0,
+        vec![OsString::from("nickname.enc")],
+        "the setup must leave exactly did/nickname.enc under the storage root"
+    );
+
+    let did_data = provider.ok(json!({ "op": "get_did" }));
+    let after = (
+        fs::read_dir(&did_dir)
+            .expect("did directory after get_did")
+            .map(|entry| entry.expect("did directory entry").file_name())
+            .collect::<Vec<OsString>>(),
+        fs::read(&nickname_path).expect("did/nickname.enc after get_did"),
+    );
+    assert_eq!(
+        after, setup,
+        "get_did changed the storage tree; the watched paths are did/ and did/nickname.enc"
+    );
+    let did = did_data["did"]
+        .as_str()
+        .expect("get_did answers its DID")
+        .to_string();
+    assert!(!did.is_empty(), "the DID must not be empty");
+
+    let document = provider.ok(json!({ "op": "resolve", "did": did }));
+    let after = (
+        fs::read_dir(&did_dir)
+            .expect("did directory after resolve")
+            .map(|entry| entry.expect("did directory entry").file_name())
+            .collect::<Vec<OsString>>(),
+        fs::read(&nickname_path).expect("did/nickname.enc after resolve"),
+    );
+    assert_eq!(
+        after, setup,
+        "resolve changed the storage tree; the watched paths are did/ and did/nickname.enc"
+    );
+    assert_eq!(document["document"]["id"], did);
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let signed = provider.ok(json!({
+        "op": "sign_chat_message", "sender_id": did, "ts": ts, "content": "no-right"
+    }));
+    let after = (
+        fs::read_dir(&did_dir)
+            .expect("did directory after sign_chat_message")
+            .map(|entry| entry.expect("did directory entry").file_name())
+            .collect::<Vec<OsString>>(),
+        fs::read(&nickname_path).expect("did/nickname.enc after sign_chat_message"),
+    );
+    assert_eq!(
+        after, setup,
+        "sign_chat_message changed the storage tree; the watched paths are did/ and did/nickname.enc"
+    );
+    let payload = signed["payload"]
+        .as_str()
+        .expect("the provider returns the payload it signed")
+        .to_string();
+    let signature = signed["signature"]
+        .as_str()
+        .expect("the provider returns its signature")
+        .to_string();
+
+    let verified = provider.ok(json!({
+        "op": "verify", "did": did, "data": payload, "signature": signature
+    }));
+    let after = (
+        fs::read_dir(&did_dir)
+            .expect("did directory after verify")
+            .map(|entry| entry.expect("did directory entry").file_name())
+            .collect::<Vec<OsString>>(),
+        fs::read(&nickname_path).expect("did/nickname.enc after verify"),
+    );
+    assert_eq!(
+        after, setup,
+        "verify changed the storage tree; the watched paths are did/ and did/nickname.enc"
+    );
+    assert_eq!(verified["valid"], true);
+
+    // Flip one character of the provider's own signature; the same payload
+    // must no longer verify.
+    let mut tampered = signature.clone();
+    let first = tampered.remove(0);
+    tampered.insert(0, if first == '0' { '1' } else { '0' });
+    let tampered_verified = provider.ok(json!({
+        "op": "verify", "did": did, "data": payload, "signature": tampered
+    }));
+    let after = (
+        fs::read_dir(&did_dir)
+            .expect("did directory after the flipped verify")
+            .map(|entry| entry.expect("did directory entry").file_name())
+            .collect::<Vec<OsString>>(),
+        fs::read(&nickname_path).expect("did/nickname.enc after the flipped verify"),
+    );
+    assert_eq!(
+        after, setup,
+        "the flipped verify changed the storage tree; the watched paths are did/ and did/nickname.enc"
+    );
+    assert_eq!(tampered_verified["valid"], false);
+
+    let refusal = provider.send(json!({
+        "op": "verify_did_recovery",
+        "did": did,
+        "principal_id": "person:local:no-right",
+        "localhost_root": "localhost://Users/person:local:no-right",
+        "protector_id": "protector:did:no-right",
+        "data_key_id": "pdek:no-right",
+        "nonce": "nonce:no-right",
+        "issued_at": ts,
+        "expires_at": ts + 300,
+        "signature": "not-hex"
+    }));
+    let after = (
+        fs::read_dir(&did_dir)
+            .expect("did directory after verify_did_recovery")
+            .map(|entry| entry.expect("did directory entry").file_name())
+            .collect::<Vec<OsString>>(),
+        fs::read(&nickname_path).expect("did/nickname.enc after verify_did_recovery"),
+    );
+    assert_eq!(
+        after, setup,
+        "verify_did_recovery changed the storage tree; the watched paths are did/ and did/nickname.enc"
+    );
+    assert_eq!(refusal["status"], "error");
+    assert_eq!(refusal["code"], "invalid_signature");
+
+    // This call answers, so the settled refusal left the provider in service.
+    let nickname = provider.ok(json!({ "op": "get_nickname" }));
+    let after = (
+        fs::read_dir(&did_dir)
+            .expect("did directory after get_nickname")
+            .map(|entry| entry.expect("did directory entry").file_name())
+            .collect::<Vec<OsString>>(),
+        fs::read(&nickname_path).expect("did/nickname.enc after get_nickname"),
+    );
+    assert_eq!(
+        after, setup,
+        "get_nickname changed the storage tree; the watched paths are did/ and did/nickname.enc"
+    );
+    assert_eq!(nickname["nickname"], "Confined");
+
+    provider.shutdown();
+    let after = (
+        fs::read_dir(&did_dir)
+            .expect("did directory after shutdown")
+            .map(|entry| entry.expect("did directory entry").file_name())
+            .collect::<Vec<OsString>>(),
+        fs::read(&nickname_path).expect("did/nickname.enc after shutdown"),
+    );
+    assert_eq!(
+        after, setup,
+        "shutdown changed the storage tree; the watched paths are did/ and did/nickname.enc"
+    );
 }
 
 /// `verify_did_recovery` answers under the profile without a genuine proof.

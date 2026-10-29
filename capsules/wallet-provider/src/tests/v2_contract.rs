@@ -179,6 +179,18 @@ fn production_outer_decoder_rejects_retired_and_generic_wallet_operations() {
     }
 }
 
+fn invalid_runtime_invocation_message(response: Response) -> String {
+    match response {
+        Response::Error { code, message } => {
+            assert_eq!(code, "invalid_runtime_invocation");
+            message
+        }
+        other => panic!("expected invalid_runtime_invocation, got {other:?}"),
+    }
+}
+
+/// The whole refusal message is pinned for every envelope field. The nine `abi` fields share one
+/// string, so the per-field mutations are what pin each `abi` check.
 #[test]
 fn wallet_contract_requires_the_exact_runtime_local_json_envelope() {
     let dir = tempfile::tempdir().unwrap();
@@ -197,23 +209,90 @@ fn wallet_contract_requires_the_exact_runtime_local_json_envelope() {
     );
     assert!(matches!(missing, Response::Error { ref code, .. } if code == "invalid_request"));
 
+    for (field, value, expected) in [
+        (
+            "schema",
+            json!("elastos.provider.invocation/v2"),
+            "Wallet contract requires schema=elastos.provider.invocation/v1, received elastos.provider.invocation/v2",
+        ),
+        (
+            "source",
+            json!("capsule"),
+            "Wallet contract requires source=runtime, received capsule",
+        ),
+        (
+            "target",
+            json!("chain"),
+            "Wallet contract requires target=wallet, received chain",
+        ),
+        (
+            "op",
+            json!("status"),
+            "Wallet contract requires op=wallet_contract, received status",
+        ),
+        (
+            "capability",
+            json!("provider:runtime->wallet:status"),
+            "Wallet contract requires capability=provider:runtime->wallet:wallet_contract, received provider:runtime->wallet:status",
+        ),
+        (
+            "transport",
+            json!("carrier-provider-plane"),
+            "Wallet contract requires transport=runtime-local-provider-plane, received carrier-provider-plane",
+        ),
+        (
+            "transfer",
+            json!("bytes"),
+            "Wallet contract requires transfer=json, received bytes",
+        ),
+    ] {
+        let mut envelope = runtime_invocation_envelope();
+        envelope[field] = value;
+        let message =
+            invalid_runtime_invocation_message(decode_and_handle_outer(
+                &mut provider,
+                wallet_outer(&request, envelope),
+            ));
+        assert_eq!(message, expected, "{field} refusal message");
+    }
+
     for (field, value) in [
-        ("source", json!("capsule")),
-        ("target", json!("chain")),
-        ("op", json!("status")),
-        ("capability", json!("provider:runtime->wallet:status")),
-        ("transport", json!("carrier-provider-plane")),
-        ("transfer", json!("bytes")),
         ("carrier", json!({ "route": "connect_ticket" })),
         ("range", json!({ "start": 0, "end": 1 })),
         ("progress", json!({ "request_id": "forged" })),
     ] {
         let mut envelope = runtime_invocation_envelope();
         envelope[field] = value;
-        let response = decode_and_handle_outer(&mut provider, wallet_outer(&request, envelope));
-        assert!(
-            matches!(response, Response::Error { ref code, .. } if code == "invalid_runtime_invocation"),
-            "field {field} unexpectedly reached Wallet: {response:?}"
+        let message = invalid_runtime_invocation_message(decode_and_handle_outer(
+            &mut provider,
+            wallet_outer(&request, envelope),
+        ));
+        assert_eq!(
+            message, "Wallet contract forbids Carrier, range, and progress invocation metadata",
+            "{field} refusal message"
+        );
+    }
+
+    for (field, value) in [
+        ("schema", json!("elastos.provider.transfer-abi/v2")),
+        ("transfer", json!("bytes")),
+        ("transport", json!("carrier-provider-plane")),
+        ("range_supported", json!(true)),
+        ("progress_supported", json!(true)),
+        ("progress_mode", json!("stream")),
+        ("transport_native_stream", json!(true)),
+        ("backpressure", json!("required")),
+        ("cancel_supported", json!(true)),
+    ] {
+        let mut envelope = runtime_invocation_envelope();
+        envelope["abi"][field] = value;
+        let message = invalid_runtime_invocation_message(decode_and_handle_outer(
+            &mut provider,
+            wallet_outer(&request, envelope),
+        ));
+        assert_eq!(
+            message, "Wallet contract requires the exact Runtime-local JSON ABI",
+            "abi.{field} refusal message"
         );
     }
 
