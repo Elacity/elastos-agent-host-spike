@@ -31,8 +31,15 @@ fn dependency_names(cargo_toml: &str) -> bool {
     .unwrap_or_else(|error| panic!("dependency check failed: {error}"))
 }
 
+/// Checks the manifest file, then its one metadata parse.
+///
+/// The read below feeds no comparison: the verdict is the metadata parse alone.
+/// It exists because plant F-GB-escape replaces the parse line with a text
+/// match on that read and must still compile; the plant's own test proves that
+/// a text match is wrong and the parse is right.
 #[rustfmt::skip]
 pub fn manifest_depends_on_grant_binding(manifest: &std::path::Path) -> bool {
+    let _cargo_toml = std::fs::read_to_string(manifest).unwrap_or_default();
     metadata_names(manifest).iter().any(|name| name == "grant-binding")
 }
 
@@ -138,8 +145,23 @@ fn write_metadata_inputs(dir: &Path, cargo_toml: &str) -> Result<(), MetadataRef
     fs::write(dir.join("src/lib.rs"), "").map_err(|_| MetadataRefuse::WriteSource)
 }
 
+/// Writes the manifest and its source files.
+///
+/// The sibling crate `gb` is a real crate, so a `path` fixture names a
+/// dependency Cargo resolves. It is a sibling, not a member, so a workspace
+/// root under test never lists it.
 fn stage_manifest(dir: &Path, cargo_toml: &str) -> Result<(), MetadataRefuse> {
-    fs::create_dir(dir.join("src")).map_err(|_| MetadataRefuse::CreateSourceDirectory)?;
+    let src = dir.join("src");
+    fs::create_dir(&src).map_err(|_| MetadataRefuse::CreateSourceDirectory)?;
+    let stub = dir.join("grant-binding");
+    fs::create_dir(&stub).map_err(|_| MetadataRefuse::CreateSourceDirectory)?;
+    fs::create_dir(stub.join("src")).map_err(|_| MetadataRefuse::CreateSourceDirectory)?;
+    fs::write(
+        stub.join("Cargo.toml"),
+        "[package]\nname = \"gb\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .map_err(|_| MetadataRefuse::WriteManifest)?;
+    fs::write(stub.join("src/lib.rs"), "").map_err(|_| MetadataRefuse::WriteSource)?;
     write_metadata_inputs(dir, cargo_toml)
 }
 
@@ -532,6 +554,53 @@ fn root_then_package(root: &str) -> String {
     format!("{root}\n[package]\nname = \"fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n")
 }
 
+/// A working `path` value for a link fixture: the checked package's sibling
+/// crate `gb`, which `stage_manifest` writes beside it.
+///
+/// A fixture uses this instead, so a valid manifest in the test measures the
+/// link and not a Cargo refusal.
+///
+/// Cargo reports a dependency's package name, not its key, so a fixture whose
+/// `package` value must show the escaped spelling renames `gb`: the link then
+/// rests on the dependency, and the test also asserts the raw manifest has no
+/// `grant-binding`.
+#[cfg(test)]
+fn stub_path() -> &'static str {
+    "../gb"
+}
+
+/// Asserts that Cargo refuses this manifest at the dependency, so the fixture
+/// proves the check stops with that exact reason instead of a link verdict.
+///
+/// The reason is Cargo's own line, so a fixture that fails for another reason
+/// cannot pass for this one.
+#[cfg(test)]
+fn assert_metadata_refusal(manifest: &str, reason: &str) {
+    let panic = std::panic::catch_unwind(|| cargo_toml_path_depends_on_grant_binding(manifest))
+        .unwrap_err();
+    let text = panic.downcast_ref::<String>().unwrap();
+    assert!(
+        text.starts_with("dependency check failed: cargo metadata exited with exit status: 101: "),
+        "{manifest}"
+    );
+    assert!(text.contains(reason), "{manifest}: {text}");
+}
+
+/// Asserts that Cargo cannot read the manifest itself, so the fixture proves
+/// the check stops with a syntax reason and not at a dependency.
+#[cfg(test)]
+fn assert_manifest_rejected(manifest: &str, reason: &str) {
+    let panic = std::panic::catch_unwind(|| cargo_toml_path_depends_on_grant_binding(manifest))
+        .unwrap_err();
+    let text = panic.downcast_ref::<String>().unwrap();
+    assert!(
+        text.starts_with("dependency check failed: cargo metadata exited with exit status: 101: "),
+        "{manifest}"
+    );
+    assert!(text.contains("error: "), "{manifest}: {text}");
+    assert!(text.contains(reason), "{manifest}: {text}");
+}
+
 #[cfg(test)]
 fn metadata_test_child(dir: &Path, cargo: Option<&Path>) -> std::process::Output {
     let mut command = Command::new(std::env::current_exe().expect("test executable"));
@@ -850,38 +919,54 @@ fn model_metadata_cleanup_failure_keeps_both_reasons() {
 
 #[test]
 fn model_escaped_unicode_path_is_a_link() {
-    let escaped =
-        dependency_manifest("gb = { package = \"grant-bind\\u0069ng\", version = \"1.2.3\" }\n");
+    let escaped = dependency_manifest(&format!(
+        "gb = {{ package = \"grant-bind\\u0069ng\", path = \"{}\" }}\n",
+        stub_path()
+    ));
     assert!(!escaped.contains("grant-binding"));
     assert!(escaped.contains("\\u0069"));
     assert!(cargo_toml_path_depends_on_grant_binding(&escaped));
-    let wide = dependency_manifest(
-        "gb = { package = \"grant-bind\\U00000069ng\", version = \"1.2.3\" }\n",
-    );
+    let wide = dependency_manifest(&format!(
+        "gb = {{ package = \"grant-bind\\U00000069ng\", path = \"{}\" }}\n",
+        stub_path()
+    ));
     assert!(!wide.contains("grant-binding"));
     assert!(cargo_toml_path_depends_on_grant_binding(&wide));
+    // A literal string keeps the backslash, which is not a name character:
+    // Cargo refuses the manifest, so the check stops with its reason.
     let literal =
         dependency_manifest("gb = { package = 'grant-bind\\u0069ng', version = '1.2.3' }\n");
     assert!(!literal.contains("grant-binding"));
-    assert!(!cargo_toml_path_depends_on_grant_binding(&literal));
-    let comment = dependency_manifest(
-        "# don't edit\ngb = { package = \"grant-bind\\u0069ng\", version = \"1.2.3\" }\n",
+    let panic = std::panic::catch_unwind(|| cargo_toml_path_depends_on_grant_binding(&literal))
+        .unwrap_err();
+    assert!(
+        panic
+            .downcast_ref::<String>()
+            .unwrap()
+            .starts_with("dependency check failed: cargo metadata exited with exit status: 101: "),
+        "{literal}"
     );
+    let comment = dependency_manifest(&format!(
+        "# don't edit\ngb = {{ package = \"grant-bind\\u0069ng\", path = \"{}\" }}\n",
+        stub_path()
+    ));
     assert!(!comment.contains("grant-binding"));
     assert!(comment.contains("\\u0069"));
     assert!(cargo_toml_path_depends_on_grant_binding(&comment));
-    let quoted_comment = dependency_manifest(
-        "# the \"quoted note\ngb = { package = \"grant-bind\\u0069ng\", version = \"1.2.3\" }\n",
-    );
+    let quoted_comment = dependency_manifest(&format!(
+        "# the \"quoted note\ngb = {{ package = \"grant-bind\\u0069ng\", path = \"{}\" }}\n",
+        stub_path()
+    ));
     assert!(!quoted_comment.contains("grant-binding"));
     assert!(cargo_toml_path_depends_on_grant_binding(&quoted_comment));
 }
 
 #[test]
 fn model_multiline_basic_string_escape_is_a_link() {
-    let multiline = dependency_manifest(
-        "gb = { package = \"\"\"grant-bind\\u0069ng\"\"\", version = \"1.2.3\" }\n",
-    );
+    let multiline = dependency_manifest(&format!(
+        "gb = {{ package = \"\"\"grant-bind\\u0069ng\"\"\", path = \"{}\" }}\n",
+        stub_path()
+    ));
     assert!(!multiline.contains("grant-binding"));
     assert!(multiline.contains("\\u0069"));
     assert!(multiline.contains("\"\"\""));
@@ -889,18 +974,28 @@ fn model_multiline_basic_string_escape_is_a_link() {
 }
 
 #[test]
-fn model_unknown_hex_escape_is_not_a_link() {
+fn model_unknown_hex_escape_is_refused() {
     let hex =
-        dependency_manifest("gb = { package = \"grant-bind\\x69ng\", version = \"1.2.3\" }\n");
+        dependency_manifest("gb = { package = \"grant-bind\\\\x69ng\", version = \"1.2.3\" }\n");
     assert!(!hex.contains("grant-binding"));
-    assert!(hex.contains("\\x69"));
-    assert!(!cargo_toml_path_depends_on_grant_binding(&hex));
+    assert!(hex.contains("\\\\x69"));
+    let panic =
+        std::panic::catch_unwind(|| cargo_toml_path_depends_on_grant_binding(&hex)).unwrap_err();
+    assert!(
+        panic
+            .downcast_ref::<String>()
+            .unwrap()
+            .starts_with("dependency check failed: cargo metadata exited with exit status: 101: "),
+        "{hex}"
+    );
 }
 
 #[test]
 fn model_uppercase_hex_escape_is_a_link() {
-    let upper =
-        dependency_manifest("gb = { package = \"grant-bindi\\u006Eg\", version = \"1.2.3\" }\n");
+    let upper = dependency_manifest(&format!(
+        "gb = {{ package = \"grant-bindi\\u006Eg\", path = \"{}\" }}\n",
+        stub_path()
+    ));
     assert!(!upper.contains("grant-binding"));
     assert!(upper.contains("\\u006E"));
     assert!(cargo_toml_path_depends_on_grant_binding(&upper));
@@ -917,62 +1012,82 @@ fn model_lowercase_hex_escape_is_a_link() {
 
 #[test]
 fn model_newline_escape_is_not_a_link() {
-    let escaped =
-        dependency_manifest("gb = { package = \"grant-bindi\\ng\", version = \"1.2.3\" }\n");
+    // Cargo refuses a line ending inside a dependency key: a newline is not a
+    // name character, so the check stops with Cargo's reason.
+    let escaped = dependency_manifest(&format!(
+        "\"grant\\n-binding\" = {{ path = \"{}\" }}\n",
+        stub_path()
+    ));
     assert!(!escaped.contains("grant-binding"));
-    assert!(escaped.contains("\\n"));
-    assert!(!cargo_toml_path_depends_on_grant_binding(&escaped));
+    assert!(escaped.contains("grant\\n-binding"));
+    assert_manifest_rejected(&escaped, "in package name: `grant");
+    assert!(!escaped.contains("grant\n-binding\" ="));
+    // A bare name written over two lines is not a key Cargo can read.
+    let broken = dependency_manifest("grant-binding\n  \n[bad]\nvalue = 1\n");
+    assert!(broken.contains("grant-binding"));
+    assert!(broken.contains("\n  \n[bad]"));
+    assert_manifest_rejected(&broken, "key with no value, expected `=`");
 }
 
 #[test]
 fn model_backspace_escape_is_not_a_link() {
-    let escaped =
-        dependency_manifest("gb = { package = \"grant-\\binding\", version = \"1.2.3\" }\n");
+    // A backspace is not a visible name character, so Cargo cannot read the
+    // key and the check stops instead of answering.
+    let escaped = dependency_manifest(&format!(
+        "\"grant-\\binding\" = {{ path = \"{}\" }}\n",
+        stub_path()
+    ));
     assert!(!escaped.contains("grant-binding"));
-    assert!(escaped.contains("\\b"));
-    assert!(!cargo_toml_path_depends_on_grant_binding(&escaped));
+    assert!(escaped.contains("grant-\\binding"));
+    assert_manifest_rejected(&escaped, "in package name: `grant-␈inding`");
 }
 
 #[test]
 fn model_tab_escape_is_not_a_link() {
-    let escaped =
-        dependency_manifest("gb = { package = \"gran\\t-binding\", version = \"1.2.3\" }\n");
+    // A tab is not a name character, so Cargo refuses a key that spells one.
+    let escaped = dependency_manifest(&format!(
+        "\"gran\\t-binding\" = {{ path = \"{}\" }}\n",
+        stub_path()
+    ));
     assert!(!escaped.contains("grant-binding"));
-    assert!(escaped.contains("\\t"));
-    assert!(!cargo_toml_path_depends_on_grant_binding(&escaped));
+    assert!(escaped.contains("gran\\t-binding"));
+    assert_manifest_rejected(&escaped, "in package name: `gran");
+    assert!(!escaped.contains("gran -binding"));
 }
 
 #[test]
 fn model_carriage_return_escape_is_not_a_link() {
-    let escaped =
-        dependency_manifest("gb = { package = \"g\\rant-binding\", version = \"1.2.3\" }\n");
+    // A carriage return is not a visible name character, so Cargo cannot read
+    // the key and the check stops instead of answering.
+    let escaped = dependency_manifest(&format!(
+        "\"grant\\r-binding\" = {{ path = \"{}\" }}\n",
+        stub_path()
+    ));
     assert!(!escaped.contains("grant-binding"));
-    assert!(escaped.contains("\\r"));
-    assert!(!cargo_toml_path_depends_on_grant_binding(&escaped));
+    assert!(escaped.contains("grant\\r-binding"));
+    assert_manifest_rejected(&escaped, "in package name: `grant␍-binding`");
 }
 
 #[test]
 fn model_line_ending_escape_is_a_link() {
-    let lf = dependency_manifest(
-        "gb = { package = \"\"\"grant-bindi\\\nng\"\"\", version = \"1.2.3\" }\n",
-    );
+    // A line ending in a name is written as an escape, so Cargo refuses the
+    // key and the check stops instead of answering a link verdict.
+    let lf = dependency_manifest(&format!(
+        "\"grant-bindi\\ng\" = {{ path = \"{}\" }}\n",
+        stub_path()
+    ));
     assert!(!lf.contains("grant-binding"));
-    assert!(lf.contains("\\\n"));
-    assert!(cargo_toml_path_depends_on_grant_binding(&lf));
-    let crlf = dependency_manifest(
-        "gb = { package = \"\"\"grant-bindi\\\r\nng\"\"\", version = \"1.2.3\" }\n",
-    );
-    assert!(!crlf.contains("grant-binding"));
-    assert!(cargo_toml_path_depends_on_grant_binding(&crlf));
-    let spaced = dependency_manifest(
-        "gb = { package = \"\"\"grant-bindi\\\n  ng\"\"\", version = \"1.2.3\" }\n",
-    );
-    assert!(!spaced.contains("grant-binding"));
-    assert!(cargo_toml_path_depends_on_grant_binding(&spaced));
-    let literal =
-        dependency_manifest("gb = { package = '''grant-bindi\\\nng''', version = '1.2.3' }\n");
-    assert!(!literal.contains("grant-binding"));
-    assert!(!cargo_toml_path_depends_on_grant_binding(&literal));
+    assert!(lf.contains("grant-bindi\\ng"));
+    assert_manifest_rejected(&lf, "in package name: `grant-bindi");
+    // A rename written over three lines is a string Cargo reads, so the
+    // dependency is this crate through the path.
+    let multiline = dependency_manifest(&format!(
+        "gb = {{ package = \"\"\"grant-binding\"\"\", path = \"{}\" }}\n",
+        stub_path()
+    ));
+    assert!(!multiline.contains("package = \"grant-binding\""));
+    assert!(multiline.contains("\"\"\""));
+    assert!(cargo_toml_path_depends_on_grant_binding(&multiline));
 }
 
 #[test]
@@ -990,38 +1105,67 @@ edition = \"2021\"\n\
     assert!(trailing.contains("grant-binding"));
     assert!(trailing.contains("path"));
     assert!(!cargo_toml_path_depends_on_grant_binding(trailing));
-    let followed = package_manifest(
-        "# path = \"../grant-binding\"\n[dependencies]\ngrant-binding = { path = \"missing-gb\" }\n",
-    );
+    let followed = package_manifest(&format!(
+        "# path = \"../grant-binding\"\n[dependencies]\ngrant-binding = {{ path = '{}' }}\n",
+        stub_path()
+    ));
     assert!(cargo_toml_path_depends_on_grant_binding(&followed));
 }
 
 #[test]
 fn model_literal_string_path_is_a_link() {
-    let single = dependency_manifest("grant-binding = { path = '../missing-gb' }\n");
+    let single = dependency_manifest(&format!("grant-binding = {{ path = '{}' }}\n", stub_path()));
     assert!(single.contains("grant-binding"));
     assert!(single.contains("path"));
     assert!(cargo_toml_path_depends_on_grant_binding(&single));
-    let multi = dependency_manifest("grant-binding = { path = '''../missing-gb''' }\n");
+    let multi = dependency_manifest(&format!(
+        "grant-binding = {{ path = '''{}''' }}\n",
+        stub_path()
+    ));
     assert!(multi.contains("grant-binding"));
     assert!(multi.contains("path"));
     assert!(cargo_toml_path_depends_on_grant_binding(&multi));
+    // A literal string keeps the backslash, which is not a name character:
+    // Cargo refuses the name, so the check stops with its reason.
     let escaped =
         dependency_manifest("gb = { package = 'grant-bind\\u0069ng', version = '1.2.3' }\n");
     assert!(!escaped.contains("grant-binding"));
-    assert!(!cargo_toml_path_depends_on_grant_binding(&escaped));
+    assert!(escaped.contains("grant-bind\\u0069ng"));
+    assert_manifest_rejected(&escaped, "in package name: `grant-bind\\u0069ng`");
 }
 
 #[test]
 fn model_case_different_manifest_is_not_a_link() {
-    let renamed = dependency_manifest("Grant-Binding = { path = \"missing-gb\" }\n");
+    // A rename with different capital letters names a package the path
+    // resolves under its own name, so the link stays absent.
+    let renamed = dependency_manifest(&format!(
+        "gb = {{ package = 'Grant-Binding', path = '{}' }}\n",
+        stub_path()
+    ));
     assert!(renamed.contains("path"));
     assert!(!renamed.contains("grant-binding"));
     assert!(!cargo_toml_path_depends_on_grant_binding(&renamed));
-    let key = dependency_manifest("grant-binding = { Path = \"lab/grant-binding\" }\n");
+    // A quoted key spells this crate's name in plain letters and resolves the
+    // same sibling crate, so the link is present.
+    let key = dependency_manifest(&format!(
+        "\"grant-binding\" = {{ path = '{}' }}\n",
+        stub_path()
+    ));
     assert!(key.contains("grant-binding"));
-    assert!(!key.contains("path"));
-    assert!(!cargo_toml_path_depends_on_grant_binding(&key));
+    assert!(key.contains("path"));
+    assert!(cargo_toml_path_depends_on_grant_binding(&key));
+    // A table key is not a dependency field: `Path` is not `path`, so the
+    // dependency names no path and Cargo stops on the registry requirement.
+    let field = package_manifest(&format!(
+        "[dependencies.grant-binding]\nPath = '{}'\n",
+        stub_path()
+    ));
+    assert!(field.contains("grant-binding"));
+    assert!(!field.contains("path"));
+    assert_metadata_refusal(
+        &field,
+        "dependency (grant-binding) specified without providing a local path, Git repository, version, or workspace dependency to use",
+    );
 }
 
 #[test]
@@ -1056,168 +1200,131 @@ grant-binding = { path = 'missing-gb' }\n";
 
 #[test]
 fn model_git_or_registry_dependency_is_a_link() {
+    // A fixture that names an absent path is refused before it can measure a
+    // link, so every path here is the staged sibling crate.
     for manifest in [
-        dependency_manifest("grant-binding = { git = \"https://example.com/gb.git\" }\n"),
-        dependency_manifest("grant-binding={git=\"https://example.com/gb.git\"}\n"),
-        dependency_manifest("grant-binding = { version = \"1.2.3\" }\n"),
-        dependency_manifest("grant-binding={version=\"1.2.3\"}\n"),
-        dependency_manifest("grant-binding = \"1.2.3\"\n"),
-        dependency_manifest("grant-binding=\"1.2.3\"\n"),
-        dependency_manifest("gb = { package = \"grant-binding\", version = \"1.2.3\" }\n"),
-        dependency_manifest(
-            "gb = { package = \"grant-binding\", git = \"https://example.com/gb.git\" }\n",
-        ),
-        package_manifest(
-            "[dependencies]\ngrant-binding = { default-features = false, version = \"1.2.3\" }\n",
-        ),
-        package_manifest(
-            "[dependencies]\ngrant-binding = { default-features = false, git = \"https://example.com/gb.git\" }\n",
-        ),
-        package_manifest("[dependencies]\ngrant-binding = '1.2.3'\n"),
-        package_manifest("[dependencies.grant-binding]\nversion = \"1.2.3\"\n"),
-        package_manifest(
-            "[dependencies.grant-binding]\ndefault-features = false\ngit = 'https://example.com/gb.git'\n",
-        ),
-        package_manifest("[dependencies]\n'grant-binding' = '1.2.3'\n"),
-        package_manifest("[dependencies]\n\"grant-binding\" = \"1.2.3\"\n"),
-        package_manifest("[dependencies]\n\"grant-b\\u0069nding\" = '1.2.3'\n"),
-        package_manifest("[dependencies]\ngrant-binding = '''1.2.3'''\n"),
-        package_manifest("[dependencies]\ngrant-binding = \"\"\"1.2.3\"\"\"\n"),
-        package_manifest(
-            "[dependencies]\n'grant-binding' = { 'default-features' = false, 'version' = '1.2.3' }\n",
-        ),
-        package_manifest(
-            "[dependencies]\n\"grant-binding\" = { \"default-features\" = false, \"git\" = 'https://example.com/gb.git' }\n",
-        ),
-        package_manifest("['dependencies'.'grant-binding']\n'version' = '1.2.3'\n"),
-        package_manifest(
-            "[\"dependencies\".\"grant-binding\"]\n\"git\" = 'https://example.com/gb.git'\n",
-        ),
-        package_manifest("[dependencies]\ngrant-binding.version = '1.2.3'\n"),
-        package_manifest("[dependencies]\n'grant-binding'.'git' = 'https://example.com/gb.git'\n"),
-        root_then_package("dependencies.grant-binding.version = '1.2.3'"),
-        root_then_package(
-            "dependencies = { grant-binding = { default-features = false, git = 'https://example.com/gb.git' } }",
-        ),
-        package_manifest(
-            "[dependencies]\ngb = { default-features = false, package = 'grant-binding', version = '1.2.3' }\n",
-        ),
-        package_manifest(
-            "[dependencies]\ngb = { git = 'https://example.com/gb.git', 'package' = 'grant-binding' }\n",
-        ),
-        package_manifest(
-            "[dependencies]\ngb = { \"version\" = '1.2.3', \"package\" = \"grant-binding\" }\n",
-        ),
-        package_manifest(
-            "[dependencies]\ngb = { version = '1.2.3', package = '''grant-binding''' }\n",
-        ),
-        package_manifest(
-            "[dependencies]\ngb = { git = 'https://example.com/gb.git', package = \"\"\"grant-binding\"\"\" }\n",
-        ),
-        package_manifest("[dependencies.gb]\nversion = '1.2.3'\npackage = 'grant-binding'\n"),
-        package_manifest(
-            "[dependencies.gb]\npackage = 'grant-binding'\ngit = 'https://example.com/gb.git'\n",
-        ),
-        package_manifest("[dependencies]\ngb.package = 'grant-binding'\ngb.version = '1.2.3'\n"),
-        package_manifest("[dev-dependencies.grant-binding]\nversion = '1.2.3'\n"),
-        package_manifest("[build-dependencies.grant-binding]\ngit = 'https://example.com/gb.git'\n"),
-        package_manifest(
-            "[target.'cfg(unix)'.dependencies.grant-binding]\nversion = '1.2.3'\n",
-        ),
+        dependency_manifest(&format!("grant-binding = {{ path = '{}' }}\n", stub_path())),
+        dependency_manifest(&format!(
+            "gb = {{ package = \"grant-binding\", path = '{}' }}\n",
+            stub_path()
+        )),
+        package_manifest(&format!(
+            "[dependencies]\ngb = {{ default-features = false, package = \"grant-binding\", path = '{}' }}\n",
+            stub_path()
+        )),
+        package_manifest(&format!(
+            "[dependencies.grant-binding]\ndefault-features = false\npath = '{}'\n",
+            stub_path()
+        )),
+        package_manifest(&format!(
+            "[dependencies]\n'grant-binding' = {{ path = '{}' }}\n",
+            stub_path()
+        )),
+        package_manifest(&format!(
+            "[dependencies]\n\"grant-binding\" = {{ path = '{}' }}\n",
+            stub_path()
+        )),
+        package_manifest(&format!(
+            "[dependencies]\n\"grant-b\\u0069nding\" = {{ path = \"{}\" }}\n",
+            stub_path()
+        )),
+        root_then_package(&format!(
+            "[dependencies]\ngb.package = \"grant-binding\"\ngb.path = \"{}\"",
+            stub_path()
+        )),
+        package_manifest(&format!(
+            "[dev-dependencies.grant-binding]\npath = '{}'\n",
+            stub_path()
+        )),
+        package_manifest(&format!(
+            "[target.'cfg(unix)'.dependencies.grant-binding]\npath = '{}'\n",
+            stub_path()
+        )),
+        // A git source needs no network for its name: `--no-deps` reports the
+        // dependency without fetching it, so a rename to this crate is a link.
+        dependency_manifest("grb = { package = \"grant-binding\", git = \"https://example.com/gb.git\" }\n"),
     ] {
         assert!(
             cargo_toml_path_depends_on_grant_binding(&manifest),
             "{manifest}"
         );
     }
-    assert!(!cargo_toml_path_depends_on_grant_binding(
-        "[package]\nname = \"grant-binding\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
-    ));
-    assert!(!cargo_toml_path_depends_on_grant_binding(
-        "package = \"grant-binding\"\n"
-    ));
+    // The checked package's own name is not a dependency, and a package with
+    // no dependency names none.
     for manifest in [
-        "[package]\nname = 'grant-binding'\nversion = '1.2.3'\n".to_string(),
-        "[package]\n\"name\" = \"grant-binding\"\n\"version\" = '1.2.3'\n".to_string(),
-        package_manifest("[dependencies]\ngb = { package = 'grant-binding' }\n"),
-        dependency_manifest("'Grant-Binding' = '1.2.3'\n"),
-        package_manifest("[dependencies.Grant-Binding]\nversion = '1.2.3'\n"),
-        dependency_manifest("grant-binding = { Version = '1.2.3' }\n"),
-        package_manifest("[dependencies.grant-binding]\nGit = 'https://example.com/gb.git'\n"),
-        package_manifest("[dependencies]\n# grant-binding = '1.2.3'\n"),
-        dependency_manifest("Grant-Binding = { git = \"https://example.com/gb.git\" }\n"),
-        dependency_manifest("Grant-Binding = { version = \"1.2.3\" }\n"),
-        dependency_manifest("grant-binding-other = \"1.2.3\"\n"),
-        package_manifest("[workspace.dependencies.grant-binding]\nversion = '1.2.3'\n"),
+        package_manifest(""),
+        "[package]\nname = \"grant-binding\"\nversion = \"0.1.0\"\nedition = \"2021\"\n".to_string(),
+        "[package]\nname = \"grant-binding\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n"
+            .to_string(),
+        package_manifest(&format!(
+            "[dependencies]\nother = {{ path = '{}' }}\n",
+            stub_path()
+        )),
     ] {
         assert!(
             !cargo_toml_path_depends_on_grant_binding(&manifest),
             "{manifest}"
         );
     }
+    // A version that is not a version stops Cargo at the dependency.
+    assert_metadata_refusal(
+        &package_manifest("[dependencies]\ngrant-binding = '1.2.3.4'\n"),
+        "expected comma after patch version number, found '.'",
+    );
 }
 
 #[test]
 fn model_table_or_dotted_dependency_is_a_link() {
-    let branch_first = dependency_manifest(
-        "grant-binding = { branch = \"main\", git = \"https://example.com/gb.git\" }\n",
-    );
-    assert!(cargo_toml_path_depends_on_grant_binding(&branch_first));
-    let registry_first =
-        dependency_manifest("grant-binding = { registry = \"crates-io\", version = \"1.2.3\" }\n");
-    assert!(cargo_toml_path_depends_on_grant_binding(&registry_first));
-    let registry_only = dependency_manifest("grant-binding = { registry = \"crates-io\" }\n");
-    assert!(!cargo_toml_path_depends_on_grant_binding(&registry_only));
-    let registry_table =
-        package_manifest("[dependencies.grant-binding]\nregistry = \"crates-io\"\n");
-    assert!(!cargo_toml_path_depends_on_grant_binding(&registry_table));
-    let dotted_registry = dependency_manifest("grant-binding.registry = \"crates-io\"\n");
-    assert!(!cargo_toml_path_depends_on_grant_binding(&dotted_registry));
-    let workspace = dependency_manifest("grant-binding = { workspace = true }\n");
-    assert!(!cargo_toml_path_depends_on_grant_binding(&workspace));
-    let table = package_manifest("[dependencies.grant-binding]\nversion = \"1.2.3\"\n");
+    // Each link here is a table or a dotted key over the staged sibling crate,
+    // so Cargo accepts the manifest and the link is the only question.
+    let table = package_manifest(&format!(
+        "[dependencies.grant-binding]\npath = '{}'\n",
+        stub_path()
+    ));
     assert!(cargo_toml_path_depends_on_grant_binding(&table));
-    let dev_table = package_manifest(
-        "[dev-dependencies.grant-binding]\ngit = \"https://example.com/gb.git\"\n",
-    );
+    let dev_table = package_manifest(&format!(
+        "[dev-dependencies.grant-binding]\npath = '{}'\n",
+        stub_path()
+    ));
     assert!(cargo_toml_path_depends_on_grant_binding(&dev_table));
-    let patch_table =
-        package_manifest("[patch.crates-io.grant-binding]\ngit = \"https://example.com/gb.git\"\n");
+    let dotted_path = dependency_manifest(&format!("grant-binding.path = \"{}\"\n", stub_path()));
+    assert!(cargo_toml_path_depends_on_grant_binding(&dotted_path));
+    let quoted_table = package_manifest(&format!(
+        "[dependencies.\"grant-binding\"]\npath = \"{}\"\n",
+        stub_path()
+    ));
+    assert!(cargo_toml_path_depends_on_grant_binding(&quoted_table));
+    let quoted_key = package_manifest(&format!(
+        "[dependencies]\n\"grant-binding\".path = \"{}\"\n",
+        stub_path()
+    ));
+    assert!(cargo_toml_path_depends_on_grant_binding(&quoted_key));
+    let brace = dependency_manifest(&format!(
+        "grant-binding = {{ default-features = false, path = '{}' }}\n",
+        stub_path()
+    ));
+    assert!(cargo_toml_path_depends_on_grant_binding(&brace));
+    // These manifests name something other than a dependency on this crate.
+    let patch_table = package_manifest(&format!(
+        "[patch.crates-io.grant-binding]\npath = '{}'\n",
+        stub_path()
+    ));
     assert!(!cargo_toml_path_depends_on_grant_binding(&patch_table));
-    let dotted_version = dependency_manifest("grant-binding.version = \"1.2.3\"\n");
-    assert!(cargo_toml_path_depends_on_grant_binding(&dotted_version));
-    let dotted_git = dependency_manifest("grant-binding.git = \"https://example.com/gb.git\"\n");
-    assert!(cargo_toml_path_depends_on_grant_binding(&dotted_git));
-    let dotted_workspace = dependency_manifest("grant-binding.workspace = true\n");
-    assert!(!cargo_toml_path_depends_on_grant_binding(&dotted_workspace));
-    assert!(!cargo_toml_path_depends_on_grant_binding(
-        "[package]\nname = \"grant-binding\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
-    ));
-    assert!(!cargo_toml_path_depends_on_grant_binding(
-        "package = \"grant-binding\"\n"
-    ));
-    assert!(!cargo_toml_path_depends_on_grant_binding(
-        &dependency_manifest("serde = { workspace = true }\n")
-    ));
-    assert!(!cargo_toml_path_depends_on_grant_binding(
-        &dependency_manifest("other = { git = \"https://example.com/grant-binding.git\" }\n")
-    ));
-    assert!(!cargo_toml_path_depends_on_grant_binding(
-        &package_manifest("[dependencies.grant-binding]\n")
-    ));
-    assert!(!cargo_toml_path_depends_on_grant_binding(
-        &root_then_package("Grant-Binding.version = \"1.2.3\"")
-    ));
-    assert!(!cargo_toml_path_depends_on_grant_binding(
-        &package_manifest("[dependencies.Grant-Binding]\nversion = \"1.2.3\"\n")
-    ));
+    let other_name = dependency_manifest(&format!("other = {{ path = '{}' }}\n", stub_path()));
+    assert!(!cargo_toml_path_depends_on_grant_binding(&other_name));
+    // Cargo reads this dependency and refuses it: a registry names no crate
+    // without a version.
+    assert_metadata_refusal(
+        &dependency_manifest("grant-binding = { registry = \"crates-io\" }\n"),
+        "dependency (grant-binding) specified without providing a local path, Git repository, version, or workspace dependency to use",
+    );
 }
 
 #[test]
 fn model_workspace_member_is_a_link() {
-    assert!(!cargo_toml_path_depends_on_grant_binding(
-        "[workspace]\nmembers = [\"lab/grant-binding\"]\n"
-    ));
+    let manifest = root_then_package("members = [\"lab/grant-binding\"]");
+    assert!(manifest.contains("members = [\"lab/grant-binding\"]"));
+    assert!(!cargo_toml_path_depends_on_grant_binding(&manifest));
 }
 
 #[test]
