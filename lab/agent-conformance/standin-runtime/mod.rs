@@ -15,6 +15,12 @@
 //! route. `post_capability_validate` is the one use path; its private
 //! `authorise` runs on that same filter.
 //!
+//! `stop_one` and the `worker_exited` seam share one private end path,
+//! `end_instance`. It refuses an unknown or already-ended id before anything
+//! changes; otherwise it applies the given phase and cause, then revokes and
+//! settles. `worker_exited` is the stand-in's dead worker with no stop
+//! request (M1 check A11): fixed cause `worker exited`, instance `failed`.
+//!
 //! A `once` grant minted by `post_capability_grant` stores its expiry as its
 //! `granted_at` plus `GRANT_LIFETIME_SECS`. One compare reads the stand-in's
 //! instant: at or past that instant `authorise` answers `grant is not live:
@@ -51,6 +57,8 @@ const RESIDENT_WORLD: &str = "resident-capsule";
 const FAILED_KEEP_SECS: u64 = 60;
 const REQUEST_TIMEOUT_SECS: u64 = 300;
 const GRANT_LIFETIME_SECS: u64 = 3_600;
+/// The one cause `worker_exited` stores, and the one reason it settles with.
+const WORKER_EXITED: &str = "worker exited";
 
 /// Authenticated caller. A method argument, not a JSON field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -812,17 +820,45 @@ impl StandIn {
     }
 
     fn stop_one(&mut self, id: &str, reason: &str) -> Result<(), (u16, String)> {
+        self.end_instance(id, ResidentStatus::Stopped, format!("stopped: {reason}"))
+    }
+
+    /// Lab test seam, not a route.
+    ///
+    /// Stands for the Runtime reaping a worker that died with no stop
+    /// request (M1 check A11). `id` is the only argument; the cause is the
+    /// fixed cause `worker exited` and the settler is `runtime`. It ends that
+    /// one instance `failed` through `end_instance`, the same path a stop
+    /// takes, so the instance leaves the live set and its pending requests
+    /// settle. An unknown id, or an instance that is already `stopped` or
+    /// `failed`, is refused and changes nothing. Other instances stay.
+    pub fn worker_exited(&mut self, id: &str) -> Result<(), (u16, String)> {
+        self.end_instance(id, ResidentStatus::Failed, WORKER_EXITED.to_owned())
+    }
+
+    /// The one end path for a live instance. `delete_capsule` reaches it
+    /// through `stop_one` with `stopped` and the stop cause; `worker_exited`
+    /// reaches it with `failed` and the fixed cause. An unknown id, or an
+    /// instance that is not `starting` or `running`, is refused before
+    /// anything changes. It writes the phase, the cause and `ended_at`, then
+    /// `revoke_live` ends that session's `Live` grants and `settle_pending`
+    /// denies its pending requests with that cause.
+    fn end_instance(
+        &mut self,
+        id: &str,
+        phase: ResidentStatus,
+        cause: String,
+    ) -> Result<(), (u16, String)> {
         let instant = self.instant;
         let Some(index) = self.instances.iter().position(|instance| instance.id == id) else {
             return Err(unknown_instance(id));
         };
-        let phase = self.instances[index].phase;
-        if !matches!(phase, ResidentStatus::Starting | ResidentStatus::Running) {
-            return Err(not_live(phase));
+        let current = self.instances[index].phase;
+        if !matches!(current, ResidentStatus::Starting | ResidentStatus::Running) {
+            return Err(not_live(current));
         }
         let session_id = self.instances[index].id.clone();
-        self.instances[index].phase = ResidentStatus::Stopped;
-        let cause = format!("stopped: {reason}");
+        self.instances[index].phase = phase;
         self.instances[index].cause = cause.clone();
         self.instances[index].ended_at = Some(instant);
         self.revoke_live(&session_id);

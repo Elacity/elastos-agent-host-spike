@@ -351,6 +351,263 @@ fn standin_settles_a_killed_agents_request() {
 }
 
 #[test]
+fn standin_settles_a_running_workers_request_when_its_worker_exits() {
+    let mut standin = StandIn::new();
+    let shared = SignedBundle::new();
+    standin
+        .admit_resident(
+            shared.path(),
+            &shared.signature(),
+            shared.accepted(),
+            Start::Ok,
+        )
+        .expect("the stand-in admits read-shared");
+    let mut launched = Vec::new();
+    for _ in 0..2 {
+        let launch = standin
+            .post_capsules(Caller::Shell, &shared.launch_body())
+            .expect("the stand-in launches the admitted CID");
+        let id = launch["id"]
+            .as_str()
+            .expect("the stand-in names each launch")
+            .to_owned();
+        standin
+            .finish_start(&id)
+            .expect("the stand-in finishes start");
+        launched.push(id);
+    }
+    let [agent_one, agent_two] = [&launched[0], &launched[1]];
+    let body = |reason: &str| {
+        json!({
+            "resource": SHARED_RESOURCE,
+            "action": "read",
+            "reason": reason,
+        })
+    };
+    let posted = standin
+        .post_capability_request(
+            Caller::Client {
+                session_id: agent_one,
+            },
+            &body("read shared"),
+        )
+        .expect("agent 1's own route stores one pending request");
+    assert_eq!(
+        posted,
+        json!({ "status": "pending", "request_id": "request-1" }),
+        "the stand-in mints one pending request for agent 1"
+    );
+    let unaffected = standin
+        .post_capability_request(
+            Caller::Client {
+                session_id: agent_two,
+            },
+            &body("read shared again"),
+        )
+        .expect("agent 2's own route stores one pending request");
+    assert_eq!(
+        unaffected,
+        json!({ "status": "pending", "request_id": "request-2" }),
+        "the stand-in mints one pending request for agent 2"
+    );
+    let agent_two_pending = request_records(&standin, agent_two);
+    assert_eq!(
+        request_records(&standin, agent_one),
+        json!([{
+            "request_id": "request-1",
+            "session_id": agent_one,
+            "resource": SHARED_RESOURCE,
+            "action": "read",
+            "reason": "read shared",
+            "status": "pending",
+            "decision_reason": "",
+            "settled_by": Value::Null,
+        }]),
+        "agent 1's request outlives the guest call and is pending before the worker dies"
+    );
+
+    standin
+        .worker_exited(agent_one)
+        .expect("the stand-in records the dead worker of agent 1");
+
+    assert_eq!(
+        request_records(&standin, agent_one),
+        json!([{
+            "request_id": "request-1",
+            "session_id": agent_one,
+            "resource": SHARED_RESOURCE,
+            "action": "read",
+            "reason": "read shared",
+            "status": "denied",
+            "decision_reason": "worker exited",
+            "settled_by": "runtime",
+        }]),
+        "the dead worker settles agent 1's pending request as the runtime"
+    );
+    assert_eq!(
+        standin.get_capability_request(
+            Caller::Client {
+                session_id: agent_one
+            },
+            "request-1"
+        ),
+        Ok(json!({ "status": "denied", "reason": "worker exited" })),
+        "agent 1's owner reads its settled request through the request route"
+    );
+    let capsules = standin
+        .get_capsules(Caller::Shell)
+        .expect("the stand-in lists both agents");
+    let statuses = capsules["capsules"]
+        .as_array()
+        .expect("the stand-in returns a capsule list")
+        .iter()
+        .map(|capsule| {
+            (
+                capsule["id"].as_str().unwrap_or("").to_owned(),
+                capsule["status"].as_str().unwrap_or("").to_owned(),
+                capsule["cause"].as_str().unwrap_or("").to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        statuses,
+        vec![
+            (
+                agent_one.to_owned(),
+                "failed".to_owned(),
+                "worker exited".to_owned()
+            ),
+            (agent_two.to_owned(), "running".to_owned(), String::new()),
+        ],
+        "the worker exit fails agent 1 only and leaves agent 2 running"
+    );
+    let refused = standin.post_capability_request(
+        Caller::Client {
+            session_id: agent_one,
+        },
+        &body("again"),
+    );
+    assert_eq!(
+        refused,
+        Err((400, "instance is not live: failed".to_owned())),
+        "the stand-in refuses a silent retry for the dead worker"
+    );
+    assert_eq!(
+        request_records(&standin, agent_one),
+        json!([{
+            "request_id": "request-1",
+            "session_id": agent_one,
+            "resource": SHARED_RESOURCE,
+            "action": "read",
+            "reason": "read shared",
+            "status": "denied",
+            "decision_reason": "worker exited",
+            "settled_by": "runtime",
+        }]),
+        "the refused retry stores no request and leaves the settlement in place"
+    );
+    assert_eq!(
+        request_records(&standin, agent_two),
+        agent_two_pending,
+        "agent 2's pending request is untouched by agent 1's worker exit"
+    );
+    let agent_two_owner = Caller::Client {
+        session_id: agent_two,
+    };
+    standin
+        .post_capability_grant(
+            Caller::Shell,
+            &json!({ "request_id": "request-2", "duration": "session" }),
+        )
+        .expect("the shell grants agent 2's pending request");
+    assert_eq!(
+        standin.post_capability_validate(agent_two_owner, &json!({ "request_id": "request-2" })),
+        Ok(json!({ "valid": true })),
+        "agent 2's grant is still usable after agent 1's worker died"
+    );
+}
+
+#[test]
+fn standin_refuses_a_worker_exit_for_an_unknown_or_ended_instance() {
+    let mut standin = StandIn::new();
+    let shared = SignedBundle::new();
+    standin
+        .admit_resident(
+            shared.path(),
+            &shared.signature(),
+            shared.accepted(),
+            Start::Ok,
+        )
+        .expect("the stand-in admits read-shared");
+    let launch = standin
+        .post_capsules(Caller::Shell, &shared.launch_body())
+        .expect("the stand-in launches the admitted CID");
+    let running = launch["id"]
+        .as_str()
+        .expect("the stand-in names the launch")
+        .to_owned();
+    standin
+        .finish_start(&running)
+        .expect("the stand-in finishes start");
+    standin
+        .post_capability_request(
+            Caller::Client {
+                session_id: &running,
+            },
+            &json!({
+                "resource": SHARED_RESOURCE,
+                "action": "read",
+                "reason": "read shared",
+            }),
+        )
+        .expect("the running agent's own route stores one pending request");
+
+    let running_before = request_records(&standin, &running);
+    assert_eq!(
+        standin.worker_exited("component-99"),
+        Err((400, "unknown instance: component-99".to_owned())),
+        "the stand-in refuses a worker exit for an id no launch minted"
+    );
+    assert_eq!(
+        request_records(&standin, &running),
+        running_before,
+        "the refused unknown id leaves the running agent's pending request"
+    );
+    assert_eq!(
+        standin.worker_exited(&running),
+        Ok(()),
+        "the stand-in accepts the one worker exit of a running instance"
+    );
+    let settled = request_records(&standin, &running);
+    assert_eq!(
+        settled[0]["status"],
+        json!("denied"),
+        "the accepted exit settles the running agent's pending request"
+    );
+    assert_eq!(
+        standin.worker_exited(&running),
+        Err((400, "instance is not live: failed".to_owned())),
+        "the stand-in refuses a second worker exit for an instance it already ended"
+    );
+    let listed = standin
+        .get_capsules(Caller::Shell)
+        .expect("the stand-in lists the failed instance");
+    assert_eq!(
+        (
+            listed["capsules"][0]["status"].clone(),
+            listed["capsules"][0]["cause"].clone(),
+        ),
+        (json!("failed"), json!("worker exited")),
+        "the refused second exit leaves the one phase and the one fixed cause"
+    );
+    assert_eq!(
+        request_records(&standin, &running),
+        settled,
+        "the refused second exit leaves the settled record unchanged"
+    );
+}
+
+#[test]
 fn standin_matches_ra6_states() {
     let mut standin = StandIn::new();
 
