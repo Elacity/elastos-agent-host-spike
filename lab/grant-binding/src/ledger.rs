@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use crate::{Call, GuestRequest, Handle, Refuse, Verifier};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct OpenHold {
     handle: Handle,
     amount: u64,
@@ -29,6 +29,9 @@ struct OpenHold {
     timed_out: bool,
     deadline: u64,
     deadline_set: bool,
+    identity: String,
+    #[allow(dead_code)] // F-A7-ownsess reads this when it plants the session clause
+    session: String,
 }
 
 fn handles_match(bound: Handle, presented: Handle) -> bool {
@@ -40,11 +43,13 @@ fn held_for_identity(
     grants: &HashMap<Handle, crate::GrantRecord>,
     identity: &str,
 ) -> u64 {
+    let _grants = grants;
     let mut sum: u64 = 0;
     for open_hold in open.values() {
-        let Some(grant) = grants.get(&open_hold.handle) else {
+        if open_hold.identity != identity {
             continue;
-        };
+        }
+        let grant = open_hold;
         if grant.identity != identity {
             continue;
         }
@@ -261,6 +266,12 @@ impl Verifier {
             .expect("resolved grant")
             .identity
             .clone();
+        let session = self
+            .grants
+            .get(&request.handle)
+            .expect("resolved grant")
+            .session
+            .clone();
         let mut ledger = self.ledger.lock().expect("ledger lock");
         let held = ledger.held;
         let shared = held;
@@ -315,6 +326,8 @@ impl Verifier {
                 timed_out: false,
                 deadline: 0,
                 deadline_set: false,
+                identity: identity.clone(),
+                session: session.clone(),
             },
         );
         Ok(Reservation {
@@ -2542,6 +2555,49 @@ fn model_unset_deadline_timeout_is_refused() {
     assert_eq!(stayed.held, 4);
     assert_eq!(stayed.open.get(&reservation.id), Some(&4));
     assert!(!stayed.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_revoked_grant_does_not_free_ceiling_room() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .ask_capability(photo, "UsersAI/photo/library", rights(), crate::Asker::App)
+        .expect("library grant");
+    let album = verifier
+        .ask_capability(photo, "UsersAI/photo/album", rights(), crate::Asker::App)
+        .expect("album grant");
+    let call = verifier.open_call(photo);
+    let library_request = guest(library);
+    let granted = verifier
+        .admit_ask(
+            &call,
+            &library_request,
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("admit");
+    assert_eq!(granted, 10);
+    let reservation = verifier
+        .reserve(&call, &library_request, 8)
+        .expect("reserve on the library grant");
+    verifier.revoke_grant(library);
+    let refusal = verifier
+        .reserve(&call, &guest(album), 8)
+        .expect_err("the revoked hold still fills the ceiling");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 10,
+            held: 8,
+            asked: 8,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 8);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&8));
 }
 
 #[test]
