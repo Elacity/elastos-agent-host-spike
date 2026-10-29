@@ -743,6 +743,20 @@ text says to name such a file with `encode_entries` (or `lab_cid`), which take
 the bytes; `ListedFile` keeps its three fields. There is no hex form: a caller
 decodes its own hex.
 
+A file over one leaf gets its name from each leaf's digest (task 055).
+`ChunkedFile` is `{ path: String, size: u64, chunk_sha256: Vec<[u8; 32]> }`:
+the file's length and the SHA-256 of each 262144-byte chunk of it, the last
+one shorter, with one digest of the empty block for an empty file.
+`encode_chunked_files(&[ChunkedFile])` makes those leaves with `raw_leaf` and
+its file root with `file_root_block`, the rules `encode_entries` uses for the
+same bytes, and hands the node to `encode_tree`, so a chunked listing and
+`encode_entries` of the same bytes give one CID. A digest count its size does
+not give is refused with `ChunkCountMismatch`, naming the path, the size, the
+count the size gives and the count supplied; a file over 174 leaves is
+refused with `FileOverLeafLimit`, as `encode_entries` refuses it. It reads no
+file and checks no manifest: the caller supplies the digests from bytes it
+read and owns verifying them.
+
 It is for the photo lane (Flint's 28 Oct note; Rong's DR-1, one identity rule;
 Anders's Q3). On `spike/spike/photo-viewer` at `d047a069a`, the photo bundle
 tool names a closure by a second rule, a raw CIDv1 over a JSON listing of
@@ -1484,9 +1498,10 @@ takes `path`; this lane's `cid` body is a lab fixture entry point, not that
 route. `commit_launch` runs the checks below, then calls the closure with
 `{"path": <the stored folder>}`. A fixture registration through
 `admit_resident` supplies a `Start` outcome; it neither verifies a publisher
-nor executes the bundle. The lane holds a store (printed lab CID -> bundle
-folder, filled at publish time by `published`, from `lab_cid` of the folder),
-the package records and an explicit list of accepted publisher DIDs.
+nor executes the bundle. The lane holds a store (printed lab CID -> a bundle
+folder or a saved listing, filled at publish time by `published`,
+`published_listing` or `published_chunked_listing`), the package records and
+an explicit list of accepted publisher DIDs.
 
 The checks run in this order, and the first refusal is the answer, with status
 400 and nothing launched. Each library refusal is its `Refusal`'s own text,
@@ -1498,10 +1513,10 @@ and one record check, never a copy (P10):
 | (a) `pre-CID, not B1 evidence` | the body is not a JSON object whose only key is `cid` with a string value; `path` is never a fallback | names the extra, missing or wrong-typed field, or says "an object" | `standin_launches_by_cid_only` |
 | (b) `pre-CID, not B1 evidence` | `cid` does not parse as `LabCid` (`impl FromStr for LabCid`) | the parse's own reason | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
 | (c) `pre-CID, not B1 evidence` | the store holds no bundle under that CID | "no bundle is stored under" the CID | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
-| (d) | `checked_bundle` of the stored folder refuses (here: `capsule.json` removed after publish) | the walk's own refusal | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
-| (e) | `CheckedBundle::check_name(cid)` refuses: the stored bytes changed after publish (here: one byte of `asks.json`) | the compare's own refusal, naming both CIDs | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
-| (f) | no record's `cid` equals the requested CID | starts "unsigned:" and names the CID | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
-| (g) | `verify_checked_package_record` refuses every record that binds the CID: a signer not accepted, an empty accepted list, a flipped signature byte | the first such record's own refusal, in store order | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch`, `standin_launch_does_not_depend_on_record_order` |
+| (d) | the stored folder is prepared by `checked_bundle`, the one walk (here: `capsule.json` removed after publish); a saved listing is prepared by its one encoder instead (`encode_listed_files` or `encode_chunked_files`) | the walk's own refusal, or the encoder's | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch`, `standin_launches_the_photo_listing_by_its_cid` |
+| (e) | `CheckedBundle::check_name(cid)` refuses: the stored folder's bytes changed after publish (here: one byte of `asks.json`); a saved listing's recomputed CID is not the requested one | the compare's own refusal, naming both CIDs | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch`, `standin_refuses_a_changed_listing_before_shared_launch` |
+| (f) | no record's `cid` equals the requested CID | starts "unsigned:" and names the CID | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch`, `standin_refuses_an_unsigned_or_unaccepted_photo_listing` |
+| (g) | `verify_cid_record` refuses every record that binds the CID: a signer not accepted, an empty accepted list, a flipped signature byte | the first such record's own refusal, in store order | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch`, `standin_launch_does_not_depend_on_record_order`, `standin_refuses_an_unsigned_or_unaccepted_photo_listing` |
 
 **Several records for one CID.** More than one package record can bind the
 same CID, for example one by a signer the stand-in does not accept and one by
@@ -1517,7 +1532,8 @@ records by two unaccepted signers with the first one's "not in the accepted
 list" text, listing no instance.
 
 Only then `commit_launch` calls the shared `post_capsules` with the stored
-folder as `path`, and the answer is the shared answer, unchanged: `id`,
+folder as `path` (or, for a saved listing, its printed lab CID), and the
+answer is the shared answer, unchanged: `id`,
 `name`, `status: starting` and `session_id`, with `session_id` equal to `id`.
 The shared `finish_start` applies the registered `Start` and moves that
 instance to `running`; `Start::Ok` is the test's supplied outcome, so it
@@ -1592,6 +1608,11 @@ Each route, field and state, and where it comes from. #309 is draft PR #309,
 | The grant view lists every held grant of every session, so it is not a constant | `standin_grant_view_lists_a_seeded_grant`, `standin_grant_view_lists_every_held_grant_of_every_session` | F-CI33b (the view answers no entries whatever is held), F-CI37a (only the first held grant), F-CI37b (only the first held grant's session), F-CI37c (one `request_id` for every grant) |
 | The grant view answers under the `all_sessions_live` marker | `standin_valid_signature_alone_yields_no_grant`, `standin_grant_view_lists_a_seeded_grant` | F-CI33c (the marker dropped) |
 | A stop through the seam updates the same shared instances and grants: the stopped entry carries its reason, its grant goes, and the sibling stays running with its own grant | `standin_shared_stop_updates_the_same_instances_and_grants` | F-CI59a (the seam answers null and calls no shared stop) |
+| A saved listing launches by its CID: the listing is prepared by its one encoder, not by a folder walk, and its display name is the printed CID | `standin_launches_the_photo_listing_by_its_cid` | F-CI58a (the preparation is a walk of the PH6 folder, which refuses its object `viewer`), F-CI58e (the shared fixture's path and name are not the printed CID) |
+| A chunked listing of the same files and its entries give one lab CID, and a digest listing holds no asks bytes | `standin_launches_a_chunked_photo_listing_by_its_cid` | F-CI58f (a listing launch invents asks bytes) |
+| A saved listing whose recorded digest changed after publish is refused by the name compare before the shared launch, in both listing arms, leaving the shared lists unchanged | `standin_refuses_a_changed_listing_before_shared_launch` | F-CI58b (the name compare is skipped and the store key trusted) |
+| A listing with no record, an unaccepted signer or a bad signature is refused before the shared launch, and a correctly signed listing launches | `standin_refuses_an_unsigned_or_unaccepted_photo_listing` | F-CI58c (the package-record check is skipped) |
+| A listing launch adds no grant to the shared view | `standin_launches_the_photo_listing_by_its_cid`, `standin_refuses_an_unsigned_or_unaccepted_photo_listing` | F-CI58d (a grant appears in the lane's view seam during a listing launch) |
 
 Not shown:
 
@@ -1608,8 +1629,85 @@ Not shown:
   pending request, token, expiry or capability check, and no grant route.
 - `principal_id` and `launch_grant` (`routes.rs:65-71`) are left out.
 
-Claim scope: one Mac, the `agent-host` fixture, test keys only, records in
-memory.
+Claim scope: one Mac, the `agent-host` fixture, the photo stand-in copy, test
+keys only, records in memory.
+
+### A saved listing launches by its CID (task 058)
+
+A test stores either a bundle folder, a saved `Vec<ListedFile>` or a saved
+`Vec<ChunkedFile>`. `published_listing` and `published_chunked_listing`
+publish a listing: each calls its one encoder (`encode_listed_files` or
+`encode_chunked_files`), keys the store by the printed lab CID it answers and
+keeps the listing exactly as given. They read no folder and parse no
+manifest, so the exact PH6 folder's object `viewer` cannot block this input.
+The listing is prepared in (d) by that same encoder, which recomputes the
+printed CID from the saved listing, and the requested CID is compared with
+it in (e); a CID the listing does not give is refused with
+`Refusal::NameMismatch`'s own text, naming both values, before any record is
+checked. Only then does the one record check (f) and (g) run, and only a
+prepared input reaches the shared launch. `require_listing_name` makes that
+compare, and `check_records` runs `verify_cid_record` for every prepared CID,
+so a folder and a listing share one record rule.
+
+A listing has no folder, so the shared `post_capsules` receives its printed
+lab CID as `path`, and the shared `admit_resident` registers that same text
+as the instance's display name (`listing_path` is the one place that names
+it). A digest listing holds no asks bytes, so its launch is handed `None`.
+The shared fixture registration is still a fixture entry point: it neither
+verifies a publisher nor executes the listing or its viewer.
+
+`standin_launches_the_photo_listing_by_its_cid` publishes the five-file PH6
+listing under its pin, signs that CID with a fresh test key whose DID is
+accepted, launches it, sees `starting`, applies the simulated `Start::Ok`
+through `finish_start`, and reads one `running` instance whose display name
+is the printed CID, no asks snapshot and an empty grant view. The exact PH6
+folder in a temp dir still gives `ManifestUnparsed` there.
+`standin_launches_a_chunked_photo_listing_by_its_cid` repeats the journey for
+the same five files plus `core/big.bin`, whose three raw-leaf digests make it
+a chunked listing; that listing and `encode_entries` of the same bytes give
+one CID, and `encode_listed_files` still refuses the big file with
+`FileOverChunkLimit`.
+`standin_refuses_a_changed_listing_before_shared_launch` flips one saved
+digest after publish and requests the old CID, in both listing arms: the
+answer is the `NameMismatch` text with both CIDs, and the shared instance and
+grant lists stay unchanged. `standin_refuses_an_unsigned_or_unaccepted_photo_listing`
+shows a missing record, an unaccepted signer, an empty accepted list and a
+flipped signature each refusing before the shared launch with the existing
+reason, and a correctly signed control launching.
+
+What the falsifiers catch. F-CI58a makes the listing preparation a walk of
+the PH6 folder (its `ManifestUnparsed` fails the launch test); F-CI58b drops
+the name compare, so a changed listing launches under the old CID; F-CI58c
+returns from `check_records` without a check, so an unsigned listing
+launches; F-CI58e makes the shared fixture's path and name a folder-like text
+instead of the printed CID; F-CI58f hands a listing launch invented asks
+bytes. F-CI58d adds a grant entry in the lane's one view seam (`live_grants`)
+during a listing launch; the shared `StandIn` stays the only grant store, so
+the plant shows the test reads the view rather than trusting the lane, and
+the shared module itself is not edited.
+
+The shared stand-in models lifecycle: launch, the simulated start, the list
+and its grants. The provider owns production content naming, and the real
+Runtime owns admission and execution. This journey proves neither.
+
+Commands actually run, from the repository root:
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --offline --locked
+--manifest-path lab/capsule-identity/Cargo.toml` printed `185 passed; 0 failed`
+(46 in `tests/stand_in.rs`, the four above among them);
+`cargo fmt --manifest-path lab/capsule-identity/Cargo.toml -- --check` printed
+nothing; `python3 -I examples/agent-host/falsify.py --from
+lab/capsule-identity/falsifiers.json F-CI58` printed `baseline: 3 named tests
+pass without an edit, 0 do not` and `summary: 6 CAUGHT of 6`, each named test
+failing by assertion. The older entries whose anchors moved were rerun
+(`F-CI32 F-CI33 F-CI35 F-CI36 F-CI37 F-CI44 F-CI48 F-CI59`, 28 entries): the
+first pass printed `summary: 5 BUILD FAILED, 23 CAUGHT of 28`, because the
+plants' `new` text still called the folder-shaped store; F-CI32a, F-CI32e,
+F-CI32f, F-CI35a and F-CI36b were rewritten to build against the listing
+store, and each then CAUGHT, except that F-CI32f SURVIVED its first rewrite
+(launching by the store key, which the shared stand-in does not admit) and
+CAUGHT once the plant launches the stored folder. Every one of the 28 is
+CAUGHT with its bug and its tests, and the runner restored the sources;
+`git diff --stat` shows only the eight files this task changes.
 
 ### Asks come only from the signed bytes (M1 check B2, no-schema part)
 
@@ -1828,7 +1926,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 278 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 284 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1877,7 +1975,9 @@ F-CI49a to F-CI49c (see
 [the lab package record](#lab-package-record-outside-the-bundle)), and task
 059's F-CI59a to F-CI59c (F-CI59a: see
 [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1); F-CI59b and
-F-CI59c: see [what it is](#what-it-is-and-what-it-is-not)).
+F-CI59c: see [what it is](#what-it-is-and-what-it-is-not)), and task 058's
+F-CI58a to F-CI58f (see
+[the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its

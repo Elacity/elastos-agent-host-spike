@@ -63,7 +63,11 @@
 //! one tree builder. [`encode_listed_files`], which a caller with its own
 //! walk calls directly with a closure listing ([`ListedFile`]: path, size,
 //! SHA-256), makes one raw leaf per listed file with the same leaf rule and
-//! hands them to the same builder. Together the walk and these two calls are
+//! hands them to the same builder. [`encode_chunked_files`] is that call for
+//! a file of any size whose caller kept each raw leaf's SHA-256
+//! ([`ChunkedFile`]: path, size, the leaves' digests): it makes the same
+//! leaves and file root `encode_entries` makes from those bytes. Together
+//! the walk and these three calls are
 //! the only code that names a bundle; tests and tools call them and
 //! re-implement none. [`lab_cid`] is the same walk and returns only
 //! its lab CID. [`check_name`] checks a claimed name, such as one a URL or a
@@ -437,6 +441,17 @@ pub enum Refusal {
     /// larger file is named from its bytes, by [`encode_entries`] or
     /// [`lab_cid`]. `length` is the listed size.
     FileOverChunkLimit { path: String, length: usize },
+    /// A chunked file ([`encode_chunked_files`]) holds a number of raw-leaf
+    /// digests its size does not give: a file's chunks are [`CHUNK_SIZE`]
+    /// bytes with a short last one, and an empty file is one leaf. `expected`
+    /// is `max(1, ceil(size / CHUNK_SIZE))`, and `supplied` is the length of
+    /// its digest list.
+    ChunkCountMismatch {
+        path: String,
+        size: u64,
+        expected: usize,
+        supplied: usize,
+    },
     /// A file needs more leaves than one file root links, 174 of 262144
     /// bytes. The lab names no deeper file tree. `length` is the file's
     /// length.
@@ -545,6 +560,15 @@ impl fmt::Display for Refusal {
             Refusal::FileOverChunkLimit { path, length } => write!(
                 f,
                 "{path} is {length} bytes, over the {CHUNK_SIZE}-byte limit of one raw leaf: a listed file's one SHA-256 names a single raw leaf, so a larger file is named from its bytes (encode_entries or lab_cid)"
+            ),
+            Refusal::ChunkCountMismatch {
+                path,
+                size,
+                expected,
+                supplied,
+            } => write!(
+                f,
+                "{path} is {size} bytes and holds {supplied} chunk digests: its size gives {expected} chunks of at most {CHUNK_SIZE} bytes, one for an empty file"
             ),
             Refusal::FileOverLeafLimit { path, length } => write!(
                 f,
@@ -833,7 +857,8 @@ fn decode_base32(text: &str) -> Option<Vec<u8>> {
 /// the SHA-256 of its bytes. A raw leaf needs nothing else, so a listing of
 /// these is enough to name a bundle of single-block files. A file over one
 /// leaf is not: its file root needs each leaf's SHA-256, so it is named from
-/// its bytes by [`encode_entries`].
+/// its bytes by [`encode_entries`], or from those digests by
+/// [`encode_chunked_files`] ([`ChunkedFile`]).
 ///
 /// A listed file names bytes only if its `sha256` and `size` are those of
 /// the bytes: the caller's walk owns that. The encoder reads no file and
@@ -848,8 +873,9 @@ pub struct ListedFile {
 /// The lab CID of `entries`, given in any order: each entry's node made from
 /// its bytes by `file_node` (one raw leaf, or a balanced file root over its
 /// leaves; a file over 174 leaves is refused), then `encode_tree`, the one
-/// tree builder, which [`encode_listed_files`] shares. Leaves, file roots and
-/// directory blocks all hash with the one naming hash, `naming_hash`.
+/// tree builder, which [`encode_listed_files`] and
+/// [`encode_chunked_files`] share. Leaves, file roots and directory blocks
+/// all hash with the one naming hash, `naming_hash`.
 pub fn encode_entries(entries: &[BundleEntry]) -> Result<LabCid, Refusal> {
     let mut files = Vec::new();
     for entry in entries {
@@ -866,7 +892,9 @@ pub fn encode_entries(entries: &[BundleEntry]) -> Result<LabCid, Refusal> {
 /// Each file is one raw leaf, made by the leaf rule [`encode_entries`] uses:
 /// a `size` over [`CHUNK_SIZE`] bytes is refused, because one SHA-256 names
 /// a single raw leaf and a file root needs each leaf's; its CID is CIDv1,
-/// raw codec, its `sha256`, with its `size` as Tsize. Then `encode_tree`, the
+/// raw codec, its `sha256`, with its `size` as Tsize, and a larger file is
+/// named from its leaves' digests by [`encode_chunked_files`]. Then
+/// `encode_tree`, the
 /// one tree builder: the paths make the directories, and a path with an
 /// empty, `.` or `..` part, two files with one path, and one path that is
 /// both a file and a directory are refused. Each directory, deepest first,
@@ -886,6 +914,110 @@ pub fn encode_listed_files(files: &[ListedFile]) -> Result<LabCid, Refusal> {
         leaves.push((file.path.as_str(), Child::File { cid, tsize }));
     }
     encode_tree(leaves)
+}
+
+/// One file of a closure listing for a file of any size: its bundle path,
+/// its length in bytes and the SHA-256 of each of its raw leaves, in
+/// file-byte order. The leaves are [`CHUNK_SIZE`]-byte chunks of the file,
+/// the last one shorter, so `size` gives each leaf's length; an empty file
+/// has one leaf, the empty raw leaf. A file of one leaf is named by that
+/// leaf's one digest, in the field of [`ListedFile`]; a larger file needs
+/// every leaf's digest, which is what this type adds.
+///
+/// A chunked file names bytes only if each digest and `size` are those of
+/// the bytes, chunk by chunk: the caller supplies them from the same
+/// observed bytes and owns reading and hashing them. The encoder reads no
+/// file and checks no manifest: it checks that each file's digest count is
+/// the count its size gives, and names it with the one CID rule.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChunkedFile {
+    pub path: String,
+    pub size: u64,
+    pub chunk_sha256: Vec<[u8; 32]>,
+}
+
+/// The lab CID of a closure listing whose files are given as the SHA-256 of
+/// each raw leaf, given in any order. It reads no file and checks no
+/// manifest.
+///
+/// Each file's digests make its raw leaves with the leaf rule
+/// [`encode_entries`] uses, then its file root with `file_root_block` and
+/// `raw_leaf`, the rules [`encode_entries`] uses for the same bytes: one
+/// leaf is that leaf, and more leaves are linked from one dag-pb root. Then
+/// `encode_tree`, the one tree builder, with the path refusals
+/// `encode_entries` gives.
+///
+/// A digest count its size does not give is refused with
+/// [`Refusal::ChunkCountMismatch`], and a file over
+/// [`MAX_FILE_LINKS`](constant.MAX_FILE_LINKS) leaves with
+/// [`Refusal::FileOverLeafLimit`], as `encode_entries` refuses it.
+/// Byte verification stays the caller's job.
+pub fn encode_chunked_files(files: &[ChunkedFile]) -> Result<LabCid, Refusal> {
+    let mut nodes = Vec::new();
+    for file in files {
+        let (cid, tsize) = chunked_file_node(file)?;
+        nodes.push((file.path.as_str(), Child::File { cid, tsize }));
+    }
+    encode_tree(nodes)
+}
+
+/// The node a directory links for `file`: one raw leaf when its size gives
+/// one leaf, else the balanced file root over the leaves its digests name,
+/// exactly as `file_node` makes that node from the same bytes.
+fn chunked_file_node(file: &ChunkedFile) -> Result<(Vec<u8>, u64), Refusal> {
+    let expected = chunk_count(file.size);
+    if file.chunk_sha256.len() as u64 != expected {
+        return Err(Refusal::ChunkCountMismatch {
+            path: file.path.clone(),
+            size: file.size,
+            expected: usize::try_from(expected).unwrap_or(usize::MAX),
+            supplied: file.chunk_sha256.len(),
+        });
+    }
+    if file.chunk_sha256.len() == 1 {
+        return Ok(raw_leaf(&file.chunk_sha256[0], file.size));
+    }
+    if file.chunk_sha256.len() > MAX_FILE_LINKS {
+        return Err(Refusal::FileOverLeafLimit {
+            path: file.path.clone(),
+            length: usize::try_from(file.size).unwrap_or(usize::MAX),
+        });
+    }
+    let leaves: Vec<Link<'_>> = file
+        .chunk_sha256
+        .iter()
+        .enumerate()
+        .map(|(index, sha256)| {
+            let (cid, tsize) = raw_leaf(sha256, chunk_length(file.size, index));
+            Link {
+                name: "",
+                cid,
+                tsize,
+            }
+        })
+        .collect();
+    let block = file_root_block(&leaves, file.size);
+    let tsize = block.len() as u64 + leaves.iter().map(|leaf| leaf.tsize).sum::<u64>();
+    Ok((cid_bytes(DAG_PB_CODEC, &naming_hash(&block)), tsize))
+}
+
+/// How many [`CHUNK_SIZE`]-byte leaves a file of `size` bytes has: one for
+/// an empty file, else the whole chunks plus one when the last is short.
+fn chunk_count(size: u64) -> u64 {
+    let chunk = CHUNK_SIZE as u64;
+    if size % chunk == 0 {
+        (size / chunk).max(1)
+    } else {
+        size / chunk + 1
+    }
+}
+
+/// The length of chunk `index` of a file of `size` bytes: [`CHUNK_SIZE`],
+/// except that the last one is short.
+fn chunk_length(size: u64, index: usize) -> u64 {
+    let chunk = CHUNK_SIZE as u64;
+    size.saturating_sub(chunk.saturating_mul(index as u64))
+        .min(chunk)
 }
 
 /// The one tree builder both public calls feed: it puts each file's node at

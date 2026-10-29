@@ -16,7 +16,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use capsule_identity::{
-    checked_bundle, sign_package_record, verify_checked_package_record, LabCid, PackageRecord,
+    checked_bundle, encode_chunked_files, encode_entries, encode_listed_files, sign_cid_record,
+    sign_package_record, verify_checked_package_record, verify_cid_record, LabCid, PackageRecord,
+    Refusal,
 };
 use common::*;
 use ed25519_dalek::SigningKey;
@@ -29,7 +31,7 @@ use tempfile::TempDir;
 struct Published {
     parent: TempDir,
     folder: PathBuf,
-    entry: (String, PathBuf),
+    entry: (String, Stored),
 }
 
 fn publish_agent_host() -> Published {
@@ -123,6 +125,86 @@ fn assert_none_listed(shared: &StandIn, case: &str) {
         listed_instances(shared),
         Vec::<Value>::new(),
         "{case}: a refused launch must leave no instance"
+    );
+}
+
+/// Register the saved listing under its printed CID: the shared fixture's
+/// path and display name are that CID, the one name a listing has.
+fn register_listing(shared: &mut StandIn, cid: &str) {
+    shared
+        .admit_resident(&listing_path(cid), &listing_path(cid), Start::Ok)
+        .expect("the stand-in admits the listing fixture once");
+}
+
+/// A fresh lane store over the saved listing `entry`, its record signed by a
+/// fresh test key whose DID is accepted, and the one shared stand-in with the
+/// listing registered under its printed CID.
+fn signed_listing(entry: (String, Stored)) -> (StandInRuntime, StandIn) {
+    let cid: LabCid = entry.0.parse().expect("the listing's printed lab CID");
+    let key = fresh_signing_key();
+    let record = sign_cid_record(&key, cid);
+    let lane = StandInRuntime::new([entry], vec![record], vec![did_of(&key)]);
+    let mut shared = StandIn::new();
+    register_listing(&mut shared, &cid.to_string());
+    (lane, shared)
+}
+
+/// Launch the listing the printed lab CID `cid` names, asserting that the
+/// launch happened: a refusal fails the test as an assertion, with the status
+/// and reason.
+fn launched_listing(lane: &mut StandInRuntime, shared: &mut StandIn, cid: &str) -> Value {
+    let answer = launch_cid(lane, shared, cid);
+    assert!(answer.is_ok(), "the listing launch was refused: {answer:?}");
+    let answer = answer.expect("the launch succeeded");
+    assert_eq!(keys(&answer), ["id", "name", "session_id", "status"]);
+    answer
+}
+
+/// The listing journey through the shared stand-in: `starting`, then the
+/// simulated start completes to `running`; the display name is the printed
+/// CID, the asks snapshot is absent and the grant view is empty.
+fn assert_listing_journey(lane: &mut StandInRuntime, shared: &mut StandIn, cid: &str) {
+    let answer = launched_listing(lane, shared, cid);
+    assert_eq!(
+        answer["status"], "starting",
+        "the shared launch answers starting"
+    );
+    assert_eq!(
+        answer["session_id"], answer["id"],
+        "the shared instance uses its id as its Bus session"
+    );
+    assert_eq!(answer["name"], cid, "the display name is the printed CID");
+
+    let listed = listed_instances(shared);
+    assert_eq!(listed.len(), 1, "exactly the one launched instance");
+    let instance = &listed[0];
+    assert_eq!(instance["id"], answer["id"]);
+    assert_eq!(instance["session_id"], answer["session_id"]);
+    assert_eq!(instance["name"], cid);
+    assert_eq!(instance["status"], "starting");
+    assert_eq!(instance["cause"], "", "the shared list's empty cause");
+
+    let id = answer["id"].as_str().expect("an id");
+    shared
+        .finish_start(id)
+        .expect("the stand-in applies Start::Ok");
+    let listed = listed_instances(shared);
+    assert_eq!(
+        listed[0]["status"], "running",
+        "finish_start moves that instance to running"
+    );
+    assert_eq!(listed[0]["cause"], "");
+
+    let session = answer["session_id"].as_str().expect("a session id");
+    assert_eq!(
+        lane.asks_of(session),
+        None,
+        "a digest listing holds no asks bytes"
+    );
+    assert_eq!(
+        grant_view(lane, shared),
+        Vec::<Value>::new(),
+        "a listing launch adds no grant"
     );
 }
 
@@ -817,4 +899,254 @@ fn standin_shared_stop_updates_the_same_instances_and_grants() {
         held[0]["resource"],
         "localhost://Users/self/Documents/notes.md"
     );
+}
+
+#[test]
+fn standin_launches_the_photo_listing_by_its_cid() {
+    // The five files of the photo stand-in copy, listed as its walk lists
+    // them: the pin is `encode_listed_files` of that listing. The exact
+    // folder of those five files is not a store input here, because the
+    // Runtime's manifest type refuses its `viewer` object.
+    let entry = published_listing(photo_listing());
+    assert_eq!(entry.0, PHOTO_STAND_IN_LAB_CID, "the listing's pin");
+    let (mut lane, mut shared) = signed_listing(entry);
+
+    assert_listing_journey(&mut lane, &mut shared, PHOTO_STAND_IN_LAB_CID);
+
+    // The exact PH6 folder still gives ManifestUnparsed: this lane names
+    // these five files only from a listing, never from that folder.
+    let folder = temp_dir();
+    for entry in photo_stand_in_entries() {
+        write_file(folder.path(), &entry.path, &entry.content);
+    }
+    let refusal = checked_bundle(folder.path()).expect_err("the exact PH6 folder is refused");
+    assert!(
+        matches!(refusal, Refusal::ManifestUnparsed(_)),
+        "another refusal: {refusal}"
+    );
+    let text = refusal.to_string();
+    assert!(text.contains("refused to parse capsule.json"), "{text}");
+}
+
+#[test]
+fn standin_launches_a_chunked_photo_listing_by_its_cid() {
+    // The five files and the three-leaf `core/big.bin`, given as each raw
+    // leaf's SHA-256: the chunked listing names the same closure as the
+    // entries do.
+    let files = photo_chunked_listing();
+    let entries = photo_entries_with_big_bin();
+    let cid = encode_chunked_files(&files)
+        .unwrap_or_else(|refusal| panic!("the chunked listing: {refusal}"));
+    assert_eq!(
+        cid.to_string(),
+        encode_entries(&entries)
+            .unwrap_or_else(|refusal| panic!("the entries: {refusal}"))
+            .to_string(),
+        "the chunked listing and the entries name one closure"
+    );
+
+    let entry = published_chunked_listing(files);
+    assert_eq!(entry.0, cid.to_string());
+    let cid_text = entry.0.clone();
+    let (mut lane, mut shared) = signed_listing(entry);
+    assert_listing_journey(&mut lane, &mut shared, &cid_text);
+
+    // The one-digest API still refuses the big file: its one SHA-256 names a
+    // single raw leaf.
+    let refusal = encode_listed_files(&listed_files(&entries))
+        .expect_err("a listed file over one leaf is refused");
+    assert_eq!(
+        refusal,
+        Refusal::FileOverChunkLimit {
+            path: BIG_BIN.to_owned(),
+            length: big_bin_bytes().len()
+        }
+    );
+}
+
+#[test]
+fn standin_refuses_a_changed_listing_before_shared_launch() {
+    // The one-digest arm: a saved file digest changes after publish, and the
+    // store keeps the old CID.
+    let listing = photo_listing();
+    let (claimed, mut stored) = published_listing(listing.clone());
+    assert_eq!(claimed, PHOTO_STAND_IN_LAB_CID);
+    match &mut stored {
+        Stored::Listing(saved) => saved[2].sha256[0] ^= 1,
+        _ => panic!("the store holds the listing"),
+    }
+    let mut changed = listing;
+    changed[2].sha256[0] ^= 1;
+    let actual = encode_listed_files(&changed)
+        .unwrap_or_else(|refusal| panic!("the changed listing: {refusal}"));
+    assert_ne!(actual.to_string(), claimed);
+    let reason = Refusal::NameMismatch {
+        actual,
+        claimed: claimed.clone(),
+    }
+    .to_string();
+    let key = fresh_signing_key();
+    let requested: LabCid = claimed.parse().expect("the listing's printed lab CID");
+    let record = sign_cid_record(&key, requested);
+    let mut lane = StandInRuntime::new(
+        [(claimed.clone(), stored)],
+        vec![record],
+        vec![did_of(&key)],
+    );
+    let mut shared = StandIn::new();
+    register_listing(&mut shared, &claimed);
+    assert_refused(
+        &mut lane,
+        &mut shared,
+        &json!({ "cid": claimed }),
+        &reason,
+        "the changed one-digest listing",
+    );
+    assert_eq!(
+        grant_view(&lane, &shared),
+        Vec::<Value>::new(),
+        "the changed one-digest listing adds no grant"
+    );
+
+    // The chunked arm: one leaf digest of the three-leaf big file changes
+    // after publish.
+    let files = photo_chunked_listing();
+    let (claimed, mut stored) = published_chunked_listing(files.clone());
+    match &mut stored {
+        Stored::Chunked(saved) => {
+            let at = saved
+                .iter()
+                .position(|file| file.path == BIG_BIN)
+                .expect("the big file's listing");
+            saved[at].chunk_sha256[0][0] ^= 1;
+        }
+        _ => panic!("the store holds the chunked listing"),
+    }
+    let mut changed = files;
+    let at = changed
+        .iter()
+        .position(|file| file.path == BIG_BIN)
+        .expect("the big file's listing");
+    changed[at].chunk_sha256[0][0] ^= 1;
+    let actual = encode_chunked_files(&changed)
+        .unwrap_or_else(|refusal| panic!("the changed chunked listing: {refusal}"));
+    assert_ne!(actual.to_string(), claimed);
+    let reason = Refusal::NameMismatch {
+        actual,
+        claimed: claimed.clone(),
+    }
+    .to_string();
+    let key = fresh_signing_key();
+    let requested: LabCid = claimed.parse().expect("the listing's printed lab CID");
+    let record = sign_cid_record(&key, requested);
+    let mut lane = StandInRuntime::new(
+        [(claimed.clone(), stored)],
+        vec![record],
+        vec![did_of(&key)],
+    );
+    let mut shared = StandIn::new();
+    register_listing(&mut shared, &claimed);
+    assert_refused(
+        &mut lane,
+        &mut shared,
+        &json!({ "cid": claimed }),
+        &reason,
+        "the changed chunked listing",
+    );
+    assert_eq!(
+        grant_view(&lane, &shared),
+        Vec::<Value>::new(),
+        "the changed chunked listing adds no grant"
+    );
+}
+
+#[test]
+fn standin_refuses_an_unsigned_or_unaccepted_photo_listing() {
+    let entry = published_listing(photo_listing());
+    assert_eq!(entry.0, PHOTO_STAND_IN_LAB_CID);
+    let cid: LabCid = entry.0.parse().expect("the listing's printed lab CID");
+    let cid_text = entry.0.clone();
+
+    // (f) No record binds the CID.
+    let key = fresh_signing_key();
+    let mut lane = StandInRuntime::new([entry.clone()], vec![], vec![did_of(&key)]);
+    let mut shared = StandIn::new();
+    register_listing(&mut shared, &cid_text);
+    assert_refused(
+        &mut lane,
+        &mut shared,
+        &json!({ "cid": cid_text }),
+        &format!("unsigned: no package record binds {cid_text}"),
+        "(f) the unsigned photo listing",
+    );
+    assert_eq!(
+        grant_view(&lane, &shared),
+        Vec::<Value>::new(),
+        "the unsigned photo listing adds no grant"
+    );
+
+    // (g1) A record signed by a key whose DID is not accepted, and (g2) the
+    // same with an empty accepted list.
+    let record = sign_cid_record(&fresh_signing_key(), cid);
+    for (accepted, case) in [
+        (
+            vec![did_of(&fresh_signing_key())],
+            "(g1) the unaccepted signer",
+        ),
+        (vec![], "(g2) the empty accepted list"),
+    ] {
+        let own = verify_cid_record(cid, &record, &accepted)
+            .expect_err("the record is not accepted")
+            .to_string();
+        assert_eq!(
+            own,
+            format!("signer {} is not in the accepted list", record.signer_did)
+        );
+        let mut lane = StandInRuntime::new([entry.clone()], vec![record.clone()], accepted);
+        let mut shared = StandIn::new();
+        register_listing(&mut shared, &cid_text);
+        assert_refused(
+            &mut lane,
+            &mut shared,
+            &json!({ "cid": cid_text }),
+            &own,
+            case,
+        );
+        assert_eq!(
+            grant_view(&lane, &shared),
+            Vec::<Value>::new(),
+            "{case}: the refused listing adds no grant"
+        );
+    }
+
+    // (g3) One signature byte flipped, by an accepted signer.
+    let key = fresh_signing_key();
+    let mut flipped = sign_cid_record(&key, cid);
+    flipped.signature[0] ^= 1;
+    let accepted = vec![did_of(&key)];
+    let own = verify_cid_record(cid, &flipped, &accepted)
+        .expect_err("a flipped signature byte")
+        .to_string();
+    assert_eq!(
+        own,
+        format!(
+            "signature by {} does not verify over {cid_text}",
+            flipped.signer_did
+        )
+    );
+    let mut lane = StandInRuntime::new([entry.clone()], vec![flipped], accepted);
+    let mut shared = StandIn::new();
+    register_listing(&mut shared, &cid_text);
+    assert_refused(
+        &mut lane,
+        &mut shared,
+        &json!({ "cid": cid_text }),
+        &own,
+        "(g3)",
+    );
+
+    // A correctly signed control launches: the refusals above come from the
+    // record check, not from the listing input.
+    let (mut lane, mut shared) = signed_listing(entry);
+    assert_listing_journey(&mut lane, &mut shared, PHOTO_STAND_IN_LAB_CID);
 }

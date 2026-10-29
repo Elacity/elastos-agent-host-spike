@@ -26,11 +26,12 @@ use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 
 use capsule_identity::{
-    check_name, checked_bundle, checked_bundle_observed, lab_cid, lab_cid_observed,
-    verify_checked_package_record, BundleEntry, CheckedBundle, LabCid, Moment, PackageRecord,
-    Refusal,
+    check_name, checked_bundle, checked_bundle_observed, encode_chunked_files, encode_listed_files,
+    lab_cid, lab_cid_observed, verify_cid_record, BundleEntry, CheckedBundle, ChunkedFile, LabCid,
+    ListedFile, Moment, PackageRecord, Refusal,
 };
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 /// The lab CIDs pinned for the committed fixtures. README.md lists the same
@@ -114,6 +115,75 @@ pub fn photo_stand_in_entries() -> Vec<BundleEntry> {
             }
         })
         .collect()
+}
+
+/// The listing the photo lane's walk makes of `entries`: each file's path,
+/// its length and the SHA-256 of its bytes, computed here with `sha2` and
+/// not by the library.
+pub fn listed_files(entries: &[BundleEntry]) -> Vec<ListedFile> {
+    entries
+        .iter()
+        .map(|entry| ListedFile {
+            path: entry.path.clone(),
+            size: entry.content.len() as u64,
+            sha256: Sha256::digest(&entry.content).into(),
+        })
+        .collect()
+}
+
+/// The raw-leaf digests of `content`, in file-byte order, as
+/// `encode_chunked_files` takes them: the SHA-256 of each 262144-byte chunk,
+/// the last one shorter, and one digest of the empty block for an empty
+/// file. Computed here from the bytes with `sha2`, not by the library.
+pub fn chunk_digests(content: &[u8]) -> Vec<[u8; 32]> {
+    let mut digests: Vec<[u8; 32]> = content
+        .chunks(262_144)
+        .map(|chunk| Sha256::digest(chunk).into())
+        .collect();
+    if digests.is_empty() {
+        digests.push(Sha256::digest([]).into());
+    }
+    digests
+}
+
+/// One chunked listing entry for `content` at `path`, its leaves' digests
+/// computed here.
+pub fn chunked_file(path: &str, content: &[u8]) -> ChunkedFile {
+    ChunkedFile {
+        path: path.to_owned(),
+        size: content.len() as u64,
+        chunk_sha256: chunk_digests(content),
+    }
+}
+
+/// The photo stand-in copy's five files, as the listing its walk makes: the
+/// pin `PHOTO_STAND_IN_LAB_CID` is `encode_listed_files` of this.
+pub fn photo_listing() -> Vec<ListedFile> {
+    listed_files(&photo_stand_in_entries())
+}
+
+/// The photo stand-in copy's five files and `core/big.bin`, as a chunked
+/// listing: each file's raw-leaf digests, the big file's three leaves
+/// included. `encode_chunked_files` of this equals `encode_entries` of the
+/// same bytes.
+pub fn photo_chunked_listing() -> Vec<ChunkedFile> {
+    let mut files: Vec<ChunkedFile> = photo_stand_in_entries()
+        .iter()
+        .map(|entry| chunked_file(&entry.path, &entry.content))
+        .collect();
+    files.push(chunked_file(BIG_BIN, &big_bin_bytes()));
+    files
+}
+
+/// The five-file photo entries and `core/big.bin`, as the entry call takes
+/// them.
+pub fn photo_entries_with_big_bin() -> Vec<BundleEntry> {
+    let mut entries = photo_stand_in_entries();
+    entries.push(BundleEntry {
+        path: BIG_BIN.to_owned(),
+        content: big_bin_bytes(),
+    });
+    entries
 }
 
 /// SHA-256 of `domain || 0x00 || content-sample's printed lab CID`. README
@@ -1411,21 +1481,62 @@ fn planted_bug_count(section: &str) -> Result<usize, String> {
     }
 }
 
+/// One input of the lane fixture store: a bundle folder, or a saved listing
+/// kept exactly as its caller gave it. A listing has no folder, so its
+/// preparation recomputes its printed lab CID with the encoder that reads
+/// just that listing ([`encode_listed_files`] or [`encode_chunked_files`])
+/// and reads no folder.
+#[derive(Clone, Debug)]
+pub enum Stored {
+    Folder(PathBuf),
+    Listing(Vec<ListedFile>),
+    Chunked(Vec<ChunkedFile>),
+}
+
 /// The stand-in's store entry for the bundle folder `folder`, as a test
 /// publishes it: the printed lab CID its bytes give now, and the folder.
-pub fn published(folder: &Path) -> (String, PathBuf) {
-    (named(folder).to_string(), folder.to_path_buf())
+pub fn published(folder: &Path) -> (String, Stored) {
+    (
+        named(folder).to_string(),
+        Stored::Folder(folder.to_path_buf()),
+    )
+}
+
+/// The store entry for a saved listing, as a test publishes it: the printed
+/// lab CID the one listing encoder gives it, and that same listing. It reads
+/// no folder and parses no manifest.
+pub fn published_listing(listing: Vec<ListedFile>) -> (String, Stored) {
+    let cid =
+        encode_listed_files(&listing).unwrap_or_else(|refusal| panic!("the listing: {refusal}"));
+    (cid.to_string(), Stored::Listing(listing))
+}
+
+/// The store entry for a saved chunked listing: the printed lab CID the
+/// chunked listing encoder gives it, and that same listing. It reads no
+/// folder and parses no manifest.
+pub fn published_chunked_listing(files: Vec<ChunkedFile>) -> (String, Stored) {
+    let cid = encode_chunked_files(&files)
+        .unwrap_or_else(|refusal| panic!("the chunked listing: {refusal}"));
+    (cid.to_string(), Stored::Chunked(files))
+}
+
+/// The shared fixture path and display name of a saved listing: its printed
+/// lab CID, the one name it has. A folder launch uses its folder; a listing
+/// has none.
+pub fn listing_path(cid: &str) -> String {
+    cid.to_owned()
 }
 
 /// The lane's fixture store and CID entry point over the shared stand-in.
 ///
 /// `StandIn` in `lab/agent-conformance/standin-runtime/mod.rs` owns
 /// instances, session ids, lifecycle and grants. This value lives in test
-/// code and runs nothing: it holds the store (printed lab CID -> bundle
-/// folder, filled at publish time by [`published`]), the publishers' package
-/// records, an explicit list of accepted publisher DIDs and the signed asks
-/// snapshots. It keeps no instance list, no grant list, no status string and
-/// no session counter (P10).
+/// code and runs nothing: it holds the store (printed lab CID -> a folder or
+/// a saved listing, filled at publish time by [`published`],
+/// [`published_listing`] or [`published_chunked_listing`]), the publishers'
+/// package records, an explicit list of accepted publisher DIDs and the
+/// signed asks snapshots. It keeps no instance list, no grant list, no status
+/// string and no session counter (P10).
 ///
 /// [`StandInRuntime::new`] builds it. Each other public method is a lab test
 /// seam, not a route:
@@ -1448,9 +1559,10 @@ pub fn published(folder: &Path) -> (String, PathBuf) {
 /// [`StandInRuntime::asks_of`]: a change on disk after launch does not reach
 /// it. The bytes are never parsed, and the shared routes have no asks field.
 /// A change on disk between the walk and the launch does not reach it either,
-/// shown through [`StandInRuntime::set_after_walk`].
+/// shown through [`StandInRuntime::set_after_walk`]. A saved listing holds no
+/// asks bytes, so its launch is handed none.
 pub struct StandInRuntime {
-    store: BTreeMap<String, PathBuf>,
+    store: BTreeMap<String, Stored>,
     records: Vec<PackageRecord>,
     accepted: Vec<String>,
     /// The `asks.json` bytes of the checked bundle, keyed by the shared
@@ -1464,7 +1576,7 @@ impl StandInRuntime {
     /// A store with these entries, package records and accepted publisher
     /// DIDs, and no signed asks snapshot.
     pub fn new(
-        store: impl IntoIterator<Item = (String, PathBuf)>,
+        store: impl IntoIterator<Item = (String, Stored)>,
         records: Vec<PackageRecord>,
         accepted: Vec<String>,
     ) -> Self {
@@ -1527,54 +1639,98 @@ impl StandInRuntime {
     /// the stored bundle folder, right after the one walk and before the name
     /// compare (e). A test uses it to change the bytes on disk between the
     /// walk and the launch, and shows that the instance is still handed the
-    /// bytes the walk read. With no hook set, nothing is called.
+    /// bytes the walk read. With no hook set, nothing is called. A saved
+    /// listing has no folder and no walk, so the hook never runs for one.
     pub fn set_after_walk(&mut self, hook: fn(&Path)) {
         self.after_walk = Some(hook);
     }
 
     /// The checks of a launch, in this order, each library refusal as its own
     /// text: (a) the body, (b) the one parse of a printed lab CID, (c) the
-    /// store, (d) the one walk, (e) the one name compare against the stored
-    /// bytes, (f) a package record for that CID, (g) the one record check.
-    /// (a), (b) and (c) come before the CID check. The answer is the stored
-    /// folder as the shared `path` text, and the bundle's `asks.json` bytes,
-    /// both from the one checked bundle that passed every check. The hook of
-    /// [`StandInRuntime::set_after_walk`], if set, runs on the stored folder
-    /// right after (d); no check after (d) and no part of the answer reads the
-    /// folder again.
+    /// store, (d) the one preparation for the stored input, (e) the one
+    /// record check. (a), (b) and (c) come before the CID check.
+    ///
+    /// A stored folder is prepared by the one walk, `checked_bundle`, and its
+    /// one name compare; its answer is that folder as the shared `path` text
+    /// and its `asks.json` bytes. A saved listing is prepared by the one
+    /// encoder that reads just that listing (`encode_listed_files` or
+    /// `encode_chunked_files`), which recomputes its printed lab CID; a CID
+    /// the listing does not give is refused with `Refusal::NameMismatch`'s
+    /// own text, naming both values, before (e). Its answer is its printed
+    /// lab CID as the shared `path` text and display name, and no asks bytes.
+    /// (d) reads no folder for a listing and does not parse a manifest. The
+    /// hook of [`StandInRuntime::set_after_walk`], if set, runs on the stored
+    /// folder right after the walk; no check after it and no part of the
+    /// answer reads the folder again.
     fn checked_launch(&self, body: &Value) -> Result<(String, Option<Vec<u8>>), String> {
         let cid = self.launch_cid(body)?;
         cid.parse::<LabCid>().map_err(said)?;
-        let folder = self
+        let stored = self
             .store
             .get(&cid)
             .ok_or_else(|| format!("no bundle is stored under {cid}"))?;
-        let checked = checked_bundle(folder).map_err(said)?;
-        if let Some(hook) = self.after_walk {
-            hook(folder);
-        }
-        checked.check_name(&cid).map_err(said)?;
-        self.check_records(&checked, &cid)?;
-        Ok((folder.to_string_lossy().into_owned(), signed_asks(&checked)))
+        let (prepared, path, asks) = match stored {
+            Stored::Folder(folder) => {
+                let checked = checked_bundle(folder).map_err(said)?;
+                if let Some(hook) = self.after_walk {
+                    hook(folder);
+                }
+                checked.check_name(&cid).map_err(said)?;
+                (
+                    checked.cid(),
+                    folder.to_string_lossy().into_owned(),
+                    signed_asks(&checked),
+                )
+            }
+            Stored::Listing(listing) => {
+                let actual = encode_listed_files(listing).map_err(said)?;
+                let path = Self::require_listing_name(actual, &cid)?;
+                (actual, path, None)
+            }
+            Stored::Chunked(files) => {
+                let actual = encode_chunked_files(files).map_err(said)?;
+                let path = Self::require_listing_name(actual, &cid)?;
+                (actual, path, None)
+            }
+        };
+        self.check_records(prepared)?;
+        Ok((path, asks))
     }
 
     /// Checks (f) and (g): every package record that binds `cid`, in store
-    /// order, gets the one record check. The launch goes on when at least one
-    /// of them passes, so the answer does not depend on the records' order.
-    /// When none passes, the answer is the first one's own refusal; when no
-    /// record binds `cid`, the bundle is unsigned.
-    fn check_records(&self, checked: &CheckedBundle, cid: &str) -> Result<(), String> {
+    /// order, gets the one record check, `verify_cid_record`, the same check
+    /// the folder and checked record calls use. The launch goes on when at
+    /// least one of them passes, so the answer does not depend on the
+    /// records' order. When none passes, the answer is the first one's own
+    /// refusal; when no record binds `cid`, the bundle is unsigned.
+    fn check_records(&self, cid: LabCid) -> Result<(), String> {
+        let name = cid.to_string();
         let mut first_refusal = None;
-        for record in self.records.iter().filter(|record| record.cid == cid) {
-            match verify_checked_package_record(checked, record, &self.accepted) {
+        for record in self.records.iter().filter(|record| record.cid == name) {
+            match verify_cid_record(cid, record, &self.accepted) {
                 Ok(()) => return Ok(()),
                 Err(refusal) => first_refusal = first_refusal.or(Some(refusal)),
             }
         }
         match first_refusal {
             Some(refusal) => Err(said(refusal)),
-            None => Err(format!("unsigned: no package record binds {cid}")),
+            None => Err(format!("unsigned: no package record binds {name}")),
         }
+    }
+
+    /// Check (d)'s name compare for a saved listing: the CID its one encoder
+    /// recomputes from the listing must be the requested one. A listing that
+    /// names another closure is refused with `Refusal::NameMismatch`'s own
+    /// text, naming both values; success answers the printed lab CID as the
+    /// shared fixture's path and display name.
+    fn require_listing_name(actual: LabCid, claimed: &str) -> Result<String, String> {
+        if actual.to_string() != claimed {
+            return Err(said(Refusal::NameMismatch {
+                actual,
+                claimed: claimed.to_owned(),
+            }));
+        }
+        Ok(listing_path(claimed))
     }
 
     /// Check (a): the body is a JSON object whose only key is `cid`, with a

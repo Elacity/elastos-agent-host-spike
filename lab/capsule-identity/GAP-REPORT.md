@@ -55,6 +55,14 @@
   the checks. `Start::Ok` is a test-supplied outcome, so it proves no publisher verification and no execution.
   Commands actually run are in "The stand-in migration (29 Oct, task 059)" below. No Runtime file was read again,
   every Runtime citation stays at `c641bcff2`, and no issue was read.
+- **Revision (task 058, 2026-10-29):** a saved listing is a store input beside a bundle folder, so the photo
+  stand-in copy's five files launch by the CID their listing gets. Its base is the task 059 line plus the exact
+  PH6 listing and its pin from task 047; it reads no file under `elastos/` and no issue. Task 055's chunked call is
+  absent from this base, so this candidate adds `ChunkedFile`, `encode_chunked_files`, `ChunkCountMismatch` and the
+  private leaf helpers it shares with `encode_entries`; no other library rule changes. Preparation recomputes a
+  listing's CID with the one encoder and refuses a mismatch with `Refusal::NameMismatch`'s text, and the record
+  loop now runs `verify_cid_record` for every prepared CID. Commands actually run are in "The listing launch
+  (29 Oct, task 058)" below.
 
 Each cited file under `elastos/` or `scripts/`, checked with
 `git diff --stat 3beb816438fd567145a8d725e22465bd83277cf0 c641bcff21d9ceaad769b1ed89529d541ffd8766 -- <file>`:
@@ -950,6 +958,43 @@ failing by assertion; every retained entry is CAUGHT. F-CI33a is
 retired with its disposition: the shared `StandIn` owns the rule that a launch adds no grant, so this lane has no
 seam where that old bug could be planted; the named test stays. Not shown: the Runtime did nothing here; it ran
 nothing, launched nothing and granted nothing.
+
+29 Oct, task 058: a saved listing is now a store input beside a bundle folder. The store holds a folder, a saved
+`Vec<ListedFile>` or a saved `Vec<ChunkedFile>`; `published`, `published_listing` and `published_chunked_listing`
+fill it, each calling the one encoder (`lab_cid`, `encode_listed_files` or `encode_chunked_files`) and keeping the
+input as given, so a listing launch reads no folder and parses no manifest. The exact PH6 photo copy cannot be a
+folder input: the Runtime's `CapsuleManifest` refuses its object `viewer`, so `checked_bundle` answers
+`ManifestUnparsed`; its five-file listing gets the same pin from `encode_listed_files`, and those files plus
+`core/big.bin` get one from `encode_chunked_files`, task 055's call. Preparation (d) recomputes the listing's
+printed CID with that encoder, and (e) compares it with the requested CID: a mismatch is refused with
+`Refusal::NameMismatch`'s own text, naming both values. The record loop (f) and (g) now runs `verify_cid_record`
+for every prepared CID, the one record check the folder path uses too, with 036's rule: any accepted record
+suffices, else the first matching record's refusal, else the unsigned text. Only a prepared input reaches the
+shared launch; a listing has no folder, so the shared `path` and the display name are its printed CID. Four new
+tests: `standin_launches_the_photo_listing_by_its_cid` (the five-file listing launches, `starting` then `running`,
+display name the printed CID, no asks snapshot, empty grant view; the exact PH6 folder still gives
+`ManifestUnparsed`), `standin_launches_a_chunked_photo_listing_by_its_cid` (the same journey for the five files and
+`core/big.bin`, whose chunked listing and entries give one CID; `encode_listed_files` still gives
+`FileOverChunkLimit` for the big file), `standin_refuses_a_changed_listing_before_shared_launch` (one saved digest
+changed after publish in both listing arms, the mismatch text, shared lists unchanged) and
+`standin_refuses_an_unsigned_or_unaccepted_photo_listing` (a missing record, an unaccepted signer, an empty accepted
+list and a flipped signature each refused with the existing reason, with a correctly signed control launching).
+Fixture scope: test keys, records in memory, `consumer-fixtures/photo-stand-in-photo-set` and a temp folder of its
+five files. The shared stand-in models lifecycle; the provider owns production content naming and the real Runtime
+owns admission and execution. Nothing runs the photo content or its viewer.
+
+Commands actually run for this change, from the repository root: the full
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --offline --locked --manifest-path
+lab/capsule-identity/Cargo.toml` printed `185 passed; 0 failed` (46 in `tests/stand_in.rs`); `cargo fmt
+--manifest-path lab/capsule-identity/Cargo.toml -- --check` printed nothing; `python3 -I
+examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json F-CI58` printed `baseline: 3 named tests
+pass without an edit, 0 do not` and `summary: 6 CAUGHT of 6`. The older entries whose anchors moved
+(`F-CI32 F-CI33 F-CI35 F-CI36 F-CI37 F-CI44 F-CI48 F-CI59`, 28 entries) rerun: the first pass printed `summary: 5
+BUILD FAILED, 23 CAUGHT of 28`, because five plants' `new` text still called the folder-shaped store; F-CI32a,
+F-CI32e, F-CI32f, F-CI35a and F-CI36b were rewritten to build against the listing store and each then CAUGHT,
+except that F-CI32f SURVIVED its first rewrite (launching by the store key, which the shared stand-in does not
+admit) and CAUGHT once the plant launches the stored folder. All 28 are CAUGHT with their bugs and tests, and the
+runner restored the sources; `git diff --stat` shows only the eight files this task changes.
 
 ### Questions with no answer
 

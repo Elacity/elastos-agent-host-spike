@@ -1,5 +1,5 @@
 {
-  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049 and 059). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
+  "about": "cc-capsule-identity lab falsifiers (tasks 001, 005, 003, 009, 004, 007, 013, 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029, 030, 031, 032, 033, 035, 036, 037, 044, 047, 048, 049, 059 and 058). Each one plants a bug in the lab CID harness (src/lib.rs), a fixture manifest, the wc-001 test driver, the fresh-key helper, the run of README's Python rule, the Cargo-based consumer scan, the claim scan of the lane's docs and code, the check of this list's inventory or the lab stand-in launcher (tests/common/mod.rs), the lane .gitignore or README.md, and requires every named test to FAIL for its own reason, never from a build error. The task list above names every task that added entries, in the order the list holds them, and README's Falsifiers section says how many entries the list holds; the_falsifier_inventory_matches_the_list (tests/inventory.rs) checks both against the ids, so a task that adds entries adds its number here and changes that count. command is \"capsule-identity\" and file paths are relative to examples/agent-host/, so a lane file is ../../lab/capsule-identity/... . The canonical runner runs them: python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json (its capsule-identity command builds and tests lab/capsule-identity/Cargo.toml).",
   "falsifiers": [
     {
       "id": "F-CI1a",
@@ -4063,7 +4063,7 @@
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
           "old": "        let (path, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;\n",
-          "new": "        let (path, asks) = (self.store.values().next().expect(\"a stored bundle\").to_string_lossy().into_owned(), None);\n"
+          "new": "        let (path, asks) = (self.store.keys().next().expect(\"a stored fixture\").clone(), None);\n"
         }
       ],
       "tests": [
@@ -4095,7 +4095,7 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "            match verify_checked_package_record(checked, record, &self.accepted) {\n",
+          "old": "            match verify_cid_record(cid, record, &self.accepted) {\n",
           "new": "            match Ok::<(), Refusal>(()) {\n"
         }
       ],
@@ -4111,7 +4111,7 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "            None => Err(format!(\"unsigned: no package record binds {cid}\")),\n",
+          "old": "            None => Err(format!(\"unsigned: no package record binds {name}\")),\n",
           "new": "            None => Ok(()),\n"
         }
       ],
@@ -4133,7 +4133,7 @@
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
           "old": "        let Some(cid) = fields.get(\"cid\") else {\n",
-          "new": "        let by_folder = fields.get(\"path\").and_then(Value::as_str).and_then(|path| {\n            self.store\n                .iter()\n                .find(|(_, folder)| folder.as_path() == Path::new(path))\n                .map(|(cid, _)| Value::from(cid.as_str()))\n        });\n        let Some(cid) = fields.get(\"cid\").or(by_folder.as_ref()) else {\n"
+          "new": "        let by_folder = fields.get(\"path\").and_then(Value::as_str).and_then(|path| {\n            self.store\n                .iter()\n                .find(|(_, stored)| match stored {\n                    Stored::Folder(folder) => folder.as_path() == Path::new(path),\n                    Stored::Listing(_) | Stored::Chunked(_) => false,\n                })\n                .map(|(cid, _)| Value::from(cid.as_str()))\n        });\n        let Some(cid) = fields.get(\"cid\").or(by_folder.as_ref()) else {\n"
         }
       ],
       "tests": [
@@ -4149,7 +4149,7 @@
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
           "old": "        let (path, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;\n",
-          "new": "        let stray = self\n            .store\n            .values()\n            .next()\n            .map(|folder| folder.to_string_lossy().into_owned())\n            .unwrap_or_default();\n        let _ = launch(&json!({ \"path\": stray }));\n        let (path, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;\n"
+          "new": "        let stray = self\n            .store\n            .values()\n            .find_map(|stored| match stored {\n                Stored::Folder(folder) => Some(folder.to_string_lossy().into_owned()),\n                Stored::Listing(_) | Stored::Chunked(_) => None,\n            })\n            .unwrap_or_default();\n        let _ = launch(&json!({ \"path\": stray }));\n        let (path, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;\n"
         }
       ],
       "tests": [
@@ -4215,7 +4215,7 @@
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
           "old": "        self.asks.get(session_id).cloned().flatten()\n",
-          "new": "        fs::read(self.store.values().next()?.join(ASKS_FILE)).ok()\n"
+          "new": "        self.store.values().find_map(|stored| match stored {\n            Stored::Folder(folder) => fs::read(folder.join(ASKS_FILE)).ok(),\n            Stored::Listing(_) | Stored::Chunked(_) => None,\n        })\n"
         }
       ],
       "tests": [
@@ -4279,8 +4279,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        for record in self.records.iter().filter(|record| record.cid == cid) {\n",
-          "new": "        for record in self.records.iter().filter(|record| record.cid == cid).take(1) {\n"
+          "old": "        for record in self.records.iter().filter(|record| record.cid == name) {\n",
+          "new": "        for record in self.records.iter().filter(|record| record.cid == name).take(1) {\n"
         }
       ],
       "tests": [
@@ -4343,8 +4343,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        Ok((folder.to_string_lossy().into_owned(), signed_asks(&checked)))\n",
-          "new": "        Ok((folder.to_string_lossy().into_owned(), fs::read(folder.join(ASKS_FILE)).ok()))\n"
+          "old": "                    signed_asks(&checked),\n",
+          "new": "                    fs::read(folder.join(ASKS_FILE)).ok(),\n"
         }
       ],
       "tests": [
@@ -4375,8 +4375,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        let checked = checked_bundle(folder).map_err(said)?;\n        if let Some(hook) = self.after_walk {\n            hook(folder);\n        }\n",
-          "new": "        if let Some(hook) = self.after_walk {\n            hook(folder);\n        }\n        let checked = checked_bundle(folder).map_err(said)?;\n"
+          "old": "                let checked = checked_bundle(folder).map_err(said)?;\n                if let Some(hook) = self.after_walk {\n                    hook(folder);\n                }\n",
+          "new": "                if let Some(hook) = self.after_walk {\n                    hook(folder);\n                }\n                let checked = checked_bundle(folder).map_err(said)?;\n"
         }
       ],
       "tests": [
@@ -4489,8 +4489,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let tsize = block.len() as u64 + leaves.iter().map(|leaf| leaf.tsize).sum::<u64>();\n",
-          "new": "    let tsize = leaves.iter().map(|leaf| leaf.tsize).sum::<u64>();\n"
+          "old": "    let block = file_root_block(&leaves, content.len() as u64);\n    let tsize = block.len() as u64 + leaves.iter().map(|leaf| leaf.tsize).sum::<u64>();\n",
+          "new": "    let block = file_root_block(&leaves, content.len() as u64);\n    let tsize = leaves.iter().map(|leaf| leaf.tsize).sum::<u64>();\n"
         }
       ],
       "tests": [
@@ -4608,6 +4608,102 @@
       ],
       "tests": [
         "the_lab_encoder_is_a_test_oracle"
+      ]
+    },
+    {
+      "id": "F-CI58a",
+      "title": "the listing recomputation is a walk of the PH6 folder, which refuses its object viewer",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "                let actual = encode_listed_files(listing).map_err(said)?;\n",
+          "new": "                let actual = lab_cid(&lane_dir().join(PHOTO_STAND_IN)).map_err(said)?;\n"
+        }
+      ],
+      "tests": [
+        "standin_launches_the_photo_listing_by_its_cid"
+      ]
+    },
+    {
+      "id": "F-CI58b",
+      "title": "the listing name compare is skipped, so the store key is trusted",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        if actual.to_string() != claimed {\n            return Err(said(Refusal::NameMismatch {\n                actual,\n                claimed: claimed.to_owned(),\n            }));\n        }\n",
+          "new": "        let _ = (actual, claimed);\n"
+        }
+      ],
+      "tests": [
+        "standin_refuses_a_changed_listing_before_shared_launch"
+      ]
+    },
+    {
+      "id": "F-CI58c",
+      "title": "the package-record check is skipped",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        let mut first_refusal = None;\n",
+          "new": "        return Ok(());\n        let mut first_refusal = None;\n"
+        }
+      ],
+      "tests": [
+        "standin_refuses_an_unsigned_or_unaccepted_photo_listing"
+      ]
+    },
+    {
+      "id": "F-CI58d",
+      "title": "a grant appears in the lane's grant view during a listing launch",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "        grants()\n",
+          "new": "        let mut view = grants();\n        if let Some(list) = view[\"capabilities\"].as_array_mut() {\n            list.push(json!({\n                \"request_id\": \"planted\",\n                \"session_id\": \"planted\",\n                \"resource\": \"planted\",\n                \"action\": \"read\",\n                \"duration\": \"once\",\n                \"granted_at\": 0\n            }));\n        }\n        view\n"
+        }
+      ],
+      "tests": [
+        "standin_launches_the_photo_listing_by_its_cid"
+      ]
+    },
+    {
+      "id": "F-CI58e",
+      "title": "the listing's shared fixture path and display name are not its printed CID",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    cid.to_owned()\n",
+          "new": "    format!(\"{cid}/\")\n"
+        }
+      ],
+      "tests": [
+        "standin_launches_the_photo_listing_by_its_cid"
+      ]
+    },
+    {
+      "id": "F-CI58f",
+      "title": "a listing launch invents asks bytes",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "                let actual = encode_listed_files(listing).map_err(said)?;\n                let path = Self::require_listing_name(actual, &cid)?;\n                (actual, path, None)\n",
+          "new": "                let actual = encode_listed_files(listing).map_err(said)?;\n                let path = Self::require_listing_name(actual, &cid)?;\n                (actual, path, Some(vec![0]))\n"
+        }
+      ],
+      "tests": [
+        "standin_launches_the_photo_listing_by_its_cid"
       ]
     }
   ]

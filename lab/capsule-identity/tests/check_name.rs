@@ -152,7 +152,15 @@ fn check_name_uses_the_single_naming_path() {
     for (call, count) in [("raw_leaf(", 1), ("encode_tree(", 1)] {
         assert_eq!(listed.matches(call).count(), count, "{call}\n{listed}");
     }
-    for (name, body) in [("encode_entries", entries), ("encode_listed_files", listed)] {
+    let chunked = library_item(&code, "pub fn encode_chunked_files(");
+    for (call, count) in [("chunked_file_node(", 1), ("encode_tree(", 1)] {
+        assert_eq!(chunked.matches(call).count(), count, "{call}\n{chunked}");
+    }
+    for (name, body) in [
+        ("encode_entries", entries),
+        ("encode_listed_files", listed),
+        ("encode_chunked_files", chunked),
+    ] {
         for own_encoding in [
             "Sha256",
             "naming_hash(",
@@ -171,8 +179,9 @@ fn check_name_uses_the_single_naming_path() {
     for call in ["Directory::default()", ".insert(", "encode_directory("] {
         assert_eq!(tree.matches(call).count(), 1, "{call}\n{tree}");
     }
-    assert_eq!(code.matches("encode_tree(").count(), 3, "encode_tree");
+    assert_eq!(code.matches("encode_tree(").count(), 4, "encode_tree");
     assert_eq!(code.matches("encode_listed_files(").count(), 1);
+    assert_eq!(code.matches("encode_chunked_files(").count(), 1);
     assert_eq!(code.matches("encode_directory(").count(), 3);
     assert_eq!(code.matches("Directory::default()").count(), 2);
     // One leaf rule: every raw leaf, a listed file's, a one-leaf file's and
@@ -185,12 +194,27 @@ fn check_name_uses_the_single_naming_path() {
         1,
         "raw_leaf is not the one leaf rule"
     );
-    assert_eq!(code.matches("raw_leaf(").count(), 4, "raw_leaf");
-    // One file rule: file_node makes a file's node from its bytes, and only
-    // it calls file_root, which alone builds a file root block.
+    assert_eq!(code.matches("raw_leaf(").count(), 6, "raw_leaf");
+    // One file rule: file_node makes a file's node from its bytes, and
+    // chunked_file_node makes the same node from a caller's leaf digests;
+    // only they call file_root and file_root_block.
     let node = library_item(&code, "fn file_node(");
     for (call, count) in [("raw_leaf(", 1), ("file_root(", 1), ("naming_hash(", 1)] {
         assert_eq!(node.matches(call).count(), count, "{call}\n{node}");
+    }
+    let chunked_node = library_item(&code, "fn chunked_file_node(");
+    for (call, count) in [
+        ("raw_leaf(", 2),
+        ("file_root_block(", 1),
+        ("chunk_length(", 1),
+        ("naming_hash(", 1),
+        ("cid_bytes(DAG_PB_CODEC", 1),
+    ] {
+        assert_eq!(
+            chunked_node.matches(call).count(),
+            count,
+            "{call}\n{chunked_node}"
+        );
     }
     assert_eq!(code.matches("file_root(").count(), 2, "file_root");
     let root = library_item(&code, "fn file_root(");
@@ -202,7 +226,7 @@ fn check_name_uses_the_single_naming_path() {
     ] {
         assert_eq!(root.matches(call).count(), count, "{call}\n{root}");
     }
-    assert_eq!(code.matches("file_root_block(").count(), 2);
+    assert_eq!(code.matches("file_root_block(").count(), 3);
     assert_eq!(code.matches("FILE_TYPE").count(), 2, "FILE_TYPE");
     // One link encoding: directory blocks and file roots write their links
     // only through put_links.
