@@ -1,0 +1,14 @@
+id: F-M4-missing
+file: src/lib.rs
+test: model_revoke_unknown_handle_is_refused
+--- old
+        #[rustfmt::skip]
+        if !self.grants.contains_key(&handle) {
+            return Err(Refuse::UnknownHandle);
+        }
+--- new
+        #[rustfmt::skip]
+        if !self.grants.contains_key(&handle) {
+            return Ok(());
+        }
+--- end

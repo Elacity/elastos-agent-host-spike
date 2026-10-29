@@ -215,9 +215,28 @@ impl Verifier {
     }
 
     /// Removes one grant from the one store.
-    pub fn revoke_grant(&mut self, handle: Handle) {
+    #[rustfmt::skip]
+    pub fn revoke_grant(&mut self, handle: Handle) -> Result<(), Refuse> {
+        macro_rules! revoke_missing {
+            (
+                #[rustfmt::skip]
+                if ! $self:tt . $grants:tt . $contains:tt ( & $handle:tt ) {
+                    return $refusal:expr;
+                }
+            ) => {
+                if ! $self . $grants . $contains ( & $handle ) {
+                    return $refusal;
+                }
+            };
+        }
+        revoke_missing! {
+        #[rustfmt::skip]
+        if !self.grants.contains_key(&handle) {
+            return Err(Refuse::UnknownHandle);
+        }}
         self.grants.remove(&handle);
         self.remove_derived_grants(handle);
+        Ok(())
     }
 
     fn remove_derived_grants(&mut self, handle: Handle) {
@@ -1326,7 +1345,7 @@ fn model_revoke_one_app_stops_only_that_app() {
         .use_grant(notes_call, &guest(notes_handle))
         .expect("notes effect");
     assert_eq!(notes_effect.identity, "notes");
-    verifier.revoke_grant(photo_handle);
+    verifier.revoke_grant(photo_handle).expect("revoke");
     let stopped = verifier
         .use_grant(photo_call, &guest(photo_handle))
         .expect_err("revoked photo effect");
@@ -1365,7 +1384,7 @@ fn model_revoke_stops_derived_child_journals() {
             .owned_root,
         "UsersAI/photo/library/roll"
     );
-    verifier.revoke_grant(library);
+    verifier.revoke_grant(library).expect("revoke");
     let stopped = verifier
         .use_grant(photo_call, &guest(library))
         .expect_err("revoked library");
@@ -1402,7 +1421,7 @@ fn model_failed_child_keeps_next_ask_independent() {
     let album = verifier
         .ask_capability(photo, "UsersAI/photo/album", rights(), Asker::App)
         .expect("album ask");
-    verifier.revoke_grant(library);
+    verifier.revoke_grant(library).expect("revoke");
     let stopped = verifier
         .use_grant(photo_call, &guest(library))
         .expect_err("revoked library");
@@ -1427,7 +1446,7 @@ fn model_successful_child_keeps_next_ask_independent() {
     let album = verifier
         .ask_capability(photo, "UsersAI/photo/album", rights(), Asker::App)
         .expect("album ask");
-    verifier.revoke_grant(library);
+    verifier.revoke_grant(library).expect("revoke");
     let child_stopped = verifier
         .use_grant(photo_call, &guest(roll))
         .expect_err("revoked child journal");
@@ -1452,7 +1471,7 @@ fn model_revoke_child_journal_leaves_its_parent() {
     let frame = verifier
         .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/library/frame")
         .expect("frame journal");
-    verifier.revoke_grant(roll);
+    verifier.revoke_grant(roll).expect("revoke");
     let stopped = verifier
         .use_grant(photo_call, &guest(roll))
         .expect_err("revoked roll");
@@ -1466,4 +1485,27 @@ fn model_revoke_child_journal_leaves_its_parent() {
         .use_grant(photo_call, &guest(frame))
         .expect("sibling journal stays");
     assert_eq!(frame_kept.owned_root, "UsersAI/photo/library/frame");
+}
+
+#[test]
+fn model_revoke_unknown_handle_is_refused() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .ask_capability(photo, "UsersAI/photo/library", rights(), Asker::App)
+        .expect("library ask");
+    let frames = verifier
+        .ask_capability(photo, "UsersAI/photo/frames", rights(), Asker::App)
+        .expect("frames ask");
+    assert_ne!(library, frames);
+    let photo_call = verifier.open_call(photo);
+    verifier.revoke_grant(library).expect("revoke");
+    let refusal = verifier
+        .revoke_grant(library)
+        .expect_err("the handle is already gone");
+    assert_eq!(refusal, Refuse::UnknownHandle);
+    assert_eq!(refusal.to_string(), "unknown handle");
+    verifier
+        .use_grant(photo_call, &guest(frames))
+        .expect("frames stays");
 }

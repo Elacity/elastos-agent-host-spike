@@ -1920,7 +1920,7 @@ fn model_revoked_grant_does_not_free_ceiling_room() {
     let reservation = verifier
         .reserve(&call, &library_request, 8)
         .expect("reserve on the library grant");
-    verifier.revoke_grant(library);
+    verifier.revoke_grant(library).expect("revoke");
     let refusal = verifier
         .reserve(&call, &guest(album), 8)
         .expect_err("the revoked hold still fills the ceiling");
@@ -1962,7 +1962,7 @@ fn model_revoked_grant_still_settles() {
     let reservation = verifier
         .reserve(&call, &library_request, 8)
         .expect("reserve on the library grant");
-    verifier.revoke_grant(library);
+    verifier.revoke_grant(library).expect("revoke");
     let stopped = verifier
         .use_grant(call, &library_request)
         .expect_err("revoked library effect");
@@ -2102,7 +2102,7 @@ fn model_revoked_grant_still_releases() {
     let reservation = verifier
         .reserve(&call, &library_request, 8)
         .expect("reserve on the library grant");
-    verifier.revoke_grant(library);
+    verifier.revoke_grant(library).expect("revoke");
     let stopped = verifier
         .use_grant(call, &library_request)
         .expect_err("revoked library effect");
@@ -2148,7 +2148,7 @@ fn model_revoked_grant_still_times_out() {
         .settle(&call, &library_request, reservation, SettleOutcome::Unknown)
         .expect_err("unknown outcome");
     assert_eq!(unknown, SettleRefuse::UnknownOutcome);
-    verifier.revoke_grant(library);
+    verifier.revoke_grant(library).expect("revoke");
     let stopped = verifier
         .use_grant(call, &library_request)
         .expect_err("revoked library effect");
