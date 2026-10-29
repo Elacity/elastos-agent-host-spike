@@ -930,14 +930,21 @@ fn resolve_principal_uri(principal: &str, uri: &str) -> Result<String, String> {
 }
 
 fn resources_match(grant: &str, presented: &str) -> bool {
-    resource_segments(grant) == resource_segments(presented)
+    resource_authority(grant) == resource_authority(presented)
 }
 
-fn resource_segments(uri: &str) -> Vec<&str> {
-    let rest = uri.split_once("://").map(|(_, rest)| rest).unwrap_or(uri);
-    rest.split('/')
-        .filter(|segment| !segment.is_empty() && *segment != ".")
-        .collect()
+/// One authority key. The scheme stays, then empty and `.` segments drop.
+fn resource_authority(uri: &str) -> String {
+    match uri.split_once("://") {
+        Some((scheme, rest)) => {
+            let segments: Vec<&str> = rest
+                .split('/')
+                .filter(|segment| !segment.is_empty() && *segment != ".")
+                .collect();
+            format!("{scheme}://{}", segments.join("/"))
+        }
+        None => uri.to_owned(),
+    }
 }
 
 fn in_agents_area(path: &str) -> bool {
@@ -2883,6 +2890,14 @@ mod tests {
     }
 
     const JOURNAL: &str = "localhost://Users/self/.AppData/Agents/demo-agent/tasks/task-1/journal";
+    /// Quoted SHA-256 of `person:local:ada`, the resolved journal uri, and `journal v1`.
+    const JOURNAL_V1: &str = "\"8ce360bd27d08ae4e53409a18cac1cb9a5639a49052f137630b345764388e6e4\"";
+    /// Quoted SHA-256 of `person:local:ada`, the resolved journal uri, and `journal v2`.
+    const JOURNAL_V2: &str = "\"ec720878b008fddd53b0cb59b0a1b9139e45a4409894e0309e5fc519df9ed4ab\"";
+    /// Quoted SHA-256 of `person:local:ada`, the resolved notes uri, and `aa`.
+    const NOTES_AA: &str = "\"7815ff28bf546239007b299576848e7a0727611fd1ee512ac71ece151074e943\"";
+    /// Quoted SHA-256 of `person:local:ada`, the resolved notes uri, and `aabb`.
+    const NOTES_AABB: &str = "\"18368739a5854310d4069e594f67fbb158f9f288a0e74fc5861a1ed054ee901c\"";
 
     fn write_line(uri: &str, body: &str, token: &str, fields: Value) -> String {
         let mut request = json!({
@@ -3009,6 +3024,38 @@ mod tests {
             Life::Live,
             false,
         );
+        let https_notes = "https://Users/self/notes";
+        standin.seed_grant(
+            "req-https",
+            "component-1",
+            https_notes,
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-https-read",
+            "component-1",
+            https_notes,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        let https_journal = "https://Users/self/.AppData/Agents/demo-agent/tasks/task-1/journal";
+        standin.seed_grant(
+            "req-https-journal",
+            "component-1",
+            https_journal,
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
         let resolved = resolve_principal_uri("person:local:ada", journal)
             .expect("the stand-in resolves the journal");
         let first_line = write_line(
@@ -3027,13 +3074,12 @@ mod tests {
             "the stand-in response names no resolved root"
         );
         let first: Value = serde_json::from_str(&first_text).expect("the stand-in returns json");
-        let v1 = object_revision("person:local:ada", &resolved, b"journal v1");
         assert_eq!(
             first["response"]["data"]["stored"], true,
             "the stand-in stores the journal"
         );
         assert_eq!(
-            first["response"]["data"]["revision"], v1,
+            first["response"]["data"]["revision"], JOURNAL_V1,
             "the stand-in returns the revision of the stored journal"
         );
         assert_eq!(
@@ -3111,15 +3157,19 @@ mod tests {
         );
         let second = host_value(
             &mut standin,
-            &write_line(journal, "journal v2", "req-j", json!({ "if_revision": v1 })),
+            &write_line(
+                journal,
+                "journal v2",
+                "req-j",
+                json!({ "if_revision": JOURNAL_V1 }),
+            ),
         );
-        let v2 = object_revision("person:local:ada", &resolved, b"journal v2");
         assert_eq!(
             second["response"]["data"]["stored"], true,
             "the stand-in stores the revised journal"
         );
         assert_eq!(
-            second["response"]["data"]["revision"], v2,
+            second["response"]["data"]["revision"], JOURNAL_V2,
             "the stand-in returns the revision of the revised journal"
         );
         assert_eq!(
@@ -3131,7 +3181,12 @@ mod tests {
         );
         let stale = host_value(
             &mut standin,
-            &write_line(journal, "replayed", "req-j", json!({ "if_revision": v1 })),
+            &write_line(
+                journal,
+                "replayed",
+                "req-j",
+                json!({ "if_revision": JOURNAL_V1 }),
+            ),
         );
         assert_refused(
             &stale,
@@ -3152,7 +3207,7 @@ mod tests {
                 journal,
                 " more",
                 "req-j",
-                json!({ "append": true, "if_revision": v2 }),
+                json!({ "append": true, "if_revision": JOURNAL_V2 }),
             ),
         );
         assert_refused(
@@ -3174,7 +3229,7 @@ mod tests {
                 journal,
                 "both",
                 "req-j",
-                json!({ "create_only": true, "if_revision": v2 }),
+                json!({ "create_only": true, "if_revision": JOURNAL_V2 }),
             ),
         );
         assert_refused(
@@ -3213,8 +3268,6 @@ mod tests {
             b"journal v2".to_vec(),
             "the stand-in keeps the revised journal bytes after a bad spelling"
         );
-        let notes_resolved = resolve_principal_uri("person:local:ada", notes)
-            .expect("the stand-in resolves the note");
         let aa = host_value(
             &mut standin,
             &write_line(notes, "aa", "req-note", json!({})),
@@ -3224,8 +3277,7 @@ mod tests {
             "the stand-in stores the note"
         );
         assert_eq!(
-            aa["response"]["data"]["revision"],
-            object_revision("person:local:ada", &notes_resolved, b"aa"),
+            aa["response"]["data"]["revision"], NOTES_AA,
             "the stand-in returns the revision of the stored note"
         );
         assert_eq!(
@@ -3244,8 +3296,7 @@ mod tests {
             "the stand-in appends the note"
         );
         assert_eq!(
-            bb["response"]["data"]["revision"],
-            object_revision("person:local:ada", &notes_resolved, b"aabb"),
+            bb["response"]["data"]["revision"], NOTES_AABB,
             "the stand-in returns the revision of the appended note"
         );
         assert_eq!(
@@ -3357,6 +3408,56 @@ mod tests {
                 .expect("the stand-in returns the stored journal"),
             b"journal v2".to_vec(),
             "the stand-in keeps the revised journal bytes after a wrong grant"
+        );
+        let https_write = host_value(
+            &mut standin,
+            &write_line(notes, "zz", "req-https", json!({})),
+        );
+        assert_refused(
+            &https_write,
+            "denied",
+            "wrong resource",
+            "the stand-in refuses a grant whose scheme is not the presented resource",
+        );
+        assert_eq!(
+            standin
+                .protected_read("component-1", "req-note-read", notes)
+                .expect("the stand-in returns the stored note"),
+            b"aabb".to_vec(),
+            "the stand-in keeps the note when the grant scheme differs"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-https"),
+            (Life::Live, false),
+            "the stand-in leaves the other-scheme write grant live"
+        );
+        let https_read = standin.protected_read("component-1", "req-https-read", notes);
+        assert_eq!(
+            https_read.expect_err("the stand-in refuses a read grant whose scheme differs"),
+            "wrong resource",
+            "the stand-in refuses a read grant whose scheme is not the presented resource"
+        );
+        let https_journal_write = host_value(
+            &mut standin,
+            &write_line(
+                journal,
+                "zz",
+                "req-https-journal",
+                json!({ "create_only": true }),
+            ),
+        );
+        assert_refused(
+            &https_journal_write,
+            "denied",
+            "wrong resource",
+            "the stand-in refuses an Agents grant whose scheme is not the presented resource",
+        );
+        assert_eq!(
+            standin
+                .protected_read("component-1", "req-r", journal)
+                .expect("the stand-in returns the stored journal"),
+            b"journal v2".to_vec(),
+            "the stand-in keeps the journal when the grant scheme differs"
         );
         let crossed = standin.protected_read("component-1", "req-note", journal);
         assert_eq!(

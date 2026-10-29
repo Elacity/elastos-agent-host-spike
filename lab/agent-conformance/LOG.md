@@ -7114,3 +7114,165 @@ New:
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `standin-runtime/mod.rs:246` `protected_write` stores only after the presented grant matches. This change adds no capsule import. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:2941` `standin_journal_write_keeps_its_revision`. Each plant fails that assertion and the restored test passes. |
 | 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:454` `bind_verified_principal` stores the principal. `:362` `authorise_presented` is the allowance. A bound principal does not grant the write. |
+
+### Round 3
+
+`resources_match` keeps the scheme. A grant for `https://Users/self/notes` does not authorise `localhost://Users/self/notes`. `protected_write` stays the only store and `object_revision` stays the only digest. The journal test compares the returned revision with a fixed quoted hex string. A PASS gives the Runtime no A15 credit.
+
+### Hand-run falsifiers, re-run
+
+No list id. Each plant was restored before the next. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_journal_write_keeps_its_revision -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. The planted crate compiled. Each test failed on its assertion. After the last restore, `standin-runtime/mod.rs` was sha256 `36a143471a6347f0066a141b5da5bb2301da86407c51300570409a796c56e9e5`.
+
+F-standin-journal-blind. Named test `standin_journal_write_keeps_its_revision`. Exit 101. Cargo finished in 7.03 seconds. Assertion: `src/../standin-runtime/mod.rs:3126:9` `the stand-in keeps the first journal bytes after a blind write`. Left bytes `[98, 108, 105, 110, 100]` (`blind`). Right bytes `[106, 111, 117, 114, 110, 97, 108, 32, 118, 49]` (`journal v1`).
+
+Old:
+
+```text
+        if journal && precondition.is_none() {
+            return Err(REVISION_REQUIRED.to_owned());
+        }
+```
+
+New:
+
+```text
+        if journal && precondition.is_none() {
+            self.protected_objects
+                .insert(resolved.clone(), body.to_vec());
+            return Err(REVISION_REQUIRED.to_owned());
+        }
+```
+
+F-standin-journal-stale. Named test `standin_journal_write_keeps_its_revision`. Exit 101. Cargo finished in 0.93 seconds. Assertion: `src/../standin-runtime/mod.rs:3198:9` `the stand-in keeps the revised journal bytes`. Left bytes `[114, 101, 112, 108, 97, 121, 101, 100]` (`replayed`). Right bytes `[106, 111, 117, 114, 110, 97, 108, 32, 118, 50]` (`journal v2`).
+
+Old:
+
+```text
+                if current != *expected {
+                    return Err(CONFLICT.to_owned());
+                }
+```
+
+New:
+
+```text
+                if current != *expected {
+                    self.protected_objects.insert(resolved.clone(), bytes.clone());
+                    return Err(CONFLICT.to_owned());
+                }
+```
+
+F-standin-journal-append. Named test `standin_journal_write_keeps_its_revision`. Exit 101. Cargo finished in 0.92 seconds. Assertion: `src/../standin-runtime/mod.rs:3226:9` `the stand-in keeps the revised journal bytes after an append`. Left bytes `[106, 111, 117, 114, 110, 97, 108, 32, 118, 50, 32, 109, 111, 114, 101]` (`journal v2 more`). Right bytes `[106, 111, 117, 114, 110, 97, 108, 32, 118, 50]` (`journal v2`).
+
+Old:
+
+```text
+        if journal && append {
+            return Err(APPEND_JOURNAL.to_owned());
+        }
+```
+
+New:
+
+```text
+        if journal && append {
+            let mut prior = self
+                .protected_objects
+                .get(&resolved)
+                .cloned()
+                .unwrap_or_default();
+            prior.extend_from_slice(body);
+            self.protected_objects.insert(resolved.clone(), prior);
+            return Err(APPEND_JOURNAL.to_owned());
+        }
+```
+
+F-standin-journal-principal. Named test `standin_journal_write_keeps_its_revision`. Exit 101. Cargo finished in 1.14 seconds. Assertion: `src/../standin-runtime/mod.rs:3081:9` `the stand-in returns the revision of the stored journal`. Left `"ddf53e49a69609409d845235093d36333601624d1e113d2adf8e624d33de9e66"`. Right `"8ce360bd27d08ae4e53409a18cac1cb9a5639a49052f137630b345764388e6e4"`.
+
+Old:
+
+```text
+    digest.update(principal_id.as_bytes());
+    digest.update([0u8]);
+    digest.update(object_uri.as_bytes());
+```
+
+New:
+
+```text
+    let _ = principal_id;
+    digest.update([0u8]);
+    digest.update(object_uri.as_bytes());
+```
+
+F-standin-journal-uri. Named test `standin_journal_write_keeps_its_revision`. Exit 101. Cargo finished in 0.92 seconds. Assertion: `src/../standin-runtime/mod.rs:3081:9` `the stand-in returns the revision of the stored journal`. Left `"1a682c8f1844f7622ccc9ddd248d7b200078596c3a324b2800acc914b280499f"`. Right `"8ce360bd27d08ae4e53409a18cac1cb9a5639a49052f137630b345764388e6e4"`.
+
+Old:
+
+```text
+    digest.update(principal_id.as_bytes());
+    digest.update([0u8]);
+    digest.update(object_uri.as_bytes());
+    digest.update([0u8]);
+```
+
+New:
+
+```text
+    digest.update(principal_id.as_bytes());
+    digest.update([0u8]);
+    let _ = object_uri;
+    digest.update([0u8]);
+```
+
+F-standin-journal-scheme. Named test `standin_journal_write_keeps_its_revision`. Exit 101. Cargo finished in 0.93 seconds. Assertion: `src/../standin-runtime/mod.rs:2925:9` `the stand-in refuses a grant whose scheme is not the presented resource`. Left `Null`. Right `"denied"`. Dropping the scheme made the https grant's write succeed, so the response had no error code.
+
+Old:
+
+```text
+fn resource_authority(uri: &str) -> String {
+    match uri.split_once("://") {
+        Some((scheme, rest)) => {
+            let segments: Vec<&str> = rest
+                .split('/')
+                .filter(|segment| !segment.is_empty() && *segment != ".")
+                .collect();
+            format!("{scheme}://{}", segments.join("/"))
+        }
+        None => uri.to_owned(),
+    }
+}
+```
+
+New:
+
+```text
+fn resource_authority(uri: &str) -> String {
+    let rest = uri.split_once("://").map(|(_, rest)| rest).unwrap_or(uri);
+    rest.split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect::<Vec<_>>()
+        .join("/")
+}
+```
+
+### Gates, round 3
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`, lane `target/host` and `target/host-build`. Both commands stayed inside 600 seconds. The locked suite passed on the first run, so there was no census rerun. `Cargo.toml` and `Cargo.lock` are unchanged. The plants were already restored.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.12 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_journal_write_keeps_its_revision -- --exact`: exit 0, real 6.77 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 253.37 seconds. 143 passed, 0 failed, 14 ignored. The lib target passed 32 tests. The effects target passed 57 tests, with 12 ignored, in 198.42 seconds. The runtime target passed 10 tests, with 2 ignored, in 14.08 seconds.
+
+### Principles check, round 3
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `standin-runtime/mod.rs:852` `object_revision` is SHA-256 over the principal, the resolved uri, and the stored plaintext. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `standin-runtime/mod.rs:932` `resources_match` keeps the scheme. An https grant does not authorise a localhost write. The method opens no file, network, or `wasi` import. |
+| 3. A second path or a second copy of one rule? | No | `standin-runtime/mod.rs:309` is the one insert. `:852` is the one digest. `:932` is the one resource comparison. `:862` `bridge_error` is the one error helper. |
+| 4. Runtime core grows? | No | The edit is `standin-runtime/mod.rs`, `standin-runtime/README.md` and `LOG.md`. |
+| 5. Refusals deny by default with a clear reason? | Yes | `standin-runtime/mod.rs:405` returns `wrong resource` when the scheme differs. A journal without a precondition still returns `Agent journal writes need create_only or if_revision`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `standin-runtime/mod.rs:256` `protected_write` calls `authorise_presented` before it stores. This change adds no capsule import. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:2956` `standin_journal_write_keeps_its_revision`. The scheme, principal, and uri plants fail that test. The restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:454` `bind_verified_principal` stores the principal. `:362` `authorise_presented` is the allowance. A bound principal does not grant the write. |
