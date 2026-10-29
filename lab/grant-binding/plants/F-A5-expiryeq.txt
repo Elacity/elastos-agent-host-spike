@@ -1,0 +1,8 @@
+id: F-A5-expiryeq
+file: src/lib.rs
+test: model_expired_grant_is_refused
+--- old
+            if self.verifier_now >= expiry {
+--- new
+            if self.verifier_now == expiry {
+--- end

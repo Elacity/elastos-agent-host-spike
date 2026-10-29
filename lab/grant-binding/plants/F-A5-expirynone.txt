@@ -1,0 +1,14 @@
+id: F-A5-expirynone
+file: src/lib.rs
+test: model_unset_expiry_is_not_expired
+--- old
+        if let Some(expiry) = grant.expiry {
+            if self.verifier_now >= expiry {
+                return Err(Refuse::Expired);
+            }
+        }
+--- new
+        if grant.expiry.map(|expiry| self.verifier_now >= expiry).unwrap_or(true) {
+            return Err(Refuse::Expired);
+        }
+--- end

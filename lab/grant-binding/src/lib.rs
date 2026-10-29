@@ -69,6 +69,7 @@ pub(crate) struct GrantRecord {
     rights: Rights,
     parent: Option<Handle>,
     once: bool,
+    expiry: Option<u64>,
 }
 
 /// The binding copied out after a successful check.
@@ -101,6 +102,7 @@ pub enum Refuse {
     OutsideRoot,
     PublicRead,
     HomeMint,
+    Expired,
 }
 
 impl std::fmt::Display for Refuse {
@@ -117,6 +119,7 @@ impl std::fmt::Display for Refuse {
             Refuse::OutsideRoot => "use path leaves the owned root",
             Refuse::PublicRead => "public storage read does not bind",
             Refuse::HomeMint => "home does not mint an app capability",
+            Refuse::Expired => "grant has expired",
         })
     }
 }
@@ -136,6 +139,7 @@ pub struct Verifier {
     next_handle: u64,
     pending_parent: Option<Handle>,
     pending_once: bool,
+    verifier_now: u64,
     #[allow(dead_code)] // later slices fill the ledger
     ledger: std::sync::Mutex<ledger::Ledger>,
 }
@@ -150,6 +154,7 @@ impl Verifier {
             next_handle: 0,
             pending_parent: None,
             pending_once: false,
+            verifier_now: 0,
             ledger: std::sync::Mutex::new(ledger::Ledger::new()),
         }
     }
@@ -204,6 +209,7 @@ impl Verifier {
                 rights,
                 parent,
                 once,
+                expiry: None,
             },
         );
         Ok(handle)
@@ -297,6 +303,16 @@ impl Verifier {
         Ok(())
     }
 
+    pub fn set_verifier_now(&mut self, now: u64) {
+        self.verifier_now = now;
+    }
+
+    pub fn set_grant_expiry(&mut self, handle: Handle, expiry: u64) -> Result<(), Refuse> {
+        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        grant.expiry = Some(expiry);
+        Ok(())
+    }
+
     /// The one handle check: resolves a handle and compares the stored grant
     /// with the registry record of the call's instance, in order.
     pub(crate) fn resolve(&self, call: Call, handle: Handle) -> Result<GrantRecord, Refuse> {
@@ -317,6 +333,11 @@ impl Verifier {
         }
         if call.instance != grant.instance {
             return Err(Refuse::Instance);
+        }
+        if let Some(expiry) = grant.expiry {
+            if self.verifier_now >= expiry {
+                return Err(Refuse::Expired);
+            }
         }
         Ok(grant)
     }
@@ -1525,4 +1546,63 @@ fn model_revoke_unknown_handle_is_refused() {
     verifier
         .use_grant(photo_call, &guest(frames))
         .expect("frames stays");
+}
+
+#[test]
+fn model_expired_grant_is_refused() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .ask_capability(photo, "UsersAI/photo/library", rights(), Asker::App)
+        .expect("library ask");
+    verifier.set_grant_expiry(library, 5).expect("expiry");
+    verifier.set_verifier_now(4);
+    verifier
+        .use_grant(verifier.open_call(photo), &guest(library))
+        .expect("before the expiry");
+    verifier.set_verifier_now(5);
+    let refusal = verifier
+        .use_grant(verifier.open_call(photo), &guest(library))
+        .expect_err("the grant has expired");
+    assert_eq!(refusal, Refuse::Expired);
+    assert_eq!(refusal.to_string(), "grant has expired");
+    verifier.set_verifier_now(6);
+    let later = verifier
+        .use_grant(verifier.open_call(photo), &guest(library))
+        .expect_err("the grant stays expired");
+    assert_eq!(later, Refuse::Expired);
+    assert_eq!(later.to_string(), "grant has expired");
+    let frames = verifier
+        .ask_capability(photo, "UsersAI/photo/frames", rights(), Asker::App)
+        .expect("frames ask");
+    verifier.revoke_grant(frames).expect("revoke");
+    let missing = verifier
+        .set_grant_expiry(frames, 5)
+        .expect_err("the handle is already gone");
+    assert_eq!(missing, Refuse::UnknownHandle);
+    assert_eq!(missing.to_string(), "unknown handle");
+}
+
+#[test]
+fn model_unset_expiry_is_not_expired() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .ask_capability(photo, "UsersAI/photo/library", rights(), Asker::App)
+        .expect("library ask");
+    verifier.set_verifier_now(u64::MAX);
+    let decision = verifier
+        .use_grant(verifier.open_call(photo), &guest(library))
+        .expect("unset expiry is not due");
+    assert_eq!(decision.owned_root, "UsersAI/photo/library");
+    let frames = verifier
+        .ask_capability(photo, "UsersAI/photo/frames", rights(), Asker::App)
+        .expect("frames ask");
+    verifier.set_grant_expiry(frames, 0).expect("zero expiry");
+    verifier.set_verifier_now(0);
+    let refusal = verifier
+        .use_grant(verifier.open_call(photo), &guest(frames))
+        .expect_err("a set expiry of 0 is due at 0");
+    assert_eq!(refusal, Refuse::Expired);
+    assert_eq!(refusal.to_string(), "grant has expired");
 }

@@ -1,0 +1,17 @@
+id: F-A5-expirymiss
+file: src/lib.rs
+test: model_expired_grant_is_refused
+--- old
+    pub fn set_grant_expiry(&mut self, handle: Handle, expiry: u64) -> Result<(), Refuse> {
+        let grant = self.grants.get_mut(&handle).ok_or(Refuse::UnknownHandle)?;
+        grant.expiry = Some(expiry);
+        Ok(())
+    }
+--- new
+    pub fn set_grant_expiry(&mut self, handle: Handle, expiry: u64) -> Result<(), Refuse> {
+        if let Some(grant) = self.grants.get_mut(&handle) {
+            grant.expiry = Some(expiry);
+        }
+        Ok(())
+    }
+--- end

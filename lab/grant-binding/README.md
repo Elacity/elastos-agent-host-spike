@@ -23,6 +23,8 @@ reference model, not the Runtime; counts toward no M1 check; the Runtime half is
 
 `Verifier::ask_once` stores an allow-once grant through the one `bind_grant`. One successful append or overwrite ends that grant through the one `revoke_grant`. A later effect is refused. `ask_capability` stays reusable. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
 
+`Verifier::set_grant_expiry` stores an expiry on that grant. `Verifier::resolve` refuses the grant when `verifier_now` is at or after that expiry. An unset expiry is not due. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
 The issuing allow-once grant owns the allowance shared by its child journals.
 Creating a child preserves that allowance. The first successful append or
 overwrite through the parent or any child ends the parent and all of its child
