@@ -112,8 +112,30 @@ fn copy_multiline(
     index
 }
 
+/// The index just after a TOML line-ending escape at `index`.
+///
+/// `index` is the backslash. The escape and the whitespace after its newline
+/// produce no characters. A letter escape is not this form.
+fn line_ending_escape_end(bytes: &[u8], index: usize) -> Option<usize> {
+    let mut next = index + 1;
+    if bytes.get(next) == Some(&b'\r') {
+        next += 1;
+    }
+    if bytes.get(next) != Some(&b'\n') {
+        return None;
+    }
+    next += 1;
+    while matches!(bytes.get(next), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+        next += 1;
+    }
+    Some(next)
+}
+
 /// Decode one escape at `index`, or copy it as source, and return the next.
 fn copy_escape(bytes: &[u8], index: usize, decoded: &mut Vec<u8>) -> usize {
+    if let Some(next) = line_ending_escape_end(bytes, index) {
+        return next;
+    }
     match decode_escape(bytes, index) {
         Some((scalar, next)) => {
             let mut buffer = [0u8; 4];
@@ -284,4 +306,21 @@ fn model_carriage_return_escape_is_not_a_link() {
     assert!(!escaped.contains("grant-binding"));
     assert!(escaped.contains("\\r"));
     assert!(!cargo_toml_path_depends_on_grant_binding(escaped));
+}
+
+#[test]
+fn model_line_ending_escape_is_a_link() {
+    let lf = "gb = { path = \"\"\"../grant-bindi\\\nng\"\"\", package = \"\"\"grant-bindi\\\nng\"\"\" }\n";
+    assert!(!lf.contains("grant-binding"));
+    assert!(lf.contains("\\\n"));
+    assert!(cargo_toml_path_depends_on_grant_binding(lf));
+    let crlf = "gb = { path = \"\"\"../grant-bindi\\\r\nng\"\"\", package = \"\"\"grant-bindi\\\r\nng\"\"\" }\n";
+    assert!(!crlf.contains("grant-binding"));
+    assert!(cargo_toml_path_depends_on_grant_binding(crlf));
+    let spaced = "gb = { path = \"\"\"../grant-bindi\\\n  ng\"\"\", package = \"\"\"grant-bindi\\\n  ng\"\"\" }\n";
+    assert!(!spaced.contains("grant-binding"));
+    assert!(cargo_toml_path_depends_on_grant_binding(spaced));
+    let literal = "gb = { path = '''../grant-bindi\\\nng''', package = '''grant-bindi\\\nng''' }\n";
+    assert!(!literal.contains("grant-binding"));
+    assert!(!cargo_toml_path_depends_on_grant_binding(literal));
 }
