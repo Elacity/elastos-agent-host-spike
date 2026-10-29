@@ -10,7 +10,9 @@ A padded size can end in `00`; earlier size bytes are `0x80` or more and cannot
 be part of the magic. Wasm magic `00 61 73 6D` at any offset returns
 `CodeInCustomSection`; a section without that run passes, including padding
 alone. This byte heuristic leaves compressed or encoded content undecoded.
-[API v1](INTERFACE.md) defines the
+One `component-type` section per artifact may skip it: the data must be the
+pinned product-capsule-v1 bytes or type-level imports of the five Bus
+interfaces. [API v1](INTERFACE.md) defines the
 public types, validation rules and exact refusal strings; `AUDIT_API` stays 1.
 
 The crate never executes or instantiates a module. It makes no admission,
@@ -31,11 +33,11 @@ cargo fmt --manifest-path lab/wasm-capsule/audit/Cargo.toml -- --check
 cargo test --locked --manifest-path lab/wasm-capsule/audit/Cargo.toml
 ```
 
-The sixteen `core_imports` tests cover default features, named refusals, exact
+The twenty-three `core_imports` tests cover default features, named refusals, exact
 declarations, malformed bytes, custom-section content, compact import groups,
 refusal order and API v1, and memory page limits for a defined memory, an absent maximum, an imported memory, a 64-bit memory and a shared memory, in import-then-definition order and with the same validation as `audit`.
 The two retained `skeleton` tests pin the manifest
-and workspace boundary. The nine `component_imports` tests cover exact names
+and workspace boundary. The ten `component_imports` tests cover exact names
 and versions (including same-major, pre-release and build-metadata versions;
 a declared pre-release or build version does not match the release;
 interface names that differ only in letter case are refused on either side;
@@ -52,6 +54,17 @@ points refuse a whole module hidden from the size's last byte and accept the
 same padded size with a plain name. The Component test runs both padded cases
 inside an embedded core module too. Component cases also cover a module header
 in the name at all four tested depths, plus plain names and data.
+Five tests cover the `component-type` exception: the pinned 1,382-byte fixture
+is accepted and records its SHA-256; a second `component-type*` section is
+refused; a type-level `wasi` name, `env`, a newer or pre-release Bus name, an
+empty import set, a `wasi` name under only the `Type` or only the
+`Instance` walk, a core module import under either component or instance
+level, a Bus-named core module, and joined core names that spell a Bus string
+are all refused with `code in custom section`; all five unpinned Bus names,
+plus a Bus import beside a `CoreType::Rec` or an import-free module type, are
+accepted. `componentized_product_capsule_passes_audit_component`
+uses the shared custom-section helper on a five-import component, asserts its
+one `component-type` section holds the fixture bytes, and lists the five names.
 The API test pins the derives and `#[non_exhaustive]` lines in both the source
 and API document. Both refusal-order tests require the header or encoding check
 and full validation before custom-section checks, then the first undeclared
@@ -126,8 +139,21 @@ apply and verify each entry by hand in this workspace.
 | F-CWA21a | Match an interface when the declared name ends with the import | `a_different_version_of_a_declared_interface_is_refused` |
 | F-CWA23a | Never run the `component-type` branch, so the magic window decides | `wit_bindgen_component_type_section_is_accepted`, `component_type_section_that_does_not_parse_is_refused` |
 | F-CWA23b | Accept any data under a `component-type` name | `component_type_section_that_does_not_parse_is_refused`, `component_type_section_with_a_core_module_is_refused` |
-| F-CWA23c | Accept any component that parses, whatever its payloads | `component_type_section_with_a_core_module_is_refused` |
+| F-CWA23c | Accept every payload kind except a non-type export | `component_type_section_with_a_core_module_is_refused` |
 | F-CWA23d | Let nested `component-type` sections keep recursing | `component_type_section_inside_component_type_data_is_refused` |
+| F-CWA24a | Never count `component-type` sections | `second_component_type_section_is_refused` |
+| F-CWA24b | Skip the Bus allowlist, so any type-level name passes | `type_level_wasi_or_env_import_is_refused` |
+| F-CWA24c | Accept a type-level name that starts with a listed string | `type_level_wasi_or_env_import_is_refused` |
+| F-CWA24d | Remove the empty-import refusal | `type_level_wasi_or_env_import_is_refused` |
+| F-CWA24e | Remove the `ComponentTypeDeclaration::Type` walk | `type_level_wasi_or_env_import_is_refused` |
+| F-CWA24f | Remove the `ComponentType::Instance` walk | `type_level_wasi_or_env_import_is_refused` |
+| F-CWA24g | Reject every unpinned section | `unpinned_bus_type_imports_are_accepted` |
+| F-CWA24h | Remove the `ComponentTypeDeclaration::CoreType` walk | `type_level_wasi_or_env_import_is_refused` |
+| F-CWA24i | Remove the `InstanceTypeDeclaration::CoreType` walk | `type_level_wasi_or_env_import_is_refused` |
+| F-CWA24j | Collect a core import as its module alone | `type_level_wasi_or_env_import_is_refused` |
+| F-CWA24k | Remove the core import prefix, so joined names can match Bus names | `type_level_wasi_or_env_import_is_refused` |
+| F-CWA24l | Collect a forbidden name from `CoreType::Rec` | `unpinned_bus_type_imports_are_accepted` |
+| F-CWA24m | Collect a forbidden name from an import-free module type | `unpinned_bus_type_imports_are_accepted` |
 
 Start with passing checks. Save the original bytes of the edited file and its
 SHA-256, then apply one entry's exact edits. With the check environment above,
