@@ -8,6 +8,10 @@
 //! and these tests say nothing about what the Runtime does.
 mod common;
 
+#[allow(dead_code)]
+#[path = "../../agent-conformance/src/harness.rs"]
+mod harness;
+
 #[path = "../../agent-conformance/standin-runtime/mod.rs"]
 mod standin_runtime;
 
@@ -817,4 +821,77 @@ fn standin_shared_stop_updates_the_same_instances_and_grants() {
         held[0]["resource"],
         "localhost://Users/self/Documents/notes.md"
     );
+}
+
+/// Every `.rs` file under `root`: the linked harness must not bring a second
+/// copy of its storage rule into this crate.
+fn rust_files(root: &Path, out: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(root).unwrap_or_else(|error| panic!("{}: {error}", root.display())) {
+        let entry = entry.expect("a directory entry");
+        let path = entry.path();
+        let kind = entry.file_type().expect("the entry's kind");
+        if kind.is_dir() {
+            rust_files(&path, out);
+        } else if kind.is_file() && path.extension().is_some_and(|extension| extension == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+fn occurrences(text: &str, needle: &str) -> usize {
+    text.match_indices(needle).count()
+}
+
+#[test]
+fn the_test_crate_links_the_one_harness() {
+    let selected = Path::new("/tmp/ci-selected-home");
+    let existed = selected.exists();
+    assert_eq!(
+        harness::data_dir(selected),
+        Ok(selected.join("Library/Application Support/elastos")),
+        "the linked harness resolves the selected Home's data directory"
+    );
+    assert_eq!(
+        selected.exists(),
+        existed,
+        "resolving storage creates no directory"
+    );
+
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(manifest.join("tests/stand_in.rs"))
+        .expect("this test's own source in the crate");
+    // Split here so this test's own needle text is not counted twice.
+    let harness_link = concat!("../../agent-conformance/src/", "harness.rs");
+    let standin_link = concat!("../../agent-conformance/standin-runtime/", "mod.rs");
+    assert_eq!(
+        occurrences(&source, harness_link),
+        1,
+        "the test crate links the one harness once"
+    );
+    assert_eq!(
+        occurrences(&source, standin_link),
+        1,
+        "the test crate links the shared stand-in once"
+    );
+
+    let mut files = Vec::new();
+    rust_files(manifest, &mut files);
+    for file in &files {
+        let text =
+            fs::read_to_string(file).unwrap_or_else(|error| panic!("{}: {error}", file.display()));
+        for line in text.lines() {
+            let line = line.trim();
+            for prefix in [
+                "fn data_dir(",
+                "pub fn data_dir(",
+                "pub(crate) fn data_dir(",
+            ] {
+                assert!(
+                    !line.starts_with(prefix),
+                    "{} holds a second storage rule: {line}",
+                    file.display()
+                );
+            }
+        }
+    }
 }
