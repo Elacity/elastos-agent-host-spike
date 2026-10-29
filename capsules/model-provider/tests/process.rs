@@ -5975,3 +5975,176 @@ fn hosted_access_states_fail_the_run_on_the_socket() {
 
     provider.shutdown();
 }
+
+/// `journal` is private to the provider binary, so the admission caps are the
+/// literals in `src/journal.rs`. The plant uses the entry cap. A different
+/// literal fails here and names its line.
+fn journal_entry_cap_from_source() -> usize {
+    let source =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/journal.rs"))
+            .expect("read src/journal.rs");
+    let mut entries = None;
+    let mut growth = None;
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("pub const MAX_NEW_JOURNAL_ENTRIES:") {
+            entries = Some((index + 1, trimmed));
+        } else if trimmed.starts_with("pub const MAX_JOURNAL_GROWTH_BYTES:") {
+            growth = Some((index + 1, trimmed));
+        }
+    }
+    let (entry_line, entry_text) = entries.expect("MAX_NEW_JOURNAL_ENTRIES is in src/journal.rs");
+    let (growth_line, growth_text) = growth.expect("MAX_JOURNAL_GROWTH_BYTES is in src/journal.rs");
+    assert_eq!(
+        entry_text, "pub const MAX_NEW_JOURNAL_ENTRIES: usize = 256;",
+        "src/journal.rs:{entry_line}"
+    );
+    assert_eq!(
+        growth_text, "pub const MAX_JOURNAL_GROWTH_BYTES: u64 = 64 * 1024 * 1024;",
+        "src/journal.rs:{growth_line}"
+    );
+    256
+}
+
+/// A full journal refuses a hosted run before the Runtime socket.
+/// Design: `docs/MODEL_PROVIDER.md` "Cancellation, interruption, and resume".
+/// The check is the `else` branch of `RunJournal::store_run`, before the
+/// Prepared record and before dispatch. The unit test
+/// `journal_admission_refuses_before_prepared_and_backend_effects` stays the
+/// in-process proof of the entry cap and the charged-growth cap.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_full_journal_refuses_before_any_send() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted full journal: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-full-journal");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind_streaming("hosted-full-journal");
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    // Plant only after init. Startup recovers a crash name whose suffix is not
+    // a live creator pid, so these files must not be in place before that.
+    // The names match the unit test: empty, mode 0o600, one per index from 0
+    // inclusive to the entry cap exclusive.
+    use std::os::unix::fs::OpenOptionsExt;
+    let entry_cap = journal_entry_cap_from_source();
+    let runs = root.join("journal").join("runs");
+    assert!(
+        runs.is_dir(),
+        "init opens the journal runs directory at {}",
+        runs.display()
+    );
+    let mut planted = Vec::with_capacity(entry_cap);
+    for index in 0..entry_cap {
+        let path = runs.join(format!(".sha256-{index:064x}.json.tmp-crash"));
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        planted.push(path);
+    }
+
+    let refused_id = test_support::fixture_model_request_id("request:hosted-journal-full");
+    let refused_request =
+        hosted_text_create_request(&refused_id, "grant:test", "a short hosted prompt");
+    let refused_binding: RuntimeCreateBinding =
+        serde_json::from_value(refused_request["runtime_binding"].clone()).unwrap();
+    let refused_run_id = model_run_id(&refused_binding);
+    let refused = provider.request(refused_request.clone());
+    assert_eq!(
+        refused,
+        json!({
+            "status": "error",
+            "code": "policy_limit",
+            "message": "Model run history is full. Retained outcomes expire after their history window; then try again.",
+        }),
+        "a full journal must refuse the new run before any send: {refused}"
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        0,
+        "the journal refusal must open no connection to the Runtime socket"
+    );
+    let missing = provider.request(json!({
+        "op": "runs_get",
+        "run_id": refused_run_id,
+        "runtime_binding": access_binding(&refused_request),
+    }));
+    assert_eq!(
+        missing,
+        json!({
+            "status": "error",
+            "code": "run_not_found",
+            "message": "model run is not available for the current caller",
+        }),
+        "a refused run must leave no record: {missing}"
+    );
+
+    for path in &planted {
+        std::fs::remove_file(path).unwrap();
+    }
+    let fresh_id = test_support::fixture_model_request_id("request:hosted-journal-open");
+    let prompt = "a hosted run after the journal has room";
+    let settled = run_hosted_text_turn(
+        &mut provider,
+        &fresh_id,
+        "grant:test",
+        HOSTED_FIXTURE_SESSION_ID,
+        prompt,
+        FIXTURE_EVENT_TIMEOUT,
+    );
+    assert_eq!(
+        settled["data"]["status"], "completed",
+        "the fresh granted turn must complete: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["output"],
+        json!({"schema": RUN_OUTPUT_TEXT_SCHEMA, "text": "ready"}),
+        "the fresh granted turn must carry the streamed text: {settled}"
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "only the fresh granted turn may open a connection to the Runtime socket"
+    );
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "observe must record the one Runtime socket connection"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "observe must record the one hosted request"
+    );
+    assert_eq!(
+        requests[0].value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
+    );
+
+    provider.shutdown();
+}
