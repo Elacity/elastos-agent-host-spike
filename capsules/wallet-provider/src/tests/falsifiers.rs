@@ -241,11 +241,12 @@ use std::process::Command;
 /// reader's length case and unknown-step case, and the launcher's list-provider
 /// check. Its two Linux-only plants are named in `CONFINEMENT-LINUX.md` and are
 /// not registered here, because a Linux-only test cannot produce a CAUGHT line
-/// on the Mac. Task 146 adds WP168 and WP169, both CAUGHT on the Mac: the
+/// on the Mac. Task 146 adds the cross-platform plants WP187 and WP188: the
 /// `STORAGE_PARENT` row widened to a read of the parent's tree, and the handled
-/// mask narrowed to the read rights. Its two Linux-only plants are named in
-/// `CONFINEMENT-LINUX.md` and are not registered here.
-const EXPECTED_FALSIFIERS: usize = 167;
+/// mask narrowed to the read rights. Its Linux-only plants are named in
+/// `CONFINEMENT-LINUX.md` and are not registered here. The repair adds WP198
+/// to WP201 for the four Landlock install-step reasons.
+const EXPECTED_FALSIFIERS: usize = 171;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

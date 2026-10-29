@@ -194,7 +194,9 @@ pub(super) fn create_wallet_dir_durable(wallet_dir: &Path) -> Result<(), String>
         .parent()
         .ok_or_else(|| "wallet storage directory has no parent to synchronize".to_string())?;
     ensure_directory(parent, "wallet storage parent directory")?;
-    sync_directory(parent, "wallet storage parent directory")
+    // The loop syncs each parent whose directory entry was created. An existing
+    // root has no new parent entry: its owner prepared it before confinement.
+    Ok(())
 }
 
 pub(super) fn prune_store(mut store: WalletStore, now: u64) -> WalletStore {

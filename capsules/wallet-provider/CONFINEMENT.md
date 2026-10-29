@@ -566,12 +566,11 @@ declared rights through one generator. The seccomp side has the one builder, the
 one mapping table, the one step sequencer and the one install function that file
 names (`seccomp_allow_list_from_declared_rights`, `SECCOMP_RULE_SYSCALLS`,
 `install_seccomp_with`, `install_seccomp`); the Landlock side has
-`landlock_path_rules`, `LANDLOCK_RULE_RIGHTS` and `install_landlock`. On a real
-Linux host the wallet provider starts under both, the four denied calls answer
-the filter's own marker, and a file read or write under `STORAGE_PARENT` outside
-`STORAGE_ROOT` is refused by the kernel with `EACCES` while the same call
-succeeds unconfined, as `CONFINEMENT-LINUX.md` records with its host, kernel,
-reported ABI and per-call answers. That is the whole Linux claim: namespaces,
+`landlock_path_rules`, `LANDLOCK_RULE_RIGHTS` and `install_landlock`. The seccomp row has a real Linux run. The repaired Landlock row grants zero
+rights on `STORAGE_PARENT` and requires kernel refusals for its listing and
+sibling directory listings, as well as outside file reads and writes. Its Linux
+journey and mutation runs await the supervisor's checks; the earlier run used
+a wider parent grant and supplies no acceptance for the repaired boundary. That is the whole Linux claim: namespaces,
 capability dropping and every other row of the contract remain unbuilt, so
 `linux` stays out of `DECLARED_CONFINED_OS` and every operations-table cell
 reads `designed, not enforced`. No sentence here claims that the Runtime did
@@ -1407,17 +1406,27 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   missing-report reason is lost behind that spawn reason.
 - Grant a read of the parent's tree in the `STORAGE_PARENT` Landlock row (WP187):
   `landlock_allow_list_follows_the_declared_rights` fails because that row then
-  carries `READ_FILE` as well as `READ_DIR`, so a read of a file beneath the
-  parent would succeed and the file row would be wider than its oracle.
+  changes from zero rights to `READ_FILE` and `READ_DIR`, so sibling file reads
+  and directory listings would succeed.
 - Name only the read rights in the Landlock handled mask (WP188):
   `landlock_program_denies_a_path_no_rule_grants` fails on its handled-mask
   comparison, because an unspecified `WRITE_FILE` leaves every write outside
   `STORAGE_ROOT` unrestricted.
 
+- Suppress the Landlock create-ruleset failure reason (WP198):
+  `landlock_install_refuses_each_failed_step` requires its exact reason and errno.
+- Replace the Landlock path-rule failure reason (WP199):
+  the same test requires the failed rule's index and exact reason.
+- Suppress the Landlock `PR_SET_NO_NEW_PRIVS` failure reason (WP200):
+  the same test requires that step's exact reason and errno.
+- Replace the Landlock `restrict_self` failure reason (WP201):
+  the same test requires that step's exact reason through the shared record.
+
 Task 146's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,
 so none can produce a CAUGHT line in this list: the launcher's skipped Landlock
-install and the `STORAGE_PARENT` row's read plant, both on the file-row journey.
+install, the `STORAGE_PARENT` row's read plant, the omitted `no_new_privs` call,
+and allocations in both child paths. Their repaired Linux runs remain pending.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

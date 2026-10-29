@@ -35,7 +35,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sha3::Keccak256;
 #[cfg(target_os = "linux")]
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -95,27 +95,44 @@ static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 static COUNT_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
 
-/// The test binary's allocator, which counts the probe child's allocations and
-/// changes nothing else.
+/// The test binary's allocator. Existing seccomp probes count allocations;
+/// Landlock child paths reject heap access before the system allocator runs.
 struct CountingAllocator;
 
 unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        self.reject_child_allocation();
         self.count_one();
         unsafe { std::alloc::System.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        self.reject_child_allocation();
         unsafe { std::alloc::System.dealloc(pointer, layout) }
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        self.reject_child_allocation();
         self.count_one();
         unsafe { std::alloc::System.realloc(pointer, layout, size) }
     }
 }
 
+// Enabled only in the forked child. Fail before entering the system allocator,
+// which may hold a lock inherited from another test thread.
+#[cfg(target_os = "linux")]
+static REJECT_CHILD_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "linux")]
+const CHILD_ALLOCATION_EXIT: i32 = 86;
+
 impl CountingAllocator {
+    fn reject_child_allocation(&self) {
+        #[cfg(target_os = "linux")]
+        if REJECT_CHILD_ALLOCATIONS.load(Ordering::Relaxed) {
+            unsafe { libc::_exit(CHILD_ALLOCATION_EXIT) }
+        }
+    }
+
     /// Counts this allocation when the calling process is a counted probe
     /// child.
     fn count_one(&self) {
@@ -813,7 +830,10 @@ impl ConfinedProvider {
         // The `pre_exec` closure must be `'static`, so it owns its own copy of
         // the ruleset rather than borrowing the caller's. The copy is made
         // before the fork, so the child allocates nothing after it.
-        let landlock = landlock.cloned();
+        let landlock = landlock
+            .map(PreparedLandlockRuleset::new)
+            .transpose()
+            .map_err(|failure| format!("{} start is refused: {failure}", allow.provider))?;
         let provider_name = allow.provider.clone();
         let (mut reader, writer) = UnixStream::pair().map_err(|err| {
             format!(
@@ -826,6 +846,7 @@ impl ConfinedProvider {
         // so the child allocates nothing after it.
         unsafe {
             command.pre_exec(move || {
+                REJECT_CHILD_ALLOCATIONS.store(true, Ordering::Relaxed);
                 let before = seccomp_launch_marker_answer();
                 // The file row first, because no seccomp row admits Landlock's
                 // own system calls.
@@ -1344,15 +1365,25 @@ fn standin_spawn_confined_provider(
         StandinPolicy::Landlock { allow, ruleset } => {
             create_shared_ancestors(&canonical);
             // The storage root must exist before its rule is added, because a
-            // Landlock path rule needs a descriptor on the path. The provider
-            // creates its own root, so the launch prepares the bound directory
-            // the same way the macOS launch prepares the shared ancestors.
-            fs::create_dir_all(provider_storage_root(name, base_path)).map_err(|err| {
-                format!(
-                    "{name} start is refused: the storage root {} must be creatable: {err}",
-                    provider_storage_root(name, base_path).display()
-                )
-            })?;
+            // Landlock path rule needs a descriptor on the path. The launcher
+            // owns this preparation and syncs the root's entry before confinement.
+            let storage_root = provider_storage_root(name, base_path);
+            fs::create_dir_all(&storage_root)
+                .and_then(|()| {
+                    fs::File::open(&storage_root)?.sync_all()?;
+                    fs::File::open(
+                        storage_root
+                            .parent()
+                            .expect("a bound storage root has a parent"),
+                    )?
+                    .sync_all()
+                })
+                .map_err(|err| {
+                    format!(
+                        "{name} start is refused: the storage root {} must be creatable: {err}",
+                        provider_storage_root(name, base_path).display()
+                    )
+                })?;
             ConfinedProvider::start_under_landlock(allow, ruleset, binary_path)?
         }
     };
@@ -6370,25 +6401,10 @@ const LANDLOCK_ACCESS_FS_IOCTL_DEV: u64 = 1 << 15;
 ///   `(allow file-read* (literal "/"))` already grants that read of the binary,
 ///   so this row grants it on the one file instead of on the whole filesystem,
 ///   which is narrower than the oracle and not wider;
-/// - the `(literal (param "STORAGE_PARENT"))` read form carries **`READ_DIR`
-///   alone**, which is narrower than a read rule and wider than an exact match.
-///   This row is the one place the measurement changed the design's intent. The
-///   design said this form would carry no right, because a path rule on a
-///   directory covers the whole tree beneath it. The measurement on the Linux
-///   host is that the provider cannot start without a right here at all: `init`
-///   opens `STORAGE_PARENT` and syncs it, so with no parent rule the answer is
-///   `failed to sync wallet storage parent directory: Permission denied (os
-///   error 13)` and nothing is created. Measured with `READ_FILE|READ_DIR` on
-///   the parent, a planted read of a file beneath the parent **succeeds**, so a
-///   read right there is the wider grant this row refuses. Measured with
-///   `READ_DIR` alone, `init` answers `ok`, a listing of the parent succeeds,
-///   and a read of a planted file beneath the parent, a write beside it and a
-///   read of a file inside it outside `STORAGE_ROOT` are all refused `EACCES`
-///   (13). So `READ_DIR` is the smallest right that lets the provider start, and
-///   the departure it leaves is that a *listing* of `STORAGE_PARENT` succeeds
-///   where the oracle's `literal` denies it. The `STORAGE_PARENT` **file content
-///   read** the oracle grants is not gained: it stays refused, which is the
-///   boundary this row is about;
+/// - the `(literal (param "STORAGE_PARENT"))` read form carries no right:
+///   a directory grant covers the entire subtree, including sibling providers.
+///   The launcher prepares the root before confinement. The provider syncs a
+///   parent only when it creates a directory entry in that parent;
 /// - the `(allow file-read* (literal "/"))` startup form carries **no right**,
 ///   for the design's reason: a read rule on `/` would grant the whole
 ///   filesystem and add a fourth path the design does not hold;
@@ -6419,7 +6435,7 @@ const LANDLOCK_RULE_RIGHTS: &[(&str, u64)] = &[
         SHARED_RULES[0],
         LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
     ),
-    (SHARED_RULES[1], LANDLOCK_ACCESS_FS_READ_DIR),
+    (SHARED_RULES[1], 0),
     (STARTUP_RULES[0], 0),
     (STARTUP_RULES[1], 0),
 ];
@@ -7110,7 +7126,6 @@ impl std::fmt::Display for LandlockInstallFailure {
 /// `PR_SET_NO_NEW_PRIVS` first, `restrict_self` fails `EPERM` (1) and nothing is
 /// confined, so an install that skipped or reordered that step would leave the
 /// provider unconfined while answering `ok`.
-#[cfg(target_os = "linux")]
 fn install_landlock_with(
     ruleset: &LandlockRuleset,
     mut steps: impl FnMut(LandlockStep) -> Result<(), i32>,
@@ -7123,6 +7138,111 @@ fn install_landlock_with(
     }
     run(LandlockStep::NoNewPrivileges)?;
     run(LandlockStep::RestrictSelf)
+}
+
+/// Every install failure preserves its step, errno, and exact reason across
+/// the shared launch record. A failed step prevents every later step.
+/// WP198 to WP201 replace each step's reason and must fail this test.
+#[test]
+fn landlock_install_refuses_each_failed_step() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let fixture = tempfile::tempdir().expect("temporary install fixture");
+    let base = resolved(fixture.path());
+    let bindings = canonical_bindings(WALLET_PROVIDER, &base, Path::new(PROVIDER_BINARY));
+    let ruleset = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, 7, &[]).unwrap();
+    assert_eq!(ruleset.rules.len(), 2);
+    let order = [
+        LandlockStep::CreateRuleset,
+        LandlockStep::AddRule(0),
+        LandlockStep::AddRule(1),
+        LandlockStep::NoNewPrivileges,
+        LandlockStep::RestrictSelf,
+    ];
+    let cases = [
+        (
+            LandlockStep::CreateRuleset,
+            libc::EINVAL,
+            "landlock install refused: the ruleset could not be created with errno 22",
+        ),
+        (
+            LandlockStep::AddRule(0),
+            libc::EACCES,
+            "landlock install refused: the path rule 0 could not be added with errno 13",
+        ),
+        (
+            LandlockStep::AddRule(1),
+            libc::ENOENT,
+            "landlock install refused: the path rule 1 could not be added with errno 2",
+        ),
+        (
+            LandlockStep::NoNewPrivileges,
+            libc::EPERM,
+            "landlock install refused: PR_SET_NO_NEW_PRIVS failed with errno 1",
+        ),
+        (
+            LandlockStep::RestrictSelf,
+            libc::EBADF,
+            "landlock install refused: landlock_restrict_self failed with errno 9",
+        ),
+    ];
+    let mut seen = Vec::new();
+    install_landlock_with(&ruleset, |step| {
+        seen.push(step);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(seen, order);
+    for (position, (failed, errno, expected)) in cases.into_iter().enumerate() {
+        let mut seen = Vec::new();
+        let failure = install_landlock_with(&ruleset, |step| {
+            seen.push(step);
+            if step == failed {
+                Err(errno)
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("each failed install step must refuse");
+        assert_eq!(
+            seen,
+            order[..=position],
+            "a refused install must stop at its failed step"
+        );
+        assert_eq!(failure, LandlockInstallFailure::new(failed, errno));
+        assert_eq!(failure.to_string(), expected);
+        assert_eq!(
+            seccomp_launch_answers_or_refusal(&failure.launch_record(), "unused").unwrap_err(),
+            expected
+        );
+
+        #[cfg(target_os = "linux")]
+        {
+            fs::create_dir_all(provider_storage_root(WALLET_PROVIDER, &base)).unwrap();
+            let mut candidate = ruleset.clone();
+            candidate.injected_step_failure = Some((failed, errno));
+            let allow = seccomp_probe_list();
+            let refusal = ConfinedProvider::start_under_landlock(
+                &allow,
+                &candidate,
+                Path::new(PROVIDER_BINARY),
+            )
+            .err()
+            .expect("the launch must refuse the injected Landlock failure");
+            assert_eq!(
+                refusal,
+                format!("{WALLET_PROVIDER} start is refused: {expected}")
+            );
+            let refusal = landlock_file_probe(&candidate, LandlockProbeRun::Confined, &base)
+                .expect_err("the probe must refuse the same Landlock failure");
+            assert_eq!(
+                refusal,
+                format!(
+                    "landlock probe refused: the probe child must install the ruleset: {expected}"
+                )
+            );
+        }
+    }
 }
 
 /// The two steps a seccomp install takes, in order. Each has its own refusal,
@@ -7446,6 +7566,38 @@ fn landlock_abi() -> Result<u32, LandlockInstallFailure> {
     ))
 }
 
+/// All owned paths are converted before fork. Both child callers take this
+/// prepared value, so the installer cannot allocate or perform lossy conversion.
+#[cfg(target_os = "linux")]
+struct PreparedLandlockRuleset {
+    ruleset: LandlockRuleset,
+    paths: Vec<CString>,
+    /// Negative fixture only: reach restrict_self with no_new_privs still clear.
+    skip_no_new_privileges: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl PreparedLandlockRuleset {
+    fn new(ruleset: &LandlockRuleset) -> Result<Self, LandlockInstallFailure> {
+        use std::os::unix::ffi::OsStrExt as _;
+        let paths = ruleset
+            .rules
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| {
+                CString::new(rule.path.as_os_str().as_bytes()).map_err(|_| {
+                    LandlockInstallFailure::new(LandlockStep::AddRule(index), libc::EINVAL)
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            ruleset: ruleset.clone(),
+            paths,
+            skip_no_new_privileges: false,
+        })
+    }
+}
+
 /// The one install function, and the only place a Landlock ruleset becomes a
 /// kernel call. The launcher and the probe child both call it, so both install
 /// the same policy by one path (P10).
@@ -7462,7 +7614,8 @@ fn landlock_abi() -> Result<u32, LandlockInstallFailure> {
 /// `injected_step_failure` is test input: a launch can be refused at a named
 /// step without a kernel that would refuse it, and every real launch has `None`.
 #[cfg(target_os = "linux")]
-fn install_landlock(ruleset: &LandlockRuleset) -> Result<(), LandlockInstallFailure> {
+fn install_landlock(prepared: &PreparedLandlockRuleset) -> Result<(), LandlockInstallFailure> {
+    let ruleset = &prepared.ruleset;
     let mut descriptor: libc::c_int = -1;
     let result = install_landlock_with(ruleset, |step| {
         if let Some((failed, errno)) = ruleset.injected_step_failure {
@@ -7495,7 +7648,7 @@ fn install_landlock(ruleset: &LandlockRuleset) -> Result<(), LandlockInstallFail
                 let Some(rule) = ruleset.rules.get(index) else {
                     return Err(libc::EINVAL);
                 };
-                let Ok(path) = CString::new(rule.path.to_string_lossy().as_bytes()) else {
+                let Some(path) = prepared.paths.get(index) else {
                     return Err(libc::EINVAL);
                 };
                 let path_descriptor =
@@ -7521,6 +7674,9 @@ fn install_landlock(ruleset: &LandlockRuleset) -> Result<(), LandlockInstallFail
                 (answer, errno)
             }
             LandlockStep::NoNewPrivileges => {
+                if prepared.skip_no_new_privileges {
+                    return Ok(());
+                }
                 let answer = unsafe {
                     libc::prctl(libc::PR_SET_NO_NEW_PRIVS, LANDLOCK_NO_NEW_PRIVS, 0, 0, 0)
                 };
@@ -8219,15 +8375,9 @@ fn seccomp_rejects_unmapped_allow_form() {
     }
 }
 
-/// The Landlock rows follow the declared rights, and the `STORAGE_PARENT` form
-/// is given only the right the kernel forces and nothing wider.
-///
-/// Wallet's declared file yields the `STORAGE_ROOT` rule with the rights a read
-/// and write of the tree needs, the `EXECUTE` rule on the bound binary, and the
-/// `STORAGE_PARENT` rule with `READ_DIR` alone. The test asserts the last one
-/// explicitly, because it is the row the measurement changed: `READ_FILE` there
-/// would let a read of a file beneath the parent succeed, which the oracle
-/// refuses, and no right at all would stop the provider starting.
+/// The Landlock rows follow the declared rights. The parent form explicitly
+/// grants zero rights, so it adds no rule covering sibling providers.
+/// Wallet retains its storage-tree grant and the bound executable grant.
 ///
 /// A copy of the file with `storage` removed yields no `STORAGE_ROOT` rule and
 /// no `STORAGE_PARENT` rule, a copy with an id the shared contract does not name
@@ -8273,22 +8423,29 @@ fn landlock_allow_list_follows_the_declared_rights() {
         "the bound-executable row must carry EXECUTE and the loader's read of that one file"
     );
 
-    // The row the measurement settled: the parent is a directory the provider
-    // opens and syncs to start, and a read right there would grant its tree.
-    let parent = rule("STORAGE_PARENT");
+    // Inspect the explicit table decision even though a zero row adds no rule.
+    let parent = LANDLOCK_RULE_RIGHTS
+        .iter()
+        .find(|(form, _)| *form == SHARED_RULES[1])
+        .expect("the parent form must have an explicit decision")
+        .1;
+    assert_eq!(parent, 0, "the STORAGE_PARENT row must grant no right");
     assert_eq!(
-        parent.rights, LANDLOCK_ACCESS_FS_READ_DIR,
-        "the STORAGE_PARENT row must grant READ_DIR alone"
-    );
-    assert_eq!(
-        parent.rights & LANDLOCK_ACCESS_FS_READ_FILE,
+        parent & LANDLOCK_ACCESS_FS_READ_FILE,
         0,
         "the STORAGE_PARENT row must grant no read of a file beneath the parent"
     );
     assert_eq!(
-        parent.rights & LANDLOCK_ACCESS_FS_WRITE_FILE,
+        parent & LANDLOCK_ACCESS_FS_WRITE_FILE,
         0,
         "the STORAGE_PARENT row must grant no write"
+    );
+    assert!(
+        !ruleset
+            .rules
+            .iter()
+            .any(|rule| rule.parameter == "STORAGE_PARENT"),
+        "the zero-right parent form must add no recursive path grant"
     );
 
     // Removing `storage` removes both of its rules, and the exec rule stays.
@@ -8575,8 +8732,8 @@ fn landlock_ruleset_refuses_an_abi_that_cannot_express_a_row() {
     }
 
     // The builder itself refuses ABI 0 for wallet's own rows, and the refusal
-    // names the first row it could not express, in profile order, by that row's
-    // allow text.
+    // names the first granted row it could not express, in profile order. The
+    // parent's zero-right row needs no ABI and is skipped.
     let refusal = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, 0, &[])
         .expect_err("ABI 0 must not express the wallet rows");
     assert!(
@@ -8584,7 +8741,7 @@ fn landlock_ruleset_refuses_an_abi_that_cannot_express_a_row() {
         "the builder's refusal must carry the design's fixed words: {refusal}"
     );
     assert!(
-        refusal.contains(SHARED_RULES[1]),
+        refusal.contains(SHARED_RULES[2]),
         "the builder's refusal must name the first row it cannot express by that row's form: \
          {refusal}"
     );
@@ -10596,17 +10753,21 @@ enum LandlockProbeCall {
     ReadBeneathParent,
     WriteBesideParent,
     ListParent,
+    ListSibling,
+    ListSiblingPrivate,
 }
 
 #[cfg(target_os = "linux")]
 impl LandlockProbeCall {
     /// Every call the journey requires, in report order.
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 7] = [
         Self::ReadInside,
         Self::WriteInside,
         Self::ReadBeneathParent,
         Self::WriteBesideParent,
         Self::ListParent,
+        Self::ListSibling,
+        Self::ListSiblingPrivate,
     ];
 
     /// The name the probe writes in its report and the test reads back.
@@ -10617,6 +10778,8 @@ impl LandlockProbeCall {
             Self::ReadBeneathParent => "read-beneath-storage-parent",
             Self::WriteBesideParent => "write-beside-storage-parent",
             Self::ListParent => "list-storage-parent",
+            Self::ListSibling => "list-sibling",
+            Self::ListSiblingPrivate => "list-sibling-private",
         }
     }
 
@@ -10630,9 +10793,12 @@ impl LandlockProbeCall {
             Self::WriteInside => root.join(LANDLOCK_PROBE_INSIDE_WRITE),
             Self::ReadBeneathParent => parent
                 .join(LANDLOCK_PROBE_PARENT_SIBLING)
+                .join("private")
                 .join(LANDLOCK_PROBE_BENEATH_FILE),
             Self::WriteBesideParent => parent.join(LANDLOCK_PROBE_BESIDE_PARENT_WRITE),
             Self::ListParent => parent,
+            Self::ListSibling => parent.join(LANDLOCK_PROBE_PARENT_SIBLING),
+            Self::ListSiblingPrivate => parent.join(LANDLOCK_PROBE_PARENT_SIBLING).join("private"),
         }
     }
 }
@@ -10645,9 +10811,9 @@ const LANDLOCK_PROBE_INSIDE_FILE: &str = "landlock-inside-read.txt";
 #[cfg(target_os = "linux")]
 const LANDLOCK_PROBE_INSIDE_WRITE: &str = "landlock-inside-write.txt";
 #[cfg(target_os = "linux")]
-const LANDLOCK_PROBE_PARENT_SIBLING: &str = "landlock-sibling";
+const LANDLOCK_PROBE_PARENT_SIBLING: &str = "sibling";
 #[cfg(target_os = "linux")]
-const LANDLOCK_PROBE_BENEATH_FILE: &str = "landlock-beneath-read.txt";
+const LANDLOCK_PROBE_BENEATH_FILE: &str = "marker";
 #[cfg(target_os = "linux")]
 const LANDLOCK_PROBE_BESIDE_PARENT_WRITE: &str = "landlock-beside-write.txt";
 /// The exact bytes the planted read and write fixtures hold.
@@ -10657,6 +10823,8 @@ const LANDLOCK_PROBE_FIXTURE_BYTES: &[u8] = b"landlock file row fixture\n";
 /// The prefix every Landlock probe record line starts with.
 #[cfg(target_os = "linux")]
 const LANDLOCK_PROBE_MARKER: &str = "landlock-probe:";
+#[cfg(target_os = "linux")]
+const LANDLOCK_PROBE_REFUSED: &[u8] = b"landlock-probe-refused:";
 
 /// What one file call answered: the errno it failed with or the value it
 /// returned. It is `SeccompAnswer`'s shape, so the probe record format and its
@@ -10664,52 +10832,55 @@ const LANDLOCK_PROBE_MARKER: &str = "landlock-probe:";
 #[cfg(target_os = "linux")]
 type LandlockAnswer = SeccompAnswer;
 
-/// The five answers one probe child recorded, in `LandlockProbeCall::ALL`
+/// The seven answers one probe child recorded, in `LandlockProbeCall::ALL`
 /// order.
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LandlockProbeReport {
-    answers: [LandlockAnswer; 5],
+    answers: [LandlockAnswer; LandlockProbeCall::ALL.len()],
 }
 
 /// What the Landlock probe child is asked to do.
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LandlockProbeRun {
-    /// Install the ruleset through `install_landlock`, make the five calls and
+    /// Install the ruleset through `install_landlock`, make the seven calls and
     /// report them.
     Confined,
-    /// Make the five calls with no ruleset, which is the positive control.
+    /// Make the seven calls with no ruleset, which is the positive control.
     Control,
     /// Run the confined case beneath an allow-all seccomp fixture filter, so a
     /// launcher that skipped only its own install is still visible here.
     ConfinedUnderFilter,
+    /// Prove Landlock sets the flag itself, before a seccomp installer can.
+    RequireNoNewPrivileges,
+    /// Negative control through the same installer, with just that step skipped.
+    WithoutNoNewPrivileges,
+    /// Exercise the allocation guard before it can enter the system allocator.
+    Allocating,
 }
 
 /// One file call, as the answer the kernel gave it. Each arm makes the call its
 /// name states and passes the complete argument list, so no call relies on a
 /// register this function left unset.
 #[cfg(target_os = "linux")]
-fn landlock_probe_call(call: LandlockProbeCall, base: &Path) -> LandlockAnswer {
-    let path = call.path(base);
+fn landlock_probe_call(call: LandlockProbeCall, path: &CStr) -> LandlockAnswer {
     match call {
         LandlockProbeCall::ReadInside | LandlockProbeCall::ReadBeneathParent => {
-            seccomp_answer(|| read_file_answer(&path))
+            seccomp_answer(|| read_file_answer(path))
         }
         LandlockProbeCall::WriteInside | LandlockProbeCall::WriteBesideParent => {
-            seccomp_answer(|| write_file_answer(&path))
+            seccomp_answer(|| write_file_answer(path))
         }
-        LandlockProbeCall::ListParent => seccomp_answer(|| list_directory_answer(&path)),
+        LandlockProbeCall::ListParent
+        | LandlockProbeCall::ListSibling
+        | LandlockProbeCall::ListSiblingPrivate => seccomp_answer(|| list_directory_answer(path)),
     }
 }
 
 /// Reads the whole of `path` and answers its length, or `-1` with its errno.
 #[cfg(target_os = "linux")]
-fn read_file_answer(path: &Path) -> i64 {
-    let Ok(path) = CString::new(path.to_string_lossy().as_bytes()) else {
-        unsafe { *libc::__errno_location() = libc::EINVAL };
-        return -1;
-    };
+fn read_file_answer(path: &CStr) -> i64 {
     let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
     if fd < 0 {
         return -1;
@@ -10728,11 +10899,7 @@ fn read_file_answer(path: &Path) -> i64 {
 /// Creates `path` for writing and writes the fixture bytes, answering their
 /// length, or `-1` with its errno.
 #[cfg(target_os = "linux")]
-fn write_file_answer(path: &Path) -> i64 {
-    let Ok(path) = CString::new(path.to_string_lossy().as_bytes()) else {
-        unsafe { *libc::__errno_location() = libc::EINVAL };
-        return -1;
-    };
+fn write_file_answer(path: &CStr) -> i64 {
     let fd = unsafe {
         libc::open(
             path.as_ptr(),
@@ -10759,39 +10926,58 @@ fn write_file_answer(path: &Path) -> i64 {
     written as i64
 }
 
-/// Lists `path` and answers how many entries it holds, or `-1` with its errno.
-/// It counts the entries without allocating a `String`, because a probe child
-/// may not allocate after its fork.
+/// Read directory entries into a fixed stack buffer. `opendir`/`readdir` own
+/// libc heap state, so the forked child uses open/getdents64/close directly.
 #[cfg(target_os = "linux")]
-fn list_directory_answer(path: &Path) -> i64 {
-    let Ok(path) = CString::new(path.to_string_lossy().as_bytes()) else {
-        unsafe { *libc::__errno_location() = libc::EINVAL };
-        return -1;
+fn list_directory_answer(path: &CStr) -> i64 {
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
     };
-    let directory = unsafe { libc::opendir(path.as_ptr()) };
-    if directory.is_null() {
+    if fd < 0 {
         return -1;
     }
+    let mut buffer = [0u8; 4096];
     let mut count = 0i64;
-    loop {
-        let entry = unsafe { libc::readdir(directory) };
-        if entry.is_null() {
-            break;
+    let result = loop {
+        let read =
+            unsafe { libc::syscall(libc::SYS_getdents64, fd, buffer.as_mut_ptr(), buffer.len()) };
+        if read < 0 {
+            break Err(unsafe { *libc::__errno_location() });
         }
-        count += 1;
+        if read == 0 {
+            break Ok(count);
+        }
+        let mut offset = 0;
+        while offset < read as usize {
+            // linux_dirent64: u64 inode, i64 offset, u16 record length.
+            if offset + 19 > read as usize {
+                break;
+            }
+            let length = u16::from_ne_bytes([buffer[offset + 16], buffer[offset + 17]]) as usize;
+            if length < 19 || offset + length > read as usize {
+                break;
+            }
+            count += 1;
+            offset += length;
+        }
+        if offset != read as usize {
+            break Err(libc::EIO);
+        }
+    };
+    unsafe { libc::close(fd) };
+    match result {
+        Ok(count) => count,
+        Err(errno) => {
+            unsafe { *libc::__errno_location() = errno };
+            -1
+        }
     }
-    let errno = unsafe { *libc::__errno_location() };
-    unsafe { libc::closedir(directory) };
-    // `readdir` reports the end as a null entry, so a null that set errno is a
-    // failed listing and keeps that errno.
-    if count == 0 && errno != 0 {
-        unsafe { *libc::__errno_location() = errno };
-        return -1;
-    }
-    count
 }
 
-/// The probe child's body: make the five calls under `run`'s policy, write one
+/// The probe child's body: make the seven calls under `run`'s policy, write one
 /// line per call, and end the process at once.
 ///
 /// It runs in a forked child before any exec, so a ruleset it installs reaches
@@ -10803,9 +10989,11 @@ fn list_directory_answer(path: &Path) -> i64 {
 fn run_landlock_probe_child(
     report: std::os::fd::RawFd,
     run: LandlockProbeRun,
-    ruleset: &LandlockRuleset,
-    base: &Path,
+    ruleset: &PreparedLandlockRuleset,
+    paths: &[CString],
+    fixture_filter: &SeccompAllowList,
 ) -> ! {
+    REJECT_CHILD_ALLOCATIONS.store(true, Ordering::Relaxed);
     if let Err(errno) = retain_probe_report_descriptor(report) {
         write_all(
             report,
@@ -10814,26 +11002,52 @@ fn run_landlock_probe_child(
         write_number(report, i64::from(errno));
         unsafe { libc::_exit(71) }
     }
+    if run == LandlockProbeRun::Allocating {
+        // Call the real global allocator; the guard exits before System.alloc.
+        let _ = unsafe { std::alloc::alloc(std::alloc::Layout::new::<u8>()) };
+        unsafe { libc::_exit(87) }
+    }
+    if matches!(
+        run,
+        LandlockProbeRun::RequireNoNewPrivileges | LandlockProbeRun::WithoutNoNewPrivileges
+    ) {
+        let flag = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) };
+        if flag != 0 {
+            write_all(
+                report,
+                b"no_new_privs must be clear before the Landlock install\n",
+            );
+            unsafe { libc::_exit(72) }
+        }
+    }
     // The seccomp fixture filter is installed first so the confined case still
     // runs under it; it admits every call, so it changes no answer here.
     if run == LandlockProbeRun::ConfinedUnderFilter {
-        let allow = landlock_probe_allow_all();
-        if install_seccomp(&allow).is_err() {
-            write_all(report, b"landlock-probe-refused:seccomp fixture\n");
+        if let Err(failure) = install_seccomp(fixture_filter) {
+            write_all(report, LANDLOCK_PROBE_REFUSED);
+            write_all(report, &failure.launch_record());
             unsafe { libc::_exit(70) }
         }
     }
     if run != LandlockProbeRun::Control {
         if let Err(failure) = install_landlock(ruleset) {
-            write_all(report, b"landlock-probe-refused:");
-            write_all(report, failure.to_string().as_bytes());
-            write_all(report, b"\n");
+            write_all(report, LANDLOCK_PROBE_REFUSED);
+            write_all(report, &failure.launch_record());
             unsafe { libc::_exit(70) }
         }
     }
+    if run == LandlockProbeRun::RequireNoNewPrivileges
+        && unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) } != 1
+    {
+        write_all(
+            report,
+            b"no_new_privs must be set by the Landlock install\n",
+        );
+        unsafe { libc::_exit(73) }
+    }
     let mut buffer = [0u8; 256];
-    for call in LandlockProbeCall::ALL {
-        let answer = landlock_probe_call(call, base);
+    for (call, path) in LandlockProbeCall::ALL.into_iter().zip(paths) {
+        let answer = landlock_probe_call(call, path);
         let mut written = copy_bytes(&mut buffer, LANDLOCK_PROBE_MARKER.as_bytes());
         written += copy_bytes(&mut buffer[written..], b" ");
         written += copy_bytes(&mut buffer[written..], call.name().as_bytes());
@@ -10862,7 +11076,7 @@ fn landlock_probe_allow_all() -> SeccompAllowList {
     }
 }
 
-/// Runs one Landlock probe child and returns its five answers, or a refusal
+/// Runs one Landlock probe child and returns its seven answers, or a refusal
 /// naming what happened. The child is a fork of this process, so its ruleset
 /// reaches only itself. The child is reaped on every result, including a
 /// timeout, so a repeated journey leaves no probe behind.
@@ -10873,6 +11087,19 @@ fn landlock_file_probe(
     base: &Path,
 ) -> Result<LandlockProbeReport, String> {
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut prepared =
+        PreparedLandlockRuleset::new(ruleset).map_err(|failure| failure.to_string())?;
+    prepared.skip_no_new_privileges = run == LandlockProbeRun::WithoutNoNewPrivileges;
+    let paths = LandlockProbeCall::ALL
+        .into_iter()
+        .map(|call| {
+            CString::new(call.path(base).as_os_str().as_bytes())
+                .map_err(|_| format!("landlock probe refused: {} path contains NUL", call.name()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let fixture_filter = landlock_probe_allow_all();
+
     let mut fds = [0 as libc::c_int; 2];
     if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
         return Err(format!(
@@ -10890,7 +11117,7 @@ fn landlock_file_probe(
         ));
     }
     if pid == 0 {
-        run_landlock_probe_child(writer.as_raw_fd(), run, ruleset, base);
+        run_landlock_probe_child(writer.as_raw_fd(), run, &prepared, &paths, &fixture_filter);
     }
     drop(writer);
 
@@ -10928,11 +11155,23 @@ fn landlock_file_probe(
     let text = String::from_utf8_lossy(&bytes).into_owned();
     match exit {
         ProbeExit::Code(code) if code == 0 => {}
-        ProbeExit::Code(_) if text.starts_with("landlock-probe-refused:") => {
-            return Err(format!(
-                "landlock probe refused: the probe child must install the ruleset: {}",
-                text["landlock-probe-refused:".len()..].trim()
-            ))
+        ProbeExit::Code(CHILD_ALLOCATION_EXIT) => {
+            return Err(
+                "landlock probe refused: the child attempted heap access after fork".into(),
+            );
+        }
+        ProbeExit::Code(_) if bytes.starts_with(LANDLOCK_PROBE_REFUSED) => {
+            return Err(
+                match decode_seccomp_launch_record(&bytes[LANDLOCK_PROBE_REFUSED.len()..]) {
+                    Ok(SeccompLaunchRecord::Refused(failure)) => format!(
+                    "landlock probe refused: the probe child must install the ruleset: {failure}"),
+                    Ok(SeccompLaunchRecord::Installed(_)) => {
+                        "landlock probe refused: the refused child reported an installed policy"
+                            .into()
+                    }
+                    Err(reason) => reason,
+                },
+            );
         }
         other => {
             return Err(format!(
@@ -10944,12 +11183,12 @@ fn landlock_file_probe(
         .map_err(|refusal| format!("landlock probe refused: {refusal}"))
 }
 
-/// The five records the probe child wrote, each with its answer. A missing or
+/// The seven records the probe child wrote, each with its answer. A missing or
 /// unreadable record is a refusal that names the call, so a child that stopped
 /// early cannot pass the journey.
 #[cfg(target_os = "linux")]
 fn parse_landlock_probe_report(text: &str) -> Result<LandlockProbeReport, String> {
-    let mut answers = [LandlockAnswer::Returned(0); 5];
+    let mut answers = [LandlockAnswer::Returned(0); LandlockProbeCall::ALL.len()];
     for (slot, call) in answers.iter_mut().zip(LandlockProbeCall::ALL) {
         let marker = format!("{LANDLOCK_PROBE_MARKER} {} ", call.name());
         let line = text
@@ -10963,60 +11202,17 @@ fn parse_landlock_probe_report(text: &str) -> Result<LandlockProbeReport, String
     Ok(LandlockProbeReport { answers })
 }
 
-/// The journey: wallet starts under the generated Landlock file row and the
-/// generated seccomp list, and one probe child under the same ruleset shows the
-/// file row refusing every path outside `STORAGE_ROOT` while the same calls
-/// succeed without it.
-///
-/// The test builds both policies from wallet's committed declared-rights file
-/// through the one builders, starts the provider through
-/// `standin_spawn_confined_provider` with the `Landlock` policy, and requires
-/// `init` `ok` and one read-only wallet call `ok`. It then plants a readable file
-/// and a fixture beneath `STORAGE_PARENT`, outside `STORAGE_ROOT`, and runs the
-/// positive control first: the same five calls under the same uid and the same
-/// fixtures with no ruleset must all succeed, so a control that is already
-/// refused is reported as missing evidence with its cause and never as a kernel
-/// change.
-///
-/// Then the confined probe under the launch's ruleset requires a read inside
-/// `STORAGE_ROOT` **ok**, a write inside `STORAGE_ROOT` **ok**, a read of the
-/// planted file beneath `STORAGE_PARENT` refused `EACCES`, a write beside it
-/// refused `EACCES`, and the listing of `STORAGE_PARENT` **ok**.
-///
-/// The listing is the one place the measured kernel overrides the written task,
-/// and the reason is in the ruleset: the provider opens `STORAGE_PARENT` and
-/// syncs it to start, so the parent must carry `READ_DIR`, and `READ_DIR` is
-/// exactly the right that allows a listing. Measured on this host, every grant
-/// that lets `init` answer `ok` also allows the listing, and every grant that
-/// refuses the listing, the empty grant included, makes `init` answer
-/// `failed to sync wallet storage parent directory: Permission denied (os error
-/// 13)`. The macOS oracle allows the same listing, because `file-read*` on the
-/// literal parent covers it. So the row is no wider than its oracle here, and
-/// the two refusals above are the file boundary it claims.
-///
-/// This is the record of where it ran: host `spark1.local`, `aarch64`, Ubuntu
-/// 24.04.4, kernel `6.17.0-1029-nvidia`, Landlock **ABI 7** unprivileged. The
-/// refusal errno is `EACCES` (13) and not `EPERM` (1), so it cannot be read as an
-/// ordinary missing privilege; the control is what shows the same call succeeds
-/// unconfined.
-///
-/// Falsifier: WP196 skips only the launcher's Landlock install and leaves the
-/// probe's own install intact, so the provider starts and its own file row is
-/// absent; the journey fails on the outside `Init` the launch must refuse. WP197
-/// adds `READ_FILE` to the `STORAGE_PARENT` row, so the planted read succeeds and
-/// the confined assertion fails. Both plants reach a Linux-only test, so neither
-/// is registered in `falsifiers.json`; `CONFINEMENT-LINUX.md` records them with
-/// the red run quoted.
+/// One fixture for all file-row probes. Paths and marker bytes are prepared
+/// before fork; only the child receives the ruleset.
 #[cfg(target_os = "linux")]
-#[test]
-fn linux_wallet_file_row_is_refused_outside_storage_root() {
+fn landlock_file_fixture(
+    loader: &[(&str, &str)],
+) -> (tempfile::TempDir, PathBuf, Value, LandlockRuleset) {
     let declared_rights =
         read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
             .unwrap_or_else(|err| panic!("{err}"));
     let fixture = tempfile::tempdir().expect("temporary wallet base");
     let base = resolved(fixture.path());
-    let profile_fixture = tempfile::tempdir().expect("temporary profile root");
-    let profile_dir = resolved(profile_fixture.path());
 
     let bindings = canonical_bindings(WALLET_PROVIDER, &base, Path::new(PROVIDER_BINARY));
     create_shared_ancestors(&bindings);
@@ -11032,10 +11228,9 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
         &declared_rights,
         &bindings,
         reported_abi,
-        LANDLOCK_LOADER_PATHS,
+        loader,
     )
     .unwrap_or_else(|err| panic!("{err}"));
-    let allow = seccomp_probe_list();
 
     // The fixtures the parent plants, outside every ruleset, so a refused write
     // is not mistaken for a file the probe could not create.
@@ -11065,6 +11260,145 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
         "the planted file beneath STORAGE_PARENT must hold its bytes before the confined run"
     );
 
+    (fixture, base, declared_rights, ruleset)
+}
+
+#[cfg(target_os = "linux")]
+fn clear_landlock_probe_writes(base: &Path) {
+    for call in [
+        LandlockProbeCall::WriteInside,
+        LandlockProbeCall::WriteBesideParent,
+    ] {
+        match fs::remove_file(call.path(base)) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => panic!("the probe write fixture must be removable: {err}"),
+        }
+    }
+}
+
+/// The child enters with no_new_privs clear and installs Landlock before any
+/// seccomp fixture. Omitting the installer's PR_SET_NO_NEW_PRIVS call (WP202)
+/// makes restrict_self fail EPERM rather than producing a confined report.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_landlock_requires_no_new_privs() {
+    let (_fixture, base, _, ruleset) = landlock_file_fixture(&[]);
+    let refusal = landlock_file_probe(&ruleset, LandlockProbeRun::WithoutNoNewPrivileges, &base)
+        .expect_err("restrict_self must refuse when no_new_privs is clear");
+    assert_eq!(
+        refusal,
+        "landlock probe refused: the probe child must install the ruleset: landlock install refused: landlock_restrict_self failed with errno 1"
+    );
+    let report = landlock_file_probe(&ruleset, LandlockProbeRun::RequireNoNewPrivileges, &base)
+        .expect("Landlock must set no_new_privs from a clear flag and install successfully");
+    for (call, answer) in LandlockProbeCall::ALL.into_iter().zip(report.answers) {
+        if matches!(
+            call,
+            LandlockProbeCall::ReadInside | LandlockProbeCall::WriteInside
+        ) {
+            assert!(matches!(answer, LandlockAnswer::Returned(_)));
+        } else {
+            assert_eq!(
+                answer,
+                LandlockAnswer::Errno(libc::EACCES),
+                "{}",
+                call.name()
+            );
+        }
+    }
+}
+
+/// Both successful probe modes run with the allocator guard armed. The negative
+/// control calls the real allocator and must exit before System.alloc; this
+/// rejects inherited allocator locks instead of waiting for one.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_landlock_child_paths_reject_allocations() {
+    let (_fixture, base, _, ruleset) = landlock_file_fixture(&[]);
+    let refusal = landlock_file_probe(&ruleset, LandlockProbeRun::Allocating, &base)
+        .expect_err("a child heap allocation must be rejected");
+    assert_eq!(
+        refusal,
+        "landlock probe refused: the child attempted heap access after fork"
+    );
+    for run in [
+        LandlockProbeRun::Control,
+        LandlockProbeRun::Confined,
+        LandlockProbeRun::ConfinedUnderFilter,
+    ] {
+        clear_landlock_probe_writes(&base);
+        let report = landlock_file_probe(&ruleset, run, &base)
+            .expect("prepared child paths must avoid heap access");
+        for (call, answer) in LandlockProbeCall::ALL.into_iter().zip(report.answers) {
+            if run == LandlockProbeRun::Control
+                || matches!(
+                    call,
+                    LandlockProbeCall::ReadInside | LandlockProbeCall::WriteInside
+                )
+            {
+                assert!(
+                    matches!(answer, LandlockAnswer::Returned(_)),
+                    "{}: {answer:?}",
+                    call.name()
+                );
+            } else {
+                assert_eq!(
+                    answer,
+                    LandlockAnswer::Errno(libc::EACCES),
+                    "{}",
+                    call.name()
+                );
+            }
+        }
+    }
+}
+
+/// The journey: wallet starts under the generated Landlock file row and the
+/// generated seccomp list, and one probe child under the same ruleset shows the
+/// file row refusing every path outside `STORAGE_ROOT` while the same calls
+/// succeed without it.
+///
+/// The test builds both policies from wallet's committed declared-rights file
+/// through the one builders, starts the provider through
+/// `standin_spawn_confined_provider` with the `Landlock` policy, and requires
+/// `init` `ok` and one read-only wallet call `ok`. It then plants a readable file
+/// and a fixture beneath `STORAGE_PARENT`, outside `STORAGE_ROOT`, and runs the
+/// positive control first: the same seven calls under the same uid and the same
+/// fixtures with no ruleset must all succeed, so a control that is already
+/// refused is reported as missing evidence with its cause and never as a kernel
+/// change.
+///
+/// Then the confined probe under the launch's ruleset requires a read inside
+/// `STORAGE_ROOT` **ok**, a write inside `STORAGE_ROOT` **ok**, a read of the
+/// planted file beneath `STORAGE_PARENT` refused `EACCES`, a write beside it
+/// refused `EACCES`, and listings of `STORAGE_PARENT`, `sibling` and
+/// `sibling/private` refused `EACCES`. The marker is planted at
+/// `STORAGE_PARENT/sibling/private/marker` before either run.
+///
+/// The target for this repaired journey is host `spark1.local`, `aarch64`, Ubuntu
+/// 24.04.4, kernel `6.17.0-1029-nvidia`, Landlock **ABI 7** unprivileged. The
+/// refusal errno is `EACCES` (13) and not `EPERM` (1), so it cannot be read as an
+/// ordinary missing privilege; the control is what shows the same call succeeds
+/// unconfined.
+///
+/// Falsifier: WP196 skips only the launcher's Landlock install and leaves the
+/// probe's own install intact, so the provider starts and its own file row is
+/// absent; the journey fails on the outside `Init` the launch must refuse. WP197
+/// adds `READ_FILE` to the `STORAGE_PARENT` row, so the planted read succeeds and
+/// the confined assertion fails. Both plants reach a Linux-only test, so neither
+/// is registered in `falsifiers.json`; `CONFINEMENT-LINUX.md` records them with
+/// the rerun requirement.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_wallet_file_row_is_refused_outside_storage_root() {
+    let (_fixture, base, declared_rights, ruleset) = landlock_file_fixture(LANDLOCK_LOADER_PATHS);
+    let profile_fixture = tempfile::tempdir().expect("temporary profile root");
+    let profile_dir = resolved(profile_fixture.path());
+    let root = provider_storage_root(WALLET_PROVIDER, &base);
+    let inside_read = LandlockProbeCall::ReadInside.path(&base);
+    let allow = seccomp_probe_list();
+
     // The positive control first: the same calls, the same uid, the same
     // fixtures, no ruleset. A control already refused is missing evidence.
     let control = landlock_file_probe(&ruleset, LandlockProbeRun::Control, &base)
@@ -11081,12 +11415,7 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
     }
     // The control wrote the two write fixtures, so remove them before the
     // confined run proves it could create them itself.
-    for call in [
-        LandlockProbeCall::WriteInside,
-        LandlockProbeCall::WriteBesideParent,
-    ] {
-        let _ = fs::remove_file(call.path(&base));
-    }
+    clear_landlock_probe_writes(&base);
 
     let mut provider = standin_spawn_confined_provider(
         StandinHost::reporting("linux"),
@@ -11123,7 +11452,7 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
     // `STORAGE_ROOT` must be refused by the kernel, so a launcher that skipped
     // its Landlock install cannot pass on the probe's separate install.
     let outside_base = storage_parent(WALLET_PROVIDER, &base).join("landlock-outside-base");
-    let outside_init = provider.init(&base.join("landlock-outside-base"));
+    let outside_init = provider.init(&outside_base);
     assert_eq!(
         outside_init["status"], "error",
         "an Init for a base outside STORAGE_ROOT must be refused under the launch: {outside_init}"
@@ -11140,7 +11469,7 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
         "the outside Init must be refused by the kernel's own denial, and it answered: {reason}"
     );
     assert!(
-        !outside_base.join("SystemServices").exists() && !outside_base.join("Wallet").exists(),
+        !outside_base.exists() && !provider_storage_root(WALLET_PROVIDER, &outside_base).exists(),
         "a refused outside Init must create nothing: {}",
         outside_base.display()
     );
@@ -11192,6 +11521,8 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
     for call in [
         LandlockProbeCall::ReadBeneathParent,
         LandlockProbeCall::WriteBesideParent,
+        LandlockProbeCall::ListSibling,
+        LandlockProbeCall::ListSiblingPrivate,
     ] {
         assert_eq!(
             refused(call),
@@ -11201,26 +11532,10 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
             refused(call)
         );
     }
-    // The listing of `STORAGE_PARENT` succeeds, and that is measured rather than
-    // desired: the provider must open the parent and sync it to start, so the
-    // parent carries `READ_DIR`, and `READ_DIR` is what allows a listing. Every
-    // parent grant that lets `init` answer `ok` also allows the listing (measured:
-    // `READ_DIR` alone, `READ_FILE|READ_DIR` and `READ_DIR|REMOVE_FILE` all list
-    // `ok`; every grant that refuses the listing, including no grant, makes `init`
-    // answer `failed to sync wallet storage parent directory: Permission denied (os
-    // error 13)`). The macOS oracle also allows it, because `file-read*` on the
-    // literal parent covers a directory listing there, so this row is no wider
-    // than the oracle on that call. `CONFINEMENT-LINUX.md` records the departure
-    // in its own words, and the two file-content refusals above are what this row
-    // claims.
-    assert!(
-        matches!(
-            refused(LandlockProbeCall::ListParent),
-            LandlockAnswer::Returned(_)
-        ),
-        "the listing of STORAGE_PARENT must succeed, because the READ_DIR the provider needs to \
-         start allows it, and it answered {:?}",
-        refused(LandlockProbeCall::ListParent)
+    assert_eq!(
+        refused(LandlockProbeCall::ListParent),
+        LandlockAnswer::Errno(libc::EACCES),
+        "the listing of STORAGE_PARENT must be refused EACCES"
     );
     // The confined write inside the root must really have created the file, so
     // the success is the kernel's answer and not a stale control fixture.

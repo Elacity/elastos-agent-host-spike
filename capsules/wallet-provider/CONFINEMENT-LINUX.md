@@ -6,13 +6,10 @@ present is the one file-profile contract: `check_profile_contract`, run over
 `(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
 no network allow, only the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and
 `STORAGE_PARENT` tokens, and the three shared rules verbatim.
-This contract has no full Linux enforcement yet. Two of its rows exist as source
-with a real Linux run behind them: the seccomp allow list in "The seccomp allow
-list" below, and the Landlock file row in "The Landlock file row" below. Both are
-generated from the same approved declared rights, and a real Linux host shows
-the provider starting under them, the four refused calls answering the filter's
-own marker, and a file read or write outside `STORAGE_ROOT` refused by the
-kernel.
+This contract has partial Linux lab implementation. The seccomp allow list has
+a real Linux run; the repaired Landlock file row awaits its Linux rerun. Both
+come from the same approved declared rights. The earlier Landlock run used a
+wider parent grant and supplies no acceptance for the repaired boundary.
 `confine.sb` stays each provider's one oracle. The contract is shared, so its
 Linux mapping is written once here, beside the one contract check (P10). The
 Linux policy that the Runtime would generate from the same approved declared
@@ -287,7 +284,7 @@ not an omission:
 
 | Allow form | Rights the row grants |
 | --- | --- |
-| `(allow file-read* (literal (param "STORAGE_PARENT")))` | `READ_DIR` |
+| `(allow file-read* (literal (param "STORAGE_PARENT")))` | zero rights |
 | `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` | `READ_FILE`, `READ_DIR`, `WRITE_FILE`, `REMOVE_FILE`, `REMOVE_DIR`, `MAKE_DIR`, `MAKE_REG` |
 | `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` | `EXECUTE`, `READ_FILE` |
 | `(allow file-read* (literal "/"))` | no right |
@@ -310,28 +307,29 @@ ruleset **before** the seccomp filter, because no seccomp list row admits
 Landlock's own system calls, so a filter installed first would refuse them and
 the file row would never apply.
 
-### The measurement this row rests on
+### Storage preparation and child safety
 
-The row's shape was settled by measurement on the Linux host, not by the design's
-expectation, and two results changed it:
+A Landlock directory grant covers its subtree. The parent form therefore grants
+zero rights. The launcher creates the storage root and syncs its parent before
+confinement. Wallet syncs parents when it creates directory entries; an existing
+root needs only its own directory sync. This keeps the durability work with the
+actor that creates the entry and permits startup with the parent rule absent.
 
-- **A grant on `STORAGE_PARENT` is mandatory.** With no parent rule, `init`
-  answers `failed to sync wallet storage parent directory: Permission denied (os
-  error 13)` and creates nothing, because the provider opens the parent and syncs
-  it to start. The design said this form would carry no right; the kernel says
-  the provider cannot start without one.
-- **`READ_DIR` is the smallest grant that works and the only one that keeps the
-  file boundary.** Measured across the parent's rights: `READ_DIR` alone makes
-  `init` answer `ok`, allows a listing of the parent, and leaves a read of a
-  planted file beneath the parent refused `EACCES`; `READ_FILE|READ_DIR` makes
-  that planted read **succeed**, which is the wider grant the row must not make.
-  Every parent grant that lets `init` answer `ok` also allows the listing, and
-  every grant that refuses the listing makes `init` fail.
-- **The bound binary needs `READ_FILE` as well as `EXECUTE`.** A rule with
-  `EXECUTE` alone makes `execve` fail `EACCES` (13) before the provider's first
-  instruction, because the loader maps the binary. The macOS oracle's
-  `file-read* (literal "/")` already covers that read, so granting it on the one
-  file is narrower than the oracle.
+Both child paths use `PreparedLandlockRuleset`, which converts paths to C strings
+before fork. The probe also prepares its paths and fixture filter before fork.
+Children write fixed install records; the parent renders each error. Directory
+probes use `open` and `getdents64` with a stack buffer. The allocator guard exits
+before entering the system allocator on any child heap access.
+`landlock_install_refuses_each_failed_step` checks the exact reason and errno
+for create, every add-rule position, `PR_SET_NO_NEW_PRIVS` and `restrict_self`.
+On Linux it exercises those failures through both the launcher and probe.
+
+### Previous binary measurement
+
+The earlier wallet binary needed `READ_FILE` as well as `EXECUTE` on the bound
+binary: `EXECUTE` alone produced `EACCES` (13) before its first instruction.
+The loader grants below come from that run. The repaired candidate needs a fresh
+Linux journey before its startup and file boundary can be accepted.
 
 ### The loader departure
 
@@ -353,67 +351,60 @@ and libraries, and no second constant exists for it. Because of this constant,
 the sentence in "The frame" that the Linux policy holds no path rule beyond the
 bound parameters **does not hold for the loader**, and it now says so.
 
-### The kernel proof
+### The kernel proof to rerun
 
-The named test `linux_wallet_file_row_is_refused_outside_storage_root` ran on host
-`spark1.local`: `aarch64`, Ubuntu 24.04.4, kernel `6.17.0-1029-nvidia`, Landlock
-**ABI 7**, unprivileged. It builds both policies from wallet's committed
-declared-rights file, starts the provider through
-`standin_spawn_confined_provider` with the `Landlock` policy, and requires `init`
-`ok`, a wallet call `ok`, the storage key created under `STORAGE_ROOT`, and no
-profile written. It then plants a readable file beneath `STORAGE_PARENT` and runs
-a positive control with the same uid, the same fixtures and no ruleset, so each
-call is shown to succeed unconfined before the refusal is attributed to the rule.
-The run printed:
+The repaired `linux_wallet_file_row_is_refused_outside_storage_root` is **NOT
+RUN** in this repair turn. The intended host is `spark1.local`, `aarch64`, Ubuntu
+24.04.4, kernel `6.17.0-1029-nvidia`, previously reporting Landlock ABI 7.
+The test reads the host ABI again. It starts the wallet through the shared
+launcher, requires `init` and a read-only call to succeed, and checks that an
+outside `init` is refused. The fixture contains
+`STORAGE_PARENT/sibling/private/marker`. The same uid runs these calls first
+unconfined and then under the generated ruleset:
 
-```
-control read-inside-storage-root: ok:26
-control write-inside-storage-root: ok:26
-control read-beneath-storage-parent: ok:26
-control write-beside-storage-parent: ok:26
-control list-storage-parent: ok:5
-confined read-inside-storage-root: control ok:26, ruleset ok:26
-confined write-inside-storage-root: control ok:26, ruleset ok:26
-confined read-beneath-storage-parent: control ok:26, ruleset errno:13
-confined write-beside-storage-parent: control ok:26, ruleset errno:13
-confined list-storage-parent: control ok:5, ruleset ok:4
-```
+| Call | Required control | Required confined answer |
+| --- | --- | --- |
+| read inside `STORAGE_ROOT` | success | success |
+| write inside `STORAGE_ROOT` | success | success |
+| read the sibling marker | success | `EACCES` (13) |
+| write beside `STORAGE_ROOT` | success | `EACCES` (13) |
+| list `STORAGE_PARENT` | success | `EACCES` (13) |
+| list `sibling` | success | `EACCES` (13) |
+| list `sibling/private` | success | `EACCES` (13) |
 
-So a read inside `STORAGE_ROOT` and a write inside it succeed, a read of a
-planted file beneath `STORAGE_PARENT` and a write beside it are refused
-`EACCES` (13), and a listing of `STORAGE_PARENT` succeeds. The refusal errno is
-`EACCES`, not the `EPERM` a kernel gives a call an unprivileged process may not
-make, and the control is what shows the same call succeeds without the ruleset.
+The earlier listing-success output describes the removed recursive grant. The
+new requirements above are assertions to run, rather than measured answers.
+Namespaces, capability dropping and the other contract rows remain unbuilt;
+`linux` stays outside `DECLARED_CONFINED_OS`. The launcher remains lab code.
 
-The listing is the one place the measurement overrides the written task, and the
-reason is in the row: the parent carries `READ_DIR` because the provider cannot
-start without it, and `READ_DIR` is the right that allows a listing. The macOS
-oracle allows the same listing, because `file-read*` on the literal parent covers
-it there, so this row is no wider than its oracle on that call. The row claims
-the two file-content refusals and no narrowing of the listing.
+The following Linux-only plants await rerun. They stay outside the Mac
+falsifier list. Each plant changes only the named code and leaves its assertions
+in place:
 
-Namespaces, capability dropping, the PID, IPC, network and kernel-fact rows, and
-the `/proc`, `/sys` and `"/"` mappings remain unbuilt, so `linux` stays out of
-`DECLARED_CONFINED_OS` and every operations-table Linux cell still reads
-`designed, not enforced`. Nothing in this row is the Runtime's launcher: it is
-lab code in this provider's `tests/confine.rs`.
+- WP196: replace the launcher's `install_landlock(ruleset)` result with
+  `Ok::<(), LandlockInstallFailure>(())`. The file journey must fail at outside
+  `init` while the probe retains its installer.
+- WP197: replace `(SHARED_RULES[1], 0)` with a row granting `READ_FILE | READ_DIR`.
+  The file journey must fail on the sibling read and directory boundary.
+- WP202: replace the installer's
+  `libc::prctl(libc::PR_SET_NO_NEW_PRIVS, LANDLOCK_NO_NEW_PRIVS, 0, 0, 0)` with `0`.
+  `linux_landlock_requires_no_new_privs` requires the child to enter with the flag
+  clear, install Landlock before seccomp, and leave with the flag set. Its
+  negative control skips that step through the same installer and requires the
+  exact `restrict_self` refusal with `EPERM`. Omitting the real call must also
+  make the normal-install case fail on the unprivileged host.
+- WP203: in `run_landlock_probe_child`, insert a real allocator call after the
+  guard is armed: `std::alloc::alloc(std::alloc::Layout::new::<u8>())` inside an
+  unsafe block. `linux_landlock_child_paths_reject_allocations` must fail on the
+  first ordinary probe run with the heap-access refusal.
+- WP204: insert the same allocation after the launcher's guard is armed in
+  `pre_exec`. `landlock_install_refuses_each_failed_step` must fail because the
+  child exits before the required install record. The allocator guard's exit
+  code is 86, so the child cannot wait on an inherited allocator lock.
 
-The Linux-only plants beside this row are named here and not in
-`falsifiers.json`, because the runner runs on the Mac where a
-`#[cfg(target_os = "linux")]` test does not run. Both were re-run on the Linux
-host against the head this section describes and both turned the named test red:
-
-- WP196 skips only the launcher's Landlock install and leaves the probe's own
-  install intact. The provider then starts without the file row, its own outside
-  `Init` answers `ok` instead of a refusal, and
-  `linux_wallet_file_row_is_refused_outside_storage_root` fails with
-  `an Init for a base outside STORAGE_ROOT must be refused under the launch:
-  {"data":{...,"storage_configured":true},"status":"ok"}`, `left: String("ok")`,
-  `right: "error"`.
-- WP197 adds `READ_FILE` to the `STORAGE_PARENT` row. The planted read beneath
-  the parent then succeeds and the same test fails with
-  `read-beneath-storage-parent must be refused EACCES by the ruleset, and it
-  answered Returned(26)`, `left: Returned(26)`, `right: Errno(13)`.
+WP198 to WP201 are the four cross-platform reason plants in `falsifiers.json`.
+Their named test is `landlock_install_refuses_each_failed_step`; mutation-run
+results remain pending.
 
 ## The frame
 
@@ -431,8 +422,8 @@ paths as on macOS: `PROVIDER_EXECUTABLE` is the provider binary; for
 
 The Linux policy holds no path rule beyond the bound parameters and the loader
 departure above: it adds none for `/`, `/proc`, `/sys` or a library directory,
-and `STORAGE_PARENT` carries only the `READ_DIR` right its row states. The
-`LANDLOCK_LOADER_PATHS` rules are the one exception, recorded in "The loader
+and `STORAGE_PARENT` carries zero rights. The `LANDLOCK_LOADER_PATHS` rules
+are the one exception, recorded in "The loader
 departure" with the measured failure that follows without each entry, and they
 are the paths a dynamically linked provider needs to start under a path-only
 ruleset. The private `/proc` mount the mount namespace provides is a mount, not a
