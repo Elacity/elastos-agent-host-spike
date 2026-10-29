@@ -3211,12 +3211,13 @@ fn hosted_relay_forwards_the_provider_body_unchanged_and_no_key() {
 /// This is the one page-until-done walk. The local-llama poll in
 /// `managed_streaming_stop_switch` reads one page until a `text_delta`
 /// appears, and that poll stays its own rule. Each complete page is checked
-/// for the private stream markers before its events are taken out, so the
-/// page envelope is part of the exclusion.
+/// for the private stream markers, and for every string in `absent`, before
+/// its events are taken out, so the page envelope is part of the exclusion.
 fn read_hosted_run_events(
     provider: &mut ProviderProcess,
     run_id: &str,
     access: &Value,
+    absent: &[&str],
 ) -> Vec<Value> {
     let mut events: Vec<Value> = Vec::new();
     let mut after_sequence: u64 = 0;
@@ -3235,6 +3236,7 @@ fn read_hosted_run_events(
                 "an events page must not carry the private marker {marker}: {page}"
             );
         }
+        assert_hosted_public_text_hides("an events page", &page_text, absent);
         let page_events = page["data"]["events"]
             .as_array()
             .expect("runs_events returns an event array")
@@ -3405,6 +3407,7 @@ fn a_hosted_tool_call_or_reasoning_never_reaches_the_caller() {
         &mut provider,
         &expected_run_id,
         &access_binding(&create_request),
+        &[],
     );
     let mut joined = String::new();
     for event in &events {
@@ -4483,7 +4486,7 @@ fn a_hosted_run_held_past_its_time_limit_fails_as_a_timeout() {
         "a timed-out hosted run must record resolved_model, usage and cost as unknown, with no count: {settled_a}"
     );
 
-    let events = read_hosted_run_events(&mut provider, &run_a, &access_binding(&create_a));
+    let events = read_hosted_run_events(&mut provider, &run_a, &access_binding(&create_a), &[]);
     assert!(
         events.iter().all(|event| event["kind"] != "text_delta"),
         "a timed-out run must carry no text deltas: {events:?}"
@@ -4745,7 +4748,7 @@ fn hosted_backend_facts_through_completion_and_restart(case: HostedBackendFactCa
         "the backend report must stay the collector's record through completion: {settled}"
     );
 
-    let events = read_hosted_run_events(&mut provider, &expected_run_id, &access);
+    let events = read_hosted_run_events(&mut provider, &expected_run_id, &access, &[]);
     let mut joined = String::new();
     for event in &events {
         if event["kind"] == "text_delta" {
@@ -4790,7 +4793,7 @@ fn hosted_backend_facts_through_completion_and_restart(case: HostedBackendFactCa
         replayed["data"]["terminal"], saved_terminal,
         "the restarted provider must replay the same terminal: {replayed}"
     );
-    let replayed_events = read_hosted_run_events(&mut provider, &expected_run_id, &access);
+    let replayed_events = read_hosted_run_events(&mut provider, &expected_run_id, &access, &[]);
     assert_eq!(
         replayed_events, saved_events,
         "the restarted provider must replay the same event sequence"
@@ -5064,7 +5067,7 @@ fn assert_hosted_identity_record(
         owner["data"]["status"], "completed",
         "{stage}: the run status stays completed: {owner}"
     );
-    let events = read_hosted_run_events(provider, run_id, access);
+    let events = read_hosted_run_events(provider, run_id, access, &[]);
     assert_eq!(
         events, saved_events,
         "{stage}: the event sequence must stay the saved sequence"
@@ -5255,7 +5258,7 @@ fn hosted_request_identity_survives_rotation_and_refuses_conflicts() {
         "the backend facts stay reported: {settled}"
     );
     let saved_data = settled["data"].clone();
-    let saved_events = read_hosted_run_events(&mut provider, &expected_run_id, &access);
+    let saved_events = read_hosted_run_events(&mut provider, &expected_run_id, &access, &[]);
     let mut joined = String::new();
     for event in &saved_events {
         if event["kind"] == "text_delta" {
@@ -5864,7 +5867,7 @@ fn hosted_access_states_fail_the_run_on_the_socket() {
             .as_str()
             .expect("the run has an id");
         let events =
-            read_hosted_run_events(&mut provider, run_id, &access_binding(&create_request));
+            read_hosted_run_events(&mut provider, run_id, &access_binding(&create_request), &[]);
         assert!(
             events.iter().all(|event| event["kind"] != "text_delta"),
             "{state}: an access denial must carry no text: {events:?}"
@@ -5922,6 +5925,7 @@ fn hosted_access_states_fail_the_run_on_the_socket() {
         &mut provider,
         during_reply_run_id,
         &access_binding(&during_reply_request),
+        &[],
     );
     let mut joined = String::new();
     for event in &events {
@@ -6144,6 +6148,164 @@ fn hosted_full_journal_refuses_before_any_send() {
         requests[0].value("authorization"),
         None,
         "a hosted run must carry no bearer key"
+    );
+
+    provider.shutdown();
+}
+
+/// The public JSON of one hosted surface must not carry any of `absent`.
+/// Create, get and each events page share this check.
+fn assert_hosted_public_text_hides(surface: &str, text: &str, absent: &[&str]) {
+    for marker in absent {
+        assert!(
+            !text.contains(marker),
+            "{surface} must hide {marker}: {text}"
+        );
+    }
+}
+
+/// A hosted run shows the caller the answer and keeps the prompt, the caller
+/// identity, the provider key and the private endpoint out of the public
+/// create, get and events.
+/// Design: `docs/MODEL_PROVIDER.md` "Request identity and session facts".
+/// The public view is `StoredRun::to_view`. The unit tests
+/// `run_view_redacts_principal_session_grant_and_request_fields` and
+/// `mismatch_settlement_public_responses_do_not_leak_private_execution_details`
+/// stay the in-process proofs.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_public_responses_hide_prompt_identity_and_endpoint() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted public responses: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-public-privacy");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind_streaming("hosted-public-privacy");
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let prompt = "privacy-sentinel-prompt";
+    let request_id = test_support::fixture_model_request_id("request:hosted-public-privacy");
+    let absent = [
+        prompt,
+        "principal_id",
+        "session_id",
+        "grant_id",
+        "request_id",
+        "person:local:test",
+        "session:test",
+        "grant:test",
+        request_id.as_str(),
+        "fixture-key",
+        "hosted.invalid",
+        "execution_binding_hash",
+        "backend_state",
+    ];
+    let create_request = hosted_text_create_request(&request_id, "grant:test", prompt);
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    assert_eq!(
+        create["data"]["run_id"], expected_run_id,
+        "runs_create must return the contract run id"
+    );
+
+    let settled = wait_for_run_terminal(
+        &mut provider,
+        &expected_run_id,
+        &access_binding(&create_request),
+    );
+    assert_eq!(
+        settled["data"]["status"], "completed",
+        "the hosted run must complete: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["output"],
+        json!({"schema": RUN_OUTPUT_TEXT_SCHEMA, "text": "ready"}),
+        "the caller must see the answer text: {settled}"
+    );
+    assert_hosted_public_text_hides("the create response", &create.to_string(), &absent);
+    assert_hosted_public_text_hides("the settled runs_get", &settled.to_string(), &absent);
+
+    let events = read_hosted_run_events(
+        &mut provider,
+        &expected_run_id,
+        &access_binding(&create_request),
+        &absent,
+    );
+    let mut joined = String::new();
+    for event in &events {
+        if event["kind"] == "text_delta" {
+            joined.push_str(event["data"]["text"].as_str().unwrap_or(""));
+        }
+    }
+    assert_eq!(
+        joined, "ready",
+        "joined text deltas must be the answer: {events:?}"
+    );
+
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "the hosted run must open one connection before observe"
+    );
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "observe must record the one Runtime socket connection"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "observe must record the one hosted request"
+    );
+    let recorded = &requests[0];
+    assert_eq!(recorded.request_line, "POST /v1/hosted-effect HTTP/1.1");
+    let body = std::str::from_utf8(&recorded.body).expect("the hosted body is utf-8");
+    assert!(
+        body.contains(prompt),
+        "the Runtime socket body must carry the prompt"
+    );
+    assert!(
+        !body.contains("fixture-key") && !body.contains("hosted.invalid"),
+        "the Runtime socket body must hide the provider key and the private endpoint: {body}"
+    );
+    let head = recorded.head();
+    assert!(
+        !head.contains("fixture-key") && !head.contains("hosted.invalid"),
+        "the Runtime socket header block must hide the provider key and the private endpoint: {head}"
+    );
+    assert_eq!(
+        recorded.value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
+    );
+    assert!(
+        !head.to_ascii_lowercase().contains("authorization"),
+        "the header block must not name authorization: {head}"
     );
 
     provider.shutdown();
