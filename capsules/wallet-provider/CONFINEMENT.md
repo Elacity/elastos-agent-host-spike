@@ -494,8 +494,10 @@ colons and a function name. The check
 `every_operations_table_row_matches_its_provider_and_the_contract` holds every
 row to four rules: the row set follows the provider's own dispatch, a Right
 cell names a declared id or `none: needs no declared right`, a right row cites
-both sides, and every Linux cell stays `designed, not enforced`. A refusal
-under `(deny default)` is a denial, not a grant, and no
+both sides, and every Linux cell stays `designed, not enforced`. The same check
+reads each ordinary row's Inputs cell against the fields its `Request` arm
+declares, in declaration order, and does not yet read a `wallet_contract` row's
+Inputs cell. A refusal under `(deny default)` is a denial, not a grant, and no
 row writes it as a right. A refusal from a `kind` comes back as an outer
 `status` `ok` whose `data.result` holds `status` `error`, `code` and `message`;
 the outer `status`/`code`/`message` error covers envelope failures only. A
@@ -1422,6 +1424,12 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   the inspection (WP180): `tests::storage_root::wallet_init_refuses_symlink_parent`
   fails because `init` answers `ok` instead of refusing the symlinked
   `SystemServices`.
+- Make the one field reader honour no `serde` attribute (WP181):
+  `operations_table_row_check_refuses_each_bad_table` fails, because `init`'s
+  renamed field then reads as its Rust name and the table names `wire_name`.
+- Make the Inputs compare tolerate a cell that stops before a declared field
+  (WP182): the same test fails, because a cell naming `op` and `config` only is
+  then accepted for `init`.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,
