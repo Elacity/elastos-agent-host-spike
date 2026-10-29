@@ -1,0 +1,12 @@
+id: F-A7-revokesettle
+file: src/ledger.rs
+test: ledger::model_revoked_grant_still_settles
+--- old
+            if presented != snapshot_instance {
+                return Err(SettleRefuse::Binding(Refuse::Instance));
+            }
+--- new
+            let _presented = presented;
+            self.resolve(*call, request.handle)
+                .map_err(SettleRefuse::Binding)?;
+--- end
