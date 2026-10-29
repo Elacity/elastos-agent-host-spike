@@ -515,7 +515,8 @@ Lane diff: 4 files, +80 -1 (`LOG.md` +21, `README.md` +11,
   the count of each kind of evidence, are kept in one place, README.md \"##
   Falsifiers\"; this text says only what each falsifier plants." No entry
   changed. Still true at `ca39ee60f`: line 2 was changed by later merges
-  (`git log -L2,2` lists 20 commits). A `python3 -I` whole-word,
+  (`git log -L2,2:lab/wasm-capsule/falsifiers.json --no-patch ca39ee60f`
+  lists 27 commits in all). A `python3 -I` whole-word,
   case-ignored check of `pending`, `hand-proven`, `runner-caught`, `R1` and
   `R2` on it finds none, and it still names `README.md` and `## Falsifiers`.
 - Promise 2, the new test `falsifiers_about_states_no_evidence_status`, with a

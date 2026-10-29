@@ -40,16 +40,23 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   `CapsuleManifest` parse and `validate()`). Take that crate for the rule; this
   crate shows one caller using it through one export.
 - `wasm_capsule_tools::verify` — wc-004's one verify path, as library calls.
-  `verify_checked(checked, signature, accepted, granted)` refuses a missing
+  `verify_checked(checked, signature, accepted)` refuses a missing
   signature, checks the in-memory name signature on the `CheckedBundle` with
   cc-capsule-identity's `verify_checked_signature`, finds the manifest's
   `entrypoint` among the checked entries (read with the Runtime's
   `CapsuleManifest`), and runs `wasm_capsule_audit::audit` on those checked
-  bytes with the granted imports, unchanged. `verify_bundle(bundle, ...)` is
-  `checked_bundle` and then `verify_checked`. It returns a sealed
-  `VerifiedBundle` (`cid()`, `entries()`, `imports()`, `unused_grants()`) for
-  wc-005 to stage. It is a lab check of name, signer and imports; it is no
-  admission or launch decision (README.md, "Verify (wc-004)").
+  bytes with an empty declared list (task 065: no core-module import is
+  granted). `verify_bundle(bundle, ...)` is `checked_bundle` and then
+  `verify_checked`. It returns a sealed `VerifiedBundle` (`cid()`,
+  `entries()`, `entrypoint()`, `memory_mb()`) for wc-005 to stage. It is a lab
+  check of name, signer and imports; it is no admission or launch decision
+  (README.md, "Verify (wc-004)"). Task 065: `read_grants(path)` reads the lab
+  grants file `wc-009.lab-grants/v3`, whose grants name `resource` and
+  `actions` exactly as the WIT `capability-request` does, labelled "lab
+  stand-in, not admission"; nothing in `run` reads it, since the lab has no Bus
+  host (README.md, "Core imports retired, grants name resource and actions
+  (task 065)").
+  Retired by task 065 (Rong WC-1, WC-2): no core-module import is granted; see 'Bus v1 import contract (wc-009b)'.
   wc-009a (task 020): `read_grants(path)` is the one reader of the lab grants
   file (`wc-009.lab-grants/v2` since task 031, labelled "lab stand-in, not
   admission"), and its list is the `granted` input (README.md, "Granted imports
@@ -61,22 +68,27 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   `entrypoint()`'s verified bytes, written from memory into a new `0o700`
   folder, with a fixed argv, stdin null and an empty environment. `run`
   (wc-005b, task 015) takes a `RunInput` (bundle path, in-memory signature,
-  accepted signer DIDs, the granted imports from the lab grants file (task
-  020), both engine program paths, work root), calls `verify_bundle` once with
-  those grants unchanged, then `run_engine` for `wasmtime` and
+  accepted signer DIDs, both engine program paths, work root; task 065 removed
+  task 020's granted imports), calls `verify_bundle` once, then `run_engine`
+  for `wasmtime` and
   then for `wasmer`, one after the other, and requires both to succeed with
-  byte-identical stdout. It returns the verified `cid()`, both outputs, and
-  (task 020) `linked()` and `unused_grants()` (README.md, "Same output on two
-  engines (wc-005b)").
+  byte-identical stdout. It returns the verified `cid()` and both outputs
+  (task 065 removed task 020's `linked()` and `unused_grants()`) (README.md,
+  "Same output on two engines (wc-005b)").
   `wasm_capsule_tools::receipt` (wc-005c, task 016) renders that run as
-  `schema: wc-005.run-receipt/v3` lines (the lab CID, `digest`, `1592590337`,
+  `schema: wc-005.run-receipt/v4` lines (the lab CID, `digest`, `1592590337`,
   each engine's version, exit status and stdout; wc-010c, task 028: the two
   memory lines `memory_mb` and `memory_cap_bytes`, then per engine
   `<engine>_memory_cap`, ENFORCED with the cap argument read back from that
   engine's argv or SKIPPED with wc-010a's reason; task 034: then per engine
   `<engine>_memory_maximum_bytes`, the module memory maximum that engine's run
   was checked against by `run`'s one `memories` check, in bytes, or `none (the
-  module has no memory)`; no peak memory), and writes it only with
+  module has no memory)`; task 062: then per engine
+  `<engine>_process_max_rss_bytes: <n> (engine process RSS, not linear
+  memory)`, the peak RSS of that engine's module-run process, its own
+  `ru_maxrss` from the `wait4` that reaped it, the counter `/usr/bin/time -l`
+  prints, in bytes on macOS; no linear-memory peak, since none is measured),
+  and writes it only with
   `bundle::write_new_file`. The versions are observed, not configured: each is
   the first line the engine printed for `--version` before the module ran, and
   none is part of the lab CID (README.md, "Run receipt (wc-005c)").
@@ -85,9 +97,9 @@ the static import audit, moved to the cx-wasm-audit lane as the `audit/` crate.
   Task 033 (M1 C0 step iii, lab half): `run` and `run_engine` read the verified module's memory limits only through `wasm_capsule_audit::memories`, the lab's one module reader, in one function (`check_module_memory`), and refuse, before any engine process starts (for `run`, before the `--version` queries), a module with more than one memory, a memory with no maximum, or a maximum above the declared `memory_mb`, each with its own reason; a module with no memory passes. A module is never run uncapped, and there is no fallback. On a grow past the maximum wasmer returns -1; wasmtime traps, because of task 027's `trap-on-grow-failure=y`. Task 034 records the checked maximum per engine in the run receipt's `<engine>_memory_maximum_bytes` lines. The claim stays "a self-contained capsule in a fixed flat space with a host-enforced cap", on this one Mac, [Proposal] for the end state (README.md, "The runner checks the module's maximum (task 033)").
   Task 038 (M1 C0, lab half): those facts were measured on wasmtime 45.0.1 and wasmer 7.5.0 only, so `run` starts only those versions. The first `--version` line, split on single spaces, must be the engine's name and then exactly its pinned version (anything after is allowed); another version is refused with its own reason before any module run, and an unpinned `wasmtime` is refused before `wasmer` is asked. A capped start the engine rejects (exit 2 with a first stderr line that starts `error: ` and names ` -W `, measured on the pinned wasmtime) is refused with its own reason naming the cap argument, and the module is never run without its cap; any other failure stays `EngineFailed`. `run_engine` does not check the version; `run`, which starts both engines, does. The runner promises no fuel limit (task 043 adds a wall-clock run budget, below). Changing a pin is a deliberate edit after a fresh probe like tasks 021 and 030 (README.md, "Run receipt (wc-005c)" and "Run one engine (wc-005a)"). Both engines stay test-only and not endorsed; the choice is Anders's.
   Task 039 (M1 A12, lab half): `run_engine` removes the run folder and its module file once the engine has exited, on every outcome after the folder was made (a refused module write, an engine that did not start, failed or succeeded), so a run leaves nothing it made in the work root, except when removing it failed: that run folder stays (task 042 corrects this sentence). The folder is removed with `fs::remove_dir`, never `remove_dir_all`, so an entry someone else put in it is never deleted. After a success, a failed removal is refused with its own reason, `the run folder cannot be removed after the engine exited: <OS error>`, and the path it stopped at. Known limits: after a refusal the first refusal stays the answer and a failed removal is not reported; a runner process that is itself killed leaves its folder (task 040's census covers a killed engine, not a killed runner) (README.md, "Run one engine (wc-005a)").
-  Task 043 (M1 A7, lab half): every module run has a wall-clock budget, passed explicitly as `RunControl::new(budget)` (a `run_engine` argument and a `RunInput` field; no default, nothing read from the environment or a file). The runner reads the engine's stdout and stderr on a thread each, polls `try_wait`, and on overrun sends SIGKILL, reaps the engine, removes the run folder and refuses `<engine> still ran at its run budget of <n> ms: the runner stopped it with SIGKILL`; a zero budget is refused before anything starts. Nothing reaches the engine or the guest: no fuel or timeout flag, the argv is unchanged. Each module run gets its own budget. Known limits: the `--version` queries have no budget, the budget is wall-clock not CPU time, a stopped run's partial output is dropped, and a runner process that is itself killed leaves its engine. Lab input for M1 A7, not a Runtime admission claim (README.md, "Run one engine (wc-005a)").
+  Task 043 (M1 A7, lab half): every module run has a wall-clock budget, passed explicitly as `RunControl::new(budget)` (a `run_engine` argument and a `RunInput` field; no default, nothing read from the environment or a file). The runner reads the engine's stdout and stderr on a thread each, polls `reap` (`wait4(pid, WNOHANG)`, since task 062) every `WAIT_POLL` (10 ms), and on overrun sends SIGKILL, reaps the engine, removes the run folder and refuses `<engine> still ran at its run budget of <n> ms: the runner stopped it with SIGKILL`; a zero budget is refused before anything starts. Nothing reaches the engine or the guest: no fuel or timeout flag, the argv is unchanged. Each module run gets its own budget. Known limits: the `--version` queries have no budget, the budget is wall-clock not CPU time, a stopped run's partial output is dropped, and a runner process that is itself killed leaves its engine. Lab input for M1 A7, not a Runtime admission claim (README.md, "Run one engine (wc-005a)").
   Task 040 (M1 A12, lab half): after a normal, a trapped and a killed run on wasmtime 45.0.1 and wasmer 7.5.0, a census of the work root finds no entry, no live process with the work root in its argv (`pgrep -f`), no open file under it (`lsof +D`), and the killed engine's live argv held no preopen, env or network flag; a runner killed itself and engine caches outside the work root are not covered (README.md, "Cleanup census (M1 A12)").
-  Task 041 (M1 A8, lab half): with a throwaway `HOME` holding `keys/host-secret` (given only to a child test process), a `run` on wasmtime 45.0.1 and wasmer 7.5.0, each behind a recording shim, gave neither engine a preopen, env or network flag, `HOME` or any value holding the fixture's path or marker, and both printed only `FIXED_OUTPUT`; a module importing `wasi_snapshot_preview1` `path_open`, `fd_read`, `fd_prestat_get`, `environ_get` or `environ_sizes_get` is refused by the verifier, granted or not, before any engine is asked anything; the engines' own reads outside the guest (a compile cache) and the Runtime are not covered (README.md, "Host secrets denied (M1 A8 lab half)").
+  Task 041 (M1 A8, lab half): with a throwaway `HOME` holding `keys/host-secret` (given only to a child test process), a `run` on wasmtime 45.0.1 and wasmer 7.5.0, each behind a recording shim, gave neither engine a preopen, env or network flag, `HOME` or any value holding the fixture's path or marker, and both printed only `FIXED_OUTPUT`; a module importing `wasi_snapshot_preview1` `path_open`, `fd_read`, `fd_prestat_get`, `environ_get` or `environ_sizes_get` is refused by the verifier before any engine is asked anything (since task 065 no core import is granted at all); the engines' own reads outside the guest (a compile cache) and the Runtime are not covered (README.md, "Host secrets denied (M1 A8 lab half)").
   The claim is only "a self-contained capsule in a fixed flat space with a host-enforced cap", on this one Mac: not the ~4 GB DigitCapsule and not any-RTOS loading; the end state is [Proposal].
   The two-engine result is a behaviour proof on one **core module** on this
   Mac, not the Component ABI. Rong's ruling (26 Oct):
@@ -289,14 +301,15 @@ kept outside the package.
 **The function.** `wasm_capsule_tools::verify::verify_checked` and
 `verify_bundle` (README.md, "Verify (wc-004)"). Claim scope: an offline lab
 check, on this one Mac with test keys only, that the bytes match a signed lab
-CID, that an accepted test key signed it, and that every import is granted. It
-makes no admission, launch or publisher-trust decision, and the granted list
-(from the lab grants file since wc-009a, task 020) is a lab stand-in, not
-admission.
+CID, that an accepted test key signed it, and that its module imports nothing
+(task 065: no core-module import is granted; wc-009a's granted list, task 020,
+is retired). It makes no admission, launch or publisher-trust decision.
 
-**The grants file (wc-009a, task 020).** The lab grants file is a lab stand-in
-for the Runtime's grant decision
-(https://github.com/Elacity/elastos-runtime/issues/464), not admission.
+**The grants file (wc-009a, task 020; v3 since task 065).** The lab grants file
+is a lab stand-in for the Runtime's grant decision
+(https://github.com/Elacity/elastos-runtime/issues/464), not admission. Since
+task 065 each grant names `resource` and `actions`, as the WIT
+`capability-request` does, and nothing in `run` reads it.
 
 **Hosting discovery (wc-009b0, task 022).** README.md, "Granted import
 hosting discovery (wc-009b0)", records how each engine's CLI could supply a
@@ -393,8 +406,9 @@ Facts only; nothing here is proposed as a contract.
    later lane task (wc-009); this task adds no import check. Tied to
    https://github.com/Elacity/elastos-runtime/issues/463 and
    https://github.com/Elacity/elastos-runtime/issues/464.
-3. **Typed lab operations as input for a typed-operations model.** Task 031
-   (M1 B4 lab half): `pub const LAB_OPERATIONS` in `tools/src/verify.rs` is the
+3. **Typed lab operations as input for a typed-operations model.**
+   Retired by task 065 (Rong WC-1, WC-2): no core-module import is granted; see 'Bus v1 import contract (wc-009b)'.
+   Task 031 (M1 B4 lab half): `pub const LAB_OPERATIONS` in `tools/src/verify.rs` is the
    lab's one table of the imports its runner can link, each typed once (module
    and name, inputs and outputs as Wasm value type names, the one right a grant
    must name, effect `none`, `read` or `write`). Today it holds one entry,
@@ -408,17 +422,16 @@ Facts only; nothing here is proposed as a contract.
    (https://github.com/Elacity/elastos-runtime/issues/464). The table and the
    grants are "lab stand-in, not admission".
 4. **Import Wasm types are not checked.** Task 046 (Rong, 27 Oct), the type
-   half of item 3, as one sentence:
-   Gap: the lab does not check an import's Wasm type against its typed lab operation, so a typed lab operation is not a type check; this blocks the type half of M1 B4 (one permission model).
-   The facts: the audit's v1 API returns each import's module and name only,
-   with no function type, and does not compare the import kind
-   (`audit/INTERFACE.md`, "Rules"). Closing the gap needs each import's
-   function type from the one module reader (cx-wasm-audit's
-   `wasm-capsule-audit` crate) and a check of it against `LAB_OPERATIONS`.
-   Until then, a module whose `env.f` import has another Wasm type than
-   `() -> ()` passes the typed-operation check in `verify_checked`, since that
-   check matches the module and name only. The B4 lab half checks names,
-   rights and effects; its type half stays open.
+   half of item 3, as one sentence, reworded by task 065 for the Bus path:
+   Gap: the lab checks Bus interface names only, never their WIT types, so a linked Bus interface is not type-checked; this blocks the type half of M1 B4 (one permission model).
+   The facts: since task 065 the lab's only import path is the Bus path, and
+   cx-wasm-audit's `audit_component`, which `bus_imports` calls, returns each
+   import's interface name only (`audit/INTERFACE.md`). Closing the gap needs
+   each Bus interface's WIT types from the one component reader and a check
+   of them against `elastos/wit/elastos-bus-v1.wit`. Until then, a component
+   importing `elastos:bus/providers@1.0.0` with other function types passes
+   `bus_imports`, since it matches the name only. Task 046's facts about the
+   typed table (item 3) are history.
 
 ## Not yet wired
 
