@@ -860,13 +860,22 @@ fn wait_for_terminal(
 /// `operations_table_cells_stay_lab_claims` runs on that same section after
 /// the real-file missing-test check and returns ok. A data row starts with
 /// `| ` and its first non-empty cell is not `Operation` and not `---`. The
-/// Right cell passes when `entry_id` read that id from the fixture's `rights`
-/// array, or the cell is `no named test shows this`. The Linux cell is the
-/// seventh non-empty cell: `designed, not enforced`. An in-memory row whose
-/// Right cell is `network` panics, and the panic contains `network` and
-/// `right`. A `storage` cell whose id list is only `bound-executable` panics
-/// with `storage` and `right`. The enforced panic contains the backticked
-/// cell `` `enforced` ``.
+/// Right cell is the fourth non-empty cell and the Linux cell is the seventh:
+/// `designed, not enforced`.
+///
+/// `match_operation` is false for the in-memory rows: the Right cell passes
+/// when `entry_id` read that id from the fixture's `rights` array, or the cell
+/// is `none: needs no declared right`. The phrase `no named test shows this`
+/// does not pass. `match_operation` is true for the real section: the Right
+/// cell of `status`, `shutdown`, `offers_list` and `unsupported` is exactly
+/// `none: needs no declared right`, and the Right cell of `init`,
+/// `runs_create`, `runs_get`, `runs_events` and `runs_cancel` is exactly
+/// `storage`. An in-memory row whose Right cell is `network` panics, and the
+/// panic contains `network` and `right`. A `storage` cell whose id list is
+/// only `bound-executable` panics with `storage` and `right`. The enforced
+/// panic contains the backticked cell `` `enforced` ``. An in-memory row with
+/// the old phrase panics with that phrase and `right`. In the true mode, a
+/// wrong Right cell panics with the operation and the rejected cell.
 ///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
 /// test no longer finds that function. F-cc49a drops the `generated_`
@@ -947,33 +956,73 @@ fn operations_section_cites_existing_tests() {
             .unwrap_or(doc.len());
         &doc[start..line_end]
     }
+    // One data row starts with `| ` and its first non-empty cell is not
+    // `Operation` and not `---`. The cell check and `operation_row_names`
+    // both use this filter, so there is one row rule.
+    fn operation_row_cells(line: &str) -> Option<Vec<&str>> {
+        if !line.starts_with("| ") {
+            return None;
+        }
+        let cells: Vec<&str> = line
+            .split('|')
+            .map(str::trim)
+            .filter(|cell| !cell.is_empty())
+            .collect();
+        match cells.first() {
+            Some(&first) if first != "Operation" && first != "---" => Some(cells),
+            _ => None,
+        }
+    }
+    fn operation_row_names(section: &str) -> Vec<&str> {
+        section
+            .lines()
+            .filter_map(operation_row_cells)
+            .map(|cells| cells[0])
+            .collect()
+    }
     // Right is the fourth non-empty cell. Linux is the seventh. Header and
     // separator rows are not data rows, so their cells are not claims.
     fn operations_table_cells_stay_lab_claims(
         section: &str,
         right_ids: &[&str],
+        match_operation: bool,
     ) -> Result<(), String> {
         const RIGHT_PLACE: usize = 4;
         const LINUX_PLACE: usize = 7;
         const UNSHOWN_RIGHT: &str = "no named test shows this";
+        const NO_DECLARED_RIGHT: &str = "none: needs no declared right";
         const LINUX_CLAIM: &str = "designed, not enforced";
-        for line in section.lines() {
-            if !line.starts_with("| ") {
-                continue;
-            }
-            let cells: Vec<&str> = line
-                .split('|')
-                .map(str::trim)
-                .filter(|cell| !cell.is_empty())
-                .collect();
-            let Some(first) = cells.first().copied() else {
-                continue;
-            };
-            if first == "Operation" || first == "---" {
-                continue;
-            }
+        const NO_RIGHT_OPERATIONS: [&str; 4] = ["status", "shutdown", "offers_list", "unsupported"];
+        const STORAGE_OPERATIONS: [&str; 5] = [
+            "init",
+            "runs_create",
+            "runs_get",
+            "runs_events",
+            "runs_cancel",
+        ];
+        for cells in section.lines().filter_map(operation_row_cells) {
+            let first = cells[0];
             let right = cells.get(RIGHT_PLACE - 1).copied().unwrap_or("");
-            if !right_ids.contains(&right) && right != UNSHOWN_RIGHT {
+            if match_operation {
+                if NO_RIGHT_OPERATIONS.contains(&first) {
+                    if right != NO_DECLARED_RIGHT {
+                        return Err(format!(
+                            "operation `{first}` needs right cell `{NO_DECLARED_RIGHT}`, not `{right}`"
+                        ));
+                    }
+                } else if STORAGE_OPERATIONS.contains(&first) {
+                    if right != "storage" {
+                        return Err(format!(
+                            "operation `{first}` needs right cell `storage`, not `{right}`"
+                        ));
+                    }
+                }
+            } else if right == UNSHOWN_RIGHT {
+                return Err(format!(
+                    "right cell `{UNSHOWN_RIGHT}` does not pass; a shown call says `{NO_DECLARED_RIGHT}`"
+                ));
+            }
+            if !right_ids.contains(&right) && right != NO_DECLARED_RIGHT {
                 return Err(format!("right cell `{right}` is not an approved right id"));
             }
             let linux = cells.get(LINUX_PLACE - 1).copied().unwrap_or("");
@@ -985,15 +1034,183 @@ fn operations_section_cites_existing_tests() {
         }
         Ok(())
     }
-    fn caught_lab_claim_panic(section: &str, right_ids: &[&str]) -> String {
+    fn caught_lab_claim_panic(section: &str, right_ids: &[&str], match_operation: bool) -> String {
         match catch_unwind(AssertUnwindSafe(|| {
-            if let Err(reason) = operations_table_cells_stay_lab_claims(section, right_ids) {
+            if let Err(reason) =
+                operations_table_cells_stay_lab_claims(section, right_ids, match_operation)
+            {
                 panic!("{reason}");
             }
         })) {
             Err(payload) => panic_text(payload),
             Ok(()) => String::new(),
         }
+    }
+    // The declaration body after one leading `#[...]` attribute, one leading
+    // `pub(...)` group or `pub` word, and one leading `async`, `unsafe` or
+    // `const` word. A line whose body starts with `fn ` starts a function.
+    fn after_declaration_prefix(mut rest: &str) -> &str {
+        rest = rest.trim();
+        if let Some(attribute) = rest.strip_prefix("#[") {
+            if let Some(end) = attribute.find(']') {
+                rest = attribute[end + 1..].trim();
+            }
+        }
+        if let Some(after) = rest.strip_prefix("pub(") {
+            if let Some(end) = after.find(')') {
+                rest = after[end + 1..].trim();
+            }
+        } else if let Some(after) = rest.strip_prefix("pub") {
+            if after.is_empty() || after.starts_with(|c: char| c.is_whitespace()) {
+                rest = after.trim_start();
+            }
+        }
+        for keyword in ["async", "unsafe", "const"] {
+            if let Some(after) = rest.strip_prefix(keyword) {
+                if after.is_empty() || after.starts_with(|c: char| c.is_whitespace()) {
+                    rest = after.trim_start();
+                    break;
+                }
+            }
+        }
+        rest
+    }
+    /// The arm names of `parse_request`'s `match op`, in source order.
+    ///
+    /// The cut starts at the `fn parse_request(` signature line and stops
+    /// before the next function declaration. A later line is a declaration
+    /// when `after_declaration_prefix` leaves a `fn ` prefix, so `pub(crate)`,
+    /// `pub(super)`, `pub(in crate::here)`, a same-line or previous-line
+    /// attribute, `async`, `pub async`, `unsafe` and `const` all end the cut.
+    /// Each arm line permits one `=>`; a second one refuses the layout.
+    ///
+    /// The compare reads the match as text. It shows the Operation cells
+    /// equal those arms, in order. It does not show that every arm is
+    /// reachable, and it does not read `src/execution.rs`.
+    fn parse_request_operation_names(source: &str) -> Result<Vec<&str>, String> {
+        let declarations = source.matches("fn parse_request(").count();
+        if declarations == 0 {
+            return Err("parse_request: missing fn parse_request(".to_string());
+        }
+        if declarations > 1 {
+            return Err("parse_request: has a second fn parse_request(".to_string());
+        }
+        let lines: Vec<&str> = source.lines().collect();
+        let signature = lines
+            .iter()
+            .position(|line| line.contains("fn parse_request("))
+            .expect("the declaration count found the signature");
+        let end = lines[signature + 1..]
+            .iter()
+            .position(|line| after_declaration_prefix(line).starts_with("fn "))
+            .map(|offset| signature + 1 + offset)
+            .unwrap_or(lines.len());
+        let cut = &lines[signature + 1..end];
+        let match_op_count: usize = cut
+            .iter()
+            .map(|line| line.matches("match op").count())
+            .sum();
+        if match_op_count == 0 {
+            return Err("parse_request: has no match op".to_string());
+        }
+        if match_op_count > 1 {
+            return Err("parse_request: has a second match op".to_string());
+        }
+        let Some(match_at) = cut.iter().position(|line| line.contains("match op {")) else {
+            return Err("parse_request: has no match op".to_string());
+        };
+        let (_, after_open) = cut[match_at]
+            .split_once("match op {")
+            .expect("the line contains the opening");
+        if !after_open.trim().is_empty() {
+            return Err("parse_request: an arm on the match op line".to_string());
+        }
+        let mut arms = Vec::new();
+        let mut other_seen = false;
+        for line in &cut[match_at + 1..] {
+            let trimmed = line.trim();
+            if trimmed == "};" {
+                break;
+            }
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.contains('{') || trimmed.contains('}') {
+                return Err("parse_request: an arm line contains a brace".to_string());
+            }
+            if trimmed.matches("=>").count() > 1 {
+                return Err("parse_request: an arm line contains a second `=>`".to_string());
+            }
+            if let Some(rest) = trimmed.strip_prefix('"') {
+                let Some(close) = rest.find('"') else {
+                    return Err(
+                        "parse_request: an arm is not a quoted name and not `other =>`".to_string(),
+                    );
+                };
+                if !rest[close + 1..].trim_start().starts_with("=>") {
+                    return Err(
+                        "parse_request: an arm is not a quoted name and not `other =>`".to_string(),
+                    );
+                }
+                arms.push(&rest[..close]);
+            } else if trimmed.starts_with("other =>") {
+                if other_seen {
+                    return Err("parse_request: has a second `other =>` arm".to_string());
+                }
+                other_seen = true;
+                arms.push("unsupported");
+            } else {
+                return Err(
+                    "parse_request: an arm is not a quoted name and not `other =>`".to_string(),
+                );
+            }
+        }
+        Ok(arms)
+    }
+    // One compare: the Operation cells and the arms must name the same
+    // operations in the same order. A mismatch names the operation that has
+    // no partner.
+    fn operations_match_parse_request(section: &str, source: &str) -> Result<(), String> {
+        let rows = operation_row_names(section);
+        let arms = parse_request_operation_names(source)?;
+        for index in 0..rows.len().max(arms.len()) {
+            match (rows.get(index), arms.get(index)) {
+                (Some(row), Some(arm)) if row == arm => {}
+                (Some(row), Some(arm)) => {
+                    return Err(format!(
+                        "operation row `{row}` has no parse_request arm; the arm there is `{arm}`"
+                    ));
+                }
+                (Some(row), None) => {
+                    return Err(format!("operation row `{row}` has no parse_request arm"));
+                }
+                (None, Some(arm)) => {
+                    return Err(format!("parse_request arm `{arm}` has no operation row"));
+                }
+                (None, None) => break,
+            }
+        }
+        Ok(())
+    }
+    fn reader_failure(source: &str) -> String {
+        match parse_request_operation_names(source) {
+            Err(reason) => reason,
+            Ok(arms) => panic!("the reader accepts: {arms:?} in {source}"),
+        }
+    }
+    fn compare_failure(section: &str, source: &str) -> String {
+        match operations_match_parse_request(section, source) {
+            Err(reason) => reason,
+            Ok(()) => panic!("the compare accepts: {section} {source}"),
+        }
+    }
+    fn rows(names: &[&str]) -> String {
+        names.iter().map(|name| format!("| {name} |\n")).collect()
+    }
+    fn source_cut_before(declaration: &str, arms: &str) -> String {
+        format!(
+            "fn parse_request() {{}}\n{declaration} unrelated() {{\n    let operation = match op {{\n{arms}\n    }};\n}}\n"
+        )
     }
 
     let source_without_the_function = "";
@@ -1037,13 +1254,13 @@ fn operations_section_cites_existing_tests() {
 
     let approved_ids = ["storage", "bound-executable"];
     let network_row = "| init | in | out | network | effect | rule | designed, not enforced |";
-    let network_panic = caught_lab_claim_panic(network_row, &approved_ids);
+    let network_panic = caught_lab_claim_panic(network_row, &approved_ids, false);
     assert!(
         network_panic.contains("network") && network_panic.contains("right"),
         "{network_panic}"
     );
     let storage_row = "| init | in | out | storage | effect | rule | designed, not enforced |";
-    let storage_panic = caught_lab_claim_panic(storage_row, &["bound-executable"]);
+    let storage_panic = caught_lab_claim_panic(storage_row, &["bound-executable"], false);
     assert!(
         storage_panic.contains("storage") && storage_panic.contains("right"),
         "{storage_panic}"
@@ -1051,19 +1268,279 @@ fn operations_section_cites_existing_tests() {
     let bound_row =
         "| init | in | out | bound-executable | effect | rule | designed, not enforced |";
     assert_eq!(
-        operations_table_cells_stay_lab_claims(bound_row, &approved_ids),
+        operations_table_cells_stay_lab_claims(bound_row, &approved_ids, false),
         Ok(())
+    );
+    let none_row =
+        "| status | in | out | none: needs no declared right | effect | rule | designed, not enforced |";
+    assert_eq!(
+        operations_table_cells_stay_lab_claims(none_row, &approved_ids, false),
+        Ok(())
+    );
+    let unshown_row =
+        "| status | in | out | no named test shows this | effect | rule | designed, not enforced |";
+    let unshown_panic = caught_lab_claim_panic(unshown_row, &approved_ids, false);
+    assert!(
+        unshown_panic.contains("no named test shows this") && unshown_panic.contains("right"),
+        "{unshown_panic}"
     );
     let startup_row =
         "| init | in | out | startup-root-directory | effect | rule | designed, not enforced |";
-    let startup_panic = caught_lab_claim_panic(startup_row, &approved_ids);
+    let startup_panic = caught_lab_claim_panic(startup_row, &approved_ids, false);
     assert!(
         startup_panic.contains("startup-root-directory") && startup_panic.contains("right"),
         "{startup_panic}"
     );
     let enforced_row = "| init | in | out | storage | effect | rule | enforced |";
-    let enforced_panic = caught_lab_claim_panic(enforced_row, &approved_ids);
+    let enforced_panic = caught_lab_claim_panic(enforced_row, &approved_ids, false);
     assert!(enforced_panic.contains("`enforced`"), "{enforced_panic}");
+
+    // In the real-section mode each operation has one right cell, so a row
+    // with the other cell, or with another approved id, must fail. Dropping
+    // any operation from either list would let that row pass.
+    let no_right_operations = ["status", "shutdown", "offers_list", "unsupported"];
+    let storage_operations = [
+        "init",
+        "runs_create",
+        "runs_get",
+        "runs_events",
+        "runs_cancel",
+    ];
+    for operation in no_right_operations {
+        for wrong in ["storage", "bound-executable", "no named test shows this"] {
+            let row = format!(
+                "| {operation} | in | out | {wrong} | effect | rule | designed, not enforced |"
+            );
+            let panic = caught_lab_claim_panic(&row, &approved_ids, true);
+            assert!(
+                panic.contains(operation) && panic.contains(wrong),
+                "{operation} with `{wrong}`: {panic}"
+            );
+        }
+        let row = format!(
+            "| {operation} | in | out | none: needs no declared right | effect | rule | designed, not enforced |"
+        );
+        assert_eq!(
+            operations_table_cells_stay_lab_claims(&row, &approved_ids, true),
+            Ok(())
+        );
+    }
+    for operation in storage_operations {
+        for wrong in [
+            "bound-executable",
+            "none: needs no declared right",
+            "no named test shows this",
+        ] {
+            let row = format!(
+                "| {operation} | in | out | {wrong} | effect | rule | designed, not enforced |"
+            );
+            let panic = caught_lab_claim_panic(&row, &approved_ids, true);
+            assert!(
+                panic.contains(operation) && panic.contains("storage") && panic.contains(wrong),
+                "{operation} with `{wrong}`: {panic}"
+            );
+        }
+        let row = format!(
+            "| {operation} | in | out | storage | effect | rule | designed, not enforced |"
+        );
+        assert_eq!(
+            operations_table_cells_stay_lab_claims(&row, &["bound-executable"], true),
+            Err("right cell `storage` is not an approved right id".to_string()),
+            "{operation} requires storage in the approved rights"
+        );
+        assert_eq!(
+            operations_table_cells_stay_lab_claims(&row, &approved_ids, true),
+            Ok(())
+        );
+    }
+
+    // The cut stops before the next function declaration. The old four
+    // prefixes and every form `after_declaration_prefix` removes end it, so a
+    // later `match op` supplies no arm.
+    let two_rows = rows(&["init", "unsupported"]);
+    let cut_arms = "        \"init\" => ProviderOperation::Init,\n        other => ProviderOperation::Unsupported(other.to_string()),";
+    for declaration in [
+        "pub(crate) fn",
+        "pub(super) fn",
+        "pub(in crate::here) fn",
+        "#[inline]\npub(crate) fn",
+        "#[inline] pub(crate) fn",
+        "async fn",
+        "pub async fn",
+        "unsafe fn",
+        "const fn",
+    ] {
+        let source = source_cut_before(declaration, cut_arms);
+        let failure = compare_failure(&two_rows, &source);
+        assert!(
+            failure.contains("parse_request")
+                && failure.contains("match op")
+                && failure.contains("has no match op"),
+            "`{declaration}` must end the cut: {failure}"
+        );
+    }
+    let own_cut = r#"fn parse_request() {
+    let operation = match op {
+        "init" => ProviderOperation::Init,
+        other => ProviderOperation::Unsupported(other.to_string()),
+    };
+}
+"#;
+    let later_ping = format!(
+        r#"{own_cut}pub(crate) fn unrelated() {{
+    let operation = match op {{
+        "ping" => ProviderOperation::Ping,
+    }};
+}}
+"#
+    );
+    assert_eq!(
+        parse_request_operation_names(&later_ping),
+        Ok(vec!["init", "unsupported"])
+    );
+
+    let commented_match = r#"fn parse_request() {
+    /*
+    match op {
+        "stale" => ProviderOperation::Stale,
+    }
+    */
+    let operation = match op {
+        "init" => ProviderOperation::Init,
+        other => ProviderOperation::Unsupported(other.to_string()),
+    };
+}
+"#;
+    let failure = reader_failure(commented_match);
+    assert!(
+        failure.contains("parse_request") && failure.contains("second match op"),
+        "{failure}"
+    );
+    let arm_on_match_line = r#"fn parse_request() {
+    let operation = match op { "init" => ProviderOperation::Init,
+        other => ProviderOperation::Unsupported(other.to_string()),
+    };
+}
+"#;
+    let failure = reader_failure(arm_on_match_line);
+    assert!(
+        failure.contains("parse_request") && failure.contains("arm on the match op line"),
+        "{failure}"
+    );
+    let arm_with_open_brace = r#"fn parse_request() {
+    let operation = match op {
+        "init" => ProviderOperation::Init { value: 1 },
+        other => ProviderOperation::Unsupported(other.to_string()),
+    };
+}
+"#;
+    let failure = reader_failure(arm_with_open_brace);
+    assert!(
+        failure.contains("parse_request") && failure.contains("arm line contains a brace"),
+        "{failure}"
+    );
+    let arm_with_close_brace = r#"fn parse_request() {
+    let operation = match op {
+        "init" => ProviderOperation::Init },
+        other => ProviderOperation::Unsupported(other.to_string()),
+    };
+}
+"#;
+    let failure = reader_failure(arm_with_close_brace);
+    assert!(
+        failure.contains("parse_request") && failure.contains("arm line contains a brace"),
+        "{failure}"
+    );
+
+    assert_eq!(operations_match_parse_request(&two_rows, own_cut), Ok(()));
+    let status_row = rows(&["init", "status"]);
+    let failure = compare_failure(&status_row, own_cut);
+    assert!(failure.contains("unsupported"), "{failure}");
+    let ping_arm = r#"fn parse_request() {
+    let operation = match op {
+        "init" => ProviderOperation::Init,
+        other => ProviderOperation::Unsupported(other.to_string()),
+        "ping" => ProviderOperation::Ping,
+    };
+}
+"#;
+    let failure = compare_failure(&two_rows, ping_arm);
+    assert!(failure.contains("ping"), "{failure}");
+    for (first_arm, extra_arm) in [
+        (
+            "\"init\" => ProviderOperation::Init,",
+            "\"ping\" => ProviderOperation::Status,",
+        ),
+        (
+            "\"init\" => ProviderOperation::Init,",
+            "other => ProviderOperation::Unsupported(other.to_string()),",
+        ),
+        (
+            "other => ProviderOperation::Unsupported(other.to_string()),",
+            "\"ping\" => ProviderOperation::Status,",
+        ),
+        (
+            "other => ProviderOperation::Unsupported(other.to_string()),",
+            "other => ProviderOperation::Unsupported(other.to_string()),",
+        ),
+    ] {
+        let same_line_arms = own_cut.replace(first_arm, &format!("{first_arm} {extra_arm}"));
+        assert_eq!(
+            compare_failure(&two_rows, &same_line_arms),
+            "parse_request: an arm line contains a second `=>`",
+            "{same_line_arms}"
+        );
+    }
+    let swapped_rows = rows(&["unsupported", "init"]);
+    let failure = compare_failure(&swapped_rows, own_cut);
+    assert!(
+        failure.contains("init") && failure.contains("unsupported"),
+        "{failure}"
+    );
+    let init_only_arm = r#"fn parse_request() {
+    let operation = match op {
+        "init" => ProviderOperation::Init,
+    };
+}
+"#;
+    let failure = compare_failure(&two_rows, init_only_arm);
+    assert!(failure.contains("unsupported"), "{failure}");
+
+    let failure = reader_failure("pub fn unrelated() {}\n");
+    assert!(
+        failure.contains("parse_request") && failure.contains("missing fn parse_request("),
+        "{failure}"
+    );
+    let failure = reader_failure("fn parse_request() {}\nfn parse_request() {}\n");
+    assert!(
+        failure.contains("parse_request") && failure.contains("second fn parse_request("),
+        "{failure}"
+    );
+    let unquoted_arm = r#"fn parse_request() {
+    let operation = match op {
+        init => ProviderOperation::Init,
+        other => ProviderOperation::Unsupported(other.to_string()),
+    };
+}
+"#;
+    let failure = reader_failure(unquoted_arm);
+    assert!(
+        failure.contains("parse_request") && failure.contains("not a quoted name"),
+        "{failure}"
+    );
+    let double_other = r#"fn parse_request() {
+    let operation = match op {
+        "init" => ProviderOperation::Init,
+        other => ProviderOperation::Unsupported(other.to_string()),
+        other => ProviderOperation::Unsupported(other.to_string()),
+    };
+}
+"#;
+    let failure = reader_failure(double_other);
+    assert!(
+        failure.contains("parse_request") && failure.contains("second `other =>` arm"),
+        "{failure}"
+    );
 
     let doc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("CONFINEMENT.md");
     let doc = fs::read_to_string(&doc_path).unwrap_or_else(|err| {
@@ -1077,6 +1554,13 @@ fn operations_section_cites_existing_tests() {
         panic!(
             "tests/confine/main.rs must be readable ({}): {err}",
             source_path.display()
+        )
+    });
+    let contract_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/contract.rs");
+    let contract_source = fs::read_to_string(&contract_path).unwrap_or_else(|err| {
+        panic!(
+            "src/contract.rs must be readable ({}): {err}",
+            contract_path.display()
         )
     });
     let section = operations_section_text(&doc);
@@ -1104,8 +1588,10 @@ fn operations_section_cites_existing_tests() {
         .and_then(Value::as_array)
         .unwrap_or_else(|| panic!("declared rights must be an array"));
     let right_ids: Vec<&str> = rights.iter().map(entry_id).collect();
-    operations_table_cells_stay_lab_claims(section, &right_ids)
+    operations_table_cells_stay_lab_claims(section, &right_ids, true)
         .expect("the real operations section keeps its Right and Linux lab claims");
+    operations_match_parse_request(section, &contract_source)
+        .expect("the real Operation cells equal the parse_request arms");
 }
 
 /// The Id cells in `section` are the same set as `ids`.
