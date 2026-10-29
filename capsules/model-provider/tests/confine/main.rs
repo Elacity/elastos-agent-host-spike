@@ -1390,8 +1390,11 @@ fn operations_section_cites_existing_tests() {
     /// returns `index` unchanged, and `string_end` is the ordinary-string end.
     ///
     /// A raw string and a character literal are skipped whole, so a `json!`
-    /// inside either is not a literal. A raw string starts with `r`, `br` or
-    /// `cr`, then zero or more `#`, then `"`, and closes at `"` followed by
+    /// inside either is not a literal. A prefixed literal starts only at a
+    /// token start: the previous byte is absent, or it is not `A-Z`, `a-z`,
+    /// `0-9` or `_`. So `vector"foo\"}"` and `abbr"foo\"}"` are cooked strings,
+    /// not raw strings. A raw string starts with `r`, `br` or `cr` at a token
+    /// start, then zero or more `#`, then `"`, and closes at `"` followed by
     /// that same number of `#`. `return`, `break` and `result` are not raw
     /// strings. In a character literal `\'` and `\\` are one character and
     /// the closer follows that one character. Lifetimes and labels leave
@@ -1404,6 +1407,11 @@ fn operations_section_cites_existing_tests() {
         };
         if first == b'"' {
             return string_end(source, index + 1);
+        }
+        let starts_token =
+            index == 0 || !(bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b'_');
+        if !starts_token {
+            return Ok(index);
         }
         if first == b'b' && bytes.get(index + 1) == Some(&b'"') {
             return string_end(source, index + 2);
@@ -2600,11 +2608,15 @@ fn operations_section_cites_existing_tests() {
     // 094 head `string_end` ends every string at its first `"`, so `r#""}"#`
     // and `br#""}"#` close `ok_response` before the later `json!`, and the
     // brace count closes it at the `}` inside `'}'`. Each plant then returns
-    // `Ok` with the first keys.
+    // `Ok` with the first keys. An identifier ending in `r` or `br` before a
+    // cooked string is not a raw-string prefix, so the escape keeps the `}`
+    // inside the string.
     for body in [
         r##"fn ok_response() { json!({"status":"ok","data":1}); let _ = r#""}"#; json!({"status":"ok","result":1}); }"##,
         r##"fn ok_response() { json!({"status":"ok","data":1}); let _ = br#""}"#; json!({"status":"ok","result":1}); }"##,
         r#"fn ok_response() { json!({"status":"ok","data":1}); let _ = '}'; json!({"status":"ok","result":1}); }"#,
+        r##"fn ok_response() { json!({"status":"ok","data":1}); let _ = vector"foo\"}"; json!({"status":"ok","result":1}); }"##,
+        r##"fn ok_response() { json!({"status":"ok","data":1}); let _ = abbr"foo\"}"; json!({"status":"ok","result":1}); }"##,
     ] {
         let region =
             function_region(body, "fn ok_response(").expect("the plant body is one region");
@@ -2684,12 +2696,12 @@ fn operations_section_cites_existing_tests() {
         "{failure}"
     );
 
-    // The signature loop skips a literal before the body's `{`, so a brace
-    // inside an attribute string does not open the region. A reader without
-    // the skip stops at that brace and reports an unterminated string.
-    let string_before_body = r#"fn ok_response() #[doc = "a { brace"] { json!({"x": 1}) }"#;
+    // The signature loop skips a raw string before the body's `{`, so a brace
+    // inside it does not open the region. The 094 head ends the raw string at
+    // its first `"`, stops at that brace, and finds no closing `}`.
+    let string_before_body = r##"fn ok_response() #[doc = r#"a " { brace"#] { json!({"x": 1}) }"##;
     let region = function_region(string_before_body, "fn ok_response(")
-        .expect("the body opens after the attribute string");
+        .expect("the body opens after the attribute raw string");
     assert_eq!(
         json_literal_keys(region),
         Ok(vec!["x".to_string()]),
@@ -2743,6 +2755,29 @@ fn operations_section_cites_existing_tests() {
         assert_eq!(skip_code_literal(unchanged, 0), Ok(0), "{unchanged}");
     }
     assert_eq!(skip_code_literal("prefix 'static str", 7), Ok(7));
+    // A prefix after an identifier byte is part of the identifier, so the next
+    // `"` is a cooked string; a token start keeps the raw-string reading.
+    for (not_a_prefix, index) in [
+        ("vector\"x\"", 5),
+        ("abbr\"x\"", 3),
+        ("xbr\"x\"", 1),
+        ("xbr\"x\"", 2),
+        ("xcr\"x\"", 2),
+        ("xr\"x\"", 1),
+    ] {
+        assert_eq!(
+            skip_code_literal(not_a_prefix, index),
+            Ok(index),
+            "{not_a_prefix}"
+        );
+    }
+    for (raw, index, end) in [
+        ("let r#\"x\"#", 4, 10),
+        ("(br\"x\")", 1, 6),
+        ("(cr\"x\")", 1, 6),
+    ] {
+        assert_eq!(skip_code_literal(raw, index), Ok(end), "{raw}");
+    }
     assert_eq!(skip_code_literal("", 0), Ok(0));
     assert_eq!(skip_code_literal("x", 1), Ok(1));
     for malformed in ["'ab'", "b'ab'", "'} json!({}) '"] {
