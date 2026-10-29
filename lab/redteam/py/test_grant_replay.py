@@ -2013,8 +2013,9 @@ class GrantReplayProbe(unittest.TestCase):
         """Cargo resolves the escaped path. The raw text does not name the crate.
 
         The owner's detector reads that raw text. A pass writes
-        grant-binding-002. A caught failure writes nothing and says the
-        detector returned true. An error propagates. A false detector
+        grant-binding-002. A caught failure writes nothing to
+        caught-escape.md, leaves grant-binding-002.md unchanged, and says
+        the detector returned true. An error propagates. A false detector
         result is not a skip.
         """
         self.assertNotIn(self._testMethodName, PROBE_NAMES)
@@ -2039,9 +2040,15 @@ class GrantReplayProbe(unittest.TestCase):
             self.target,
         )
         print(f"escaped link outcome: {outcome.kind}", file=sys.stderr, flush=True)
-        if outcome.kind == "failed" and outcome.caught and LINK_FINDING.is_file():
-            LINK_FINDING.unlink()
-        returned = record_escaped_link(outcome, meta_code, meta_output, LINK_FINDING)
+        self.assertTrue(LINK_FINDING.is_file(), "grant-binding-002.md is absent")
+        tracked = LINK_FINDING.read_bytes()
+        caught_escape = self.work / "caught-escape.md"
+        if outcome.kind == "failed" and outcome.caught:
+            self.assertFalse(caught_escape.exists())
+            destination = caught_escape
+        else:
+            destination = LINK_FINDING
+        returned = record_escaped_link(outcome, meta_code, meta_output, destination)
         start = meta_output.find("{")
         parsed, _end = json.JSONDecoder().raw_decode(meta_output, start)
         names = [package["name"] for package in parsed["packages"]]
@@ -2073,8 +2080,11 @@ class GrantReplayProbe(unittest.TestCase):
                 ],
             )
         elif outcome.kind == "failed" and outcome.caught:
-            self.assertFalse(LINK_FINDING.is_file())
+            self.assertEqual(destination, self.work / "caught-escape.md")
+            self.assertFalse(destination.exists())
             self.assertEqual(returned, names)
+            self.assertTrue(LINK_FINDING.is_file(), "grant-binding-002.md is absent")
+            self.assertEqual(LINK_FINDING.read_bytes(), tracked)
             print("detector returned true", file=sys.stderr, flush=True)
         else:
             self.fail(f"escaped link outcome: {outcome.kind}")
