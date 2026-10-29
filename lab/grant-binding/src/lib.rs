@@ -180,6 +180,9 @@ impl Verifier {
             .registry
             .get(&instance)
             .ok_or(Refuse::UnknownInstance)?;
+        if record.identity == "home" {
+            return Err(Refuse::HomeMint);
+        }
         let owned_root = resource_name(&record.identity, resource, None)?;
         self.next_handle += 1;
         let handle = Handle(self.next_handle);
@@ -196,18 +199,14 @@ impl Verifier {
         Ok(handle)
     }
 
-    /// The stand-in entry for a capability ask. An app ask stores through
-    /// `bind_grant`. A Home ask returns a refusal and stores nothing.
     pub fn ask_capability(
         &mut self,
-        asker: Asker,
         instance: InstanceId,
         resource: &str,
         rights: Rights,
+        claimed: Asker,
     ) -> Result<Handle, Refuse> {
-        if asker == Asker::Home {
-            return Err(Refuse::HomeMint);
-        }
+        let _claimed = claimed;
         self.bind_grant(instance, resource, rights)
     }
 
@@ -1737,47 +1736,15 @@ fn model_workspace_dependency_is_a_link_in_place() {
 }
 
 #[test]
-fn model_home_ask_for_another_app_is_refused() {
-    let mut verifier = Verifier::new();
-    let photo = verifier.register_instance("photo", "session-a");
-    let handle = verifier
-        .ask_capability(Asker::App, photo, "UsersAI/photo/library", rights())
-        .expect("app ask");
-    let call = verifier.open_call(photo);
-    let decision = verifier
-        .use_grant(call, &guest(handle))
-        .expect("app effect");
-    assert_eq!(decision.identity, "photo");
-    assert_eq!(decision.owned_root, "UsersAI/photo/library");
-    let stored = verifier.grants.get(&handle).expect("app grant").clone();
-    let handles = verifier.next_handle;
-    let count = verifier.grants.len();
-    assert_eq!(handles, 1);
-    assert_eq!(count, 1);
-    let refusal = verifier
-        .ask_capability(Asker::Home, photo, "UsersAI/photo/library", rights())
-        .expect_err("home ask for the photo app");
-    assert_eq!(refusal, Refuse::HomeMint);
-    assert_eq!(refusal.to_string(), "home does not mint an app capability");
-    assert_eq!(verifier.next_handle, handles);
-    assert_eq!(verifier.grants.len(), count);
-    assert_eq!(verifier.grants.get(&handle).expect("app grant"), &stored);
-    let again = verifier
-        .use_grant(call, &guest(handle))
-        .expect("app effect remains");
-    assert_eq!(again.owned_root, "UsersAI/photo/library");
-}
-
-#[test]
 fn model_revoke_one_app_stops_only_that_app() {
     let mut verifier = Verifier::new();
     let photo = verifier.register_instance("photo", "session-a");
     let notes = verifier.register_instance("notes", "session-a");
     let photo_handle = verifier
-        .ask_capability(Asker::App, photo, "UsersAI/photo/library", rights())
+        .ask_capability(photo, "UsersAI/photo/library", rights(), Asker::App)
         .expect("photo ask");
     let notes_handle = verifier
-        .ask_capability(Asker::App, notes, "UsersAI/notes/pad", rights())
+        .ask_capability(notes, "UsersAI/notes/pad", rights(), Asker::App)
         .expect("notes ask");
     let photo_call = verifier.open_call(photo);
     let notes_call = verifier.open_call(notes);
@@ -1801,4 +1768,56 @@ fn model_revoke_one_app_stops_only_that_app() {
         .expect("notes effect remains");
     assert_eq!(kept.identity, "notes");
     assert_eq!(kept.owned_root, "UsersAI/notes/pad");
+}
+
+#[test]
+fn model_registered_home_ask_is_refused() {
+    let mut verifier = Verifier::new();
+    let home = verifier.register_instance("home", "session-a");
+    let photo = verifier.register_instance("photo", "session-a");
+    let handle = verifier
+        .ask_capability(photo, "UsersAI/photo/library", rights(), Asker::Home)
+        .expect("photo ask claimed as home");
+    let call = verifier.open_call(photo);
+    let decision = verifier
+        .use_grant(call, &guest(handle))
+        .expect("photo effect");
+    assert_eq!(decision.identity, "photo");
+    assert_eq!(decision.owned_root, "UsersAI/photo/library");
+    let refusal = verifier
+        .ask_capability(home, "UsersAI/home/desk", rights(), Asker::App)
+        .expect_err("home ask claimed as app");
+    assert_eq!(refusal, Refuse::HomeMint);
+    assert_eq!(refusal.to_string(), "home does not mint an app capability");
+    let again = verifier
+        .use_grant(call, &guest(handle))
+        .expect("photo effect remains");
+    assert_eq!(again.owned_root, "UsersAI/photo/library");
+    let for_home = verifier
+        .ask_capability(photo, "UsersAI/home/desk", rights(), Asker::Home)
+        .expect_err("photo ask for a home root");
+    assert_eq!(for_home, Refuse::OutsidePrincipal);
+    assert_eq!(
+        for_home.to_string(),
+        "owned root is outside the agent principal"
+    );
+}
+
+#[test]
+fn model_home_direct_mint_is_refused() {
+    let mut verifier = Verifier::new();
+    let home = verifier.register_instance("home", "session-a");
+    let photo = verifier.register_instance("photo", "session-a");
+    let direct = verifier
+        .bind_grant(home, "UsersAI/home/desk", rights())
+        .expect_err("home calls the mint");
+    assert_eq!(direct, Refuse::HomeMint);
+    assert_eq!(direct.to_string(), "home does not mint an app capability");
+    let handle = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("app mint");
+    let decision = verifier
+        .use_grant(verifier.open_call(photo), &guest(handle))
+        .expect("photo effect");
+    assert_eq!(decision.identity, "photo");
 }
