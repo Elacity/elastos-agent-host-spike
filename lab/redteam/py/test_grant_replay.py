@@ -916,7 +916,7 @@ def write_probe(pkg, crate):
     return pkg
 
 
-def cargo(pkg, args, target):
+def cargo(pkg, args, target, timeout=TIMEOUT_S):
     env = os.environ.copy()
     env["CARGO_TARGET_DIR"] = str(Path(target).resolve())
     env["CARGO_NET_OFFLINE"] = "true"
@@ -939,14 +939,14 @@ def cargo(pkg, args, target):
     except OSError as error:
         raise ProbeError(f"cannot run cargo: {error}") from None
     try:
-        out, err = proc.communicate(timeout=TIMEOUT_S)
+        out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         proc.communicate()
-        raise ProbeError(f"{shlex.join(argv)} timed out after {TIMEOUT_S}s") from None
+        raise ProbeError(f"{shlex.join(argv)} timed out after {timeout}s") from None
     output = strip_ansi((out or "") + "\n" + (err or ""))
     return proc.returncode, output
 

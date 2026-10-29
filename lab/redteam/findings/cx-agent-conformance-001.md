@@ -1,0 +1,5 @@
+cx-agent-conformance-001 lab/agent-conformance/standin-runtime/mod.rs ba24246809268ece8e06f68e16a387d41442cc7e sha256 c3cce06d96029a8a3d3fc5b005f0e2ed55e43aace6eb4f1bff544d60d847b519
+
+probe: test_once_grant_second_authorise_is_refused
+falsifier: F-once-twice
+observed: second authorise returned Ok
