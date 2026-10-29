@@ -480,3 +480,191 @@ pub(super) fn external_signature_message(
         request.expires_at
     ))
 }
+
+/// One test per refusal string the two protected-content rights wire readers
+/// raise, each asserting the whole `Err` value. They pin answers the readers
+/// already give: they add no rule and register no falsifier. They prove what
+/// the wallet provider refuses to sign, not confinement: the Runtime decides
+/// whether the provider runs at all.
+///
+/// `protected-content rights request hex is required` stands at `:280` and
+/// `:300`, and `protected-content rights request exceeds the Wallet wire limit
+/// of {MAX_PROTECTED_CONTENT_RIGHTS_WIRE_BYTES} bytes` at `:283` and `:302`, so
+/// one test each holds its two sites.
+///
+/// `invalid protected-content rights request hex: {err}` (`:297`) is recorded
+/// as unreachable instead of tested. `hex::decode` follows the length and
+/// all-lowercase-hex-digit checks above it, which accept exactly the strings
+/// `hex::decode` decodes, so that mapping never produces an error.
+///
+/// Two further lines are unreachable. `hex is required` at `:300` follows a
+/// non-empty, even-length, all-hex-digit string, which decodes to a non-empty
+/// byte vector, so `:280` already refused. The `wire limit` string at `:302`
+/// follows a decode of half the character length, so `:283` already refused at
+/// twice that length.
+#[cfg(test)]
+mod uf_crypto_wire_refusal_tests {
+    use super::*;
+    use elastos_protected_content_contracts::ContractError;
+    use serde_json::json;
+
+    /// The schema string every `protected_content_rights_request_from_payload`
+    /// case either carries or deliberately changes, read from this file rather
+    /// than pasted.
+    const SCHEMA: &str = PROTECTED_CONTENT_RIGHTS_APPROVAL_PAYLOAD_SCHEMA;
+
+    /// Catches removal of the empty-hex refusal in
+    /// `protected_content_rights_request_from_hex`. `hex is required` stands
+    /// twice, at `:280` on the trimmed string and at `:300` on the decoded
+    /// bytes. The second site cannot refuse on its own: a non-empty,
+    /// even-length, all-hex-digit string decodes to a non-empty byte vector, so
+    /// `:280` already refused. The mutation this test pins is therefore the
+    /// pair, because removing either guard alone still answers this string from
+    /// the other one.
+    ///
+    /// The second case is whitespace only, so the reader reaches :280 through
+    /// its trim; a missing trim leaves a non-hex character and the case fails
+    /// on the reason rather than on the guard.
+    #[test]
+    fn rejects_empty_hex() {
+        let reason = "protected-content rights request hex is required";
+        for input in ["", "  \t\n "] {
+            assert_eq!(
+                protected_content_rights_request_from_hex(input).unwrap_err(),
+                reason
+            );
+        }
+    }
+
+    /// Catches removal of the wire-limit refusal in
+    /// `protected_content_rights_request_from_hex`. The same string is raised
+    /// at `:283` on the character length and at `:302` on the decoded byte
+    /// length. The second site cannot refuse on its own: the decoded length is
+    /// half the character length, so `:283` already refused at twice that
+    /// length. The mutation this test pins is therefore the pair, because
+    /// removing `:283` alone still answers this string from `:302`.
+    ///
+    /// The input is one byte past the limit, is otherwise canonical lowercase
+    /// hex, and carries the limit formatted from the crate's constant.
+    #[test]
+    fn rejects_hex_over_the_wire_limit() {
+        let reason = format!(
+            "protected-content rights request exceeds the Wallet wire limit of {MAX_PROTECTED_CONTENT_RIGHTS_WIRE_BYTES} bytes"
+        );
+        let oversized = "aa".repeat(MAX_PROTECTED_CONTENT_RIGHTS_WIRE_BYTES + 1);
+        assert_eq!(
+            protected_content_rights_request_from_hex(&oversized).unwrap_err(),
+            reason
+        );
+    }
+
+    /// Catches removal of the lowercase, unprefixed hex refusal in
+    /// `protected_content_rights_request_from_hex` at `:293`. The guard has two
+    /// conditions, an odd length and an uppercase digit, and both raise this
+    /// string, so this one test drives both. The uppercase case is even-length
+    /// and every character is a hex digit, so only the case rule refuses it.
+    #[test]
+    fn rejects_odd_or_uppercase_hex() {
+        let reason = "protected-content rights request must be lowercase hex without a prefix";
+        for input in ["a", "AA"] {
+            assert_eq!(
+                protected_content_rights_request_from_hex(input).unwrap_err(),
+                reason
+            );
+        }
+    }
+
+    /// Catches removal of the decode refusal in
+    /// `protected_content_rights_request_from_hex` at `:309`. `"00"` is
+    /// canonical lowercase hex of even length and one byte, so it passes every
+    /// check above and reaches the contract reader, which refuses it as the
+    /// wrong canonical domain because it is shorter than the domain prefix.
+    #[test]
+    fn rejects_hex_that_is_not_a_canonical_request() {
+        let reason = format!(
+            "invalid protected-content rights request: {}",
+            ContractError::WrongDomain
+        );
+        assert_eq!(
+            protected_content_rights_request_from_hex("00").unwrap_err(),
+            reason
+        );
+    }
+
+    /// Catches removal of the object refusal in
+    /// `protected_content_rights_request_from_payload` at `:315`. Both a JSON
+    /// string and a JSON array are valid JSON that is not an object, so a
+    /// reader that fell through would reach the field-set check with no keys.
+    #[test]
+    fn rejects_a_payload_that_is_not_a_json_object() {
+        let reason = "protected-content rights approval payload must be a JSON object";
+        for payload in [json!("canonical_rights_request_hex"), json!([SCHEMA])] {
+            assert_eq!(
+                protected_content_rights_request_from_payload(&payload).unwrap_err(),
+                reason
+            );
+        }
+    }
+
+    /// Catches removal of the field-set refusal in
+    /// `protected_content_rights_request_from_payload` at `:322`. The guard has
+    /// three refusals, a key count other than two, a missing `schema`, and a
+    /// missing `canonical_rights_request_hex`, and all three raise this string.
+    /// The first case carries a third key, so the count refuses it. The second
+    /// carries two keys of which the second is not the allowed name, so the
+    /// `canonical_rights_request_hex` rule refuses it. Both carry the right
+    /// schema, so the schema check below the field-set check would accept them.
+    #[test]
+    fn rejects_unsupported_fields() {
+        let reason = "protected-content rights approval payload has unsupported fields";
+        let third_key = json!({
+            "schema": SCHEMA,
+            "canonical_rights_request_hex": "00",
+            "canonical_rights_request_hex_v2": "00",
+        });
+        let wrong_second_key = json!({
+            "schema": SCHEMA,
+            "canonical_rights_request_hex_v2": "00",
+        });
+        for payload in [third_key, wrong_second_key] {
+            assert_eq!(
+                protected_content_rights_request_from_payload(&payload).unwrap_err(),
+                reason
+            );
+        }
+    }
+
+    /// Catches removal of the schema refusal in
+    /// `protected_content_rights_request_from_payload` at `:326`. The case
+    /// carries exactly the two allowed keys and only a second schema string, so
+    /// the field-set check above it passes and this test pins the schema rule
+    /// alone.
+    #[test]
+    fn rejects_an_unsupported_schema() {
+        let payload = json!({
+            "schema": "elastos.wallet.protected-content-rights-approval/v2",
+            "canonical_rights_request_hex": "00",
+        });
+        assert_eq!(
+            protected_content_rights_request_from_payload(&payload).unwrap_err(),
+            "protected-content rights approval payload has unsupported schema"
+        );
+    }
+
+    /// Catches removal of the text-field refusal in
+    /// `protected_content_rights_request_from_payload` at `:330`. The case
+    /// carries exactly the two allowed keys and the right schema, and its
+    /// `canonical_rights_request_hex` is a number rather than a string, so the
+    /// checks above it pass and this test pins the reader's type rule alone.
+    #[test]
+    fn rejects_a_missing_canonical_rights_request_hex() {
+        let payload = json!({
+            "schema": SCHEMA,
+            "canonical_rights_request_hex": 0,
+        });
+        assert_eq!(
+            protected_content_rights_request_from_payload(&payload).unwrap_err(),
+            "protected-content rights approval payload missing canonical_rights_request_hex"
+        );
+    }
+}

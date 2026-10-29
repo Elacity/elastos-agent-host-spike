@@ -139,3 +139,104 @@ pub(crate) fn rlp_length_prefix(len: usize, offset: u8) -> Vec<u8> {
     encoded.extend_from_slice(len_bytes);
     encoded
 }
+
+/// One test per refusal the legacy EIP-155 signer raises, asserting the whole
+/// `Err` value. It pins an answer the signer already gives: it adds no rule and
+/// registers no falsifier. It proves what the wallet provider answers a
+/// transaction intent, not confinement: the Runtime decides whether the
+/// provider runs.
+#[cfg(test)]
+mod uf_transaction_refusal_tests {
+    use super::*;
+
+    const ADDRESS: &str = "0x1111111111111111111111111111111111111111";
+
+    /// A transaction intent every earlier check accepts, so the case reaches
+    /// the `v` computation. The validator in `validation.rs` bounds `chain_id`
+    /// only by `u64` and by non-zero, so a payload carrying a chain id near
+    /// the top of that range arrives here.
+    fn request(chain_id: u64) -> WalletApprovalRequest {
+        WalletApprovalRequest {
+            schema: "elastos.wallet.approval_request/v1".to_string(),
+            request_id: "req-1".to_string(),
+            wallet_request_sha256: String::new(),
+            authority_binding: String::new(),
+            kind: "signature".to_string(),
+            status: ApprovalStatus::Pending,
+            principal_id: "person:local:alice".to_string(),
+            account_id: format!("wallet:eip155:20:{ADDRESS}"),
+            proof_binding_id: format!("proof:eip155:20:{ADDRESS}"),
+            chain_namespace: "eip155:20".to_string(),
+            address: ADDRESS.to_string(),
+            proof_type: MANAGED_EVM_PROOF_TYPE.to_string(),
+            connector_id: None,
+            intent: "transaction_intent".to_string(),
+            session_id: String::new(),
+            launch_id: String::new(),
+            requested_by_actor: "browser".to_string(),
+            resource: "elastos://wallet/eip155:20/sign/transaction_intent".to_string(),
+            reason: "unit test transaction".to_string(),
+            payload: json!({
+                "schema": "elastos.chain.unsigned_transaction_intent/v1",
+                "transaction_type": "eip155_legacy",
+                "wallet_intent": "transaction_intent",
+                "requires_wallet_approval": true,
+                "chain_id": chain_id,
+                "from": ADDRESS,
+                "to": ADDRESS,
+                "nonce": "0x0",
+                "gas_price": "0x1",
+                "gas_limit": "0x5208",
+                "value": "0x0",
+                "data": "0x"
+            }),
+            payload_hash: "hash-1".to_string(),
+            created_at: 0,
+            expires_at: 1_000,
+            resolved_at: None,
+            rejection_reason: None,
+            approved_at: None,
+            approval_reason: None,
+            completed_at: None,
+            signature_receipt: None,
+            signed_result: None,
+            validated_chain_outcome: None,
+        }
+    }
+
+    /// The `v` computation has three arms that can carry out, and this test
+    /// drives all three. `1 << 63` and `u64::MAX` carry out of the multiply by
+    /// two; `u64::MAX / 2` carries out of the add of 35; and
+    /// `(u64::MAX - 35) / 2` leaves `2 * chain_id + 35` exactly `u64::MAX`, so
+    /// the add of the recovery id carries out when the signature's recovery id
+    /// is one, which the second key below produces for that chain id.
+    ///
+    /// `1 << 63` is the case that proves the multiply is checked rather than
+    /// wrapped: a wrapping multiply turns it into zero, and the adds that
+    /// follow then fit.
+    ///
+    /// Falsifier: compute `v` with wrapping arithmetic, so a chain id near the
+    /// top of `u64` signs as a small chain id and the transaction replays on
+    /// another chain.
+    #[test]
+    fn overflowing_chain_id_is_refused() {
+        let reason = "transaction chain_id is too large";
+        let signing_key = SigningKey::from_bytes((&[9u8; 32]).into()).expect("a valid key");
+        for chain_id in [1u64 << 63, u64::MAX, u64::MAX / 2] {
+            assert_eq!(
+                sign_eip155_legacy_transaction(&signing_key, &request(chain_id)).unwrap_err(),
+                reason
+            );
+        }
+        // This key signs with recovery id one for this chain id, so `v` reaches
+        // `u64::MAX + 1` on the third arm alone.
+        let mut seed = [7u8; 32];
+        seed[31] = 1;
+        let last_arm_key = SigningKey::from_bytes((&seed).into()).expect("a valid key");
+        assert_eq!(
+            sign_eip155_legacy_transaction(&last_arm_key, &request((u64::MAX - 35) / 2))
+                .unwrap_err(),
+            reason
+        );
+    }
+}

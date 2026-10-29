@@ -220,8 +220,24 @@ use std::process::Command;
 /// catches it, at did's launched-profile check, because the head keeps its
 /// order, the contract checks read only allow forms and no suite case reads
 /// that literal, so the journey fails at its launched profile and its oracle
-/// disagree panic, which names the planted form.
-const EXPECTED_FALSIFIERS: usize = 136;
+/// disagree panic, which names the planted form. Task 116 adds WP139, which
+/// reads `/etc/hosts`, outside every grant, in `status`'s ok arm and answers
+/// `storage_error` when that read is denied, and WP140, which appends one byte
+/// to `wallet-key.hex` inside the granted root in the same arm while every
+/// answer stays ok, so
+/// `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged`
+/// fails on its first answer and on its wallet directory comparison. Task 117
+/// adds WP141, which removes the row-set rule's call so a table may omit a row
+/// its dispatch answers, WP142, which makes the Right-vocabulary refusal always
+/// return early, WP143, which does the same for the both-sides refusal, and
+/// WP144, which does the same for the Linux-status refusal;
+/// `operations_table_row_check_refuses_each_bad_table` fails on that rule's
+/// cases. Task 119 adds WP145, which writes one file into the wallet directory
+/// in the `Request::Shutdown` arm of `fn handle` before it answers
+/// `Response::empty_ok()`, so the final wallet directory compare in
+/// `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged`
+/// fails because it finds a name the setup did not leave.
+const EXPECTED_FALSIFIERS: usize = 143;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

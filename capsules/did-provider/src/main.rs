@@ -760,11 +760,20 @@ mod tests {
     /// appended parent write grant, task 065 adds DID29 for the shutdown
     /// arm that writes into the provider's own executable while it lies
     /// beneath its storage root, and task 071 adds DID30 for the appended
-    /// parent read that adopts a planted persona key.
-    const EXPECTED_FALSIFIER_IDS: [&str; 30] = [
+    /// parent read that adopts a planted persona key. Task 115 adds DID31,
+    /// which reads `/etc/hosts`, outside every grant, in `get_did`'s ok arm and
+    /// answers `storage_error` when that read is denied, so `get_did` stops
+    /// answering ok and
+    /// `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged`
+    /// fails. Task 118 adds DID32, which writes one file into the provider's
+    /// own storage root in the `Request::Shutdown` arm of `fn handle` before
+    /// it answers, so that same test fails on its final compare after
+    /// `shutdown`.
+    const EXPECTED_FALSIFIER_IDS: [&str; 32] = [
         "DID01", "DID02", "DID03", "DID04", "DID05", "DID06", "DID07", "DID08", "DID09", "DID10",
         "DID11", "DID12", "DID13", "DID14", "DID15", "DID16", "DID17", "DID18", "DID19", "DID20",
         "DID21", "DID22", "DID23", "DID24", "DID25", "DID26", "DID27", "DID28", "DID29", "DID30",
+        "DID31", "DID32",
     ];
 
     /// The repository root; this crate, its test targets and the one runner's
@@ -1760,27 +1769,42 @@ mod tests {
         }
     }
 
+    /// Pins the principal-root mismatch refusal with another principal and a
+    /// suffix of the requested principal. Removing the comparison lets both
+    /// reach signature validation; replacing equality with `starts_with` lets
+    /// the suffix through. Either change loses the exact refusal below.
     #[test]
     fn test_verify_did_recovery_rejects_noncanonical_root_binding() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let did = encode_signing_key_did(&signing_key);
         let provider = DidProvider::new();
 
-        let err = match provider.verify_did_recovery(
-            &did,
-            "person:local:abc123",
-            "localhost://Users/person:local:other",
-            "protector:did:abc123",
-            "pdek:abc123",
-            "nonce:abc123",
-            now_ts(),
-            now_ts() + 300,
-            "00",
-        ) {
-            Response::Error { message, .. } => message,
-            other => panic!("Expected noncanonical root to fail closed, got {:?}", other),
-        };
-        assert!(err.contains("must match"));
+        for (case, root) in [
+            ("another principal", "localhost://Users/person:local:other"),
+            (
+                "principal plus a suffix",
+                "localhost://Users/person:local:abc123x",
+            ),
+        ] {
+            let err = match provider.verify_did_recovery(
+                &did,
+                "person:local:abc123",
+                root,
+                "protector:did:abc123",
+                "pdek:abc123",
+                "nonce:abc123",
+                now_ts(),
+                now_ts() + 300,
+                "00",
+            ) {
+                Response::Error { message, .. } => message,
+                other => panic!("Expected noncanonical root to fail closed, got {:?}", other),
+            };
+            assert_eq!(
+                err, "localhost_root must match the DID recovery principal",
+                "case {case}: root {root:?}"
+            );
+        }
     }
 
     #[test]
@@ -1823,6 +1847,9 @@ mod tests {
         }
     }
 
+    /// Pins the request validator's subject refusal. Removing its codec call
+    /// reaches the later DID decode, whose error lacks the recovery prefix,
+    /// so the exact assertion fails.
     #[test]
     fn test_verify_did_recovery_rejects_did_elastos_until_resolver_exists() {
         let provider = DidProvider::new();
@@ -1840,7 +1867,10 @@ mod tests {
             Response::Error { message, .. } => message,
             other => panic!("Expected did:elastos to fail closed, got {:?}", other),
         };
-        assert!(err.contains("did:key"));
+        assert_eq!(
+            err,
+            "invalid DID recovery subject: DID must be one canonical Ed25519 did:key"
+        );
     }
 
     #[test]
@@ -1877,25 +1907,27 @@ mod tests {
         ));
     }
 
+    /// Pins the expired refusal for a signed past proof and at `expires_at == now`.
+    /// Both intervals stay ordered and within the maximum TTL. Removing the
+    /// expired guard accepts them; changing `<=` to `<` accepts the boundary.
     #[test]
     fn test_verify_did_recovery_rejects_expired_proof() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let did = encode_signing_key_did(&signing_key);
-        let issued_at = now_ts().saturating_sub(600);
+        let now = now_ts();
+        let issued_at = now.saturating_sub(600);
         let expires_at = issued_at + 300;
-        let signature = did_recovery_test_signature(
-            &signing_key,
-            DidRecoveryPayload {
-                did: &did,
-                principal_id: "person:local:abc123",
-                localhost_root: "localhost://Users/person:local:abc123",
-                protector_id: "protector:did:abc123",
-                data_key_id: "pdek:abc123",
-                nonce: "nonce:abc123",
-                issued_at,
-                expires_at,
-            },
-        );
+        let recovery = DidRecoveryPayload {
+            did: &did,
+            principal_id: "person:local:abc123",
+            localhost_root: "localhost://Users/person:local:abc123",
+            protector_id: "protector:did:abc123",
+            data_key_id: "pdek:abc123",
+            nonce: "nonce:abc123",
+            issued_at,
+            expires_at,
+        };
+        let signature = did_recovery_test_signature(&signing_key, recovery);
         let provider = DidProvider::new();
         let err = match provider.verify_did_recovery(
             &did,
@@ -1911,7 +1943,26 @@ mod tests {
             Response::Error { message, .. } => message,
             other => panic!("Expected expired proof to fail closed, got {:?}", other),
         };
-        assert!(err.contains("expired"));
+        for (case, result) in [
+            ("signed past proof", Err(err)),
+            (
+                "expiry equals now",
+                validate_did_recovery_request(
+                    &DidRecoveryPayload {
+                        issued_at: now - 60,
+                        expires_at: now,
+                        ..recovery
+                    },
+                    now,
+                ),
+            ),
+        ] {
+            assert_eq!(
+                result,
+                Err("DID recovery proof expired".to_string()),
+                "{case}"
+            );
+        }
     }
 
     #[test]
@@ -2189,5 +2240,521 @@ mod tests {
             Response::Error { code, .. } => assert_eq!(code, "invalid_name"),
             _ => panic!("Expected error for traversal attempt"),
         }
+    }
+
+    /// The serialized form of a response, so a refusal is asserted whole: its
+    /// code, its message and the absence of a `data` field in one comparison.
+    fn refusal_wire(response: &Response) -> serde_json::Value {
+        serde_json::to_value(response).expect("a response serializes")
+    }
+
+    /// Pins `DID key not available`, the one string `get_did` (:244) and
+    /// `sign_bytes` (:261) raise. The chat call passes the sender and timestamp
+    /// check first, so it pins the `sign_bytes` site rather than :274.
+    ///
+    /// Falsifier: answer ok from either `None` arm; the matching assertion
+    /// fails.
+    #[test]
+    fn handler_refuses_a_missing_did_key() {
+        let provider = DidProvider::new();
+        assert_eq!(
+            refusal_wire(&provider.get_did()),
+            serde_json::json!({
+                "status": "error",
+                "code": "not_init",
+                "message": "DID key not available",
+            })
+        );
+        assert_eq!(
+            refusal_wire(&provider.sign_chat_message("did:key:zMissing", 1_714_000_000, "hello")),
+            serde_json::json!({
+                "status": "error",
+                "code": "not_init",
+                "message": "DID key not available",
+            })
+        );
+    }
+
+    /// Pins `No device key provided`, the one string `set_nickname` (:394) and
+    /// `get_persona_did` (:409) raise before any storage work.
+    ///
+    /// Falsifier: remove either `device_key.is_none()`/`None` guard; that call
+    /// then writes or answers ok instead of refusing.
+    #[test]
+    fn handler_refuses_a_missing_device_key() {
+        let mut provider = DidProvider::new();
+        let nickname = provider.set_nickname("alice");
+        let persona = provider.get_persona_did("bot");
+        for response in [&nickname, &persona] {
+            assert_eq!(
+                refusal_wire(response),
+                serde_json::json!({
+                    "status": "error",
+                    "code": "not_init",
+                    "message": "No device key provided",
+                })
+            );
+        }
+    }
+
+    /// Pins `No nickname set` (:388). The provider initialised without a stored
+    /// nickname, so the read that loads one answers "absent".
+    ///
+    /// Falsifier: answer ok from `get_nickname`'s `None` arm; this test fails.
+    #[test]
+    fn handler_refuses_a_missing_nickname() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = init_provider(Some(dir.path().to_str().unwrap()));
+        assert_eq!(
+            refusal_wire(&provider.get_nickname()),
+            serde_json::json!({
+                "status": "error",
+                "code": "not_set",
+                "message": "No nickname set",
+            })
+        );
+    }
+
+    /// Pins `Persona name must be 1-64 characters` (:414). Both ends of the
+    /// range are refused: an empty name and one of 65 characters, so removing
+    /// either term of the length condition fails this test.
+    ///
+    /// Falsifier: remove `name.is_empty() || name.len() > 64`; the empty case
+    /// then reaches the character rule and the 65-character case answers ok.
+    #[test]
+    fn handler_refuses_a_persona_name_of_wrong_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
+        let overlong = "a".repeat(65);
+        for name in ["", overlong.as_str()] {
+            assert_eq!(
+                refusal_wire(&provider.get_persona_did(name)),
+                serde_json::json!({
+                    "status": "error",
+                    "code": "invalid_name",
+                    "message": "Persona name must be 1-64 characters",
+                })
+            );
+        }
+    }
+
+    /// Pins `Persona name must be alphanumeric, hyphens, or underscores`
+    /// (:422). The name is eight characters, so the length check above it
+    /// passes and only the character rule refuses it.
+    ///
+    /// Falsifier: remove the character loop; the name then becomes a path
+    /// segment and the call answers ok.
+    #[test]
+    fn handler_refuses_a_persona_name_with_reserved_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
+        assert_eq!(
+            refusal_wire(&provider.get_persona_did("bad/name")),
+            serde_json::json!({
+                "status": "error",
+                "code": "invalid_name",
+                "message": "Persona name must be alphanumeric, hyphens, or underscores",
+            })
+        );
+    }
+
+    /// Pins `Invalid persona key length` (:440). The stored payload decrypts,
+    /// so the read and decrypt checks pass and only the 32-byte rule refuses.
+    ///
+    /// Falsifier: remove the length check; `copy_from_slice` then panics on the
+    /// short slice instead of the handler refusing it.
+    #[test]
+    fn handler_refuses_a_stored_persona_key_of_wrong_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
+        let storage_key = derive_storage_key(&provider.device_key.expect("init sets a key"));
+        let personas = dir.path().join("did").join("personas");
+        fs::create_dir_all(&personas).unwrap();
+        fs::write(
+            personas.join("bot.enc"),
+            encrypt_data(&storage_key, b"short").expect("short payload seals"),
+        )
+        .unwrap();
+        assert_eq!(
+            refusal_wire(&provider.get_persona_did("bot")),
+            serde_json::json!({
+                "status": "error",
+                "code": "key_error",
+                "message": "Invalid persona key length",
+            })
+        );
+    }
+
+    /// Pins `chat message signing requires sender_id and timestamp` (:274).
+    /// Three cases reach the one condition: an empty sender and a
+    /// whitespace-only sender each carry a valid timestamp, and a valid sender
+    /// carries timestamp zero. The whitespace case catches a lost `trim`.
+    ///
+    /// Falsifier: remove `sender_id.trim().is_empty()`; the first two cases
+    /// reach signing and answer ok. Remove `ts == 0`; the third case answers ok.
+    #[test]
+    fn handler_refuses_missing_chat_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = init_provider(Some(dir.path().to_str().unwrap()));
+        for (sender_id, ts) in [
+            ("", 1_714_000_000),
+            ("  \t ", 1_714_000_000),
+            ("did:key:zMissing", 0),
+        ] {
+            assert_eq!(
+                refusal_wire(&provider.sign_chat_message(sender_id, ts, "hello")),
+                serde_json::json!({
+                    "status": "error",
+                    "code": "invalid_intent",
+                    "message": "chat message signing requires sender_id and timestamp",
+                }),
+                "sender_id {sender_id:?}, ts {ts}"
+            );
+        }
+    }
+
+    /// Pins `Invalid hex data: {e}` (:304), with the text `hex`'s own `Display`
+    /// gives for the first character it refuses on `"zz"`.
+    ///
+    /// Falsifier: replace the format argument or let the decode error through;
+    /// this test fails on the changed or missing refusal.
+    #[test]
+    fn handler_refuses_invalid_hex_data() {
+        let provider = DidProvider::new();
+        let did = encode_signing_key_did(&SigningKey::from_bytes(&[9u8; 32]));
+        assert_eq!(
+            refusal_wire(&provider.verify(&did, "zz", "00")),
+            serde_json::json!({
+                "status": "error",
+                "code": "invalid_data",
+                "message": "Invalid hex data: Invalid character 'z' at position 0",
+            })
+        );
+    }
+
+    /// Pins `Invalid signature: {e}`, raised at two sites: `verify` (:317) and
+    /// `verify_did_recovery` (:366). The signature `"00"` decodes as one byte,
+    /// so it passes the hex check and reaches `Signature::from_slice`, whose
+    /// `Display` is `signature error`. The recovery call carries a request that
+    /// passes `validate_did_recovery_request` and a canonical subject DID.
+    ///
+    /// Falsifier: let a wrong-length signature through either site; that call
+    /// then answers ok with `valid: false` instead of refusing.
+    #[test]
+    fn handler_refuses_an_invalid_signature() {
+        let provider = DidProvider::new();
+        let did = encode_signing_key_did(&SigningKey::from_bytes(&[9u8; 32]));
+        let expected = serde_json::json!({
+            "status": "error",
+            "code": "invalid_signature",
+            "message": "Invalid signature: signature error",
+        });
+        assert_eq!(refusal_wire(&provider.verify(&did, "00", "00")), expected);
+
+        let issued_at = now_ts();
+        let recovery = provider.verify_did_recovery(
+            &did,
+            "person:local:abc123",
+            "localhost://Users/person:local:abc123",
+            "protector:did:abc123",
+            "pdek:abc123",
+            "nonce:abc123",
+            issued_at,
+            issued_at + 300,
+            "00",
+        );
+        assert_eq!(refusal_wire(&recovery), expected);
+    }
+
+    /// Pins `Read failed: {e}` (:454). `did/personas/bot.enc` exists as a
+    /// directory, so the existence check passes and the read is what fails.
+    ///
+    /// Falsifier: replace the read error with a generated key or a decrypt
+    /// attempt; the call no longer answers this reason.
+    #[test]
+    fn handler_refuses_an_unreadable_persona_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
+        let key_path = dir.path().join("did").join("personas").join("bot.enc");
+        fs::create_dir_all(&key_path).unwrap();
+        assert_eq!(
+            refusal_wire(&provider.get_persona_did("bot")),
+            serde_json::json!({
+                "status": "error",
+                "code": "key_error",
+                "message": "Read failed: Is a directory (os error 21)",
+            })
+        );
+    }
+
+    /// Pins `Decrypt failed: {e}` (:451). The stored payload is long enough
+    /// for a nonce and fails authentication, so only the decrypt refuses it.
+    ///
+    /// Falsifier: let the decrypt error fall through to the key length check;
+    /// this test then fails on the changed reason.
+    #[test]
+    fn handler_refuses_a_persona_key_that_fails_decryption() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
+        let personas = dir.path().join("did").join("personas");
+        fs::create_dir_all(&personas).unwrap();
+        fs::write(personas.join("bot.enc"), [0u8; NONCE_LEN + 4]).unwrap();
+        assert_eq!(
+            refusal_wire(&provider.get_persona_did("bot")),
+            serde_json::json!({
+                "status": "error",
+                "code": "key_error",
+                "message": "Decrypt failed: Decryption failed: aead::Error",
+            })
+        );
+    }
+
+    /// Pins `Failed to create dir: {e}` (:459). `did/personas` is a regular
+    /// file, so the persona key path does not exist and `create_dir_all`
+    /// refuses the fresh name.
+    ///
+    /// Falsifier: ignore the `create_dir_all` error and generate the key; this
+    /// test then fails on the changed answer.
+    #[test]
+    fn handler_refuses_a_persona_directory_that_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
+        fs::create_dir_all(dir.path().join("did")).unwrap();
+        fs::write(dir.path().join("did").join("personas"), b"not a directory").unwrap();
+        assert_eq!(
+            refusal_wire(&provider.get_persona_did("bot")),
+            serde_json::json!({
+                "status": "error",
+                "code": "key_error",
+                "message": "Failed to create dir: File exists (os error 17)",
+            })
+        );
+    }
+}
+
+/// The remaining refusal strings of the DID recovery request validator, the
+/// localhost-root check and the storage cipher, one test per string. The
+/// existing `tests` module owns subject, expired-proof and root-mismatch refusals.
+///
+/// These tests pin behaviour the production lines already have: they add no
+/// rule and change no answer. Each asserts the whole `Err` value, so a dropped
+/// check, a changed message or a reordered check fails the named test.
+#[cfg(test)]
+mod uf_did_refusal_tests {
+    use super::*;
+
+    /// The moment every case below reads as "now".
+    const NOW: u64 = 1_800_000_000;
+
+    const PRINCIPAL_ID: &str = "person:local:abc123";
+    const LOCALHOST_ROOT: &str = "localhost://Users/person:local:abc123";
+    const PROTECTOR_ID: &str = "protector:did:abc123";
+    const DATA_KEY_ID: &str = "pdek:abc123";
+    const NONCE: &str = "nonce:abc123";
+
+    /// A key of the length `encrypt_data` and `decrypt_data` take.
+    const CIPHER_KEY: [u8; 32] = [7u8; 32];
+
+    /// The canonical `did:key` every request case starts from, produced by the
+    /// crate's own encoder so the test pastes no literal.
+    fn subject_did() -> String {
+        encode_signing_key_did(&SigningKey::from_bytes(&[3u8; 32]))
+    }
+
+    /// A recovery request that passes every check in
+    /// `validate_did_recovery_request`, so a case changes one field and pins
+    /// the check it names.
+    fn valid_request<'a>(did: &'a str) -> DidRecoveryPayload<'a> {
+        DidRecoveryPayload {
+            did,
+            principal_id: PRINCIPAL_ID,
+            localhost_root: LOCALHOST_ROOT,
+            protector_id: PROTECTOR_ID,
+            data_key_id: DATA_KEY_ID,
+            nonce: NONCE,
+            issued_at: NOW - 60,
+            expires_at: NOW + 240,
+        }
+    }
+
+    fn refuse(payload: &DidRecoveryPayload<'_>) -> String {
+        validate_did_recovery_request(payload, NOW).unwrap_err()
+    }
+
+    /// Pins `Data too short` (`decrypt_data` :566).
+    ///
+    /// Falsifier: drop the length check, so `split_at` panics; this test fails
+    /// on the panic instead of the refusal.
+    #[test]
+    fn decrypt_data_refuses_input_shorter_than_its_nonce() {
+        assert_eq!(
+            decrypt_data(&CIPHER_KEY, &[0u8; NONCE_LEN - 1]).unwrap_err(),
+            "Data too short"
+        );
+    }
+
+    /// Pins `Decryption failed: {e}` (`decrypt_data` :575), with the text
+    /// `aead`'s own `Display` gives for its single error value.
+    ///
+    /// Falsifier: replace the format argument with an empty string, or let the
+    /// authentication error pass, and this test fails.
+    #[test]
+    fn decrypt_data_refuses_a_ciphertext_that_fails_authentication() {
+        let mut sealed =
+            encrypt_data(&CIPHER_KEY, b"elastos did recovery").expect("sealing succeeds");
+        *sealed
+            .last_mut()
+            .expect("a sealed payload is longer than its nonce") ^= 0x01;
+        assert_eq!(
+            decrypt_data(&CIPHER_KEY, &sealed).unwrap_err(),
+            "Decryption failed: aead::Error"
+        );
+    }
+
+    /// Pins `data_key_id must start with pdek:` (:625). The subject, the
+    /// principal, the root, the protector and the id itself all pass their
+    /// earlier checks first, so only the prefix rule fires.
+    ///
+    /// Falsifier: remove the prefix check at :625; this request then answers
+    /// `Ok`.
+    #[test]
+    fn did_recovery_refuses_a_data_key_id_without_its_prefix() {
+        let did = subject_did();
+        let mut payload = valid_request(&did);
+        payload.data_key_id = "xkey:abc123";
+        assert_eq!(refuse(&payload), "data_key_id must start with pdek:");
+    }
+
+    /// Pins `DID recovery proof issued_at is in the future` (:629), one second
+    /// past the 300-second allowance. Every other check passes.
+    ///
+    /// Falsifier: remove the issued_at check at :629; this request then answers
+    /// `Ok`.
+    #[test]
+    fn did_recovery_refuses_an_issued_at_in_the_future() {
+        let did = subject_did();
+        let mut payload = valid_request(&did);
+        payload.issued_at = NOW + 301;
+        payload.expires_at = NOW + 361;
+        assert_eq!(
+            refuse(&payload),
+            "DID recovery proof issued_at is in the future"
+        );
+    }
+
+    /// Pins `DID recovery proof expiry is invalid` (:637), which one string
+    /// carries for two rules, from two cases that each catch one rule's
+    /// removal on its own.
+    ///
+    /// Falsifier, first case: remove the `expires_at <= issued_at` comparison
+    /// at :634; the ends are ordered backwards yet both lie after now, so the
+    /// request answers `Ok` and the first assertion fails.
+    ///
+    /// Falsifier, second case: remove the `DID_RECOVERY_MAX_TTL_SECS`
+    /// comparison at :635; the ends are ordered and after now, so the request
+    /// answers `Ok` and the second assertion fails.
+    #[test]
+    fn did_recovery_refuses_an_invalid_expiry() {
+        let did = subject_did();
+        let mut payload = valid_request(&did);
+
+        payload.issued_at = NOW + 300;
+        payload.expires_at = NOW + 200;
+        assert_eq!(refuse(&payload), "DID recovery proof expiry is invalid");
+
+        payload.issued_at = NOW;
+        payload.expires_at = NOW + DID_RECOVERY_MAX_TTL_SECS + 1;
+        assert_eq!(refuse(&payload), "DID recovery proof expiry is invalid");
+    }
+
+    /// Pins `localhost_root must be a principal-owned localhost user root`,
+    /// raised at two sites: :647 for a value without the `localhost://Users/`
+    /// prefix, and :658 for a segment that is empty, `self`, `.`, `..`, over
+    /// 256 characters, or carries a slash, backslash, control or whitespace.
+    /// The request reaches the check through its call at :621.
+    ///
+    /// The prefix case is the bare principal id: it carries no slash, is not
+    /// reserved, fits 256 characters and equals `principal_id`, so only the
+    /// missing prefix refuses it.
+    ///
+    /// Falsifier, prefix case: accept the bare principal as an unprefixed root
+    /// at :647; the request then answers `Ok`, so the assertion fails.
+    /// Falsifier, segment cases: remove the matching term of the :649 to :656
+    /// condition; that request then reaches the principal match and answers
+    /// `localhost_root must match the DID recovery principal`, so the assertion
+    /// fails. Removing the call at :621 makes every case answer `Ok`.
+    #[test]
+    fn did_recovery_refuses_a_root_that_is_not_a_principal_owned_user_root() {
+        let did = subject_did();
+        let overlong = format!("localhost://Users/{}", "a".repeat(257));
+        for (case, root) in [
+            ("no prefix", PRINCIPAL_ID),
+            ("empty segment", "localhost://Users/"),
+            ("self", "localhost://Users/self"),
+            ("dot", "localhost://Users/."),
+            ("dot dot", "localhost://Users/.."),
+            ("over 256 characters", overlong.as_str()),
+            ("slash", "localhost://Users/person/local"),
+            ("backslash", "localhost://Users/person\\local"),
+            ("control", "localhost://Users/person\u{7f}local"),
+            ("whitespace", "localhost://Users/person local"),
+        ] {
+            let mut payload = valid_request(&did);
+            payload.localhost_root = root;
+            assert_eq!(
+                refuse(&payload),
+                "localhost_root must be a principal-owned localhost user root",
+                "case {case}: root {root:?}"
+            );
+        }
+    }
+
+    /// Pins `{field} is invalid` (:675), the one string four call sites raise:
+    /// `principal_id` (:620), `protector_id` (:622), `data_key_id` (:623) and
+    /// `nonce` (:627). Every case changes one field of a request that passes
+    /// the checks ahead of that field, and each predicate of
+    /// `validate_token_like_id` has a case only that predicate refuses: the
+    /// blank case is a non-ASCII space, which `trim` removes but the ASCII
+    /// whitespace term leaves alone, and the whitespace case is an ASCII space.
+    ///
+    /// Falsifier, per case: remove the guard that case names (the matching term
+    /// of the :667 to :673 condition for a predicate case, or the call at :620,
+    /// :622, :623 or :627 for a site case); that request then passes the token
+    /// check and answers whatever the next check says, so the assertion fails.
+    #[test]
+    fn did_recovery_refuses_an_invalid_token_like_id() {
+        let did = subject_did();
+        let overlong = "a".repeat(513);
+
+        for (case, principal_id) in [
+            ("blank", "\u{a0}"),
+            ("over 512 bytes", overlong.as_str()),
+            ("dot", "."),
+            ("dot dot", ".."),
+            ("slash", "person/local"),
+            ("backslash", "person\\local"),
+            ("control", "person\u{7f}local"),
+            ("whitespace", "person local"),
+        ] {
+            let mut payload = valid_request(&did);
+            payload.principal_id = principal_id;
+            assert_eq!(
+                refuse(&payload),
+                "principal_id is invalid",
+                "case {case}: principal_id {principal_id:?}"
+            );
+        }
+
+        let mut payload = valid_request(&did);
+        payload.protector_id = "protector/local";
+        assert_eq!(refuse(&payload), "protector_id is invalid");
+
+        let mut payload = valid_request(&did);
+        payload.data_key_id = "pdek/local";
+        assert_eq!(refuse(&payload), "data_key_id is invalid");
+
+        let mut payload = valid_request(&did);
+        payload.nonce = "nonce local";
+        assert_eq!(refuse(&payload), "nonce is invalid");
     }
 }

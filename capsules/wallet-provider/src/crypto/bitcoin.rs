@@ -505,3 +505,250 @@ pub(crate) fn bitcoin_challenge_id_from_message(message: &str) -> Option<&str> {
             .filter(|challenge_id| !challenge_id.trim().is_empty())
     })
 }
+
+#[cfg(test)]
+mod uf_tests {
+    use super::*;
+    use ::bitcoin::consensus::encode::{deserialize, serialize};
+    use ::bitcoin::{Network, Witness};
+    use serde_json::json;
+
+    /// Mainnet native P2WPKH address from the BIP-322 vector in
+    /// `src/tests/proofs.rs`, with the witness that vector verifies.
+    const BIP322_P2WPKH_ADDRESS: &str = "bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l";
+    const BIP322_P2WPKH_WITNESS: &str = "AkcwRAIgZRfIY3p7/DoVTty6YZbWS71bc5Vct9p9Fia83eRmw2QCICK/ENGfwLtptFluMGs2KsqoNSk89pO7F29zJLUx9a/sASECx/EgAxlkQpQ9hYjgGu6EBCPMVPwVIVJqO4XCsMvViHI=";
+
+    /// Mainnet Legacy P2PKH address, so the signed-message path runs.
+    const SIGNED_MESSAGE_P2PKH_ADDRESS: &str = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2";
+
+    fn bip322_request_message(address: &str) -> String {
+        format!(
+            "elastos.local wants you to prove Bitcoin account ownership:\n{address}\n\nURI: http://elastos.local/apps/home/\nVersion: 1\nNetwork: bitcoin\nResources:\n- elastos://auth/bitcoin-challenge/abc123"
+        )
+    }
+
+    fn bip322_request_payload(address: &str, message: &str) -> Value {
+        json!({
+            "schema": "elastos.wallet.bitcoin_bip322_request/v1",
+            "wallet_intent": "bitcoin_bip322_proof",
+            "chain_namespace": bitcoin_chain_namespace(Network::Bitcoin),
+            "address": address,
+            "message": message,
+        })
+    }
+
+    fn bip322_account() -> LinkedAccount {
+        LinkedAccount {
+            account_id: "wallet:bip122:mainnet:link".to_string(),
+            principal_id: "person:local:alice".to_string(),
+            proof_binding_id: "proof:wallet:bip122:mainnet".to_string(),
+            chain_namespace: bitcoin_chain_namespace(Network::Bitcoin),
+            address: BIP322_P2WPKH_ADDRESS.to_string(),
+            proof_type: MANAGED_BTC_P2WPKH_PROOF_TYPE.to_string(),
+            connector_id: None,
+            label: None,
+            linked_at: 0,
+            revoked_at: None,
+        }
+    }
+
+    #[test]
+    fn bitcoin_network_rejects_unknown() {
+        assert_eq!(
+            bitcoin_network("testnet").unwrap_err(),
+            "unsupported Bitcoin proof network"
+        );
+    }
+
+    #[test]
+    fn bitcoin_address_rejects_garbage() {
+        let err = bitcoin_address("not-an-address", Network::Bitcoin).unwrap_err();
+        assert!(err.starts_with("invalid Bitcoin address"), "got {err}");
+    }
+
+    #[test]
+    fn bitcoin_address_rejects_network_mismatch() {
+        let err = bitcoin_address(BIP322_P2WPKH_ADDRESS, Network::Testnet).unwrap_err();
+        assert!(
+            err.starts_with("Bitcoin address network mismatch"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn bip322_verify_rejects_bad_base64() {
+        let err = verify_bip322_simple(
+            "bitcoin",
+            BIP322_P2WPKH_ADDRESS,
+            "Hello World",
+            "not*base64",
+        )
+        .unwrap_err();
+        assert!(
+            err.starts_with("invalid BIP-322 base64 signature"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn bip322_verify_rejects_corrupt_witness() {
+        let witness_bytes = BASE64_STANDARD
+            .decode(BIP322_P2WPKH_WITNESS)
+            .expect("the vector signature is base64");
+        let witness: Witness = deserialize(&witness_bytes).expect("the vector holds a witness");
+        let mut reduced = Witness::new();
+        reduced.push(
+            witness
+                .iter()
+                .next()
+                .expect("the vector witness has items")
+                .to_vec(),
+        );
+        let signature = BASE64_STANDARD.encode(serialize(&reduced));
+        let err = verify_bip322_simple("bitcoin", BIP322_P2WPKH_ADDRESS, "Hello World", &signature)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "BIP-322 P2WPKH proof must contain signature and public key"
+        );
+    }
+
+    #[test]
+    fn validate_payload_rejects_bad_schema() {
+        let account = bip322_account();
+        let address = account.address.clone();
+        let mut payload = bip322_request_payload(&address, &bip322_request_message(&address));
+        payload["schema"] = json!("wrong");
+        assert_eq!(
+            validate_bitcoin_bip322_proof_payload(&payload, &account).unwrap_err(),
+            "Bitcoin BIP-322 payload has unsupported schema"
+        );
+    }
+
+    #[test]
+    fn validate_payload_rejects_wallet_intent_mismatch() {
+        let account = bip322_account();
+        let address = account.address.clone();
+        let mut payload = bip322_request_payload(&address, &bip322_request_message(&address));
+        payload["wallet_intent"] = json!("something_else");
+        assert_eq!(
+            validate_bitcoin_bip322_proof_payload(&payload, &account).unwrap_err(),
+            "Bitcoin BIP-322 payload has mismatched wallet_intent"
+        );
+    }
+
+    #[test]
+    fn validate_payload_rejects_chain_mismatch() {
+        let account = bip322_account();
+        let address = account.address.clone();
+        let mut payload = bip322_request_payload(&address, &bip322_request_message(&address));
+        payload["chain_namespace"] = json!("bip122:other");
+        assert_eq!(
+            validate_bitcoin_bip322_proof_payload(&payload, &account).unwrap_err(),
+            "Bitcoin BIP-322 payload chain does not match account"
+        );
+    }
+
+    #[test]
+    fn validate_payload_rejects_address_mismatch() {
+        let account = bip322_account();
+        let message = bip322_request_message(&account.address);
+        let mut payload = bip322_request_payload(&account.address, &message);
+        payload["address"] = json!("bc1qother");
+        assert_eq!(
+            validate_bitcoin_bip322_proof_payload(&payload, &account).unwrap_err(),
+            "Bitcoin BIP-322 payload address does not match account"
+        );
+    }
+
+    #[test]
+    fn validate_payload_rejects_missing_message_field() {
+        let account = bip322_account();
+        let address = account.address.clone();
+        let mut payload = bip322_request_payload(&address, &bip322_request_message(&address));
+        payload
+            .as_object_mut()
+            .expect("the payload is a JSON object")
+            .remove("message");
+        assert_eq!(
+            validate_bitcoin_bip322_proof_payload(&payload, &account).unwrap_err(),
+            "Bitcoin BIP-322 payload missing message"
+        );
+    }
+
+    #[test]
+    fn validate_payload_rejects_message_without_challenge_binding() {
+        let account = bip322_account();
+        let message = format!(
+            "wants you to prove Bitcoin account ownership {}",
+            account.address
+        );
+        let payload = bip322_request_payload(&account.address, &message);
+        assert_eq!(
+            validate_bitcoin_bip322_proof_payload(&payload, &account).unwrap_err(),
+            "Bitcoin BIP-322 message must bind a Runtime bitcoin challenge"
+        );
+    }
+
+    #[test]
+    fn proof_for_type_rejects_signature_type_mismatch() {
+        let err = verify_bitcoin_proof_for_type(
+            BITCOIN_PROOF_BIP322_SIMPLE,
+            "ecdsa",
+            "bitcoin",
+            BIP322_P2WPKH_ADDRESS,
+            "Hello World",
+            BIP322_P2WPKH_WITNESS,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "Bitcoin signature type ecdsa does not match required proof type bip322_simple"
+        );
+    }
+
+    #[test]
+    fn proof_for_type_rejects_missing_signed_message_public_key() {
+        let err = verify_bitcoin_proof_for_type(
+            BITCOIN_PROOF_SIGNED_MESSAGE,
+            BITCOIN_PROOF_SIGNED_MESSAGE,
+            "bitcoin",
+            SIGNED_MESSAGE_P2PKH_ADDRESS,
+            "Hello Legacy",
+            "AAAA",
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err, "Bitcoin signed-message proof missing public key");
+    }
+
+    #[test]
+    fn signed_message_rejects_unsupported_address_type() {
+        let err = verify_bitcoin_signed_message(
+            "bitcoin",
+            BIP322_P2WPKH_ADDRESS,
+            "Hello World",
+            "AAAA",
+            "00",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "Bitcoin signed-message proof supports Legacy P2PKH and Nested SegWit P2SH-P2WPKH accounts only"
+        );
+    }
+
+    #[test]
+    fn signed_message_rejects_bad_public_key_hex() {
+        let err = verify_bitcoin_signed_message(
+            "bitcoin",
+            SIGNED_MESSAGE_P2PKH_ADDRESS,
+            "Hello Legacy",
+            "AAAA",
+            "zz",
+        )
+        .unwrap_err();
+        assert!(err.starts_with("invalid Bitcoin public key"), "got {err}");
+    }
+}
