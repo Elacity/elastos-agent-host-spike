@@ -1390,9 +1390,10 @@ fn operations_section_cites_existing_tests() {
     /// The literal is an ordinary string, a character literal or byte
     /// character, a byte string, or a raw string. A raw string's prefix is
     /// `r`, `br` or `cr`, then zero or more `#`, then `"`, and its closer is
-    /// `"` followed by that same number of `#`. A character literal ends at
-    /// its `'`, where `\'` and `\\` are one character. A raw string and a
-    /// character literal are skipped, so a `json!` inside either is not a
+    /// `"` followed by that same number of `#`. A character literal holds one
+    /// character or escape before its closing `'`; labels and lifetimes stay
+    /// visible to the caller. Both `\'` and `\\` are one character. A raw
+    /// string and a character literal are skipped, so a `json!` inside either is not a
     /// literal. Any other byte returns the same index.
     fn skip_code_literal(source: &str, index: usize) -> Result<usize, String> {
         let bytes = source.as_bytes();
@@ -1410,12 +1411,38 @@ fn operations_section_cites_existing_tests() {
             _ => return Ok(index),
         };
         let Some(mut hashes) = raw_hashes else {
-            while let Some(&byte) = bytes.get(cursor) {
-                match byte {
-                    b'\\' => cursor += 2,
-                    b'\'' => return Ok(cursor + 1),
-                    _ => cursor += 1,
-                }
+            let character = source[cursor..].chars().next();
+            match character {
+                Some('\\') => match bytes.get(cursor + 1) {
+                    Some(b'x') => cursor += 4,
+                    Some(b'u') if bytes.get(cursor + 2) == Some(&b'{') => {
+                        cursor += 3;
+                        while bytes
+                            .get(cursor)
+                            .is_some_and(|byte| byte.is_ascii_hexdigit() || *byte == b'_')
+                        {
+                            cursor += 1;
+                        }
+                        if bytes.get(cursor) == Some(&b'}') {
+                            cursor += 1;
+                        }
+                    }
+                    _ => cursor += 2,
+                },
+                Some(character) => cursor += character.len_utf8(),
+                None => {}
+            }
+            if bytes.get(cursor) == Some(&b'\'') {
+                return Ok(cursor + 1);
+            }
+            if bytes[index] == b'\''
+                && character.is_some_and(|character| character.is_alphabetic() || character == '_')
+                && cursor < bytes.len()
+            {
+                // A continuation after an identifier character belongs to a
+                // label or lifetime. An incomplete character at EOF retains
+                // the unterminated-character refusal below.
+                return Ok(index);
             }
             return Err("an unterminated character is in the region".to_string());
         };
@@ -2592,6 +2619,56 @@ fn operations_section_cites_existing_tests() {
             "{literal}: {failure}"
         );
     }
+    // Labels and lifetimes keep the later answer visible. In particular,
+    // the two apostrophes around a labelled loop delimit separate tokens.
+    for (body, signature) in [
+        (
+            r#"fn ok_response() {
+                json!({"status":"ok","data":1});
+                'hide: loop {
+                    json!({"status":"ok","result":1});
+                    break 'hide;
+                }
+            }"#,
+            "fn ok_response(",
+        ),
+        (
+            r#"fn ok_response<'a>(value: &'a str) -> &'a str {
+                json!({"status":"ok","data":1});
+                json!({"status":"ok","result":1});
+                value
+            }"#,
+            "fn ok_response<",
+        ),
+        (
+            r#"fn ok_response() {
+                json!({"status":"ok","data":1});
+                let _: &'static str = "kept";
+                json!({"status":"ok","result":1});
+                let _: &'static str = "kept too";
+            }"#,
+            "fn ok_response(",
+        ),
+    ] {
+        let region = function_region(body, signature).expect("the whole function stays visible");
+        assert_eq!(region, body);
+        let failure = json_literal_keys(region).expect_err("the second answer stays visible");
+        assert_eq!(failure, "a second json! literal is in the region");
+        assert!(failure.contains("second") && failure.contains("json"));
+    }
+    let labelled_arm = r#"ProviderOperation::Shutdown => 'a: {
+        json!({"shutdown": true});
+        json!({"renamed": true});
+        break 'a Ok(());
+    },"#;
+    assert_eq!(
+        json_literal_keys(shutdown_arm_region(labelled_arm).expect("the labelled arm stays whole")),
+        Err("a second json! literal is in the region".to_string())
+    );
+    assert_eq!(
+        json_literal_keys(r#"json!({"shutdown": 'a: { break 'a true; }, "kept": true})"#),
+        Ok(vec!["shutdown".to_string(), "kept".to_string()])
+    );
     // The character literal `','` keeps the Shutdown arm open through the
     // second `json!`. The old reader cuts the arm at the comma inside it and
     // accepts the first keys.
@@ -2624,11 +2701,19 @@ fn operations_section_cites_existing_tests() {
         r#""ab""#,
         r#""a\"b""#,
         r#"b"ab""#,
+        r#"b"a\"b""#,
         "'a'",
+        "'é'",
+        "'🦀'",
         r"'\''",
         r"'\\'",
+        r"'\x7d'",
+        r"'\u{7d}'",
+        r"'\u{1_f980}'",
         "b'a'",
         r"b'\''",
+        r"b'\\'",
+        r"b'\x7d'",
         r#"r"a""#,
         r##"r#"a"#"##,
         r###"r##"a"##"###,
@@ -2636,6 +2721,7 @@ fn operations_section_cites_existing_tests() {
         r##"br#"a"#"##,
         r#"cr"a""#,
         r##"cr#"a"#"##,
+        r####"r###"a"#b"##c"###"####,
     ] {
         assert_eq!(
             skip_code_literal(literal, 0),
@@ -2644,11 +2730,37 @@ fn operations_section_cites_existing_tests() {
         );
     }
     for other in [
-        "x", "}", ",", "b", "c", "r", "break", "return", "result", "json!",
+        "x",
+        "}",
+        ",",
+        "b",
+        "c",
+        "r",
+        "break",
+        "return",
+        "result",
+        "json!",
+        "'hide: loop",
+        "'a: loop",
+        "'é: loop",
+        "'a str",
+        "'_ str",
+        "'static str",
+        "'static",
+        "'a>",
+        "br",
+        "cr",
+        "r#name",
+        "br#name",
+        "cr#name",
     ] {
         assert_eq!(skip_code_literal(other, 0), Ok(0), "{other}");
     }
     assert_eq!(skip_code_literal("ab", 1), Ok(1));
+    assert_eq!(skip_code_literal("x 'a str", 2), Ok(2));
+    assert_eq!(skip_code_literal("", 0), Ok(0));
+    assert_eq!(skip_code_literal("x", 1), Ok(1));
+    assert_eq!(skip_code_literal("x 'é' tail", 2), Ok(6));
     // Unterminated raw strings and characters keep their own reasons.
     for (text, reason) in [
         (r##"r#"a"##, "an unterminated raw string is in the region"),
@@ -2658,6 +2770,18 @@ fn operations_section_cites_existing_tests() {
         ),
         ("'a", "an unterminated character is in the region"),
         (r"'\'", "an unterminated character is in the region"),
+        ("'", "an unterminated character is in the region"),
+        ("b'a", "an unterminated character is in the region"),
+        (r"b'\'", "an unterminated character is in the region"),
+        (r"'\x7d", "an unterminated character is in the region"),
+        (r"'\u{7d}", "an unterminated character is in the region"),
+        ("';,'", "an unterminated character is in the region"),
+        ("b'ab'", "an unterminated character is in the region"),
+        (r#"r"a"#, "an unterminated raw string is in the region"),
+        (r##"br#"a"##, "an unterminated raw string is in the region"),
+        (r##"cr#"a"##, "an unterminated raw string is in the region"),
+        (r#""a"#, "an unterminated string is in the region"),
+        (r#"b"a"#, "an unterminated string is in the region"),
     ] {
         assert_eq!(
             skip_code_literal(text, 0),
