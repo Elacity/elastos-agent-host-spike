@@ -1,0 +1,11 @@
+id: F-A7-endbindsess
+file: src/ledger.rs
+test: ledger::model_release_after_session_change_is_refused
+test: ledger::model_timeout_after_session_change_is_refused
+--- old
+        if registered.session != held_session {
+            return Err(HoldBind::Refused(Refuse::Session));
+        }
+--- new
+        let _same_session = registered.session == held_session;
+--- end
