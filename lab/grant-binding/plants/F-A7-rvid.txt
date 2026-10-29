@@ -1,0 +1,25 @@
+id: F-A7-rvid
+file: src/ledger.rs
+test: ledger::model_forged_identity_does_not_move_the_reserve
+--- old
+        self.resolve(*call, request.handle)
+            .map_err(ReserveRefuse::Binding)?;
+--- new
+        let mut instance = call.instance;
+        if request.forged_identity.is_some() {
+            let live = self
+                .registry
+                .get(&call.instance)
+                .map(|record| record.identity.clone());
+            if let Some(live) = live {
+                for (id, record) in &self.registry {
+                    if *id != call.instance && record.identity == live {
+                        instance = *id;
+                        break;
+                    }
+                }
+            }
+        }
+        self.resolve(Call { instance }, request.handle)
+            .map_err(ReserveRefuse::Binding)?;
+--- end
