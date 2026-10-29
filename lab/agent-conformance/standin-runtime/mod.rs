@@ -1396,6 +1396,8 @@ fn grant_body(body: &Value) -> Result<(&str, &str, &str), (u16, String)> {
     Ok((request_id, duration, rationale.unwrap_or(DEFAULT_RATIONALE)))
 }
 
+type RequestBody<'a> = (&'a str, &'a str, &'a str, Option<&'a str>);
+
 /// The request body's only keys are `resource`, `action`, a `reason` and an
 /// optional plan preview (`plan`, the preview's `sha256`).
 ///
@@ -1404,7 +1406,7 @@ fn grant_body(body: &Value) -> Result<(&str, &str, &str), (u16, String)> {
 /// 400 with its own reason, and any other `plan*` key is `request body rejects
 /// ` plus that key, so a plan value is never silently dropped. A string `plan`
 /// is stored as given: it is the hash of the plan already previewed.
-fn request_body(body: &Value) -> Result<(&str, &str, &str, Option<&str>), (u16, String)> {
+fn request_body(body: &Value) -> Result<RequestBody<'_>, (u16, String)> {
     const NEEDS_RESOURCE: &str = "request body needs resource";
     const NEEDS_ACTION: &str = "request body needs action";
 
