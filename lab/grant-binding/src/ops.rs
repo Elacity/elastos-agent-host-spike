@@ -87,6 +87,20 @@ impl Verifier {
                         }
                     };
                 }
+                // The issuing grant owns the lifetime shared by its children.
+                // Keep this handle's rights and root for the effect check.
+                let mut effect = grant;
+                let mut request = request.clone();
+                let mut parent = effect.parent;
+                while let Some(handle) = parent {
+                    let ancestor = self
+                        .resolve(*call, handle)
+                        .map_err(OperateRefuse::Binding)?;
+                    effect.once = ancestor.once;
+                    request.handle = handle;
+                    parent = ancestor.parent;
+                }
+                let grant = effect;
                 #[rustfmt::skip]
                 let _ = {
                     super::resource_name(&grant.identity, path, Some(&grant.owned_root))
@@ -1349,7 +1363,7 @@ fn model_allow_once_ends_after_one_effect() {
         )
         .expect("allow once");
     let call = verifier.open_call(photo);
-    verifier
+    let child = verifier
         .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
         .expect("child journal does not end the grant");
     verifier
@@ -1370,6 +1384,18 @@ fn model_allow_once_ends_after_one_effect() {
         .expect_err("the allow-once grant has ended");
     assert_eq!(refusal, OperateRefuse::Binding(Refuse::UnknownHandle));
     assert_eq!(refusal.to_string(), "unknown handle");
+    for operation in [Operation::Append, Operation::Overwrite] {
+        let ended = verifier
+            .operate(
+                &call,
+                &guest(child),
+                operation,
+                "UsersAI/photo/library/roll/page",
+            )
+            .expect_err("the parent effect also ends its child journal");
+        assert_eq!(ended, OperateRefuse::Binding(Refuse::UnknownHandle));
+        assert_eq!(ended.to_string(), "unknown handle");
+    }
     let roll = verifier
         .ask_once(
             photo,
@@ -1478,4 +1504,103 @@ fn model_refused_effect_keeps_allow_once() {
             "UsersAI/photo/library/page",
         )
         .expect("a refused effect keeps the allow-once grant");
+}
+
+#[test]
+fn model_allow_once_child_effect_ends_shared_grant() {
+    for operation in [Operation::Append, Operation::Overwrite] {
+        let mut verifier = Verifier::new();
+        let photo = verifier.register_instance("photo", "session-a");
+        let rights = Rights {
+            append: true,
+            overwrite: true,
+            child_journal: true,
+        };
+        let library = verifier
+            .ask_once(photo, "UsersAI/photo/library", rights, crate::Asker::App)
+            .expect("allow once");
+        let call = verifier.open_call(photo);
+        let child = verifier
+            .create_child_journal(&call, &guest(library), "UsersAI/photo/library/roll")
+            .expect("first child creation keeps the shared allowance");
+        let sibling = verifier
+            .create_child_journal(&call, &guest(library), "UsersAI/photo/library/other")
+            .expect("sibling creation keeps the shared allowance");
+        let session = verifier
+            .ask_capability(photo, "UsersAI/photo/library", rights, crate::Asker::App)
+            .expect("independent session grant on the same root");
+        let separate_once = verifier
+            .ask_once(photo, "UsersAI/photo/library", rights, crate::Asker::App)
+            .expect("independent allow-once grant on the same root");
+
+        let outside = verifier
+            .operate(
+                &call,
+                &guest(child),
+                operation,
+                "UsersAI/photo/library/page",
+            )
+            .expect_err("the child keeps its own root");
+        assert_eq!(outside, OperateRefuse::Binding(Refuse::OutsideRoot));
+        assert_eq!(outside.to_string(), "use path leaves the owned root");
+        let refused = verifier
+            .create_child_journal(&call, &guest(child), "UsersAI/photo/library/roll/nested")
+            .expect_err("the child keeps its narrowed rights");
+        assert_eq!(refused, OperateRefuse::ChildJournalNotGranted);
+        assert_eq!(refused.to_string(), "child journal is its own right");
+        verifier
+            .operate(
+                &call,
+                &guest(child),
+                operation,
+                "UsersAI/photo/library/roll/page",
+            )
+            .expect("one child effect uses the shared allowance");
+
+        for (handle, path) in [
+            (child, "UsersAI/photo/library/roll/page"),
+            (library, "UsersAI/photo/library/page"),
+            (sibling, "UsersAI/photo/library/other/page"),
+        ] {
+            for next_operation in [Operation::Append, Operation::Overwrite] {
+                let ended = verifier
+                    .operate(&call, &guest(handle), next_operation, path)
+                    .expect_err("the child effect ends the parent and both children");
+                assert_eq!(ended, OperateRefuse::Binding(Refuse::UnknownHandle));
+                assert_eq!(ended.to_string(), "unknown handle");
+            }
+        }
+
+        let session_child = verifier
+            .create_child_journal(&call, &guest(session), "UsersAI/photo/library/roll")
+            .expect("the independent session grant keeps its child-journal right");
+        for (handle, path) in [
+            (session, "UsersAI/photo/library/page"),
+            (session_child, "UsersAI/photo/library/roll/page"),
+        ] {
+            for next_operation in [Operation::Append, Operation::Overwrite] {
+                verifier
+                    .operate(&call, &guest(handle), next_operation, path)
+                    .expect("independent session authority stays reusable");
+            }
+        }
+        verifier
+            .operate(
+                &call,
+                &guest(separate_once),
+                operation,
+                "UsersAI/photo/library/page",
+            )
+            .expect("the independent allow-once grant keeps its own allowance");
+        let ended = verifier
+            .operate(
+                &call,
+                &guest(separate_once),
+                operation,
+                "UsersAI/photo/library/page",
+            )
+            .expect_err("the independent allowance also ends after one effect");
+        assert_eq!(ended, OperateRefuse::Binding(Refuse::UnknownHandle));
+        assert_eq!(ended.to_string(), "unknown handle");
+    }
 }
