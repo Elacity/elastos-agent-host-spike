@@ -7017,3 +7017,100 @@ The shell refusal is removed. `visible` was left as it is.
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `standin-runtime/mod.rs:146` decides from stored grants. This change adds no capsule import. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:2146` `standin_sibling_cannot_use_the_grant`. The planted `return Ok(())` fails that assertion and the restored test passes. |
 | 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:147` reads grants and does not read instances. `admit_resident` at `:166` still admits a path on its own. |
+
+## 098 — A journal write keeps its revision
+
+098: `protected_write` is the one store of plaintext in `protected_objects`. A write under `.AppData/Agents/` stores only with `create_only` or the current `object_revision`. A blind write, a stale revision, and an append leave the stored bytes. A PASS gives the Runtime no A15 credit. This checkout had no `protected_write`, so this task adds that one store. `authorise` stays two arguments. No `falsifiers.json` id. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+The ask at `513988ebd` says: "The A15 host can send an approved journal write through the Runtime's own protected storage path, so the write is stored under the person's protected root."
+
+The journal uri is `localhost://Users/self/.AppData/Agents/demo-agent/tasks/task-1/journal`. The revision is SHA-256 over the principal id bytes, a zero byte, the resolved object uri bytes, a zero byte, and the stored plaintext, then a quoted lowercase hex string. The refusal messages are `create_only must be a boolean`, `if_revision must be a non-empty string`, `create_only and if_revision cannot both be set`, `append does not take create_only or if_revision`, `paths under .AppData/Agents/ must be spelled exactly, with lower-case segments of letters, digits, '.', '_' or '-' that do not end in '.'`, `append is read-then-write; Agent journals are written whole with a revision precondition`, `Agent journal writes need create_only or if_revision`, and `principal-root object write precondition failed`.
+
+### Hand-run falsifiers
+
+No list id. Each plant was restored before the next. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_journal_write_keeps_its_revision -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. The planted crate compiled. Each test failed on its assertion. After the last restore, `standin-runtime/mod.rs` matched its pre-plant bytes (`sha256 a981d79a5b07a44de49dbc8d6d76467fb84ce196c4666b85b12d979f51c58702`).
+
+F-standin-journal-blind. Named test `standin_journal_write_keeps_its_revision`. Exit 101. Cargo finished in 6.19 seconds. Assertion: `src/../standin-runtime/mod.rs:3080:9` `the stand-in keeps the first journal bytes after a blind write`. Left bytes `[98, 108, 105, 110, 100]` (`blind`). Right bytes `[106, 111, 117, 114, 110, 97, 108, 32, 118, 49]` (`journal v1`).
+
+Old:
+
+```text
+        if journal && precondition.is_none() {
+            return Err(REVISION_REQUIRED.to_owned());
+        }
+```
+
+New:
+
+```text
+        if journal && precondition.is_none() {
+            self.protected_objects
+                .insert(resolved.clone(), body.to_vec());
+            return Err(REVISION_REQUIRED.to_owned());
+        }
+```
+
+F-standin-journal-stale. Named test `standin_journal_write_keeps_its_revision`. Exit 101. Cargo finished in 0.46 seconds. Assertion: `src/../standin-runtime/mod.rs:3143:9` `the stand-in keeps the revised journal bytes`. Left bytes `[114, 101, 112, 108, 97, 121, 101, 100]` (`replayed`). Right bytes `[106, 111, 117, 114, 110, 97, 108, 32, 118, 50]` (`journal v2`).
+
+Old:
+
+```text
+                if current != *expected {
+                    return Err(CONFLICT.to_owned());
+                }
+```
+
+New:
+
+```text
+                if current != *expected {
+                    self.protected_objects.insert(resolved.clone(), bytes.clone());
+                    return Err(CONFLICT.to_owned());
+                }
+```
+
+F-standin-journal-append. Named test `standin_journal_write_keeps_its_revision`. Exit 101. Cargo finished in 0.43 seconds. Assertion: `src/../standin-runtime/mod.rs:3171:9` `the stand-in keeps the revised journal bytes after an append`. Left bytes `[106, 111, 117, 114, 110, 97, 108, 32, 118, 50, 32, 109, 111, 114, 101]` (`journal v2 more`). Right bytes `[106, 111, 117, 114, 110, 97, 108, 32, 118, 50]` (`journal v2`).
+
+Old:
+
+```text
+        if journal && append {
+            return Err(APPEND_JOURNAL.to_owned());
+        }
+```
+
+New:
+
+```text
+        if journal && append {
+            let mut prior = self
+                .protected_objects
+                .get(&resolved)
+                .cloned()
+                .unwrap_or_default();
+            prior.extend_from_slice(body);
+            self.protected_objects.insert(resolved.clone(), prior);
+            return Err(APPEND_JOURNAL.to_owned());
+        }
+```
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. Both commands stayed inside 600 seconds. The locked suite passed on the first run, so there was no census rerun. `Cargo.toml` and `Cargo.lock` are unchanged. The plants were already restored.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.12 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_journal_write_keeps_its_revision -- --exact`: exit 0, real 6.33 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 247.67 seconds. 143 passed, 0 failed, 14 ignored. The lib target passed 32 tests. The effects target passed 57 tests, with 12 ignored, in 196.50 seconds. The runtime target passed 10 tests, with 2 ignored, in 13.74 seconds.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `standin-runtime/mod.rs:852` `object_revision` is SHA-256 over the principal, the resolved uri, and the stored plaintext. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `standin-runtime/mod.rs:362` `authorise_presented` runs before the store. A mismatched action or resource stores nothing. The method opens no file, network, or `wasi` import. |
+| 3. A second path or a second copy of one rule? | No | `standin-runtime/mod.rs:309` is the one insert into `protected_objects`. `:852` is the one digest. `:862` `bridge_error` is the one error helper. `:955` `agents_area_refusal` is the one Agents rule. |
+| 4. Runtime core grows? | No | The edit is `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and `LOG.md`. `src/lib.rs` still points the lab module there. |
+| 5. Refusals deny by default with a clear reason? | Yes | `standin-runtime/mod.rs:277` returns `Agent journal writes need create_only or if_revision`. `:303` returns `principal-root object write precondition failed`. `:271` returns the append refusal. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `standin-runtime/mod.rs:246` `protected_write` stores only after the presented grant matches. This change adds no capsule import. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:2941` `standin_journal_write_keeps_its_revision`. Each plant fails that assertion and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:454` `bind_verified_principal` stores the principal. `:362` `authorise_presented` is the allowance. A bound principal does not grant the write. |

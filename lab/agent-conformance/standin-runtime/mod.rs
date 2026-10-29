@@ -10,8 +10,14 @@
 //! that session's `Live` grants. One map names the five statuses. One age
 //! compare keeps a `failed` or `stopped` entry. One check refuses a client
 //! on a shell-only route. `authorise` is a lab seam on that same filter.
+//!
+//! `protected_write` is the one store. Plaintext sits in `protected_objects`.
+//! `object_revision` is the one digest. A journal under `.AppData/Agents/`
+//! stays until the caller presents `create_only` or that current revision.
 
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 const LIVE_SCOPE: &str = "all_sessions_live";
 const RESIDENT_WORLD: &str = "resident-capsule";
@@ -68,6 +74,7 @@ struct Admitted {
     name: String,
     start: Start,
     world: &'static str,
+    principal: Option<String>,
 }
 
 struct Instance {
@@ -77,6 +84,12 @@ struct Instance {
     phase: ResidentStatus,
     cause: String,
     ended_at: Option<u64>,
+    principal: Option<String>,
+}
+
+struct AuditEvent {
+    kind: String,
+    request_id: String,
 }
 
 pub struct StandIn {
@@ -85,6 +98,8 @@ pub struct StandIn {
     instances: Vec<Instance>,
     next_id: u64,
     instant: u64,
+    protected_objects: BTreeMap<String, Vec<u8>>,
+    audit: Vec<AuditEvent>,
 }
 
 impl StandIn {
@@ -95,6 +110,8 @@ impl StandIn {
             instances: Vec::new(),
             next_id: 1,
             instant: 0,
+            protected_objects: BTreeMap::new(),
+            audit: Vec::new(),
         }
     }
 
@@ -161,6 +178,251 @@ impl StandIn {
         Ok(())
     }
 
+    /// The one hostcall. A protected `Users` or `UsersAI` invoke stores or reads.
+    ///
+    /// The response text carries no principal and no resolved root.
+    pub fn bridge_envelope(&mut self, line: &str, capsule_id: &str) -> Result<String, String> {
+        let envelope: Value =
+            serde_json::from_str(line.trim()).map_err(|_| "invalid json".to_owned())?;
+        let id = envelope
+            .get("id")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let request = envelope.get("request").cloned().unwrap_or(Value::Null);
+        let request_type = request
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if request_type != "resource_invoke" {
+            return Ok(bridge_error(id, "denied", "unsupported request").to_string());
+        }
+        let uri = request
+            .get("uri")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let operation = request
+            .get("operation")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let token = request
+            .get("token")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if !uri.starts_with("localhost://Users/") && !uri.starts_with("localhost://UsersAI/") {
+            return Ok(bridge_error(
+                id,
+                "denied",
+                "protected storage needs a Users or UsersAI uri",
+            )
+            .to_string());
+        }
+        let result = match operation {
+            "write" => {
+                let Some(body) = request.get("body").and_then(|value| value.as_str()) else {
+                    return Ok(
+                        bridge_error(id, protected_code(MISSING_CONTENT), MISSING_CONTENT)
+                            .to_string(),
+                    );
+                };
+                self.protected_write(capsule_id, token, uri, body.as_bytes(), &request)
+                    .map(|data| json!({ "id": id, "response": { "data": data } }))
+            }
+            "read" => self
+                .protected_read(capsule_id, token, uri)
+                .and_then(|bytes| {
+                    String::from_utf8(bytes)
+                        .map(|text| json!({ "id": id, "response": { "data": text } }))
+                        .map_err(|_| "stored bytes are not text".to_owned())
+                }),
+            _ => Err("unsupported operation".to_owned()),
+        };
+        match result {
+            Ok(value) => Ok(value.to_string()),
+            Err(message) => Ok(bridge_error(id, protected_code(&message), &message).to_string()),
+        }
+    }
+
+    /// The one protected store. Plaintext goes into `protected_objects`.
+    pub fn protected_write(
+        &mut self,
+        capsule_id: &str,
+        token: &str,
+        uri: &str,
+        body: &[u8],
+        fields: &Value,
+    ) -> Result<Value, String> {
+        let principal = self.instance_principal(capsule_id)?.to_owned();
+        let resolved = resolve_principal_uri(&principal, uri)?;
+        self.authorise_presented(
+            Caller::Client {
+                session_id: capsule_id,
+            },
+            token,
+            uri,
+            "write",
+            &resolved,
+        )?;
+        if let Some((_, message)) = agents_area_refusal(&resolved, "write") {
+            return Err(message.to_owned());
+        }
+        let append = append_flag(fields);
+        let precondition = write_precondition(fields)?;
+        let journal = in_agents_area(&resolved);
+        if journal && append {
+            return Err(APPEND_JOURNAL.to_owned());
+        }
+        if append && precondition.is_some() {
+            return Err(APPEND_COMBO.to_owned());
+        }
+        if journal && precondition.is_none() {
+            return Err(REVISION_REQUIRED.to_owned());
+        }
+        let existing = self.protected_objects.get(&resolved).cloned();
+        let bytes = if append {
+            match existing.clone() {
+                Some(mut prior) => {
+                    prior.extend_from_slice(body);
+                    prior
+                }
+                None => body.to_vec(),
+            }
+        } else {
+            body.to_vec()
+        };
+        match &precondition {
+            Some(WritePrecondition::Absent) => {
+                if existing.is_some() {
+                    return Err(CONFLICT.to_owned());
+                }
+            }
+            Some(WritePrecondition::Revision(expected)) => {
+                let Some(prior) = existing.as_ref() else {
+                    return Err(CONFLICT.to_owned());
+                };
+                let current = object_revision(&principal, &resolved, prior);
+                if current != *expected {
+                    return Err(CONFLICT.to_owned());
+                }
+            }
+            None => {}
+        }
+        self.protected_objects
+            .insert(resolved.clone(), bytes.clone());
+        self.record_use(token);
+        Ok(json!({
+            "stored": true,
+            "revision": object_revision(&principal, &resolved, &bytes),
+        }))
+    }
+
+    /// Returns the stored plaintext after the same grant and area checks.
+    pub fn protected_read(
+        &mut self,
+        capsule_id: &str,
+        token: &str,
+        uri: &str,
+    ) -> Result<Vec<u8>, String> {
+        let principal = self.instance_principal(capsule_id)?.to_owned();
+        let resolved = resolve_principal_uri(&principal, uri)?;
+        self.authorise_presented(
+            Caller::Client {
+                session_id: capsule_id,
+            },
+            token,
+            uri,
+            "read",
+            &resolved,
+        )?;
+        if let Some((_, message)) = agents_area_refusal(&resolved, "read") {
+            return Err(message.to_owned());
+        }
+        self.protected_objects
+            .get(&resolved)
+            .cloned()
+            .ok_or_else(|| "protected object is absent".to_owned())
+    }
+
+    /// `GET /api/audit`. A client is refused. Newest first.
+    pub fn get_audit(&self, caller: Caller<'_>) -> Result<Value, (u16, String)> {
+        require_shell(caller)?;
+        let events = self
+            .audit
+            .iter()
+            .rev()
+            .map(|event| {
+                json!({
+                    "type": event.kind,
+                    "request_id": event.request_id,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({ "events": events }))
+    }
+
+    fn authorise_presented(
+        &mut self,
+        caller: Caller<'_>,
+        request_id: &str,
+        resource: &str,
+        action: &str,
+        resolved: &str,
+    ) -> Result<(), String> {
+        self.authorise(caller, request_id)
+            .map_err(|(_, message)| message)?;
+        let (same, action_ok, spend, spelling) = {
+            let grant = self
+                .grants
+                .iter()
+                .find(|grant| grant.request_id == request_id)
+                .expect("authorise found this grant");
+            let same = resources_match(&grant.resource, resource);
+            let action_ok = grant.action == action;
+            let spelling = action_ok
+                && in_agents_area(&grant.resource)
+                && agents_area_refusal(resolved, action).is_some();
+            (
+                same,
+                action_ok,
+                same && action_ok && grant.duration == "once",
+                spelling,
+            )
+        };
+        if spend {
+            if let Some(grant) = self
+                .grants
+                .iter_mut()
+                .find(|grant| grant.request_id == request_id)
+            {
+                grant.life = Life::Exhausted;
+            }
+        }
+        if (same && action_ok) || spelling {
+            return Ok(());
+        }
+        if !action_ok {
+            return Err("wrong action".to_owned());
+        }
+        Err("wrong resource".to_owned())
+    }
+
+    fn instance_principal(&self, capsule_id: &str) -> Result<&str, String> {
+        let instance = self
+            .instances
+            .iter()
+            .find(|instance| instance.id == capsule_id)
+            .ok_or_else(|| format!("unknown instance: {capsule_id}"))?;
+        instance.principal.as_deref().ok_or_else(|| {
+            "localhost://Users requires a principal-scoped launch context".to_owned()
+        })
+    }
+
+    fn record_use(&mut self, request_id: &str) {
+        self.audit.push(AuditEvent {
+            kind: "capability_use".to_owned(),
+            request_id: request_id.to_owned(),
+        });
+    }
+
     /// Lab test seam, not a route.
     ///
     /// Stores one resident guest for `path`. This method reads no directory.
@@ -181,7 +443,26 @@ impl StandIn {
             name: name.to_owned(),
             start,
             world: RESIDENT_WORLD,
+            principal: None,
         });
+        Ok(())
+    }
+
+    /// Lab test seam, not a route.
+    ///
+    /// Stores the principal the verified launch supplied for this path.
+    pub fn bind_verified_principal(
+        &mut self,
+        path: &str,
+        principal: &str,
+    ) -> Result<(), (u16, String)> {
+        let Some(row) = self.admitted.iter_mut().find(|row| row.path == path) else {
+            return Err(self.not_resident(path));
+        };
+        if principal.is_empty() {
+            return Err((400, "verified principal is empty".to_owned()));
+        }
+        row.principal = Some(principal.to_owned());
         Ok(())
     }
 
@@ -227,6 +508,11 @@ impl StandIn {
         let (name, start) = self.admitted_start(path)?;
         let id = self.mint_id();
         let phase = ResidentStatus::Starting;
+        let principal = self
+            .admitted
+            .iter()
+            .find(|row| row.path == path)
+            .and_then(|row| row.principal.clone());
         self.instances.push(Instance {
             id: id.clone(),
             name: name.clone(),
@@ -234,6 +520,7 @@ impl StandIn {
             phase,
             cause: String::new(),
             ended_at: None,
+            principal,
         });
         Ok(launch_body(&id, &name, phase))
     }
@@ -541,6 +828,186 @@ fn stop_reason(body: &Value) -> Result<&str, (u16, String)> {
         return Err((400, "stop reason must be a string".to_owned()));
     }
     reason.ok_or_else(|| (400, "stop body misses reason".to_owned()))
+}
+
+const CREATE_ONLY_BOOL: &str = "create_only must be a boolean";
+const IF_REVISION_STRING: &str = "if_revision must be a non-empty string";
+const BOTH_SET: &str = "create_only and if_revision cannot both be set";
+const APPEND_JOURNAL: &str =
+    "append is read-then-write; Agent journals are written whole with a revision precondition";
+const APPEND_COMBO: &str = "append does not take create_only or if_revision";
+const REVISION_REQUIRED: &str = "Agent journal writes need create_only or if_revision";
+const CONFLICT: &str = "principal-root object write precondition failed";
+const SPELLING: &str = "paths under .AppData/Agents/ must be spelled exactly, with lower-case segments of letters, digits, '.', '_' or '-' that do not end in '.'";
+const OPERATION_NOT_ALLOWED: &str = "only read and write are allowed under .AppData/Agents/";
+const MISSING_CONTENT: &str = "write request missing content";
+
+enum WritePrecondition {
+    Absent,
+    Revision(String),
+}
+
+/// SHA-256 over the principal id, a zero byte, the resolved uri, a zero byte,
+/// and the stored plaintext. The result is a quoted lowercase hex string.
+pub fn object_revision(principal_id: &str, object_uri: &str, plaintext: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(principal_id.as_bytes());
+    digest.update([0u8]);
+    digest.update(object_uri.as_bytes());
+    digest.update([0u8]);
+    digest.update(plaintext);
+    format!("\"{:x}\"", digest.finalize())
+}
+
+fn bridge_error(id: u64, code: &str, message: &str) -> Value {
+    json!({
+        "id": id,
+        "response": {
+            "type": "error",
+            "code": code,
+            "message": message,
+        }
+    })
+}
+
+fn protected_code(message: &str) -> &'static str {
+    match message {
+        CREATE_ONLY_BOOL | IF_REVISION_STRING | BOTH_SET | APPEND_COMBO => "invalid_content",
+        SPELLING => "invalid_localhost_path",
+        APPEND_JOURNAL => "append_not_allowed",
+        REVISION_REQUIRED => "revision_required",
+        CONFLICT => "revision_conflict",
+        OPERATION_NOT_ALLOWED => "operation_not_allowed",
+        _ => "denied",
+    }
+}
+
+fn principal_digest_prefix(principal: &str) -> String {
+    let digest = Sha256::digest(principal.as_bytes());
+    format!("{:x}", digest)[..24].to_owned()
+}
+
+fn scoped_root(uri: &str, alias: &str, root: &str) -> Option<String> {
+    if uri == alias {
+        return Some(root.to_owned());
+    }
+    let prefix = format!("{alias}/");
+    uri.strip_prefix(&prefix)
+        .map(|rest| format!("{root}/{rest}"))
+}
+
+fn resolve_principal_uri(principal: &str, uri: &str) -> Result<String, String> {
+    if uri.split('/').any(|segment| segment == "..") {
+        return Err("invalid principal-root object path".to_owned());
+    }
+    let prefix = principal_digest_prefix(principal);
+    let users = format!("localhost://Users/{prefix}");
+    let usersai = format!("localhost://UsersAI/{prefix}");
+    if let Some(scoped) = scoped_root(uri, "localhost://Users/self", &users) {
+        return Ok(scoped);
+    }
+    if uri == users || uri.starts_with(&format!("{users}/")) {
+        return Ok(uri.to_owned());
+    }
+    if uri.starts_with("localhost://Users/") {
+        return Err(
+            "localhost://Users roots must use Users/self or the active principal root".to_owned(),
+        );
+    }
+    if let Some(scoped) = scoped_root(uri, "localhost://UsersAI/self", &usersai) {
+        return Ok(scoped);
+    }
+    if uri == usersai || uri.starts_with(&format!("{usersai}/")) {
+        return Ok(uri.to_owned());
+    }
+    if uri.starts_with("localhost://UsersAI/") {
+        return Err(
+            "localhost://UsersAI roots must use UsersAI/self or the active principal root"
+                .to_owned(),
+        );
+    }
+    Err("protected storage needs a Users or UsersAI uri".to_owned())
+}
+
+fn resources_match(grant: &str, presented: &str) -> bool {
+    resource_segments(grant) == resource_segments(presented)
+}
+
+fn resource_segments(uri: &str) -> Vec<&str> {
+    let rest = uri.split_once("://").map(|(_, rest)| rest).unwrap_or(uri);
+    rest.split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect()
+}
+
+fn in_agents_area(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("localhost://Users/") else {
+        return false;
+    };
+    let named: Vec<&str> = rest
+        .split('/')
+        .filter(|segment| !matches!(*segment, "" | "."))
+        .collect();
+    let folds_to = |segment: &str, target: &str| segment.to_uppercase().to_lowercase() == target;
+    named.len() >= 3 && folds_to(named[1], ".appdata") && folds_to(named[2], "agents")
+}
+
+fn agents_area_refusal(rooted: &str, operation: &str) -> Option<(&'static str, &'static str)> {
+    if !in_agents_area(rooted) {
+        return None;
+    }
+    if !matches!(operation, "read" | "write") {
+        return Some(("operation_not_allowed", OPERATION_NOT_ALLOWED));
+    }
+    let segments: Vec<&str> = rooted
+        .strip_prefix("localhost://Users/")
+        .unwrap_or_default()
+        .split('/')
+        .collect();
+    let segment_ok = |segment: &&str| {
+        segment
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            && segment.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'.' | b'_' | b'-')
+            })
+            && !segment.ends_with('.')
+    };
+    let exact = segments.len() >= 3
+        && !segments.iter().any(|segment| matches!(*segment, "" | "."))
+        && segments[1] == ".AppData"
+        && segments[2] == "Agents"
+        && segments[3..].iter().all(segment_ok);
+    if !exact || (operation == "write" && segments.len() < 4) {
+        return Some(("invalid_localhost_path", SPELLING));
+    }
+    None
+}
+
+fn append_flag(fields: &Value) -> bool {
+    matches!(fields.get("append"), Some(Value::Bool(true)))
+}
+
+fn write_precondition(fields: &Value) -> Result<Option<WritePrecondition>, String> {
+    let create_only = match fields.get("create_only") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err(CREATE_ONLY_BOOL.to_owned()),
+    };
+    let if_revision = match fields.get("if_revision") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
+        Some(_) => return Err(IF_REVISION_STRING.to_owned()),
+    };
+    match (create_only, if_revision) {
+        (true, Some(_)) => Err(BOTH_SET.to_owned()),
+        (true, None) => Ok(Some(WritePrecondition::Absent)),
+        (false, Some(revision)) => Ok(Some(WritePrecondition::Revision(revision))),
+        (false, None) => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -2413,5 +2880,609 @@ mod tests {
             owner.is_ok(),
             "the stand-in authorises the owning client of that live grant: {owner:?}"
         );
+    }
+
+    const JOURNAL: &str = "localhost://Users/self/.AppData/Agents/demo-agent/tasks/task-1/journal";
+
+    fn write_line(uri: &str, body: &str, token: &str, fields: Value) -> String {
+        let mut request = json!({
+            "type": "resource_invoke",
+            "uri": uri,
+            "operation": "write",
+            "body": body,
+            "token": token,
+        });
+        if let Some(object) = fields.as_object() {
+            for (key, value) in object {
+                request[key] = value.clone();
+            }
+        }
+        json!({ "id": 1, "request": request }).to_string()
+    }
+
+    fn host_text(standin: &mut StandIn, line: &str) -> String {
+        standin
+            .bridge_envelope(line, "component-1")
+            .expect("the stand-in answers the invoke")
+    }
+
+    fn host_value(standin: &mut StandIn, line: &str) -> Value {
+        let text = host_text(standin, line);
+        serde_json::from_str(&text).expect("the stand-in returns json")
+    }
+
+    fn assert_refused(value: &Value, code: &str, message: &str, why: &str) {
+        assert_eq!(value["response"]["code"], code, "{why}");
+        assert_eq!(value["response"]["message"], message, "{why}");
+    }
+
+    fn assert_journal_running(standin: &StandIn) {
+        let listed = shell_list(standin);
+        let entry = listed["capsules"]
+            .as_array()
+            .expect("the stand-in returns capsules")
+            .iter()
+            .find(|entry| entry["id"] == "component-1");
+        let expected = json!({
+            "id": "component-1",
+            "name": "journal-a",
+            "status": "running",
+            "session_id": "component-1",
+            "cause": "",
+        });
+        assert_eq!(
+            entry,
+            Some(&expected),
+            "the stand-in leaves the journal instance running"
+        );
+    }
+
+    #[test]
+    fn standin_journal_write_keeps_its_revision() {
+        let mut standin = StandIn::new();
+        standin
+            .admit_resident("/capsules/journal-a", "journal-a", Start::Ok)
+            .expect("the stand-in admits journal-a");
+        standin
+            .bind_verified_principal("/capsules/journal-a", "person:local:ada")
+            .expect("the stand-in binds the verified principal");
+        let launched = standin
+            .post_capsules(Caller::Shell, &json!({ "path": "/capsules/journal-a" }))
+            .expect("the stand-in launches journal-a");
+        assert_eq!(
+            launched["id"], "component-1",
+            "the stand-in names the first launch component-1"
+        );
+        standin
+            .finish_start("component-1")
+            .expect("the stand-in finishes start");
+        assert_journal_running(&standin);
+        let journal = JOURNAL;
+        standin.seed_grant(
+            "req-j",
+            "component-1",
+            journal,
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-r",
+            "component-1",
+            journal,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-once",
+            "component-1",
+            journal,
+            "write",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        let notes = "localhost://Users/self/notes";
+        standin.seed_grant(
+            "req-note",
+            "component-1",
+            notes,
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-note-read",
+            "component-1",
+            notes,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        let resolved = resolve_principal_uri("person:local:ada", journal)
+            .expect("the stand-in resolves the journal");
+        let first_line = write_line(
+            journal,
+            "journal v1",
+            "req-j",
+            json!({ "create_only": true }),
+        );
+        let first_text = host_text(&mut standin, &first_line);
+        assert!(
+            !first_text.contains("person:local:ada"),
+            "the stand-in response names no principal"
+        );
+        assert!(
+            !first_text.contains("localhost://"),
+            "the stand-in response names no resolved root"
+        );
+        let first: Value = serde_json::from_str(&first_text).expect("the stand-in returns json");
+        let v1 = object_revision("person:local:ada", &resolved, b"journal v1");
+        assert_eq!(
+            first["response"]["data"]["stored"], true,
+            "the stand-in stores the journal"
+        );
+        assert_eq!(
+            first["response"]["data"]["revision"], v1,
+            "the stand-in returns the revision of the stored journal"
+        );
+        assert_eq!(
+            standin
+                .protected_read("component-1", "req-r", journal)
+                .expect("the stand-in returns the stored journal"),
+            b"journal v1".to_vec(),
+            "the stand-in returns the first journal bytes"
+        );
+        let again = host_value(
+            &mut standin,
+            &write_line(
+                journal,
+                "journal v1 again",
+                "req-j",
+                json!({ "create_only": true }),
+            ),
+        );
+        assert_refused(
+            &again,
+            "revision_conflict",
+            CONFLICT,
+            "the stand-in keeps the first journal when create_only finds it",
+        );
+        assert_eq!(
+            standin
+                .protected_read("component-1", "req-r", journal)
+                .expect("the stand-in returns the stored journal"),
+            b"journal v1".to_vec(),
+            "the stand-in keeps the first journal bytes"
+        );
+        let blind = host_value(
+            &mut standin,
+            &write_line(journal, "blind", "req-j", json!({})),
+        );
+        assert_refused(
+            &blind,
+            "revision_required",
+            REVISION_REQUIRED,
+            "the stand-in refuses a blind journal write",
+        );
+        assert_eq!(
+            standin
+                .protected_read("component-1", "req-r", journal)
+                .expect("the stand-in returns the stored journal"),
+            b"journal v1".to_vec(),
+            "the stand-in keeps the first journal bytes after a blind write"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-j"),
+            (Life::Live, false),
+            "the stand-in leaves the session grant live"
+        );
+        let once_blind = host_value(
+            &mut standin,
+            &write_line(journal, "blind", "req-once", json!({})),
+        );
+        assert_refused(
+            &once_blind,
+            "revision_required",
+            REVISION_REQUIRED,
+            "the stand-in refuses a blind journal write on a once grant",
+        );
+        assert_eq!(
+            grant_record(&standin, "req-once"),
+            (Life::Exhausted, false),
+            "the stand-in exhausts the once grant when the write stores nothing"
+        );
+        assert_eq!(
+            standin
+                .protected_read("component-1", "req-r", journal)
+                .expect("the stand-in returns the stored journal"),
+            b"journal v1".to_vec(),
+            "the stand-in keeps the first journal bytes after the once grant"
+        );
+        let second = host_value(
+            &mut standin,
+            &write_line(journal, "journal v2", "req-j", json!({ "if_revision": v1 })),
+        );
+        let v2 = object_revision("person:local:ada", &resolved, b"journal v2");
+        assert_eq!(
+            second["response"]["data"]["stored"], true,
+            "the stand-in stores the revised journal"
+        );
+        assert_eq!(
+            second["response"]["data"]["revision"], v2,
+            "the stand-in returns the revision of the revised journal"
+        );
+        assert_eq!(
+            standin
+                .protected_read("component-1", "req-r", journal)
+                .expect("the stand-in returns the stored journal"),
+            b"journal v2".to_vec(),
+            "the stand-in returns the revised journal bytes"
+        );
+        let stale = host_value(
+            &mut standin,
+            &write_line(journal, "replayed", "req-j", json!({ "if_revision": v1 })),
+        );
+        assert_refused(
+            &stale,
+            "revision_conflict",
+            CONFLICT,
+            "the stand-in refuses a stale journal revision",
+        );
+        assert_eq!(
+            standin
+                .protected_read("component-1", "req-r", journal)
+                .expect("the stand-in returns the stored journal"),
+            b"journal v2".to_vec(),
+            "the stand-in keeps the revised journal bytes"
+        );
+        let appended = host_value(
+            &mut standin,
+            &write_line(
+                journal,
+                " more",
+                "req-j",
+                json!({ "append": true, "if_revision": v2 }),
+            ),
+        );
+        assert_refused(
+            &appended,
+            "append_not_allowed",
+            APPEND_JOURNAL,
+            "the stand-in refuses an append to the journal",
+        );
+        assert_eq!(
+            standin
+                .protected_read("component-1", "req-r", journal)
+                .expect("the stand-in returns the stored journal"),
+            b"journal v2".to_vec(),
+            "the stand-in keeps the revised journal bytes after an append"
+        );
+        let both = host_value(
+            &mut standin,
+            &write_line(
+                journal,
+                "both",
+                "req-j",
+                json!({ "create_only": true, "if_revision": v2 }),
+            ),
+        );
+        assert_refused(
+            &both,
+            "invalid_content",
+            BOTH_SET,
+            "the stand-in refuses create_only together with if_revision",
+        );
+        assert_eq!(
+            standin
+                .protected_read("component-1", "req-r", journal)
+                .expect("the stand-in returns the stored journal"),
+            b"journal v2".to_vec(),
+            "the stand-in keeps the revised journal bytes when both preconditions are set"
+        );
+        let dotted = format!("{journal}.");
+        let dot = host_value(
+            &mut standin,
+            &write_line(&dotted, "dot", "req-j", json!({ "create_only": true })),
+        );
+        assert_eq!(
+            dot["response"]["code"], "invalid_localhost_path",
+            "the stand-in refuses a journal segment that ends in '.'"
+        );
+        assert!(
+            dot["response"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("paths under .AppData/Agents/ must be spelled exactly"),
+            "the stand-in names the exact journal spelling: {dot}"
+        );
+        assert_eq!(
+            standin
+                .protected_read("component-1", "req-r", journal)
+                .expect("the stand-in returns the stored journal"),
+            b"journal v2".to_vec(),
+            "the stand-in keeps the revised journal bytes after a bad spelling"
+        );
+        let notes_resolved = resolve_principal_uri("person:local:ada", notes)
+            .expect("the stand-in resolves the note");
+        let aa = host_value(
+            &mut standin,
+            &write_line(notes, "aa", "req-note", json!({})),
+        );
+        assert_eq!(
+            aa["response"]["data"]["stored"], true,
+            "the stand-in stores the note"
+        );
+        assert_eq!(
+            aa["response"]["data"]["revision"],
+            object_revision("person:local:ada", &notes_resolved, b"aa"),
+            "the stand-in returns the revision of the stored note"
+        );
+        assert_eq!(
+            standin
+                .protected_read("component-1", "req-note-read", notes)
+                .expect("the stand-in returns the stored note"),
+            b"aa".to_vec(),
+            "the stand-in returns the stored note"
+        );
+        let bb = host_value(
+            &mut standin,
+            &write_line(notes, "bb", "req-note", json!({ "append": true })),
+        );
+        assert_eq!(
+            bb["response"]["data"]["stored"], true,
+            "the stand-in appends the note"
+        );
+        assert_eq!(
+            bb["response"]["data"]["revision"],
+            object_revision("person:local:ada", &notes_resolved, b"aabb"),
+            "the stand-in returns the revision of the appended note"
+        );
+        assert_eq!(
+            standin
+                .protected_read("component-1", "req-note-read", notes)
+                .expect("the stand-in returns the stored note"),
+            b"aabb".to_vec(),
+            "the stand-in returns the appended note"
+        );
+        let cc = host_value(
+            &mut standin,
+            &write_line(
+                notes,
+                "cc",
+                "req-note",
+                json!({ "append": true, "create_only": true }),
+            ),
+        );
+        assert_refused(
+            &cc,
+            "invalid_content",
+            APPEND_COMBO,
+            "the stand-in refuses append together with create_only",
+        );
+        assert_eq!(
+            standin
+                .protected_read("component-1", "req-note-read", notes)
+                .expect("the stand-in returns the stored note"),
+            b"aabb".to_vec(),
+            "the stand-in keeps the appended note"
+        );
+        let bad_bool = host_value(
+            &mut standin,
+            &write_line(journal, "no", "req-j", json!({ "create_only": "yes" })),
+        );
+        assert_refused(
+            &bad_bool,
+            "invalid_content",
+            CREATE_ONLY_BOOL,
+            "the stand-in refuses a create_only value that is not a boolean",
+        );
+        let bad_revision = host_value(
+            &mut standin,
+            &write_line(journal, "no", "req-j", json!({ "if_revision": "" })),
+        );
+        assert_refused(
+            &bad_revision,
+            "invalid_content",
+            IF_REVISION_STRING,
+            "the stand-in refuses an empty if_revision",
+        );
+        let bad_type = host_value(
+            &mut standin,
+            &write_line(journal, "no", "req-j", json!({ "if_revision": 1 })),
+        );
+        assert_refused(
+            &bad_type,
+            "invalid_content",
+            IF_REVISION_STRING,
+            "the stand-in refuses an if_revision value that is not a string",
+        );
+        let append_text = host_value(
+            &mut standin,
+            &write_line(journal, "no", "req-j", json!({ "append": "yes" })),
+        );
+        assert_refused(
+            &append_text,
+            "revision_required",
+            REVISION_REQUIRED,
+            "the stand-in treats a non-true append as absent",
+        );
+        let null_create = host_value(
+            &mut standin,
+            &write_line(journal, "no", "req-j", json!({ "create_only": null })),
+        );
+        assert_refused(
+            &null_create,
+            "revision_required",
+            REVISION_REQUIRED,
+            "the stand-in treats a null create_only as false",
+        );
+        let wrong_action = host_value(
+            &mut standin,
+            &write_line(journal, "no", "req-r", json!({ "create_only": true })),
+        );
+        assert_refused(
+            &wrong_action,
+            "denied",
+            "wrong action",
+            "the stand-in refuses a read grant for a journal write",
+        );
+        let wrong_resource = host_value(&mut standin, &write_line(notes, "zz", "req-j", json!({})));
+        assert_refused(
+            &wrong_resource,
+            "denied",
+            "wrong resource",
+            "the stand-in refuses the journal grant for the note",
+        );
+        assert_eq!(
+            standin
+                .protected_read("component-1", "req-note-read", notes)
+                .expect("the stand-in returns the stored note"),
+            b"aabb".to_vec(),
+            "the stand-in keeps the appended note after a wrong grant"
+        );
+        assert_eq!(
+            standin
+                .protected_read("component-1", "req-r", journal)
+                .expect("the stand-in returns the stored journal"),
+            b"journal v2".to_vec(),
+            "the stand-in keeps the revised journal bytes after a wrong grant"
+        );
+        let crossed = standin.protected_read("component-1", "req-note", journal);
+        assert_eq!(
+            crossed.expect_err("the stand-in refuses the notes grant for the journal"),
+            "wrong action",
+            "the stand-in refuses the notes write grant for a journal read"
+        );
+        let bare = "localhost://Users/self/.AppData/Agents";
+        let bare_write = host_value(
+            &mut standin,
+            &write_line(bare, "no", "req-j", json!({ "create_only": true })),
+        );
+        assert_refused(
+            &bare_write,
+            "invalid_localhost_path",
+            SPELLING,
+            "the stand-in refuses a journal write with no name under Agents",
+        );
+        assert_eq!(
+            agents_area_refusal(&resolved, "delete"),
+            Some(("operation_not_allowed", OPERATION_NOT_ALLOWED)),
+            "the stand-in allows only read and write under Agents"
+        );
+        let client_audit = standin.get_audit(Caller::Client {
+            session_id: "component-1",
+        });
+        assert_eq!(
+            client_audit,
+            Err((403, "This endpoint requires shell privileges".to_owned())),
+            "the stand-in refuses a client audit read"
+        );
+        let audit = standin
+            .get_audit(Caller::Shell)
+            .expect("the stand-in returns the shell audit");
+        let events = audit["events"]
+            .as_array()
+            .expect("the stand-in returns audit events");
+        assert_eq!(
+            events.len(),
+            4,
+            "the stand-in records one event for each successful store"
+        );
+        assert!(
+            events.iter().all(|event| event["type"] == "capability_use"),
+            "the stand-in records capability_use: {events:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["request_id"] == "req-j")
+                .count(),
+            2,
+            "the stand-in records the first journal store and the revised journal store"
+        );
+        assert_eq!(
+            events[0]["request_id"], "req-note",
+            "the stand-in lists the newest store first"
+        );
+        assert_eq!(events[1]["request_id"], "req-note");
+        assert_eq!(events[2]["request_id"], "req-j");
+        assert_eq!(events[3]["request_id"], "req-j");
+        assert_eq!(
+            grant_record(&standin, "req-j"),
+            (Life::Live, false),
+            "the stand-in leaves the session grant live"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-r"),
+            (Life::Live, false),
+            "the stand-in leaves the read grant live"
+        );
+        let usersai = "localhost://UsersAI/self/journal";
+        standin.seed_grant(
+            "req-ai",
+            "component-1",
+            usersai,
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-ai-read",
+            "component-1",
+            usersai,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        let ai_one = host_value(
+            &mut standin,
+            &write_line(usersai, "one", "req-ai", json!({})),
+        );
+        assert_eq!(
+            ai_one["response"]["data"]["stored"], true,
+            "the stand-in stores a UsersAI journal without a precondition"
+        );
+        assert_eq!(
+            standin
+                .protected_read("component-1", "req-ai-read", usersai)
+                .expect("the stand-in returns the UsersAI journal"),
+            b"one".to_vec(),
+            "the stand-in returns the UsersAI journal"
+        );
+        let ai_two = host_value(
+            &mut standin,
+            &write_line(usersai, "two", "req-ai", json!({})),
+        );
+        assert_eq!(
+            ai_two["response"]["data"]["stored"], true,
+            "the stand-in replaces a UsersAI journal"
+        );
+        assert_eq!(
+            standin
+                .protected_read("component-1", "req-ai-read", usersai)
+                .expect("the stand-in returns the UsersAI journal"),
+            b"two".to_vec(),
+            "the stand-in replaces the UsersAI journal bytes"
+        );
+        assert!(
+            !in_agents_area(&resolve_principal_uri("person:local:ada", usersai).expect("resolved")),
+            "the stand-in keeps UsersAI outside the Agents rule"
+        );
+        assert_journal_running(&standin);
     }
 }

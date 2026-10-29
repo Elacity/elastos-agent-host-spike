@@ -702,3 +702,5 @@ Every `standin_` row is the lab stand-in in `standin-runtime/`, and a PASS there
 The new `standin_` rows are this stand-in, and a PASS there leaves the real Runtime's resident rows blocked.
 
 These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A6 credit.
+
+`standin_journal_write_keeps_its_revision` is this stand-in, and a PASS there gives the Runtime no A15 credit.
