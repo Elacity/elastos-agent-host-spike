@@ -156,3 +156,34 @@ fn listed_file_over_the_chunk_limit_is_refused() {
         }
     );
 }
+
+#[test]
+fn listed_file_over_one_leaf_names_the_bytes_call() {
+    // Task 048: a file over one leaf now has a lab CID, but only from its
+    // bytes. A listed file's one SHA-256 names a single raw leaf, and a file
+    // root needs each leaf's digest, so the listing call keeps its refusal
+    // and its text points to the call that names the bytes.
+    let bytes = vec![0; 262_145];
+    let over = ListedFile {
+        path: "core/docs.wasm".to_owned(),
+        size: bytes.len() as u64,
+        sha256: Sha256::digest(&bytes).into(),
+    };
+    let refusal = encode_listed_files(&[over]).expect_err("a listed file over one leaf");
+    assert_eq!(
+        refusal,
+        Refusal::FileOverChunkLimit {
+            path: "core/docs.wasm".into(),
+            length: 262_145
+        }
+    );
+    let text = refusal.to_string();
+    for part in ["core/docs.wasm", "262145 bytes", "encode_entries"] {
+        assert!(text.contains(part), "{part}: {text}");
+    }
+    encode_entries(&[BundleEntry {
+        path: "core/docs.wasm".to_owned(),
+        content: bytes,
+    }])
+    .expect("the bytes call names the same file");
+}

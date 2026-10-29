@@ -21,14 +21,22 @@
 //! Kubo v0.40.1 profile, computed by the lab: no Kubo has computed any pin,
 //! so until an offline Kubo cross-check prints the same value as a committed
 //! pin, it is not called equal to the Runtime's CID or to Kubo's output.
-//! This crate runs no Kubo and pins only the single-block, non-sharded
-//! subset of that profile:
+//! This crate runs no Kubo and pins only the non-sharded subset of that
+//! profile, with files of up to one tree level:
 //!
 //! 1. Each regular file of at most 262144 bytes (`CHUNK_SIZE`) is one raw
 //!    leaf: its block is the file's bytes (an empty file is an empty block),
 //!    its CID is the bytes `01 55 12 20` and the SHA-256 of the block (CID
 //!    version 1, raw codec `0x55`, multihash sha2-256 of 32 bytes), and its
-//!    Tsize is its length. A larger file is refused: no chunked file DAG.
+//!    Tsize is its length. A larger file is split into 262144-byte raw
+//!    leaves, the last one shorter, under one balanced dag-pb file root
+//!    (trickle off): for each leaf in order a link with the leaf's CID, an
+//!    empty name and the leaf's length as Tsize; then the UnixFS data `08 02`
+//!    (type file), the file's length (field 3) and each leaf's length (field
+//!    4, one tag per value). Its CID is `01 70 12 20` and the SHA-256 of that
+//!    block, and its Tsize is the block's length plus its leaves' lengths. A
+//!    file of more than 174 leaves (`max-file-links`), over 45613056 bytes,
+//!    would need a second tree level and is refused.
 //! 2. A bundle path such as `browser/app.js` is a directory `browser` that
 //!    links `app.js`. Each directory's block is dag-pb: one link per child,
 //!    sorted by name bytes, each as protobuf field 2 holding the child's CID
@@ -50,11 +58,14 @@
 //! # One naming path
 //!
 //! [`checked_bundle`] walks a bundle, checks its root manifest, and hands its
-//! entries to [`encode_entries`]. That takes each entry's SHA-256 and length
-//! and calls [`encode_listed_files`], the encoder, which a caller with its
-//! own walk calls directly with a closure listing ([`ListedFile`]: path,
-//! size, SHA-256). Together the walk and the encoder are the only code that
-//! names a bundle; tests and tools call them and re-implement neither. [`lab_cid`] is the same walk and returns only
+//! entries to [`encode_entries`]. That makes each entry's node from its bytes
+//! (one raw leaf, or a file root over its leaves) and hands the nodes to the
+//! one tree builder. [`encode_listed_files`], which a caller with its own
+//! walk calls directly with a closure listing ([`ListedFile`]: path, size,
+//! SHA-256), makes one raw leaf per listed file with the same leaf rule and
+//! hands them to the same builder. Together the walk and these two calls are
+//! the only code that names a bundle; tests and tools call them and
+//! re-implement none. [`lab_cid`] is the same walk and returns only
 //! its lab CID. [`check_name`] checks a claimed name, such as one a URL or a
 //! Store row gives, by recomputing the name with [`lab_cid`]: it computes no
 //! name of its own. [`CheckedBundle::check_name`] is its checked form: the
@@ -211,7 +222,8 @@ pub const VARIANT_RECIPE_ENTRY: &str = "provider-variant.recipe";
 
 // The profile: Kubo v0.40.1's import flags as
 // `capsules/ipfs-provider/src/directory_hash.rs` `ADD_OPTIONS` sends them, for
-// one chunk and no HAMT shard, computed by the lab (no Kubo runs here). Each
+// files of up to one tree level and no HAMT shard, computed by the lab (no
+// Kubo runs here). Each
 // one changes the CID or the refusal, and each has a falsifier. There is no
 // inline setting: no CID here uses the identity multihash, whatever the size of the block.
 
@@ -226,10 +238,15 @@ const RAW_CODEC: u8 = 0x55;
 /// The codec of a directory block, dag-pb.
 const DAG_PB_CODEC: u8 = 0x70;
 /// The largest file one raw leaf holds (`chunker: size-262144`). A larger
-/// file would need a chunked file DAG, which the lab refuses.
+/// file is split into leaves of this size under one file root.
 const CHUNK_SIZE: usize = 262_144;
+/// The most leaves one file root links (`max-file-links: 174`). A file of
+/// more leaves would need a second tree level, which the lab refuses.
+const MAX_FILE_LINKS: usize = 174;
 /// The UnixFS data type of a directory, written in its block as `08 01`.
 const DIRECTORY_TYPE: u8 = 1;
+/// The UnixFS data type of a file root, written in its block as `08 02`.
+const FILE_TYPE: u8 = 2;
 /// The longest directory block the lab names. Kubo shards a directory into a
 /// HAMT once its links' estimated size passes 256KiB; the lab refuses a block
 /// over this length instead, which is earlier, so it fails closed.
@@ -410,9 +427,15 @@ pub enum Refusal {
     /// One path given to the encoder is both a file and a directory, as
     /// `a` and `a/b` would be. The walk never makes one.
     FileAndDirectory { path: String },
-    /// A file is longer than one raw leaf holds, 262144 bytes. The lab names
-    /// no chunked file DAG. `length` is the file's length.
+    /// A listed file ([`encode_listed_files`]) is longer than one raw leaf
+    /// holds, 262144 bytes. Its one SHA-256 names a single raw leaf, so a
+    /// larger file is named from its bytes, by [`encode_entries`] or
+    /// [`lab_cid`]. `length` is the listed size.
     FileOverChunkLimit { path: String, length: usize },
+    /// A file needs more leaves than one file root links, 174 of 262144
+    /// bytes. The lab names no deeper file tree. `length` is the file's
+    /// length.
+    FileOverLeafLimit { path: String, length: usize },
     /// A directory's encoded block is longer than 262144 bytes; `.` is the
     /// bundle root. The lab names no HAMT-sharded directory. `length` is the
     /// block's length.
@@ -516,7 +539,12 @@ impl fmt::Display for Refusal {
             ),
             Refusal::FileOverChunkLimit { path, length } => write!(
                 f,
-                "{path} is {length} bytes, over the {CHUNK_SIZE}-byte limit of one raw leaf: the lab names no chunked file"
+                "{path} is {length} bytes, over the {CHUNK_SIZE}-byte limit of one raw leaf: a listed file's one SHA-256 names a single raw leaf, so a larger file is named from its bytes (encode_entries or lab_cid)"
+            ),
+            Refusal::FileOverLeafLimit { path, length } => write!(
+                f,
+                "{path} is {length} bytes, over the {MAX_FILE_LINKS}-leaf limit of one file root ({} bytes): the lab names no deeper file tree",
+                MAX_FILE_LINKS * CHUNK_SIZE
             ),
             Refusal::DirectoryOverBlockLimit { path, length } => write!(
                 f,
@@ -798,7 +826,9 @@ fn decode_base32(text: &str) -> Option<Vec<u8>> {
 
 /// One file of a closure listing: its bundle path, its length in bytes and
 /// the SHA-256 of its bytes. A raw leaf needs nothing else, so a listing of
-/// these is enough to name a bundle of single-block files.
+/// these is enough to name a bundle of single-block files. A file over one
+/// leaf is not: its file root needs each leaf's SHA-256, so it is named from
+/// its bytes by [`encode_entries`].
 ///
 /// A listed file names bytes only if its `sha256` and `size` are those of
 /// the bytes: the caller's walk owns that. The encoder reads no file and
@@ -810,36 +840,36 @@ pub struct ListedFile {
     pub sha256: [u8; 32],
 }
 
-/// The lab CID of `entries`, given in any order: each entry's SHA-256 and
-/// length, then [`encode_listed_files`], the one encoder. A leaf's SHA-256
-/// is the one naming hash, [`naming_hash`], which the directory blocks share.
+/// The lab CID of `entries`, given in any order: each entry's node made from
+/// its bytes by `file_node` (one raw leaf, or a balanced file root over its
+/// leaves; a file over 174 leaves is refused), then `encode_tree`, the one
+/// tree builder, which [`encode_listed_files`] shares. Leaves, file roots and
+/// directory blocks all hash with the one naming hash, `naming_hash`.
 pub fn encode_entries(entries: &[BundleEntry]) -> Result<LabCid, Refusal> {
-    let listed: Vec<ListedFile> = entries
-        .iter()
-        .map(|entry| ListedFile {
-            path: entry.path.clone(),
-            size: entry.content.len() as u64,
-            sha256: naming_hash(&entry.content),
-        })
-        .collect();
-    encode_listed_files(&listed)
+    let mut files = Vec::new();
+    for entry in entries {
+        files.push((entry.path.as_str(), file_node(entry)?));
+    }
+    encode_tree(files)
 }
 
-/// The encoder: the lab CID of a closure listing, given in any order. It
-/// reads no file and checks no manifest. The lab CID names the bytes only if
-/// each file's `sha256` and `size` are those of its bytes; the caller's walk
-/// owns that, as [`checked_bundle`]'s walk does for [`encode_entries`].
+/// The lab CID of a closure listing, given in any order. It reads no file
+/// and checks no manifest. The lab CID names the bytes only if each file's
+/// `sha256` and `size` are those of its bytes; the caller's walk owns that,
+/// as [`checked_bundle`]'s walk does for [`encode_entries`].
 ///
-/// Each file is a raw leaf: a `size` over [`CHUNK_SIZE`] bytes is refused,
-/// and its CID is CIDv1, raw codec, its `sha256`, with its `size` as Tsize.
-/// The paths make the directories: a path with an empty, `.` or `..` part,
-/// two files with one path, and one path that is both a file and a directory
-/// are refused. Then each directory, deepest first, becomes one dag-pb block
-/// whose links are sorted by name bytes, a block over
-/// [`DIRECTORY_BLOCK_LIMIT`] bytes is refused, and the root block's SHA-256
-/// is the lab CID.
+/// Each file is one raw leaf, made by the leaf rule [`encode_entries`] uses:
+/// a `size` over [`CHUNK_SIZE`] bytes is refused, because one SHA-256 names
+/// a single raw leaf and a file root needs each leaf's; its CID is CIDv1,
+/// raw codec, its `sha256`, with its `size` as Tsize. Then `encode_tree`, the
+/// one tree builder: the paths make the directories, and a path with an
+/// empty, `.` or `..` part, two files with one path, and one path that is
+/// both a file and a directory are refused. Each directory, deepest first,
+/// becomes one dag-pb block whose links are sorted by name bytes, a block
+/// over [`DIRECTORY_BLOCK_LIMIT`] bytes is refused, and the root block's
+/// SHA-256 is the lab CID.
 pub fn encode_listed_files(files: &[ListedFile]) -> Result<LabCid, Refusal> {
-    let mut root = Directory::default();
+    let mut leaves = Vec::new();
     for file in files {
         if file.size > CHUNK_SIZE as u64 {
             return Err(Refusal::FileOverChunkLimit {
@@ -847,17 +877,76 @@ pub fn encode_listed_files(files: &[ListedFile]) -> Result<LabCid, Refusal> {
                 length: usize::try_from(file.size).unwrap_or(usize::MAX),
             });
         }
-        let leaf = Child::File {
-            cid: cid_bytes(RAW_CODEC, &file.sha256),
-            tsize: file.size,
-        };
-        root.insert(&file.path, leaf)?;
+        let (cid, tsize) = raw_leaf(&file.sha256, file.size);
+        leaves.push((file.path.as_str(), Child::File { cid, tsize }));
+    }
+    encode_tree(leaves)
+}
+
+/// The one tree builder both public calls feed: it puts each file's node at
+/// its bundle path with `Directory::insert`, then encodes the root with
+/// `encode_directory`. The root block's SHA-256 is the lab CID.
+fn encode_tree(files: Vec<(&str, Child)>) -> Result<LabCid, Refusal> {
+    let mut root = Directory::default();
+    for (path, file) in files {
+        root.insert(path, file)?;
     }
     let (digest, _) = encode_directory(&root, "", &naming_hash)?;
     Ok(LabCid(digest))
 }
 
-/// The one naming hash: the SHA-256 of a leaf or of a directory block.
+/// The node a directory links for `entry`, made from its bytes: one raw leaf
+/// for at most [`CHUNK_SIZE`] bytes (an empty file is an empty leaf), else
+/// the balanced file root over its leaves.
+fn file_node(entry: &BundleEntry) -> Result<Child, Refusal> {
+    let content = &entry.content;
+    let (cid, tsize) = if content.len() <= CHUNK_SIZE {
+        raw_leaf(&naming_hash(content), content.len() as u64)
+    } else {
+        file_root(&entry.path, content)?
+    };
+    Ok(Child::File { cid, tsize })
+}
+
+/// A raw leaf's CID bytes and Tsize: CIDv1, raw codec and `sha256`, the
+/// SHA-256 of its block, and its length `size`. Every leaf is made here: a
+/// listed file's, a one-leaf file's and each leaf under a file root.
+fn raw_leaf(sha256: &[u8; 32], size: u64) -> (Vec<u8>, u64) {
+    (cid_bytes(RAW_CODEC, sha256), size)
+}
+
+/// The CID bytes and Tsize of the balanced file root of `content`, the bytes
+/// of the file at `path`, which is over one leaf. The bytes are split into
+/// [`CHUNK_SIZE`]-byte raw leaves, the last one shorter, all linked from one
+/// dag-pb block, so the tree has one level. A file of more than
+/// [`MAX_FILE_LINKS`] leaves would need a second level and is refused with
+/// its path and length. The root's Tsize is its block's length plus its
+/// leaves' lengths.
+fn file_root(path: &str, content: &[u8]) -> Result<(Vec<u8>, u64), Refusal> {
+    if content.len().div_ceil(CHUNK_SIZE) > MAX_FILE_LINKS {
+        return Err(Refusal::FileOverLeafLimit {
+            path: path.to_owned(),
+            length: content.len(),
+        });
+    }
+    let leaves: Vec<Link<'_>> = content
+        .chunks(CHUNK_SIZE)
+        .map(|chunk| {
+            let (cid, tsize) = raw_leaf(&naming_hash(chunk), chunk.len() as u64);
+            Link {
+                name: "",
+                cid,
+                tsize,
+            }
+        })
+        .collect();
+    let block = file_root_block(&leaves, content.len() as u64);
+    let tsize = block.len() as u64 + leaves.iter().map(|leaf| leaf.tsize).sum::<u64>();
+    Ok((cid_bytes(DAG_PB_CODEC, &naming_hash(&block)), tsize))
+}
+
+/// The one naming hash: the SHA-256 of a leaf, of a file root block or of a
+/// directory block.
 fn naming_hash(block: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(block);
@@ -873,14 +962,14 @@ struct Directory {
 
 /// One child of a [`Directory`].
 enum Child {
-    /// A raw leaf: its CID bytes and its Tsize, the file's length.
+    /// A file's node, a raw leaf or a file root: its CID bytes and its Tsize.
     File { cid: Vec<u8>, tsize: u64 },
     /// A directory below this one.
     Directory(Directory),
 }
 
 impl Directory {
-    /// Put the leaf `file` at the bundle path `path`, making each directory
+    /// Put the file node `file` at the bundle path `path`, making each directory
     /// on the way. A path with an empty, `.` or `..` part is refused; so is
     /// a path already given, and a path that is a file and a directory, in
     /// either order.
@@ -931,7 +1020,8 @@ impl Directory {
     }
 }
 
-/// One link of a directory block: the child's name, CID bytes and Tsize.
+/// One link of a directory block or a file root: the child's name (empty
+/// under a file root), CID bytes and Tsize.
 struct Link<'a> {
     name: &'a str,
     cid: Vec<u8>,
@@ -976,22 +1066,48 @@ fn encode_directory(
     Ok((sha256(&block), tsize))
 }
 
-/// A directory's dag-pb block: each link in the order given, as protobuf
-/// field 2 holding the child's CID (field 1), its name (field 2) and its
-/// Tsize (field 3, a varint); then the UnixFS data as field 1, which is only
-/// its type (field 1, a varint): `08 01`, a directory.
+/// A directory's dag-pb block: its links (`put_links`), then the UnixFS data
+/// as field 1, which is only its type (field 1, a varint): `08 01`, a
+/// directory.
 fn directory_block(links: &[Link<'_>]) -> Vec<u8> {
     let mut block = Vec::new();
+    put_links(&mut block, links);
+    put_length_delimited(&mut block, 1, &[1 << 3, DIRECTORY_TYPE]);
+    block
+}
+
+/// A file root's dag-pb block: its leaves as links (`put_links`, each name
+/// empty), then the UnixFS data as field 1: its type `08 02`, a file, the
+/// file's `length` as filesize (field 3, `0x18`), and each leaf's length as
+/// one blocksize (field 4, `0x20`, one tag per value, not packed). The data
+/// has no Data field (field 2): the bytes are in the leaves.
+fn file_root_block(leaves: &[Link<'_>], length: u64) -> Vec<u8> {
+    let mut block = Vec::new();
+    put_links(&mut block, leaves);
+    let mut data = vec![1 << 3, FILE_TYPE];
+    data.push(3 << 3);
+    put_varint(&mut data, length);
+    for leaf in leaves {
+        data.push(4 << 3);
+        put_varint(&mut data, leaf.tsize);
+    }
+    put_length_delimited(&mut block, 1, &data);
+    block
+}
+
+/// The links of a dag-pb block, each in the order given, as protobuf field 2
+/// holding the child's CID (field 1), its name (field 2, so an empty name is
+/// `12 00`) and its Tsize (field 3, a varint). Directory blocks and file
+/// roots write their links here alone.
+fn put_links(block: &mut Vec<u8>, links: &[Link<'_>]) {
     for link in links {
         let mut pb_link = Vec::new();
         put_length_delimited(&mut pb_link, 1, &link.cid);
         put_length_delimited(&mut pb_link, 2, link.name.as_bytes());
         pb_link.push(3 << 3);
         put_varint(&mut pb_link, link.tsize);
-        put_length_delimited(&mut block, 2, &pb_link);
+        put_length_delimited(block, 2, &pb_link);
     }
-    put_length_delimited(&mut block, 1, &[1 << 3, DIRECTORY_TYPE]);
-    block
 }
 
 /// Protobuf field `field` of wire type 2: its tag, the length of `bytes` as a
