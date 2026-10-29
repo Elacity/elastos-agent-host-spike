@@ -4438,3 +4438,507 @@ fn hosted_backend_facts_conflicts_stay_unknown_after_restart() {
 fn hosted_backend_facts_malformed_values_stay_unknown_after_restart() {
     hosted_backend_facts_through_completion_and_restart(HostedBackendFactCase::Malformed);
 }
+
+/// What an accepted retry of one hosted request must return.
+#[derive(Clone, Copy)]
+enum HostedIdentityReplay<'a> {
+    /// The answer is still held: the run is `prepared` or `running`.
+    Open,
+    /// The run has completed: the retry returns this saved `data`.
+    Saved(&'a Value),
+}
+
+/// The prompt the identity journey sends once. Conflict rows use another prompt.
+const HOSTED_IDENTITY_PROMPT: &str = "hosted request identity";
+
+/// The refusal `handle_runs_create` returns when a retained run's fingerprint
+/// differs (`src/state.rs`).
+const HOSTED_REQUEST_CONFLICT_MESSAGE: &str = "request_id conflicts with an existing model run";
+
+/// Reported model, usage and cost for 073's fact set A. The frames are
+/// `hosted_fact_frames` of `hosted_fact_set_a`, so every fact stays `reported`.
+fn reported_hosted_identity_facts() -> Value {
+    json!({
+        "schema": BACKEND_REPORT_SCHEMA,
+        "resolved_model": {"status": "reported", "value": "resolved-a"},
+        "usage": {
+            "status": "reported",
+            "value": {
+                "input_tokens": 7,
+                "output_tokens": 1,
+                "total_tokens": 8,
+            },
+        },
+        "cost": {
+            "status": "reported",
+            "value": {"value": "0.1", "unit": "backend-credit"},
+        },
+    })
+}
+
+fn hosted_request_with_audit(
+    request: &Value,
+    session_id: Option<&str>,
+    grant_id: Option<&str>,
+) -> Value {
+    let mut request = request.clone();
+    if let Some(session_id) = session_id {
+        request["runtime_binding"]["session_id"] = json!(session_id);
+    }
+    if let Some(grant_id) = grant_id {
+        request["runtime_binding"]["grant_id"] = json!(grant_id);
+    }
+    request
+}
+
+fn hosted_request_with_prompt(request: &Value, prompt: &str) -> Value {
+    let mut request = request.clone();
+    let input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": prompt
+    });
+    request["input"] = input.clone();
+    request["runtime_binding"]["input_hash"] = json!(model_input_hash(&input).unwrap());
+    request
+}
+
+fn hosted_request_with_field(request: &Value, field: &str, value: &str) -> Value {
+    let mut request = request.clone();
+    request[field] = json!(value);
+    request["runtime_binding"][field] = json!(value);
+    request
+}
+
+fn hosted_identity_rotations(original: &Value) -> Vec<(&'static str, Value)> {
+    vec![
+        ("unchanged binding", original.clone()),
+        (
+            "changed session only",
+            hosted_request_with_audit(original, Some("session:rotated"), None),
+        ),
+        (
+            "changed grant only",
+            hosted_request_with_audit(original, None, Some("grant:rotated")),
+        ),
+        (
+            "changed session and grant",
+            hosted_request_with_audit(original, Some("session:rotated"), Some("grant:rotated")),
+        ),
+    ]
+}
+
+fn hosted_identity_conflicts(original: &Value) -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "changed prompt",
+            hosted_request_with_prompt(original, "hosted request identity changed"),
+        ),
+        (
+            "changed offer id",
+            hosted_request_with_field(original, "offer_id", "other-offer"),
+        ),
+        (
+            "changed operation",
+            hosted_request_with_field(original, "operation", "image.generate"),
+        ),
+    ]
+}
+
+/// Sends one retry only after `RuntimeCreateBinding::validate` accepts it for
+/// its own request. Principal, capsule and request id stay the original values.
+fn send_hosted_identity_retry(
+    provider: &mut ProviderProcess,
+    stage: &str,
+    row: &str,
+    original: &Value,
+    request: &Value,
+) -> Value {
+    for field in ["principal_id", "capsule_id", "request_id"] {
+        assert_eq!(
+            request["runtime_binding"][field], original["runtime_binding"][field],
+            "{stage} / {row}: {field} stays the original value"
+        );
+    }
+    let binding: RuntimeCreateBinding = serde_json::from_value(request["runtime_binding"].clone())
+        .unwrap_or_else(|error| {
+            panic!("{stage} / {row}: the runtime binding is not JSON: {error}")
+        });
+    let offer_id = request["offer_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{stage} / {row}: offer_id must be a string"));
+    let operation = request["operation"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{stage} / {row}: operation must be a string"));
+    binding
+        .validate(offer_id, operation, &request["input"])
+        .unwrap_or_else(|error| {
+            panic!(
+                "{stage} / {row}: RuntimeCreateBinding::validate must accept this \
+                 request before the provider sees it: {error}"
+            )
+        });
+    provider.request(request.clone())
+}
+
+fn assert_hosted_identity_retry(
+    stage: &str,
+    row: &str,
+    response: &Value,
+    run_id: &str,
+    expected: HostedIdentityReplay<'_>,
+) {
+    assert_eq!(
+        response["status"], "ok",
+        "{stage} / {row}: the retained request must be accepted: {response}"
+    );
+    assert_eq!(
+        response["data"]["run_id"], run_id,
+        "{stage} / {row}: the retained request must return the original run id: {response}"
+    );
+    match expected {
+        HostedIdentityReplay::Open => {
+            assert!(
+                response["data"]["terminal"].is_null(),
+                "{stage} / {row}: the run must stay open: {response}"
+            );
+            assert!(
+                matches!(
+                    response["data"]["status"].as_str(),
+                    Some("prepared" | "running")
+                ),
+                "{stage} / {row}: the run must report an open status: {response}"
+            );
+        }
+        HostedIdentityReplay::Saved(data) => {
+            assert_eq!(
+                &response["data"], data,
+                "{stage} / {row}: the retained request must return the saved run data: {response}"
+            );
+        }
+    }
+}
+
+/// One refusal check for every conflict row. The stage and the row name the failure.
+fn assert_hosted_request_conflict(stage: &str, row: &str, response: &Value) {
+    assert_eq!(
+        response,
+        &json!({
+            "status": "error",
+            "code": "invalid_request",
+            "message": HOSTED_REQUEST_CONFLICT_MESSAGE,
+        }),
+        "{stage} / {row}: a changed request fact must be refused: {response}"
+    );
+}
+
+fn replay_hosted_request_identity(
+    provider: &mut ProviderProcess,
+    stage: &str,
+    original: &Value,
+    run_id: &str,
+    expected: HostedIdentityReplay<'_>,
+) {
+    for (row, request) in hosted_identity_rotations(original) {
+        let response = send_hosted_identity_retry(provider, stage, row, original, &request);
+        assert_hosted_identity_retry(stage, row, &response, run_id, expected);
+    }
+    for (row, request) in hosted_identity_conflicts(original) {
+        let response = send_hosted_identity_retry(provider, stage, row, original, &request);
+        assert_hosted_request_conflict(stage, row, &response);
+    }
+}
+
+fn assert_hosted_identity_record(
+    provider: &mut ProviderProcess,
+    stage: &str,
+    run_id: &str,
+    access: &Value,
+    saved_data: &Value,
+    saved_events: &[Value],
+) {
+    let owner = provider.request(json!({
+        "op": "runs_get",
+        "run_id": run_id,
+        "runtime_binding": access,
+    }));
+    assert_eq!(
+        owner["status"], "ok",
+        "{stage}: the owner read must succeed: {owner}"
+    );
+    assert_eq!(
+        &owner["data"], saved_data,
+        "{stage}: the owner run must stay the saved result: {owner}"
+    );
+    assert_eq!(
+        owner["data"]["status"], "completed",
+        "{stage}: the run status stays completed: {owner}"
+    );
+    let events = read_hosted_run_events(provider, run_id, access);
+    assert_eq!(
+        events, saved_events,
+        "{stage}: the event sequence must stay the saved sequence"
+    );
+    let terminal = events.last().expect("the run keeps a terminal event");
+    assert_eq!(
+        terminal["kind"], "output",
+        "{stage}: the final terminal event kind is output: {terminal}"
+    );
+}
+
+fn assert_one_hosted_identity_effect(
+    stand_in: HostedEffectStandIn,
+    request_id: &str,
+    run_id: &str,
+    prompt: &str,
+) {
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "the journey must open exactly one connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "the journey must send exactly one request"
+    );
+    let recorded = &requests[0];
+    assert_eq!(recorded.request_line, "POST /v1/hosted-effect HTTP/1.1");
+    assert!(
+        recorded.colonless.is_empty(),
+        "the Runtime refuses a header line with no colon: {:?}",
+        recorded.colonless
+    );
+    let mut names: Vec<String> = Vec::new();
+    for (name, _) in &recorded.headers {
+        let name = name.to_ascii_lowercase();
+        assert!(
+            RUNTIME_HOSTED_HEADER_NAMES.contains(&name.as_str()),
+            "the Runtime refuses every other header name: {name}"
+        );
+        assert!(
+            !names.contains(&name),
+            "the Runtime refuses a repeated header name: {name}"
+        );
+        names.push(name);
+    }
+    assert_eq!(recorded.value("host"), Some("runtime.invalid"));
+    assert_eq!(recorded.value("x-elastos-effect"), Some("text"));
+    assert_eq!(
+        recorded.value("x-elastos-offer-id"),
+        Some(HOSTED_EFFECT_OFFER)
+    );
+    assert_eq!(recorded.value("x-elastos-request-id"), Some(request_id));
+    assert_eq!(recorded.value("x-elastos-run-id"), Some(run_id));
+    assert_eq!(
+        recorded.value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
+    );
+    assert_eq!(
+        recorded.value("x-elastos-job-id"),
+        None,
+        "a text effect carries no job id"
+    );
+    assert!(
+        !recorded.head().contains("fixture-key"),
+        "the offer's key must appear nowhere in the recorded request head: {}",
+        recorded.head()
+    );
+    let body: Value = serde_json::from_slice(&recorded.body)
+        .expect("the hosted effect body is the JSON text request");
+    assert_eq!(
+        body["messages"][0]["content"], prompt,
+        "the hosted effect body must carry the original prompt: {body}"
+    );
+}
+
+/// A hosted model request keeps one result through session and grant rotation,
+/// and refuses a retry that changes the prompt, the offer or the operation.
+/// The run id is `model_run_id` (principal, capsule, request). The fingerprint
+/// in `request_fingerprint` binds principal, capsule, request, offer, operation
+/// and the input hash. Session and grant stay invocation audit facts
+/// (`docs/MODEL_PROVIDER.md`, "Request identity and session facts";
+/// `docs/AGENT_ARCHITECTURE.md`, "Session and interaction contract").
+/// The terminal event kind is `output` when the run status is `completed`
+/// (`synthesize_terminal_event`). This is the Runtime-socket lab proof for the
+/// provider side of the M1 A4/A7 unblock.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_request_identity_survives_rotation_and_refuses_conflicts() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted request identity: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-request-identity");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (model, usage) = hosted_fact_set_a();
+    let stand_in = HostedEffectStandIn::bind_streaming_frames(
+        "hosted-request-identity",
+        runtime_hosted_chat_frames_answer(&hosted_fact_frames(model, &usage)),
+    );
+    stand_in.hold_answer();
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init.clone());
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let request_id = test_support::fixture_model_request_id("request:hosted-request-identity");
+    let create_request =
+        hosted_text_create_request(&request_id, "grant:test", HOSTED_IDENTITY_PROMPT);
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+    let create = send_hosted_identity_retry(
+        &mut provider,
+        "create",
+        "original request",
+        &create_request,
+        &create_request,
+    );
+    assert_hosted_identity_retry(
+        "create",
+        "original request",
+        &create,
+        &expected_run_id,
+        HostedIdentityReplay::Open,
+    );
+    stand_in.wait_for_connections(1);
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "the hosted run must open exactly one connection to the Runtime socket"
+    );
+
+    replay_hosted_request_identity(
+        &mut provider,
+        "while the answer is held",
+        &create_request,
+        &expected_run_id,
+        HostedIdentityReplay::Open,
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "while the answer is held: a replay must not open another connection"
+    );
+
+    stand_in.release_answer();
+    let access = access_binding(&create_request);
+    let settled = wait_for_run_terminal_within(
+        &mut provider,
+        &expected_run_id,
+        &access,
+        FIXTURE_EVENT_TIMEOUT,
+    );
+    assert_eq!(
+        settled["data"]["status"], "completed",
+        "the hosted identity run must complete: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["output"],
+        json!({"schema": RUN_OUTPUT_TEXT_SCHEMA, "text": "ready set"}),
+        "the answer text stays ready set: {settled}"
+    );
+    assert!(
+        settled["data"]["terminal"].get("error").is_none(),
+        "a completed identity run has no error: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["backend_report"],
+        reported_hosted_identity_facts(),
+        "the backend facts stay reported: {settled}"
+    );
+    let saved_data = settled["data"].clone();
+    let saved_events = read_hosted_run_events(&mut provider, &expected_run_id, &access);
+    let mut joined = String::new();
+    for event in &saved_events {
+        if event["kind"] == "text_delta" {
+            joined.push_str(event["data"]["text"].as_str().unwrap_or(""));
+        }
+    }
+    assert_eq!(
+        joined, "ready set",
+        "joined text deltas must be exactly the answer: {saved_events:?}"
+    );
+    let terminal = saved_events.last().expect("the run keeps a terminal event");
+    assert_eq!(
+        terminal["kind"], "output",
+        "the final terminal event kind is output: {terminal}"
+    );
+    assert_eq!(
+        terminal["data"],
+        json!({"schema": RUN_OUTPUT_TEXT_SCHEMA, "text": "ready set"}),
+        "the terminal output is ready set: {terminal}"
+    );
+    assert_eq!(
+        terminal["backend_report"], saved_data["terminal"]["backend_report"],
+        "the terminal event carries the same backend report: {terminal}"
+    );
+
+    replay_hosted_request_identity(
+        &mut provider,
+        "after completion",
+        &create_request,
+        &expected_run_id,
+        HostedIdentityReplay::Saved(&saved_data),
+    );
+    assert_hosted_identity_record(
+        &mut provider,
+        "after completion",
+        &expected_run_id,
+        &access,
+        &saved_data,
+        &saved_events,
+    );
+    provider.shutdown();
+
+    let mut provider = ProviderProcess::start();
+    let restarted = provider.request(init);
+    assert_eq!(
+        restarted["status"], "ok",
+        "unexpected restart init response: {restarted}"
+    );
+    replay_hosted_request_identity(
+        &mut provider,
+        "after restart",
+        &create_request,
+        &expected_run_id,
+        HostedIdentityReplay::Saved(&saved_data),
+    );
+    assert_hosted_identity_record(
+        &mut provider,
+        "after restart",
+        &expected_run_id,
+        &access,
+        &saved_data,
+        &saved_events,
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "after restart: a replay must not open another connection"
+    );
+    provider.shutdown();
+
+    assert_one_hosted_identity_effect(
+        stand_in,
+        &request_id,
+        &expected_run_id,
+        HOSTED_IDENTITY_PROMPT,
+    );
+}

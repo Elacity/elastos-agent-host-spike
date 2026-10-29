@@ -2775,6 +2775,54 @@
       "tests": [
         "hosted_backend_facts_repeated_values_stay_reported_after_restart"
       ]
+    },
+    {
+      "id": "MP63",
+      "title": "request_fingerprint hashes session_id, so a rotated session conflicts with the retained run",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/journal.rs",
+          "old": "        \"capsule_id\": binding.capsule_id,\n        \"request_id\": binding.request_id,",
+          "new": "        \"capsule_id\": binding.capsule_id,\n        \"session_id\": binding.session_id,\n        \"request_id\": binding.request_id,"
+        }
+      ],
+      "tests": [
+        "hosted_request_identity_survives_rotation_and_refuses_conflicts"
+      ]
+    },
+    {
+      "id": "MP64",
+      "title": "request_fingerprint hashes grant_id, so a rotated grant conflicts with the retained run",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/journal.rs",
+          "old": "        \"operation\": binding.operation,\n        \"input_hash\": input_hash,",
+          "new": "        \"operation\": binding.operation,\n        \"grant_id\": binding.grant_id,\n        \"input_hash\": input_hash,"
+        }
+      ],
+      "tests": [
+        "hosted_request_identity_survives_rotation_and_refuses_conflicts"
+      ]
+    },
+    {
+      "id": "MP65",
+      "title": "the retained-run fingerprint comparison is skipped, so a changed request fact returns the stored run",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "            if request_fingerprint(&existing.runtime_binding, &existing.input_hash)? != fingerprint",
+          "new": "            if false && request_fingerprint(&existing.runtime_binding, &existing.input_hash)? != fingerprint"
+        }
+      ],
+      "tests": [
+        "hosted_request_identity_survives_rotation_and_refuses_conflicts"
+      ]
     }
   ]
 }
