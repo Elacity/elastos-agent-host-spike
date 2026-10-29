@@ -6,10 +6,11 @@ present is the one file-profile contract: `check_profile_contract`, run over
 `(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
 no network allow, only the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and
 `STORAGE_PARENT` tokens, and the three shared rules verbatim.
-This contract has no Linux enforcement or tests yet. Nothing in this file is
-current behaviour except the seccomp allow list in "The seccomp allow list"
-below, which is source that builds and refuses and whose kernel behaviour is not
-proven on Linux by this task.
+This contract has no Linux enforcement yet. Its only current Linux behaviour is
+the seccomp allow list in "The seccomp allow list" below: a generated allow
+list, source that builds, and one real Linux run behind it in which
+wallet-provider starts under the generated filter and the four refused calls
+answer the filter's own marker.
 `confine.sb` stays each provider's one oracle. The contract is shared, so its
 Linux mapping is written once here, beside the one contract check (P10). The
 Linux policy that the Runtime would generate from the same approved declared
@@ -19,10 +20,11 @@ file exists (P10).
 ## The seccomp allow list
 
 One part of this design exists today as source, for `wallet-provider` only: a
-seccomp allow list generated from the provider's declared rights. It builds and
-it refuses, and no Linux start has been proven with it. The kernel proof of the
-filter and of the four calls below belongs to the task that runs on a real Linux
-host, and this section does not claim it.
+seccomp allow list generated from the provider's declared rights, and one real
+Linux run behind it. That run starts the wallet provider under the filter and
+proves the four denied calls. Namespaces, Landlock, capability dropping and
+every file row of the contract stay unbuilt, so a seccomp filter is the only
+Linux confinement this lab applies.
 
 One function builds the list:
 `seccomp_allow_list_from_declared_rights(name, declared)` in
@@ -60,39 +62,110 @@ allow form is, `is_allow_form`, reads `(allow)`, `(allow(file-read*))` and
 `(allow file-read*)` as allow forms; the three allow predicates and
 `allow_forms` call it, so the rule has one spelling.
 
-The table is the only source of the list's syscalls. The builder adds none of its
-own, so a declaration with no allow form yields an empty list and a program whose
-only decisions are the two ABI guards and the deny marker. The launch set a Linux
-start needs beside the forms-derived part is measured on the Linux host by the
-task that proves the kernel behaviour, and it is not in this list yet. A Linux
-start is therefore refused at the launcher's seat below until that set exists, so
-no provider runs with a list that lacks a call its launch needs.
+The table is the only source of the list's declared syscalls, so a declaration
+with no allow form yields an empty list and a program whose only decisions are
+the two ABI guards and the deny marker. A launch additionally needs the measured
+set below, which no declared right covers. That set joins the list in exactly one
+place, `SeccompAllowList::with_launch_essentials`, and the launcher and the probe
+child both install the result through the one `install_seccomp`, so there is one
+list and one install path (P10).
 
-Four calls are in no row, so the default decision is
-the only answer they receive: `ptrace`, `mount`, `bpf` and `keyctl`. The named
-test `seccomp_program_denies_by_default_and_lists_no_undeclared_call` asserts
-each of the four is in no list entry and no table row and is tested by no
-equality in the program, so adding one to a row turns it red. The filter's
-marker errno is `EACCES` rather than `EPERM` on purpose: a host can already
-answer `EPERM` for a call an unprivileged process may not make, so a plain
-`EPERM` assertion would pass with no filter installed.
+`LAUNCH_ESSENTIALS` is measured, not guessed, on the Linux host the proof ran on:
+each entry was dropped alone from the whole list and the call that failed named
+it.
+
+| Entry | The call whose refusal named it |
+| --- | --- |
+| `close` | `close(3)` in the loader, refused before the first mapping |
+| `exit_group` | `exit_group(101)` as the runtime aborted |
+| `getrandom` | `getrandom(0xfdb7d0076700, 8, GRND_NONBLOCK)` in the loader |
+| `mmap` | `mmap(NULL, 8192, PROT_READ\|PROT_WRITE, MAP_PRIVATE\|MAP_ANONYMOUS, -1, 0)` in the loader |
+| `mprotect` | `mprotect(0xfa5e165ef000, 65536, PROT_NONE)` in the loader |
+| `ppoll` | `ppoll([{fd=0}, {fd=1}, {fd=2}], 3, {tv_sec=0, tv_nsec=0}, NULL, 0)` while the runtime waits |
+| `rt_sigaction` | `rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[PIPE], sa_flags=SA_RESTART}, 0xfffff4896e40, 8)` |
+
+Four calls are in no row and in no launch entry, so the default decision is the
+only answer they receive: `ptrace`, `mount`, `bpf` and `keyctl`. The named test
+`seccomp_program_denies_by_default_and_lists_no_undeclared_call` asserts each of
+the four is in no list entry and no table row and is tested by no equality in
+the program, so adding one to a row turns it red. The filter's marker errno is
+`EACCES` rather than `EPERM` on purpose: a host can already answer `EPERM` for a
+call an unprivileged process may not make, so a plain `EPERM` assertion would
+pass with no filter installed.
 
 `install_seccomp_with(allow, steps)` is the one step sequencer and makes no
 kernel call. It checks the audit architecture first, then runs
 `NoNewPrivileges` and `Filter` in that order, and stops at the first failure with
-that step's own reason and errno.
+that step's own reason and errno. `install_seccomp(allow)` is the one function
+that makes the two kernel calls, and it copies the program into a fixed stack
+buffer so it allocates nothing after a fork.
 `seccomp_launch_refuses_each_reporting_failure` covers the record writer, which
 completes a short write and retries on `EINTR`, and gives a failed write and a
 zero-byte write distinct reasons and errnos.
+`seccomp_launch_record_refuses_missing_or_unknown_report` covers the record
+reader: a record that is missing, short, long or names an unknown step is a
+refusal with its own reason, never a bare spawn error.
+
+### The kernel proof
+
+The named test `linux_wallet_journey_runs_under_the_seccomp_allow_list` ran on
+host `spark1.local`: `aarch64`, Ubuntu 24.04.4, kernel `6.17.0-1029-nvidia`, 20
+cores, unprivileged. It builds the list from wallet's committed declared-rights
+file, starts the provider through `standin_spawn_confined_provider` with a
+`Seccomp` policy, and requires `init` `ok`, one read-only wallet call `ok`, a
+`wallet-key.hex` of 64 hex digits and a newline under `STORAGE_ROOT`, no
+profile written, and the named sibling `ElastOS/SystemServices/seccomp-outside-write`
+outside `STORAGE_ROOT` absent after the run. The file evidence is those named
+fixture paths; a seccomp filter carries syscall policy, not path policy, so the
+run claims no general file boundary.
+
+The launched child's own `/proc/<pid>/status` reports `Seccomp: 2`
+(`SECCOMP_MODE_FILTER`). That mode alone also accepts an inherited filter, so the
+launcher's record additionally carries the marker call's answer before and after
+its own `pre_exec` install, and the two must differ.
+
+Then one forked probe child records the four calls before the filter, installs
+the same filter through `install_seccomp`, and records them again:
+
+| Call | Before the filter | After the filter |
+| --- | --- | --- |
+| `ptrace(PTRACE_TRACEME)` | returned `0` | `EACCES` (13) |
+| `mount` | `ENOENT` (2) | `EACCES` (13) |
+| `bpf` (request `0` with a null attribute pointer) | `EINVAL` (22) | `EACCES` (13) |
+| `keyctl` (command `0`) | `ENOKEY` (126) | `EACCES` (13) |
+
+Every filtered answer is the deny marker, and the marker differs from the
+unfiltered answer the same probe recorded, so a host that already refuses a call
+cannot stand in for the filter. The kernel already answers `EPERM` for `bpf`
+under `unprivileged_bpf_disabled=2` and `EACCES` is never that answer, which is
+why the marker is `EACCES`.
 
 Namespaces, Landlock, capability dropping and every file row of the contract stay
 unbuilt on Linux, and a seccomp filter reads syscall numbers and not paths, so no
 sentence here says a contract file row is enforced on Linux. `linux` stays out of
 `DECLARED_CONFINED_OS`. A `linux` host under a `Seatbelt` policy keeps the words
 this lab already used, and a `linux` host under a `Seccomp` policy is accepted by
-the host rule; because this build installs no filter, the launcher's own seat
-then refuses that start by name instead of starting the provider unconfined.
+the host rule and starts the provider under the filter; on any other OS the same
+seat refuses the start by name instead of starting the provider unconfined.
 `standin_host_refusal_decides_each_policy` holds both.
+
+The two kernel plants behind that proof, each naming exactly one test and each
+re-run on the host above with its red output quoted:
+
+- WP166 skips only the launcher's `pre_exec` install and leaves the self-filtering
+  probe intact, so the launched provider reports `Seccomp: 0` and
+  `linux_wallet_journey_runs_under_the_seccomp_allow_list` fails with
+  `left: 0` `right: 2`.
+- WP167 writes the named outside sibling in `status`'s ok arm, so the journey
+  finds `ElastOS/SystemServices/seccomp-outside-write` present and fails with
+  `the named sibling outside STORAGE_ROOT must stay absent after the run`.
+  That plant shows the fixture can fail; a seccomp filter does not stop that
+  write, so the assertion is path evidence for the run and not a Linux file
+  boundary.
+
+Both are absent from `falsifiers.json`: the runner runs on the Mac, where these
+`#[cfg(target_os = "linux")]` tests do not run, so neither can print a CAUGHT
+line there.
 
 ## The frame
 
@@ -114,10 +187,11 @@ rule, as its row says. The private `/proc` mount the mount namespace provides
 is a mount, not a grant. The policy is a second rendering of the same rights,
 and the one contract check stays the one check of the oracle.
 
-The Linux policy would be applied before the provider image is entered. This
-file is a design: each row names the Linux test that would prove it, the Linux
-counterparts do not exist yet, and no sentence here claims that any provider is
-confined on Linux.
+The Linux policy would be applied before the provider image is entered. Apart
+from the seccomp allow list above, this file is a design: each row names the
+Linux test that would prove it, those Linux counterparts do not exist yet, and
+no sentence here claims that any provider is confined on Linux beyond that one
+filter.
 
 ## The contract on Linux
 

@@ -554,24 +554,26 @@ one on `linux` is a skip, and a present one on `macos` runs the test.
 The one caller, `sandbox_available`, fails the test on that error;
 `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` calls it
 with `macos` and a missing path and expects the failure.
-This contract has no Linux enforcement or tests yet. A provider-status claim
+The Linux policy stays outside this provider's status. A provider-status claim
 needs host-specific test evidence and the Runtime acceptance step, so no status
-document records `did-provider` or `wallet-provider` as confined on Linux until
-that test exists (P10, P11). The status change lands when the Runtime side
-does.
+document records `did-provider` or `wallet-provider` as confined on Linux (P10,
+P11). The status change lands when the Runtime side does.
 
-Future Linux enforcement tests for this lab contract are designed in
-`CONFINEMENT-LINUX.md`. One part of that design exists today as source: a
+Most Linux enforcement rows are designed in `CONFINEMENT-LINUX.md` and remain
+unbuilt. One row exists today as source with a real Linux run behind it: a
 seccomp allow list generated from this provider's declared rights, with the one
-builder, the one mapping table and the one step sequencer that file names, and
-five named tests that read the built program and call no kernel
+builder, the one mapping table, the one step sequencer and the one install
+function that file names
 (`seccomp_allow_list_from_declared_rights`, `SECCOMP_RULE_SYSCALLS`,
-`install_seccomp_with`). No Linux start has been proven yet: the filter's two
-kernel calls, the launch under it and the four denied calls are the next task's
-work, and `linux` stays out of `DECLARED_CONFINED_OS` until that run passes. The
-existing source-only check `both_file_profiles_bind_one_storage_parameter_contract`
-reads the three oracles and supplies contract evidence, not Linux execution
-evidence.
+`install_seccomp_with`, `install_seccomp`). On a real Linux host the wallet
+provider starts under that filter and the four denied calls answer the filter's
+own marker there, as `CONFINEMENT-LINUX.md` records with its host, kernel and
+per-call answers. That is the whole Linux claim: namespaces, Landlock,
+capability dropping and every file row of the contract remain unbuilt, so
+`linux` stays out of `DECLARED_CONFINED_OS` and every operations-table cell
+reads `designed, not enforced`.
+`both_file_profiles_bind_one_storage_parameter_contract` reads the three oracles
+and supplies contract evidence, not Linux execution evidence.
 
 ## Tests
 
@@ -661,6 +663,28 @@ evidence.
   failure names the request, the exit status and `sandbox-exec`'s own line on
   standard error. That failure also shows that `sandbox-exec` refused the
   profile before any exec.
+
+- The Linux half of `tests/confine.rs` builds nothing on the Mac. Four tests are
+  `#[cfg(target_os = "linux")]` and one runs everywhere:
+  `linux_wallet_journey_runs_under_the_seccomp_allow_list` starts the provider
+  under the generated filter and requires the launched child's own
+  `SECCOMP_MODE_FILTER`, the launcher's own install, and one file under
+  `STORAGE_ROOT` as its path evidence, then runs one probe child that shows the
+  four refused calls answering the filter's marker;
+  `linux_seccomp_launch_refuses_each_failed_install` requires each install
+  failure and an architecture refusal to start nothing;
+  `linux_seccomp_launcher_runs_the_requested_program` requires the child's own
+  `exe` link to name the program the launcher was given;
+  `linux_seccomp_probe_reaps_failures_and_repeated_journeys` requires every
+  probe child to be reaped and the kernel proof to answer the same twice; and
+  `linux_seccomp_journey_is_not_applicable_off_linux` runs on every OS and
+  requires the journey's label to say `not applicable` and this OS off Linux.
+  `CONFINEMENT-LINUX.md` records the host, kernel, per-call answers and the two
+  kernel plants behind the journey.
+- `seccomp_launch_record_refuses_missing_or_unknown_report` reads the one
+  install-record reader and requires a missing, short, long and unknown-step
+  record each to give its own reason, and a complete record to carry the
+  marker's two answers. It reads no kernel and runs on every OS.
 
 `unbound_copy_is_refused_under_profile` and `bound_copy_serves_under_profile`
 split the exec rule into its two halves under the real profile, with no fixture
@@ -1358,6 +1382,23 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Test `ptrace`'s number where an admitted syscall's belongs (WP161):
   `seccomp_program_denies_by_default_and_lists_no_undeclared_call` fails on its
   number-set comparison, because the program tests a number no row names.
+- Label the Linux journey with a Linux host on a host that is not Linux
+  (WP162): `linux_seccomp_journey_is_not_applicable_off_linux` fails on a
+  non-Linux host because the label reads `applicable, host` instead of
+  `not applicable`, so a Mac run cannot pass a Linux claim on.
+- Accept any install-record length (WP163):
+  `seccomp_launch_record_refuses_missing_or_unknown_report` fails on its short
+  and long cases, because a short record then decodes as an installed filter.
+- Decode an unknown record step as an installed filter (WP164): the same test
+  fails on its unknown-step case, because the refusal does not come.
+- Accept a seccomp allow list generated for another provider (WP165):
+  `standin_host_refusal_decides_each_policy` fails because the start is then
+  attempted instead of refused for both providers' names.
+
+Task 148's two kernel-only plants are recorded in `CONFINEMENT-LINUX.md`, not
+here. Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on
+the Mac, so neither can produce a CAUGHT line in this list; both were re-run on
+the Linux host with their red output quoted in `CONFINEMENT-LINUX.md`.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

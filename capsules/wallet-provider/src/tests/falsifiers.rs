@@ -236,8 +236,13 @@ use std::process::Command;
 /// in the `Request::Shutdown` arm of `fn handle` before it answers
 /// `Response::empty_ok()`, so the final wallet directory compare in
 /// `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged`
-/// fails because it finds a name the setup did not leave.
-const EXPECTED_FALSIFIERS: usize = 159;
+/// fails because it finds a name the setup did not leave. Task 148 adds WP162 to
+/// WP165, all CAUGHT on the Mac: the off-Linux journey label, the record
+/// reader's length case and unknown-step case, and the launcher's list-provider
+/// check. Its two Linux-only plants are named in `CONFINEMENT-LINUX.md` and are
+/// not registered here, because a Linux-only test cannot produce a CAUGHT line
+/// on the Mac.
+const EXPECTED_FALSIFIERS: usize = 163;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
