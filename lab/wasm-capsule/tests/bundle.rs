@@ -28,13 +28,13 @@ use wasm_capsule_tools::{bundle_identity, CAPSULE_MANIFEST};
 const MODULE: &[u8] = b"\0asm\x01\0\0\0";
 
 /// The lab CID `tools/bundle` prints on this Mac: this capsule's manifest
-/// beside the pinned `capsule.wasm` (README, "tools/bundle"). Task 032
-/// re-pinned it when `capsule.wasm` gained its memory maximum, recomputed
-/// outside the lab code with task 024's `python3 -I` script quoted in LOG
-/// (written from cc-capsule-identity's README rules), over the bundle
+/// beside the pinned `capsule.wasm` (README, "tools/bundle"). Task 068
+/// re-pinned it when `capsule.wasm` gained its `lifecycle.run` export,
+/// recomputed outside the lab code with task 024's `python3 -I` script quoted
+/// in LOG (written from cc-capsule-identity's README rules), over the bundle
 /// `tools/bundle` wrote, and pinned it only because it equals what
 /// `bundle_identity` prints for the same folder.
-const REFERENCE_LAB_CID: &str = "bafybeiebyzg55l4s6kb6daroty4prlkximwp6uvo32ovacfzdx7cahywqm";
+const REFERENCE_LAB_CID: &str = "bafybeigbjo5l3o5wmqf3ccdwfpcyci455r4c3elfpg2i6lhj5qwp2qwvou";
 
 /// The reasons the run refusals give, after `<path>: `.
 const OUT_DIR_EXISTS: &str = "OUT_DIR already exists: tools/bundle makes a new OUT_DIR and never writes into or through what is already there";

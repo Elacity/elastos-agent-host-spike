@@ -41,6 +41,14 @@ fn built_capsule_has_the_required_wasm_shape() {
         }),
         "digest must be (param i32) -> (result i64)"
     );
+    assert_eq!(
+        shape.lifecycle_run,
+        Some(FuncType {
+            params: vec![],
+            results: vec![ValType::I32],
+        }),
+        "elastos:bus/lifecycle@1.0.0#run must be () -> (result i32)"
+    );
     assert!(
         shape.is_the_required_capsule_shape(),
         "the artifact must have the full required capsule shape"
