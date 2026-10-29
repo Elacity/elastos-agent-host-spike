@@ -1404,15 +1404,17 @@ fn serve_hosted_effect(
                 return;
             }
             // The same check's session tie is the shared stand-in's one
-            // admission rule, `StandIn::authorise`
-            // (`lab/agent-conformance/standin-runtime/mod.rs:146-161`): the
-            // grant must be for the session this stand-in serves, or it refuses
-            // with its own reason, which names both sessions (`:504-510`).
-            if let Err((_, reason)) = grants.lock().unwrap().authorise(
+            // admission rule, behind its use route
+            // `StandIn::post_capability_validate`
+            // (`lab/agent-conformance/standin-runtime/mod.rs:554-563`): the
+            // grant must be for the session this stand-in serves, or the route
+            // refuses with its own reason, which names both sessions.
+            let use_body = json!({ "request_id": request_id });
+            if let Err((_, reason)) = grants.lock().unwrap().post_capability_validate(
                 Caller::Client {
                     session_id: &served_session,
                 },
-                &request_id,
+                &use_body,
             ) {
                 refusals.lock().unwrap().push(reason);
                 let _ = (&stream).write_all(RUNTIME_HOSTED_REFUSAL);

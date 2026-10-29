@@ -9,7 +9,8 @@
 //! Bus session before `finish_start`. A stop stores `stopped` and revokes
 //! that session's `Live` grants. One map names the five statuses. One age
 //! compare keeps a `failed` or `stopped` entry. One check refuses a client
-//! on a shell-only route. `authorise` is a lab seam on that same filter.
+//! on a shell-only route. `post_capability_validate` is the one use path; its
+//! private `authorise` runs on that same filter.
 //!
 //! `get_capability_requests` answers `GET /api/capability/requests?session=`
 //! from one request store beside the grants. `seed_request` is the test seam.
@@ -544,11 +545,28 @@ impl StandIn {
         Ok(self.render(caller))
     }
 
-    /// Lab test seam, not a route.
+    /// `POST /api/capability/validate`.
+    ///
+    /// This is the one use path. The body's only key is `request_id`. A shell
+    /// is refused before the body is read, as on every other client route. A
+    /// `once` grant stores `Exhausted` on the first success, so the live view
+    /// omits it and a second use is not live.
+    pub fn post_capability_validate(
+        &mut self,
+        caller: Caller<'_>,
+        body: &Value,
+    ) -> Result<Value, (u16, String)> {
+        require_client(caller)?;
+        let request_id = validate_body(body)?;
+        self.authorise(caller, request_id)?;
+        Ok(json!({ "valid": true }))
+    }
+
+    /// The one use check. `post_capability_validate` is its route.
     ///
     /// `Ok(())` means the grant authorises that caller, and a `once` grant
     /// stores `Exhausted`. This method reads no clock, no disk and no WIT file.
-    pub fn authorise(&mut self, caller: Caller<'_>, request_id: &str) -> Result<(), (u16, String)> {
+    fn authorise(&mut self, caller: Caller<'_>, request_id: &str) -> Result<(), (u16, String)> {
         let Some(index) = self
             .grants
             .iter()
@@ -915,6 +933,38 @@ fn require_shell(caller: Caller<'_>) -> Result<(), (u16, String)> {
         Caller::Shell => Ok(()),
         Caller::Client { .. } => Err((403, "This endpoint requires shell privileges".to_owned())),
     }
+}
+
+/// The client check for `post_capability_validate`. The use path holds only an
+/// instance session, so a shell is refused before the body is read.
+fn require_client(caller: Caller<'_>) -> Result<(), (u16, String)> {
+    match caller {
+        Caller::Client { .. } => Ok(()),
+        Caller::Shell => Err((
+            403,
+            "capability validate needs an instance session".to_owned(),
+        )),
+    }
+}
+
+/// The validate body's only key is `request_id`.
+fn validate_body(body: &Value) -> Result<&str, (u16, String)> {
+    const NEEDS_ID: &str = "validate body needs request_id";
+
+    let Some(object) = body.as_object() else {
+        return Err((400, NEEDS_ID.to_owned()));
+    };
+    let mut request_id = None;
+    for (key, value) in object {
+        match key.as_str() {
+            "request_id" => match value {
+                Value::String(text) => request_id = Some(text.as_str()),
+                _ => return Err((400, "validate request_id must be a string".to_owned())),
+            },
+            other => return Err((400, format!("validate body rejects {other}"))),
+        }
+    }
+    request_id.ok_or_else(|| (400, NEEDS_ID.to_owned()))
 }
 
 /// The five status strings from the resident-instance list.
@@ -3102,18 +3152,18 @@ mod tests {
             "the stand-in still shows exactly the first instance's live grant"
         );
         standin
-            .authorise(
+            .post_capability_validate(
                 Caller::Client {
                     session_id: "component-1",
                 },
-                "req-g",
+                &json!({ "request_id": "req-g" }),
             )
             .expect("the stand-in authorises the first instance with its grant");
-        let sibling = standin.authorise(
+        let sibling = standin.post_capability_validate(
             Caller::Client {
                 session_id: "component-2",
             },
-            "req-g",
+            &json!({ "request_id": "req-g" }),
         );
         assert!(
             matches!(&sibling, Err((403, reason)) if reason.contains("wrong capsule")),
@@ -3415,18 +3465,18 @@ mod tests {
             "the stand-in shows the sibling client no grant"
         );
         standin
-            .authorise(
+            .post_capability_validate(
                 Caller::Client {
                     session_id: "component-1",
                 },
-                "req-1",
+                &json!({ "request_id": "req-1" }),
             )
             .expect("the stand-in authorises the granted instance");
-        let sibling = standin.authorise(
+        let sibling = standin.post_capability_validate(
             Caller::Client {
                 session_id: "component-2",
             },
-            "req-1",
+            &json!({ "request_id": "req-1" }),
         );
         assert!(
             matches!(&sibling, Err((403, reason)) if reason.contains("wrong capsule")),
@@ -4662,7 +4712,7 @@ mod tests {
         launch_finished(standin);
     }
 
-    fn assert_unknown(result: &Result<(), (u16, String)>, request_id: &str, who: &str) {
+    fn assert_unknown(result: &Result<Value, (u16, String)>, request_id: &str, who: &str) {
         let expected = format!("unknown grant: {request_id}");
         assert!(
             matches!(
@@ -4673,7 +4723,7 @@ mod tests {
         );
     }
 
-    fn assert_not_live(result: &Result<(), (u16, String)>, life_name: &str, message: &str) {
+    fn assert_not_live(result: &Result<Value, (u16, String)>, life_name: &str, message: &str) {
         let expected = format!("grant is not live: {life_name}");
         assert!(
             matches!(
@@ -4688,7 +4738,7 @@ mod tests {
     }
 
     fn assert_wrong_capsule(
-        result: &Result<(), (u16, String)>,
+        result: &Result<Value, (u16, String)>,
         grant_session: &str,
         caller_session: Option<&str>,
         message: &str,
@@ -4746,11 +4796,11 @@ mod tests {
             BTreeSet::new(),
             "the stand-in client list for component-2 is empty"
         );
-        let refused = standin.authorise(
+        let refused = standin.post_capability_validate(
             Caller::Client {
                 session_id: "component-2",
             },
-            "req-1",
+            &json!({ "request_id": "req-1" }),
         );
         assert_wrong_capsule(
             &refused,
@@ -4768,11 +4818,11 @@ mod tests {
             BTreeSet::from(["req-1".to_owned()]),
             "the stand-in did the work: the refused sibling leaves the grant in the live view"
         );
-        let owner = standin.authorise(
+        let owner = standin.post_capability_validate(
             Caller::Client {
                 session_id: "component-1",
             },
-            "req-1",
+            &json!({ "request_id": "req-1" }),
         );
         assert!(
             owner.is_ok(),
@@ -4808,36 +4858,42 @@ mod tests {
     fn standin_once_grant_is_spent_by_one_use() {
         let mut standin = StandIn::new();
         launch_two_running(&mut standin);
-        standin.seed_grant(
-            "req-once",
-            "component-1",
-            "res",
-            "read",
-            "once",
-            1,
-            Life::Live,
-            false,
-        );
-        standin.seed_grant(
-            "req-session",
-            "component-2",
-            "res",
-            "read",
-            "session",
-            1,
-            Life::Live,
-            false,
-        );
+        let mut minted = Vec::new();
+        for (session_id, duration) in [("component-1", "once"), ("component-2", "session")] {
+            let pending = standin
+                .post_capability_request(
+                    Caller::Client { session_id },
+                    &json!({ "resource": SHARED_RESOURCE, "action": "read", "reason": "read shared" }),
+                )
+                .expect("the stand-in stores the guest request");
+            let request_id = pending["request_id"]
+                .as_str()
+                .expect("the stand-in names the request")
+                .to_owned();
+            let granted = standin
+                .post_capability_grant(
+                    Caller::Shell,
+                    &json!({ "request_id": request_id, "duration": duration }),
+                )
+                .expect("the shell grants the pending request");
+            assert_eq!(
+                granted,
+                json!({ "success": true }),
+                "the shell grant answers"
+            );
+            minted.push(request_id);
+        }
+        let [req_once, req_session] = [minted[0].as_str(), minted[1].as_str()];
         assert_eq!(
             request_ids(&shell_pair(&standin).0),
-            BTreeSet::from(["req-once".to_owned(), "req-session".to_owned()]),
-            "the stand-in did the work: the live view lists both seeded grants"
+            BTreeSet::from([req_once.to_owned(), req_session.to_owned()]),
+            "the stand-in did the work: the live view lists both granted requests"
         );
-        let sibling = standin.authorise(
+        let sibling = standin.post_capability_validate(
             Caller::Client {
                 session_id: "component-2",
             },
-            "req-once",
+            &json!({ "request_id": req_once }),
         );
         assert_wrong_capsule(
             &sibling,
@@ -4845,48 +4901,49 @@ mod tests {
             Some("component-2"),
             "the stand-in did the work: it refuses the sibling of the once grant",
         );
-        let shell = standin.authorise(Caller::Shell, "req-once");
-        assert_wrong_capsule(
+        let shell =
+            standin.post_capability_validate(Caller::Shell, &json!({ "request_id": req_once }));
+        assert_delete(
             &shell,
-            "component-1",
-            None,
-            "the stand-in did the work: it refuses the shell presentation of the once grant",
+            403,
+            "capability validate needs an instance session",
+            "the stand-in did the work: the use route refuses a shell",
         );
         assert_eq!(
-            grant_record(&standin, "req-once"),
+            grant_record(&standin, req_once),
             (Life::Live, false),
             "the stand-in did the work: both refusals spend nothing"
         );
         assert_eq!(
             request_ids(&shell_pair(&standin).0),
-            BTreeSet::from(["req-once".to_owned(), "req-session".to_owned()]),
+            BTreeSet::from([req_once.to_owned(), req_session.to_owned()]),
             "the stand-in did the work: both refusals leave the live view unchanged"
         );
-        let owner = standin.authorise(
+        let owner = standin.post_capability_validate(
             Caller::Client {
                 session_id: "component-1",
             },
-            "req-once",
+            &json!({ "request_id": req_once }),
         );
         assert!(
             owner.is_ok(),
             "the stand-in did the work: it authorises the owner's one use: {owner:?}"
         );
         assert_eq!(
-            grant_record(&standin, "req-once"),
+            grant_record(&standin, req_once),
             (Life::Exhausted, false),
             "the stand-in did the work: the owner's one use stores Exhausted"
         );
         assert_eq!(
             request_ids(&shell_pair(&standin).0),
-            BTreeSet::from(["req-session".to_owned()]),
+            BTreeSet::from([req_session.to_owned()]),
             "the stand-in did the work: the live view omits the spent once grant"
         );
-        let again = standin.authorise(
+        let again = standin.post_capability_validate(
             Caller::Client {
                 session_id: "component-1",
             },
-            "req-once",
+            &json!({ "request_id": req_once }),
         );
         assert_not_live(
             &again,
@@ -4894,11 +4951,11 @@ mod tests {
             "the stand-in did the work: the spent grant is not live for a second use",
         );
         for attempt in 1..=2 {
-            let session = standin.authorise(
+            let session = standin.post_capability_validate(
                 Caller::Client {
                     session_id: "component-2",
                 },
-                "req-session",
+                &json!({ "request_id": req_session }),
             );
             assert!(
                 session.is_ok(),
@@ -4906,13 +4963,13 @@ mod tests {
             );
         }
         assert_eq!(
-            grant_record(&standin, "req-session"),
+            grant_record(&standin, req_session),
             (Life::Live, false),
             "the stand-in did the work: the session grant stays Live after two uses"
         );
         assert_eq!(
             request_ids(&shell_pair(&standin).0),
-            BTreeSet::from(["req-session".to_owned()]),
+            BTreeSet::from([req_session.to_owned()]),
             "the stand-in did the work: the live view still lists the session grant"
         );
         for id in ["component-1", "component-2"] {
@@ -4924,6 +4981,97 @@ mod tests {
                 "the stand-in did the work: it leaves both instances running",
             );
         }
+    }
+
+    #[test]
+    fn standin_validate_refuses_a_malformed_body_without_spending() {
+        let mut standin = StandIn::new();
+        launch_two_running(&mut standin);
+        let pending = standin
+            .post_capability_request(
+                Caller::Client {
+                    session_id: "component-1",
+                },
+                &json!({ "resource": SHARED_RESOURCE, "action": "read", "reason": "read shared" }),
+            )
+            .expect("the stand-in stores the guest request");
+        let request_id = pending["request_id"]
+            .as_str()
+            .expect("the stand-in names the request")
+            .to_owned();
+        standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({ "request_id": request_id, "duration": "once" }),
+            )
+            .expect("the shell grants the pending request once");
+        assert_eq!(
+            request_ids(&shell_pair(&standin).0),
+            BTreeSet::from([request_id.clone()]),
+            "the stand-in did the work: the live view lists the granted once request"
+        );
+        let owner = Caller::Client {
+            session_id: "component-1",
+        };
+        let attempts = [
+            (
+                json!({ "request_id": request_id, "extra": true }),
+                "validate body rejects extra",
+                "the stand-in refuses a body with an extra key",
+            ),
+            (
+                json!({}),
+                "validate body needs request_id",
+                "the stand-in refuses a body with no request_id",
+            ),
+            (
+                json!({ "request_id": 1 }),
+                "validate request_id must be a string",
+                "the stand-in refuses a non-string request_id",
+            ),
+        ];
+        for (body, reason, message) in attempts {
+            let refused = standin.post_capability_validate(owner, &body);
+            assert_delete(&refused, 400, reason, message);
+            assert_eq!(
+                grant_record(&standin, &request_id),
+                (Life::Live, false),
+                "{message}: the refusal spends nothing"
+            );
+            assert_eq!(
+                request_ids(&shell_pair(&standin).0),
+                BTreeSet::from([request_id.clone()]),
+                "{message}: the live view still lists the once grant"
+            );
+            assert_capsule(
+                &standin,
+                "component-1",
+                "running",
+                "",
+                &format!("{message}: instance 1 keeps running"),
+            );
+        }
+        let spent = standin.post_capability_validate(owner, &json!({ "request_id": request_id }));
+        assert!(
+            spent.is_ok(),
+            "the stand-in did the work: the owner spends the once grant after the refusals: {spent:?}"
+        );
+        assert_eq!(
+            grant_record(&standin, &request_id),
+            (Life::Exhausted, false),
+            "the stand-in did the work: that one use stores Exhausted"
+        );
+        assert_eq!(
+            request_ids(&shell_pair(&standin).0),
+            BTreeSet::new(),
+            "the stand-in did the work: the spent once grant leaves the live view"
+        );
+        let again = standin.post_capability_validate(owner, &json!({ "request_id": request_id }));
+        assert_not_live(
+            &again,
+            "Exhausted",
+            "the stand-in did the work: the spent grant is not live for a second use",
+        );
     }
 
     #[test]
@@ -4939,11 +5087,11 @@ mod tests {
             stopped.is_null(),
             "the stand-in answers null when it stops one instance"
         );
-        let owner = standin.authorise(
+        let owner = standin.post_capability_validate(
             Caller::Client {
                 session_id: "component-1",
             },
-            "req-1",
+            &json!({ "request_id": "req-1" }),
         );
         assert_not_live(
             &owner,
@@ -4960,21 +5108,21 @@ mod tests {
             BTreeSet::from(["req-2".to_owned()]),
             "the stand-in lists exactly the sibling grant"
         );
-        let sibling_own = standin.authorise(
+        let sibling_own = standin.post_capability_validate(
             Caller::Client {
                 session_id: "component-2",
             },
-            "req-2",
+            &json!({ "request_id": "req-2" }),
         );
         assert!(
             sibling_own.is_ok(),
             "the stand-in authorises instance 2's own grant: {sibling_own:?}"
         );
-        let sibling_other = standin.authorise(
+        let sibling_other = standin.post_capability_validate(
             Caller::Client {
                 session_id: "component-2",
             },
-            "req-1",
+            &json!({ "request_id": "req-1" }),
         );
         assert_not_live(
             &sibling_other,
@@ -5004,7 +5152,6 @@ mod tests {
             false,
         );
         let callers = [
-            ("shell", Caller::Shell),
             (
                 "owner",
                 Caller::Client {
@@ -5020,19 +5167,28 @@ mod tests {
         ];
         for (who, caller) in callers {
             for request_id in ["", "req-missing"] {
-                let result = standin.authorise(caller, request_id);
+                let result =
+                    standin.post_capability_validate(caller, &json!({ "request_id": request_id }));
                 assert_unknown(&result, request_id, who);
             }
         }
-        let owner = standin.authorise(
+        let owner = standin.post_capability_validate(
             Caller::Client {
                 session_id: "component-1",
             },
-            "req-1",
+            &json!({ "request_id": "req-1" }),
         );
         assert!(
             owner.is_ok(),
             "the stand-in authorises the owning client of a known live grant: {owner:?}"
+        );
+        let shell =
+            standin.post_capability_validate(Caller::Shell, &json!({ "request_id": "req-1" }));
+        assert_delete(
+            &shell,
+            403,
+            "capability validate needs an instance session",
+            "the stand-in refuses a shell before it reads the use body",
         );
     }
 
@@ -5063,11 +5219,11 @@ mod tests {
             Caller::Client {
                 session_id: "component-2",
             },
-            Caller::Shell,
         ];
         for (request_id, life, life_name) in rows {
             for caller in callers {
-                let result = standin.authorise(caller, request_id);
+                let result =
+                    standin.post_capability_validate(caller, &json!({ "request_id": request_id }));
                 assert_not_live(
                     &result,
                     life_name,
@@ -5158,18 +5314,19 @@ mod tests {
             Life::Live,
             false,
         );
-        let shell = standin.authorise(Caller::Shell, "req-1");
-        assert_wrong_capsule(
+        let shell =
+            standin.post_capability_validate(Caller::Shell, &json!({ "request_id": "req-1" }));
+        assert_delete(
             &shell,
-            "component-1",
-            None,
+            403,
+            "capability validate needs an instance session",
             "the stand-in refuses a shell presentation of a live grant",
         );
-        let owner = standin.authorise(
+        let owner = standin.post_capability_validate(
             Caller::Client {
                 session_id: "component-1",
             },
-            "req-1",
+            &json!({ "request_id": "req-1" }),
         );
         assert!(
             owner.is_ok(),
