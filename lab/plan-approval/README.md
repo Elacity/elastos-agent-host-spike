@@ -29,6 +29,17 @@ bytes, refuses a step the bytes do not contain, and then only calls
 `grant_shown_plan` only calls `post_capability_grant` as the shell, with the
 duration `once`. It takes no approved flag.
 
+`deny_shown_plan` only calls `post_capability_deny` as the shell, with the
+reason `deny the shown plan` and no other key. A deny is the other settlement
+of the pending request the design's step 8 records. It settles one request: the
+denied step is not a live grant, and a later grant of it is refused with
+`request is not pending: ` plus its id. The sibling request stays pending for
+its own allow-once grant. A denied step that is performed is refused with
+`unknown grant: ` plus its id.
+
+`preview`, `submit_shown_plan`, `grant_shown_plan` and `perform_shown_plan` are
+unchanged by the deny path.
+
 `perform_shown_plan` ignores `approved` and reads the request through
 `get_capability_requests`. It calls `authorise` only when the recomputed hash
 matches that request's `reason`, so a later byte change is refused. A `once`
@@ -43,13 +54,15 @@ A passing run gives the Runtime no A15 credit. RA-4 and RA-5 stay open.
 ## Layout
 
 - `src/lib.rs`: `Preview`, `preview`, `preview_makes_no_effect`,
-  `submit_shown_plan`, `grant_shown_plan`, `perform_shown_plan` and
-  `approval_binds_to_the_previewed_plan_hash`.
+  `submit_shown_plan`, `grant_shown_plan`, `deny_shown_plan`,
+  `perform_shown_plan`, `approval_binds_to_the_previewed_plan_hash` and
+  `deny_one_shown_step`.
 
 ## Checks
 
 ```bash
 cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
+cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib deny_one_shown_step -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib approval_binds_to_the_previewed_plan_hash -- --exact
 cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib preview_makes_no_effect -- --exact
 ```
