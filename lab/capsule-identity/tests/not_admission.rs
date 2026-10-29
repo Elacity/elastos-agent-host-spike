@@ -102,7 +102,8 @@ fn valid_signature_grants_nothing_by_itself() {
 }
 
 /// Every `pub fn` the library declares: identity checks only. `check_name`
-/// is listed twice: the free function and `CheckedBundle`'s checked form.
+/// is listed three times: the free function, `CheckedBundle`'s checked form
+/// and `LabCid`'s form for a CID recomputed from a listing.
 /// `manifest_name` is task 036's: the checked manifest's `name`, identity
 /// data read from the one manifest check, not a decision.
 /// `encode_listed_files` is task 047's: the one encoder, for a caller whose
@@ -114,7 +115,7 @@ fn valid_signature_grants_nothing_by_itself() {
 /// task 049's: the package record's one signer and one verifier over a lab
 /// CID, which the folder and checked record calls use. None admits, grants
 /// or launches.
-const IDENTITY_FUNCTIONS: [&str; 29] = [
+const IDENTITY_FUNCTIONS: [&str; 30] = [
     "lab_cid",
     "lab_cid_observed",
     "checked_bundle",
@@ -123,6 +124,7 @@ const IDENTITY_FUNCTIONS: [&str; 29] = [
     "cid",
     "entries",
     "manifest_name",
+    "check_name",
     "check_name",
     "encode_entries",
     "encode_listed_files",

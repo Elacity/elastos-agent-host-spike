@@ -167,6 +167,27 @@ fn checked_name_check_refuses_a_mismatch() {
 }
 
 #[test]
+fn cid_name_check_preserves_the_shared_refusals() {
+    let cid = named(assemble(&WEB_APP).path());
+    assert_eq!(cid.check_name(WEB_APP_LAB_CID), Ok(()));
+    assert_mismatch(
+        cid.check_name(CONTENT_SAMPLE_LAB_CID),
+        CONTENT_SAMPLE_LAB_CID,
+        cid,
+    );
+    for claim in not_lab_cids() {
+        let refusal = cid.check_name(&claim).expect_err("an invalid claim");
+        assert_eq!(
+            refusal,
+            Refusal::NotALabCid {
+                claimed: claim.clone()
+            }
+        );
+        assert_eq!(refusal.to_string(), not_a_lab_cid_text(&claim));
+    }
+}
+
+#[test]
 fn checked_name_check_shares_the_claim_check_and_the_compare() {
     // P10: the checked form is check_name on the lab CID the value holds. It
     // calls the one claim check and the one compare, makes no refusal of its

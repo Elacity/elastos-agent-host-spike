@@ -1724,12 +1724,7 @@ impl StandInRuntime {
     /// text, naming both values; success answers the printed lab CID as the
     /// shared fixture's path and display name.
     fn require_listing_name(actual: LabCid, claimed: &str) -> Result<String, String> {
-        if actual.to_string() != claimed {
-            return Err(said(Refusal::NameMismatch {
-                actual,
-                claimed: claimed.to_owned(),
-            }));
-        }
+        actual.check_name(claimed).map_err(said)?;
         Ok(listing_path(claimed))
     }
 

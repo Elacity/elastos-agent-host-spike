@@ -751,7 +751,18 @@ impl CheckedBundle {
     }
 }
 
-/// The compare both name checks make: a lab CID whose root digest is not the
+impl LabCid {
+    /// Check `claimed` against this CID from an encoder or a checked bundle.
+    /// Uses the same claim check and comparator as [`CheckedBundle::check_name`],
+    /// with the same refusals. The caller supplies the recomputed CID; this
+    /// method reads no bytes and makes no admission decision.
+    pub fn check_name(self, claimed: &str) -> Result<(), Refusal> {
+        let claimed_digits = lab_cid_digits(claimed)?;
+        compare_name(self, claimed_digits, claimed)
+    }
+}
+
+/// The compare all name checks make: a lab CID whose root digest is not the
 /// claim's is refused with both values. `claimed` is the whole claim, kept
 /// only to say what was refused.
 fn compare_name(actual: LabCid, claimed_digits: [u8; 32], claimed: &str) -> Result<(), Refusal> {

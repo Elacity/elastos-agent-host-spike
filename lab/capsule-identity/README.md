@@ -574,6 +574,7 @@ The public API another lab may call:
 | `CheckedBundle::entries(&self) -> &[BundleEntry]` | every regular file the walk read, as `path` and `content` |
 | `CheckedBundle::manifest_name(&self) -> &str` | the `name` of the bundle's `capsule.json`, as the one manifest check read it |
 | `CheckedBundle::check_name(&self, claimed: &str) -> Result<(), Refusal>` | `Ok(())` when `claimed` is this lab CID; otherwise `NotALabCid` or `NameMismatch` |
+| `LabCid::check_name(self, claimed: &str) -> Result<(), Refusal>` | The same claim check and comparator for a CID recomputed by a listing encoder |
 
 | `str::parse::<LabCid>(printed)` | the `LabCid` a printed lab CID names; otherwise `NotALabCid` (see [Reading a printed lab CID](#reading-a-printed-lab-cid)) |
 
@@ -1613,6 +1614,7 @@ Each route, field and state, and where it comes from. #309 is draft PR #309,
 | A saved listing launches by its CID: the listing is prepared by its one encoder, not by a folder walk, and its display name is the printed CID | `standin_launches_the_photo_listing_by_its_cid` | F-CI58a (the preparation is a walk of the PH6 folder, which refuses its object `viewer`), F-CI58e (the shared fixture's path and name are not the printed CID) |
 | A chunked listing of the same files and its entries give one lab CID through the one file rule, a digest listing holds no asks bytes, and a digest count its size does not give is refused with its own text | `standin_launches_a_chunked_photo_listing_by_its_cid`, `chunked_files_are_checked_and_named_by_the_one_file_rule` | F-CI58f (a listing launch invents asks bytes), F-CI58g (the digest-count refusal is removed), F-CI48d (the shared root Tsize line) |
 | A saved listing whose recorded digest changed after publish is refused by the name compare before the shared launch, in both listing arms, leaving the shared lists unchanged | `standin_refuses_a_changed_listing_before_shared_launch` | F-CI58b (the store key is trusted: no recompute and no compare, so the changed listing launches) |
+| Folder and listing preparation use the library's one name comparator | `standin_folder_and_listing_names_share_the_library_compare`, `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch`, `standin_refuses_a_changed_listing_before_shared_launch` | F-CI58h (the shared comparator accepts a mismatch; both mismatch tests fail) |
 | A listing with no record, an unaccepted signer or a bad signature is refused before the shared launch, and a correctly signed listing launches | `standin_refuses_an_unsigned_or_unaccepted_photo_listing` | F-CI58c (the package-record check is skipped) |
 | A listing launch adds no grant to the shared view, which lists exactly the grants the shared state holds | `standin_launches_the_photo_listing_by_its_cid`, `standin_refuses_an_unsigned_or_unaccepted_photo_listing` | F-CI58d (the lane's view seam adds an entry the shared state does not hold) |
 
@@ -1647,9 +1649,14 @@ printed CID from the saved listing, and the requested CID is compared with
 it in (e); a CID the listing does not give is refused with
 `Refusal::NameMismatch`'s own text, naming both values, before any record is
 checked. Only then does the one record check (f) and (g) run, and only a
-prepared input reaches the shared launch. `require_listing_name` makes that
-compare, and `check_records` runs `verify_cid_record` for every prepared CID,
-so a folder and a listing share one record rule.
+prepared input reaches the shared launch. `require_listing_name` calls
+`LabCid::check_name`, which uses the library's `compare_name`, as
+`CheckedBundle::check_name` does for a folder. The structural test
+`standin_folder_and_listing_names_share_the_library_compare` covers both
+callers and both listing arms. `cid_name_check_preserves_the_shared_refusals`
+checks the CID-only method's exact refusal text. `check_records` runs
+`verify_cid_record` for every prepared CID, so a folder and a listing share
+one name comparator and one record rule.
 
 A listing has no folder, so the shared `post_capsules` receives its printed
 lab CID as `path`, and the shared `admit_resident` registers that same text
@@ -1697,6 +1704,10 @@ view seam (`live_grants`) that the shared state does not hold; the shared
 `StandIn` owns grant storage and no lane seam can seed a grant, so this is
 the only plant that reaches the view, and the test now reads a real seeded
 grant too.
+F-CI58h removes the mismatch refusal from the shared library comparator;
+the folder and listing mismatch tests both require that refusal. F-CI32a's
+unchecked launch uses the stored folder for a folder fixture, so it reaches
+the registered shared resident and exercises the skipped identity checks.
 
 The digest path shares the byte path's file rule: `file_links_node` makes
 one leaf or one dag-pb root, builds its CID and Tsize and applies the
@@ -1951,7 +1962,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 285 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 286 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -2001,7 +2012,7 @@ F-CI49a to F-CI49c (see
 059's F-CI59a to F-CI59c (F-CI59a: see
 [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1); F-CI59b and
 F-CI59c: see [what it is](#what-it-is-and-what-it-is-not)), and task 058's
-F-CI58a to F-CI58g (see
+F-CI58a to F-CI58h (see
 [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build

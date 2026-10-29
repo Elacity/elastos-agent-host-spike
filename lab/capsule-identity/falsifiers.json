@@ -4064,7 +4064,7 @@
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
           "old": "        let (path, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;\n",
-          "new": "        let (path, asks) = (self.store.keys().next().expect(\"a stored fixture\").clone(), None);\n"
+          "new": "        let (cid, stored) = self.store.iter().next().expect(\"a stored fixture\");\n        let path = match stored {\n            Stored::Folder(folder) => folder.to_string_lossy().into_owned(),\n            Stored::Listing(_) | Stored::Chunked(_) => listing_path(cid),\n        };\n        let asks = None;\n"
         }
       ],
       "tests": [
@@ -4722,6 +4722,23 @@
       ],
       "tests": [
         "chunked_files_are_checked_and_named_by_the_one_file_rule"
+      ]
+    },
+    {
+      "id": "F-CI58h",
+      "title": "the shared name comparator accepts mismatched folder and listing CIDs",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    if actual.0 != claimed_digits {\n        return Err(Refusal::NameMismatch {\n            actual,\n            claimed: claimed.to_owned(),\n        });\n    }\n",
+          "new": "    let _ = (actual, claimed_digits);\n"
+        }
+      ],
+      "tests": [
+        "standin_refuses_an_unsigned_or_mismatched_bundle_before_launch",
+        "standin_refuses_a_changed_listing_before_shared_launch"
       ]
     }
   ]

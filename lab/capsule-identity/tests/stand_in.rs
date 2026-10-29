@@ -983,6 +983,63 @@ fn standin_launches_a_chunked_photo_listing_by_its_cid() {
 }
 
 #[test]
+fn standin_folder_and_listing_names_share_the_library_compare() {
+    let code = library_code();
+    let adapter = include_str!("common/mod.rs")
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prepare = library_item(&adapter, "fn checked_launch(");
+    let folder = prepare
+        .split("Stored::Folder(folder) =>")
+        .nth(1)
+        .expect("the folder preparation")
+        .split("Stored::Listing(listing) =>")
+        .next()
+        .expect("the end of folder preparation");
+    assert_eq!(folder.matches("checked.check_name(&cid)").count(), 1);
+    for arm in ["Stored::Listing(listing) =>", "Stored::Chunked(files) =>"] {
+        let listing = prepare.split(arm).nth(1).expect("the listing arm");
+        let listing = listing.split("\n            }").next().unwrap();
+        assert_eq!(
+            listing
+                .matches("Self::require_listing_name(actual, &cid)?")
+                .count(),
+            1,
+            "{arm} uses the shared listing name check"
+        );
+    }
+    for (body, call) in [
+        (
+            library_item(&adapter, "fn require_listing_name("),
+            "actual.check_name(claimed).map_err(said)?",
+        ),
+        (
+            library_item(&code, "pub fn check_name(&self"),
+            "compare_name(self.cid, claimed_digits, claimed)",
+        ),
+        (
+            library_item(&code, "pub fn check_name(self,"),
+            "compare_name(self, claimed_digits, claimed)",
+        ),
+    ] {
+        assert_eq!(body.matches(call).count(), 1, "{body}");
+        assert!(!body.contains("Refusal::"), "a second refusal path: {body}");
+    }
+    assert_eq!(
+        library_item(&adapter, "impl StandInRuntime {")
+            .matches("Refusal::NameMismatch")
+            .count(),
+        0
+    );
+    assert_eq!(
+        code.matches("return Err(Refusal::NameMismatch {").count(),
+        1
+    );
+}
+
+#[test]
 fn standin_refuses_a_changed_listing_before_shared_launch() {
     // The one-digest arm: a saved file digest changes after publish, and the
     // store keeps the old CID.
