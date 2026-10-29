@@ -60,13 +60,15 @@ allow form is, `is_allow_form`, reads `(allow)`, `(allow(file-read*))` and
 `(allow file-read*)` as allow forms; the three allow predicates and
 `allow_forms` call it, so the rule has one spelling.
 
-`LAUNCH_ESSENTIALS` holds the fixed syscalls every launch needs beside the
-forms-derived part: `close`, `exit_group`, `getrandom`, `mmap`, `mprotect`,
-`ppoll` and `rt_sigaction`. No declared right covers them; they are the runtime's
-own plumbing. Which of them a given launch reaches is measured on the Linux host
-by the kernel-proof task, which owns the full launch set.
+The table is the only source of the list's syscalls. The builder adds none of its
+own, so a declaration with no allow form yields an empty list and a program whose
+only decisions are the two ABI guards and the deny marker. The launch set a Linux
+start needs beside the forms-derived part is measured on the Linux host by the
+task that proves the kernel behaviour, and it is not in this list yet. A Linux
+start is therefore refused at the launcher's seat below until that set exists, so
+no provider runs with a list that lacks a call its launch needs.
 
-Four calls are in no row and in no essentials entry, so the default decision is
+Four calls are in no row, so the default decision is
 the only answer they receive: `ptrace`, `mount`, `bpf` and `keyctl`. The named
 test `seccomp_program_denies_by_default_and_lists_no_undeclared_call` asserts
 each of the four is in no list entry and no table row and is tested by no

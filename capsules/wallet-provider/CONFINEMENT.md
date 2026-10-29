@@ -1350,6 +1350,12 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   refusal is lost.
 - Bypass the launcher's `Seccomp` seat (WP159): the same test fails because the
   `Seccomp` start returns Started instead of its own refusal.
+- Add one unconditional syscall beside the rows (WP160):
+  `seccomp_allow_list_follows_the_declared_rights` fails on its empty case,
+  because a declaration with no allow form still admits that call.
+- Test `ptrace`'s number where an admitted syscall's belongs (WP161):
+  `seccomp_program_denies_by_default_and_lists_no_undeclared_call` fails on its
+  number-set comparison, because the program tests a number no row names.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

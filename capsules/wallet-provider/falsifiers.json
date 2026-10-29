@@ -2388,14 +2388,14 @@
     },
     {
       "id": "WP149",
-      "title": "the recogniser requires a space after the operator, so (allow) is not an allow form",
+      "title": "the recogniser requires a space after the operator, so (allow) and (allow(file-read*)) are not allow forms",
       "command": "wallet",
       "expect": "caught",
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
           "old": "    let rest = form.strip_prefix('(')?.trim_start();\n    let operation = rest.split([' ', '(', ')']).next().unwrap_or_default();\n    if operation != \"allow\" {\n        return None;\n    }\n    Some(&rest[operation.len()..])",
-          "new": "    let _ = form;\n    None"
+          "new": "    let rest = form.strip_prefix(\"(allow \")?;\n    Some(rest)"
         }
       ],
       "tests": [
@@ -2560,6 +2560,38 @@
       ],
       "tests": [
         "standin_host_refusal_decides_each_policy"
+      ]
+    },
+    {
+      "id": "WP160",
+      "title": "the builder adds one unconditional syscall beside the rows, so a declaration with no allow form still admits it",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    if SECCOMP_AUDIT_ARCH == 0 {",
+          "new": "    // WP160 admits close without any allow form selecting it.\n    syscalls.push(\"close\");\n    if SECCOMP_AUDIT_ARCH == 0 {"
+        }
+      ],
+      "tests": [
+        "seccomp_allow_list_follows_the_declared_rights"
+      ]
+    },
+    {
+      "id": "WP161",
+      "title": "an admitted syscall's number is replaced by an undeclared call's, so the program tests a number no row names",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "        program.push(SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number, 0, 1));",
+          "new": "        // WP161 tests ptrace's number where an admitted syscall's belongs.\n        let number = if *syscall == \"execve\" {\n            seccomp_syscall_number(\"ptrace\", audit_arch).expect(\"ptrace has a number\")\n        } else {\n            number\n        };\n        program.push(SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number, 0, 1));"
+        }
+      ],
+      "tests": [
+        "seccomp_program_denies_by_default_and_lists_no_undeclared_call"
       ]
     }
   ]

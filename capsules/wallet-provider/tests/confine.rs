@@ -6254,6 +6254,10 @@ fn read_declared_rights(name: &str, path: &Path) -> Result<Value, String> {
 /// default decision is the only answer they receive. Adding one of them to a
 /// row would grant it and turn
 /// `seccomp_program_denies_by_default_and_lists_no_undeclared_call` red.
+///
+/// This table is the only source of the list's syscalls: the builder adds none
+/// of its own, so a syscall enters the filter only through a row an allow form
+/// of the generated profile selects.
 const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
     (SHARED_RULES[0], &["execve", "execveat"]),
     (
@@ -6319,26 +6323,6 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
         ],
     ),
     (STARTUP_RULES[1], &["uname", "sysinfo"]),
-];
-
-/// The syscalls every launch needs beside the forms-derived part. No declared
-/// right covers them: they are the runtime's own plumbing, and a launch that
-/// loses one cannot speak its protocol.
-///
-/// `ptrace`, `mount`, `bpf` and `keyctl` are in no entry here and in no row
-/// above, so the default decision is the only answer they receive.
-///
-/// The names are the calls a Linux launch needs; which of them a given launch
-/// actually reaches is measured on the Linux host by task 148, which owns every
-/// kernel call and the full launch set.
-const LAUNCH_ESSENTIALS: &[&str] = &[
-    "close",
-    "exit_group",
-    "getrandom",
-    "mmap",
-    "mprotect",
-    "ppoll",
-    "rt_sigaction",
 ];
 
 /// The system call numbers the filter tests against, per audit architecture:
@@ -6482,6 +6466,12 @@ fn seccomp_syscall_number(name: &str, audit_arch: u32) -> Option<u32> {
 /// reads the declared-rights document directly, so the JSON has one reader and
 /// the profile one parser (P10).
 ///
+/// Every admitted syscall comes from a mapping-table row an allow form selects,
+/// so a declaration with no allow form yields an empty list and a program whose
+/// only decisions are the ABI guards and the deny marker. The launch set a
+/// Linux start additionally needs is measured on the Linux host by the task
+/// that owns the kernel calls; nothing here adds a syscall of its own.
+///
 /// It refuses, in this order: whatever `generate_profile` refuses, with that
 /// reason unchanged; an allow form the mapping table does not hold, with a
 /// reason that names the provider and the form, before any filter is built; and
@@ -6514,11 +6504,6 @@ fn seccomp_allow_list_from_declared_rights(
             if !syscalls.contains(syscall) {
                 syscalls.push(syscall);
             }
-        }
-    }
-    for syscall in LAUNCH_ESSENTIALS {
-        if !syscalls.contains(syscall) {
-            syscalls.push(syscall);
         }
     }
     if SECCOMP_AUDIT_ARCH == 0 {
@@ -6687,7 +6672,10 @@ impl std::fmt::Display for SeccompLaunchWriteFailure {
 /// reachable only through an equality test against a number the list names: the
 /// test walks each test's true and false jump and requires the true jump to land
 /// on its `ALLOW` and the false jump to step over it, so a changed jump target
-/// fails even when the syscall number is right.
+/// fails even when the syscall number is right. It then collects every number
+/// the program tests and requires that set to equal the numbers the admitted
+/// syscalls name, so a number swapped for an undeclared call's fails even when
+/// every jump target is right.
 ///
 /// It also holds the architecture guard: a program whose audit-arch test
 /// refused the target instead of admitting it would deny every call, and one
@@ -6701,7 +6689,9 @@ impl std::fmt::Display for SeccompLaunchWriteFailure {
 /// Falsifier: WP146 replaces the default decision with `ALLOW` and refuses only
 /// `socket`, `connect` and `execve`, so the last instruction allows. WP150
 /// admits both architecture branches. WP151 makes a false jump land on its own
-/// `ALLOW`, so a call the test does not name is admitted.
+/// `ALLOW`, so a call the test does not name is admitted. WP161 tests `ptrace`'s
+/// number where an admitted syscall's belongs, so the program tests a number no
+/// row names and admits a call the list never derived.
 #[test]
 fn seccomp_program_denies_by_default_and_lists_no_undeclared_call() {
     let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
@@ -6756,14 +6746,39 @@ fn seccomp_program_denies_by_default_and_lists_no_undeclared_call() {
         "the program must hold one ALLOW per admitted syscall"
     );
 
+    // Every equality test names a number the list admits, and every admitted
+    // syscall has its own equality test: a number swapped for an undeclared
+    // call's passes the layout checks above but fails here.
+    let mut expected: Vec<u32> = allow
+        .syscalls
+        .iter()
+        .filter_map(|syscall| seccomp_syscall_number(syscall, SECCOMP_AUDIT_ARCH))
+        .collect();
+    expected.sort_unstable();
+    let mut tested: Vec<u32> = program
+        .iter()
+        .filter(|instruction| instruction.code == SECCOMP_BPF_JEQ_K)
+        .map(|instruction| instruction.k)
+        .filter(|number| *number != SECCOMP_AUDIT_ARCH)
+        .collect();
+    tested.sort_unstable();
+    for number in &tested {
+        assert!(
+            expected.contains(number),
+            "the program must test only admitted syscall numbers, and {number} is in no row: {:?}",
+            allow.syscalls
+        );
+    }
+    assert_eq!(
+        tested, expected,
+        "the program must test exactly the admitted syscall numbers: {:?}",
+        allow.syscalls
+    );
+
     for denied in ["bpf", "keyctl", "mount", "ptrace"] {
         assert!(
             !allow.admits(denied),
             "{denied} must be in no allow-list entry, so the default decision refuses it"
-        );
-        assert!(
-            !LAUNCH_ESSENTIALS.contains(&denied),
-            "LAUNCH_ESSENTIALS must hold none of the four refused calls, and it holds {denied}"
         );
         let Some(number) = seccomp_syscall_number(denied, SECCOMP_AUDIT_ARCH) else {
             continue;
@@ -6832,16 +6847,21 @@ fn seccomp_program_denies_by_default_and_lists_no_undeclared_call() {
 /// The allow list follows the declared rights: the file syscalls of `storage`
 /// and the exec syscalls of `bound-executable` come from the two rights, a copy
 /// of the file without `storage` yields a list without the calls only that right
-/// brings, and a copy holding an id the shared contract does not name is
-/// refused with `declared_entries`' existing reason, unchanged.
+/// brings, a copy with no allow form at all yields an empty list and a program
+/// with no `ALLOW` decision, and a copy holding an id the shared contract does
+/// not name is refused with `declared_entries`' existing reason, unchanged.
 ///
 /// The removed right's own calls are the ones the startup-root-directory row
 /// does not also grant, because that row still admits `read`, `openat` and the
-/// other reads of an opened file. The test reads the committed fixture, starts
-/// no process and calls no kernel, so it runs on every OS.
+/// other reads of an opened file. The empty case is the one that forbids a
+/// second permission source: the builder adds no syscall of its own beside the
+/// rows an allow form selects. The test reads the committed fixture, starts no
+/// process and calls no kernel, so it runs on every OS.
 ///
 /// Falsifier: WP147 makes the builder return a fixed list and ignore its
-/// declared input, so neither the removal case nor its syscalls change.
+/// declared input, so neither the removal case nor its syscalls change. WP160
+/// adds an unconditional syscall beside the rows, so the empty case admits it
+/// and this test fails on the empty list.
 #[test]
 fn seccomp_allow_list_follows_the_declared_rights() {
     let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
@@ -6892,6 +6912,42 @@ fn seccomp_allow_list_follows_the_declared_rights() {
         reduced.admits("read"),
         "the startup-root-directory row still admits read: {:?}",
         reduced.syscalls
+    );
+
+    // A declaration with no allow form grants nothing: the list is empty and the
+    // program holds no `ALLOW` decision, so a builder that adds a syscall of its
+    // own beside the rows shows here.
+    let mut empty = declared.clone();
+    empty["rights"]
+        .as_array_mut()
+        .expect("the declared rights must hold a rights list")
+        .clear();
+    empty[PLATFORM_BASELINE]["rules"]
+        .as_array_mut()
+        .expect("the platform baseline must hold a rules list")
+        .clear();
+    let nothing = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &empty)
+        .unwrap_or_else(|err| panic!("{err}"));
+    assert!(
+        nothing.syscalls.is_empty(),
+        "a declaration with no allow form must admit no syscall: {:?}",
+        nothing.syscalls
+    );
+    assert!(
+        !nothing
+            .program
+            .iter()
+            .any(|instruction| instruction.code == SECCOMP_BPF_RET_K
+                && instruction.k == SECCOMP_RET_ALLOW),
+        "a program built from no allow form must hold no ALLOW decision"
+    );
+    assert_eq!(
+        nothing.program.last(),
+        Some(&SeccompInstruction::stmt(
+            SECCOMP_BPF_RET_K,
+            seccomp_deny_return()
+        )),
+        "a program built from no allow form must end on the deny marker"
     );
 
     let mut unnamed = declared.clone();
