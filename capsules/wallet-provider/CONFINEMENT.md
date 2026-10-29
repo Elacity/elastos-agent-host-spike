@@ -504,10 +504,11 @@ outside case, and its cell cites only the test that shows the answer and that
 test's falsifier. The startup grants stay in "What the profile allows".
 
 M1 check B4 stays open: this table records the macOS half of its permission
-model. Linux stays designed, not enforced, and this section claims no current
-Linux behaviour. The design is `CONFINEMENT-LINUX.md`; its tests do not exist
-yet. A JSON parse failure answers `invalid_request`; it is not an operation
-and gets no row.
+model. The Linux half that exists today is the generated seccomp allow list
+described in `CONFINEMENT-LINUX.md`, which carries the four denied syscalls and
+no path rule; every row cell below reads `designed, not enforced` because no
+file row of the contract is applied on Linux. A JSON parse failure answers
+`invalid_request`; it is not an operation and gets no row.
 
 | Operation | Inputs | Outputs | Right | Effect | macOS rule and test | Linux |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -552,15 +553,17 @@ one on `linux` is a skip, and a present one on `macos` runs the test.
 The one caller, `sandbox_available`, fails the test on that error;
 `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` calls it
 with `macos` and a missing path and expects the failure.
-This contract has no Linux enforcement or tests yet. A provider-status claim
-needs host-specific test evidence and the Runtime acceptance step, so no status
-document records `did-provider` or `wallet-provider` as confined on Linux until
-that test exists (P10, P11). The status change lands when the Runtime side
-does.
+This contract has one Linux enforcement in place: the seccomp allow list that
+`CONFINEMENT-LINUX.md` maps, installed for `wallet-provider` alone, and proven
+by `linux_wallet_journey_runs_under_the_seccomp_allow_list` on a real Linux
+kernel. Namespaces, Landlock and the file rows remain unbuilt, so no document
+records either provider as confined on Linux file or IPC boundaries. A
+provider-status claim needs host-specific test evidence and the Runtime
+acceptance step, and that step has not run.
 
-Future Linux enforcement tests for this lab contract are designed in
-`CONFINEMENT-LINUX.md`: it is the one Linux mapping, its tests do not exist
-yet, and it claims no current behaviour. The existing source-only check
+`CONFINEMENT-LINUX.md` is the one Linux mapping. Its seccomp section states what
+now exists and what the journey proves; its remaining sections are design, and
+they claim no current behaviour. The existing source-only check
 `both_file_profiles_bind_one_storage_parameter_contract` reads the three
 oracles and supplies contract evidence, not Linux execution evidence.
 
@@ -1306,6 +1309,35 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` fails
   at its final wallet directory compare after `shutdown`, which finds
   `shutdown-falsifier.hex`, a name the setup did not leave.
+- Replace the built filter's final decision with `ALLOW` and refuse `socket`,
+  `connect` and `execve`, which is the 0710 deny list (WP146):
+  `seccomp_program_denies_by_default_and_lists_no_undeclared_call` fails on its
+  default arm, because the last instruction permits and the four refused calls
+  lose their equality-test assertion.
+- Make the allow-list builder return a fixed list and ignore its declared input
+  (WP147): `seccomp_allow_list_follows_the_declared_rights` fails, because
+  removing `storage` no longer removes its file syscalls.
+- Skip an allow form the mapping table does not hold instead of refusing it
+  (WP148): `seccomp_rejects_unmapped_allow_form` fails, because the list is
+  built and no refusal comes.
+- Ignore each install step's failure and return `Ok(())` (WP149):
+  `seccomp_install_refuses_each_failed_step` fails, because no refusal comes
+  for either step.
+- Give the audit-architecture guard no admit arm (WP150):
+  `seccomp_program_denies_by_default_and_lists_no_undeclared_call` fails on its
+  architecture assertions, because a wrong architecture no longer falls through
+  to the marker and the admit arm never loads the syscall number.
+- Label the Linux journey with a host name on a host that is not Linux (WP151):
+  `linux_seccomp_journey_is_not_applicable_off_linux` reads a claim instead of
+  `not applicable` and fails.
+- Add `linux` to `DECLARED_CONFINED_OS` (WP152):
+  `standin_host_refusal_decides_each_policy` fails on the `linux` `Seatbelt`
+  case, whose refusal words must stay unchanged.
+
+The Linux journey `linux_wallet_journey_runs_under_the_seccomp_allow_list` is
+`#[cfg(target_os = "linux")]`, so WP146's second plant — the same deny-list edit
+re-run on the Linux host — is where the filter's kernel behaviour is scored.
+Every other falsifier above names a test that runs on every OS.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

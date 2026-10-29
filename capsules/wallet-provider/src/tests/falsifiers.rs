@@ -236,8 +236,21 @@ use std::process::Command;
 /// in the `Request::Shutdown` arm of `fn handle` before it answers
 /// `Response::empty_ok()`, so the final wallet directory compare in
 /// `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged`
-/// fails because it finds a name the setup did not leave.
-const EXPECTED_FALSIFIERS: usize = 143;
+/// fails because it finds a name the setup did not leave. Task 145 adds WP146,
+/// which makes the built filter a deny list that permits every unnamed call, so
+/// `seccomp_program_denies_by_default_and_lists_no_undeclared_call` fails on its
+/// default arm; WP147, which makes the allow-list builder ignore its declared
+/// input, so `seccomp_allow_list_follows_the_declared_rights` fails; WP148,
+/// which skips an allow form the mapping table does not hold, so
+/// `seccomp_rejects_unmapped_allow_form` fails; WP149, which ignores each
+/// install step's failure, so `seccomp_install_refuses_each_failed_step` fails;
+/// WP150, which removes the audit-architecture guard, so the default-decision
+/// test fails on its architecture assertions; WP151, which labels the Linux
+/// journey with a host name off Linux, so
+/// `linux_seccomp_journey_is_not_applicable_off_linux` fails; and WP152, which
+/// adds `linux` to `DECLARED_CONFINED_OS`, so
+/// `standin_host_refusal_decides_each_policy` fails on its unchanged refusal.
+const EXPECTED_FALSIFIERS: usize = 150;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

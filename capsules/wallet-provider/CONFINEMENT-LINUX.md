@@ -6,13 +6,83 @@ present is the one file-profile contract: `check_profile_contract`, run over
 `(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
 no network allow, only the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and
 `STORAGE_PARENT` tokens, and the three shared rules verbatim.
-This contract has no Linux enforcement or tests yet. Nothing in this file is
-current behaviour.
+The seccomp allow list in "The seccomp allow list" below is Linux enforcement
+that exists today, for `wallet-provider` only. Every other section of this file
+is design: those rows name the Linux test that would prove them, and until that
+test exists the row claims no behaviour.
 `confine.sb` stays each provider's one oracle. The contract is shared, so its
 Linux mapping is written once here, beside the one contract check (P10). The
 Linux policy that the Runtime would generate from the same approved declared
 rights must carry each oracle rule as this file maps it, and no second profile
 file exists (P10).
+
+## The seccomp allow list
+
+`wallet-provider` starts on Linux under a seccomp filter whose allow list is
+generated from the provider's declared rights. One function builds it:
+`seccomp_allow_list_from_declared_rights(name, declared)` in
+`tests/confine.rs` calls `generate_profile`, the one lab generator, reads the
+profile text back through `profile_forms`, the one profile parser, and maps each
+allow form through one table. It reads no file, holds no rule text of its own,
+and never reads the declared-rights JSON: `declared_entries` reaches it only
+through `generate_profile`, so the JSON has one reader and the profile one
+parser (P10).
+
+The filter is an allow list. Its final decision is the deny marker
+`SECCOMP_RET_ERRNO` with `EACCES` (13), and every `SECCOMP_RET_ALLOW` return sits
+behind an equality test against a syscall number the list names. A call the list
+does not name is refused by the default arm, which is what closes the 0710 fault
+class: a deny list permits every call it does not name.
+
+`SECCOMP_RULE_SYSCALLS` is the one mapping table, keyed on the allow form text.
+It holds one row for each of the five allow forms a did or wallet profile
+carries:
+
+| Allow form | Syscalls the row admits |
+| --- | --- |
+| `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` | `execve`, `execveat` |
+| `(allow file-read* (literal (param "STORAGE_PARENT")))` | `faccessat`, `fstat`, `getdents64`, `lseek`, `newfstatat`, `openat`, `openat2`, `pread64`, `read`, `readlinkat`, `readv`, `statx` |
+| `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` | the file-read row, plus `fchmod`, `fdatasync`, `fsync`, `ftruncate`, `linkat`, `mkdirat`, `pwrite64`, `renameat2`, `unlinkat`, `write`, `writev` |
+| `(allow file-read* (literal "/"))` | the file-read row |
+| `(allow sysctl-read)` | `uname`, `sysinfo` |
+
+The head forms (`(version 1)`, `(deny default)`) and the deny forms grant
+nothing, so no syscall answers to them. An allow form with no row is a refusal
+that names the provider and the form and builds no filter, symmetrical to
+`check_profile_contract`'s refusals.
+
+`LAUNCH_ESSENTIALS` holds the fixed set every launch needs beside the
+forms-derived part: `close`, `exit_group`, `getrandom`, `mmap`, `mprotect`,
+`ppoll` and `rt_sigaction`. No declared right covers them; they are the
+runtime's own plumbing. Each entry earned its place by dropping it alone from the
+whole list on the proof host and reading the call that failed, and each comment
+in that table names that call.
+
+Four calls are in no row and in no essentials entry, so the default decision is
+the only answer they receive: `ptrace`, `mount`, `bpf` and `keyctl`. On the proof
+host `bpf` was already `EPERM` before any filter, because
+`kernel.unprivileged_bpf_disabled` is `2`; the filter's own marker errno is
+therefore `EACCES` (13), which differs from every unfiltered answer the journey's
+probe recorded. A plain `EPERM` assertion would pass with no filter installed.
+
+The proof ran on `spark1.local`: aarch64, Ubuntu 24.04.4, kernel
+`6.17.0-1029-nvidia`. `linux_wallet_journey_runs_under_the_seccomp_allow_list`
+builds the list from wallet's committed declared-rights file, starts the provider
+through `standin_spawn_confined_provider` with a `Seccomp` policy, requires
+`init` `ok`, one read-only wallet call `ok`, the storage key under `STORAGE_ROOT`
+and no new name outside it, and requires the launched provider's own
+`/proc/<pid>/status` to report `Seccomp: 2`. It then runs one probe child under
+the same filter that records what `ptrace(PTRACE_TRACEME)`, `mount`, `bpf` and
+`keyctl` answer before the filter and again after it, and requires each filtered
+answer to be the marker and to differ from every unfiltered answer.
+
+Namespaces, Landlock and every file row of the contract remain unbuilt on Linux,
+so `linux` stays out of `DECLARED_CONFINED_OS`. A `linux` host with a `Seatbelt`
+policy is still refused with the words this lab already used, and a `linux` host
+with a `Seccomp` policy is accepted with an acceptance line that says it is
+confined by the generated seccomp allow list only. A seccomp filter reads syscall
+numbers and not paths, so no sentence here claims the contract's file rows are
+enforced on Linux.
 
 ## The frame
 
@@ -34,10 +104,11 @@ rule, as its row says. The private `/proc` mount the mount namespace provides
 is a mount, not a grant. The policy is a second rendering of the same rights,
 and the one contract check stays the one check of the oracle.
 
-The Linux policy would be applied before the provider image is entered. This
-file is a design: each row names the Linux test that would prove it, the Linux
-counterparts do not exist yet, and no sentence here claims that any provider is
-confined on Linux.
+The Linux policy beyond the seccomp allow list would be applied before the
+provider image is entered. Each row of the tables below is design: it names the
+Linux test that would prove it, the seccomp allow list above is the one Linux
+policy that runs today, and no sentence here claims any other row is enforced on
+Linux.
 
 ## The contract on Linux
 
