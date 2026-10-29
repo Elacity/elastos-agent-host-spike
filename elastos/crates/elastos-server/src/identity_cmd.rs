@@ -72,7 +72,13 @@ pub(crate) async fn load_identity_profile(data_dir: &Path) -> anyhow::Result<Ide
         .ok()
         .map(|(_, did)| did)
         .filter(|did| !did.trim().is_empty());
-    let nickname = elastos_identity::load_nickname(data_dir).ok().flatten();
+    // A storage error is not absence: report it instead of showing "not set".
+    let nickname = elastos_identity::load_nickname(data_dir).with_context(|| {
+        format!(
+            "nickname unreadable: {}",
+            data_dir.join("did").join("nickname.enc").display()
+        )
+    })?;
     Ok(IdentityProfile { did, nickname })
 }
 
@@ -149,8 +155,48 @@ fn prompt_for_nickname(current: Option<&str>) -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::prompt_for_nickname;
+    use super::{load_identity_profile, prompt_for_nickname};
     use std::io::IsTerminal;
+
+    #[test]
+    fn identity_profile_reports_three_nickname_path_states() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let did_dir = dir.path().join("did");
+        std::fs::create_dir_all(&did_dir).unwrap();
+        let nickname_path = did_dir.join("nickname.enc");
+
+        // Absent: no nickname file means no nickname and no error.
+        let absent = rt.block_on(load_identity_profile(dir.path())).unwrap();
+        assert_eq!(absent.nickname, None);
+
+        // Stored but unreadable: the check must report it, not read absence.
+        std::fs::write(&nickname_path, b"permission-denied").unwrap();
+
+        std::fs::set_permissions(&did_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = std::fs::read(&nickname_path).err();
+        let unreadable = rt.block_on(load_identity_profile(dir.path()));
+        std::fs::set_permissions(&did_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let Some(_denied) = denied else {
+            eprintln!("skipping: running with permission override (root)");
+            return;
+        };
+
+        let err = unreadable.expect_err("storage error must not be read as absence");
+        let message = format!("{err:#}");
+        assert!(message.starts_with("nickname unreadable: "), "{message}");
+        assert!(message.contains("nickname.enc"), "{message}");
+
+        // Present: the nickname is returned with no error.
+        let data_dir = tempfile::tempdir().unwrap();
+        let (signing_key, _did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        drop(signing_key);
+        elastos_identity::save_nickname(data_dir.path(), "owner").unwrap();
+        let present = rt.block_on(load_identity_profile(data_dir.path())).unwrap();
+        assert_eq!(present.nickname.as_deref(), Some("owner"));
+    }
 
     #[test]
     fn nickname_validation_rejects_empty() {

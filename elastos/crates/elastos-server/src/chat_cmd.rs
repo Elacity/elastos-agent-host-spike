@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{io::IsTerminal, io::Read, io::Write};
 
+use anyhow::Context;
 use elastos_server::carrier::live_source_bootstrap_ticket;
 use elastos_server::sources::{default_data_dir, load_trusted_sources, TrustedSourcesConfig};
 use sha2::{Digest, Sha256};
@@ -233,6 +234,17 @@ fn native_discovery_consumer_id(topic: &str, session_id: &str) -> String {
     format!("native-chat-discovery:{}:{}", topic, session_id)
 }
 
+/// Read the stored nickname for Chat. A storage error is reported, not treated
+/// as an absent nickname, so Chat never silently renames the user to "anon".
+fn load_local_chat_nickname(data_dir: &std::path::Path) -> anyhow::Result<Option<String>> {
+    elastos_identity::load_nickname(data_dir).with_context(|| {
+        format!(
+            "nickname unreadable: {}",
+            data_dir.join("did").join("nickname.enc").display()
+        )
+    })
+}
+
 fn resolve_chat_nickname(
     requested_nick: Option<String>,
     local_nickname: Option<String>,
@@ -271,9 +283,7 @@ async fn run_native_chat_with_runtime(
     let api = &coords.api_url;
     let client_token = &tokens.client_token;
     let identity = load_attached_chat_identity(&client, api, client_token).await;
-    let local_nickname = elastos_identity::load_nickname(&default_data_dir())
-        .ok()
-        .flatten();
+    let local_nickname = load_local_chat_nickname(&default_data_dir())?;
     let self_did = identity.did;
     let self_session_id = new_chat_session_id();
     let room_consumer_id = native_room_consumer_id(CHAT_TOPIC, &self_session_id);
@@ -2025,6 +2035,49 @@ mod tests {
         assert_eq!(
             ChatBootstrap::TrustedSourceSeed("seed-ticket".to_string()).gossip_join_mode(),
             "direct"
+        );
+    }
+
+    #[test]
+    fn chat_nickname_read_reports_three_path_states() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let did_dir = dir.path().join("did");
+        std::fs::create_dir_all(&did_dir).unwrap();
+        let nickname_path = did_dir.join("nickname.enc");
+
+        // Absent: no nickname file means no nickname and no error.
+        assert_eq!(
+            load_local_chat_nickname(dir.path()).unwrap(),
+            None,
+            "absent nickname file is not an error"
+        );
+
+        // Stored but unreadable: the check must report it, not read absence.
+        std::fs::write(&nickname_path, b"permission-denied").unwrap();
+
+        std::fs::set_permissions(&did_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = std::fs::read(&nickname_path).err();
+        let unreadable = load_local_chat_nickname(dir.path());
+        std::fs::set_permissions(&did_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let Some(_denied) = denied else {
+            eprintln!("skipping: running with permission override (root)");
+            return;
+        };
+
+        let err = unreadable.expect_err("storage error must not be read as absence");
+        let message = format!("{err:#}");
+        assert!(message.starts_with("nickname unreadable: "), "{message}");
+        assert!(message.contains("nickname.enc"), "{message}");
+
+        // Present: the nickname is returned with no error.
+        let present_dir = tempfile::tempdir().unwrap();
+        let _ = elastos_identity::load_or_create_did(present_dir.path()).unwrap();
+        elastos_identity::save_nickname(present_dir.path(), "owner").unwrap();
+        assert_eq!(
+            load_local_chat_nickname(present_dir.path()).unwrap(),
+            Some("owner".to_string())
         );
     }
 
