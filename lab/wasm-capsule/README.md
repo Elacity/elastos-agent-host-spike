@@ -1609,6 +1609,65 @@ hosting cannot be claimed for wasmer.
   is the only result they share. wc-009b's wasmer hosting test must report
   SKIPPED with this reason, never PASS.
 
+## Bus v1 import contract (wc-009b)
+
+Task 064, the first half of wc-009b (M1 B4 and C0 lab half, one permission
+model and fail closed; P10, one canonical path). Rong's import contract (28
+Oct, relayed by Flint in INBOX 28 Oct 00:30, verdict C+) says the contract
+already exists and must be used, not rewritten: world `product-capsule-v1` of
+package `elastos:bus@1.0.0` in `elastos/wit/elastos-bus-v1.wit`. It imports
+`runtime`, `identity`, `capabilities` and `providers` (with their shared
+`types`) and exports `lifecycle`. His finding WC-1 (High): the lab's one typed
+operation, `env.f`, is a core import, and the Runtime refuses a core module at
+admission and any core import holding `env`, so a link rule for it proves an
+ABI that will never ship. Everything below is a lab stand-in, not admission.
+
+- `BUS_V1_INTERFACES` (`tools/src/verify.rs`) is the five Bus v1 import names,
+  in the Runtime's order: `elastos:bus/types@1.0.0`,
+  `elastos:bus/runtime@1.0.0`, `elastos:bus/identity@1.0.0`,
+  `elastos:bus/capabilities@1.0.0` and `elastos:bus/providers@1.0.0`.
+  `bus_interfaces_are_the_runtime_admission_list` reads the Runtime's own
+  `ALLOWED_BUS_IMPORTS` (`elastos/crates/elastos-server/src/component.rs`,
+  read only) and fails unless the two lists are equal, in order.
+- `bus_imports(component)` is cx-wasm-audit's `audit_component(component,
+  &BUS_V1_INTERFACES)` and nothing else; a refusal comes back as
+  `VerifyRefusal::Audit`, unchanged: `undeclared interface <name>` for an
+  import outside Bus v1 (exact name and version, so
+  `wasi:cli/environment@0.2.0`, `elastos:bus/runtime@2.0.0` and the world's
+  export `elastos:bus/lifecycle@1.0.0` are each refused by name), and `not a
+  component` for core-module bytes, `env.f`'s module among them. It lists the
+  Bus interfaces the lab would link; no Bus host exists in the lab. The tools
+  crate calls `audit_component` exactly once (`verifier_has_one_check_path`).
+- The Runtime's own wrapper, `elastos/tools/componentize`, wraps the built
+  `capsule.wasm`, run read only as `scripts/build-component-capsule.sh` runs
+  it, plus `--offline`: `cargo run --quiet --locked --offline --manifest-path
+  elastos/tools/componentize/Cargo.toml -- <in> <out>`, with its build in this
+  lane's git-ignored `target/componentize` and its files in a test temp
+  folder (`tests/common/componentize.rs`). Nothing of the tool is copied, and
+  this lane's lockfile holds none of its crates.
+  `runtime_componentize_wraps_the_built_capsule_with_no_bus_import`: the
+  wrapped capsule is a component, and `bus_imports` lists nothing for it.
+  `runtime_componentize_refuses_the_env_f_module`: the same tool refuses
+  `IMPORTING_MODULE` (exit 1), with this stderr line (measured first, LOG.md,
+  task 064). That is the Runtime's own tool refusing WC-1's import.
+
+  ```
+      2: module requires an import interface named `env`
+  ```
+
+Not covered:
+
+- The two engines still run the zero-import core module. No Bus call is hosted
+  or linked by any engine, and no engine runs a component.
+- `audit_component` is not the Runtime's `validate_component_imports`: the
+  Runtime also lets through the generated names `import-type-*` and
+  `import-func-run`, and checks embedded core imports for its authority
+  markers (`env`, `wasi` and others). Neither is applied here.
+- The componentized capsule imports nothing and exports no `lifecycle`, so it
+  does not implement `product-capsule-v1`.
+- `env.f` is still in `LAB_OPERATIONS`, and the grants file still names a
+  right per import, until task 065.
+
 ## Cancel (M1 A10 lab half)
 
 Task 045. The rule: a run the caller cancels settles as `cancelled`, with a
@@ -1986,8 +2045,10 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
   before unsigned, unsigned before the audit, the signature before the
   entrypoint and the audit, the name before the audit.
 - `verified_bundle_is_sealed` — the source, comments stripped: no public
-  field, exactly eight public functions (`verify_checked`, `verify_bundle`,
-  `read_grants` and the five accessors, `unused_grants()` among them), no
+  field, exactly ten public functions (`verify_checked`, `verify_bundle`,
+  `read_grants`, task 064's `bus_imports` and the six accessors,
+  `unused_grants()` and `memory_mb()` among them; this line said "eight" and
+  "five" before task 064, one behind the test), no
   `&mut self`, no `Deserialize`, `Default` or trait impl for the value, and one
   literal that makes it, in `verify_checked`.
 - `verifier_has_one_check_path` — the tools crate calls
@@ -1995,8 +2056,9 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
   `from_slice` in `manifest_entrypoint`, one in `parse_grants`), calls
   `manifest_entrypoint` once, reads one file with `fs::read` (in
   `read_grants`), calls `parse_grants` once and `read_grants` never (the caller
-  does), uses neither `verify_name_signature` nor `audit_component`,
-  `verify_checked` reads no grants, `verify_bundle` only walks and delegates,
+  does), does not use `verify_name_signature`, calls `audit_component` once
+  (task 064, in `bus_imports`; it held "never" before), `verify_checked`
+  reads no grants, `verify_bundle` only walks and delegates,
   and `entrypoint()` reads no manifest.
 - `verifier_uses_audit_api_v1` — `wasm_capsule_audit::AUDIT_API` is 1.
 - `verifier_has_no_import_parser_of_its_own` — `tools/Cargo.toml` and
@@ -2534,9 +2596,38 @@ The v3 text in the three updated tests: the zero-memory `MODULE` gives the
 `receipt_records_the_declared_memory_cap`, now 16 lines), and the real capsule
 gives `67108864` on both (`real_receipt_names_both_installed_engines`).
 
+Task 064, the Bus v1 import contract (README "Bus v1 import contract
+(wc-009b)"). In `tests/verify.rs`:
+
+- `bus_interfaces_are_the_runtime_admission_list` — reads the Runtime's
+  `elastos/crates/elastos-server/src/component.rs` (read only), finds the line
+  `const ALLOWED_BUS_IMPORTS: &[&str] = &[` exactly once, requires each line up
+  to the next `];` to be exactly `"<name>",` once trimmed (any other line fails,
+  naming it), and requires those names to equal `BUS_V1_INTERFACES` in order.
+- `bus_imports_lists_the_bus_interfaces_a_component_imports` — a component
+  importing `elastos:bus/providers@1.0.0` and then `elastos:bus/runtime@1.0.0`
+  gives both, in that order.
+- `bus_imports_refuses_an_interface_outside_bus_v1_by_name` —
+  `wasi:cli/environment@0.2.0`, `elastos:bus/runtime@2.0.0` and
+  `elastos:bus/lifecycle@1.0.0` are each refused as
+  `VerifyRefusal::Audit(UndeclaredInterface)` with exactly `undeclared
+  interface <name>`.
+- `bus_imports_refuses_a_core_module` — `IMPORTING_MODULE` (`env.f`) is refused
+  with exactly `not a component`.
+
+In `tests/run.rs`, through `componentize` (`tests/common/componentize.rs`,
+each input run at most once per test binary):
+
+- `runtime_componentize_wraps_the_built_capsule_with_no_bus_import` — the
+  built `capsule.wasm`, wrapped by the Runtime's componentize tool, gives
+  `bus_imports(...) == Ok(vec![])`.
+- `runtime_componentize_refuses_the_env_f_module` — wrapping `IMPORTING_MODULE`
+  exits non-zero, and stderr holds the measured line
+  `COMPONENTIZE_ENV_REFUSAL`.
+
 ## Falsifiers
 
-`falsifiers.json` holds 191 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 192 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
@@ -2544,21 +2635,21 @@ seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
 031, two task 032, one task 035, three task 036, five task 038, three task
 039, one task 040, one task 041, two task 043, one task 044, one task
 033, two task 034, one task 045, two task 046, one task 050, three task
-052, one task 056 and two task 062.
+052, one task 056, two task 062 and one task 064.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 127, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 128, the sections below
 marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046, 050, 052, 056 and 062: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
-+ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1 + 3 + 1 + 2), each run by the canonical runner with its summary
+029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046, 050, 052, 056, 062 and 064: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
++ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1 + 3 + 1 + 2 + 1), each run by the canonical runner with its summary
 line quoted.
 Hand-proven, pending R1: 69, each counted once: the 64 entries of the sections
 marked so (wc-001, tasks 010 and 009, wc-004 and wc-008: 9 + 7 + 23 + 21 + 4),
-and five proofs with no `falsifiers.json` entry, outside the 191 (task 036's
+and five proofs with no `falsifiers.json` entry, outside the 192 (task 036's
 `/bin/bash` 3.2 guard in `tests/reproducible.rs`, task 042's killed-run
 stop and task 049's two environment record proofs in `tests/run.rs`, and task
 053's import-section refusal in `tests/common/wasm_shape.rs`; none of these
@@ -3457,4 +3548,18 @@ Task 062 also re-anchors F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT to the
 new total, and F-WC10-CAP-REJECTED-RETRY (its planted uncapped retry fills the
 new `EngineRun::process_max_rss_bytes` with 0, since that retry is not reaped by
 `wait4`), each the same bug as before (LOG.md, task 062). This task changes no
+other label.
+
+Task 064's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 064). The anchor pair is found exactly once, and each named test
+fails at its assertion:
+
+- F-WC9B-BUS-LIST-WIDENED — `BUS_V1_INTERFACES` (`tools/src/verify.rs`) gains
+  `"wasi:cli/environment@0.2.0"` as a sixth entry, its length with it
+  (`bus_interfaces_are_the_runtime_admission_list`: the list is no longer the
+  Runtime's; `bus_imports_refuses_an_interface_outside_bus_v1_by_name`: the
+  `wasi:cli` component is no longer refused).
+
+Task 064 also re-anchors F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT to the
+new total, each the same bug as before (LOG.md, task 064). This task changes no
 other label.
