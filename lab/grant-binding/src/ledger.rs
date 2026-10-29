@@ -1735,6 +1735,152 @@ fn model_forged_ceiling_does_not_replace_the_settled_charge() {
 }
 
 #[test]
+fn model_forged_append_does_not_retarget_the_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    assert_eq!(books(&verifier).held, 4);
+    assert_eq!(books(&verifier).open.get(&reservation.id), Some(&4));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged append does not retarget the hold");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_overwrite_does_not_retarget_the_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_overwrite);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    assert_eq!(books(&verifier).held, 4);
+    assert_eq!(books(&verifier).open.get(&reservation.id), Some(&4));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged overwrite does not retarget the hold");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_child_journal_does_not_retarget_the_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    assert_eq!(books(&verifier).held, 4);
+    assert_eq!(books(&verifier).open.get(&reservation.id), Some(&4));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged child journal does not retarget the hold");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_identity_does_not_retarget_the_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    assert_eq!(books(&verifier).held, 4);
+    assert_eq!(books(&verifier).open.get(&reservation.id), Some(&4));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged identity does not retarget the hold");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_session_does_not_retarget_the_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    assert_eq!(books(&verifier).held, 4);
+    assert_eq!(books(&verifier).open.get(&reservation.id), Some(&4));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged session does not retarget the hold");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_instance_does_not_retarget_the_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    verifier.admit(10);
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_instance: Some(sibling),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_instance, Some(sibling));
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    assert_eq!(books(&verifier).held, 4);
+    assert_eq!(books(&verifier).open.get(&reservation.id), Some(&4));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged instance does not retarget the hold");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
 fn model_release_after_unknown_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
