@@ -2999,6 +2999,43 @@
       "tests": [
         "state::tests::journal_admission_refuses_before_prepared_and_backend_effects"
       ]
+    },
+    {
+      "id": "MP76",
+      "title": "RunView carries principal_id, session_id, grant_id and request_id, so the public run shows the caller identity",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/contract.rs",
+          "old": "    pub sequence_cursor: u64,\n    #[serde(skip_serializing_if = \"Option::is_none\")]\n    pub terminal: Option<RunTerminalOutcome>,",
+          "new": "    pub sequence_cursor: u64,\n    pub principal_id: String,\n    pub session_id: String,\n    pub grant_id: String,\n    pub request_id: String,\n    #[serde(skip_serializing_if = \"Option::is_none\")]\n    pub terminal: Option<RunTerminalOutcome>,"
+        },
+        {
+          "file": "../../capsules/model-provider/src/journal.rs",
+          "old": "            sequence_cursor: self.next_sequence.saturating_sub(1),\n            terminal: self.status.is_terminal().then(|| RunTerminalOutcome {",
+          "new": "            sequence_cursor: self.next_sequence.saturating_sub(1),\n            principal_id: self.runtime_binding.principal_id.clone(),\n            session_id: self.runtime_binding.session_id.clone(),\n            grant_id: self.runtime_binding.grant_id.clone(),\n            request_id: self.runtime_binding.request_id.clone(),\n            terminal: self.status.is_terminal().then(|| RunTerminalOutcome {"
+        }
+      ],
+      "tests": [
+        "hosted_public_responses_hide_prompt_identity_and_endpoint"
+      ]
+    },
+    {
+      "id": "MP77",
+      "title": "a mismatched execution offer is returned, so settlement reconciles the private backend",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "        if current_summary != recorded_summary || current_hash != run.execution_binding_hash {\n            return Ok(None);\n        }",
+          "new": "        if current_summary != recorded_summary || current_hash != run.execution_binding_hash {\n            return Ok(Some(offer.clone()));\n        }"
+        }
+      ],
+      "tests": [
+        "state::tests::mismatch_settlement_public_responses_do_not_leak_private_execution_details"
+      ]
     }
   ]
 }
