@@ -11,8 +11,9 @@
 //! verifier passes in when it stays at or under the stored hold, refuses a
 //! larger one, and an unknown outcome marks that hold uncertain when its bound
 //! handle is presented and keeps it, release of an uncertain hold is refused,
-//! and a timeout before the verifier deadline is refused, and a timeout at
-//! that deadline records timed out, outcome unknown and keeps the hold. The
+//! a timeout before the verifier deadline is refused, a timeout when the
+//! verifier never set a deadline is refused, and a timeout at a deadline the
+//! verifier set records timed out, outcome unknown and keeps the hold. The
 //! ledger value sits behind one mutex, and admit, reserve, settle, release,
 //! and timeout_hold lock it for the check and the write.
 
@@ -27,6 +28,7 @@ struct OpenHold {
     uncertain: bool,
     timed_out: bool,
     deadline: u64,
+    deadline_set: bool,
 }
 
 fn handles_match(bound: Handle, presented: Handle) -> bool {
@@ -61,6 +63,7 @@ pub(crate) struct Ledger {
     next_reservation: u64,
     charged: u64,
     verifier_deadline: u64,
+    deadline_set: bool,
     open: HashMap<u64, OpenHold>,
 }
 
@@ -75,6 +78,7 @@ impl Ledger {
             next_reservation: 0,
             charged: 0,
             verifier_deadline: 0,
+            deadline_set: false,
             open: HashMap::new(),
         }
     }
@@ -177,6 +181,7 @@ pub enum TimeoutRefuse {
     NotOutstanding,
     OtherHandle,
     Early,
+    NoDeadline,
     Binding(Refuse),
 }
 
@@ -189,6 +194,7 @@ impl std::fmt::Display for TimeoutRefuse {
                 formatter.write_str("reservation is bound to another handle")
             }
             TimeoutRefuse::Early => formatter.write_str("timeout is before the verifier deadline"),
+            TimeoutRefuse::NoDeadline => formatter.write_str("verifier deadline is not set"),
             TimeoutRefuse::Binding(refusal) => refusal.fmt(formatter),
         }
     }
@@ -305,6 +311,7 @@ impl Verifier {
                 uncertain: false,
                 timed_out: false,
                 deadline: 0,
+                deadline_set: false,
             },
         );
         Ok(Reservation {
@@ -338,6 +345,7 @@ impl Verifier {
                         if handles_match(open.handle, request.handle) {
                             open.uncertain = true;
                             open.deadline = ledger.verifier_deadline;
+                            open.deadline_set = ledger.deadline_set;
                         }
                     }
                 }
@@ -367,17 +375,20 @@ impl Verifier {
         Ok(charge)
     }
 
-    /// Stores the deadline the next unknown settle copies onto its hold.
-    /// The guest does not pass this value.
+    /// Stores the deadline the next unknown settle copies onto its hold
+    /// and marks that deadline as set. The guest does not pass this value.
     pub fn set_verifier_deadline(&self, deadline: u64) {
-        self.ledger.lock().expect("ledger lock").verifier_deadline = deadline;
+        let mut ledger = self.ledger.lock().expect("ledger lock");
+        ledger.verifier_deadline = deadline;
+        ledger.deadline_set = true;
     }
 
     /// Records a due timeout on an uncertain hold. A binding refusal records
     /// nothing, a reservation that is not outstanding is refused, a hold that
-    /// is not uncertain stays open, and a timeout that arrives before the
-    /// verifier deadline is refused. A due timeout records timed out, outcome
-    /// unknown and keeps the hold, so a second timeout records it again.
+    /// is not uncertain stays open, a hold whose deadline was never set is
+    /// refused, and a timeout that arrives before the verifier deadline is
+    /// refused. A due timeout records timed out, outcome unknown and keeps
+    /// the hold, so a second timeout records it again.
     pub fn timeout_hold(
         &self,
         call: &Call,
@@ -388,15 +399,25 @@ impl Verifier {
         self.resolve(*call, request.handle)
             .map_err(TimeoutRefuse::Binding)?;
         let mut ledger = self.ledger.lock().expect("ledger lock");
-        let (bound, amount, uncertain, deadline) = match ledger.open.get(&reservation.id) {
-            Some(open) => (open.handle, open.amount, open.uncertain, open.deadline),
+        let open = match ledger.open.get(&reservation.id) {
+            Some(open) => (
+                open.handle,
+                open.amount,
+                open.uncertain,
+                open.deadline,
+                open.deadline_set,
+            ),
             None => return Err(TimeoutRefuse::NotOutstanding),
         };
+        let (bound, amount, uncertain, deadline, deadline_set) = open;
         if !handles_match(bound, request.handle) {
             return Err(TimeoutRefuse::OtherHandle);
         }
         if !uncertain {
             return Err(TimeoutRefuse::NotUncertain);
+        }
+        if !deadline_set {
+            return Err(TimeoutRefuse::NoDeadline);
         }
         if now < deadline {
             return Err(TimeoutRefuse::Early);
@@ -2373,6 +2394,7 @@ fn model_timeout_ends_an_uncertain_hold() {
     assert_eq!(before.held, 7);
     assert_eq!(before.open.get(&first.id), Some(&4));
     assert_eq!(before.open.get(&second.id), Some(&3));
+    verifier.set_verifier_deadline(0);
     let unknown = verifier
         .settle(&call, &request, first, SettleOutcome::Unknown)
         .expect_err("unknown outcome");
@@ -2418,6 +2440,7 @@ fn model_known_settle_after_timeout_still_charges() {
         .expect("ask");
     let request = guest(handle);
     let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    verifier.set_verifier_deadline(0);
     let unknown = verifier
         .settle(&call, &request, reservation, SettleOutcome::Unknown)
         .expect_err("unknown outcome");
@@ -2481,6 +2504,41 @@ fn model_early_timeout_is_refused() {
     assert_eq!(after.held, 4);
     assert_eq!(after.open.get(&reservation.id), Some(&4));
     assert!(after.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_unset_deadline_timeout_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = guest(handle);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let refusal = verifier
+        .timeout_hold(&call, &request, reservation, 0)
+        .expect_err("unset deadline is not due");
+    assert_eq!(refusal, TimeoutRefuse::NoDeadline);
+    assert_eq!(refusal.to_string(), "verifier deadline is not set");
+    let later = verifier
+        .timeout_hold(&call, &request, reservation, 100)
+        .expect_err("a later instant is still unset");
+    assert_eq!(later, TimeoutRefuse::NoDeadline);
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert!(!stayed.timed_out.contains_key(&reservation.id));
 }
 
 #[test]
@@ -3319,6 +3377,7 @@ fn model_timeout_twice_is_refused() {
         .expect("ask");
     let request = guest(handle);
     let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
+    verifier.set_verifier_deadline(0);
     let unknown = verifier
         .settle(&call, &request, reservation, SettleOutcome::Unknown)
         .expect_err("unknown outcome");
@@ -3369,6 +3428,7 @@ fn model_timeout_on_another_handle_is_refused() {
         .expect("ask");
     let request = guest(holder);
     let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    verifier.set_verifier_deadline(0);
     let unknown = verifier
         .settle(&call, &request, reservation, SettleOutcome::Unknown)
         .expect_err("unknown outcome");
@@ -3415,6 +3475,7 @@ fn model_timeout_on_a_sibling_instance_is_refused() {
         .expect("ask");
     let request = guest(handle);
     let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
+    verifier.set_verifier_deadline(0);
     let unknown = verifier
         .settle(&call, &request, reservation, SettleOutcome::Unknown)
         .expect_err("unknown outcome");
@@ -3456,6 +3517,7 @@ fn model_forged_instance_does_not_move_the_timeout() {
         )
         .expect("ask");
     let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    verifier.set_verifier_deadline(0);
     let unknown = verifier
         .settle(&call, &guest(handle), reservation, SettleOutcome::Unknown)
         .expect_err("unknown outcome");
@@ -3495,6 +3557,7 @@ fn model_forged_append_does_not_move_the_timeout() {
         )
         .expect("ask");
     let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    verifier.set_verifier_deadline(0);
     let unknown = verifier
         .settle(&call, &guest(handle), reservation, SettleOutcome::Unknown)
         .expect_err("unknown outcome");
@@ -3535,6 +3598,7 @@ fn model_forged_overwrite_does_not_move_the_timeout() {
         )
         .expect("ask");
     let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    verifier.set_verifier_deadline(0);
     let unknown = verifier
         .settle(&call, &guest(handle), reservation, SettleOutcome::Unknown)
         .expect_err("unknown outcome");
@@ -3575,6 +3639,7 @@ fn model_forged_child_journal_does_not_move_the_timeout() {
         )
         .expect("ask");
     let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    verifier.set_verifier_deadline(0);
     let unknown = verifier
         .settle(&call, &guest(handle), reservation, SettleOutcome::Unknown)
         .expect_err("unknown outcome");
@@ -3615,6 +3680,7 @@ fn model_forged_identity_does_not_move_the_timeout() {
         )
         .expect("ask");
     let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    verifier.set_verifier_deadline(0);
     let unknown = verifier
         .settle(&call, &guest(handle), reservation, SettleOutcome::Unknown)
         .expect_err("unknown outcome");
@@ -3655,6 +3721,7 @@ fn model_forged_session_does_not_move_the_timeout() {
         )
         .expect("ask");
     let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    verifier.set_verifier_deadline(0);
     let unknown = verifier
         .settle(&call, &guest(handle), reservation, SettleOutcome::Unknown)
         .expect_err("unknown outcome");
@@ -3695,6 +3762,7 @@ fn model_forged_ceiling_does_not_move_the_timeout() {
         )
         .expect("ask");
     let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    verifier.set_verifier_deadline(0);
     let unknown = verifier
         .settle(&call, &guest(handle), reservation, SettleOutcome::Unknown)
         .expect_err("unknown outcome");
@@ -3735,6 +3803,7 @@ fn model_reported_usage_does_not_move_the_timeout() {
         )
         .expect("ask");
     let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    verifier.set_verifier_deadline(0);
     let unknown = verifier
         .settle(&call, &guest(handle), reservation, SettleOutcome::Unknown)
         .expect_err("unknown outcome");
