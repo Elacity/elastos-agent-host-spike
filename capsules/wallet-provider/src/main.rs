@@ -1057,5 +1057,1009 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+/// One unit test per proof-handler refusal in this file.
+///
+/// The three proof handlers (`verify_proof`, `verify_bitcoin_proof` and
+/// `verify_contract_proof`) refuse a proof before any signature check when its
+/// challenge binding, its stored record, its consumption, its expiry or its
+/// whole message is wrong. Each string below is asserted as the whole
+/// `Response::Error` value, so a dropped guard fails one named test in about a
+/// second instead of only the confined process suite.
+///
+/// A string raised from several sites gets one test that drives each site, and
+/// its doc comment names them.
+#[cfg(test)]
+mod uf_proof_refusal_tests {
+    use super::*;
+
+    /// A mainnet P2WPKH address, so a Bitcoin challenge is issuable without a key.
+    const BITCOIN_ADDRESS: &str = "bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l";
+    /// An EVM address the challenge validator accepts.
+    const EVM_ADDRESS: &str = "0x1111111111111111111111111111111111111111";
+    /// A signature the handlers never reach: every case here stops at a
+    /// challenge check that runs before verification.
+    const UNREACHED_SIGNATURE: &str = "0x01020304";
+
+    /// An initialised provider over its own temporary root.
+    fn init_provider() -> (tempfile::TempDir, WalletProvider) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut provider = WalletProvider::new();
+        let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "init must succeed, got {response:?}"
+        );
+        (dir, provider)
+    }
+
+    fn error(code: &str, message: &str) -> Response {
+        Response::Error {
+            code: code.to_string(),
+            message: message.to_string(),
+        }
+    }
+
+    /// Issues a SIWE challenge and answers its message, so a case changes only
+    /// the part it names.
+    fn siwe_challenge_message(provider: &mut WalletProvider) -> String {
+        let response = provider.challenge(ChallengeInput {
+            domain: "http://elastos.local".to_string(),
+            uri: "http://elastos.local/apps/home/".to_string(),
+            address: EVM_ADDRESS.to_string(),
+            chain_id: 20,
+            resources: Vec::new(),
+        });
+        match response {
+            Response::Ok { data: Some(data) } => data["message"].as_str().unwrap().to_string(),
+            other => panic!("expected challenge, got {other:?}"),
+        }
+    }
+
+    /// Issues a Bitcoin challenge and answers its message, so a case changes
+    /// only the part it names.
+    fn bitcoin_challenge_message(provider: &mut WalletProvider) -> String {
+        let response = provider.bitcoin_challenge(BitcoinChallengeInput {
+            domain: "elastos.local".to_string(),
+            uri: "http://elastos.local/apps/home/".to_string(),
+            address: BITCOIN_ADDRESS.to_string(),
+            network: "bitcoin".to_string(),
+            resources: Vec::new(),
+        });
+        match response {
+            Response::Ok { data: Some(data) } => data["message"].as_str().unwrap().to_string(),
+            other => panic!("expected Bitcoin challenge, got {other:?}"),
+        }
+    }
+
+    /// Catches removal of the challenge-resource lookup in `verify_proof`
+    /// (:556) and `verify_contract_proof` (:687): without it a SIWE message
+    /// that binds no Runtime challenge reaches the store lookup with no
+    /// challenge id, and any stored challenge could answer it.
+    ///
+    /// One string is raised from both sites, so this test drives both.
+    #[test]
+    fn proof_refuses_siwe_proof_without_challenge_resource() {
+        let (_dir, mut provider) = init_provider();
+        let message = siwe_challenge_message(&mut provider)
+            .replace("- elastos://auth/challenge/", "- elastos://auth/other/");
+
+        assert_eq!(
+            provider.verify_proof(&message, UNREACHED_SIGNATURE),
+            error("invalid_proof", "SIWE proof missing challenge resource")
+        );
+        assert_eq!(
+            provider.verify_contract_proof(&message, UNREACHED_SIGNATURE, &json!({})),
+            error("invalid_proof", "SIWE proof missing challenge resource")
+        );
+    }
+
+    /// Catches removal of the stored-challenge lookup in `verify_proof` (:565)
+    /// and `verify_contract_proof` (:696): without it a well-formed SIWE
+    /// message naming an id the store does not hold is verified as if a
+    /// challenge existed.
+    ///
+    /// One string is raised from both sites, so this test drives both.
+    ///
+    /// The issued challenge stays in the store and only the id the message
+    /// names is changed, so a lookup that falls back to any stored record is
+    /// caught here rather than passing on an empty store.
+    #[test]
+    fn proof_refuses_siwe_unknown_challenge() {
+        let (_dir, mut provider) = init_provider();
+        let message = siwe_challenge_message(&mut provider)
+            .replace("elastos://auth/challenge/", "elastos://auth/challenge/0");
+
+        assert_eq!(
+            provider.verify_proof(&message, UNREACHED_SIGNATURE),
+            error("not_found", "wallet proof challenge not found")
+        );
+        assert_eq!(
+            provider.verify_contract_proof(&message, UNREACHED_SIGNATURE, &json!({})),
+            error("not_found", "wallet proof challenge not found")
+        );
+    }
+
+    /// Catches removal of the consumption guard in `verify_proof` (:568) and
+    /// `verify_contract_proof` (:699): without it one SIWE challenge answers
+    /// any number of proofs, so a captured message replays.
+    ///
+    /// `src/tests/proofs.rs:412` and `:523` assert `contains("already
+    /// consumed")` on the wallet's answer to a whole confined call, which is a
+    /// fragment of this message and of the Bitcoin one; the assertion here is
+    /// the whole message, so it pins which of the two is raised.
+    ///
+    /// One string is raised from both sites, so this test drives both.
+    #[test]
+    fn proof_refuses_siwe_consumed_challenge() {
+        let (_dir, mut provider) = init_provider();
+        let message = siwe_challenge_message(&mut provider);
+        provider.store.challenges[0].consumed_at = Some(now_ts());
+
+        assert_eq!(
+            provider.verify_proof(&message, UNREACHED_SIGNATURE),
+            error("invalid_proof", "wallet proof challenge already consumed")
+        );
+        assert_eq!(
+            provider.verify_contract_proof(&message, UNREACHED_SIGNATURE, &json!({})),
+            error("invalid_proof", "wallet proof challenge already consumed")
+        );
+    }
+
+    /// Catches removal of the expiry guard in `verify_proof` (:571): without it
+    /// a SIWE challenge past its lifetime still answers a proof.
+    ///
+    /// `src/tests/proofs.rs:606` pins the same rule with
+    /// `contains("expired")`, which is a fragment of this message and of the
+    /// Bitcoin one; the assertion here is the whole message, so it pins which
+    /// of the two is raised. That is one rule with one test per handler, not a
+    /// second path: `verify_contract_proof` has no expiry guard of its own.
+    #[test]
+    fn proof_refuses_siwe_expired_challenge() {
+        let (_dir, mut provider) = init_provider();
+        let message = siwe_challenge_message(&mut provider);
+        provider.store.challenges[0].challenge.expires_at = now_ts().saturating_sub(1);
+
+        assert_eq!(
+            provider.verify_proof(&message, UNREACHED_SIGNATURE),
+            error("invalid_proof", "wallet proof challenge expired")
+        );
+    }
+
+    /// Catches removal of the challenge-line scan in `verify_bitcoin_proof`
+    /// (:609): without it a BIP-322 message that binds no Runtime challenge
+    /// reaches no id and could be verified against any stored challenge.
+    #[test]
+    fn proof_refuses_bip322_proof_without_challenge_resource() {
+        let (_dir, mut provider) = init_provider();
+        let message = bitcoin_challenge_message(&mut provider).replace(
+            "- elastos://auth/bitcoin-challenge/",
+            "- elastos://auth/other/",
+        );
+
+        assert_eq!(
+            provider.verify_bitcoin_proof(&message, UNREACHED_SIGNATURE, None, None),
+            error("invalid_proof", "BIP-322 proof missing challenge resource")
+        );
+    }
+
+    /// Catches removal of the stored-challenge lookup in
+    /// `verify_bitcoin_proof` (:618): without it a well-formed BIP-322 message
+    /// naming an id the store does not hold is verified as if a challenge
+    /// existed.
+    ///
+    /// The issued challenge stays in the store and only the id the message
+    /// names is changed, so a lookup that falls back to any stored record is
+    /// caught here rather than passing on an empty store.
+    #[test]
+    fn proof_refuses_bip322_unknown_challenge() {
+        let (_dir, mut provider) = init_provider();
+        let message = bitcoin_challenge_message(&mut provider).replace(
+            "elastos://auth/bitcoin-challenge/",
+            "elastos://auth/bitcoin-challenge/0",
+        );
+
+        assert_eq!(
+            provider.verify_bitcoin_proof(&message, UNREACHED_SIGNATURE, None, None),
+            error("not_found", "Bitcoin wallet proof challenge not found")
+        );
+    }
+
+    /// Catches removal of the consumption guard in `verify_bitcoin_proof`
+    /// (:623): without it one Bitcoin challenge answers any number of
+    /// BIP-322 proofs, so a captured message replays.
+    ///
+    /// `src/tests/proofs.rs:222` reaches the same rule through a whole confined
+    /// call and asserts `contains("already consumed")`, which is a fragment of
+    /// this message and of the SIWE one; the assertion here is the whole
+    /// message, so it pins which of the two is raised.
+    #[test]
+    fn proof_refuses_bip322_consumed_challenge() {
+        let (_dir, mut provider) = init_provider();
+        let message = bitcoin_challenge_message(&mut provider);
+        provider.store.bitcoin_challenges[0].consumed_at = Some(now_ts());
+
+        assert_eq!(
+            provider.verify_bitcoin_proof(&message, UNREACHED_SIGNATURE, None, None),
+            error(
+                "invalid_proof",
+                "Bitcoin wallet proof challenge already consumed"
+            )
+        );
+    }
+
+    /// Catches removal of the expiry guard in `verify_bitcoin_proof` (:627):
+    /// without it a Bitcoin challenge past its lifetime still answers a
+    /// BIP-322 proof.
+    #[test]
+    fn proof_refuses_bip322_expired_challenge() {
+        let (_dir, mut provider) = init_provider();
+        let message = bitcoin_challenge_message(&mut provider);
+        provider.store.bitcoin_challenges[0].challenge.expires_at = now_ts().saturating_sub(1);
+
+        assert_eq!(
+            provider.verify_bitcoin_proof(&message, UNREACHED_SIGNATURE, None, None),
+            error("invalid_proof", "Bitcoin wallet proof challenge expired")
+        );
+    }
+
+    /// Catches removal of the whole-message comparison in
+    /// `verify_bitcoin_proof` (:630): without it a signed BIP-322 message that
+    /// names a stored challenge but carries different words than the challenge
+    /// it names is verified against that challenge's address.
+    ///
+    /// The only difference below is a trailing newline, so the challenge id
+    /// still resolves and every check ahead of the comparison passes; only the
+    /// equality can answer.
+    #[test]
+    fn proof_refuses_bip322_message_mismatch() {
+        let (_dir, mut provider) = init_provider();
+        let message = bitcoin_challenge_message(&mut provider);
+        let altered = format!("{message}\n");
+
+        assert_eq!(
+            provider.verify_bitcoin_proof(&altered, UNREACHED_SIGNATURE, None, None),
+            error("invalid_proof", "Bitcoin challenge message does not match")
+        );
+    }
+}
+
+#[cfg(test)]
+mod uf_managed_key_refusal_tests {
+    use super::*;
+
+    /// The one managed chain every case starts from.
+    const EVM_CHAIN: &str = "eip155:20";
+    /// The one principal every case starts from.
+    const PRINCIPAL: &str = "person:local:managed-key";
+    /// The private key the fixture encrypts; every case re-encrypts this key
+    /// unless it names a different one.
+    const FIXTURE_KEY_BYTES: [u8; 32] = [0x11; 32];
+    /// A second private key, used where the stored key must differ.
+    const OTHER_KEY_BYTES: [u8; 32] = [0x33; 32];
+    /// An EVM address that is not the fixture key's, so a case can put an
+    /// account and a secret out of step without an invalid address.
+    const OTHER_EVM_ADDRESS: &str = "0x2222222222222222222222222222222222222222";
+
+    /// One initialised provider, one valid linked account and its encrypted
+    /// secret, so a case changes one field and meets every check ahead of the
+    /// one it names.
+    struct ManagedKeyFixture {
+        _dir: tempfile::TempDir,
+        provider: WalletProvider,
+        account: LinkedAccount,
+        secret: ManagedWalletSecret,
+        signing_key: SigningKey,
+    }
+
+    impl ManagedKeyFixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let mut provider = WalletProvider::new();
+            let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+            assert!(
+                matches!(response, Response::Ok { .. }),
+                "init must succeed, got {response:?}"
+            );
+            let signing_key =
+                SigningKey::from_slice(&FIXTURE_KEY_BYTES).expect("fixture signing key");
+            let address = managed_address_for_signing_key(&signing_key, EVM_CHAIN)
+                .expect("eip155:20 is a managed chain");
+            let account = LinkedAccount {
+                account_id: account_id(EVM_CHAIN, &address),
+                principal_id: PRINCIPAL.to_string(),
+                proof_binding_id: format!("proof:wallet:managed:{EVM_CHAIN}:{address}"),
+                chain_namespace: EVM_CHAIN.to_string(),
+                address: address.clone(),
+                proof_type: MANAGED_EVM_PROOF_TYPE.to_string(),
+                connector_id: None,
+                label: None,
+                linked_at: 1,
+                revoked_at: None,
+            };
+            let secret = provider
+                .encrypt_managed_key(
+                    &account.account_id,
+                    &account.principal_id,
+                    &account.chain_namespace,
+                    &account.address,
+                    signing_key.to_bytes().as_ref(),
+                    1,
+                )
+                .expect("fixture secret");
+            provider.store.accounts.push(account.clone());
+            provider.store.managed_wallets.push(secret.clone());
+            Self {
+                _dir: dir,
+                provider,
+                account,
+                secret,
+                signing_key,
+            }
+        }
+
+        /// Re-encrypts the fixture key under a caller-chosen account id, so a
+        /// case can move the stored account id without breaking the AEAD
+        /// authentication that binds it.
+        fn reencrypt_under_account_id(&mut self, account_id: &str) {
+            self.provider.store.managed_wallets[0] = self
+                .provider
+                .encrypt_managed_key(
+                    account_id,
+                    &self.account.principal_id,
+                    &self.account.chain_namespace,
+                    &self.account.address,
+                    self.signing_key.to_bytes().as_ref(),
+                    1,
+                )
+                .expect("re-encrypted secret");
+        }
+
+        /// Re-encrypts a caller-chosen private key under the fixture account,
+        /// so the stored address still matches the account and only the key's
+        /// derived address can differ.
+        fn reencrypt_under_key(&mut self, key_bytes: &[u8; 32]) {
+            self.provider.store.managed_wallets[0] = self
+                .provider
+                .encrypt_managed_key(
+                    &self.account.account_id,
+                    &self.account.principal_id,
+                    &self.account.chain_namespace,
+                    &self.account.address,
+                    key_bytes.as_ref(),
+                    1,
+                )
+                .expect("re-encrypted secret");
+        }
+    }
+
+    /// Catches removal of the revocation guard in
+    /// `managed_signing_key_for_account` (:812).
+    ///
+    /// `src/tests/accounts.rs:230` in
+    /// `substituted_decryptable_managed_key_is_not_account_authority` asserts
+    /// `is_err()` on this function for a different reason; the assertion here
+    /// is the whole message, which no test made before.
+    #[test]
+    fn managed_signing_key_refuses_revoked_account() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.account.revoked_at = Some(1);
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet account is revoked".to_string())
+        );
+    }
+
+    /// Catches removal of the connector-authority guard in
+    /// `managed_signing_key_for_account` (:815): without it an account linked
+    /// through an external connector could sign with a provider-held key.
+    ///
+    /// `src/tests/accounts.rs:230` asserts `is_err()` only; the assertion here
+    /// is the whole message.
+    #[test]
+    fn managed_signing_key_refuses_connector_account() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.account.connector_id = Some("wallet-metamask".to_string());
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet account cannot carry connector authority".to_string())
+        );
+    }
+
+    /// Catches removal of the proof-type guard in
+    /// `managed_signing_key_for_account` (:819): without it an account whose
+    /// stored proof type names the other managed chain still signs.
+    ///
+    /// The chain namespace stays `eip155:20`, so `managed_proof_type` answers
+    /// the EVM type and this guard is the one that refuses; an unmanaged
+    /// namespace would refuse earlier inside `managed_proof_type`.
+    ///
+    /// `src/tests/accounts.rs:230` asserts `is_err()` only; the assertion here
+    /// is the whole message.
+    #[test]
+    fn managed_signing_key_refuses_mismatched_proof_type() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.account.proof_type = MANAGED_BTC_P2WPKH_PROOF_TYPE.to_string();
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet account proof type does not match its chain".to_string())
+        );
+    }
+
+    /// Catches removal of the secret lookup in
+    /// `managed_signing_key_for_account` (:836): without it an account with no
+    /// stored secret reaches decryption with nothing to decrypt.
+    ///
+    /// The account record stays in the store, so the refusal is the missing
+    /// secret and not a missing account.
+    ///
+    /// `src/tests/accounts.rs:230` asserts `is_err()` only; the assertion here
+    /// is the whole message.
+    #[test]
+    fn managed_signing_key_refuses_missing_secret() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.provider.store.managed_wallets.clear();
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet key not found".to_string())
+        );
+    }
+
+    /// Catches removal of the second-match guard in
+    /// `managed_signing_key_for_account` (:839): without it two active secrets
+    /// for one account silently resolve to the first, so which key signs
+    /// depends on store order.
+    ///
+    /// `src/tests/accounts.rs:230` asserts `is_err()` only; the assertion here
+    /// is the whole message.
+    #[test]
+    fn managed_signing_key_refuses_duplicate_active_keys() {
+        let mut fixture = ManagedKeyFixture::new();
+        let duplicate = fixture.secret.clone();
+        fixture.provider.store.managed_wallets.push(duplicate);
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet account has multiple active signing keys".to_string())
+        );
+    }
+
+    /// Catches removal of the metadata comparison in
+    /// `managed_signing_key_for_account` (:842): without it a secret written by
+    /// another schema version is decrypted as if it were current.
+    ///
+    /// The lookup filter at :831 already requires the principal and the account
+    /// id to match, so the schema is the field that can still disagree here.
+    ///
+    /// `src/tests/accounts.rs:230` asserts `is_err()` only; the assertion here
+    /// is the whole message.
+    #[test]
+    fn managed_signing_key_refuses_mismatched_secret_schema() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.provider.store.managed_wallets[0].schema =
+            "elastos.wallet.managed_secret/v2".to_string();
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet key metadata does not match its account".to_string())
+        );
+    }
+
+    /// Catches removal of the stored-address comparison in
+    /// `managed_signing_key_for_account` (:850): without it a secret that names
+    /// another address is handed back as this account's authority.
+    ///
+    /// The address here is a valid EVM address, so `canonical_address` accepts
+    /// both sides and only the comparison can answer.
+    ///
+    /// `src/tests/accounts.rs:230` asserts `is_err()` only; the assertion here
+    /// is the whole message.
+    #[test]
+    fn managed_signing_key_refuses_mismatched_secret_address() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.provider.store.managed_wallets[0].address = OTHER_EVM_ADDRESS.to_string();
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet key address does not match its account".to_string())
+        );
+    }
+
+    /// Catches removal of the derived-address comparison in
+    /// `managed_signing_key_for_account` (:858): without it a decryptable key
+    /// that derives another account's address signs for this one.
+    ///
+    /// The stored address stays equal to the account's address, so the check at
+    /// :850 passes, and a different private key is encrypted under both, so
+    /// only the derived address can disagree. That is the ordering trap the
+    /// task names: re-encrypt the key rather than move the stored address.
+    ///
+    /// `src/tests/accounts.rs:230` in
+    /// `substituted_decryptable_managed_key_is_not_account_authority` asserts
+    /// `is_err()` on this same substitution; the assertion here is the whole
+    /// message, so it pins which check refuses.
+    #[test]
+    fn managed_signing_key_refuses_derived_address_mismatch() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.reencrypt_under_key(&OTHER_KEY_BYTES);
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet key derives a different account address".to_string())
+        );
+    }
+
+    /// Catches removal of the account-id comparison in
+    /// `managed_signing_key_for_account` (:862): without it an account whose id
+    /// names another key authority signs with this one.
+    ///
+    /// This is the second ordering trap. The lookup filter at :831 and the
+    /// metadata check at :842 both require the secret's account id to equal the
+    /// account's, so both ids move together; the key is then re-encrypted under
+    /// the wrong id, because the account id is part of the AEAD associated
+    /// data and a bare field edit would fail decryption at :802 instead. With
+    /// that, the revocation, connector, proof-type, lookup, metadata, address
+    /// and derived-address checks all pass, and only :862 can refuse.
+    ///
+    /// `src/tests/accounts.rs:230` asserts `is_err()` only; the assertion here
+    /// is the whole message.
+    #[test]
+    fn managed_signing_key_refuses_mismatched_account_id() {
+        let mut fixture = ManagedKeyFixture::new();
+        let wrong_account_id = account_id(EVM_CHAIN, OTHER_EVM_ADDRESS);
+        fixture.reencrypt_under_account_id(&wrong_account_id);
+        fixture.account.account_id = wrong_account_id;
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet account id does not match its key authority".to_string())
+        );
+    }
+
+    /// Catches removal of the proof-binding comparison in
+    /// `managed_signing_key_for_account` (:869): without it a proof binding
+    /// earned for another address is accepted as this key's authority.
+    ///
+    /// `src/tests/accounts.rs:230` asserts `is_err()` only; the assertion here
+    /// is the whole message.
+    #[test]
+    fn managed_signing_key_refuses_mismatched_proof_binding() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.account.proof_binding_id =
+            format!("proof:wallet:managed:{EVM_CHAIN}:{OTHER_EVM_ADDRESS}");
+
+        assert_eq!(
+            fixture
+                .provider
+                .managed_signing_key_for_account(&fixture.account),
+            Err("managed wallet proof binding does not match its key authority".to_string())
+        );
+    }
+
+    /// Catches removal of the envelope guard in `decrypt_managed_key` (:772):
+    /// without it a secret sealed with another algorithm or cipher is fed to
+    /// AES-256-GCM as if it were that cipher.
+    ///
+    /// `src/tests/accounts.rs:382` and `:385` in
+    /// `create_managed_account_persists_encrypted_key_and_is_idempotent` assert
+    /// `is_err()` for a changed principal and a changed chain; the assertion
+    /// here is the whole message.
+    #[test]
+    fn decrypt_managed_key_refuses_unsupported_envelope() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.secret.key_algorithm = "ed25519".to_string();
+
+        assert_eq!(
+            fixture.provider.decrypt_managed_key(&fixture.secret),
+            Err("unsupported managed wallet key envelope".to_string())
+        );
+    }
+
+    /// Catches removal of the nonce-length check in `decrypt_managed_key`
+    /// (:777): without it an eight-byte nonce reaches `try_into` and answers a
+    /// conversion error instead of the provider's own reason.
+    ///
+    /// This string is raised from two sites, :777 and :782. Only :777 is
+    /// reachable: :782 runs after the length check has already refused every
+    /// slice whose length is not twelve, and a twelve-byte slice converts
+    /// infallibly. :782 is recorded, not forced.
+    ///
+    /// `src/tests/accounts.rs:382` asserts `is_err()` only; the assertion here
+    /// is the whole message.
+    #[test]
+    fn decrypt_managed_key_refuses_short_nonce() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.secret.nonce = hex::encode([0_u8; 8]);
+
+        assert_eq!(
+            fixture.provider.decrypt_managed_key(&fixture.secret),
+            Err("managed wallet nonce must be 12 bytes".to_string())
+        );
+    }
+
+    /// Catches removal of the decryption-failure branch in `decrypt_managed_key`
+    /// (:801): without it a secret whose associated data no longer matches is
+    /// handed on to signature parsing instead of being reported as unreadable.
+    ///
+    /// This string is raised from two sites, :753 inside `encrypt_managed_key`
+    /// and :801 here. Only :801 is in this module's scope; the encryption
+    /// direction is pinned from the request side elsewhere, so this test drives
+    /// the decryption site.
+    ///
+    /// `src/tests/accounts.rs:382` in
+    /// `create_managed_account_persists_encrypted_key_and_is_idempotent`
+    /// asserts `is_err()` for the same changed principal; the assertion here is
+    /// the whole message.
+    #[test]
+    fn decrypt_managed_key_refuses_unreadable_secret() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.secret.principal_id = "person:local:other".to_string();
+
+        assert_eq!(
+            fixture.provider.decrypt_managed_key(&fixture.secret),
+            Err(
+                "managed wallet key could not be decrypted; recover or recreate this account"
+                    .to_string()
+            )
+        );
+    }
+
+    /// Catches removal of the storage-key guard in `managed_storage_key`
+    /// (:880): without it a provider with no storage key derives one from
+    /// nothing and decrypts secrets that were never sealed for it.
+    ///
+    /// One site raises this string, and both entry paths reach it, so this test
+    /// drives both: `decrypt_managed_key` (:774) and `encrypt_managed_key`
+    /// (:738).
+    ///
+    /// No existing test asserts this string; `src/tests/accounts.rs:382` is the
+    /// closest `is_err()` on the decrypt path that reaches the same helper.
+    #[test]
+    fn managed_storage_key_refuses_uninitialized_provider() {
+        let mut fixture = ManagedKeyFixture::new();
+        fixture.provider.storage_key = None;
+
+        assert_eq!(
+            fixture.provider.decrypt_managed_key(&fixture.secret),
+            Err("managed wallet storage key is not initialized".to_string())
+        );
+        assert_eq!(
+            fixture.provider.encrypt_managed_key(
+                &fixture.account.account_id,
+                &fixture.account.principal_id,
+                &fixture.account.chain_namespace,
+                &fixture.account.address,
+                fixture.signing_key.to_bytes().as_ref(),
+                1,
+            ),
+            Err("managed wallet storage key is not initialized".to_string())
+        );
+    }
+}
+
+/// One unit test per refusal on the managed Bitcoin signing path.
+///
+/// `validate_bitcoin_challenge_for_signing` (:951) and the one unpinned guard of
+/// `account_for_signature` (:918) decide whether a managed Bitcoin approval is
+/// signed against a challenge the Runtime issued. Each string below is asserted
+/// as the whole value, so a dropped consumed, expiry, address, network or
+/// message-binding check fails one named test in about a second instead of only
+/// the confined process suite.
+///
+/// `Bitcoin BIP-322 payload missing message` (:961) has no test: the first line
+/// of the function is `validate_bitcoin_bip322_proof_payload`, whose own
+/// `message` guard (`src/crypto/bitcoin.rs:479` to `:482`) raises the same
+/// string before :961 can run, so :961 is unreachable and is recorded here.
+///
+/// `active linked account not found` (:914) has no test here:
+/// `src/tests/approvals/managed.rs:420` already asserts that code and message on
+/// the whole approval call, so a second test for it would be a second path to
+/// one rule.
+#[cfg(test)]
+mod uf_signing_challenge_refusal_tests {
+    use super::*;
+
+    /// A second mainnet P2WPKH address (BIP-173's example), so a case can make
+    /// the stored record name another address than the account.
+    const OTHER_BITCOIN_ADDRESS: &str = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
+
+    /// One initialised provider holding one managed Bitcoin account, taken from
+    /// the store so no account field list is written here.
+    struct SigningFixture {
+        _dir: tempfile::TempDir,
+        provider: WalletProvider,
+        account: LinkedAccount,
+    }
+
+    impl SigningFixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let mut provider = WalletProvider::new();
+            let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+            assert!(
+                matches!(response, Response::Ok { .. }),
+                "init must succeed, got {response:?}"
+            );
+            let response = provider.create_managed_account(CreateManagedAccountInput {
+                principal_id: "person:local:signing".to_string(),
+                chain_namespace: BITCOIN_MAINNET_CHAIN_NAMESPACE.to_string(),
+                label: None,
+                create_new: false,
+            });
+            assert!(
+                matches!(response, Response::Ok { .. }),
+                "managed Bitcoin account must be created, got {response:?}"
+            );
+            let account = provider
+                .store
+                .accounts
+                .first()
+                .cloned()
+                .expect("the provider must store the account it just created");
+            Self {
+                _dir: dir,
+                provider,
+                account,
+            }
+        }
+
+        /// Issues one Bitcoin challenge for the fixture account through the
+        /// provider and answers the message it issued, so a case changes only
+        /// the part it names.
+        fn issue_challenge(&mut self) -> String {
+            let response = self.provider.bitcoin_challenge(BitcoinChallengeInput {
+                domain: "elastos.local".to_string(),
+                uri: "http://elastos.local/apps/home/".to_string(),
+                address: self.account.address.clone(),
+                network: "bitcoin".to_string(),
+                resources: Vec::new(),
+            });
+            match response {
+                Response::Ok { data: Some(data) } => data["message"].as_str().unwrap().to_string(),
+                other => panic!("expected Bitcoin challenge, got {other:?}"),
+            }
+        }
+
+        /// The id of the challenge `issue_challenge` wrote.
+        fn challenge_id(&self) -> String {
+            self.provider.store.bitcoin_challenges[0]
+                .challenge
+                .challenge_id
+                .clone()
+        }
+
+        /// Runs the signing-path guard for the fixture account with the payload
+        /// the Runtime sends for `message`, and answers its refusal.
+        fn refusal(&self, message: &str, now: u64) -> String {
+            let payload = json!({
+                "schema": "elastos.wallet.bitcoin_bip322_request/v1",
+                "wallet_intent": "bitcoin_bip322_proof",
+                "chain_namespace": self.account.chain_namespace.clone(),
+                "address": self.account.address.clone(),
+                "message": message,
+            });
+            self.provider
+                .validate_bitcoin_challenge_for_signing(&payload, &self.account, now)
+                .expect_err("the signing path must refuse this challenge")
+        }
+    }
+
+    /// Catches removal of the chain-namespace guard in `account_for_signature`
+    /// (:915): without it a Bitcoin account signs a request that names an EVM
+    /// chain, so the account answers an effect it does not own.
+    ///
+    /// The account id and the principal are the stored ones, so the earlier
+    /// `active_account` lookup passes and only :918 can answer.
+    #[test]
+    fn signing_refuses_incompatible_chain_namespace() {
+        let fixture = SigningFixture::new();
+        let input = SignatureRequestInput {
+            request_id: "request-1".to_string(),
+            wallet_request_sha256: "request-sha-1".to_string(),
+            authority_binding: format!("0x{}", "11".repeat(32)),
+            principal_id: fixture.account.principal_id.clone(),
+            session_id: "session-1".to_string(),
+            launch_id: "launch-1".to_string(),
+            proof_binding_id: None,
+            account_id: fixture.account.account_id.clone(),
+            chain_namespace: "eip155:20".to_string(),
+            intent: "bitcoin_bip322_proof".to_string(),
+            requested_by_actor: "wallet".to_string(),
+            resource: "elastos://wallet/bitcoin/proof".to_string(),
+            reason: "Prove Bitcoin account".to_string(),
+            payload: json!({}),
+            expires_at: 0,
+        };
+
+        assert_eq!(
+            fixture.provider.account_for_signature(&input),
+            Err(Response::Error {
+                code: "invalid_request".to_string(),
+                message: "wallet account does not match requested chain_namespace".to_string(),
+            })
+        );
+    }
+
+    /// Catches removal of the challenge-id guard at :963: without it a message
+    /// that binds the challenge resource line but names no id reaches the store
+    /// lookup with nothing to find.
+    ///
+    /// The issued message is kept whole and only its id is removed, so the
+    /// payload validator (`src/crypto/bitcoin.rs:459`) still sees a line that
+    /// starts with `- elastos://auth/bitcoin-challenge/` while the id reader
+    /// (`:501`) filters the empty remainder.
+    #[test]
+    fn signing_refuses_message_without_runtime_challenge() {
+        let mut fixture = SigningFixture::new();
+        let message = fixture.issue_challenge();
+        let message = message.replace(&fixture.challenge_id(), "");
+
+        assert_eq!(
+            fixture.refusal(&message, now_ts()),
+            "Bitcoin BIP-322 message missing Runtime challenge"
+        );
+    }
+
+    /// Catches removal of the stored-challenge lookup at :969: without it a
+    /// well-formed message naming an id the store does not hold is signed as if
+    /// a challenge existed.
+    ///
+    /// The issued challenge stays in the store and only the id the message
+    /// names moves, so a lookup that falls back to any stored record is caught
+    /// here. `src/tests/approvals/managed.rs:444` asserts
+    /// `contains("challenge not found")` on a whole approval call, a fragment
+    /// shared by this string, the SIWE path's and the verify path's
+    /// `Bitcoin wallet proof challenge not found`; the assertion here pins which
+    /// string this function raises.
+    #[test]
+    fn signing_refuses_unknown_challenge() {
+        let mut fixture = SigningFixture::new();
+        let message = fixture.issue_challenge();
+        let unknown_id = format!("{}0", fixture.challenge_id());
+        let message = message.replace(&fixture.challenge_id(), &unknown_id);
+
+        assert_eq!(
+            fixture.refusal(&message, now_ts()),
+            "Bitcoin proof challenge not found"
+        );
+    }
+
+    /// Catches removal of the consumption guard at :971: without it one Bitcoin
+    /// challenge signs any number of approvals, so a captured message replays.
+    ///
+    /// No existing test asserts this string: `src/tests/proofs.rs` covers the
+    /// verify path's own consumption rule, a different string on a different
+    /// operation.
+    #[test]
+    fn signing_refuses_consumed_challenge() {
+        let mut fixture = SigningFixture::new();
+        let message = fixture.issue_challenge();
+        let now = now_ts();
+        let record = &mut fixture.provider.store.bitcoin_challenges[0];
+        let original = record.consumed_at;
+        record.consumed_at = Some(now);
+
+        assert_eq!(
+            fixture.refusal(&message, now),
+            "Bitcoin proof challenge already consumed"
+        );
+        fixture.provider.store.bitcoin_challenges[0].consumed_at = original;
+    }
+
+    /// Catches removal of the expiry guard at :974: without it a challenge past
+    /// its lifetime still signs an approval.
+    ///
+    /// The function is called directly, because the whole approval call prunes
+    /// the store first (`src/approval.rs:394`, `:516`, `:573`, `:841`); that
+    /// pruning is why `src/tests/approvals/managed.rs:518` has to accept
+    /// `"expired"` or `"not found"`. The assertion here pins the string this
+    /// function raises for an expired record.
+    #[test]
+    fn signing_refuses_expired_challenge() {
+        let mut fixture = SigningFixture::new();
+        let message = fixture.issue_challenge();
+        let now = now_ts();
+        let record = &mut fixture.provider.store.bitcoin_challenges[0];
+        let original = record.challenge.expires_at;
+        record.challenge.expires_at = now.saturating_sub(1);
+
+        assert_eq!(
+            fixture.refusal(&message, now),
+            "Bitcoin proof challenge expired"
+        );
+        fixture.provider.store.bitcoin_challenges[0]
+            .challenge
+            .expires_at = original;
+    }
+
+    /// Catches removal of the address guard at :977: without it a challenge the
+    /// Runtime issued to one address signs an approval for another account.
+    ///
+    /// The message and the payload keep the account's own address, so the
+    /// payload validator passes at `src/crypto/bitcoin.rs:489`; only the stored
+    /// record names another address.
+    #[test]
+    fn signing_refuses_address_mismatch() {
+        let mut fixture = SigningFixture::new();
+        let message = fixture.issue_challenge();
+        let record = &mut fixture.provider.store.bitcoin_challenges[0];
+        let original = record.challenge.address.clone();
+        record.challenge.address = OTHER_BITCOIN_ADDRESS.to_string();
+
+        assert_eq!(
+            fixture.refusal(&message, now_ts()),
+            "Bitcoin proof challenge address does not match account"
+        );
+        fixture.provider.store.bitcoin_challenges[0]
+            .challenge
+            .address = original;
+    }
+
+    /// Catches removal of the network guard at :980: without it a challenge the
+    /// Runtime issued on one Bitcoin network signs for an account on another.
+    ///
+    /// The message and the payload keep `bitcoin`, so every check ahead of this
+    /// one passes; only the stored record names `testnet`.
+    #[test]
+    fn signing_refuses_network_mismatch() {
+        let mut fixture = SigningFixture::new();
+        let message = fixture.issue_challenge();
+        let record = &mut fixture.provider.store.bitcoin_challenges[0];
+        let original = record.challenge.network.clone();
+        record.challenge.network = "testnet".to_string();
+
+        assert_eq!(
+            fixture.refusal(&message, now_ts()),
+            "Bitcoin proof challenge network does not match account"
+        );
+        fixture.provider.store.bitcoin_challenges[0]
+            .challenge
+            .network = original;
+    }
+
+    /// Catches removal of the whole-message comparison at :983: without it a
+    /// message that names a stored challenge but carries different words is
+    /// signed against that challenge's address.
+    ///
+    /// Only the stored nonce moves, so the id, the consumption, the expiry, the
+    /// address and the network checks all pass and only the comparison can
+    /// answer.
+    #[test]
+    fn signing_refuses_message_mismatch() {
+        let mut fixture = SigningFixture::new();
+        let message = fixture.issue_challenge();
+        let record = &mut fixture.provider.store.bitcoin_challenges[0];
+        let original = record.challenge.nonce.clone();
+        record.challenge.nonce = "0".repeat(24);
+
+        assert_eq!(
+            fixture.refusal(&message, now_ts()),
+            "Bitcoin proof message does not match challenge"
+        );
+        fixture.provider.store.bitcoin_challenges[0].challenge.nonce = original;
+    }
+}
+
 #[cfg(test)]
 mod tests;

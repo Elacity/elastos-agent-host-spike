@@ -111,14 +111,20 @@ one, the cell says "no named test shows this". A citation is a backtick span
 that holds a file relative to this folder, two colons and a function name. The
 check `every_operations_table_cites_existing_tests` in
 `../wallet-provider/tests/confine.rs` finds `fn <fn>(` in that file and does
-not decide whether the function is a `#[test]`. A refusal under `(deny
-default)` is a denial, not a grant, and no row writes it as a right. The
+not decide whether the function is a `#[test]`. The check
+`every_operations_table_row_matches_its_provider_and_the_contract` holds every
+row to four rules: the row set follows the provider's own dispatch, a Right
+cell names a declared id or `none: needs no declared right`, a right row cites
+both sides, and every Linux cell stays `designed, not enforced`. A refusal
+under `(deny default)` is a denial, not a grant, and no row writes it as a
+right. The
 startup grants stay in "What the profile allows". A `storage` row cites both
 sides of its right: `permitted:` names the test that shows the operation under
 `STORAGE_ROOT`, and `nearest outside refused:` names the test that shows the
 same file beneath `STORAGE_PARENT` refused, each with its falsifier ids. A row
-whose Right is "no named test shows this" names no granted resource, so it has
-no outside case, and its cell cites only the test that shows the answer.
+whose Right is "no named test shows this" or `none: needs no declared right`
+names no granted resource, so it has no outside case, and its cell cites only
+the test that shows the answer and that test's falsifier.
 
 M1 check B4 stays open: this table records the macOS half of its permission
 model. Linux stays designed, not enforced, and this section claims no current
@@ -129,15 +135,15 @@ an operation and gets no row.
 | Operation | Inputs | Outputs | Right | Effect | macOS rule and test | Linux |
 | --- | --- | --- | --- | --- | --- | --- |
 | init | `op`, `config` | ok: `status`, `data` (`protocol_version`, `provider`). error: `status`, `code`, `message`. | `storage` | reads `did/nickname.enc` under `STORAGE_ROOT`; `tests/confine.rs::outside_read_denied` shows the read refused with `storage_error` when that path resolves outside. | The `STORAGE_ROOT` subpath rule is `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`. permitted: `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows this call reading `did/nickname.enc` under `STORAGE_ROOT`, and its removal is DID10. nearest outside refused: the read half of `tests/confine.rs::planted_file_beneath_storage_parent_is_neither_read_nor_written` shows the same file beneath `STORAGE_PARENT` refused with `storage_error`, and the widened parent read is DID27. | designed, not enforced |
-| get_did | `op` | ok: `status`, `data` (`did`). error: `status`, `code`, `message`. | no named test shows this | derives the DID from the device key in memory; no named test shows a file read or write for this call. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the answer; no named test shows a storage rule for this call. | designed, not enforced |
-| resolve | `op`, `did` | ok: `status`, `data` (`public_key`, `document`). error: `status`, `code`, `message`. | no named test shows this | builds the document from the DID in memory; no named test shows a file read or write for this call. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the document id; no named test shows a storage rule for this call. | designed, not enforced |
-| sign_chat_message | `op`, `sender_id`, `ts`, `content` | ok: `status`, `data` (`payload`, `signature`). error: `status`, `code`, `message`. | no named test shows this | signs the rendered payload in memory; no named test shows a file read or write for this call. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the payload and the signature; no named test shows a storage rule for this call. | designed, not enforced |
-| verify | `op`, `did`, `data`, `signature` | ok: `status`, `data` (`valid`). error: `status`, `code`, `message`. | no named test shows this | verifies the payload in memory; no named test shows a file read or write for this call. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows `valid: true` and `valid: false` for a flipped signature; no named test shows a storage rule for this call. | designed, not enforced |
-| verify_did_recovery | `op`, `did`, `principal_id`, `localhost_root`, `protector_id`, `data_key_id`, `nonce`, `issued_at`, `expires_at`, `signature` | ok: `status`, `data` (`schema`, `valid`, `did`, `principal_id`, `localhost_root`, `protector_id`, `data_key_id`, `payload_sha256`, `verified_at`). error: `status`, `code`, `message`. | no named test shows this | refuses a non-hex signature with `invalid_signature` and stays in service; genuine-proof correctness is the in-process unit tests in `src/main.rs`. | `tests/confine.rs::verify_did_recovery_under_profile` shows the refusal and the later `get_did`; no named test shows a storage rule for this call. | designed, not enforced |
-| get_nickname | `op` | ok: `status`, `data` (`nickname`). error: `status`, `code`, `message`. | no named test shows this | returns the cached nickname; the file read belongs to `init`, and no named test shows a read for this call. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the nickname after a restart; the read is `init`'s. | designed, not enforced |
+| get_did | `op` | ok: `status`, `data` (`did`). error: `status`, `code`, `message`. | none: needs no declared right | derives the DID from the device key in memory; `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the call leaves the names under `did/` and the bytes of `did/nickname.enc` exactly as `init` and `set_nickname` left them. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the answer; `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the storage tree after `init` and `set_nickname` is the same after this call, and `DID31` is the plant that reaches this call. | designed, not enforced |
+| resolve | `op`, `did` | ok: `status`, `data` (`public_key`, `document`). error: `status`, `code`, `message`. | none: needs no declared right | builds the document from the DID in memory; `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the call leaves the names under `did/` and the bytes of `did/nickname.enc` exactly as `init` and `set_nickname` left them. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the document id; `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the storage tree after `init` and `set_nickname` is the same after this call. The only registered plants for this test are `DID31` in `get_did` and `DID32` in `shutdown`, so a regression in this call alone fails the test with no plant of its own. | designed, not enforced |
+| sign_chat_message | `op`, `sender_id`, `ts`, `content` | ok: `status`, `data` (`payload`, `signature`). error: `status`, `code`, `message`. | none: needs no declared right | signs the rendered payload in memory; `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the call leaves the names under `did/` and the bytes of `did/nickname.enc` exactly as `init` and `set_nickname` left them. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the payload and the signature; `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the storage tree after `init` and `set_nickname` is the same after this call. The only registered plants for this test are `DID31` in `get_did` and `DID32` in `shutdown`, so a regression in this call alone fails the test with no plant of its own. | designed, not enforced |
+| verify | `op`, `did`, `data`, `signature` | ok: `status`, `data` (`valid`). error: `status`, `code`, `message`. | none: needs no declared right | verifies the payload in memory; `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the call leaves the names under `did/` and the bytes of `did/nickname.enc` exactly as `init` and `set_nickname` left them. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows `valid: true` and `valid: false` for a flipped signature; `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the storage tree after `init` and `set_nickname` is the same after this call. The only registered plants for this test are `DID31` in `get_did` and `DID32` in `shutdown`, so a regression in this call alone fails the test with no plant of its own. | designed, not enforced |
+| verify_did_recovery | `op`, `did`, `principal_id`, `localhost_root`, `protector_id`, `data_key_id`, `nonce`, `issued_at`, `expires_at`, `signature` | ok: `status`, `data` (`schema`, `valid`, `did`, `principal_id`, `localhost_root`, `protector_id`, `data_key_id`, `payload_sha256`, `verified_at`). error: `status`, `code`, `message`. | none: needs no declared right | refuses a non-hex signature with `invalid_signature` and stays in service; genuine-proof correctness is the in-process unit tests in `src/main.rs`; `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the call leaves the names under `did/` and the bytes of `did/nickname.enc` exactly as `init` and `set_nickname` left them. | `tests/confine.rs::verify_did_recovery_under_profile` shows the refusal and the later `get_did`; `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the storage tree after `init` and `set_nickname` is the same after this call. The only registered plants for this test are `DID31` in `get_did` and `DID32` in `shutdown`, so a regression in this call alone fails the test with no plant of its own. | designed, not enforced |
+| get_nickname | `op` | ok: `status`, `data` (`nickname`). error: `status`, `code`, `message`. | none: needs no declared right | returns the cached nickname; the file read belongs to `init`, and `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the call leaves the names under `did/` and the bytes of `did/nickname.enc` exactly as `init` and `set_nickname` left them. | `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the nickname after a restart; the read is `init`'s; `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the storage tree after `init` and `set_nickname` is the same after this call. The only registered plants for this test are `DID31` in `get_did` and `DID32` in `shutdown`, so a regression in this call alone fails the test with no plant of its own. | designed, not enforced |
 | set_nickname | `op`, `nickname` | ok: `status`, `data` (`nickname`). error: `status`, `code`, `message`. | `storage` | writes `did/nickname.enc` under `STORAGE_ROOT`; `tests/confine.rs::outside_write_denied` shows the write refused with `storage_error` outside the root. | The `STORAGE_ROOT` subpath rule is `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`. permitted: `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the nickname written under `STORAGE_ROOT` and read back after a restart, and its removal is DID10. nearest outside refused: the write half of `tests/confine.rs::planted_file_beneath_storage_parent_is_neither_read_nor_written` shows the same file beneath `STORAGE_PARENT` refused with `storage_error`, and the appended parent write is DID28. | designed, not enforced |
 | get_persona_did | `op`, `name` | ok: `status`, `data` (`did`, `owner_did`, `name`). error: `status`, `code`, `message`. | `storage` | reads or writes `did/personas/<name>.enc` under `STORAGE_ROOT`; `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows the file after the call and the same persona after a restart. | The `STORAGE_ROOT` subpath rule is `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))`. permitted: `tests/confine.rs::confined_provider_serves_did_operations_under_its_root` shows `did/personas/fixture.enc` under `STORAGE_ROOT` after the call and the same persona after a restart, and its removal is DID10. nearest outside refused: `tests/confine.rs::persona_key_beneath_storage_parent_is_not_adopted` shows a persona key beneath `STORAGE_PARENT` refused with `key_error`, and the appended parent read is DID30. | designed, not enforced |
-| shutdown | `op` | ok: `status`, `data` (`message`). error: `status`, `code`, `message`. | no named test shows this | answers and exits; no named test shows a file read or write for this call. | `tests/confine.rs::bound_copy_serves_under_profile` shows the answer and a clean exit; no named test shows a storage rule for this call. | designed, not enforced |
+| shutdown | `op` | ok: `status`, `data` (`message`). error: `status`, `code`, `message`. | none: needs no declared right | answers and exits; `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the call leaves the names under `did/` and the bytes of `did/nickname.enc` exactly as `init` and `set_nickname` left them. | `tests/confine.rs::bound_copy_serves_under_profile` shows the answer and a clean exit; `tests/confine.rs::no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged` shows the storage tree after `init` and `set_nickname` is the same after this call, and `DID32` is the plant that reaches this call. | designed, not enforced |
 
 ## Host-OS status
 
@@ -390,7 +396,7 @@ This section records the lab evidence for M1 checks C0 and B3 for
 `did-provider`. It states what the evidence is and gives no verdict; cc-redteam
 judges C0 and B3.
 
-Pins: read at the base head this build started from, `16c4997d20b332d5e5f82999a10a035fcee6a3ab`, read with `git rev-parse spike/spike/agent-host`; the earlier fetched head `c76403f1c26ac1ed8be7ed218b988d9d34ce2327` from `git fetch spike spike/agent-host` and one `git rev-parse FETCH_HEAD` is an ancestor of it; each file pin below is a commit that holds the file, read with `git show <commit>:<path>`, every `confine.rs` line number is from `git show 16c4997d20b332d5e5f82999a10a035fcee6a3ab:capsules/wallet-provider/tests/confine.rs`, and each wallet `falsifiers.json` entry line is from `git show 16c4997d20b332d5e5f82999a10a035fcee6a3ab:capsules/wallet-provider/falsifiers.json`.
+Pins: `e31f0f517a3364c6067b1989c1c985c21f823312` is a fixed commit on this lane; every `confine.rs` line number in this section is read with `git show e31f0f517a3364c6067b1989c1c985c21f823312:capsules/wallet-provider/tests/confine.rs`, each wallet `falsifiers.json` entry line in this section is read with `git show e31f0f517a3364c6067b1989c1c985c21f823312:capsules/wallet-provider/falsifiers.json`, and each file pin below is a commit that holds the file, read with `git show <commit>:<path>`.
 
 Gap (#309, routed to Flint): draft PR #309 at 513988ebd names no provider-launch ask, so this launcher has no RA route to copy, and M1-R for C0 and B3 waits on that ask.
 
@@ -559,14 +565,16 @@ Files at their commits:
   `16c4997d20b332d5e5f82999a10a035fcee6a3ab`.
 
 Refusals, with the message the code writes for `did-provider`: each quoted line
-is the panic's own message, and the panic prints it with Rust's frame. The suite
-rows quote the assertion's own message. The `assert_eq!` rows (wrong case or
-class, case count, entry, extra entries) print it after Rust's ``assertion `left
-== right` failed: `` and before the left/right lines. `assert_suite_outcomes`
-runs on the stand-in record with the label `<name>'s stand-in launched profile`,
-which the lines below quote, and on the record under the committed `confine.sb`
-with the label `<name>'s committed confine.sb`. The wallet leg asserts the same
-strings with `wallet-provider` in place of `did-provider`.
+is the panic's own message, and the panic prints it with Rust's frame. The
+`assert_eq!` rows (order or class, case count, entry, extra entries) print it
+after Rust's ``assertion `left == right` failed: `` and before the left/right
+lines. `assert_suite_outcomes` checks the record under the committed
+`confine.sb` with the label `<name>'s committed confine.sb` first (lines
+4826-4830), so a change that breaks both records panics with that label in place
+of `<name>'s stand-in launched profile`; the stand-in label (lines 4831-4835),
+which the lines below quote, shows when only the launched profile differs. The
+wallet leg asserts the same strings with `wallet-provider` in place of
+`did-provider`.
 
 - Launched-profile mismatch, contract check: `did-provider B3 journey: the launched profile must pass the contract check: did-provider must deny the network explicitly with (deny network*)`.
 - Launched-profile mismatch, declared-rights check: `did-provider B3 journey: the launched profile must trace to its declared rights: did-provider allow rule has no declared right and no platform-baseline rule: <appended allow form>`.
@@ -736,6 +744,16 @@ has no provider-launch ask.
   `persona_key_beneath_storage_parent_is_not_adopted` fails on its refusal
   assertion because the planted persona key loads and answers ok with the
   planted DID.
+- Read `/etc/hosts`, outside every grant, in `get_did`'s ok arm and answer
+  `storage_error` when that read is denied (DID31): the `storage_error`
+  refusal replaces the ok answer, so
+  `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged`
+  fails on its first answer.
+- Write one file into the provider's own storage root in the `Request::Shutdown`
+  arm of `fn handle` before it answers (DID32):
+  `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged`
+  fails on its final compare after `shutdown`, because the root holds a name
+  that `init` and `set_nickname` did not leave.
 
 Task 015 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

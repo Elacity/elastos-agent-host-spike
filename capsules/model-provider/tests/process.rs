@@ -20,6 +20,7 @@ use elastos_model_contract::{
     RUNTIME_ACCESS_BINDING_SCHEMA, RUNTIME_CREATE_BINDING_SCHEMA,
 };
 use serde_json::{json, Value};
+use std::collections::VecDeque;
 use std::io::{BufRead as _, BufReader, Read, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt as _;
@@ -743,6 +744,21 @@ const RUNTIME_HOSTED_REFUSAL: &[u8] =
     b"HTTP/1.1 403 Forbidden\r\nX-Elastos-Hosted-Access: refused\r\n\
       Content-Length: 0\r\nConnection: close\r\n\r\n";
 
+/// The Runtime's 403 when hosted access is `pending`, `denied` or `ended`.
+/// The bytes are the same shape as `RUNTIME_HOSTED_REFUSAL`. `refused` stays
+/// that constant, so this helper is not a second writer for it.
+fn runtime_hosted_access_denial(state: &str) -> Vec<u8> {
+    match state {
+        "pending" | "denied" | "ended" => {}
+        _ => panic!("refused stays RUNTIME_HOSTED_REFUSAL"),
+    }
+    format!(
+        "HTTP/1.1 403 Forbidden\r\nX-Elastos-Hosted-Access: {state}\r\n\
+         Content-Length: 0\r\nConnection: close\r\n\r\n"
+    )
+    .into_bytes()
+}
+
 /// The shared stand-in's shell scope marker. The shared file names it once
 /// (`LIVE_SCOPE`, `lab/agent-conformance/standin-runtime/mod.rs:16`), and its
 /// shell route call takes it as the one scope argument
@@ -767,8 +783,8 @@ const RUNTIME_HOSTED_STREAM_EVENTS: [&str; 2] = [
 /// The Runtime's accepted head, copied from `write_response_head`
 /// (`elastos/crates/elastos-server/src/api/model_provider_egress.rs:1662-1670`).
 /// The Runtime forwards the backend's content type (`:1589-1599`), so this
-/// head says `text/event-stream`. Only a refusal carries
-/// `X-Elastos-Hosted-Access` (`:2453-2486`).
+/// head says `text/event-stream`. A refusal and the access states `pending`,
+/// `denied` and `ended` carry `X-Elastos-Hosted-Access` (`:2453-2486`).
 fn runtime_hosted_stream_head() -> Vec<u8> {
     b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
 Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
@@ -914,11 +930,27 @@ fn runtime_hosted_cut_answer() -> Vec<u8> {
     answer
 }
 
+/// The Runtime's answer when access ends after the first text frame. The head
+/// is `runtime_hosted_stream_head`, so the content type is `text/event-stream`.
+/// The first frame is `data: ` plus `RUNTIME_HOSTED_STREAM_EVENTS[0]`, whose
+/// text is `ready`. The next frame is `: elastos-hosted-access ended`. There
+/// is no closing `0\r\n\r\n`.
+fn runtime_hosted_access_ended_during_reply_answer() -> Vec<u8> {
+    let mut answer = runtime_hosted_stream_head();
+    push_runtime_hosted_stream_frame(
+        &mut answer,
+        format!("data: {}\n\n", RUNTIME_HOSTED_STREAM_EVENTS[0]).as_bytes(),
+    );
+    push_runtime_hosted_stream_frame(&mut answer, b": elastos-hosted-access ended\n\n");
+    answer
+}
+
 /// What the stand-in answers: the Runtime's refusal, which is the default, its
 /// accepted head followed by the whole backend stream, its accepted head
 /// followed by a cut stream, a real backend answer relayed through that same
 /// head and framing, or that relay only when the shared RA-1 grant store holds
-/// a live grant for the effect's request id and session.
+/// a live grant for the effect's request id and session, or the next body
+/// from a shared queue.
 #[derive(Clone)]
 enum HostedEffectAnswer {
     Refused,
@@ -946,6 +978,12 @@ enum HostedEffectAnswer {
         /// about how the Runtime finds an effect's session.
         served_session: String,
         backend_url: String,
+    },
+    /// Pops the next response body. The queue is an `Arc` because each
+    /// connection clones this answer. An empty queue writes
+    /// `RUNTIME_HOSTED_REFUSAL`.
+    Script {
+        queue: Arc<Mutex<VecDeque<Vec<u8>>>>,
     },
 }
 
@@ -1031,6 +1069,10 @@ struct HostedEffectStandIn {
     answer_released: Arc<(Mutex<bool>, Condvar)>,
     /// What the backend answered, when the answer relays.
     relay_outcome: Arc<Mutex<Option<RelayOutcome>>>,
+    /// The next scripted response bodies. `bind_script` is the only
+    /// constructor that fills this queue. It is the same `Arc` the `Script`
+    /// answer carries, because each connection clones that answer.
+    script_queue: Arc<Mutex<VecDeque<Vec<u8>>>>,
     /// The shared stand-in's live-grant view when the answer checks grants
     /// before it relays, and `None` for the answer modes that do not.
     grants: Option<Arc<Mutex<StandIn>>>,
@@ -1107,6 +1149,25 @@ impl HostedEffectStandIn {
         )
     }
 
+    /// Binds the stand-in that answers each connection with the next queued
+    /// body, on the same listener. This is the only constructor that fills
+    /// the queue. An empty queue writes `RUNTIME_HOSTED_REFUSAL`.
+    fn bind_script(label: &str, responses: Vec<Vec<u8>>) -> Self {
+        let queue = Arc::new(Mutex::new(VecDeque::from(responses)));
+        let stand_in = Self::bind_answering(
+            label,
+            HostedEffectAnswer::Script {
+                queue: Arc::clone(&queue),
+            },
+            None,
+        );
+        assert!(
+            Arc::ptr_eq(&stand_in.script_queue, &queue),
+            "the script queue beside relay_outcome is the answer's queue"
+        );
+        stand_in
+    }
+
     fn bind_answering(
         label: &str,
         answer: HostedEffectAnswer,
@@ -1128,6 +1189,10 @@ impl HostedEffectStandIn {
         let (request_tx, requests) = mpsc::channel();
         let answer_released = Arc::new((Mutex::new(true), Condvar::new()));
         let relay_outcome = Arc::new(Mutex::new(None));
+        let script_queue = match &answer {
+            HostedEffectAnswer::Script { queue } => Arc::clone(queue),
+            _ => Arc::new(Mutex::new(VecDeque::new())),
+        };
         let refusals = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let accept_loop = {
@@ -1170,6 +1235,7 @@ impl HostedEffectStandIn {
             requests,
             answer_released,
             relay_outcome,
+            script_queue,
             grants,
             refusals,
             stop,
@@ -1355,6 +1421,14 @@ fn serve_hosted_effect(
             let relayed = relay_hosted_effect(&stream, &body, &backend_url);
             *relay_outcome.lock().unwrap() = Some(relayed);
             return;
+        }
+        HostedEffectAnswer::Script { queue } => {
+            if let Some(body) = queue.lock().unwrap().pop_front() {
+                body
+            } else {
+                let _ = (&stream).write_all(RUNTIME_HOSTED_REFUSAL);
+                return;
+            }
         }
     };
     let _ = (&stream).write_all(&response);
@@ -5258,4 +5332,646 @@ fn hosted_request_identity_survives_rotation_and_refuses_conflicts() {
         &expected_run_id,
         HOSTED_IDENTITY_PROMPT,
     );
+}
+
+/// The encoded length `handle_runs_create` compares with the offer limit.
+/// The check is `serde_json::to_vec` of the text/v1 input, and the comparison
+/// is `>`. The body is the one `hosted_text_create_request` builds.
+fn hosted_text_input_len(prompt: &str) -> usize {
+    let request = hosted_text_create_request("request:measure", "grant:test", prompt);
+    serde_json::to_vec(&request["input"])
+        .expect("encode the hosted text input")
+        .len()
+}
+
+/// A prompt whose text/v1 input encodes to exactly `target` bytes. Each ASCII
+/// `x` adds one byte inside the one helper's input object.
+fn prompt_filling_hosted_input(target: usize) -> String {
+    let empty_len = hosted_text_input_len("");
+    assert!(
+        target >= empty_len,
+        "the text/v1 wrapper is {empty_len} bytes, past {target}"
+    );
+    let prompt = "x".repeat(target - empty_len);
+    assert_eq!(
+        hosted_text_input_len(&prompt),
+        target,
+        "one ASCII byte in the prompt adds one encoded input byte"
+    );
+    prompt
+}
+
+/// True when a file under `<root>/journal/runs` stores `run_id`. The byte
+/// refusal returns before `store_run`, so that run has no journal file.
+fn provider_journal_stores_run(root: &Path, run_id: &str) -> bool {
+    let runs = root.join("journal").join("runs");
+    let entries = std::fs::read_dir(&runs)
+        .unwrap_or_else(|error| panic!("the provider journal is at {}: {error}", runs.display()));
+    entries.flatten().any(|entry| {
+        std::fs::read(entry.path())
+            .unwrap_or_default()
+            .windows(run_id.len())
+            .any(|window| window == run_id.as_bytes())
+    })
+}
+
+/// A hosted offer refuses an output-token request and an over-limit input
+/// before the Runtime socket. Design: `docs/MODEL_PROVIDER.md` "Request
+/// identity and session facts". `validate_text_messages` refuses
+/// `max_output_tokens`. `ModelProviderState::handle_runs_create` refuses an
+/// input past `input_bytes_limit`.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_token_and_byte_bounds_refuse_before_any_send() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted token and byte bounds: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-token-byte-bounds");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // `bind` answers with the Runtime refusal. The in-limit control must
+    // complete, so this stand-in is `bind_streaming`.
+    let stand_in = HostedEffectStandIn::bind_streaming("hosted-token-byte-bounds");
+    let offer = hosted_effect_offer(HOSTED_FIXTURE_MODEL, HOSTED_FIXTURE_RUNTIME_MS_LIMIT);
+    let input_bytes_limit = offer["policy"]["input_bytes_limit"]
+        .as_u64()
+        .expect("the fixture hosted offer names input_bytes_limit")
+        as usize;
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let oversized_request = hosted_text_create_request(
+        &test_support::fixture_model_request_id("request:hosted-byte-bound"),
+        "grant:test",
+        &prompt_filling_hosted_input(input_bytes_limit + 1),
+    );
+    assert_eq!(
+        serde_json::to_vec(&oversized_request["input"])
+            .expect("encode the oversized input")
+            .len(),
+        input_bytes_limit + 1,
+        "the oversized input is one byte past the offer limit"
+    );
+    let oversized_binding: RuntimeCreateBinding =
+        serde_json::from_value(oversized_request["runtime_binding"].clone()).unwrap();
+    let oversized_run_id = model_run_id(&oversized_binding);
+    let oversized = provider.request(oversized_request);
+    assert_eq!(
+        oversized,
+        json!({
+            "status": "error",
+            "code": "policy_limit",
+            "message": "model input exceeds configured limits",
+        }),
+        "an input past the offer byte bound must be refused before any send: {oversized}"
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        0,
+        "the byte refusal must open no connection to the Runtime socket"
+    );
+    assert!(
+        !provider_journal_stores_run(&root, &oversized_run_id),
+        "the byte refusal must store no run for {oversized_run_id}"
+    );
+
+    let mut token_request = hosted_text_create_request(
+        &test_support::fixture_model_request_id("request:hosted-token-bound"),
+        "grant:test",
+        "a hosted token bound",
+    );
+    token_request["input"]["max_output_tokens"] = json!(16);
+    token_request["runtime_binding"]["input_hash"] =
+        json!(model_input_hash(&token_request["input"]).expect("hash the token-bound input"));
+    assert!(
+        serde_json::to_vec(&token_request["input"])
+            .expect("encode the token-bound input")
+            .len()
+            <= input_bytes_limit,
+        "the token refusal is inside the offer byte bound"
+    );
+    let token_binding: RuntimeCreateBinding =
+        serde_json::from_value(token_request["runtime_binding"].clone()).unwrap();
+    let token_run_id = model_run_id(&token_binding);
+    let token_create = provider.request(token_request.clone());
+    assert_eq!(
+        token_create["status"], "ok",
+        "unexpected create response: {token_create}"
+    );
+    assert_eq!(
+        token_create["data"]["run_id"], token_run_id,
+        "runs_create must return the contract run id"
+    );
+    let token_settled = wait_for_run_terminal_within(
+        &mut provider,
+        &token_run_id,
+        &access_binding(&token_request),
+        FIXTURE_EVENT_TIMEOUT,
+    );
+    assert_eq!(
+        token_settled["data"]["terminal"]["error"]["code"], "context_rejected",
+        "a hosted offer must refuse max_output_tokens before any send: {token_settled}"
+    );
+    assert_eq!(
+        token_settled["data"]["terminal"]["error"]["message"],
+        "model output request is not supported by this offer",
+        "the hosted output limit must name its reason: {token_settled}"
+    );
+    assert_eq!(
+        token_settled["data"]["status"], "failed",
+        "the hosted output limit must reach one failed terminal: {token_settled}"
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        0,
+        "the token refusal must open no connection to the Runtime socket"
+    );
+
+    let exact_request = hosted_text_create_request(
+        &test_support::fixture_model_request_id("request:hosted-byte-bound-exact"),
+        "grant:test",
+        &prompt_filling_hosted_input(input_bytes_limit),
+    );
+    assert_eq!(
+        serde_json::to_vec(&exact_request["input"])
+            .expect("encode the in-limit input")
+            .len(),
+        input_bytes_limit,
+        "the control input encodes to the offer byte limit"
+    );
+    assert!(
+        exact_request["input"].get("max_output_tokens").is_none(),
+        "the control input asks for no output limit"
+    );
+    let exact_binding: RuntimeCreateBinding =
+        serde_json::from_value(exact_request["runtime_binding"].clone()).unwrap();
+    let exact_run_id = model_run_id(&exact_binding);
+    let exact_create = provider.request(exact_request.clone());
+    assert_eq!(
+        exact_create["status"], "ok",
+        "unexpected create response: {exact_create}"
+    );
+    assert_eq!(
+        exact_create["data"]["run_id"], exact_run_id,
+        "runs_create must return the contract run id"
+    );
+    let exact_settled = wait_for_run_terminal_within(
+        &mut provider,
+        &exact_run_id,
+        &access_binding(&exact_request),
+        FIXTURE_EVENT_TIMEOUT,
+    );
+    assert_eq!(
+        exact_settled["data"]["status"], "completed",
+        "an input at the offer byte limit must complete: {exact_settled}"
+    );
+    assert_eq!(
+        exact_settled["data"]["terminal"]["output"],
+        json!({"schema": RUN_OUTPUT_TEXT_SCHEMA, "text": "ready"}),
+        "the run must carry the streamed text: {exact_settled}"
+    );
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "only the in-limit run may open a connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "only the in-limit run may send a hosted request"
+    );
+    assert_eq!(
+        requests[0].value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
+    );
+
+    provider.shutdown();
+}
+
+/// An unseen request id outside the freshness window is `request_expired`
+/// before the Runtime socket, and a retained run returns its stored result
+/// on that same socket. Design: `docs/MODEL_PROVIDER.md` "Request identity
+/// and session facts". `ModelProviderState::handle_runs_create` looks up a
+/// retained binding first, then `validate_new_model_request_id`. The unit
+/// tests `unseen_expired_requests_leave_journal_and_backend_unchanged` and
+/// `retained_request_precedes_freshness_floor_policy_and_unrelated_pruning`
+/// stay the in-process proof.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_unseen_request_ids_expire_before_any_send() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted request freshness: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-request-freshness");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind_streaming("hosted-request-freshness");
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    // One clock read, the same clock `fixture_model_request_id` uses. Too old
+    // is that instant minus the five-minute window and one millisecond. Too
+    // far ahead is that instant plus the one-minute skew and the unit test's
+    // extra 60_000 ms.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let unseen = [
+        (
+            "too old",
+            test_support::fixture_model_request_id_at(
+                "hosted-unseen-too-old",
+                now_ms.saturating_sub(elastos_model_contract::MODEL_REQUEST_MAX_AGE_MS + 1),
+            ),
+        ),
+        (
+            "too far in the future",
+            test_support::fixture_model_request_id_at(
+                "hosted-unseen-too-future",
+                now_ms + elastos_model_contract::MODEL_REQUEST_FUTURE_SKEW_MS + 60_000,
+            ),
+        ),
+        ("legacy", "legacy-unseen".to_string()),
+    ];
+    let expired = json!({
+        "status": "error",
+        "code": elastos_model_contract::MODEL_REQUEST_EXPIRED_CODE,
+        "message": elastos_model_contract::MODEL_REQUEST_EXPIRED_MESSAGE,
+    });
+    let missing = json!({
+        "status": "error",
+        "code": "run_not_found",
+        "message": "model run is not available for the current caller",
+    });
+    for (label, request_id) in unseen {
+        let request =
+            hosted_text_create_request(&request_id, "grant:test", "an unseen hosted request");
+        let binding: RuntimeCreateBinding =
+            serde_json::from_value(request["runtime_binding"].clone()).unwrap();
+        binding
+            .validate(
+                request["offer_id"].as_str().unwrap(),
+                request["operation"].as_str().unwrap(),
+                &request["input"],
+            )
+            .unwrap_or_else(|error| {
+                panic!("{label}: the refusal binding must be valid, and only the request id is outside the window: {error}")
+            });
+        let run_id = model_run_id(&binding);
+        let created = provider.request(request.clone());
+        assert_eq!(
+            created, expired,
+            "{label}: an unseen request id must be request_expired before any send: {created}"
+        );
+        assert_eq!(
+            stand_in.connection_count(),
+            0,
+            "{label}: the freshness refusal must open no connection to the Runtime socket"
+        );
+        let got = provider.request(json!({
+            "op": "runs_get",
+            "run_id": run_id,
+            "runtime_binding": access_binding(&request),
+        }));
+        assert_eq!(
+            got, missing,
+            "{label}: an unseen expired id must leave no run: {got}"
+        );
+    }
+
+    let fresh_id = test_support::fixture_model_request_id("request:hosted-request-fresh");
+    let prompt = "a fresh hosted request";
+    let fresh_request = hosted_text_create_request(&fresh_id, "grant:test", prompt);
+    let fresh_binding: RuntimeCreateBinding =
+        serde_json::from_value(fresh_request["runtime_binding"].clone()).unwrap();
+    let fresh_run_id = model_run_id(&fresh_binding);
+    let settled = run_hosted_text_turn(
+        &mut provider,
+        &fresh_id,
+        "grant:test",
+        HOSTED_FIXTURE_SESSION_ID,
+        prompt,
+        FIXTURE_EVENT_TIMEOUT,
+    );
+    assert_eq!(
+        settled["data"]["status"], "completed",
+        "the fresh granted turn must complete: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["output"],
+        json!({"schema": RUN_OUTPUT_TEXT_SCHEMA, "text": "ready"}),
+        "the fresh granted turn must carry the streamed text: {settled}"
+    );
+    let replay = provider.request(fresh_request.clone());
+    assert_eq!(
+        replay["status"], "ok",
+        "a retained request must return its stored run: {replay}"
+    );
+    assert_eq!(
+        replay["data"]["run_id"], fresh_run_id,
+        "the retained run must keep the contract run id: {replay}"
+    );
+    let replayed = wait_for_run_terminal(
+        &mut provider,
+        &fresh_run_id,
+        &access_binding(&fresh_request),
+    );
+    assert_eq!(
+        replayed["data"]["terminal"]["output"], settled["data"]["terminal"]["output"],
+        "runs_get must return the stored completed output: {replayed}"
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "the retained replay must not open a second connection"
+    );
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "only the fresh granted turn may open a connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "only the fresh granted turn may send a hosted request"
+    );
+    assert_eq!(
+        requests[0].value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
+    );
+
+    provider.shutdown();
+}
+
+/// A hosted run takes the Runtime's pending, denied and ended access states
+/// as its own failure, including an end that arrives after text has started.
+/// `map_effect_http_status` maps those three `X-Elastos-Hosted-Access` values
+/// on a Runtime socket's HTTP 403 to `hosted_access_pending`,
+/// `hosted_access_denied` and `hosted_access_ended`, class `access_refused`.
+/// `HOSTED_ACCESS_ENDED_LINE` flushes text already buffered and returns
+/// `hosted_access_ended_during_reply`. That run is not a model success:
+/// `terminal.output` stays null, and the backend report is the unknown report
+/// a sent hosted failure records
+/// (`hosted_stream_cut_by_the_runtime_fails_the_run_with_unknown_usage`).
+///
+/// The create response is `ok`: the provider accepts the run, then the
+/// stand-in answers on the socket. Off macOS the provider refuses every
+/// hosted run before any socket, so the test prints one `SKIP` line and
+/// returns.
+#[test]
+fn hosted_access_states_fail_the_run_on_the_socket() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted access states: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-access-states");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind_script(
+        "hosted-access-states",
+        vec![
+            runtime_hosted_access_denial("pending"),
+            runtime_hosted_access_denial("denied"),
+            runtime_hosted_access_denial("ended"),
+            runtime_hosted_access_ended_during_reply_answer(),
+        ],
+    );
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    // The same object the cut test records for a hosted run the provider sent
+    // and then failed. It has no usage reason.
+    let sent_failure_report = json!({
+        "schema": BACKEND_REPORT_SCHEMA,
+        "resolved_model": {"status": "unknown"},
+        "usage": {"status": "unknown"},
+        "cost": {"status": "unknown"},
+    });
+    let denials = [
+        (
+            "pending",
+            "hosted_access_pending",
+            "Hosted access is waiting for approval in Inbox.",
+            "request:hosted-access-pending",
+            "a hosted run the Runtime leaves pending",
+        ),
+        (
+            "denied",
+            "hosted_access_denied",
+            "Hosted access was denied in Inbox.",
+            "request:hosted-access-denied",
+            "a hosted run the Runtime denies",
+        ),
+        (
+            "ended",
+            "hosted_access_ended",
+            "Hosted access ended. Approve the new request in Inbox to use it again.",
+            "request:hosted-access-ended",
+            "a hosted run the Runtime ends before any text",
+        ),
+    ];
+    for (index, (state, code, message, label, prompt)) in denials.iter().enumerate() {
+        let request_id = test_support::fixture_model_request_id(label);
+        let create_request = hosted_text_create_request(&request_id, "grant:test", prompt);
+        let settled = run_hosted_text_turn(
+            &mut provider,
+            &request_id,
+            "grant:test",
+            HOSTED_FIXTURE_SESSION_ID,
+            prompt,
+            FIXTURE_EVENT_TIMEOUT,
+        );
+        assert_eq!(
+            settled["data"]["status"], "failed",
+            "{state}: a Runtime access state must fail the run: {settled}"
+        );
+        // The pending row is first. Dropping the three access arms makes this
+        // equality fail on `hosted_access_pending`.
+        assert_eq!(
+            settled["data"]["terminal"]["error"]["code"], *code,
+            "{state}: the Runtime access state must keep its code: {settled}"
+        );
+        assert_eq!(
+            settled["data"]["terminal"]["error"]["class"], "access_refused",
+            "{state}: the Runtime access state must be access_refused: {settled}"
+        );
+        assert_eq!(
+            settled["data"]["terminal"]["error"]["message"], *message,
+            "{state}: the Runtime access state must keep its message: {settled}"
+        );
+        assert!(
+            settled["data"]["terminal"]["output"].is_null(),
+            "{state}: a failed run must carry no output: {settled}"
+        );
+        assert_eq!(
+            settled["data"]["terminal"]["backend_report"], sent_failure_report,
+            "{state}: a sent hosted failure must record unknown usage: {settled}"
+        );
+        let run_id = settled["data"]["run_id"]
+            .as_str()
+            .expect("the run has an id");
+        let events =
+            read_hosted_run_events(&mut provider, run_id, &access_binding(&create_request));
+        assert!(
+            events.iter().all(|event| event["kind"] != "text_delta"),
+            "{state}: an access denial must carry no text: {events:?}"
+        );
+        assert_eq!(
+            stand_in.connection_count(),
+            index + 1,
+            "{state}: the denial must open one connection on the Runtime socket"
+        );
+    }
+
+    let during_reply_id =
+        test_support::fixture_model_request_id("request:hosted-access-ended-during-reply");
+    let during_reply_prompt = "a hosted reply the Runtime ends after ready";
+    let during_reply_request =
+        hosted_text_create_request(&during_reply_id, "grant:test", during_reply_prompt);
+    let during_reply = run_hosted_text_turn(
+        &mut provider,
+        &during_reply_id,
+        "grant:test",
+        HOSTED_FIXTURE_SESSION_ID,
+        during_reply_prompt,
+        FIXTURE_EVENT_TIMEOUT,
+    );
+    assert_eq!(
+        during_reply["data"]["status"], "failed",
+        "an end during the reply must fail the run: {during_reply}"
+    );
+    // Deleting the in-band end line makes this equality fail.
+    assert_eq!(
+        during_reply["data"]["terminal"]["error"]["code"], "hosted_access_ended_during_reply",
+        "an end during the reply must keep its code: {during_reply}"
+    );
+    assert_eq!(
+        during_reply["data"]["terminal"]["error"]["class"], "access_refused",
+        "an end during the reply must be access_refused: {during_reply}"
+    );
+    assert_eq!(
+        during_reply["data"]["terminal"]["error"]["message"],
+        "Hosted access ended during this reply. Approve the new request in Inbox to use it again.",
+        "an end during the reply must keep its message: {during_reply}"
+    );
+    assert!(
+        during_reply["data"]["terminal"]["output"].is_null(),
+        "an end during the reply must carry no output: {during_reply}"
+    );
+    assert_eq!(
+        during_reply["data"]["terminal"]["backend_report"], sent_failure_report,
+        "an end during the reply must record unknown usage: {during_reply}"
+    );
+    let during_reply_run_id = during_reply["data"]["run_id"]
+        .as_str()
+        .expect("the mid-reply run has an id");
+    let events = read_hosted_run_events(
+        &mut provider,
+        during_reply_run_id,
+        &access_binding(&during_reply_request),
+    );
+    let mut joined = String::new();
+    for event in &events {
+        if event["kind"] == "text_delta" {
+            joined.push_str(event["data"]["text"].as_str().unwrap_or(""));
+        }
+    }
+    assert_eq!(
+        joined, "ready",
+        "text already sent stays when access ends: {events:?}"
+    );
+    let terminal = events
+        .last()
+        .expect("the mid-reply run keeps a terminal event");
+    assert_eq!(
+        terminal["terminal"], true,
+        "the last event must be the terminal: {terminal}"
+    );
+    assert_eq!(
+        terminal["kind"], "failed",
+        "the last event must be the failed terminal: {terminal}"
+    );
+    assert_eq!(
+        terminal["data"]["code"], "hosted_access_ended_during_reply",
+        "the last event must name the end during the reply: {terminal}"
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        4,
+        "the four runs must open four connections before observe"
+    );
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 4,
+        "observe must record the four Runtime socket connections"
+    );
+    assert_eq!(
+        requests.len(),
+        4,
+        "observe must record the four hosted requests"
+    );
+    for request in &requests {
+        assert_eq!(request.request_line, "POST /v1/hosted-effect HTTP/1.1");
+        assert_eq!(
+            request.value("authorization"),
+            None,
+            "a hosted run must carry no bearer key"
+        );
+    }
+
+    provider.shutdown();
 }
