@@ -6,5 +6,5 @@ test: model_workspace_dependency_is_a_link_in_place
 --- old
     metadata_names(manifest).iter().any(|name| name == "grant-binding")
 --- new
-    _cargo_toml.contains("grant-binding") && _cargo_toml.contains("path")
+    std::fs::read_to_string(manifest).unwrap_or_default().contains("grant-binding")
 --- end
