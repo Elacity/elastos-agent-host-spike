@@ -1,0 +1,8 @@
+id: F-GB-multi
+file: src/link.rs
+test: link::model_multiline_basic_string_escape_is_a_link
+--- old
+    metadata_names(manifest).iter().any(|name| name == "grant-binding")
+--- new
+    false
+--- end

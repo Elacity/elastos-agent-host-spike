@@ -93,6 +93,7 @@ pub struct Reservation {
 pub enum ReserveRefuse {
     OverCeiling { ceiling: u64, held: u64, asked: u64 },
     SumOverflow { held: u64, asked: u64 },
+    NoCeiling,
     Binding(Refuse),
 }
 
@@ -105,6 +106,7 @@ impl std::fmt::Display for ReserveRefuse {
             ReserveRefuse::SumOverflow { .. } => {
                 formatter.write_str("reservation sum does not fit in u64")
             }
+            ReserveRefuse::NoCeiling => formatter.write_str("identity has no ceiling"),
             ReserveRefuse::Binding(refusal) => refusal.fmt(formatter),
         }
     }
@@ -235,9 +237,10 @@ impl Verifier {
 
     /// Holds `amount` on the ledger when the total this identity compares plus
     /// `amount` stays at or under the ceiling. A binding refusal records nothing,
-    /// a total that does not fit in `u64` is over the ceiling, a stored sum of
-    /// every open hold plus `amount` that does not fit in `u64` is a sum
-    /// overflow, and the request's reported usage does not lower the hold.
+    /// an identity with no stored ceiling is refused with no ceiling, a total
+    /// that does not fit in `u64` is over the ceiling, a stored sum of every
+    /// open hold plus `amount` that does not fit in `u64` is a sum overflow,
+    /// and the request's reported usage does not lower the hold.
     pub fn reserve(
         &self,
         call: &Call,
@@ -261,6 +264,9 @@ impl Verifier {
         } else {
             shared
         };
+        if !ledger.ceilings.contains_key(&identity) {
+            return Err(ReserveRefuse::NoCeiling);
+        }
         ledger.ceiling = ledger.admitted;
         if let Some(agent_ceiling) = ledger.ceilings.get(&identity).copied() {
             ledger.ceiling = agent_ceiling;
@@ -490,8 +496,15 @@ fn books(verifier: &Verifier) -> Books {
 fn model_reserve_at_the_ceiling_is_allowed() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(5);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 5 },
+            5,
+        )
+        .expect("ask");
     let request = GuestRequest {
         reported_usage: 1,
         ..guest(handle)
@@ -504,8 +517,15 @@ fn model_reserve_at_the_ceiling_is_allowed() {
 fn model_reserve_over_the_ceiling_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(5);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 5 },
+            5,
+        )
+        .expect("ask");
     let refusal = verifier
         .reserve(&call, &guest(handle), 6)
         .expect_err("over the ceiling");
@@ -525,8 +545,15 @@ fn model_reserve_over_the_ceiling_is_refused() {
 fn model_reserve_past_the_u64_total_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(u64::MAX);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: u64::MAX },
+            u64::MAX,
+        )
+        .expect("ask");
     verifier
         .reserve(&call, &guest(handle), u64::MAX)
         .expect("at the ceiling");
@@ -555,8 +582,15 @@ fn model_reserve_past_the_u64_total_is_refused() {
 fn model_outstanding_hold_counts_toward_the_ceiling() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(5);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 5 },
+            5,
+        )
+        .expect("ask");
     verifier
         .reserve(&call, &guest(handle), 3)
         .expect("first reserve");
@@ -580,12 +614,20 @@ fn model_outstanding_hold_counts_toward_the_ceiling() {
 fn model_reported_usage_does_not_lower_the_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = GuestRequest {
-        reported_usage: 1,
+        reported_usage: 11,
         ..guest(handle)
     };
+    assert!(request.reported_usage > 10);
     verifier.reserve(&call, &request, 10).expect("reserve");
     assert_eq!(books(&verifier).held, 10);
 }
@@ -617,8 +659,15 @@ fn model_forged_instance_does_not_move_the_reserve() {
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = GuestRequest {
         forged_instance: Some(sibling),
         ..guest(handle)
@@ -634,11 +683,242 @@ fn model_forged_instance_does_not_move_the_reserve() {
 }
 
 #[test]
+fn model_forged_append_does_not_move_the_reserve() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    let reservation = verifier
+        .reserve(&call, &request, 4)
+        .expect("forged append does not move the reserve");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_overwrite_does_not_move_the_reserve() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_overwrite);
+    let reservation = verifier
+        .reserve(&call, &request, 4)
+        .expect("forged overwrite does not move the reserve");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_child_journal_does_not_move_the_reserve() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let reservation = verifier
+        .reserve(&call, &request, 4)
+        .expect("forged child journal does not move the reserve");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_identity_does_not_move_the_reserve() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    let reservation = verifier
+        .reserve(&call, &request, 4)
+        .expect("forged identity does not move the reserve");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_session_does_not_move_the_reserve() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    let reservation = verifier
+        .reserve(&call, &request, 4)
+        .expect("forged session does not move the reserve");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_ceiling_does_not_move_the_reserve() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = GuestRequest {
+        forged_ceiling: 1,
+        ..guest(handle)
+    };
+    assert!(request.forged_ceiling > 0);
+    let reservation = verifier
+        .reserve(&call, &request, 4)
+        .expect("forged ceiling does not move the reserve");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_reported_usage_does_not_move_the_reserve() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(handle)
+    };
+    assert!(request.reported_usage > 0);
+    let reservation = verifier
+        .reserve(&call, &request, 4)
+        .expect("reported usage does not move the reserve");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
 fn model_settle_known_outcome_charges_the_measured_figure() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let reservation = verifier
         .reserve(&call, &guest(handle), 10)
         .expect("reserve");
@@ -655,8 +935,15 @@ fn model_settle_known_outcome_charges_the_measured_figure() {
 fn model_reported_usage_does_not_lower_the_settled_charge() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = GuestRequest {
         reported_usage: 1,
         ..guest(handle)
@@ -674,8 +961,15 @@ fn model_reported_usage_does_not_lower_the_settled_charge() {
 fn model_settle_twice_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = GuestRequest {
         reported_usage: 0,
         ..guest(handle)
@@ -700,8 +994,15 @@ fn model_settle_twice_is_refused() {
 fn model_unknown_outcome_keeps_the_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
     let refusal = verifier
@@ -722,8 +1023,15 @@ fn model_unknown_outcome_keeps_the_hold() {
 fn model_release_returns_the_unused_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let reservation = verifier
         .reserve(&call, &guest(handle), 10)
         .expect("reserve");
@@ -742,8 +1050,15 @@ fn model_settle_on_a_sibling_instance_is_refused() {
     let handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    verifier.admit(10);
     let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
     let sibling_call = verifier.open_call(sibling);
@@ -769,8 +1084,15 @@ fn model_release_on_a_sibling_instance_is_refused() {
     let handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    verifier.admit(10);
     let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
     let sibling_call = verifier.open_call(sibling);
@@ -793,8 +1115,15 @@ fn model_forged_instance_does_not_move_the_release() {
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
     let request = GuestRequest {
         forged_instance: Some(sibling),
@@ -811,11 +1140,249 @@ fn model_forged_instance_does_not_move_the_release() {
 }
 
 #[test]
+fn model_forged_append_does_not_move_the_release() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    verifier
+        .release(&call, &request, reservation)
+        .expect("forged append does not move the release");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_overwrite_does_not_move_the_release() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_overwrite);
+    verifier
+        .release(&call, &request, reservation)
+        .expect("forged overwrite does not move the release");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_child_journal_does_not_move_the_release() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    verifier
+        .release(&call, &request, reservation)
+        .expect("forged child journal does not move the release");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_identity_does_not_move_the_release() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    verifier
+        .release(&call, &request, reservation)
+        .expect("forged identity does not move the release");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_session_does_not_move_the_release() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    verifier
+        .release(&call, &request, reservation)
+        .expect("forged session does not move the release");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_ceiling_does_not_move_the_release() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_ceiling: 1,
+        ..guest(handle)
+    };
+    assert!(request.forged_ceiling > 0);
+    verifier
+        .release(&call, &request, reservation)
+        .expect("forged ceiling does not move the release");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_reported_usage_does_not_move_the_release() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(handle)
+    };
+    assert!(request.reported_usage > 0);
+    verifier
+        .release(&call, &request, reservation)
+        .expect("reported usage does not move the release");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
 fn model_settle_below_the_hold_returns_the_rest() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = GuestRequest {
         reported_usage: 9,
         ..guest(handle)
@@ -839,8 +1406,15 @@ fn model_settle_below_the_hold_returns_the_rest() {
 fn model_release_twice_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let reservation = verifier
         .reserve(&call, &guest(handle), 10)
         .expect("reserve");
@@ -862,8 +1436,15 @@ fn model_release_twice_is_refused() {
 fn model_concurrent_reserves_keep_one_ceiling() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(5);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 5 },
+            5,
+        )
+        .expect("ask");
     let request = guest(handle);
     let (first, second) = std::thread::scope(|scope| {
         let first = scope.spawn(|| verifier.reserve(&call, &request, 3));
@@ -888,18 +1469,36 @@ fn model_concurrent_reserves_keep_one_ceiling() {
         }
     );
     assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
-    let books = books(&verifier);
-    assert_eq!(books.held, 3);
-    assert_eq!(books.charged, 0);
-    assert_eq!(books.open.len(), 1);
+    let after = books(&verifier);
+    assert_eq!(after.held, 3);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.open.len(), 1);
+    let (third, fourth) = std::thread::scope(|scope| {
+        let third = scope.spawn(|| verifier.reserve(&call, &request, 1));
+        let fourth = scope.spawn(|| verifier.reserve(&call, &request, 1));
+        (third.join().expect("third"), fourth.join().expect("fourth"))
+    });
+    third.expect("both later reserves fit the ceiling");
+    fourth.expect("both later reserves fit the ceiling");
+    let filled = books(&verifier);
+    assert_eq!(filled.held, 5);
+    assert_eq!(filled.charged, 0);
+    assert_eq!(filled.open.len(), 3);
 }
 
 #[test]
 fn model_settle_above_the_reservation_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = GuestRequest {
         reported_usage: 100,
         ..guest(handle)
@@ -931,8 +1530,15 @@ fn model_settle_above_the_reservation_is_refused() {
 fn model_settle_past_the_u64_charge_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(u64::MAX);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: u64::MAX },
+            u64::MAX,
+        )
+        .expect("ask");
     let request = GuestRequest {
         reported_usage: 1,
         ..guest(handle)
@@ -979,8 +1585,15 @@ fn model_settle_on_another_handle_is_refused() {
         .bind_grant(second, "UsersAI/agent-1/notes", rights())
         .expect("bind");
     assert_ne!(holder, other);
-    verifier.admit(10);
     let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(holder),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(holder);
     let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
     let refusal = verifier
@@ -1022,8 +1635,15 @@ fn model_release_on_another_handle_is_refused() {
         .bind_grant(second, "UsersAI/agent-1/notes", rights())
         .expect("bind");
     assert_ne!(holder, other);
-    verifier.admit(10);
     let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(holder),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(holder);
     let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
     let refusal = verifier
@@ -1049,8 +1669,15 @@ fn model_release_on_another_handle_is_refused() {
 fn model_forged_ceiling_does_not_raise_the_ceiling() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(5);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 5 },
+            5,
+        )
+        .expect("ask");
     let request = GuestRequest {
         forged_ceiling: 100,
         ..guest(handle)
@@ -1082,8 +1709,15 @@ fn model_forged_ceiling_does_not_raise_the_ceiling() {
 fn model_lower_ceiling_leaves_the_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let reservation = verifier.reserve(&call, &guest(handle), 8).expect("reserve");
     verifier.admit(4);
     let after = books(&verifier);
@@ -1112,8 +1746,15 @@ fn model_lower_ceiling_leaves_the_hold() {
 fn model_known_zero_settle_frees_the_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = GuestRequest {
         reported_usage: 7,
         ..guest(handle)
@@ -1137,8 +1778,15 @@ fn model_known_zero_settle_frees_the_hold() {
 fn model_one_release_returns_only_that_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let first = verifier.reserve(&call, &request, 6).expect("reserve");
     let second = verifier.reserve(&call, &request, 4).expect("reserve");
@@ -1155,8 +1803,15 @@ fn model_one_release_returns_only_that_hold() {
 fn model_one_settle_drops_only_that_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let first = verifier.reserve(&call, &request, 6).expect("reserve");
     let second = verifier.reserve(&call, &request, 4).expect("reserve");
@@ -1176,8 +1831,15 @@ fn model_one_settle_drops_only_that_hold() {
 fn model_settled_reservation_id_is_not_reused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let first = verifier.reserve(&call, &request, 6).expect("reserve");
     let measured = 6;
@@ -1207,20 +1869,40 @@ fn model_reserve_before_admit_is_refused() {
     let refusal = verifier
         .reserve(&call, &guest(handle), 1)
         .expect_err("reserve before admit");
+    assert_eq!(refusal, ReserveRefuse::NoCeiling);
+    assert_eq!(refusal.to_string(), "identity has no ceiling");
+    let after_refusal = books(&verifier);
+    assert_eq!(after_refusal.held, 0);
+    assert_eq!(after_refusal.charged, 0);
+    assert!(after_refusal.open.is_empty());
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 0 },
+            0,
+        )
+        .expect("zero ceiling");
+    let zero = verifier
+        .reserve(&call, &guest(handle), 1)
+        .expect_err("a zero ceiling still refuses");
     assert_eq!(
-        refusal,
+        zero,
         ReserveRefuse::OverCeiling {
             ceiling: 0,
             held: 0,
             asked: 1,
         }
     );
-    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
-    let after_refusal = books(&verifier);
-    assert_eq!(after_refusal.held, 0);
-    assert_eq!(after_refusal.charged, 0);
-    assert!(after_refusal.open.is_empty());
-    verifier.admit(1);
+    assert_eq!(zero.to_string(), "reservation exceeds the ceiling");
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 1 },
+            1,
+        )
+        .expect("ask");
     verifier
         .reserve(&call, &guest(handle), 1)
         .expect("admit opens the ceiling");
@@ -1231,8 +1913,15 @@ fn model_reserve_before_admit_is_refused() {
 fn model_reported_usage_does_not_open_ceiling_room() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(5);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 5 },
+            5,
+        )
+        .expect("ask");
     let request = GuestRequest {
         reported_usage: 1,
         ..guest(handle)
@@ -1264,8 +1953,15 @@ fn model_reported_usage_does_not_open_ceiling_room() {
 fn model_released_reservation_id_is_not_reused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let released = verifier.reserve(&call, &request, 6).expect("reserve");
     assert_eq!(verifier.release(&call, &request, released), Ok(()));
@@ -1287,8 +1983,15 @@ fn model_released_reservation_id_is_not_reused() {
 fn model_reported_usage_does_not_keep_the_released_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = GuestRequest {
         reported_usage: 1,
         ..guest(handle)
@@ -1313,8 +2016,15 @@ fn model_reported_usage_does_not_keep_the_released_hold() {
 fn model_lower_ceiling_does_not_refuse_the_settle() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let reservation = verifier.reserve(&call, &request, 8).expect("reserve");
     verifier.admit(4);
@@ -1352,8 +2062,15 @@ fn model_lower_ceiling_does_not_refuse_the_settle() {
 fn model_forged_ceiling_does_not_replace_the_settled_charge() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = GuestRequest {
         forged_ceiling: 9,
         ..guest(handle)
@@ -1371,11 +2088,206 @@ fn model_forged_ceiling_does_not_replace_the_settled_charge() {
 }
 
 #[test]
+fn model_forged_append_does_not_retarget_the_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    assert_eq!(books(&verifier).held, 4);
+    assert_eq!(books(&verifier).open.get(&reservation.id), Some(&4));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged append does not retarget the hold");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_overwrite_does_not_retarget_the_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_overwrite);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    assert_eq!(books(&verifier).held, 4);
+    assert_eq!(books(&verifier).open.get(&reservation.id), Some(&4));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged overwrite does not retarget the hold");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_child_journal_does_not_retarget_the_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    assert_eq!(books(&verifier).held, 4);
+    assert_eq!(books(&verifier).open.get(&reservation.id), Some(&4));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged child journal does not retarget the hold");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_identity_does_not_retarget_the_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    assert_eq!(books(&verifier).held, 4);
+    assert_eq!(books(&verifier).open.get(&reservation.id), Some(&4));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged identity does not retarget the hold");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_session_does_not_retarget_the_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    assert_eq!(books(&verifier).held, 4);
+    assert_eq!(books(&verifier).open.get(&reservation.id), Some(&4));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged session does not retarget the hold");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_instance_does_not_retarget_the_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = GuestRequest {
+        forged_instance: Some(sibling),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_instance, Some(sibling));
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    assert_eq!(books(&verifier).held, 4);
+    assert_eq!(books(&verifier).open.get(&reservation.id), Some(&4));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged instance does not retarget the hold");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
 fn model_release_after_unknown_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
     let refusal = verifier
@@ -1403,11 +2315,54 @@ fn model_release_after_unknown_is_refused() {
 }
 
 #[test]
+fn model_reported_usage_does_not_release_an_uncertain_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    let unknown = verifier
+        .settle(&call, &reserved, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(handle)
+    };
+    assert!(request.reported_usage > 0);
+    let blocked = verifier
+        .release(&call, &request, reservation)
+        .expect_err("uncertain hold is not released");
+    assert_eq!(blocked, ReleaseRefuse::Uncertain);
+    assert_eq!(blocked.to_string(), "uncertain hold is not released");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
 fn model_timeout_ends_an_uncertain_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let first = verifier.reserve(&call, &request, 4).expect("reserve");
     let second = verifier.reserve(&call, &request, 3).expect("reserve");
@@ -1452,11 +2407,58 @@ fn model_timeout_ends_an_uncertain_hold() {
 }
 
 #[test]
+fn model_known_settle_after_timeout_still_charges() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = guest(handle);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
+    let record = verifier
+        .timeout_hold(&call, &request, reservation, 0)
+        .expect("a due timeout records the uncertain hold");
+    assert_eq!(record.to_string(), "timed out, outcome unknown");
+    let recorded = books(&verifier);
+    assert_eq!(recorded.charged, 0);
+    assert_eq!(recorded.held, 4);
+    assert_eq!(recorded.open.get(&reservation.id), Some(&4));
+    assert!(recorded.timed_out.contains_key(&reservation.id));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("measured settle charges the recorded hold");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+    assert!(!after.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
 fn model_early_timeout_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
     verifier.set_verifier_deadline(5);
@@ -1485,6 +2487,555 @@ fn model_early_timeout_is_refused() {
 }
 
 #[test]
+fn model_forged_ceiling_does_not_set_the_timeout_deadline() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    verifier.set_verifier_deadline(100);
+    let request = GuestRequest {
+        forged_ceiling: 1,
+        ..guest(handle)
+    };
+    assert!(request.forged_ceiling > 0);
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let early = verifier
+        .timeout_hold(&call, &request, reservation, 50)
+        .expect_err("guest ceiling does not set the deadline");
+    assert_eq!(early, TimeoutRefuse::Early);
+    assert_eq!(early.to_string(), "timeout is before the verifier deadline");
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert!(!stayed.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_reported_usage_does_not_set_the_timeout_deadline() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    verifier.set_verifier_deadline(100);
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(handle)
+    };
+    assert!(request.reported_usage > 0);
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let early = verifier
+        .timeout_hold(&call, &request, reservation, 50)
+        .expect_err("reported usage does not set the deadline");
+    assert_eq!(early, TimeoutRefuse::Early);
+    assert_eq!(early.to_string(), "timeout is before the verifier deadline");
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert!(!stayed.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_later_deadline_does_not_move_the_hold() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = guest(handle);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    verifier.set_verifier_deadline(100);
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    verifier.set_verifier_deadline(0);
+    let early = verifier
+        .timeout_hold(&call, &request, reservation, 50)
+        .expect_err("a later deadline does not move this hold");
+    assert_eq!(early, TimeoutRefuse::Early);
+    assert_eq!(early.to_string(), "timeout is before the verifier deadline");
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert!(!stayed.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_append_does_not_set_the_timeout_deadline() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    verifier.set_verifier_deadline(100);
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let early = verifier
+        .timeout_hold(&call, &request, reservation, 50)
+        .expect_err("forged append does not set the deadline");
+    assert_eq!(early, TimeoutRefuse::Early);
+    assert_eq!(early.to_string(), "timeout is before the verifier deadline");
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert!(!stayed.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_overwrite_does_not_set_the_timeout_deadline() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    verifier.set_verifier_deadline(100);
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_overwrite);
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let early = verifier
+        .timeout_hold(&call, &request, reservation, 50)
+        .expect_err("forged overwrite does not set the deadline");
+    assert_eq!(early, TimeoutRefuse::Early);
+    assert_eq!(early.to_string(), "timeout is before the verifier deadline");
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert!(!stayed.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_child_journal_does_not_set_the_timeout_deadline() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    verifier.set_verifier_deadline(100);
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let early = verifier
+        .timeout_hold(&call, &request, reservation, 50)
+        .expect_err("forged child journal does not set the deadline");
+    assert_eq!(early, TimeoutRefuse::Early);
+    assert_eq!(early.to_string(), "timeout is before the verifier deadline");
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert!(!stayed.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_identity_does_not_set_the_timeout_deadline() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    verifier.set_verifier_deadline(100);
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let early = verifier
+        .timeout_hold(&call, &request, reservation, 50)
+        .expect_err("forged identity does not set the deadline");
+    assert_eq!(early, TimeoutRefuse::Early);
+    assert_eq!(early.to_string(), "timeout is before the verifier deadline");
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert!(!stayed.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_session_does_not_set_the_timeout_deadline() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    verifier.set_verifier_deadline(100);
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let early = verifier
+        .timeout_hold(&call, &request, reservation, 50)
+        .expect_err("forged session does not set the deadline");
+    assert_eq!(early, TimeoutRefuse::Early);
+    assert_eq!(early.to_string(), "timeout is before the verifier deadline");
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert!(!stayed.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_instance_does_not_set_the_timeout_deadline() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    verifier.set_verifier_deadline(100);
+    let request = GuestRequest {
+        forged_instance: Some(sibling),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_instance, Some(sibling));
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let early = verifier
+        .timeout_hold(&call, &request, reservation, 50)
+        .expect_err("forged instance does not set the deadline");
+    assert_eq!(early, TimeoutRefuse::Early);
+    assert_eq!(early.to_string(), "timeout is before the verifier deadline");
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert!(!stayed.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_append_does_not_skip_the_uncertain_mark() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
+    let blocked = verifier
+        .release(&call, &request, reservation)
+        .expect_err("forged append does not skip the uncertain mark");
+    assert_eq!(blocked, ReleaseRefuse::Uncertain);
+    assert_eq!(blocked.to_string(), "uncertain hold is not released");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_overwrite_does_not_skip_the_uncertain_mark() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_overwrite);
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
+    let blocked = verifier
+        .release(&call, &request, reservation)
+        .expect_err("forged overwrite does not skip the uncertain mark");
+    assert_eq!(blocked, ReleaseRefuse::Uncertain);
+    assert_eq!(blocked.to_string(), "uncertain hold is not released");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_child_journal_does_not_skip_the_uncertain_mark() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
+    let blocked = verifier
+        .release(&call, &request, reservation)
+        .expect_err("forged child journal does not skip the uncertain mark");
+    assert_eq!(blocked, ReleaseRefuse::Uncertain);
+    assert_eq!(blocked.to_string(), "uncertain hold is not released");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_identity_does_not_skip_the_uncertain_mark() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
+    let blocked = verifier
+        .release(&call, &request, reservation)
+        .expect_err("forged identity does not skip the uncertain mark");
+    assert_eq!(blocked, ReleaseRefuse::Uncertain);
+    assert_eq!(blocked.to_string(), "uncertain hold is not released");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_session_does_not_skip_the_uncertain_mark() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
+    let blocked = verifier
+        .release(&call, &request, reservation)
+        .expect_err("forged session does not skip the uncertain mark");
+    assert_eq!(blocked, ReleaseRefuse::Uncertain);
+    assert_eq!(blocked.to_string(), "uncertain hold is not released");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_forged_instance_does_not_skip_the_uncertain_mark() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reserved = guest(handle);
+    let reservation = verifier.reserve(&call, &reserved, 4).expect("reserve");
+    let request = GuestRequest {
+        forged_instance: Some(sibling),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_instance, Some(sibling));
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
+    let blocked = verifier
+        .release(&call, &request, reservation)
+        .expect_err("forged instance does not skip the uncertain mark");
+    assert_eq!(blocked, ReleaseRefuse::Uncertain);
+    assert_eq!(blocked.to_string(), "uncertain hold is not released");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
 fn model_forged_instance_does_not_move_the_settle() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
@@ -1493,8 +3044,15 @@ fn model_forged_instance_does_not_move_the_settle() {
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
     let request = GuestRequest {
         forged_instance: Some(sibling),
@@ -1512,11 +3070,256 @@ fn model_forged_instance_does_not_move_the_settle() {
 }
 
 #[test]
+fn model_forged_append_does_not_move_the_settle() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged append does not move the settle");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_overwrite_does_not_move_the_settle() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_overwrite);
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged overwrite does not move the settle");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_child_journal_does_not_move_the_settle() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged child journal does not move the settle");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_identity_does_not_move_the_settle() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged identity does not move the settle");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_session_does_not_move_the_settle() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged session does not move the settle");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_ceiling_does_not_move_the_settle() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_ceiling: 1,
+        ..guest(handle)
+    };
+    assert!(request.forged_ceiling > 0);
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("forged ceiling does not move the settle");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_reported_usage_does_not_move_the_settle() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(handle)
+    };
+    assert!(request.reported_usage > 0);
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("reported usage does not move the settle");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(!after.open.contains_key(&reservation.id));
+}
+
+#[test]
 fn model_timeout_twice_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
     let unknown = verifier
@@ -1558,8 +3361,15 @@ fn model_timeout_on_another_handle_is_refused() {
         .bind_grant(second, "UsersAI/agent-1/notes", rights())
         .expect("bind");
     assert_ne!(holder, other);
-    verifier.admit(10);
     let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(holder),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(holder);
     let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
     let unknown = verifier
@@ -1597,8 +3407,15 @@ fn model_timeout_on_a_sibling_instance_is_refused() {
     let handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    verifier.admit(10);
     let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
     let unknown = verifier
@@ -1632,8 +3449,15 @@ fn model_forged_instance_does_not_move_the_timeout() {
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
     let unknown = verifier
         .settle(&call, &guest(handle), reservation, SettleOutcome::Unknown)
@@ -1656,6 +3480,286 @@ fn model_forged_instance_does_not_move_the_timeout() {
 }
 
 #[test]
+fn model_forged_append_does_not_move_the_timeout() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let unknown = verifier
+        .settle(&call, &guest(handle), reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    let record = verifier
+        .timeout_hold(&call, &request, reservation, 0)
+        .expect("forged append does not move the timeout");
+    assert_eq!(record, TimeoutRecord);
+    assert_eq!(record.to_string(), "timed out, outcome unknown");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+    assert!(after.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_overwrite_does_not_move_the_timeout() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let unknown = verifier
+        .settle(&call, &guest(handle), reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_overwrite);
+    let record = verifier
+        .timeout_hold(&call, &request, reservation, 0)
+        .expect("forged overwrite does not move the timeout");
+    assert_eq!(record, TimeoutRecord);
+    assert_eq!(record.to_string(), "timed out, outcome unknown");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+    assert!(after.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_child_journal_does_not_move_the_timeout() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let unknown = verifier
+        .settle(&call, &guest(handle), reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let record = verifier
+        .timeout_hold(&call, &request, reservation, 0)
+        .expect("forged child journal does not move the timeout");
+    assert_eq!(record, TimeoutRecord);
+    assert_eq!(record.to_string(), "timed out, outcome unknown");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+    assert!(after.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_identity_does_not_move_the_timeout() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let unknown = verifier
+        .settle(&call, &guest(handle), reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    let record = verifier
+        .timeout_hold(&call, &request, reservation, 0)
+        .expect("forged identity does not move the timeout");
+    assert_eq!(record, TimeoutRecord);
+    assert_eq!(record.to_string(), "timed out, outcome unknown");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+    assert!(after.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_session_does_not_move_the_timeout() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let unknown = verifier
+        .settle(&call, &guest(handle), reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(handle)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    let record = verifier
+        .timeout_hold(&call, &request, reservation, 0)
+        .expect("forged session does not move the timeout");
+    assert_eq!(record, TimeoutRecord);
+    assert_eq!(record.to_string(), "timed out, outcome unknown");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+    assert!(after.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_ceiling_does_not_move_the_timeout() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let unknown = verifier
+        .settle(&call, &guest(handle), reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let request = GuestRequest {
+        forged_ceiling: 1,
+        ..guest(handle)
+    };
+    assert!(request.forged_ceiling > 0);
+    let record = verifier
+        .timeout_hold(&call, &request, reservation, 0)
+        .expect("forged ceiling does not move the timeout");
+    assert_eq!(record, TimeoutRecord);
+    assert_eq!(record.to_string(), "timed out, outcome unknown");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+    assert!(after.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_reported_usage_does_not_move_the_timeout() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
+    let unknown = verifier
+        .settle(&call, &guest(handle), reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(handle)
+    };
+    assert!(request.reported_usage > 0);
+    let record = verifier
+        .timeout_hold(&call, &request, reservation, 0)
+        .expect("reported usage does not move the timeout");
+    assert_eq!(record, TimeoutRecord);
+    assert_eq!(record.to_string(), "timed out, outcome unknown");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+    assert!(after.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
 fn model_unknown_from_another_handle_does_not_mark_the_hold() {
     let mut verifier = Verifier::new();
     let first = verifier.register_instance("agent-1", "session-a");
@@ -1667,8 +3771,15 @@ fn model_unknown_from_another_handle_does_not_mark_the_hold() {
         .bind_grant(second, "UsersAI/agent-1/notes", rights())
         .expect("bind");
     assert_ne!(holder, other);
-    verifier.admit(10);
     let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(holder),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(holder);
     let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
     let refusal = verifier
@@ -1690,6 +3801,350 @@ fn model_unknown_from_another_handle_does_not_mark_the_hold() {
     assert_eq!(after_release.charged, 0);
     assert_eq!(after_release.held, 0);
     assert!(!after_release.open.contains_key(&reservation.id));
+}
+
+#[test]
+fn model_forged_append_does_not_mark_another_handle() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(holder),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(holder), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(other)
+    };
+    assert!(request.forged_append);
+    let unknown = verifier
+        .settle(
+            &verifier.open_call(second),
+            &request,
+            reservation,
+            SettleOutcome::Unknown,
+        )
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert_eq!(verifier.release(&call, &guest(holder), reservation), Ok(()));
+}
+
+#[test]
+fn model_forged_overwrite_does_not_mark_another_handle() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(holder),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(holder), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(other)
+    };
+    assert!(request.forged_overwrite);
+    let unknown = verifier
+        .settle(
+            &verifier.open_call(second),
+            &request,
+            reservation,
+            SettleOutcome::Unknown,
+        )
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert_eq!(verifier.release(&call, &guest(holder), reservation), Ok(()));
+}
+
+#[test]
+fn model_forged_child_journal_does_not_mark_another_handle() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(holder),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(holder), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(other)
+    };
+    assert!(request.forged_child_journal);
+    let unknown = verifier
+        .settle(
+            &verifier.open_call(second),
+            &request,
+            reservation,
+            SettleOutcome::Unknown,
+        )
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert_eq!(verifier.release(&call, &guest(holder), reservation), Ok(()));
+}
+
+#[test]
+fn model_forged_identity_does_not_mark_another_handle() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(holder),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(holder), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(other)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    let unknown = verifier
+        .settle(
+            &verifier.open_call(second),
+            &request,
+            reservation,
+            SettleOutcome::Unknown,
+        )
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert_eq!(verifier.release(&call, &guest(holder), reservation), Ok(()));
+}
+
+#[test]
+fn model_forged_session_does_not_mark_another_handle() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(holder),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(holder), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(other)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    let unknown = verifier
+        .settle(
+            &verifier.open_call(second),
+            &request,
+            reservation,
+            SettleOutcome::Unknown,
+        )
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert_eq!(verifier.release(&call, &guest(holder), reservation), Ok(()));
+}
+
+#[test]
+fn model_forged_instance_does_not_mark_another_handle() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(holder),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(holder), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_instance: Some(second),
+        ..guest(other)
+    };
+    assert_eq!(request.forged_instance, Some(second));
+    let unknown = verifier
+        .settle(
+            &verifier.open_call(second),
+            &request,
+            reservation,
+            SettleOutcome::Unknown,
+        )
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert_eq!(verifier.release(&call, &guest(holder), reservation), Ok(()));
+}
+
+#[test]
+fn model_forged_ceiling_does_not_mark_another_handle() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(holder),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(holder), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_ceiling: 1,
+        ..guest(other)
+    };
+    assert!(request.forged_ceiling > 0);
+    let unknown = verifier
+        .settle(
+            &verifier.open_call(second),
+            &request,
+            reservation,
+            SettleOutcome::Unknown,
+        )
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert_eq!(verifier.release(&call, &guest(holder), reservation), Ok(()));
+}
+
+#[test]
+fn model_reported_usage_does_not_mark_another_handle() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(holder),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let reservation = verifier.reserve(&call, &guest(holder), 4).expect("reserve");
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(other)
+    };
+    assert!(request.reported_usage > 0);
+    let unknown = verifier
+        .settle(
+            &verifier.open_call(second),
+            &request,
+            reservation,
+            SettleOutcome::Unknown,
+        )
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert_eq!(verifier.release(&call, &guest(holder), reservation), Ok(()));
 }
 
 #[test]
@@ -1782,7 +4237,7 @@ fn model_lower_admit_binds_an_asked_agent() {
 }
 
 #[test]
-fn model_unasked_agent_reads_the_last_admit() {
+fn model_unasked_agent_does_not_inherit_the_last_admit() {
     let mut verifier = Verifier::new();
     let first = verifier.register_instance("agent-1", "session-a");
     let second = verifier.register_instance("agent-2", "session-a");
@@ -1823,19 +4278,28 @@ fn model_unasked_agent_reads_the_last_admit() {
         .expect("first agent inside its own ceiling");
     let refusal = verifier
         .reserve(&third_call, &third_request, 40)
-        .expect_err("an agent with no ask reads the last admit");
-    assert_eq!(
-        refusal,
-        ReserveRefuse::OverCeiling {
-            ceiling: 4,
-            held: 1,
-            asked: 40,
-        }
-    );
-    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+        .expect_err("an unasked agent has no ceiling");
+    assert_eq!(refusal, ReserveRefuse::NoCeiling);
+    assert_eq!(refusal.to_string(), "identity has no ceiling");
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
     assert_eq!(after.held, 1);
+}
+
+#[test]
+fn model_empty_ceilings_map_has_no_ceiling() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(5);
+    let call = verifier.open_call(instance);
+    let refusal = verifier
+        .reserve(&call, &guest(handle), 1)
+        .expect_err("an empty ceilings map has no ceiling");
+    assert_eq!(refusal, ReserveRefuse::NoCeiling);
+    assert_eq!(refusal.to_string(), "identity has no ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
 }
 
 #[test]
@@ -1946,4 +4410,489 @@ fn model_second_agent_hold_past_the_shared_u64_total_is_refused() {
     assert_eq!(after.held, u64::MAX);
     assert_eq!(after.open.len(), 1);
     assert_eq!(after.charged, 0);
+}
+
+#[test]
+fn model_same_identity_shares_one_ceiling() {
+    let mut verifier = Verifier::new();
+    let asked = verifier.register_instance("agent-1", "session-a");
+    let other = verifier.register_instance("agent-1", "session-b");
+    assert_ne!(other, asked);
+    let asked_handle = verifier
+        .bind_grant(asked, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other_handle = verifier
+        .bind_grant(other, "UsersAI/agent-1/other", rights())
+        .expect("bind");
+    assert_ne!(other_handle, asked_handle);
+    let asked_call = verifier.open_call(asked);
+    let other_call = verifier.open_call(other);
+    let asked_request = guest(asked_handle);
+    let other_request = guest(other_handle);
+    verifier
+        .admit_ask(
+            &asked_call,
+            &asked_request,
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("one ask for the identity");
+    verifier
+        .reserve(&other_call, &other_request, 6)
+        .expect("other session holds inside the shared ceiling");
+    let refusal = verifier
+        .reserve(&asked_call, &asked_request, 6)
+        .expect_err("the other session's hold fills this identity");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 10,
+            held: 6,
+            asked: 6,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 6);
+}
+
+#[test]
+fn model_forged_identity_does_not_pick_the_reserve_ceiling() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-2", "session-a");
+    assert_ne!(second, first);
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", rights())
+        .expect("bind");
+    assert_ne!(second_handle, first_handle);
+    let first_call = verifier.open_call(first);
+    let second_call = verifier.open_call(second);
+    let first_honest = guest(first_handle);
+    let second_request = guest(second_handle);
+    verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            crate::ask::BudgetAsk { amount: 50 },
+            80,
+        )
+        .expect("agent-2 ceiling is 50");
+    verifier
+        .admit_ask(
+            &first_call,
+            &first_honest,
+            crate::ask::BudgetAsk { amount: 4 },
+            10,
+        )
+        .expect("agent-1 ceiling is 4");
+    let forged = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(first_handle)
+    };
+    assert_eq!(forged.forged_identity.as_deref(), Some("agent-2"));
+    let refusal = verifier
+        .reserve(&first_call, &forged, 40)
+        .expect_err("forged identity does not use agent-2's ceiling");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 0,
+            asked: 40,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
+}
+
+#[test]
+fn model_forged_session_does_not_pick_the_reserve_ceiling() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-2", "session-a");
+    assert_ne!(second, first);
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", rights())
+        .expect("bind");
+    assert_ne!(second_handle, first_handle);
+    let first_call = verifier.open_call(first);
+    let second_call = verifier.open_call(second);
+    let first_honest = guest(first_handle);
+    let second_request = guest(second_handle);
+    verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            crate::ask::BudgetAsk { amount: 50 },
+            80,
+        )
+        .expect("agent-2 ceiling is 50");
+    verifier
+        .admit_ask(
+            &first_call,
+            &first_honest,
+            crate::ask::BudgetAsk { amount: 4 },
+            10,
+        )
+        .expect("agent-1 ceiling is 4");
+    let forged = GuestRequest {
+        forged_session: Some("agent-2".to_owned()),
+        ..guest(first_handle)
+    };
+    assert_eq!(forged.forged_session.as_deref(), Some("agent-2"));
+    let refusal = verifier
+        .reserve(&first_call, &forged, 40)
+        .expect_err("forged session does not use agent-2's ceiling");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 0,
+            asked: 40,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
+}
+
+#[test]
+fn model_forged_instance_does_not_pick_the_reserve_ceiling() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-2", "session-a");
+    assert_ne!(second, first);
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", rights())
+        .expect("bind");
+    assert_ne!(second_handle, first_handle);
+    let first_call = verifier.open_call(first);
+    let second_call = verifier.open_call(second);
+    let first_honest = guest(first_handle);
+    let second_request = guest(second_handle);
+    verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            crate::ask::BudgetAsk { amount: 50 },
+            80,
+        )
+        .expect("agent-2 ceiling is 50");
+    verifier
+        .admit_ask(
+            &first_call,
+            &first_honest,
+            crate::ask::BudgetAsk { amount: 4 },
+            10,
+        )
+        .expect("agent-1 ceiling is 4");
+    let forged = GuestRequest {
+        forged_instance: Some(second),
+        ..guest(first_handle)
+    };
+    assert_eq!(forged.forged_instance, Some(second));
+    let refusal = verifier
+        .reserve(&first_call, &forged, 40)
+        .expect_err("forged instance does not use agent-2's ceiling");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 0,
+            asked: 40,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
+}
+
+#[test]
+fn model_forged_append_does_not_pick_the_reserve_ceiling() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-2", "session-a");
+    assert_ne!(second, first);
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", rights())
+        .expect("bind");
+    assert_ne!(second_handle, first_handle);
+    let first_call = verifier.open_call(first);
+    let second_call = verifier.open_call(second);
+    let first_honest = guest(first_handle);
+    let second_request = guest(second_handle);
+    verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            crate::ask::BudgetAsk { amount: 50 },
+            80,
+        )
+        .expect("agent-2 ceiling is 50");
+    verifier
+        .admit_ask(
+            &first_call,
+            &first_honest,
+            crate::ask::BudgetAsk { amount: 4 },
+            10,
+        )
+        .expect("agent-1 ceiling is 4");
+    let forged = GuestRequest {
+        forged_append: true,
+        ..guest(first_handle)
+    };
+    assert!(forged.forged_append);
+    let refusal = verifier
+        .reserve(&first_call, &forged, 40)
+        .expect_err("forged append does not use agent-2's ceiling");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 0,
+            asked: 40,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
+}
+
+#[test]
+fn model_forged_overwrite_does_not_pick_the_reserve_ceiling() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-2", "session-a");
+    assert_ne!(second, first);
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", rights())
+        .expect("bind");
+    assert_ne!(second_handle, first_handle);
+    let first_call = verifier.open_call(first);
+    let second_call = verifier.open_call(second);
+    let first_honest = guest(first_handle);
+    let second_request = guest(second_handle);
+    verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            crate::ask::BudgetAsk { amount: 50 },
+            80,
+        )
+        .expect("agent-2 ceiling is 50");
+    verifier
+        .admit_ask(
+            &first_call,
+            &first_honest,
+            crate::ask::BudgetAsk { amount: 4 },
+            10,
+        )
+        .expect("agent-1 ceiling is 4");
+    let forged = GuestRequest {
+        forged_overwrite: true,
+        ..guest(first_handle)
+    };
+    assert!(forged.forged_overwrite);
+    let refusal = verifier
+        .reserve(&first_call, &forged, 40)
+        .expect_err("forged overwrite does not use agent-2's ceiling");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 0,
+            asked: 40,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
+}
+
+#[test]
+fn model_forged_child_journal_does_not_pick_the_reserve_ceiling() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-2", "session-a");
+    assert_ne!(second, first);
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", rights())
+        .expect("bind");
+    assert_ne!(second_handle, first_handle);
+    let first_call = verifier.open_call(first);
+    let second_call = verifier.open_call(second);
+    let first_honest = guest(first_handle);
+    let second_request = guest(second_handle);
+    verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            crate::ask::BudgetAsk { amount: 50 },
+            80,
+        )
+        .expect("agent-2 ceiling is 50");
+    verifier
+        .admit_ask(
+            &first_call,
+            &first_honest,
+            crate::ask::BudgetAsk { amount: 4 },
+            10,
+        )
+        .expect("agent-1 ceiling is 4");
+    let forged = GuestRequest {
+        forged_child_journal: true,
+        ..guest(first_handle)
+    };
+    assert!(forged.forged_child_journal);
+    let refusal = verifier
+        .reserve(&first_call, &forged, 40)
+        .expect_err("forged child journal does not use agent-2's ceiling");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 0,
+            asked: 40,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
+}
+
+#[test]
+fn model_forged_ceiling_does_not_pick_the_reserve_ceiling() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-2", "session-a");
+    assert_ne!(second, first);
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", rights())
+        .expect("bind");
+    assert_ne!(second_handle, first_handle);
+    let first_call = verifier.open_call(first);
+    let second_call = verifier.open_call(second);
+    let first_honest = guest(first_handle);
+    let second_request = guest(second_handle);
+    verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            crate::ask::BudgetAsk { amount: 50 },
+            80,
+        )
+        .expect("agent-2 ceiling is 50");
+    verifier
+        .admit_ask(
+            &first_call,
+            &first_honest,
+            crate::ask::BudgetAsk { amount: 4 },
+            10,
+        )
+        .expect("agent-1 ceiling is 4");
+    let forged = GuestRequest {
+        forged_ceiling: 100,
+        ..guest(first_handle)
+    };
+    assert!(forged.forged_ceiling > 0);
+    let refusal = verifier
+        .reserve(&first_call, &forged, 40)
+        .expect_err("forged ceiling does not use agent-2's ceiling");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 0,
+            asked: 40,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
+}
+
+#[test]
+fn model_reported_usage_does_not_pick_the_reserve_ceiling() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-2", "session-a");
+    assert_ne!(second, first);
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", rights())
+        .expect("bind");
+    assert_ne!(second_handle, first_handle);
+    let first_call = verifier.open_call(first);
+    let second_call = verifier.open_call(second);
+    let first_honest = guest(first_handle);
+    let second_request = guest(second_handle);
+    verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            crate::ask::BudgetAsk { amount: 50 },
+            80,
+        )
+        .expect("agent-2 ceiling is 50");
+    verifier
+        .admit_ask(
+            &first_call,
+            &first_honest,
+            crate::ask::BudgetAsk { amount: 4 },
+            10,
+        )
+        .expect("agent-1 ceiling is 4");
+    let forged = GuestRequest {
+        reported_usage: 1,
+        ..guest(first_handle)
+    };
+    assert!(forged.reported_usage > 0);
+    let refusal = verifier
+        .reserve(&first_call, &forged, 40)
+        .expect_err("reported usage does not use agent-2's ceiling");
+    assert_eq!(
+        refusal,
+        ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 0,
+            asked: 40,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
 }
