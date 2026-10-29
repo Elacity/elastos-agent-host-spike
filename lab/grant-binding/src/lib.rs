@@ -787,6 +787,20 @@ fn model_extended_usersai_segment_is_refused() {
 }
 
 #[test]
+fn model_case_different_usersai_segment_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let refusal = verifier
+        .bind_grant(instance, "usersai/agent-1/notes", rights())
+        .expect_err("case-different UsersAI segment");
+    assert_eq!(refusal, Refuse::OutsidePrincipal);
+    assert_eq!(
+        refusal.to_string(),
+        "owned root is outside the agent principal"
+    );
+}
+
+#[test]
 fn model_use_path_under_the_owned_root_is_allowed() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
