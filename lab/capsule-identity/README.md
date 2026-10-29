@@ -1414,7 +1414,7 @@ Each route, field and state, and where it comes from. #309 is draft PR #309,
 | A refused launch leaves no instance | `standin_launches_by_cid_only`, `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32f (the instance is added before the checks) |
 | A launched answer has its listed instance | `standin_launches_a_signed_bundle_by_its_cid` | F-CI32g (answers launched, adds no instance) |
 | A valid signature alone yields no grant: a launch adds none, and the answer and the list hold no grant key | `standin_valid_signature_alone_yields_no_grant` | F-CI33a (a launch grants each `capabilities` entry of the manifest) |
-| The grant view lists every held grant, so it is not a constant | `standin_grant_view_lists_a_seeded_grant` | F-CI33b (the view answers no entries whatever is held) |
+| The grant view lists every held grant of every session, so it is not a constant | `standin_grant_view_lists_a_seeded_grant`, `standin_grant_view_lists_every_held_grant_of_every_session` | F-CI33b (the view answers no entries whatever is held), F-CI37a (only the first held grant), F-CI37b (only the first held grant's session), F-CI37c (one `request_id` for every grant) |
 | The grant view answers under the `all_sessions_live` marker | `standin_valid_signature_alone_yields_no_grant`, `standin_grant_view_lists_a_seeded_grant` | F-CI33c (the marker dropped) |
 
 Not shown:
@@ -1625,7 +1625,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 259 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 262 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1662,7 +1662,9 @@ and task 032's F-CI32a to F-CI32g, task 033's F-CI33a to F-CI33c and task
 035's F-CI35a to F-CI35c (all three: see
 [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)), and task 036's
 F-CI36a (see [the checked bundle](#checked-bundle-the-name-and-the-bytes-it-covers))
-and F-CI36b (see [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)).
+and F-CI36b (see [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)),
+and task 037's F-CI37a to F-CI37c (see
+[the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
@@ -1753,6 +1755,11 @@ The stand-in's record lookup moved into `check_records`, so F-CI32c now
 replaces the record check there and F-CI32d answers `Ok(())` where no record
 binds the CID. The stand-in imports neither `CapsuleManifest` nor
 `MANIFEST_FILE` now, so F-CI33a's planted code names both by their paths.
+Task 037's entries also edit `tests/common/mod.rs`, in `StandInRuntime`:
+F-CI37a and F-CI37b in `get_capability_list_all_sessions_live`, on F-CI33b's
+anchor line (found exactly once; entries may share an anchor), and F-CI37c in
+`seed_grant`, its anchor a line task 033 added, found exactly once. Task 037
+changed no older edit's text.
 
 ### The inventory check
 
@@ -1888,7 +1895,9 @@ At task 032 it reported `summary: 251 CAUGHT of 251` (`baseline: 130 named
 tests pass without an edit, 0 do not`; with the id prefix `F-CI32`: 7 of 7).
 At task 036 it reported `summary: 259 CAUGHT of 259` (`baseline: 136 named
 tests pass without an edit, 0 do not`; with the id prefix `F-CI36`: 2 of 2,
-and the seventeen moved edits each CAUGHT).
+and the seventeen moved edits each CAUGHT). At task 037 it reported
+`summary: 262 CAUGHT of 262` (`baseline: 137 named tests pass without an
+edit, 0 do not`; with the id prefix `F-CI37`: 3 of 3).
 The runner does not print why a test failed. Tasks 003, 009, 004, 007, 013,
 014, 011, 012, 015, 016, 017, 018, 019, 020, 025, 023, 024, 027, 028, 029,
 030, 031 and 032 prove each of their falsifiers by break, named test fails, revert.
