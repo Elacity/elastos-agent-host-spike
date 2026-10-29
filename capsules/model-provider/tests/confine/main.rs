@@ -845,8 +845,9 @@ fn wait_for_terminal(
 /// line. `cited_test_name` is true for that exact span. Otherwise a backtick
 /// span needs a `model_` or `generated_` prefix and a non-empty tail of
 /// lowercase letters, digits and underscores, so the spans `model_` and
-/// `generated_` stay uncited. `cited_test_names` is the only scan of backtick
-/// spans. `missing_cited_tests` is that list filtered to names the source
+/// `generated_` stay uncited. `cited_test_names` scans backtick spans for test
+/// names. `cell_backtick_names` scans the backtick spans of one Inputs cell.
+/// `missing_cited_tests` is that list filtered to names the source
 /// does not contain as `fn <name>(`. An in-memory section whose only span is
 /// `generated_profile_denies_the_hosted_connect`, read against a source that
 /// has no such function, fails first. The panic contains
@@ -860,13 +861,34 @@ fn wait_for_terminal(
 /// `operations_table_cells_stay_lab_claims` runs on that same section after
 /// the real-file missing-test check and returns ok. A data row starts with
 /// `| ` and its first non-empty cell is not `Operation` and not `---`. The
-/// Right cell passes when `entry_id` read that id from the fixture's `rights`
-/// array, or the cell is `no named test shows this`. The Linux cell is the
-/// seventh non-empty cell: `designed, not enforced`. An in-memory row whose
-/// Right cell is `network` panics, and the panic contains `network` and
-/// `right`. A `storage` cell whose id list is only `bound-executable` panics
-/// with `storage` and `right`. The enforced panic contains the backticked
-/// cell `` `enforced` ``.
+/// Right cell is the fourth non-empty cell and the Linux cell is the seventh:
+/// `designed, not enforced`.
+///
+/// `match_operation` is false for the in-memory rows: the Right cell passes
+/// when `entry_id` read that id from the fixture's `rights` array, or the cell
+/// is `none: needs no declared right`. The phrase `no named test shows this`
+/// does not pass. `match_operation` is true for the real section: the Right
+/// cell of `status`, `shutdown`, `offers_list` and `unsupported` is exactly
+/// `none: needs no declared right`, and the Right cell of `init`,
+/// `runs_create`, `runs_get`, `runs_events` and `runs_cancel` is exactly
+/// `storage`. An in-memory row whose Right cell is `network` panics, and the
+/// panic contains `network` and `right`. A `storage` cell whose id list is
+/// only `bound-executable` panics with `storage` and `right`. The enforced
+/// panic contains the backticked cell `` `enforced` ``. An in-memory row with
+/// the old phrase panics with that phrase and `right`. In the true mode, a
+/// wrong Right cell panics with the operation and the rejected cell.
+///
+/// `operations_inputs_match_the_request_structs` reads each Inputs cell's
+/// backtick names and the fields of that operation's request struct in
+/// `src/contract.rs` through `struct_field_names`. A row with no such struct
+/// names `op` alone. A missing name, an extra name or a swap fails with the
+/// operation and the name that has no partner. In-memory sources cover the
+/// matching cell, the missing and extra names, a swap, a rename on both
+/// sides, the complete default attribute forms, a missing struct, two
+/// structs, two attribute lines, invalid body lines, an unfinished body,
+/// an attribute without a field and unsupported attributes such as
+/// `#[serde(skip)]` or combined rename options. The attribute
+/// `#[serde(skip_serializing_if = "...")]` keeps the Rust name.
 ///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
 /// test no longer finds that function. F-cc49a drops the `generated_`
@@ -947,33 +969,71 @@ fn operations_section_cites_existing_tests() {
             .unwrap_or(doc.len());
         &doc[start..line_end]
     }
+    // One data row starts with `| ` and its first non-empty cell is not
+    // `Operation` and not `---`. The cell check and `operation_row_names`
+    // both use this filter, so there is one row rule.
+    fn operation_row_cells(line: &str) -> Option<Vec<&str>> {
+        if !line.starts_with("| ") {
+            return None;
+        }
+        let cells: Vec<&str> = line
+            .split('|')
+            .map(str::trim)
+            .filter(|cell| !cell.is_empty())
+            .collect();
+        match cells.first() {
+            Some(&first) if first != "Operation" && first != "---" => Some(cells),
+            _ => None,
+        }
+    }
+    fn operation_row_names(section: &str) -> Vec<&str> {
+        section
+            .lines()
+            .filter_map(operation_row_cells)
+            .map(|cells| cells[0])
+            .collect()
+    }
     // Right is the fourth non-empty cell. Linux is the seventh. Header and
     // separator rows are not data rows, so their cells are not claims.
     fn operations_table_cells_stay_lab_claims(
         section: &str,
         right_ids: &[&str],
+        match_operation: bool,
     ) -> Result<(), String> {
         const RIGHT_PLACE: usize = 4;
         const LINUX_PLACE: usize = 7;
         const UNSHOWN_RIGHT: &str = "no named test shows this";
+        const NO_DECLARED_RIGHT: &str = "none: needs no declared right";
         const LINUX_CLAIM: &str = "designed, not enforced";
-        for line in section.lines() {
-            if !line.starts_with("| ") {
-                continue;
-            }
-            let cells: Vec<&str> = line
-                .split('|')
-                .map(str::trim)
-                .filter(|cell| !cell.is_empty())
-                .collect();
-            let Some(first) = cells.first().copied() else {
-                continue;
-            };
-            if first == "Operation" || first == "---" {
-                continue;
-            }
+        const NO_RIGHT_OPERATIONS: [&str; 4] = ["status", "shutdown", "offers_list", "unsupported"];
+        const STORAGE_OPERATIONS: [&str; 5] = [
+            "init",
+            "runs_create",
+            "runs_get",
+            "runs_events",
+            "runs_cancel",
+        ];
+        for cells in section.lines().filter_map(operation_row_cells) {
+            let first = cells[0];
             let right = cells.get(RIGHT_PLACE - 1).copied().unwrap_or("");
-            if !right_ids.contains(&right) && right != UNSHOWN_RIGHT {
+            if match_operation {
+                if NO_RIGHT_OPERATIONS.contains(&first) {
+                    if right != NO_DECLARED_RIGHT {
+                        return Err(format!(
+                            "operation `{first}` needs right cell `{NO_DECLARED_RIGHT}`, not `{right}`"
+                        ));
+                    }
+                } else if STORAGE_OPERATIONS.contains(&first) && right != "storage" {
+                    return Err(format!(
+                        "operation `{first}` needs right cell `storage`, not `{right}`"
+                    ));
+                }
+            } else if right == UNSHOWN_RIGHT {
+                return Err(format!(
+                    "right cell `{UNSHOWN_RIGHT}` does not pass; a shown call says `{NO_DECLARED_RIGHT}`"
+                ));
+            }
+            if !right_ids.contains(&right) && right != NO_DECLARED_RIGHT {
                 return Err(format!("right cell `{right}` is not an approved right id"));
             }
             let linux = cells.get(LINUX_PLACE - 1).copied().unwrap_or("");
@@ -985,15 +1045,363 @@ fn operations_section_cites_existing_tests() {
         }
         Ok(())
     }
-    fn caught_lab_claim_panic(section: &str, right_ids: &[&str]) -> String {
+    fn caught_lab_claim_panic(section: &str, right_ids: &[&str], match_operation: bool) -> String {
         match catch_unwind(AssertUnwindSafe(|| {
-            if let Err(reason) = operations_table_cells_stay_lab_claims(section, right_ids) {
+            if let Err(reason) =
+                operations_table_cells_stay_lab_claims(section, right_ids, match_operation)
+            {
                 panic!("{reason}");
             }
         })) {
             Err(payload) => panic_text(payload),
             Ok(()) => String::new(),
         }
+    }
+    // The declaration body after one leading `#[...]` attribute, one leading
+    // `pub(...)` group or `pub` word, and one leading `async`, `unsafe` or
+    // `const` word. A line whose body starts with `fn ` starts a function.
+    fn after_declaration_prefix(mut rest: &str) -> &str {
+        rest = rest.trim();
+        if let Some(attribute) = rest.strip_prefix("#[") {
+            if let Some(end) = attribute.find(']') {
+                rest = attribute[end + 1..].trim();
+            }
+        }
+        if let Some(after) = rest.strip_prefix("pub(") {
+            if let Some(end) = after.find(')') {
+                rest = after[end + 1..].trim();
+            }
+        } else if let Some(after) = rest.strip_prefix("pub") {
+            if after.is_empty() || after.starts_with(|c: char| c.is_whitespace()) {
+                rest = after.trim_start();
+            }
+        }
+        for keyword in ["async", "unsafe", "const"] {
+            if let Some(after) = rest.strip_prefix(keyword) {
+                if after.is_empty() || after.starts_with(|c: char| c.is_whitespace()) {
+                    rest = after.trim_start();
+                    break;
+                }
+            }
+        }
+        rest
+    }
+    /// The arm names of `parse_request`'s `match op`, in source order.
+    ///
+    /// The cut starts at the `fn parse_request(` signature line and stops
+    /// before the next function declaration. A later line is a declaration
+    /// when `after_declaration_prefix` leaves a `fn ` prefix, so `pub(crate)`,
+    /// `pub(super)`, `pub(in crate::here)`, a same-line or previous-line
+    /// attribute, `async`, `pub async`, `unsafe` and `const` all end the cut.
+    /// Each arm line permits one `=>`; a second one refuses the layout.
+    ///
+    /// The compare reads the match as text. It shows the Operation cells
+    /// equal those arms, in order. It does not show that every arm is
+    /// reachable, and it does not read `src/execution.rs`.
+    fn parse_request_operation_names(source: &str) -> Result<Vec<&str>, String> {
+        let declarations = source.matches("fn parse_request(").count();
+        if declarations == 0 {
+            return Err("parse_request: missing fn parse_request(".to_string());
+        }
+        if declarations > 1 {
+            return Err("parse_request: has a second fn parse_request(".to_string());
+        }
+        let lines: Vec<&str> = source.lines().collect();
+        let signature = lines
+            .iter()
+            .position(|line| line.contains("fn parse_request("))
+            .expect("the declaration count found the signature");
+        let end = lines[signature + 1..]
+            .iter()
+            .position(|line| after_declaration_prefix(line).starts_with("fn "))
+            .map(|offset| signature + 1 + offset)
+            .unwrap_or(lines.len());
+        let cut = &lines[signature + 1..end];
+        let match_op_count: usize = cut
+            .iter()
+            .map(|line| line.matches("match op").count())
+            .sum();
+        if match_op_count == 0 {
+            return Err("parse_request: has no match op".to_string());
+        }
+        if match_op_count > 1 {
+            return Err("parse_request: has a second match op".to_string());
+        }
+        let Some(match_at) = cut.iter().position(|line| line.contains("match op {")) else {
+            return Err("parse_request: has no match op".to_string());
+        };
+        let (_, after_open) = cut[match_at]
+            .split_once("match op {")
+            .expect("the line contains the opening");
+        if !after_open.trim().is_empty() {
+            return Err("parse_request: an arm on the match op line".to_string());
+        }
+        let mut arms = Vec::new();
+        let mut other_seen = false;
+        for line in &cut[match_at + 1..] {
+            let trimmed = line.trim();
+            if trimmed == "};" {
+                break;
+            }
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.contains('{') || trimmed.contains('}') {
+                return Err("parse_request: an arm line contains a brace".to_string());
+            }
+            if trimmed.matches("=>").count() > 1 {
+                return Err("parse_request: an arm line contains a second `=>`".to_string());
+            }
+            if let Some(rest) = trimmed.strip_prefix('"') {
+                let Some(close) = rest.find('"') else {
+                    return Err(
+                        "parse_request: an arm is not a quoted name and not `other =>`".to_string(),
+                    );
+                };
+                if !rest[close + 1..].trim_start().starts_with("=>") {
+                    return Err(
+                        "parse_request: an arm is not a quoted name and not `other =>`".to_string(),
+                    );
+                }
+                arms.push(&rest[..close]);
+            } else if trimmed.starts_with("other =>") {
+                if other_seen {
+                    return Err("parse_request: has a second `other =>` arm".to_string());
+                }
+                other_seen = true;
+                arms.push("unsupported");
+            } else {
+                return Err(
+                    "parse_request: an arm is not a quoted name and not `other =>`".to_string(),
+                );
+            }
+        }
+        Ok(arms)
+    }
+    // One compare: the Operation cells and the arms must name the same
+    // operations in the same order. A mismatch names the operation that has
+    // no partner.
+    fn operations_match_parse_request(section: &str, source: &str) -> Result<(), String> {
+        let rows = operation_row_names(section);
+        let arms = parse_request_operation_names(source)?;
+        for index in 0..rows.len().max(arms.len()) {
+            match (rows.get(index), arms.get(index)) {
+                (Some(row), Some(arm)) if row == arm => {}
+                (Some(row), Some(arm)) => {
+                    return Err(format!(
+                        "operation row `{row}` has no parse_request arm; the arm there is `{arm}`"
+                    ));
+                }
+                (Some(row), None) => {
+                    return Err(format!("operation row `{row}` has no parse_request arm"));
+                }
+                (None, Some(arm)) => {
+                    return Err(format!("parse_request arm `{arm}` has no operation row"));
+                }
+                (None, None) => break,
+            }
+        }
+        Ok(())
+    }
+    /// The wire field names of one request struct in `source`, in source
+    /// order.
+    ///
+    /// Zero occurrences of `struct {struct_name} {` return `Ok(None)`. A
+    /// second occurrence, a second attribute line above one field, an
+    /// unsupported attribute line and any other body line are errors that
+    /// name the struct. The body runs from that `{` to the line whose trim is
+    /// `}`. A blank line or a line whose trim starts with `//` is skipped. One
+    /// attribute line above a field may be `#[serde(rename = "...")]`, which
+    /// gives the wire name, or `#[serde(default)]`,
+    /// `#[serde(default, skip_serializing_if = "...")]` or
+    /// `#[serde(skip_serializing_if = "...")]`, which keep the Rust name.
+    /// These are complete attribute forms with one non-empty, unescaped
+    /// quoted value; extra options are rejected. A field line's trim starts
+    /// with `pub `, then the name, then `:`.
+    ///
+    /// The compare reads struct text, not serde's output. A later
+    /// `#[serde(skip)]` is rejected until this rule is widened. A
+    /// `#[serde(default)]` field is required. A nested type stays one name.
+    /// This reader does not read `src/execution.rs` or `src/state.rs`, and it
+    /// does not check an Outputs cell.
+    fn struct_field_names(source: &str, struct_name: &str) -> Result<Option<Vec<String>>, String> {
+        let marker = format!("struct {struct_name} {{");
+        let occurrences = source.matches(&marker).count();
+        if occurrences == 0 {
+            return Ok(None);
+        }
+        if occurrences > 1 {
+            return Err(format!(
+                "struct {struct_name}: has a second `struct {struct_name} {{`"
+            ));
+        }
+        let lines: Vec<&str> = source.lines().collect();
+        let declaration = lines
+            .iter()
+            .position(|line| line.contains(&marker))
+            .expect("the occurrence count found the struct");
+        let mut names = Vec::new();
+        let mut attribute: Option<&str> = None;
+        for line in &lines[declaration + 1..] {
+            let trimmed = line.trim();
+            if trimmed == "}" {
+                if let Some(line) = attribute {
+                    return Err(format!(
+                        "struct {struct_name}: attribute line has no field `{line}`"
+                    ));
+                }
+                return Ok(Some(names));
+            }
+            if trimmed.is_empty() || trimmed.starts_with("//") {
+                continue;
+            }
+            if trimmed.starts_with("#[") {
+                if attribute.is_some() {
+                    return Err(format!(
+                        "struct {struct_name}: a field has a second attribute line `{trimmed}`"
+                    ));
+                }
+                attribute = Some(trimmed);
+                continue;
+            }
+            let Some(field) = trimmed.strip_prefix("pub ") else {
+                return Err(format!(
+                    "struct {struct_name}: body line is not a field line `{trimmed}`"
+                ));
+            };
+            let Some((rust_name, _)) = field.split_once(':') else {
+                return Err(format!(
+                    "struct {struct_name}: field line has no `:` `{trimmed}`"
+                ));
+            };
+            let wire_name = match attribute.take() {
+                Some("#[serde(default)]") => rust_name.trim().to_string(),
+                Some(line) => {
+                    let quoted_value = |prefix| {
+                        line.strip_prefix(prefix)
+                            .and_then(|rest| rest.strip_suffix("\")]"))
+                            .filter(|value| !value.is_empty() && !value.contains(['"', '\\']))
+                    };
+                    match (
+                        quoted_value("#[serde(rename = \""),
+                        quoted_value("#[serde(default, skip_serializing_if = \""),
+                        quoted_value("#[serde(skip_serializing_if = \""),
+                    ) {
+                        (Some(wire_name), _, _) => wire_name.to_string(),
+                        (_, Some(_), _) | (_, _, Some(_)) => rust_name.trim().to_string(),
+                        _ => {
+                            return Err(format!(
+                                "struct {struct_name}: unsupported attribute line `{line}`"
+                            ))
+                        }
+                    }
+                }
+                None => rust_name.trim().to_string(),
+            };
+            names.push(wire_name);
+        }
+        Err(format!(
+            "struct {struct_name}: body has no line whose trim is `}}`"
+        ))
+    }
+    // The backtick spans of one Inputs cell, in order.
+    fn cell_backtick_names(cell: &str) -> Vec<&str> {
+        let mut names = Vec::new();
+        let mut rest = cell;
+        while let Some(start) = rest.find('`') {
+            rest = &rest[start + 1..];
+            let Some(end) = rest.find('`') else {
+                break;
+            };
+            names.push(&rest[..end]);
+            rest = &rest[end + 1..];
+        }
+        names
+    }
+    // `runs_events` -> `RunsEventsRequest`.
+    fn request_struct_name(operation: &str) -> String {
+        let mut name = String::new();
+        for part in operation.split('_') {
+            let mut chars = part.chars();
+            if let Some(first) = chars.next() {
+                name.extend(first.to_uppercase());
+                name.push_str(chars.as_str());
+            }
+        }
+        name.push_str("Request");
+        name
+    }
+    // Each Inputs cell's backtick names, in order, equal the fields of that
+    // operation's request struct in `source`; a row with no such struct names
+    // `op` alone. A mismatch names the operation and the name with no partner.
+    fn operations_inputs_match_the_request_structs(
+        section: &str,
+        source: &str,
+    ) -> Result<(), String> {
+        const INPUTS_PLACE: usize = 2;
+        for cells in section.lines().filter_map(operation_row_cells) {
+            let operation = cells[0];
+            let cell_names =
+                cell_backtick_names(cells.get(INPUTS_PLACE - 1).copied().unwrap_or(""));
+            let struct_name = request_struct_name(operation);
+            let field_names = match struct_field_names(source, &struct_name)? {
+                Some(names) => names,
+                None => vec!["op".to_string()],
+            };
+            for index in 0..cell_names.len().max(field_names.len()) {
+                match (cell_names.get(index).copied(), field_names.get(index)) {
+                    (Some(cell_name), Some(field_name)) if cell_name == field_name.as_str() => {}
+                    (Some(cell_name), Some(field_name)) => {
+                        return Err(format!(
+                            "operation `{operation}` Inputs name `{cell_name}` has no partner; the field there is `{field_name}`"
+                        ));
+                    }
+                    (Some(cell_name), None) => {
+                        return Err(format!(
+                            "operation `{operation}` Inputs name `{cell_name}` has no partner in `{struct_name}`"
+                        ));
+                    }
+                    (None, Some(field_name)) => {
+                        return Err(format!(
+                            "operation `{operation}` field `{field_name}` has no partner in the Inputs cell"
+                        ));
+                    }
+                    (None, None) => break,
+                }
+            }
+        }
+        Ok(())
+    }
+    fn reader_failure(source: &str) -> String {
+        match parse_request_operation_names(source) {
+            Err(reason) => reason,
+            Ok(arms) => panic!("the reader accepts: {arms:?} in {source}"),
+        }
+    }
+    fn compare_failure(section: &str, source: &str) -> String {
+        match operations_match_parse_request(section, source) {
+            Err(reason) => reason,
+            Ok(()) => panic!("the compare accepts: {section} {source}"),
+        }
+    }
+    fn inputs_row(operation: &str, inputs: &str) -> String {
+        format!(
+            "| {operation} | {inputs} | out | storage | effect | rule | designed, not enforced |"
+        )
+    }
+    fn inputs_failure(section: &str, source: &str) -> String {
+        match operations_inputs_match_the_request_structs(section, source) {
+            Err(reason) => reason,
+            Ok(()) => panic!("the compare accepts: {section} {source}"),
+        }
+    }
+    fn rows(names: &[&str]) -> String {
+        names.iter().map(|name| format!("| {name} |\n")).collect()
+    }
+    fn source_cut_before(declaration: &str, arms: &str) -> String {
+        format!(
+            "fn parse_request() {{}}\n{declaration} unrelated() {{\n    let operation = match op {{\n{arms}\n    }};\n}}\n"
+        )
     }
 
     let source_without_the_function = "";
@@ -1037,13 +1445,13 @@ fn operations_section_cites_existing_tests() {
 
     let approved_ids = ["storage", "bound-executable"];
     let network_row = "| init | in | out | network | effect | rule | designed, not enforced |";
-    let network_panic = caught_lab_claim_panic(network_row, &approved_ids);
+    let network_panic = caught_lab_claim_panic(network_row, &approved_ids, false);
     assert!(
         network_panic.contains("network") && network_panic.contains("right"),
         "{network_panic}"
     );
     let storage_row = "| init | in | out | storage | effect | rule | designed, not enforced |";
-    let storage_panic = caught_lab_claim_panic(storage_row, &["bound-executable"]);
+    let storage_panic = caught_lab_claim_panic(storage_row, &["bound-executable"], false);
     assert!(
         storage_panic.contains("storage") && storage_panic.contains("right"),
         "{storage_panic}"
@@ -1051,19 +1459,444 @@ fn operations_section_cites_existing_tests() {
     let bound_row =
         "| init | in | out | bound-executable | effect | rule | designed, not enforced |";
     assert_eq!(
-        operations_table_cells_stay_lab_claims(bound_row, &approved_ids),
+        operations_table_cells_stay_lab_claims(bound_row, &approved_ids, false),
         Ok(())
+    );
+    let none_row =
+        "| status | in | out | none: needs no declared right | effect | rule | designed, not enforced |";
+    assert_eq!(
+        operations_table_cells_stay_lab_claims(none_row, &approved_ids, false),
+        Ok(())
+    );
+    let unshown_row =
+        "| status | in | out | no named test shows this | effect | rule | designed, not enforced |";
+    let unshown_panic = caught_lab_claim_panic(unshown_row, &approved_ids, false);
+    assert!(
+        unshown_panic.contains("no named test shows this") && unshown_panic.contains("right"),
+        "{unshown_panic}"
     );
     let startup_row =
         "| init | in | out | startup-root-directory | effect | rule | designed, not enforced |";
-    let startup_panic = caught_lab_claim_panic(startup_row, &approved_ids);
+    let startup_panic = caught_lab_claim_panic(startup_row, &approved_ids, false);
     assert!(
         startup_panic.contains("startup-root-directory") && startup_panic.contains("right"),
         "{startup_panic}"
     );
     let enforced_row = "| init | in | out | storage | effect | rule | enforced |";
-    let enforced_panic = caught_lab_claim_panic(enforced_row, &approved_ids);
+    let enforced_panic = caught_lab_claim_panic(enforced_row, &approved_ids, false);
     assert!(enforced_panic.contains("`enforced`"), "{enforced_panic}");
+
+    // In the real-section mode each operation has one right cell, so a row
+    // with the other cell, or with another approved id, must fail. Dropping
+    // any operation from either list would let that row pass.
+    let no_right_operations = ["status", "shutdown", "offers_list", "unsupported"];
+    let storage_operations = [
+        "init",
+        "runs_create",
+        "runs_get",
+        "runs_events",
+        "runs_cancel",
+    ];
+    for operation in no_right_operations {
+        for wrong in ["storage", "bound-executable", "no named test shows this"] {
+            let row = format!(
+                "| {operation} | in | out | {wrong} | effect | rule | designed, not enforced |"
+            );
+            let panic = caught_lab_claim_panic(&row, &approved_ids, true);
+            assert!(
+                panic.contains(operation) && panic.contains(wrong),
+                "{operation} with `{wrong}`: {panic}"
+            );
+        }
+        let row = format!(
+            "| {operation} | in | out | none: needs no declared right | effect | rule | designed, not enforced |"
+        );
+        assert_eq!(
+            operations_table_cells_stay_lab_claims(&row, &approved_ids, true),
+            Ok(())
+        );
+    }
+    for operation in storage_operations {
+        for wrong in [
+            "bound-executable",
+            "none: needs no declared right",
+            "no named test shows this",
+        ] {
+            let row = format!(
+                "| {operation} | in | out | {wrong} | effect | rule | designed, not enforced |"
+            );
+            let panic = caught_lab_claim_panic(&row, &approved_ids, true);
+            assert!(
+                panic.contains(operation) && panic.contains("storage") && panic.contains(wrong),
+                "{operation} with `{wrong}`: {panic}"
+            );
+        }
+        let row = format!(
+            "| {operation} | in | out | storage | effect | rule | designed, not enforced |"
+        );
+        assert_eq!(
+            operations_table_cells_stay_lab_claims(&row, &["bound-executable"], true),
+            Err("right cell `storage` is not an approved right id".to_string()),
+            "{operation} requires storage in the approved rights"
+        );
+        assert_eq!(
+            operations_table_cells_stay_lab_claims(&row, &approved_ids, true),
+            Ok(())
+        );
+    }
+
+    // The cut stops before the next function declaration. The old four
+    // prefixes and every form `after_declaration_prefix` removes end it, so a
+    // later `match op` supplies no arm.
+    let two_rows = rows(&["init", "unsupported"]);
+    let cut_arms = "        \"init\" => ProviderOperation::Init,\n        other => ProviderOperation::Unsupported(other.to_string()),";
+    for declaration in [
+        "pub(crate) fn",
+        "pub(super) fn",
+        "pub(in crate::here) fn",
+        "#[inline]\npub(crate) fn",
+        "#[inline] pub(crate) fn",
+        "async fn",
+        "pub async fn",
+        "unsafe fn",
+        "const fn",
+    ] {
+        let source = source_cut_before(declaration, cut_arms);
+        let failure = compare_failure(&two_rows, &source);
+        assert!(
+            failure.contains("parse_request")
+                && failure.contains("match op")
+                && failure.contains("has no match op"),
+            "`{declaration}` must end the cut: {failure}"
+        );
+    }
+    let own_cut = r#"fn parse_request() {
+    let operation = match op {
+        "init" => ProviderOperation::Init,
+        other => ProviderOperation::Unsupported(other.to_string()),
+    };
+}
+"#;
+    let later_ping = format!(
+        r#"{own_cut}pub(crate) fn unrelated() {{
+    let operation = match op {{
+        "ping" => ProviderOperation::Ping,
+    }};
+}}
+"#
+    );
+    assert_eq!(
+        parse_request_operation_names(&later_ping),
+        Ok(vec!["init", "unsupported"])
+    );
+
+    let commented_match = r#"fn parse_request() {
+    /*
+    match op {
+        "stale" => ProviderOperation::Stale,
+    }
+    */
+    let operation = match op {
+        "init" => ProviderOperation::Init,
+        other => ProviderOperation::Unsupported(other.to_string()),
+    };
+}
+"#;
+    let failure = reader_failure(commented_match);
+    assert!(
+        failure.contains("parse_request") && failure.contains("second match op"),
+        "{failure}"
+    );
+    let arm_on_match_line = r#"fn parse_request() {
+    let operation = match op { "init" => ProviderOperation::Init,
+        other => ProviderOperation::Unsupported(other.to_string()),
+    };
+}
+"#;
+    let failure = reader_failure(arm_on_match_line);
+    assert!(
+        failure.contains("parse_request") && failure.contains("arm on the match op line"),
+        "{failure}"
+    );
+    let arm_with_open_brace = r#"fn parse_request() {
+    let operation = match op {
+        "init" => ProviderOperation::Init { value: 1 },
+        other => ProviderOperation::Unsupported(other.to_string()),
+    };
+}
+"#;
+    let failure = reader_failure(arm_with_open_brace);
+    assert!(
+        failure.contains("parse_request") && failure.contains("arm line contains a brace"),
+        "{failure}"
+    );
+    let arm_with_close_brace = r#"fn parse_request() {
+    let operation = match op {
+        "init" => ProviderOperation::Init },
+        other => ProviderOperation::Unsupported(other.to_string()),
+    };
+}
+"#;
+    let failure = reader_failure(arm_with_close_brace);
+    assert!(
+        failure.contains("parse_request") && failure.contains("arm line contains a brace"),
+        "{failure}"
+    );
+
+    assert_eq!(operations_match_parse_request(&two_rows, own_cut), Ok(()));
+    let status_row = rows(&["init", "status"]);
+    let failure = compare_failure(&status_row, own_cut);
+    assert!(failure.contains("unsupported"), "{failure}");
+    let ping_arm = r#"fn parse_request() {
+    let operation = match op {
+        "init" => ProviderOperation::Init,
+        other => ProviderOperation::Unsupported(other.to_string()),
+        "ping" => ProviderOperation::Ping,
+    };
+}
+"#;
+    let failure = compare_failure(&two_rows, ping_arm);
+    assert!(failure.contains("ping"), "{failure}");
+    for (first_arm, extra_arm) in [
+        (
+            "\"init\" => ProviderOperation::Init,",
+            "\"ping\" => ProviderOperation::Status,",
+        ),
+        (
+            "\"init\" => ProviderOperation::Init,",
+            "other => ProviderOperation::Unsupported(other.to_string()),",
+        ),
+        (
+            "other => ProviderOperation::Unsupported(other.to_string()),",
+            "\"ping\" => ProviderOperation::Status,",
+        ),
+        (
+            "other => ProviderOperation::Unsupported(other.to_string()),",
+            "other => ProviderOperation::Unsupported(other.to_string()),",
+        ),
+    ] {
+        let same_line_arms = own_cut.replace(first_arm, &format!("{first_arm} {extra_arm}"));
+        assert_eq!(
+            compare_failure(&two_rows, &same_line_arms),
+            "parse_request: an arm line contains a second `=>`",
+            "{same_line_arms}"
+        );
+    }
+    let swapped_rows = rows(&["unsupported", "init"]);
+    let failure = compare_failure(&swapped_rows, own_cut);
+    assert!(
+        failure.contains("init") && failure.contains("unsupported"),
+        "{failure}"
+    );
+    let init_only_arm = r#"fn parse_request() {
+    let operation = match op {
+        "init" => ProviderOperation::Init,
+    };
+}
+"#;
+    let failure = compare_failure(&two_rows, init_only_arm);
+    assert!(failure.contains("unsupported"), "{failure}");
+
+    let failure = reader_failure("pub fn unrelated() {}\n");
+    assert!(
+        failure.contains("parse_request") && failure.contains("missing fn parse_request("),
+        "{failure}"
+    );
+    let failure = reader_failure("fn parse_request() {}\nfn parse_request() {}\n");
+    assert!(
+        failure.contains("parse_request") && failure.contains("second fn parse_request("),
+        "{failure}"
+    );
+    let unquoted_arm = r#"fn parse_request() {
+    let operation = match op {
+        init => ProviderOperation::Init,
+        other => ProviderOperation::Unsupported(other.to_string()),
+    };
+}
+"#;
+    let failure = reader_failure(unquoted_arm);
+    assert!(
+        failure.contains("parse_request") && failure.contains("not a quoted name"),
+        "{failure}"
+    );
+    let double_other = r#"fn parse_request() {
+    let operation = match op {
+        "init" => ProviderOperation::Init,
+        other => ProviderOperation::Unsupported(other.to_string()),
+        other => ProviderOperation::Unsupported(other.to_string()),
+    };
+}
+"#;
+    let failure = reader_failure(double_other);
+    assert!(
+        failure.contains("parse_request") && failure.contains("second `other =>` arm"),
+        "{failure}"
+    );
+
+    let init_source = "pub struct InitRequest {\n    pub op: String,\n    pub config: String,\n}\n";
+    let init_match = inputs_row("init", "`op`, `config`");
+    assert_eq!(
+        operations_inputs_match_the_request_structs(&init_match, init_source),
+        Ok(())
+    );
+    let failure = inputs_failure(&inputs_row("init", "`op`"), init_source);
+    assert_eq!(
+        failure,
+        "operation `init` field `config` has no partner in the Inputs cell"
+    );
+    assert!(
+        failure.contains("init") && failure.contains("config"),
+        "{failure}"
+    );
+    let failure = inputs_failure(&inputs_row("init", "`op`, `config`, `extra`"), init_source);
+    assert_eq!(
+        failure,
+        "operation `init` Inputs name `extra` has no partner in `InitRequest`"
+    );
+    assert!(
+        failure.contains("init") && failure.contains("extra"),
+        "{failure}"
+    );
+    let failure = inputs_failure(&inputs_row("init", "`config`, `op`"), init_source);
+    assert_eq!(
+        failure,
+        "operation `init` Inputs name `config` has no partner; the field there is `op`"
+    );
+    assert!(failure.contains("init"), "{failure}");
+
+    // A rename gives the wire name on both sides: the Rust name fails and the
+    // wire name passes.
+    let renamed_source = "pub struct InitRequest {\n    pub op: String,\n    #[serde(rename = \"wire_name\")]\n    pub config: String,\n}\n";
+    let failure = inputs_failure(&inputs_row("init", "`op`, `config`"), renamed_source);
+    assert_eq!(
+        failure,
+        "operation `init` Inputs name `config` has no partner; the field there is `wire_name`"
+    );
+    assert!(
+        failure.contains("init") && failure.contains("wire_name"),
+        "{failure}"
+    );
+    assert_eq!(
+        operations_inputs_match_the_request_structs(
+            &inputs_row("init", "`op`, `wire_name`"),
+            renamed_source
+        ),
+        Ok(())
+    );
+
+    // Default attributes keep the Rust field name only in the complete
+    // supported forms. Extra options in either quoted form are refused.
+    for attribute in [
+        "#[serde(default)]",
+        r#"#[serde(default, skip_serializing_if = "Option::is_none")]"#,
+    ] {
+        let source = format!(
+            "pub struct InitRequest {{\n    pub op: String,\n    {attribute}\n    pub config: Option<String>,\n}}\n"
+        );
+        assert_eq!(
+            operations_inputs_match_the_request_structs(&init_match, &source),
+            Ok(()),
+            "{attribute}"
+        );
+    }
+    for attribute in [
+        r#"#[serde(default, skip_serializing_if = "Option::is_none", rename = "wire_name")]"#,
+        r#"#[serde(default, skip_serializing_if = "Option::is_none", skip)]"#,
+        r#"#[serde(default, rename = "wire_name")]"#,
+        r#"#[serde(rename = "wire_name", skip_serializing_if = "Option::is_none")]"#,
+        r#"#[serde(rename = "wire_name", alias = "config")]"#,
+        r#"#[serde(rename = "wire_name", default)]"#,
+        r#"#[serde(rename = "")]"#,
+        r#"#[serde(default, skip_serializing_if = "")]"#,
+        r#"#[serde(rename = "wire\x5fname")]"#,
+        r#"#[serde(default, skip_serializing_if = "Option\x3a\x3ais_none")]"#,
+        r#"#[serde(rename = "wire_name")"#,
+        r#"#[serde(default, skip_serializing_if = "Option::is_none")"#,
+    ] {
+        let source = format!(
+            "pub struct InitRequest {{\n    pub op: String,\n    {attribute}\n    pub config: Option<String>,\n}}\n"
+        );
+        assert_eq!(
+            inputs_failure(&init_match, &source),
+            format!("struct InitRequest: unsupported attribute line `{attribute}`")
+        );
+    }
+
+    // A row with no request struct names `op` alone.
+    assert_eq!(
+        operations_inputs_match_the_request_structs(&inputs_row("status", "`op`"), init_source),
+        Ok(())
+    );
+    let failure = inputs_failure(&inputs_row("status", "`op`, `body`"), init_source);
+    assert_eq!(
+        failure,
+        "operation `status` Inputs name `body` has no partner in `StatusRequest`"
+    );
+    assert!(
+        failure.contains("status") && failure.contains("body"),
+        "{failure}"
+    );
+
+    // A second struct, a second attribute line, a body line that is not a
+    // field, and an unsupported attribute each fail with their own reason.
+    let duplicate_source = "pub struct InitRequest {\n    pub op: String,\n}\npub struct InitRequest {\n    pub op: String,\n}\n";
+    let failure = inputs_failure(&init_match, duplicate_source);
+    assert_eq!(
+        failure,
+        "struct InitRequest: has a second `struct InitRequest {`"
+    );
+    assert!(
+        failure.contains("InitRequest") && failure.contains("second `struct InitRequest {`"),
+        "{failure}"
+    );
+    let stacked_attribute_source = "pub struct InitRequest {\n    #[serde(default)]\n    #[serde(skip_serializing_if = \"Option::is_none\")]\n    pub op: String,\n}\n";
+    let failure = inputs_failure(&init_match, stacked_attribute_source);
+    assert_eq!(
+        failure,
+        "struct InitRequest: a field has a second attribute line `#[serde(skip_serializing_if = \"Option::is_none\")]`"
+    );
+    assert!(
+        failure.contains("InitRequest") && failure.contains("second attribute line"),
+        "{failure}"
+    );
+    let invalid_body_source =
+        "pub struct InitRequest {\n    pub op: String,\n    let config = 1;\n}\n";
+    let failure = inputs_failure(&init_match, invalid_body_source);
+    assert_eq!(
+        failure,
+        "struct InitRequest: body line is not a field line `let config = 1;`"
+    );
+    assert!(
+        failure.contains("InitRequest") && failure.contains("not a field line"),
+        "{failure}"
+    );
+    let skipped_field_source =
+        "pub struct InitRequest {\n    #[serde(skip)]\n    pub config: String,\n}\n";
+    let failure = inputs_failure(&init_match, skipped_field_source);
+    assert_eq!(
+        failure,
+        "struct InitRequest: unsupported attribute line `#[serde(skip)]`"
+    );
+    assert!(
+        failure.contains("InitRequest") && failure.contains("unsupported attribute line"),
+        "{failure}"
+    );
+    let missing_colon_source = "pub struct InitRequest {\n    pub op String,\n}\n";
+    assert_eq!(
+        inputs_failure(&init_match, missing_colon_source),
+        "struct InitRequest: field line has no `:` `pub op String,`"
+    );
+    let unfinished_source = "pub struct InitRequest {\n    pub op: String,\n";
+    assert_eq!(
+        inputs_failure(&init_match, unfinished_source),
+        "struct InitRequest: body has no line whose trim is `}`"
+    );
+    let dangling_attribute_source =
+        "pub struct InitRequest {\n    pub op: String,\n    #[serde(default)]\n}\n";
+    assert_eq!(
+        inputs_failure(&inputs_row("init", "`op`"), dangling_attribute_source),
+        "struct InitRequest: attribute line has no field `#[serde(default)]`"
+    );
 
     let doc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("CONFINEMENT.md");
     let doc = fs::read_to_string(&doc_path).unwrap_or_else(|err| {
@@ -1077,6 +1910,13 @@ fn operations_section_cites_existing_tests() {
         panic!(
             "tests/confine/main.rs must be readable ({}): {err}",
             source_path.display()
+        )
+    });
+    let contract_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/contract.rs");
+    let contract_source = fs::read_to_string(&contract_path).unwrap_or_else(|err| {
+        panic!(
+            "src/contract.rs must be readable ({}): {err}",
+            contract_path.display()
         )
     });
     let section = operations_section_text(&doc);
@@ -1104,8 +1944,12 @@ fn operations_section_cites_existing_tests() {
         .and_then(Value::as_array)
         .unwrap_or_else(|| panic!("declared rights must be an array"));
     let right_ids: Vec<&str> = rights.iter().map(entry_id).collect();
-    operations_table_cells_stay_lab_claims(section, &right_ids)
+    operations_table_cells_stay_lab_claims(section, &right_ids, true)
         .expect("the real operations section keeps its Right and Linux lab claims");
+    operations_match_parse_request(section, &contract_source)
+        .expect("the real Operation cells equal the parse_request arms");
+    operations_inputs_match_the_request_structs(section, &contract_source)
+        .expect("the real Inputs cells equal each operation's request struct fields");
 }
 
 /// The Id cells in `section` are the same set as `ids`.
