@@ -290,3 +290,45 @@ stays unchanged and the shared runner reports `CAUGHT`. The live model turn
 stays held.
 
 - 003: Bound `judge` to the spec's `input_sha256` and `recorded_sha256`, added the seven-reason order and strict hash-field loading, and extended the named test with the wrong-input and substitute refusals plus format plants.
+
+## 004 — judge requires one of the two named task specs
+
+`CHECK_ORDER` now names eight checks, with `task` first. `judge` keeps
+`    let trimmed = answer.trim();` as its first statement and the existing
+reasons loop gains one arm, `            Reason::Task => !is_named_task(spec),`.
+`is_named_task` loads the embedded `tasks/agent-a/accept.json` and
+`tasks/agent-b/accept.json` with the one `load_spec`, compares `Spec` equality,
+and refuses when either embedded spec fails to load. A caller-supplied spec
+whose hashes match a different note and answer is now `task` instead of
+`Accept`. Both fixture specs change only their `reasons` arrays; `input.txt`,
+`recorded.json`, `Cargo.toml`, `Cargo.lock` and `F-UT1` keep their bytes.
+
+The one test `checker_accepts_recorded_answer_and_refuses_stubs` now uses the
+eight labels and adds three refusals: a copy of agent-a's spec with `m1` set to
+`other` judged against the real fixture bytes, and the self-consistent agent-a
+and agent-b substitutes described in the task. Each substitute keeps its own
+`task_id`, hashes its own input and recorded strings with `sha256_hex`, and is
+`task`. Without the new arm those three calls are `Accept`; the other refusals
+and the spec swaps keep their reasons.
+
+### Falsifiers
+
+`F-UT2` skips the named-task check with
+`            Reason::Task => false,` and names the same test. The shared runner
+reports:
+
+```
+baseline: 1 named tests pass without an edit, 0 do not
+F-UT1  CAUGHT                             1s  accept every answer before the judge reads it
+F-UT2  CAUGHT                             1s  skip the named-task check
+summary: 2 CAUGHT of 2
+```
+
+After the run, `lab/useful-task/src/lib.rs.falsify-original` is absent and the
+source is restored to SHA-256
+`7cb4678485686ecc154837b8321022038a7acb42db45bb6a9e09791ad76dd96c`. The
+restored tree passes `cargo fmt --manifest-path lab/useful-task/Cargo.toml --
+--check`, the named test, and the full `cargo test --locked` run (seven
+tests). The live model turn stays held.
+
+- 004: Made `judge` refuse a spec that is not one of the two named task specs, added the eight-reason order with `task` first, extended the named test with the m1 and self-consistent substitute cases, and added `F-UT2`.

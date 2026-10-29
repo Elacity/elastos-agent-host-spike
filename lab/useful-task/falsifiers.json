@@ -14,6 +14,20 @@
         }
       ],
       "tests": ["checker_accepts_recorded_answer_and_refuses_stubs"]
+    },
+    {
+      "id": "F-UT2",
+      "title": "skip the named-task check",
+      "command": "useful-task",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/useful-task/src/lib.rs",
+          "old": "            Reason::Task => !is_named_task(spec),\n",
+          "new": "            Reason::Task => false,\n"
+        }
+      ],
+      "tests": ["checker_accepts_recorded_answer_and_refuses_stubs"]
     }
   ]
 }

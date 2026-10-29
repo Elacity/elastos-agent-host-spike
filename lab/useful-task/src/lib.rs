@@ -8,7 +8,8 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 /// The canonical refusal checks, in the order every spec must name them.
-const CHECK_ORDER: [Reason; 7] = [
+const CHECK_ORDER: [Reason; 8] = [
+    Reason::Task,
     Reason::Input,
     Reason::Recorded,
     Reason::Empty,
@@ -113,6 +114,8 @@ impl Spec {
 /// One reason an answer is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reason {
+    /// The spec is not one of the two named task specs.
+    Task,
     Input,
     Recorded,
     Empty,
@@ -126,6 +129,7 @@ impl Reason {
     /// The spec label and the verdict reason for this check.
     pub fn label(self) -> &'static str {
         match self {
+            Reason::Task => "task",
             Reason::Input => "input",
             Reason::Recorded => "recorded",
             Reason::Empty => "empty",
@@ -258,6 +262,7 @@ pub fn judge(spec: &Spec, input: &str, expected: &str, answer: &str) -> Verdict 
 
     for reason in &spec.reasons {
         let refused = match reason {
+            Reason::Task => !is_named_task(spec),
             Reason::Input => sha256_hex(input) != spec.input_sha256(),
             Reason::Recorded => sha256_hex(expected) != spec.recorded_sha256(),
             Reason::Empty => trimmed.is_empty(),
@@ -280,6 +285,22 @@ pub fn judge(spec: &Spec, input: &str, expected: &str, answer: &str) -> Verdict 
     Verdict::Accept {
         answer_sha256: sha256_hex(trimmed),
     }
+}
+
+/// True only when `spec` is the `Spec` loaded from one of the two named tasks.
+fn is_named_task(spec: &Spec) -> bool {
+    let mut named = false;
+    for bytes in [
+        include_str!("../tasks/agent-a/accept.json"),
+        include_str!("../tasks/agent-b/accept.json"),
+    ] {
+        match load_spec(bytes) {
+            Ok(task) if &task == spec => named = true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    named
 }
 
 /// Lower-case SHA-256 hex of exactly these bytes.
