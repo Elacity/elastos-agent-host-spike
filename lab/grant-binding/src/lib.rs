@@ -1436,6 +1436,42 @@ fn model_forged_child_journal_does_not_widen_the_returned_grant() {
 }
 
 #[test]
+fn model_forged_append_does_not_replace_the_returned_root() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    let decision = verifier
+        .use_grant(verifier.open_call(instance), &request)
+        .expect("forged append does not replace the returned root");
+    assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
+}
+
+#[test]
+fn model_forged_child_journal_does_not_replace_the_returned_root() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let decision = verifier
+        .use_grant(verifier.open_call(instance), &request)
+        .expect("forged child journal does not replace the returned root");
+    assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
+}
+
+#[test]
 fn model_readme_states_the_reference_model_boundary() {
     let readme = include_str!("../README.md");
     assert!(readme.contains(
