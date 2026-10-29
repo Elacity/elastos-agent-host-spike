@@ -882,6 +882,20 @@ fn runtime_hosted_tool_and_reasoning_frames() -> Vec<u8> {
     answer
 }
 
+/// The Runtime's accepted answer for caller-supplied Chat Completions frames
+/// followed by `[DONE]`. The bytes use the same head, `push_runtime_hosted_stream_frame`
+/// and closing `0\r\n\r\n` as `runtime_hosted_stream_answer`.
+fn runtime_hosted_chat_frames_answer(payloads: &[String]) -> Vec<u8> {
+    let mut answer = runtime_hosted_stream_head();
+    for payload in payloads {
+        let frame = format!("data: {payload}\n\n");
+        push_runtime_hosted_stream_frame(&mut answer, frame.as_bytes());
+    }
+    push_runtime_hosted_stream_frame(&mut answer, b"data: [DONE]\n\n");
+    answer.extend_from_slice(b"0\r\n\r\n");
+    answer
+}
+
 /// The Runtime's answer when it cuts a hosted stream: the head, then one chunk
 /// that holds the first event, and the connection closes with no `0\r\n\r\n`
 /// and no usage event. The Runtime returns an error after the head when the
@@ -4136,4 +4150,291 @@ fn a_hosted_run_held_past_its_time_limit_fails_as_a_timeout() {
     }
 
     provider.shutdown();
+}
+
+/// Which three-frame fact sequence the hosted backend-fact journey sends.
+enum HostedBackendFactCase {
+    Repeated,
+    Conflict,
+    Malformed,
+}
+
+/// One Chat Completions frame. `text` is the delta; `None` is an empty delta.
+fn hosted_chat_fact_payload(model: Value, usage: &Value, text: Option<&str>) -> String {
+    let delta = match text {
+        Some(text) => json!({ "content": text }),
+        None => json!({}),
+    };
+    serde_json::to_string(&json!({
+        "model": model,
+        "choices": [{ "delta": delta }],
+        "usage": usage,
+    }))
+    .expect("a hosted fact frame is json")
+}
+
+fn hosted_fact_frames(model: Value, usage: &Value) -> [String; 3] {
+    [
+        hosted_chat_fact_payload(model.clone(), usage, Some("ready")),
+        hosted_chat_fact_payload(model.clone(), usage, Some(" set")),
+        hosted_chat_fact_payload(model, usage, None),
+    ]
+}
+
+/// The report a completed hosted run stores when every fact is unknown.
+/// Each fact is the bare `{"status":"unknown"}` object: usage has no reason
+/// and no count (`src/contract.rs`, `BackendFact::Unknown`).
+fn unknown_hosted_backend_report() -> Value {
+    json!({
+        "schema": BACKEND_REPORT_SCHEMA,
+        "resolved_model": {"status": "unknown"},
+        "usage": {"status": "unknown"},
+        "cost": {"status": "unknown"},
+    })
+}
+
+/// Fact set A, written once. Frames that repeat A share this object.
+fn hosted_fact_set_a() -> (Value, Value) {
+    (
+        json!("resolved-a"),
+        json!({
+            "prompt_tokens": 7,
+            "completion_tokens": 1,
+            "total_tokens": 8,
+            "cost": 0.1,
+            "cost_unit": "backend-credit",
+        }),
+    )
+}
+
+/// A hosted run's backend facts stay as `CapturedBackendFact::observe`
+/// recorded them (`src/adapters.rs`) through completion and a restart on the
+/// same journal. The design sections are "Selection policy" and "Request
+/// identity and session facts" in `docs/MODEL_PROVIDER.md`: the provider
+/// records the resolved model, usage and cost the backend reports, and a
+/// conflicting or malformed fact stays unknown through later frames.
+/// `HostedBackendReport::observe_chat_completions` feeds that collector, and
+/// `finish` reports it.
+///
+/// The run status is `completed`. The terminal event kind is `output`
+/// (`src/state.rs`, `synthesize_terminal_event`). The answer text is
+/// `ready set` for every fact sequence.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+fn hosted_backend_facts_through_completion_and_restart(case: HostedBackendFactCase) {
+    let (model_a, usage_a) = hosted_fact_set_a();
+    let (label, payloads, expected_report) = match case {
+        HostedBackendFactCase::Repeated => (
+            "hosted-facts-repeated",
+            hosted_fact_frames(model_a, &usage_a).to_vec(),
+            json!({
+                "schema": BACKEND_REPORT_SCHEMA,
+                "resolved_model": {"status": "reported", "value": "resolved-a"},
+                "usage": {
+                    "status": "reported",
+                    "value": {
+                        "input_tokens": 7,
+                        "output_tokens": 1,
+                        "total_tokens": 8,
+                    },
+                },
+                "cost": {
+                    "status": "reported",
+                    "value": {"value": "0.1", "unit": "backend-credit"},
+                },
+            }),
+        ),
+        HostedBackendFactCase::Conflict => {
+            let usage_b = json!({
+                "prompt_tokens": 8,
+                "completion_tokens": 1,
+                "total_tokens": 9,
+                "cost": 0.2,
+                "cost_unit": "backend-credit",
+            });
+            (
+                "hosted-facts-conflict",
+                vec![
+                    hosted_chat_fact_payload(model_a.clone(), &usage_a, Some("ready")),
+                    hosted_chat_fact_payload(json!("resolved-b"), &usage_b, Some(" set")),
+                    hosted_chat_fact_payload(model_a, &usage_a, None),
+                ],
+                unknown_hosted_backend_report(),
+            )
+        }
+        HostedBackendFactCase::Malformed => {
+            let usage_malformed = json!({
+                "prompt_tokens": "invalid",
+                "completion_tokens": 1,
+                "total_tokens": 8,
+                "cost": -0.1,
+                "cost_unit": "backend-credit",
+            });
+            (
+                "hosted-facts-malformed",
+                vec![
+                    hosted_chat_fact_payload(model_a.clone(), &usage_a, Some("ready")),
+                    hosted_chat_fact_payload(json!(17), &usage_malformed, Some(" set")),
+                    hosted_chat_fact_payload(model_a, &usage_a, None),
+                ],
+                unknown_hosted_backend_report(),
+            )
+        }
+    };
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted backend facts ({label}): off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+
+    let root = test_support::temp_root_path("model-provider-process", label);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind_streaming_frames(
+        label,
+        runtime_hosted_chat_frames_answer(&payloads),
+    );
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init.clone());
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let create_request = hosted_text_create_request(
+        &test_support::fixture_model_request_id(&format!("request:{label}")),
+        "grant:test",
+        "hosted backend facts",
+    );
+    let binding: RuntimeCreateBinding =
+        serde_json::from_value(create_request["runtime_binding"].clone()).unwrap();
+    let expected_run_id = model_run_id(&binding);
+    let create = provider.request(create_request.clone());
+    assert_eq!(
+        create["status"], "ok",
+        "unexpected create response: {create}"
+    );
+    assert_eq!(
+        create["data"]["run_id"], expected_run_id,
+        "runs_create must return the contract run id"
+    );
+
+    let access = access_binding(&create_request);
+    let settled = wait_for_run_terminal_within(
+        &mut provider,
+        &expected_run_id,
+        &access,
+        FIXTURE_EVENT_TIMEOUT,
+    );
+    assert_eq!(
+        settled["data"]["status"], "completed",
+        "the hosted fact run must complete: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["output"],
+        json!({"schema": RUN_OUTPUT_TEXT_SCHEMA, "text": "ready set"}),
+        "the answer text stays ready set: {settled}"
+    );
+    assert!(
+        settled["data"]["terminal"].get("error").is_none(),
+        "a completed fact run has no error: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["backend_report"], expected_report,
+        "the backend report must stay the collector's record through completion: {settled}"
+    );
+
+    let events = read_hosted_run_events(&mut provider, &expected_run_id, &access);
+    let mut joined = String::new();
+    for event in &events {
+        if event["kind"] == "text_delta" {
+            joined.push_str(event["data"]["text"].as_str().unwrap_or(""));
+        }
+    }
+    assert_eq!(
+        joined, "ready set",
+        "joined text deltas must be exactly the answer: {events:?}"
+    );
+    let terminal_event = events.last().expect("the run keeps a terminal event");
+    assert_eq!(
+        terminal_event["kind"], "output",
+        "the terminal event kind is output: {terminal_event}"
+    );
+    assert_eq!(
+        terminal_event["backend_report"], settled["data"]["terminal"]["backend_report"],
+        "the terminal event carries the same backend report: {terminal_event}"
+    );
+
+    let saved_terminal = settled["data"]["terminal"].clone();
+    let saved_events = events;
+    provider.shutdown();
+
+    let mut provider = ProviderProcess::start();
+    let restarted = provider.request(init);
+    assert_eq!(
+        restarted["status"], "ok",
+        "unexpected restart init response: {restarted}"
+    );
+    let replayed = wait_for_run_terminal_within(
+        &mut provider,
+        &expected_run_id,
+        &access,
+        FIXTURE_EVENT_TIMEOUT,
+    );
+    assert_eq!(
+        replayed["data"]["status"], "completed",
+        "the restarted provider must still show the completed run: {replayed}"
+    );
+    assert_eq!(
+        replayed["data"]["terminal"], saved_terminal,
+        "the restarted provider must replay the same terminal: {replayed}"
+    );
+    let replayed_events = read_hosted_run_events(&mut provider, &expected_run_id, &access);
+    assert_eq!(
+        replayed_events, saved_events,
+        "the restarted provider must replay the same event sequence"
+    );
+    provider.shutdown();
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "the journey must open exactly one connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "the journey must send exactly one request"
+    );
+    assert_eq!(requests[0].request_line, "POST /v1/hosted-effect HTTP/1.1");
+    assert_eq!(
+        requests[0].value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
+    );
+}
+
+#[test]
+fn hosted_backend_facts_repeated_values_stay_reported_after_restart() {
+    hosted_backend_facts_through_completion_and_restart(HostedBackendFactCase::Repeated);
+}
+
+#[test]
+fn hosted_backend_facts_conflicts_stay_unknown_after_restart() {
+    hosted_backend_facts_through_completion_and_restart(HostedBackendFactCase::Conflict);
+}
+
+#[test]
+fn hosted_backend_facts_malformed_values_stay_unknown_after_restart() {
+    hosted_backend_facts_through_completion_and_restart(HostedBackendFactCase::Malformed);
 }
