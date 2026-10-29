@@ -98,6 +98,17 @@ pub const HAMT_OVER_THRESHOLD_LAB_CID: &str =
 /// at the root, whose own estimate is 140: the child directory is a shard and
 /// the root a basic directory. Built in a temp dir and never committed.
 pub const HAMT_CHILD_LAB_CID: &str = "bafybeihmck6tdzcctrlvqlyl35xkja36ogb2qwts7qofk5abrlzb7jr3zi";
+/// The shared six-byte row's bundle: the 261945 file set with two 100-byte
+/// fillers replaced by 200-byte names whose murmur3 digests share bytes 0
+/// through 5, so the estimate is 262145. Built in a temp dir and never
+/// committed; task 071 printed it first with README's Python rule.
+pub const SHARED_SIX_BYTE_PREFIX_LAB_CID: &str =
+    "bafybeihe5tbuj3b3bh76xcrd4hklsombul7skdeurbuwb5steypvasqrjm";
+/// The shared seven-byte row's bundle: the same file set with a pair whose
+/// digests share bytes 0 through 6. Built in a temp dir and never committed;
+/// task 071 printed it first with README's Python rule.
+pub const SHARED_SEVEN_BYTE_PREFIX_LAB_CID: &str =
+    "bafybeie2vvrtsognxi7rnvjpzbzerrk73zfzakxdr6eoxmzgkzvtphnmeu";
 
 /// The empty file names whose links estimate alone is `estimate`, and the
 /// bytes one name was lengthened by. Each name is 100 bytes
@@ -150,6 +161,102 @@ pub fn flat_bundle_at(prefix: &str, estimate: usize) -> (Vec<BundleEntry>, Vec<S
         });
     }
     (entries, names, extra)
+}
+
+/// One row of [`shared_prefix_rows`]: two 200-byte names whose murmur3
+/// digests share bytes 0 through `shared - 1`, and the shard link that keeps
+/// the next byte.
+pub struct SharedPrefixRow {
+    /// The first name of the pair.
+    pub first: String,
+    /// The second name of the pair.
+    pub second: String,
+    /// The two first 64-bit murmur3 digests, big-endian: the values README's
+    /// Python rule printed first.
+    pub digests: [[u8; 8]; 2],
+    /// How many digest bytes the pair shares.
+    pub shared: usize,
+    /// The first byte where the pair differs: `shared`.
+    pub differ_at: usize,
+    /// The level whose one link keeps the next shard.
+    pub depth: usize,
+    /// That link's name: the two uppercase hex digits of the shared bucket.
+    pub link: &'static str,
+    /// How many of the 100-byte fillers to skip before the row's two.
+    pub skip: usize,
+    /// The bundle's lab CID, printed first by README's Python rule.
+    pub pin: &'static str,
+}
+
+/// The one table of the remaining HAMT prefixes: a six-byte row and a
+/// seven-byte row, and no per-row function. Each row's pair shares exactly
+/// the bytes through `shared - 1`, so the shard at `depth` still has one
+/// prefix link to a child shard over the next byte.
+pub fn shared_prefix_rows() -> [SharedPrefixRow; 2] {
+    [
+        SharedPrefixRow {
+            first: format!("f6-{:0>197}", 67_618_900u64),
+            second: format!("f6-{:0>197}", 192_452_893u64),
+            digests: [
+                [0x43, 0x13, 0x36, 0x39, 0xba, 0xde, 0x3f, 0x88],
+                [0x43, 0x13, 0x36, 0x39, 0xba, 0xde, 0x8a, 0x08],
+            ],
+            shared: 6,
+            differ_at: 6,
+            depth: 5,
+            link: "DE",
+            skip: 9,
+            pin: SHARED_SIX_BYTE_PREFIX_LAB_CID,
+        },
+        SharedPrefixRow {
+            first: format!("f7-{:0>197}", 2_731_584_490u64),
+            second: format!("f7-{:0>197}", 3_825_277_504u64),
+            digests: [
+                [0xb0, 0xe8, 0x0a, 0x53, 0xf3, 0x0d, 0x3e, 0xc1],
+                [0xb0, 0xe8, 0x0a, 0x53, 0xf3, 0x0d, 0x3e, 0x39],
+            ],
+            shared: 7,
+            differ_at: 7,
+            depth: 6,
+            link: "3E",
+            skip: 11,
+            pin: SHARED_SEVEN_BYTE_PREFIX_LAB_CID,
+        },
+    ]
+}
+
+/// The bundle of one shared-prefix row: the 077 file set at estimate 261945,
+/// with the two 100-byte fillers at the row's place replaced by its 200-byte
+/// names, so the links estimate reaches 262145 and the directory is a shard.
+pub fn shared_prefix_bundle(row: &SharedPrefixRow) -> Vec<BundleEntry> {
+    let (mut entries, names, _extra) = flat_bundle_at("", 261_945);
+    let fixed = entries.len() - names.len();
+    let at = fixed + row.skip;
+    assert_eq!(
+        [entries[at].path.as_str(), entries[at + 1].path.as_str()],
+        [names[row.skip].as_str(), names[row.skip + 1].as_str()],
+        "the row's place holds the two fillers it names"
+    );
+    assert_eq!(
+        [entries[at].path.len(), entries[at + 1].path.len()],
+        [100, 100],
+        "the row replaces two 100-byte fillers"
+    );
+    entries[at].path = row.first.clone();
+    entries[at + 1].path = row.second.clone();
+    assert_eq!(
+        [entries[at].path.as_str(), entries[at + 1].path.as_str()],
+        [row.first.as_str(), row.second.as_str()],
+        "the row's two replacements are its names"
+    );
+    assert_eq!(
+        [entries[at].path.len(), entries[at + 1].path.len()],
+        [200, 200],
+        "each new name is 200 bytes"
+    );
+    let estimate: usize = entries.iter().map(|entry| entry.path.len() + 36).sum();
+    assert_eq!(estimate, 262_145, "the row's links estimate");
+    entries
 }
 
 /// A temp bundle folder holding `entries`.
@@ -817,6 +924,56 @@ pub fn readme_python_lab_cids(bundles: &[&[BundleEntry]]) -> Result<Vec<String>,
             run_python(&program, &input)
         })
         .collect()
+}
+
+/// The heading of README's section that holds the cross-implementation
+/// check: the Python pin test's count and the Kubo cross-check.
+pub const CROSS_IMPLEMENTATION_HEADING: &str = "### The cross-implementation check\n";
+
+/// The three counts README's cross-implementation section states for the
+/// Python pin test: the "For each of the N pins" sentence, the "checked
+/// exactly N bundles" sentence and the "The N are" sentence. Each place must
+/// hold one number, and the caller compares all three with the bundles it
+/// checks.
+pub fn readme_pinned_bundle_counts() -> Result<[usize; 3], String> {
+    let section = section_under(README, CROSS_IMPLEMENTATION_HEADING)?;
+    let words: Vec<&str> = section.split_whitespace().collect();
+    Ok([
+        count_after(&words, &["For", "each", "of", "the"], "pins,")?,
+        count_after(&words, &["checked", "exactly"], "bundles.")?,
+        count_after(&words, &["The"], "are")?,
+    ])
+}
+
+/// The number in the one place `words` holds `before`, then digits, then
+/// `after`. A place with no digits, no such place, or two of them is
+/// refused.
+fn count_after(words: &[&str], before: &[&str], after: &str) -> Result<usize, String> {
+    let mut found = Vec::new();
+    for at in 0..words.len().saturating_sub(before.len() + 1) {
+        if &words[at..at + before.len()] != before || words[at + before.len() + 1] != after {
+            continue;
+        }
+        let number = words[at + before.len()];
+        found.push(number.parse::<usize>().map_err(|_| {
+            format!(
+                "README's {:?} count {number:?} is not a number",
+                before.join(" ")
+            )
+        })?);
+    }
+    match found[..] {
+        [count] => Ok(count),
+        [] => Err(format!(
+            "README has no {:?} ... {after:?} count",
+            before.join(" ")
+        )),
+        _ => Err(format!(
+            "README has {} {:?} ... {after:?} counts, not one",
+            found.len(),
+            before.join(" ")
+        )),
+    }
 }
 
 /// The driver run after README's name-signature block. It holds no part of

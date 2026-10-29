@@ -196,6 +196,19 @@
 //! exactly as the bytes its checked handle held.
 #![forbid(unsafe_code)]
 
+// The unit-test module includes the shared test support, whose imports name
+// this crate the way an integration test does. This alias is test-only and
+// exports nothing.
+#[cfg(test)]
+extern crate self as capsule_identity;
+
+// The one shared test support file each integration test includes: the unit
+// tests read the same pins, flat bundles and shared-prefix table from it, so
+// there is no second copy.
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod test_common;
+
 use std::ffi::{CString, OsStr};
 use std::fmt;
 use std::fs::File;
@@ -2177,6 +2190,7 @@ fn hamt_digest_is_the_marked_murmur3_copy() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_common as common;
 
     /// A protobuf varint of `bytes` at `at`, which moves past it.
     fn read_varint(bytes: &[u8], at: &mut usize) -> u64 {
@@ -2240,6 +2254,23 @@ mod tests {
         links
     }
 
+    /// Each link's CID bytes of a block, in block order.
+    fn link_cids(block: &[u8]) -> Vec<Vec<u8>> {
+        let mut cids = Vec::new();
+        for (field, link) in length_delimited(block) {
+            if field != 2 {
+                continue;
+            }
+            cids.extend(
+                length_delimited(&link)
+                    .into_iter()
+                    .filter(|(inner, _)| *inner == 1)
+                    .map(|(_, cid)| cid),
+            );
+        }
+        cids
+    }
+
     /// A shard block's UnixFS data field.
     fn unixfs_of(block: &[u8]) -> Vec<u8> {
         for (field, value) in length_delimited(block) {
@@ -2300,6 +2331,140 @@ mod tests {
             ["81collision-one", "90collision-two-82"],
             "the child shard holds each name behind its next-byte prefix"
         );
+    }
+
+    #[test]
+    fn shared_digest_prefixes_keep_the_next_shard() {
+        // The one table's two rows share six and seven digest bytes. At the
+        // row's depth both names are still in one bucket, so the shard keeps
+        // one prefix link to a child shard over the next byte, and each
+        // bundle keeps the pin README's Python rule printed first.
+        let leaf = raw_leaf;
+        let (empty_leaf, _) = leaf(&naming_hash(&[]), 0);
+        let mut pins = Vec::new();
+        for row in &common::shared_prefix_rows() {
+            assert_eq!(row.first.len(), 200, "the first name is 200 bytes");
+            assert_eq!(row.second.len(), 200, "the second name is 200 bytes");
+            let first_digest = hamt_digest(&row.first);
+            let second_digest = hamt_digest(&row.second);
+            assert_eq!(first_digest, row.digests[0], "the first digest");
+            assert_eq!(second_digest, row.digests[1], "the second digest");
+            assert_eq!(
+                first_digest[..row.shared],
+                second_digest[..row.shared],
+                "the pair shares its first {} bytes",
+                row.shared
+            );
+            assert_eq!(
+                row.shared, row.differ_at,
+                "the pair first differs right after the shared bytes"
+            );
+            assert_ne!(
+                first_digest[row.differ_at], second_digest[row.differ_at],
+                "the pair differs at byte {}",
+                row.differ_at
+            );
+
+            // The pair at the row's depth: one link named only the prefix,
+            // holding neither child's name, to a child shard that is no leaf.
+            let pair = [
+                Link {
+                    name: &row.first,
+                    cid: empty_leaf.clone(),
+                    tsize: 0,
+                },
+                Link {
+                    name: &row.second,
+                    cid: empty_leaf.clone(),
+                    tsize: 0,
+                },
+            ];
+            let borrowed: Vec<&Link<'_>> = pair.iter().collect();
+            let (block, _) = hamt_shard(&borrowed, ".", row.depth, hamt_digest)
+                .unwrap_or_else(|refusal| panic!("{}: {refusal}", row.link));
+            let written = links_of(&block);
+            assert_eq!(written.len(), 1, "the pair's bucket is one link");
+            assert_eq!(
+                written[0].0, row.link,
+                "the link is named only by its prefix"
+            );
+            assert!(
+                !written[0].0.contains(row.first.as_str()),
+                "the link holds no first name"
+            );
+            assert!(
+                !written[0].0.contains(row.second.as_str()),
+                "the link holds no second name"
+            );
+            let cids = link_cids(&block);
+            assert_eq!(cids.len(), 1, "one link carries one CID");
+            assert_ne!(cids[0], empty_leaf, "the link is no child's leaf");
+            let (child, child_tsize) = hamt_shard(&borrowed, ".", row.depth + 1, hamt_digest)
+                .unwrap_or_else(|refusal| panic!("{}: {refusal}", row.link));
+            assert_eq!(
+                cids[0],
+                cid_bytes(DAG_PB_CODEC, &naming_hash(&child)),
+                "the link points at the child shard"
+            );
+            assert_eq!(
+                written[0].1, child_tsize,
+                "the link's Tsize is the child shard's"
+            );
+
+            // The row's bundle: the two names, the measured estimate, and
+            // both naming paths against the pin README's Python rule printed.
+            let entries = common::shared_prefix_bundle(row);
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| entry.path == row.first || entry.path == row.second)
+                    .count(),
+                2,
+                "the bundle holds the row's two names"
+            );
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| entry.path == row.first)
+                    .count(),
+                1,
+                "the bundle holds the first name once"
+            );
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| entry.path == row.second)
+                    .count(),
+                1,
+                "the bundle holds the second name once"
+            );
+            let estimate: usize = entries.iter().map(|entry| entry.path.len() + 36).sum();
+            assert_eq!(estimate, 262_145, "the bundle's links estimate");
+            let bundle = common::bundled(&entries);
+            let named = lab_cid(bundle.path())
+                .unwrap_or_else(|refusal| panic!("{}: {refusal}", row.pin))
+                .to_string();
+            let encode = encode_entries;
+            let encoded = encode(&entries)
+                .unwrap_or_else(|refusal| panic!("{}: {refusal}", row.pin))
+                .to_string();
+            assert_eq!(
+                named, encoded,
+                "lab_cid and encode_entries name the same bytes"
+            );
+            assert_eq!(named, row.pin, "lab_cid against the row's pin");
+            pins.push(row.pin);
+        }
+        assert_ne!(pins[0], pins[1], "the two rows name different bundles");
+        for pin in pins {
+            for hamt in [
+                common::HAMT_THRESHOLD_LAB_CID,
+                common::HAMT_OVER_THRESHOLD_LAB_CID,
+                common::HAMT_CHILD_LAB_CID,
+            ] {
+                assert_ne!(pin, hamt, "a shared-prefix row names no 077 bundle");
+            }
+        }
     }
 
     #[test]

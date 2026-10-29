@@ -23,8 +23,9 @@ use std::process::Command;
 /// How many pinned bundles the check covers: seven fixtures, the recipe,
 /// the three bundles built for the profile tests, the photo stand-in
 /// consumer copy (task 047), the three bundles with a file over one leaf
-/// (tasks 048 and 076) and the three HAMT-threshold bundles (task 077).
-const PINNED_BUNDLES: usize = 18;
+/// (tasks 048 and 076), the three HAMT-threshold bundles (task 077) and the
+/// two shared-prefix bundles (task 071).
+const PINNED_BUNDLES: usize = 20;
 
 /// How many committed fixtures have a pin: all but wc001-core.
 const PINNED_FIXTURES: usize = 7;
@@ -172,6 +173,13 @@ fn pinned_bundles() -> Vec<Pinned> {
         pin: HAMT_CHILD_LAB_CID,
         entries: flat_bundle_at("photos/", 262_145).0,
     });
+    for row in shared_prefix_rows() {
+        bundles.push(Pinned {
+            what: format!("shared-prefix bundle at link {}", row.link),
+            pin: row.pin,
+            entries: shared_prefix_bundle(&row),
+        });
+    }
     bundles
 }
 
@@ -224,6 +232,16 @@ fn readme_python_recomputes_every_lab_cid_pin() {
         );
     }
     assert_eq!(README_PYTHON_DRIVER.matches("lab_cid(").count(), 1);
+
+    // README names the count this test checks, in the Python sentences and
+    // in the Kubo cross-check, and the three say one count.
+    let counts = readme_pinned_bundle_counts().unwrap_or_else(|reason| panic!("{reason}"));
+    for count in counts {
+        assert_eq!(
+            count, PINNED_BUNDLES,
+            "README names a count of pinned bundles that this test does not check"
+        );
+    }
 
     // Python, the pin and the Rust encoder agree on every pinned bundle.
     let bundles = pinned_bundles();
@@ -533,7 +551,7 @@ fn kubo_roots(kubo: &Path) -> Result<Vec<String>, String> {
 /// ```
 ///
 /// Every pinned bundle's Kubo root, its pin and `encode_entries` must be one
-/// value, and the test asserts it checked all 18.
+/// value, and the test asserts it checked all 20.
 #[test]
 #[ignore = "needs LAB_KUBO naming a Kubo v0.40.1 binary"]
 fn kubo_hash_only_import_prints_every_lab_cid_pin() {
@@ -546,6 +564,10 @@ fn kubo_hash_only_import_prints_every_lab_cid_pin() {
         let rust = encode_entries(&bundle.entries)
             .unwrap_or_else(|refusal| panic!("{}: {refusal}", bundle.what))
             .to_string();
+        println!(
+            "{}: Kubo {root}, pin {}, encode_entries {rust}",
+            bundle.what, bundle.pin
+        );
         assert_eq!(
             (root.as_str(), rust.as_str()),
             (bundle.pin, bundle.pin),
