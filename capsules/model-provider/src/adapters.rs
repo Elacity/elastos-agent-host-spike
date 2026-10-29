@@ -52,6 +52,7 @@ fn effect_request(
     offer_id: &str,
     run_id: &str,
     request_id: &str,
+    grant_id: &str,
     effect: &'static str,
 ) -> reqwest::RequestBuilder {
     let url = if runtime_socket.is_some() {
@@ -65,6 +66,7 @@ fn effect_request(
             .header("x-elastos-offer-id", offer_id)
             .header("x-elastos-run-id", run_id)
             .header("x-elastos-request-id", request_id)
+            .header("x-elastos-grant-id", grant_id)
             .header("x-elastos-effect", effect)
     } else {
         builder
@@ -449,6 +451,7 @@ impl HostedBackendReport {
 struct LocalTextWorkerTask {
     run_id: String,
     request_id: String,
+    grant_id: String,
     generation: u64,
     backend: LocalTextBackend,
     offer: ConfiguredOffer,
@@ -791,6 +794,7 @@ impl LiveAdapterExecutor {
             backend,
             offer,
             &binding.request_id,
+            &binding.grant_id,
             messages,
             deadline_ms,
             PreparedLocalTextWorker {
@@ -809,6 +813,7 @@ impl LiveAdapterExecutor {
         backend: LocalTextBackend,
         offer: &ConfiguredOffer,
         request_id: &str,
+        grant_id: &str,
         messages: &[Value],
         deadline_ms: u64,
         prepared: PreparedLocalTextWorker,
@@ -824,12 +829,14 @@ impl LiveAdapterExecutor {
         let offer = offer.clone();
         let messages = messages.to_vec();
         let request_id = request_id.to_string();
+        let grant_id = grant_id.to_string();
         let hosted_socket = self.hosted_socket.clone();
         let run_id_for_task = run_id.clone();
         let join_handle = self.runtime.spawn(async move {
             let timed_out = run_local_text_worker(LocalTextWorkerTask {
                 run_id: run_id_for_task.clone(),
                 request_id,
+                grant_id,
                 generation,
                 backend,
                 offer,
@@ -1658,6 +1665,7 @@ async fn run_http_artifact_create_worker_inner(
             &offer.id,
             &deterministic_run_id(binding),
             &binding.request_id,
+            &binding.grant_id,
             "job_create",
         )
         .header("content-type", "application/json")
@@ -1737,6 +1745,7 @@ async fn run_http_artifact_status_worker_inner(
         &offer.id,
         &deterministic_run_id(_binding),
         &_binding.request_id,
+        &_binding.grant_id,
         "job_status",
     );
     if hosted_socket.is_some() {
@@ -1795,6 +1804,7 @@ async fn run_local_text_worker_with_timing(
                 &mut task.cancel_rx,
                 &task.run_id,
                 &task.request_id,
+                &task.grant_id,
                 task.hosted_socket.as_deref(),
             )
             .await;
@@ -1985,6 +1995,7 @@ async fn run_local_text_worker_with_timing(
             &task.offer.id,
             &task.run_id,
             &task.request_id,
+            &task.grant_id,
             effect,
         )
         .header("content-type", "application/json")
@@ -2232,6 +2243,7 @@ async fn run_decision_worker(
     cancel: &mut watch::Receiver<bool>,
     run_id: &str,
     request_id: &str,
+    grant_id: &str,
     hosted_socket: Option<&str>,
 ) -> std::result::Result<ReconcileResult, AdapterFault> {
     require_external_http_containment(hosted_socket)?;
@@ -2252,6 +2264,7 @@ async fn run_decision_worker(
         &offer.id,
         run_id,
         request_id,
+        grant_id,
         "decisions",
     )
     .json(&body);
@@ -3154,6 +3167,7 @@ async fn run_http_artifact_cancel_worker_inner(
         &offer.id,
         &deterministic_run_id(_binding),
         &_binding.request_id,
+        &_binding.grant_id,
         "job_cancel",
     )
     .header("content-type", "application/json")
@@ -3790,6 +3804,7 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let mut task = LocalTextWorkerTask {
             request_id: "fixture-engine-start".into(),
+            grant_id: "fixture-grant".into(),
             hosted_socket: None,
             run_id: "run-engine-start".into(),
             generation: 1,
@@ -3877,6 +3892,7 @@ mod tests {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let task = LocalTextWorkerTask {
             request_id: "fixture-memory-pressure".into(),
+            grant_id: "fixture-grant".into(),
             hosted_socket: None,
             run_id: format!("run-memory-pressure-{prompt}"),
             generation: 1,
@@ -4522,6 +4538,7 @@ mod tests {
                     &mut cancel,
                     "run:fixture",
                     "fixture-request",
+                    "fixture-grant",
                     None,
                 ))
                 .unwrap();
@@ -4608,6 +4625,7 @@ mod tests {
                     &mut cancel,
                     "run:fixture",
                     "fixture-request",
+                    "fixture-grant",
                     None,
                 );
                 let interrupt = async {
@@ -4868,6 +4886,7 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let mut task = LocalTextWorkerTask {
             request_id: "fixture-request".into(),
+            grant_id: "fixture-grant".into(),
             hosted_socket: None,
             run_id: "run-hosted-status".to_string(),
             generation: 1,
@@ -4952,6 +4971,7 @@ mod tests {
             let (_cancel_tx, cancel_rx) = watch::channel(false);
             let mut task = LocalTextWorkerTask {
                 request_id: "fixture-request".into(),
+                grant_id: "fixture-grant".into(),
                 hosted_socket: Some(path.to_string_lossy().into_owned()),
                 run_id: "run-hosted-refusal".into(),
                 generation: 1,
@@ -5037,6 +5057,7 @@ mod tests {
             let worker = tokio::spawn(async move {
                 let mut task = LocalTextWorkerTask {
                     request_id: "fixture-request".into(),
+                    grant_id: "fixture-grant".into(),
                     hosted_socket: Some(socket),
                     run_id: "run-hosted-reply".into(),
                     generation: 1,
@@ -5112,6 +5133,97 @@ mod tests {
         assert!(format!("{delivered}{result:?}").contains(" upon"));
     }
 
+    /// A hosted effect carries the Runtime-minted grant id as its own header,
+    /// separate from the request id that Runtime uses for freshness and replay.
+    #[cfg(unix)]
+    #[test]
+    fn hosted_effect_sends_binding_grant_id_apart_from_request_id() {
+        use std::os::unix::net::UnixListener;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (captured_tx, captured_rx) = std_mpsc::channel();
+        let outcome = runtime.block_on(async move {
+            let path = std::env::temp_dir().join(format!(
+                "elastos-hosted-grant-{}-{}",
+                std::process::id(),
+                now_ms()
+            ));
+            let listener = UnixListener::bind(&path).unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = stream.read(&mut chunk).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                }
+                captured_tx.send(String::from_utf8_lossy(&request).into_owned()).unwrap();
+                let body = sse_body(&[], true);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:X}\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+                stream.write_all(b"\r\n0\r\n\r\n").unwrap();
+            });
+            let (update_tx, _update_rx) = mpsc::channel(1);
+            let (_cancel_tx, cancel_rx) = watch::channel(false);
+            let task = LocalTextWorkerTask {
+                request_id: "request:1".into(),
+                grant_id: "grant:1".into(),
+                hosted_socket: Some(path.to_string_lossy().into_owned()),
+                run_id: "run-hosted-grant".into(),
+                generation: 1,
+                backend: LocalTextBackend::OpenAiCompatible {
+                    api_url: "https://example.invalid/chat".into(),
+                    api_key: None,
+                    model: "fixture-model".into(),
+                },
+                offer: openai_offer("https://example.invalid/chat"),
+                deadline_ms: now_ms().saturating_add(30_000),
+                messages: vec![json!({"role": "user", "content": "hello"})],
+                cancel_rx,
+                updates: update_tx,
+            };
+            let worker = tokio::spawn(async move {
+                let mut task = task;
+                run_local_text_worker_inner(&mut task).await
+            });
+            let runtime = Handle::current();
+            let captured = tokio::task::spawn_blocking(move || {
+                runtime.block_on(async {
+                    captured_rx
+                        .recv_timeout(Duration::from_secs(10))
+                        .unwrap_or_default()
+                })
+            })
+            .await
+            .unwrap();
+            let _ = worker.await.unwrap();
+            server.join().unwrap();
+            std::fs::remove_file(&path).unwrap();
+            captured
+        });
+        let request = outcome.to_ascii_lowercase();
+        assert!(request.starts_with("post /v1/hosted-effect "), "{outcome}");
+        let header = |name: &str| {
+            request
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{name}:")))
+                .map(|value| value.trim().to_string())
+        };
+        assert_eq!(header("x-elastos-grant-id").as_deref(), Some("grant:1"));
+        assert_eq!(header("x-elastos-request-id").as_deref(), Some("request:1"));
+        assert_ne!(header("x-elastos-grant-id"), header("x-elastos-request-id"));
+    }
+
     #[test]
     fn hosted_openai_compatible_429_is_rate_limited() {
         let fault = hosted_openai_status_fault("429 Too Many Requests");
@@ -5147,6 +5259,7 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let mut task = LocalTextWorkerTask {
             request_id: "fixture-request".into(),
+            grant_id: "fixture-grant".into(),
             hosted_socket: None,
             run_id: "run-hosted-timeout".to_string(),
             generation: 1,
@@ -5244,6 +5357,7 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let mut task = LocalTextWorkerTask {
             request_id: "fixture-request".into(),
+            grant_id: "fixture-grant".into(),
             hosted_socket: None,
             run_id: "run-delayed-first-byte".to_string(),
             generation: 1,
@@ -5457,6 +5571,7 @@ mod tests {
             let result = runtime.block_on(async move {
                 let mut task = LocalTextWorkerTask {
                     request_id: "fixture-request".into(),
+                    grant_id: "fixture-grant".into(),
                     hosted_socket: None,
                     run_id: "run-coalesced".to_string(),
                     generation: 1,
@@ -5610,6 +5725,7 @@ mod tests {
         let worker = tokio::spawn(async move {
             let mut task = LocalTextWorkerTask {
                 request_id: "fixture-request".into(),
+                grant_id: "fixture-grant".into(),
                 hosted_socket: None,
                 run_id: "small-live-delta".into(),
                 generation: 1,
@@ -5733,6 +5849,7 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let mut task = LocalTextWorkerTask {
             request_id: "fixture-request".into(),
+            grant_id: "fixture-grant".into(),
             hosted_socket: None,
             run_id: "run-admitted-budget".into(),
             generation: 1,
@@ -5945,6 +6062,7 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let mut task = LocalTextWorkerTask {
             request_id: "fixture-request".into(),
+            grant_id: "fixture-grant".into(),
             hosted_socket: None,
             run_id: "run-truncated".to_string(),
             generation: 1,
@@ -5985,6 +6103,7 @@ mod tests {
         drop(cancel_tx);
         let mut task = LocalTextWorkerTask {
             request_id: "fixture-request".into(),
+            grant_id: "fixture-grant".into(),
             hosted_socket: None,
             run_id: "run-control-loss".to_string(),
             generation: 1,
@@ -6447,6 +6566,7 @@ mod tests {
         ] {
             let mut task = LocalTextWorkerTask {
                 request_id: "fixture-request".into(),
+                grant_id: "fixture-grant".into(),
                 hosted_socket: None,
                 run_id: "run:fixture".into(),
                 generation: 1,
@@ -6470,6 +6590,7 @@ mod tests {
             now_ms() + 5000,
             &mut cancel,
             "run:fixture",
+            "fixture-grant",
             "fixture-request",
             None,
         ));

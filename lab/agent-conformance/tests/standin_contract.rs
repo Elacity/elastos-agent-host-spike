@@ -33,6 +33,15 @@ fn assert_keys(value: &Value, expected: &[&str], message: &str) {
     assert_eq!(keys(value), expected, "{message}");
 }
 
+/// Changes one payload byte of the signed bundle, so its bytes name another
+/// lab CID and the admitted signature no longer covers it.
+fn change_one_byte(bundle: &SignedBundle) {
+    let asks = bundle.path().join("asks.json");
+    let mut bytes = std::fs::read(&asks).expect("read asks.json");
+    bytes[0] ^= 0x01;
+    std::fs::write(&asks, &bytes).expect("flip one byte of asks.json");
+}
+
 fn request_ids(body: &Value) -> BTreeSet<String> {
     body["capabilities"]
         .as_array()
@@ -752,4 +761,272 @@ fn standin_cancelled_resident_leaves_the_second_resident_to_complete() {
         Some((Some("running"), Some(""))),
         "the stand-in leaves the surviving resident running"
     );
+}
+
+/// M2 exit (b), lab half: every launch path refuses a tampered or unsigned
+/// bundle at admission.
+///
+/// The shell admits a signed bundle, launches it, stops it through
+/// `DELETE /api/capsules/:id`, changes one payload byte on disk, then
+/// launches the same CID again and launches a second instance. Both launches
+/// are refused with `capsule_identity`'s own name-mismatch text, because the
+/// launch re-walks and re-verifies the bytes on disk now against the admitted
+/// row. The capsule list gains nothing and the stopped instance stays exactly
+/// as the stop left it.
+#[test]
+fn standin_tampered_bundle_is_refused_on_every_launch_path() {
+    let mut standin = StandIn::new();
+    let shared = SignedBundle::new();
+    let cid = shared.cid();
+    standin
+        .admit_resident(
+            shared.path(),
+            &shared.signature(),
+            shared.accepted(),
+            Start::Ok,
+        )
+        .expect("the stand-in admits the signed bundle");
+
+    let first = standin
+        .post_capsules(Caller::Shell, &shared.launch_body())
+        .expect("the stand-in launches the admitted CID");
+    let first_id = first["id"]
+        .as_str()
+        .expect("the stand-in names the launch")
+        .to_owned();
+    standin
+        .finish_start(&first_id)
+        .expect("the stand-in applies the admitted Start::Ok");
+    standin
+        .delete_capsule(
+            Caller::Shell,
+            &first_id,
+            &json!({ "reason": "swap the bundle" }),
+        )
+        .expect("the stand-in stops the first instance");
+
+    change_one_byte(&shared);
+    let stopped = standin
+        .get_capsules(Caller::Shell)
+        .expect("the stand-in lists before the refused launches");
+    let before = stopped["capsules"]
+        .as_array()
+        .expect("the stand-in returns capsules")
+        .clone();
+    assert_eq!(
+        before.len(),
+        1,
+        "the stand-in lists the one stopped instance before the refused launches"
+    );
+    assert_eq!(
+        (before[0]["id"].as_str(), before[0]["status"].as_str()),
+        (Some(first_id.as_str()), Some("stopped")),
+        "the stop left the first instance stopped before the refused launches"
+    );
+
+    let tampered_cid = capsule_identity::checked_bundle(shared.path())
+        .expect("the walk names the changed bundle")
+        .cid();
+    let tampered_cid = tampered_cid.to_string();
+    assert_ne!(
+        tampered_cid, cid,
+        "the changed bundle's bytes name another lab CID, so the refusal comes from the bytes check"
+    );
+    let expected = capsule_identity::Refusal::NameMismatch {
+        actual: tampered_cid.parse().expect("the walk prints a lab CID"),
+        claimed: cid.clone(),
+    }
+    .to_string();
+
+    // The launch body names the admitted CID itself: `launch_body` re-walks
+    // the bundle, so it would name the changed bytes' CID, which no row holds.
+    let admitted_launch = json!({ "cid": cid });
+    for attempt in ["relaunch", "second instance"] {
+        let refused = standin.post_capsules(Caller::Shell, &admitted_launch);
+        assert_eq!(
+            refused,
+            Err((403, expected.clone())),
+            "the {attempt} launch of the admitted CID refuses the changed bytes with the library's own text"
+        );
+        assert_eq!(
+            standin
+                .get_capsules(Caller::Shell)
+                .expect("the stand-in lists after the refused launch"),
+            json!({ "capsules": before }),
+            "the refused {attempt} launch adds no instance and leaves the stopped one unchanged"
+        );
+    }
+}
+
+/// The negative control for the journey above: the same route with the same
+/// launcher succeeds before the change and refuses an unadmitted CID with its
+/// own 404. The change alone makes the relaunch refusal happen, so the journey
+/// does not pass on a stand-in that refuses every launch.
+#[test]
+fn standin_untouched_bundle_relaunches_and_unadmitted_cid_is_refused() {
+    let mut standin = StandIn::new();
+    let shared = SignedBundle::new();
+    standin
+        .admit_resident(
+            shared.path(),
+            &shared.signature(),
+            shared.accepted(),
+            Start::Ok,
+        )
+        .expect("the stand-in admits the signed bundle");
+    let first = standin
+        .post_capsules(Caller::Shell, &shared.launch_body())
+        .expect("the stand-in launches the admitted CID before any change");
+    let first_id = first["id"]
+        .as_str()
+        .expect("the stand-in names it")
+        .to_owned();
+    standin
+        .delete_capsule(Caller::Shell, &first_id, &json!({ "reason": "relaunch" }))
+        .expect("the stand-in stops the first instance");
+    let relaunched = standin
+        .post_capsules(Caller::Shell, &shared.launch_body())
+        .expect("the untouched bundle relaunches under its admitted CID");
+    assert_eq!(
+        relaunched["name"], SHARED_NAME,
+        "the relaunch carries the admitted manifest name"
+    );
+
+    let other = SignedBundle::distinct(SECOND_NAME);
+    let unadmitted = standin.post_capsules(Caller::Shell, &other.launch_body());
+    assert_eq!(
+        unadmitted,
+        Err((
+            404,
+            format!(
+                "no bundle is admitted under {} in world resident-capsule",
+                other.cid()
+            )
+        )),
+        "an unadmitted CID is refused with its own 404, not the tampered reason"
+    );
+}
+
+/// M2 exit (b): a content capsule opens by CID as content and never runs as
+/// code. The stand-in has no admission route, so this test drives the content
+/// refusal at the `admit_resident` seam, then drives the launch route and gets
+/// its own 404 for the unadmitted CID. The victim is a real app bundle with a
+/// real launch, request and grant that must stay as it was.
+#[test]
+fn standin_refuses_a_content_bundle_at_the_admission_seam() {
+    let mut standin = StandIn::new();
+    let app = SignedBundle::new();
+    standin
+        .admit_resident(app.path(), &app.signature(), app.accepted(), Start::Ok)
+        .expect("the stand-in admits the app bundle");
+    let launched = standin
+        .post_capsules(Caller::Shell, &app.launch_body())
+        .expect("the stand-in launches the app bundle");
+    let session_id = launched["session_id"]
+        .as_str()
+        .expect("the stand-in names the app session")
+        .to_owned();
+    standin
+        .finish_start(&session_id)
+        .expect("the stand-in finishes the app start");
+    let requested = standin
+        .post_capability_request(
+            Caller::Client {
+                session_id: &session_id,
+            },
+            &json!({ "resource": SHARED_RESOURCE, "action": "read", "reason": "read shared" }),
+        )
+        .expect("the app asks for one grant");
+    let request_id = requested["request_id"]
+        .as_str()
+        .expect("the stand-in mints the app request")
+        .to_owned();
+    standin
+        .post_capability_grant(
+            Caller::Shell,
+            &json!({ "request_id": request_id, "duration": "session" }),
+        )
+        .expect("the shell grants the app request");
+    let before = standin
+        .get_capsules(Caller::Shell)
+        .expect("the stand-in lists the app instance");
+    let grants_before = standin
+        .get_capability_list(Caller::Shell, None)
+        .expect("the stand-in lists the app grant");
+
+    let content = SignedBundle::content();
+    assert_ne!(content.cid(), app.cid(), "the two bundles differ");
+    let content_cid = content.cid();
+    let path = content.path();
+    let signature = content.signature();
+    let accepted = content.accepted();
+    let refused = standin.admit_resident(path, &signature, accepted, Start::Ok);
+    match &refused {
+        Err((status, reason)) => {
+            assert_eq!(*status, 403, "content is refused as forbidden: {reason}");
+            assert_eq!(
+                reason,
+                &format!(
+                    "bundle {content_cid} has role content: content opens by CID and never runs as code"
+                ),
+                "the stand-in gives the one content reason"
+            );
+        }
+        Ok(()) => panic!("a content bundle must not be admitted"),
+    }
+
+    let after = standin
+        .get_capsules(Caller::Shell)
+        .expect("the stand-in lists the capsules after the refusal");
+    assert_eq!(
+        after, before,
+        "the refused admission added no instance: the app instance is as it was"
+    );
+    let launch_body = json!({ "cid": content_cid });
+    let unlaunched = standin.post_capsules(Caller::Shell, &launch_body);
+    match &unlaunched {
+        Err((status, reason)) => {
+            assert_eq!(*status, 404, "no row names the content CID: {reason}");
+            assert_eq!(
+                reason,
+                &format!("no bundle is admitted under {content_cid} in world resident-capsule"),
+                "the stand-in gives its not-resident reason"
+            );
+        }
+        Ok(body) => panic!("a content CID must not launch: {body}"),
+    }
+    let grants_after = standin
+        .get_capability_list(Caller::Shell, None)
+        .expect("the stand-in lists the grants after the refusal");
+    assert_eq!(
+        grants_after, grants_before,
+        "the refused admission and launch added no grant: the app grant is as it was"
+    );
+    let requests = standin
+        .get_capability_requests(Caller::Shell, Some(&session_id))
+        .expect("the stand-in lists the app requests");
+    assert_eq!(
+        requests["requests"].as_array().map(Vec::len),
+        Some(1),
+        "the refused admission and launch added no request: the app request stays"
+    );
+    assert_eq!(
+        requests["requests"][0]["request_id"],
+        json!(request_id),
+        "the app request is the one request, still granted"
+    );
+    assert_eq!(
+        requests["requests"][0]["status"],
+        json!("granted"),
+        "the app grant stays: no admission or launch touched it"
+    );
+    let listed = after["capsules"]
+        .as_array()
+        .expect("the stand-in returns capsules");
+    assert_eq!(
+        listed.len(),
+        1,
+        "the only instance is the app's: the content bundle started none"
+    );
+    assert_eq!(listed[0]["id"], json!(session_id), "the app instance stays");
 }
