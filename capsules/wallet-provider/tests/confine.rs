@@ -799,26 +799,14 @@ impl ConfinedProvider {
             command.pre_exec(move || {
                 let before = seccomp_launch_marker_answer();
                 let install = install_seccomp(&allow);
-                let frame = match install {
-                    Ok(()) => [
+                let record = match install {
+                    Ok(()) => seccomp_launch_record(
                         SECCOMP_LAUNCH_INSTALLED,
                         before,
                         seccomp_launch_marker_answer(),
-                    ],
-                    Err(SeccompInstallFailure::Step(SeccompStep::NoNewPrivileges, errno)) => {
-                        [SECCOMP_LAUNCH_NO_NEW_PRIVS, i64::from(errno), 0]
-                    }
-                    Err(SeccompInstallFailure::Step(SeccompStep::Filter, errno)) => {
-                        [SECCOMP_LAUNCH_FILTER, i64::from(errno), 0]
-                    }
-                    Err(SeccompInstallFailure::AuditArchitecture(arch)) => {
-                        [SECCOMP_LAUNCH_AUDIT_ARCH, 0, i64::from(arch)]
-                    }
+                    ),
+                    Err(failure) => failure.launch_record(),
                 };
-                let mut record = [0u8; SECCOMP_LAUNCH_RECORD_LEN];
-                for (field, value) in record.chunks_exact_mut(8).zip(frame) {
-                    field.copy_from_slice(&value.to_ne_bytes());
-                }
                 // `write` is admitted by the list and is async-signal-safe
                 // after a fork; a socket write is not in the list at all.
                 write_seccomp_launch_record(&record, |bytes| {
@@ -6614,6 +6602,21 @@ enum SeccompInstallFailure {
     AuditArchitecture(u32),
 }
 
+impl SeccompInstallFailure {
+    /// Both child paths report failures through the same fixed record and
+    /// decoder. This conversion uses only stack values after a fork.
+    fn launch_record(self) -> [u8; SECCOMP_LAUNCH_RECORD_LEN] {
+        let (step, first, second) = match self {
+            Self::Step(SeccompStep::NoNewPrivileges, errno) => {
+                (SECCOMP_LAUNCH_NO_NEW_PRIVS, i64::from(errno), 0)
+            }
+            Self::Step(SeccompStep::Filter, errno) => (SECCOMP_LAUNCH_FILTER, i64::from(errno), 0),
+            Self::AuditArchitecture(arch) => (SECCOMP_LAUNCH_AUDIT_ARCH, 0, i64::from(arch)),
+        };
+        seccomp_launch_record(step, first, second)
+    }
+}
+
 impl std::fmt::Display for SeccompInstallFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -7018,9 +7021,9 @@ const SECCOMP_PROBE_KEYCTL_TABLE: [libc::c_long; SECCOMP_PROBE_KEYCTL_ARGUMENTS]
 /// arguments than the command reads fails here even though the call compiles.
 /// It makes no kernel call and starts no process, so it runs on every OS.
 ///
-/// Falsifier: WP166 passes only the command to `keyctl`, so the argument table
-/// names one argument where the command reads three and the call's own list
-/// does not name the keyring or the create flag.
+/// Falsifier: WP166 passes only the command to `keyctl`, so the call's own
+/// list omits the keyring, create flag and unused arguments while the table
+/// still supplies the complete fixture.
 #[test]
 fn seccomp_keyctl_probe_supplies_every_argument_without_creation() {
     assert_eq!(
@@ -7786,12 +7789,29 @@ fn seccomp_launch_record_refuses_missing_or_unknown_report() {
         let SeccompLaunchRecord::Refused(failure) = decoded else {
             panic!("a failed step must decode as a refusal");
         };
+        assert_eq!(
+            failure.launch_record(),
+            seccomp_launch_record(step, i64::from(errno), 0),
+            "both child paths must encode the same failed-step record"
+        );
         assert!(
             failure.to_string().starts_with("seccomp install refused: ")
                 && failure.to_string().contains(&format!("errno {errno}")),
             "the refusal must name the step and its errno: {failure}"
         );
     }
+    let supplied_arch = SECCOMP_AUDIT_ARCH.wrapping_add(1);
+    let failure = SeccompInstallFailure::AuditArchitecture(supplied_arch);
+    assert_eq!(
+        failure.launch_record(),
+        seccomp_launch_record(SECCOMP_LAUNCH_AUDIT_ARCH, 0, i64::from(supplied_arch)),
+        "the architecture must keep all its unsigned bits in the fixed record"
+    );
+    assert_eq!(
+        decode_seccomp_launch_record(&failure.launch_record()).unwrap(),
+        SeccompLaunchRecord::Refused(failure),
+        "the shared decoder must preserve the architecture refusal for both child paths"
+    );
 }
 
 /// One install record's bytes, so the reader's cases are built by the record's
@@ -8020,6 +8040,9 @@ enum SeccompProbeRun {
     Stopped,
     /// Allocate after the fork, so the allocation guard has something to count.
     Allocating,
+    /// Check that another probe's pipe ends were closed in this fork-only
+    /// child, then run the normal filter proof.
+    CheckInheritedDescriptors([std::os::fd::RawFd; 2]),
 }
 
 /// The probe child's own body: record the four calls, install the filter through
@@ -8042,12 +8065,28 @@ fn run_seccomp_probe_child(
     allow: &SeccompAllowList,
     prepared_report: Option<&[u8]>,
 ) -> ! {
-    // This child inherits the harness's own standard streams, and a child this
-    // process left behind would hold them open, so the test runner would wait
-    // for an end of file that never comes. It writes its report to the pipe it
-    // was given, so it closes the three it does not use before it does anything
-    // else. A leaked child then costs nothing beyond itself.
-    detach_child_stdio(report);
+    // CLOEXEC protects exec children. This one shared ownership check also
+    // closes other probes' pipes and launcher sockets in fork-only children.
+    if let Err(errno) = retain_probe_report_descriptor(report) {
+        write_all(
+            report,
+            b"the probe child could not close inherited descriptors: errno ",
+        );
+        write_number(report, i64::from(errno));
+        unsafe { libc::_exit(71) }
+    }
+    if let SeccompProbeRun::CheckInheritedDescriptors(inherited) = run {
+        for fd in inherited {
+            let result = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            if result != -1 || unsafe { *libc::__errno_location() } != libc::EBADF {
+                write_all(
+                    report,
+                    b"the probe child retained another probe's descriptor",
+                );
+                unsafe { libc::_exit(71) }
+            }
+        }
+    }
     if run == SeccompProbeRun::WithoutReport {
         unsafe { libc::_exit(0) }
     }
@@ -8092,22 +8131,7 @@ fn run_seccomp_probe_child(
     // four refused calls, so their answer is still the default decision.
     if let Err(failure) = install_seccomp(allow) {
         write_all(report, SECCOMP_PROBE_REFUSED.as_bytes());
-        let (step, errno) = match failure {
-            SeccompInstallFailure::Step(step, errno) => (
-                match step {
-                    SeccompStep::NoNewPrivileges => SECCOMP_LAUNCH_NO_NEW_PRIVS,
-                    SeccompStep::Filter => SECCOMP_LAUNCH_FILTER,
-                },
-                errno,
-            ),
-            SeccompInstallFailure::AuditArchitecture(arch) => {
-                (SECCOMP_LAUNCH_AUDIT_ARCH, arch as i32)
-            }
-        };
-        write_number(report, step);
-        write_all(report, b":");
-        write_number(report, i64::from(errno));
-        write_all(report, b"\n");
+        write_all(report, &failure.launch_record());
         unsafe { libc::_exit(70) }
     }
     let mut after = [SeccompAnswer::Returned(0); SECCOMP_PROBE_CALLS.len()];
@@ -8140,28 +8164,22 @@ fn run_seccomp_probe_child(
     unreachable!("exit_group must not return")
 }
 
-/// Points this probe child's standard streams at `/dev/null`, so a child this
-/// process leaves behind cannot hold the harness's own pipes open. The child
-/// writes its report to `report`, so a stream whose number is that descriptor is
-/// left alone: the report path is never closed here. It uses the raw calls,
-/// because a forked child may rely only on async-signal-safe ones.
+/// The fork-only child owns exactly its report writer. Closing both ranges
+/// also covers descriptors created by concurrent threads before the fork.
+/// This runs before installing the filter, using raw syscalls and stack values.
+/// A kernel that cannot close the ranges refuses the probe before it runs.
 #[cfg(target_os = "linux")]
-fn detach_child_stdio(report: std::os::fd::RawFd) {
-    unsafe {
-        let dev_null = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
-        if dev_null < 0 {
-            return;
+fn retain_probe_report_descriptor(report: std::os::fd::RawFd) -> Result<(), i32> {
+    for (first, last) in [(0, report as u32), (report as u32 + 1, u32::MAX)] {
+        if first == last {
+            continue;
         }
-        for stream in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
-            if stream == report || stream == dev_null {
-                continue;
-            }
-            libc::dup2(dev_null, stream);
-        }
-        if dev_null > libc::STDERR_FILENO {
-            libc::close(dev_null);
+        let last = if first == 0 { last - 1 } else { last };
+        if unsafe { libc::syscall(libc::SYS_close_range, first, last, 0u32) } != 0 {
+            return Err(unsafe { *libc::__errno_location() });
         }
     }
+    Ok(())
 }
 
 /// Makes this probe child count its own allocations. It runs in the forked
@@ -8321,14 +8339,29 @@ fn seccomp_denied_call_probe(
     allow: &SeccompAllowList,
     run: SeccompProbeRun,
 ) -> Result<SeccompProbeReport, String> {
-    use std::os::fd::FromRawFd as _;
+    seccomp_denied_call_probe_with_pipe(allow, run, |_| {})
+}
+
+/// The probe's one channel and fork path. The observer runs in the parent
+/// after pipe creation and before the fork, so the inheritance test can hold
+/// that exact race window open while it launches other children.
+#[cfg(target_os = "linux")]
+fn seccomp_denied_call_probe_with_pipe(
+    allow: &SeccompAllowList,
+    run: SeccompProbeRun,
+    observe_pipe: impl FnOnce([std::os::fd::RawFd; 2]),
+) -> Result<SeccompProbeReport, String> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
     let mut fds = [0 as libc::c_int; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
         return Err(format!(
             "seccomp probe refused: the report pipe could not open: {}",
             std::io::Error::last_os_error()
         ));
     }
+    let mut reader = unsafe { fs::File::from_raw_fd(fds[0]) };
+    let writer = unsafe { fs::File::from_raw_fd(fds[1]) };
+    observe_pipe(fds);
     // The lifecycle fixture's report is built here, where an allocator is
     // allowed, and the child only writes it. Counted children allocate nothing,
     // so that report says zero.
@@ -8350,72 +8383,76 @@ fn seccomp_denied_call_probe(
     };
     let pid = unsafe { libc::fork() };
     if pid < 0 {
-        unsafe {
-            libc::close(fds[0]);
-            libc::close(fds[1]);
-        }
         return Err(format!(
             "seccomp probe refused: the probe child could not start: {}",
             std::io::Error::last_os_error()
         ));
     }
     if pid == 0 {
-        unsafe { libc::close(fds[0]) };
-        run_seccomp_probe_child(fds[1], run, allow, prepared.as_deref().map(str::as_bytes));
+        run_seccomp_probe_child(
+            writer.as_raw_fd(),
+            run,
+            allow,
+            prepared.as_deref().map(str::as_bytes),
+        );
     }
-    unsafe { libc::close(fds[1]) };
+    drop(writer);
 
-    let mut reader = unsafe { fs::File::from_raw_fd(fds[0]) };
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let drainer = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = reader.read_to_end(&mut bytes);
-        let _ = sender.send(bytes);
-    });
     let exit = wait_for_probe_exit(pid);
     // The wait must have reaped the child on every result: a second wait finds
     // no child, so a repeated journey leaves no probe running. This is asserted
     // here, before any arm can return, so no early return skips it.
     assert_probe_reaped(pid);
-    // The child is reaped before this read, so its end of the pipe is closed
-    // and the drainer reaches end of file. The deadline still bounds the wait,
-    // because reaping the child is the only thing that closes its write end and
-    // a report that never arrives must not hang the test.
-    let bytes = match receiver.recv_timeout(CHILD_EXIT_DEADLINE) {
-        Ok(bytes) => {
-            let _ = drainer.join();
-            bytes
-        }
-        Err(_) => {
-            // The drainer still holds the read end, so this join is not
-            // reached: the report never arrived and the thread is abandoned
-            // with the descriptor the wait above already closed.
+    // Reports fit within PIPE_BUF, so the child can write before this read.
+    // The parent owns the nonblocking reader throughout, including every
+    // error and deadline. A concurrent exec may briefly hold a CLOEXEC writer
+    // before exec closes it; wait for that close within the same bound.
+    let started = Instant::now();
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 512];
+    loop {
+        if started.elapsed() >= CHILD_EXIT_DEADLINE {
             return Err(format!(
                 "seccomp probe refused: child {exit} wrote no complete report within {}s",
                 CHILD_EXIT_DEADLINE.as_secs()
             ));
         }
-    };
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                bytes.extend_from_slice(&buffer[..count]);
+                if bytes.len() > libc::PIPE_BUF {
+                    return Err("seccomp probe refused: the report exceeds PIPE_BUF".into());
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(CHILD_EXIT_POLL);
+            }
+            Err(err) => {
+                return Err(format!(
+                    "seccomp probe refused: reading the report failed: {err}"
+                ))
+            }
+        }
+    }
     let text = String::from_utf8_lossy(&bytes).into_owned();
 
     match exit {
         ProbeExit::Code(code) if code == 0 => {}
-        ProbeExit::Code(_) if text.starts_with(SECCOMP_PROBE_REFUSED) => {
-            let rest = &text[SECCOMP_PROBE_REFUSED.len()..];
-            let (step, errno) = rest
-                .trim_end()
-                .split_once(':')
-                .unwrap_or_else(|| panic!("the child's refusal must name its step: {text}"));
-            let step = match step.parse::<i64>().expect("the refused step") {
-                SECCOMP_LAUNCH_NO_NEW_PRIVS => SeccompStep::NoNewPrivileges,
-                SECCOMP_LAUNCH_FILTER => SeccompStep::Filter,
-                other => panic!("the child named no install step: {other}"),
-            };
-            let failure =
-                SeccompInstallFailure::Step(step, errno.parse::<i32>().expect("the refused errno"));
-            return Err(format!(
-                "seccomp probe refused: the probe child must install the filter: {failure}"
-            ));
+        ProbeExit::Code(_) if bytes.starts_with(SECCOMP_PROBE_REFUSED.as_bytes()) => {
+            return Err(
+                match decode_seccomp_launch_record(&bytes[SECCOMP_PROBE_REFUSED.len()..]) {
+                    Ok(SeccompLaunchRecord::Refused(failure)) => format!(
+                        "seccomp probe refused: the probe child must install the filter: {failure}"
+                    ),
+                    Ok(SeccompLaunchRecord::Installed(_)) => {
+                        "seccomp probe refused: the refused child reported an installed filter"
+                            .into()
+                    }
+                    Err(reason) => format!("seccomp probe refused: {reason}"),
+                },
+            );
         }
         other => {
             return Err(format!(
@@ -8466,7 +8503,7 @@ fn assert_probe_reaped(pid: libc::pid_t) {
 /// before this returns, exactly as a timed-out child is. An `EINTR` from
 /// `waitpid` retries the same wait instead of ending it, and a child the kernel
 /// no longer holds is `Gone` with its errno. Every arm leaves no child behind,
-/// so the caller can join its drainer and a repeated journey reaps everything.
+/// so the caller can finish its bounded read and a repeated journey reaps everything.
 #[cfg(target_os = "linux")]
 fn wait_for_probe_exit(pid: libc::pid_t) -> ProbeExit {
     let started = Instant::now();
@@ -8602,12 +8639,11 @@ fn parse_seccomp_probe_report(text: &str) -> Result<SeccompProbeReport, String> 
 /// killed at a bound, a child that allocated after its fork is refused, and a
 /// repeated journey answers the same as the first.
 ///
-/// The test starts six probe children: one whose own install refuses the filter
-/// step, one that writes no report, one that traces itself and stops, one that
-/// writes a complete report and never exits, one that allocates after the fork,
-/// and one that runs the kernel proof. Each must end, and the kernel proof must
-/// give the same four records twice in a row, so the second journey in the same
-/// process reaps everything the first started.
+/// The test covers both failed install steps and a wrong audit architecture,
+/// then missing reports, stops, timeouts, allocations and repeated kernel
+/// proofs. Each child must end, and the kernel proof must give the same four
+/// records twice in a row, so the second journey reaps everything the first
+/// started.
 ///
 /// Falsifier: WP171 reads a stopped child as an end, so this test hangs on the
 /// stopped case until the harness kills it, and the stopped child is never
@@ -8627,6 +8663,38 @@ fn linux_seccomp_probe_reaps_failures_and_repeated_journeys() {
     let started = Instant::now();
 
     let allow = seccomp_probe_list();
+    for (step, errno, reason) in [
+        (
+            SeccompStep::NoNewPrivileges,
+            libc::EPERM,
+            "seccomp install refused: PR_SET_NO_NEW_PRIVS failed with errno 1",
+        ),
+        (
+            SeccompStep::Filter,
+            libc::EINVAL,
+            "seccomp install refused: the filter install failed with errno 22",
+        ),
+    ] {
+        let mut candidate = allow.clone();
+        candidate.injected_step_failure = Some((step, errno));
+        assert_eq!(
+            seccomp_denied_call_probe(&candidate, SeccompProbeRun::Filter).unwrap_err(),
+            format!("seccomp probe refused: the probe child must install the filter: {reason}"),
+            "the probe must preserve each install step's own refusal"
+        );
+    }
+    let mut wrong_arch = allow.clone();
+    wrong_arch.audit_arch = SECCOMP_AUDIT_ARCH.wrapping_add(1);
+    assert_eq!(
+        seccomp_denied_call_probe(&wrong_arch, SeccompProbeRun::Filter).unwrap_err(),
+        format!(
+            "seccomp probe refused: the probe child must install the filter: \
+             seccomp install refused: the list was built for audit architecture {:#x} \
+             and this target reports {SECCOMP_AUDIT_ARCH:#x}",
+            wrong_arch.audit_arch
+        ),
+        "the probe must preserve the supplied and target audit architectures"
+    );
     let failed = seccomp_denied_call_probe(&allow, SeccompProbeRun::Filter)
         .expect("the filter proof must pass on this host");
     assert_eq!(
@@ -8690,9 +8758,101 @@ fn linux_seccomp_probe_reaps_failures_and_repeated_journeys() {
     );
     assert!(
         started.elapsed() < CHILD_EXIT_DEADLINE * 8,
-        "six bounded children must finish well inside eight deadlines, and this took {:?}",
+        "the probe cases must finish well inside eight deadlines, and this took {:?}",
         started.elapsed()
     );
+}
+
+/// Hold the report pipe open before its fork while a concurrent launch execs
+/// and another fork-only probe runs. Both ends belong to the first probe;
+/// neither other child may use them or keep its report reader waiting for EOF.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_seccomp_probe_descriptors_stay_with_their_owner() {
+    let allow = seccomp_probe_list();
+    let mut provider = None;
+    let started = Instant::now();
+    let report = seccomp_denied_call_probe_with_pipe(&allow, SeccompProbeRun::Filter, |fds| {
+        let channel = fs::read_link(format!("/proc/self/fd/{}", fds[0]))
+            .expect("the probe pipe must have a kernel identity");
+        for fd in fds {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(flags >= 0, "the report descriptor must be open");
+            assert_ne!(
+                flags & libc::FD_CLOEXEC,
+                0,
+                "each report descriptor must be close-on-exec at creation"
+            );
+        }
+        // The callback is a barrier after pipe creation: both pipe ends stay
+        // open until this other thread has completed the provider's exec.
+        provider = Some(std::thread::scope(|scope| {
+            scope
+                .spawn(|| ConfinedProvider::start_under_seccomp(&allow, Path::new(PROVIDER_BINARY)))
+                .join()
+                .expect("the concurrent launch thread must finish")
+                .expect("the concurrent provider must start")
+        }));
+        let pid = provider.as_ref().unwrap().child.id();
+        for entry in fs::read_dir(format!("/proc/{pid}/fd")).expect("the provider's descriptors") {
+            let path = entry.expect("a provider descriptor").path();
+            let identity = match fs::read_link(path) {
+                Ok(identity) => identity,
+                // The loader may close a descriptor after read_dir listed it.
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => panic!("the descriptor's kernel identity must be readable: {err}"),
+            };
+            assert_ne!(
+                identity, channel,
+                "the concurrent provider must inherit neither probe pipe end"
+            );
+        }
+        let sibling =
+            seccomp_denied_call_probe(&allow, SeccompProbeRun::CheckInheritedDescriptors(fds))
+                .expect("a fork-only probe must close both inherited pipe ends before its calls");
+        assert_eq!(sibling.allocations, 0);
+    })
+    .expect("the owner must reap its probe and reach EOF while the provider stays alive");
+    assert_eq!(report.allocations, 0);
+    let mut provider = provider.expect("the observer started the concurrent provider");
+    assert!(
+        provider.child.try_wait().unwrap().is_none(),
+        "the provider must remain alive when the probe report reaches EOF"
+    );
+    assert!(
+        started.elapsed() < CHILD_EXIT_DEADLINE,
+        "descriptor ownership must let both probes finish before a timeout"
+    );
+    provider.shutdown();
+
+    // Hold an extra writer in the parent to force the read deadline even after
+    // the probe is reaped. The caller must close its reader on that error too.
+    use std::os::fd::FromRawFd as _;
+    let mut held_writer = None;
+    let mut owned_fds = [0; 2];
+    let mut channel = None;
+    let refusal =
+        seccomp_denied_call_probe_with_pipe(&allow, SeccompProbeRun::WithoutReport, |fds| {
+            owned_fds = fds;
+            channel = Some(fs::read_link(format!("/proc/self/fd/{}", fds[0])).unwrap());
+            let duplicate = unsafe { libc::fcntl(fds[1], libc::F_DUPFD_CLOEXEC, 0) };
+            assert!(duplicate >= 0, "the deadline fixture must hold a writer");
+            held_writer = Some(unsafe { fs::File::from_raw_fd(duplicate) });
+        })
+        .expect_err("an open writer must cause a bounded report refusal");
+    assert_eq!(
+        refusal,
+        "seccomp probe refused: child exit status: 0 wrote no complete report within 10s"
+    );
+    for fd in owned_fds {
+        assert_ne!(
+            fs::read_link(format!("/proc/self/fd/{fd}")).ok(),
+            channel,
+            "the deadline must close the probe owner's descriptors"
+        );
+    }
+    drop(held_writer);
+    assert!(started.elapsed() < CHILD_EXIT_DEADLINE * 3);
 }
 
 /// The one launcher decides each policy: a `Seatbelt` policy keeps today's host
@@ -8912,7 +9072,8 @@ fn linux_seccomp_journey_is_not_applicable_off_linux() {
 /// The test builds the list from wallet's committed declared-rights file, starts
 /// the provider through `standin_spawn_confined_provider` with a `Seccomp`
 /// policy, and requires `init` `ok`, one read-only wallet call `ok`, a file it
-/// wrote under `STORAGE_ROOT` to hold its own bytes and be the only entry there,
+/// wrote under `STORAGE_ROOT` to keep its bytes, a named file to keep the exact
+/// fixture bytes,
 /// and a named sibling path outside `STORAGE_ROOT` to be absent. The file
 /// evidence is those named fixture paths: a seccomp filter carries syscall
 /// policy and not path policy, so this test claims no general file boundary.
@@ -8933,8 +9094,9 @@ fn linux_seccomp_journey_is_not_applicable_off_linux() {
 /// host, and the call whose failure named each `LAUNCH_ESSENTIALS` entry.
 ///
 /// Falsifier: WP176 skips only the launcher's `pre_exec` install and leaves the
-/// self-filtering probe intact, so the launched child reports no
-/// `SECCOMP_MODE_FILTER` and the test fails there. WP177 writes the named
+/// self-filtering probe intact. The journey inherits an allow-all fixture
+/// filter, so the mode assertion passes and the before/after assertion fails.
+/// WP177 writes the named
 /// outside sibling, so the journey finds it present and fails. WP162 labels the
 /// journey with a Linux host off Linux and is caught by
 /// `linux_seccomp_journey_is_not_applicable_off_linux` on the Mac. Both Linux
@@ -8943,6 +9105,59 @@ fn linux_seccomp_journey_is_not_applicable_off_linux() {
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
+    use std::os::unix::process::CommandExt as _;
+
+    // Run this same journey in a separate test process beneath an inherited
+    // filter. Install that fixture through the shared installer as well; its
+    // ALLOW decision leaves the host's marker answer intact. The parent test
+    // runner keeps its own policy and the existing process owner reaps the run.
+    const INHERITED_FIXTURE: &str = "WALLET_SECCOMP_INHERITED_FIXTURE";
+    if std::env::var_os(INHERITED_FIXTURE).as_deref() != Some(std::ffi::OsStr::new("1")) {
+        let mut inherited = seccomp_probe_list();
+        inherited.program = vec![SeccompInstruction::stmt(
+            SECCOMP_BPF_RET_K,
+            SECCOMP_RET_ALLOW,
+        )];
+        let mut command = Command::new(std::env::current_exe().expect("the journey test binary"));
+        command
+            .args([
+                "--exact",
+                "linux_wallet_journey_runs_under_the_seccomp_allow_list",
+                "--nocapture",
+            ])
+            .env(INHERITED_FIXTURE, "1");
+        unsafe {
+            command.pre_exec(move || {
+                install_seccomp(&inherited).map_err(|failure| {
+                    std::io::Error::from_raw_os_error(match failure {
+                        SeccompInstallFailure::Step(_, errno) => errno,
+                        SeccompInstallFailure::AuditArchitecture(_) => libc::EINVAL,
+                    })
+                })
+            });
+        }
+        let mut journey = ConfinedProvider::spawn(command);
+        let exit = journey.wait_for_exit();
+        let stderr = journey.stderr().to_owned();
+        let mut stdout = String::new();
+        journey
+            .stdout
+            .read_to_string(&mut stdout)
+            .expect("the journey output");
+        eprintln!("{stdout}{stderr}");
+        assert_eq!(
+            exit.code(),
+            Some(0),
+            "the journey under an inherited filter must pass: {exit}"
+        );
+        return;
+    }
+    let inherited_status = fs::read_to_string("/proc/self/status").expect("the fixture's status");
+    assert!(
+        inherited_status.lines().any(|line| line == "Seccomp:\t2"),
+        "the journey fixture must already carry an inherited filter"
+    );
+    eprintln!("journey fixture before provider launch: Seccomp: 2 (inherited)");
     // Ran on spark1.local: aarch64, Ubuntu 24.04.4, kernel 6.17.0-1029-nvidia.
     // The deny marker is EACCES (13). Each unfiltered answer differed from it on
     // that host: ptrace(PTRACE_TRACEME) returned 0, mount answered ENOENT (2),
@@ -8980,6 +9195,8 @@ fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
         .join("seccomp-outside-write");
     let root = provider_storage_root(WALLET_PROVIDER, &base);
     let inside = root.join(WALLET_KEY_FILE);
+    let inside_fixture = root.join("seccomp-inside-write");
+    let expected_fixture = b"wallet seccomp journey fixture\n";
 
     let mut provider = standin_spawn_confined_provider(
         StandinHost::reporting("linux"),
@@ -8991,6 +9208,11 @@ fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
         &profile_dir,
     )
     .unwrap_or_else(|err| panic!("the linux wallet start must be confined: {err}"));
+    // Init creates the random key. Keep those exact bytes as the expected
+    // value across the read-only calls, and also compare a fixed byte fixture.
+    let expected_key = fs::read(&inside).expect("init must create the storage key");
+    fs::write(&inside_fixture, expected_fixture)
+        .expect("the named inside fixture must be writable");
 
     assert_eq!(
         provider.launched_seccomp_mode(),
@@ -9001,14 +9223,15 @@ fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
     let [before_install, after_install] = provider
         .seccomp_launch_answers
         .expect("the launcher must report its own install's before and after answers");
+    eprintln!("launcher marker: before {before_install}, after {after_install}");
+    assert_ne!(
+        before_install, after_install,
+        "an inherited filter alone must not satisfy the launcher's own install"
+    );
     assert_eq!(
         after_install,
         -i64::from(SECCOMP_DENY_ERRNO),
         "this launcher's install must supply the deny marker"
-    );
-    assert_ne!(
-        before_install, after_install,
-        "an inherited filter alone must not satisfy the launcher's own install"
     );
 
     let status = provider.send(&json!({ "op": "status" }));
@@ -9030,14 +9253,25 @@ fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
 
     let written = fs::read(&inside)
         .unwrap_or_else(|err| panic!("the launch must write {}: {err}", inside.display()));
+    assert_eq!(
+        written, expected_key,
+        "the read-only journey must keep the exact key bytes from init"
+    );
     let text = String::from_utf8(written).expect("the storage key must be hex text");
-    let digits = text.strip_suffix('\n').unwrap_or(&text);
+    let digits = text
+        .strip_suffix('\n')
+        .expect("the storage key must end with a newline");
     assert_eq!(
         digits.len(),
         2 * WALLET_KEY_BYTES,
         "the storage key must hold its {} hex digits and a newline: {}",
         2 * WALLET_KEY_BYTES,
         inside.display()
+    );
+    assert_eq!(
+        fs::read(&inside_fixture).expect("the named inside fixture must remain readable"),
+        expected_fixture,
+        "the named inside fixture must keep its exact expected bytes"
     );
     assert!(
         digits.bytes().all(|byte| byte.is_ascii_hexdigit()),

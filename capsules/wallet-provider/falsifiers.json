@@ -2666,8 +2666,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "const SECCOMP_PROBE_KEYCTL_TABLE: [libc::c_long; SECCOMP_PROBE_KEYCTL_ARGUMENTS] = [\n    SECCOMP_PROBE_KEYCTL_GET_KEYRING_ID,\n    SECCOMP_PROBE_KEYRING,\n    0,\n    0,\n    0,\n];",
-          "new": "const SECCOMP_PROBE_KEYCTL_TABLE: [libc::c_long; SECCOMP_PROBE_KEYCTL_ARGUMENTS] = [\n    SECCOMP_PROBE_KEYCTL_GET_KEYRING_ID,\n    0,\n    0,\n    0,\n    0,\n];"
+          "old": "            libc::syscall(libc::SYS_keyctl, command, keyring, create, first, second)",
+          "new": "            libc::syscall(libc::SYS_keyctl, command)"
         }
       ],
       "tests": [

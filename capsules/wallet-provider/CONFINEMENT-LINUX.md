@@ -111,7 +111,7 @@ own write failed or because it never ran, keeps the record's reason and adds wha
 the child did instead, so that reason is never lost behind a bare spawn error.
 
 `seccomp_keyctl_probe_supplies_every_argument_without_creation` covers the probe's
-`keyctl` request, which the kernel reads four arguments of: `KEYCTL_GET_KEYRING_ID`
+`keyctl` request, whose first three arguments are `KEYCTL_GET_KEYRING_ID`
 (command `0`), the session keyring, a create flag of `0` that asks for no keyring
 to be created, and two unused zeros. One table, `SECCOMP_PROBE_KEYCTL_TABLE`,
 holds all five, and the test reads both the table and the call, so a call that
@@ -130,10 +130,21 @@ outside `STORAGE_ROOT` absent after the run. The file evidence is those named
 fixture paths; a seccomp filter carries syscall policy, not path policy, so the
 run claims no general file boundary.
 
+The current journey also compares the key's final bytes with the bytes captured
+immediately after `init`. Its separate `STORAGE_ROOT/seccomp-inside-write`
+fixture must equal `b"wallet seccomp journey fixture\n"` after the read-only
+calls and shutdown. The key check requires the trailing newline.
+
 The launched child's own `/proc/<pid>/status` reports `Seccomp: 2`
 (`SECCOMP_MODE_FILTER`). That mode alone also accepts an inherited filter, so the
 launcher's record additionally carries the marker call's answer before and after
 its own `pre_exec` install, and the two must differ.
+
+The current test runs that journey in a child test process with an inherited
+allow-all filter, installed through `install_seccomp`. It checks `Seccomp: 2`
+before launching the provider and prints the launcher's before/after answers.
+This makes the WP176 skip-install plant reach the before/after assertion even
+when the provider already carries an inherited filter.
 
 Then one forked probe child records the four calls before the filter, installs
 the same filter through `install_seccomp`, and records them again:
@@ -158,14 +169,25 @@ The probe child allocates nothing after its fork, and the report proves it. The
 test binary counts the probe child's own allocations and the child writes the
 count with its report, which is `0` on every kernel-proof child; a child that
 allocated reports a count the parser reads and the probe refuses with its own
-reason. A child also closes the three standard streams it inherits before it does
-anything else, so a child this process ever leaves behind cannot hold the
-harness's own pipes open.
+reason. The report pipe is created with atomic `O_CLOEXEC`. One child ownership
+check uses `close_range` before the filter to keep only that child's report
+writer, including when another probe or launcher has an open report channel.
+The parent owns a bounded, nonblocking reader directly, so a read deadline
+closes the descriptor without leaving a reader thread behind. A kernel that
+refuses `close_range` ends the probe with its errno before any probe call.
+
+`linux_seccomp_probe_descriptors_stay_with_their_owner` holds the pipe-creation
+window open while another thread launches a provider, checks its `/proc` file
+descriptors, and runs a fork-only sibling that requires both inherited pipe
+ends to be closed. The owner then reaches EOF while the provider stays alive.
+A retained parent writer exercises the read deadline and checks descriptor
+cleanup on that error.
 
 The reaping test `linux_seccomp_probe_reaps_failures_and_repeated_journeys` starts
-six children: one that installs a refusing filter, one that reports nothing, one
-that traces itself and stops, one that writes a complete report and never exits,
-one that allocates after its fork, and the kernel proof. A stopped child is
+children for both failed install steps, an architecture mismatch, missing
+reports, stops, timeouts, allocations and repeated kernel proofs. Install
+failures use the launcher's fixed-record encoder and decoder, and the test
+requires the architecture refusal to name both architectures. A stopped child is
 killed and reaped like a timed-out one, because `PTRACE_TRACEME` makes a child's
 stops reportable without `WUNTRACED` and a stopped child is still alive. The reap
 is asserted on every result before any arm can return, and the whole test is
@@ -180,8 +202,9 @@ the host rule and starts the provider under the filter; on any other OS the same
 seat refuses the start by name instead of starting the provider unconfined.
 `standin_host_refusal_decides_each_policy` holds both.
 
-Every Linux-only plant below names exactly one test, and each was re-run on the
-host above with its red output quoted. None is registered in `falsifiers.json`:
+Every Linux-only plant below names exactly one test. The quoted outputs are
+from the earlier run on the host above; the repair's new inheritance cases await
+a Linux rerun. None is registered in `falsifiers.json`:
 the runner runs on the Mac, where these `#[cfg(target_os = "linux")]` tests do not
 run, so none can print a CAUGHT line there. Two Mac-runnable rules beside them are
 registered instead: WP166's argument rule in
@@ -213,18 +236,30 @@ missing-record reason in `seccomp_launch_record_refuses_missing_or_unknown_repor
   test fails with `the probe child allocated 1 times after its fork, where only
   async-signal-safe calls are available`.
 - WP176 skips only the launcher's `pre_exec` install and leaves the self-filtering
-  probe intact, so `linux_wallet_journey_runs_under_the_seccomp_allow_list` fails
+  probe intact. The earlier `linux_wallet_journey_runs_under_the_seccomp_allow_list` run failed
   with `the launched provider must carry SECCOMP_MODE_FILTER in its own /proc
-  status`, `left: 0`, `right: 2`.
+  status`, `left: 0`, `right: 2`. That run did not exercise an inherited filter.
+  The current test installs the inherited fixture first. Its required plant
+  failure is `an inherited filter alone must not satisfy the launcher's own install`,
+  with equal before/after answers. This additional Linux run is NOT RUN in the
+  repair session, which runs on macOS. To exercise it, replace only
+  `let install = install_seccomp(&allow);` in `start_under_seccomp` with
+  `let install: Result<(), SeccompInstallFailure> = Ok(());`, then run
+  `cargo test --locked --manifest-path capsules/wallet-provider/Cargo.toml --test confine linux_wallet_journey_runs_under_the_seccomp_allow_list -- --exact --nocapture`.
+  The inherited fixture's install and the probe's install stay intact.
 - WP177 writes the named outside sibling in `status`'s ok arm, so the journey
   finds `ElastOS/SystemServices/seccomp-outside-write` present and fails with
   `the named sibling outside STORAGE_ROOT must stay absent after the run`. That
   plant shows the fixture can fail; a seccomp filter does not stop that write, so
   the assertion is path evidence for the run and not a Linux file boundary.
 
-WP166 and WP167 are CAUGHT on the Mac, in
+The earlier WP166 and WP167 plants were CAUGHT on the Mac, in
 `seccomp_keyctl_probe_supplies_every_argument_without_creation` and
-`seccomp_launch_record_refuses_missing_or_unknown_report`.
+`seccomp_launch_record_refuses_missing_or_unknown_report`. WP166 now removes
+the call's four trailing arguments. A macOS hand run of that exact edit failed
+the named test with `the keyctl call must pass the table's five arguments and
+no register it did not set`; the source was then restored byte-for-byte. The
+registered runner check remains with the supervisor.
 
 ## The frame
 

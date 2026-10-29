@@ -1396,8 +1396,8 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   attempted instead of refused for both providers' names.
 - Pass only the command to the probe's `keyctl` call (WP166):
   `seccomp_keyctl_probe_supplies_every_argument_without_creation` fails because
-  the argument table names no keyring and no create flag, so the kernel would read
-  registers the probe never set.
+  the call omits the keyring, create flag and two unused arguments. The table
+  keeps all five values, so the test checks the call's use of them.
 - Answer a failed spawn's reason alone when the install record is empty (WP167):
   `seccomp_launch_record_refuses_missing_or_unknown_report` fails because the
   missing-report reason is lost behind that spawn reason.
