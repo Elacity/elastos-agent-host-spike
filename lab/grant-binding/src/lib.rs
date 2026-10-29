@@ -1388,6 +1388,54 @@ fn model_grant_keeps_bound_rights() {
 }
 
 #[test]
+fn model_forged_append_does_not_widen_the_returned_grant() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let bound = Rights {
+        append: false,
+        overwrite: true,
+        child_journal: false,
+    };
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", bound)
+        .expect("bind");
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_append);
+    let decision = verifier
+        .use_grant(verifier.open_call(instance), &request)
+        .expect("forged append does not widen the returned grant");
+    assert_eq!(decision.rights, bound);
+    assert!(!decision.rights.append);
+}
+
+#[test]
+fn model_forged_child_journal_does_not_widen_the_returned_grant() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let bound = Rights {
+        append: true,
+        overwrite: false,
+        child_journal: false,
+    };
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", bound)
+        .expect("bind");
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let decision = verifier
+        .use_grant(verifier.open_call(instance), &request)
+        .expect("forged child journal does not widen the returned grant");
+    assert_eq!(decision.rights, bound);
+    assert!(!decision.rights.child_journal);
+}
+
+#[test]
 fn model_readme_states_the_reference_model_boundary() {
     let readme = include_str!("../README.md");
     assert!(readme.contains(
