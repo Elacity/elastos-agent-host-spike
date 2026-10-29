@@ -93,6 +93,7 @@ pub struct Reservation {
 pub enum ReserveRefuse {
     OverCeiling { ceiling: u64, held: u64, asked: u64 },
     SumOverflow { held: u64, asked: u64 },
+    NoCeiling,
     Binding(Refuse),
 }
 
@@ -105,6 +106,7 @@ impl std::fmt::Display for ReserveRefuse {
             ReserveRefuse::SumOverflow { .. } => {
                 formatter.write_str("reservation sum does not fit in u64")
             }
+            ReserveRefuse::NoCeiling => formatter.write_str("identity has no ceiling"),
             ReserveRefuse::Binding(refusal) => refusal.fmt(formatter),
         }
     }
@@ -235,9 +237,11 @@ impl Verifier {
 
     /// Holds `amount` on the ledger when the total this identity compares plus
     /// `amount` stays at or under the ceiling. A binding refusal records nothing,
-    /// a total that does not fit in `u64` is over the ceiling, a stored sum of
-    /// every open hold plus `amount` that does not fit in `u64` is a sum
-    /// overflow, and the request's reported usage does not lower the hold.
+    /// an identity with no stored ceiling while one is stored for another is
+    /// refused with no ceiling, a total that does not fit in `u64` is over the
+    /// ceiling, a stored sum of every open hold plus `amount` that does not fit
+    /// in `u64` is a sum overflow, and the request's reported usage does not
+    /// lower the hold.
     pub fn reserve(
         &self,
         call: &Call,
@@ -261,6 +265,9 @@ impl Verifier {
         } else {
             shared
         };
+        if !ledger.ceilings.is_empty() && !ledger.ceilings.contains_key(&identity) {
+            return Err(ReserveRefuse::NoCeiling);
+        }
         ledger.ceiling = ledger.admitted;
         if let Some(agent_ceiling) = ledger.ceilings.get(&identity).copied() {
             ledger.ceiling = agent_ceiling;
@@ -1782,7 +1789,7 @@ fn model_lower_admit_binds_an_asked_agent() {
 }
 
 #[test]
-fn model_unasked_agent_reads_the_last_admit() {
+fn model_unasked_agent_does_not_inherit_the_last_admit() {
     let mut verifier = Verifier::new();
     let first = verifier.register_instance("agent-1", "session-a");
     let second = verifier.register_instance("agent-2", "session-a");
@@ -1823,16 +1830,9 @@ fn model_unasked_agent_reads_the_last_admit() {
         .expect("first agent inside its own ceiling");
     let refusal = verifier
         .reserve(&third_call, &third_request, 40)
-        .expect_err("an agent with no ask reads the last admit");
-    assert_eq!(
-        refusal,
-        ReserveRefuse::OverCeiling {
-            ceiling: 4,
-            held: 1,
-            asked: 40,
-        }
-    );
-    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+        .expect_err("an unasked agent has no ceiling");
+    assert_eq!(refusal, ReserveRefuse::NoCeiling);
+    assert_eq!(refusal.to_string(), "identity has no ceiling");
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
     assert_eq!(after.held, 1);
