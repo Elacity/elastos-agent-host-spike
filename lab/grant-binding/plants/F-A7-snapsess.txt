@@ -1,0 +1,10 @@
+id: F-A7-snapsess
+file: src/ledger.rs
+test: ledger::model_settle_after_session_change_is_refused
+--- old
+        if live.session != snapshot_session {
+            return Err(SettleRefuse::Binding(Refuse::Session));
+        }
+--- new
+        let _same_session = live.session == snapshot_session;
+--- end
