@@ -131,7 +131,7 @@ fn adding_or_removing_a_payload_file_changes_the_lab_cid() {
 #[test]
 fn one_byte_change_in_asks_json_changes_the_lab_cid() {
     // M1 check B2: the asks a capsule declares are inside its name. The lab
-    // never parses asks.json; to the lab CID it is one more payload file.
+    // CID never parses asks.json: to the name it is one more payload file.
     let bundle = assemble(&AGENT_HOST);
     let before = named(bundle.path());
     let asks = read_fixture(&AGENT_HOST, "asks.json");

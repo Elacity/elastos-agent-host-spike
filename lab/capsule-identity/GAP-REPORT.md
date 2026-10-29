@@ -806,8 +806,8 @@ content provider that happens before capsule CID validation as 'pre-CID, not B1 
 encoding; the ask-to-operation mapping now lives in lab/bus-v2-proposal/ (new lane cu-bus-v2-proposal), so this
 lane writes no B2 encoding."
 
-Each citation in this section is at `563017a7a`, the lab commit task 026 read (see the header). This report did
-not run the tests.
+Each citation in this section is at `563017a7a`, the lab commit task 026 read (see the header), except task 074's
+corrected quote and its dated paragraph, which are at the current lane head. This report did not run the tests.
 
 - (a) B1 today. The CID component command applies the current signature policy, and that is not complete
   signed-package verification. B1's narrow first step is the record-to-launch repair and its regression test, on
@@ -849,8 +849,9 @@ not run the tests.
   not the Runtime's B1 check, for the reasons in (b).
 - (d) B2. The lab's B2 test shows only that `asks.json`'s bytes are inside the lab CID:
   `lab/capsule-identity/tests/bytes.rs:132` `fn one_byte_change_in_asks_json_changes_the_lab_cid() {`
-  The lab never parses `asks.json`:
-  `lab/capsule-identity/README.md:301` ``capsule's name. The lab never parses `asks.json`: to the lab CID it is one more``
+  The lab CID still covers those bytes:
+  `lab/capsule-identity/README.md:366` ``capsule's name. The lab CID still covers those bytes: `asks.json` is one more payload file in the name. The launch journey parses their provisional declaration, and the library encoder still does not.``
+  Corrected by task 074.
   Not shown: what an ask means, or how one is encoded. The ask-to-operation mapping is in `lab/bus-v2-proposal/`
   (its `CORE-CALLS-PROPOSAL.md`, lane cu-bus-v2-proposal), named here and not cited by line. This lane writes no
   B2 encoding, no ask schema and no mapping.
@@ -858,7 +859,7 @@ not run the tests.
   checked, signed bundle it launched, read through a lab test seam, not a route, so a change on disk after launch
   does not reach it and a stub that reads the folder again fails
   (`standin_hands_an_instance_only_its_signed_asks_bytes`, `standin_gives_each_session_its_own_asks`; README
-  "Asks come only from the signed bytes (M1 check B2, no-schema part)"); not shown: no ask schema, no parse of
+  "Asks come only from the signed bytes (M1 check B2)"); not shown: no ask schema, no parse of
   `asks.json`, no mapping of an ask to an operation (`lab/bus-v2-proposal/`), no grant from an ask (033), and the
   Runtime hands no asks to anything and did nothing here.
   28 Oct, task 044: until task 044, only the call-time re-read (F-CI35a, a stub in which `asks_of` reads the
@@ -866,6 +867,12 @@ not run the tests.
   above, as the 041 second review's FOLLOWUP found (`SECOND-REVIEW.md`, the #730 section). That stub now fails too
   (`standin_takes_the_asks_from_the_walk_not_the_folder`, F-CI44a), through a lab test seam, not a route, that
   changes the stored bytes between the walk and the launch.
+  29 Oct, task 074: the launch journey reads the provisional declaration from the checked `asks.json` bytes
+  through the one lab parse, `provisional_asks` (`tests/common/mod.rs`), and `declared_asks_of`, a lab test seam,
+  not a route, answers the parsed (`kind`, `resource`) pairs in file order
+  (`standin_reads_declared_asks_from_the_signed_manifest`). The library encoder still does not parse those bytes
+  for the lab CID, so the name stays a name over bytes, and a matching signature adds no grant. The
+  ask-to-operation mapping stays in `lab/bus-v2-proposal/`, and this lane writes no B2 encoding.
 
 ### B1 through a lab stand-in (27 Oct, tasks 032 and 033)
 

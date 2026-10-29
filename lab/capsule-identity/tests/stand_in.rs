@@ -749,6 +749,223 @@ fn standin_gives_each_session_its_own_asks() {
     }
 }
 
+/// The committed `agent-host` asks as (`kind`, `resource`) pairs, in file
+/// order, read with `serde_json::Value`.
+fn committed_declared_asks() -> Vec<(String, String)> {
+    let declaration: Value =
+        serde_json::from_slice(&read_fixture(&AGENT_HOST, "asks.json")).expect("asks.json is JSON");
+    declaration["asks"]
+        .as_array()
+        .expect("an asks array")
+        .iter()
+        .map(|ask| {
+            (
+                ask["kind"].as_str().expect("a kind").to_owned(),
+                ask["resource"].as_str().expect("a resource").to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// Change the `asks.json` of `folder` with `edit`, which sees the parsed
+/// declaration, and write it back as JSON.
+fn change_asks(folder: &Path, edit: impl FnOnce(&mut Value)) {
+    let path = folder.join("asks.json");
+    let mut declaration: Value = serde_json::from_slice(&fs::read(&path).expect("read asks.json"))
+        .expect("asks.json is JSON");
+    edit(&mut declaration);
+    fs::write(
+        &path,
+        serde_json::to_vec(&declaration).expect("asks.json serializes"),
+    )
+    .expect("write asks.json");
+}
+
+/// Publish a fresh copy of `fixture` as `folder_name`, change its `asks.json`
+/// with `edit`, sign its changed lab CID with a fresh test key, and register
+/// it once with a fresh shared stand-in.
+fn signed_variant(
+    fixture: &Fixture,
+    folder_name: &str,
+    edit: impl FnOnce(&Path),
+) -> (Published, StandInRuntime, StandIn) {
+    let parent = temp_dir();
+    let folder = parent.path().join(folder_name);
+    assemble_at(fixture, &folder);
+    edit(&folder);
+    let entry = published(&folder);
+    let key = fresh_signing_key();
+    let record = sign(&key, &folder);
+    let lane = StandInRuntime::new([entry.clone()], vec![record], vec![did_of(&key)]);
+    let mut shared = StandIn::new();
+    register(&mut shared, &folder);
+    (
+        Published {
+            parent,
+            folder,
+            entry,
+        },
+        lane,
+        shared,
+    )
+}
+
+#[test]
+fn standin_reads_declared_asks_from_the_signed_manifest() {
+    let published = publish_agent_host();
+    let (mut lane, mut shared) = signed_stand_in(&published);
+    let signed = read_fixture(&AGENT_HOST, "asks.json");
+    let declared = committed_declared_asks();
+    assert_eq!(
+        declared.first(),
+        Some(&("read".to_owned(), "<principal>/".to_owned())),
+        "the committed declaration's first ask"
+    );
+
+    let answer = launch_cid(&mut lane, &mut shared, AGENT_HOST_LAB_CID)
+        .unwrap_or_else(|(status, reason)| panic!("refused with {status}: {reason}"));
+    assert_eq!(answer["status"], "starting");
+    let session = answer["session_id"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+    assert_eq!(lane.declared_asks_of(&session), Some(declared.clone()));
+    assert_eq!(lane.asks_of(&session), Some(signed.clone()));
+    assert_eq!(
+        grant_view(&lane, &shared),
+        Vec::<Value>::new(),
+        "a matching signature adds no grant"
+    );
+    assert_eq!(lane.declared_asks_of("no-such-session"), None);
+
+    // A change to the stored read kind after publish: (e)'s own refusal, and
+    // the first session keeps the declaration it was handed.
+    change_asks(&published.folder, |declaration| {
+        declaration["asks"][0]["kind"] = json!("reed");
+    });
+    let now = named(&published.folder).to_string();
+    assert_ne!(now, AGENT_HOST_LAB_CID);
+    let compare = checked(&published.folder)
+        .check_name(AGENT_HOST_LAB_CID)
+        .expect_err("the bytes changed")
+        .to_string();
+    assert!(compare.contains(AGENT_HOST_LAB_CID) && compare.contains(&now));
+    assert_eq!(
+        launch_cid(&mut lane, &mut shared, AGENT_HOST_LAB_CID),
+        Err((400, compare)),
+        "(e) after the stored read kind changed"
+    );
+    assert!(
+        lane.declared_asks_of(&session)
+            .is_some_and(|declared| declared[0].0 == "read"),
+        "the first session still declares read"
+    );
+    assert_eq!(listed_instances(&shared).len(), 1, "no new instance");
+    assert_eq!(grant_view(&lane, &shared), Vec::<Value>::new(), "no grant");
+
+    // A schema string other than the provisional one is refused with its own
+    // sentence, even with the same asks array.
+    let (bad_schema, mut lane, mut shared) = signed_variant(&AGENT_HOST, "bad-schema", |folder| {
+        change_asks(folder, |declaration| {
+            declaration["schema"] = json!("not-the-provisional-schema");
+        });
+    });
+    let cid = bad_schema.entry.0.clone();
+    assert_refused(
+        &mut lane,
+        &mut shared,
+        &json!({ "cid": cid }),
+        "asks declaration: schema is not-the-provisional-schema, not elastos.agent-host.asks/v1",
+        "the provisional schema id",
+    );
+
+    // An extra field on the first ask is a shape error, with the serde text
+    // after the one prefix and not the schema sentence.
+    let (extra_field, mut lane, mut shared) =
+        signed_variant(&AGENT_HOST, "extra-field", |folder| {
+            change_asks(folder, |declaration| {
+                declaration["asks"][0]["extra"] = json!("x");
+            });
+        });
+    let cid = extra_field.entry.0.clone();
+    let (status, reason) =
+        launch_cid(&mut lane, &mut shared, &cid).expect_err("an ask's extra field must be refused");
+    assert_eq!(status, 400);
+    assert!(reason.starts_with("asks declaration:"), "{reason}");
+    assert_ne!(
+        reason,
+        "asks declaration: schema is not-the-provisional-schema, not elastos.agent-host.asks/v1",
+        "the extra-field refusal is not the schema sentence"
+    );
+    assert_none_listed(&shared, "an ask's extra field");
+
+    // An empty kind and an empty resource each have their own sentence.
+    let (empty_kind, mut lane, mut shared) = signed_variant(&AGENT_HOST, "empty-kind", |folder| {
+        change_asks(folder, |declaration| {
+            declaration["asks"][0]["kind"] = json!("");
+        });
+    });
+    let cid = empty_kind.entry.0.clone();
+    assert_refused(
+        &mut lane,
+        &mut shared,
+        &json!({ "cid": cid }),
+        "asks declaration: an ask has an empty kind",
+        "an empty kind",
+    );
+
+    let (empty_resource, mut lane, mut shared) =
+        signed_variant(&AGENT_HOST, "empty-resource", |folder| {
+            change_asks(folder, |declaration| {
+                declaration["asks"][0]["resource"] = json!("");
+            });
+        });
+    let cid = empty_resource.entry.0.clone();
+    assert_refused(
+        &mut lane,
+        &mut shared,
+        &json!({ "cid": cid }),
+        "asks declaration: an ask has an empty resource",
+        "an empty resource",
+    );
+
+    // No kind allow-list: a signed unknown kind launches and is declared.
+    let (unknown_kind, mut lane, mut shared) =
+        signed_variant(&AGENT_HOST, "unknown-kind", |folder| {
+            change_asks(folder, |declaration| {
+                declaration["asks"][0]["kind"] = json!("teleport");
+            });
+        });
+    let cid = unknown_kind.entry.0.clone();
+    let answer = launch_cid(&mut lane, &mut shared, &cid)
+        .unwrap_or_else(|(status, reason)| panic!("refused with {status}: {reason}"));
+    assert_eq!(answer["status"], "starting");
+    let session = answer["session_id"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+    let mut expected = declared.clone();
+    expected[0].0 = "teleport".to_owned();
+    assert_eq!(lane.declared_asks_of(&session), Some(expected));
+    assert_eq!(grant_view(&lane, &shared), Vec::<Value>::new(), "no grant");
+
+    // A bundle with no asks.json is handed none, and its session declares
+    // none.
+    let (web_app, mut lane, mut shared) = signed_variant(&WEB_APP, "web-app", |_| {});
+    assert_eq!(web_app.entry.0, WEB_APP_LAB_CID, "the fixture's pin");
+    let answer = launch_cid(&mut lane, &mut shared, WEB_APP_LAB_CID)
+        .unwrap_or_else(|(status, reason)| panic!("refused with {status}: {reason}"));
+    assert_eq!(answer["status"], "starting");
+    let session = answer["session_id"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+    assert_eq!(lane.asks_of(&session), None);
+    assert_eq!(lane.declared_asks_of(&session), None);
+    assert_eq!(listed_instances(&shared).len(), 1);
+    assert_eq!(grant_view(&lane, &shared), Vec::<Value>::new(), "no grant");
+}
+
 #[test]
 fn standin_shared_stop_updates_the_same_instances_and_grants() {
     let published = publish_agent_host();

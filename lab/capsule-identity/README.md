@@ -363,8 +363,10 @@ The agent-host lane may change its files later; these copies stay as they are,
 so the pin holds. The manifest's entrypoint, `agent-host.component.wasm`, is
 build output and is never committed (HANDOFF rule 7), so the module is not in
 the fixture: this lab CID covers the two files only and is not the whole
-capsule's name. The lab never parses `asks.json`: to the lab CID it is one more
-payload file. The manifest is a component manifest, so the Runtime's
+capsule's name. The lab CID still covers those bytes: `asks.json` is one more
+payload file in the name. The launch journey parses their provisional
+declaration, and the library encoder still does not. The manifest is a
+component manifest, so the Runtime's
 `validate()` also requires its `wit_world_sha256` to equal the SHA-256 of
 `elastos/wit/elastos-bus-v1.wit`, which `elastos-common` compiles in
 (`elastos/crates/elastos-common/src/manifest.rs:412` and `:794-800`).
@@ -1611,14 +1613,18 @@ Not shown:
 Claim scope: one Mac, the `agent-host` fixture, test keys only, records in
 memory.
 
-### Asks come only from the signed bytes (M1 check B2, no-schema part)
+### Asks come only from the signed bytes (M1 check B2)
 
 A launched instance is handed its asks only as the `asks.json` bytes of the
 checked bundle that passed every check above. `checked_launch` takes the
 content of the `asks.json` entry (`CheckedBundle::entries()`) from the one
 `CheckedBundle`, the one walk (P10), and `commit_launch` keeps that content
 under the shared launch's `session_id`, once: `Some(bytes)`, or `None` when
-the bundle has no `asks.json`. Nothing reads the folder again. Task 044 shows
+the bundle has no `asks.json`. The same launch parses those bytes once, through
+`provisional_asks`, into the provisional declaration; `declared_asks_of`, a
+lab test seam, not a route, answers that declaration. The library encoder still
+does not parse `asks.json`, so the lab CID stays a name over the bytes.
+Nothing reads the folder again. Task 044 shows
 that for the launch itself: `set_after_walk`, a lab test seam, not a route,
 gives `checked_launch` a hook that it calls once on the stored folder, right
 after the one walk and before (e), so a test can change the bytes on disk
@@ -1646,17 +1652,32 @@ bytes, which the test reads itself. Before task 044, a launch that read
 `asks.json` from the folder after the walk passed both tests above, because
 neither changes the folder between the walk and the launch.
 
+Task 074's `standin_reads_declared_asks_from_the_signed_manifest` uses the
+same launch entry and shows the provisional declaration. The `agent-host`
+session declares the committed `kind` and `resource` pairs in file order,
+starting with `read` and `<principal>/`, while `asks_of` still answers the
+committed bytes. `provisional_asks` accepts one shape only: `schema`, exactly
+`elastos.agent-host.asks/v1`, and `asks`, an array of objects whose only
+fields are non-empty `kind` and `resource` strings. A changed stored kind is
+refused by (e); a wrong schema, an extra ask field, an empty kind and an empty
+resource are each refused with their own `asks declaration:` reason; a signed
+unknown kind launches; a bundle with no `asks.json` declares none; and an
+unknown session answers none. A matching signature adds no grant: the grant
+view stays empty.
+
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
 | The instance keeps the signed bytes from launch; a change on disk after launch does not reach it | `standin_hands_an_instance_only_its_signed_asks_bytes` | F-CI35a (the planted accept-anything stub: `asks_of` reads `asks.json` from the stored folder at call time) |
 | Each session answers its own asks | `standin_gives_each_session_its_own_asks` | F-CI35b (`asks_of` ignores the session and answers the first snapshot's asks) |
 | A bundle with no `asks.json` is handed `None`, not empty bytes | `standin_gives_each_session_its_own_asks` | F-CI35c (`Some(Vec::new())` for a bundle with no `asks.json`) |
 | A change on disk between the walk and the launch does not reach the instance | `standin_takes_the_asks_from_the_walk_not_the_folder` | F-CI44a (the 041 review's stub: `checked_launch` reads `asks.json` from the stored folder at launch), F-CI44b (the hook is never called), F-CI44c (the hook runs before the walk, so (e) refuses) |
+| The launch reads the provisional declaration from the checked bytes; a wrong schema, an extra field, an empty kind and an empty resource are each refused | `standin_reads_declared_asks_from_the_signed_manifest` | F-CI74a (the schema-id comparison removed: any schema string is accepted) |
 
 Not shown:
 
-- No ask schema, provisional or not, and no parse or field read of
-  `asks.json`: to the lane it is bytes.
+- No ask schema from the Runtime and no second parse: `provisional_asks` is
+  the one parse, its schema id is lab text, and the library encoder does not
+  parse `asks.json` for the lab CID.
 - No mapping of an ask to an operation; that is `lab/bus-v2-proposal/`, and
   this lane writes no B2 encoding.
 - No grant from an ask: a launch still adds none (the grant view above).
@@ -1828,7 +1849,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 278 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 279 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1869,7 +1890,7 @@ and F-CI36b (see [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)),
 and task 037's F-CI37a to F-CI37c (see
 [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)), and task 044's
 F-CI44a to F-CI44c (see
-[asks come only from the signed bytes](#asks-come-only-from-the-signed-bytes-m1-check-b2-no-schema-part)),
+[asks come only from the signed bytes](#asks-come-only-from-the-signed-bytes-m1-check-b2)),
 and task 047's F-CI47a to F-CI47c (see
 [naming a closure listing](#naming-a-closure-listing)), and task 048's
 F-CI48a to F-CI48e (see [the encoding](#the-encoding)), and task 049's
@@ -1877,7 +1898,9 @@ F-CI49a to F-CI49c (see
 [the lab package record](#lab-package-record-outside-the-bundle)), and task
 059's F-CI59a to F-CI59c (F-CI59a: see
 [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1); F-CI59b and
-F-CI59c: see [what it is](#what-it-is-and-what-it-is-not)).
+F-CI59c: see [what it is](#what-it-is-and-what-it-is-not)), and task 074's
+F-CI74a (see
+[asks come only from the signed bytes](#asks-come-only-from-the-signed-bytes-m1-check-b2)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its

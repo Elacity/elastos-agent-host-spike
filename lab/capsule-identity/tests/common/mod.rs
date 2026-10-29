@@ -30,6 +30,7 @@ use capsule_identity::{
     verify_checked_package_record, BundleEntry, CheckedBundle, LabCid, Moment, PackageRecord,
     Refusal,
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -1433,7 +1434,9 @@ pub fn published(folder: &Path) -> (String, PathBuf) {
 /// - [`StandInRuntime::live_grants`]: the one shared grant view;
 /// - [`grant_request_id`]: the request id for one seeded grant;
 /// - [`StandInRuntime::apply_stop`]: the one shared stop;
-/// - [`StandInRuntime::asks_of`]: the signed asks of one launch;
+/// - [`StandInRuntime::asks_of`]: the signed asks bytes of one launch;
+/// - [`StandInRuntime::declared_asks_of`]: the provisional declaration of one
+///   launch;
 /// - [`StandInRuntime::set_after_walk`]: the after-walk hook.
 ///
 /// The shared launch body's only field is `path`; this lane's launch body's
@@ -1445,19 +1448,30 @@ pub fn published(folder: &Path) -> (String, PathBuf) {
 ///
 /// A launch is handed its asks only as the `asks.json` bytes of the checked
 /// bundle, kept under the shared `session_id` it answers, through
-/// [`StandInRuntime::asks_of`]: a change on disk after launch does not reach
-/// it. The bytes are never parsed, and the shared routes have no asks field.
-/// A change on disk between the walk and the launch does not reach it either,
-/// shown through [`StandInRuntime::set_after_walk`].
+/// [`StandInRuntime::asks_of`], and as the provisional declaration parsed from
+/// those same bytes once at launch, through
+/// [`StandInRuntime::declared_asks_of`]: a change on disk after launch does
+/// not reach either snapshot. The shared routes have no asks field. A change
+/// on disk between the walk and the launch does not reach the snapshots
+/// either, shown through [`StandInRuntime::set_after_walk`].
 pub struct StandInRuntime {
     store: BTreeMap<String, PathBuf>,
     records: Vec<PackageRecord>,
     accepted: Vec<String>,
-    /// The `asks.json` bytes of the checked bundle, keyed by the shared
-    /// session id of the launch that created the instance. It holds no
-    /// status, grant or independent session id.
-    asks: BTreeMap<String, Option<Vec<u8>>>,
+    /// The asks of the checked bundle, keyed by the shared session id of the
+    /// launch that created the instance: the `asks.json` bytes and the
+    /// provisional declaration parsed from them, both from the one launch. It
+    /// holds no status, grant or independent session id.
+    asks: BTreeMap<String, Option<SignedAsks>>,
     after_walk: Option<fn(&Path)>,
+}
+
+/// The asks of one launch: the `asks.json` bytes of the checked bundle and the
+/// provisional declaration parsed from those same bytes, once.
+#[derive(Clone)]
+struct SignedAsks {
+    bytes: Vec<u8>,
+    declared: Vec<(String, String)>,
 }
 
 impl StandInRuntime {
@@ -1518,9 +1532,27 @@ impl StandInRuntime {
     /// Lab test seam, not a route: the asks the shared instance of
     /// `session_id` was handed at launch. `None` when that bundle has no
     /// `asks.json`, or when no launch has that session. The shared routes
-    /// have no asks field, and nothing here parses the bytes.
+    /// have no asks field. This reads the snapshot kept at launch; it does
+    /// not parse and does not read the folder.
     pub fn asks_of(&self, session_id: &str) -> Option<Vec<u8>> {
-        self.asks.get(session_id).cloned().flatten()
+        self.asks
+            .get(session_id)
+            .cloned()
+            .flatten()
+            .map(|asks| asks.bytes)
+    }
+
+    /// Lab test seam, not a route: the provisional declaration the shared
+    /// instance of `session_id` was handed at launch, as its (`kind`,
+    /// `resource`) pairs in file order. `None` when that bundle has no
+    /// `asks.json`, or when no launch has that session. It answers what the
+    /// launch parsed; it does not parse and does not read the folder.
+    pub fn declared_asks_of(&self, session_id: &str) -> Option<Vec<(String, String)>> {
+        self.asks
+            .get(session_id)
+            .cloned()
+            .flatten()
+            .map(|asks| asks.declared)
     }
 
     /// Lab test seam, not a route: every later launch calls `hook` once, on
@@ -1535,14 +1567,17 @@ impl StandInRuntime {
     /// The checks of a launch, in this order, each library refusal as its own
     /// text: (a) the body, (b) the one parse of a printed lab CID, (c) the
     /// store, (d) the one walk, (e) the one name compare against the stored
-    /// bytes, (f) a package record for that CID, (g) the one record check.
-    /// (a), (b) and (c) come before the CID check. The answer is the stored
-    /// folder as the shared `path` text, and the bundle's `asks.json` bytes,
-    /// both from the one checked bundle that passed every check. The hook of
-    /// [`StandInRuntime::set_after_walk`], if set, runs on the stored folder
-    /// right after (d); no check after (d) and no part of the answer reads the
-    /// folder again.
-    fn checked_launch(&self, body: &Value) -> Result<(String, Option<Vec<u8>>), String> {
+    /// bytes, (f) a package record for that CID, (g) the one record check,
+    /// then the provisional declaration of the checked bundle's `asks.json`
+    /// bytes, when it has them. (a), (b) and (c) come before the CID check.
+    /// The answer is the stored folder as the shared `path` text, and the
+    /// signed asks of the one checked bundle that passed every check: its
+    /// `asks.json` bytes and the declaration parsed from those same bytes,
+    /// once. A declaration refusal is status 400 and the closure is not
+    /// called. The hook of [`StandInRuntime::set_after_walk`], if set, runs on
+    /// the stored folder right after (d); no check after (d) and no part of
+    /// the answer reads the folder again.
+    fn checked_launch(&self, body: &Value) -> Result<(String, Option<SignedAsks>), String> {
         let cid = self.launch_cid(body)?;
         cid.parse::<LabCid>().map_err(said)?;
         let folder = self
@@ -1555,7 +1590,13 @@ impl StandInRuntime {
         }
         checked.check_name(&cid).map_err(said)?;
         self.check_records(&checked, &cid)?;
-        Ok((folder.to_string_lossy().into_owned(), signed_asks(&checked)))
+        let asks = signed_asks(&checked)
+            .map(|bytes| {
+                let declared = provisional_asks(&bytes)?;
+                Ok::<SignedAsks, String>(SignedAsks { bytes, declared })
+            })
+            .transpose()?;
+        Ok((folder.to_string_lossy().into_owned(), asks))
     }
 
     /// Checks (f) and (g): every package record that binds `cid`, in store
@@ -1612,8 +1653,66 @@ fn said(refusal: Refusal) -> String {
     refusal.to_string()
 }
 
-/// The asks file of a bundle, which the lab never parses.
+/// The asks file of a bundle; the walk reads its bytes and the launch parses
+/// them once.
 const ASKS_FILE: &str = "asks.json";
+
+/// The provisional declaration's schema id. It is lab text, not the Runtime's
+/// manifest schema.
+const ASKS_SCHEMA: &str = "elastos.agent-host.asks/v1";
+
+/// Provisional lab stand-in schema, not the Runtime manifest.
+///
+/// It is the one parse of an `asks.json` body.
+/// The body is a JSON object whose only fields are `schema`, exactly
+/// [`ASKS_SCHEMA`], and `asks`, an array of objects whose only fields are
+/// `kind` and `resource`, both non-empty strings. File order is kept. There is
+/// no kind allow-list and no reading of `<principal>`: a kind is text the
+/// capsule declares.
+///
+/// Each refusal is its own text: a shape or unknown-field error is
+/// `asks declaration: ` plus the serde error, a wrong schema names the value
+/// it found, and an empty kind or an empty resource has its own sentence.
+pub fn provisional_asks(bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
+    let declaration: AsksDeclaration =
+        serde_json::from_slice(bytes).map_err(|error| format!("asks declaration: {error}"))?;
+    if declaration.schema != ASKS_SCHEMA {
+        return Err(format!(
+            "asks declaration: schema is {}, not {ASKS_SCHEMA}",
+            declaration.schema
+        ));
+    }
+    declaration
+        .asks
+        .into_iter()
+        .map(|ask| {
+            if ask.kind.is_empty() {
+                return Err("asks declaration: an ask has an empty kind".to_owned());
+            }
+            if ask.resource.is_empty() {
+                return Err("asks declaration: an ask has an empty resource".to_owned());
+            }
+            Ok((ask.kind, ask.resource))
+        })
+        .collect()
+}
+
+/// The provisional declaration's shape: `schema` and `asks`, nothing else.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AsksDeclaration {
+    schema: String,
+    asks: Vec<AskDeclaration>,
+}
+
+/// One ask of the provisional declaration: `kind` and `resource`, nothing
+/// else.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AskDeclaration {
+    kind: String,
+    resource: String,
+}
 
 /// The content of the checked bundle's `asks.json` entry, or `None` when it
 /// has none: the bytes the walk read, never read from the folder again.
