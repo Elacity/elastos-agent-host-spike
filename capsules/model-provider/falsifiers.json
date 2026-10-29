@@ -2935,6 +2935,38 @@
         "tests": [
           "state::tests::retained_request_precedes_freshness_floor_policy_and_unrelated_pruning"
         ]
-      }
+      },
+    {
+      "id": "MP72",
+      "title": "the pending, denied and ended arms are dropped, so a pending Runtime denial is not hosted_access_pending",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "            Some(\"pending\") => (\n                \"hosted_access_pending\",\n                \"Hosted access is waiting for approval in Inbox.\",\n            ),\n            Some(\"denied\") => (\"hosted_access_denied\", \"Hosted access was denied in Inbox.\"),\n            Some(\"ended\") => (\n                \"hosted_access_ended\",\n                \"Hosted access ended. Approve the new request in Inbox to use it again.\",\n            ),\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "hosted_access_states_fail_the_run_on_the_socket"
+      ]
+    },
+    {
+      "id": "MP73",
+      "title": "the in-band end line is ignored, so a mid-reply end is not hosted_access_ended_during_reply",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "            if runtime_end_line_possible && current_line == HOSTED_ACCESS_ENDED_LINE {\n                // Keep the text that already arrived, then say why the reply stopped.\n                if !stream_state.delta_buffer.is_empty() {\n                    flush_local_text_delta(\n                        &task.offer,\n                        &task.run_id,\n                        task.generation,\n                        &task.updates,\n                        &mut stream_state.delta_buffer,\n                        timing,\n                    )\n                    .await?;\n                }\n                return Err(hosted_access_ended_during_reply_fault());\n            }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "hosted_access_states_fail_the_run_on_the_socket"
+      ]
+    }
   ]
 }
