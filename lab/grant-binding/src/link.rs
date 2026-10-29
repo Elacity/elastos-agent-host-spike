@@ -338,3 +338,18 @@ fn model_comment_is_not_a_path_link() {
     let followed = "# path = \"../grant-binding\"\ngb = { path = \"../grant-binding\" }\n";
     assert!(cargo_toml_path_depends_on_grant_binding(followed));
 }
+
+#[test]
+fn model_literal_string_path_is_a_link() {
+    let single = "gb = { path = '../grant-binding' }\n";
+    assert!(single.contains("grant-binding"));
+    assert!(single.contains("path"));
+    assert!(cargo_toml_path_depends_on_grant_binding(single));
+    let multi = "gb = { path = '''../grant-binding''' }\n";
+    assert!(multi.contains("grant-binding"));
+    assert!(multi.contains("path"));
+    assert!(cargo_toml_path_depends_on_grant_binding(multi));
+    let escaped = "gb = { path = '../grant-bind\\u0069ng' }\n";
+    assert!(!escaped.contains("grant-binding"));
+    assert!(!cargo_toml_path_depends_on_grant_binding(escaped));
+}
