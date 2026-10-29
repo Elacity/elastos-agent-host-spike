@@ -460,7 +460,7 @@ const KUBO_ADD_FLAGS: [&str; 25] = [
 ];
 
 /// One `kubo` command with `IPFS_PATH` at `repo`, returning its stdout, or a
-/// refusal that names the command and its stderr.
+/// refusal that names the command, its exit status or signal, and its stderr.
 fn kubo_run(kubo: &Path, repo: &Path, args: &[&str]) -> Result<String, String> {
     let output = Command::new(kubo)
         .args(args)
@@ -469,7 +469,11 @@ fn kubo_run(kubo: &Path, repo: &Path, args: &[&str]) -> Result<String, String> {
         .map_err(|error| format!("{} {args:?} could not run: {error}", kubo.display()))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("{} {args:?} failed: {stderr}", kubo.display()));
+        return Err(format!(
+            "{} {args:?} failed with {}: {stderr}",
+            kubo.display(),
+            output.status
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -554,7 +558,8 @@ fn kubo_hash_only_import_prints_every_lab_cid_pin() {
 }
 
 /// The helper's setup refusals, checked without Kubo: an unset name, another
-/// version, and a name that is no binary each fail with their own reason.
+/// version, a name that is no binary, and a failed version command each fail
+/// with their own reason.
 #[test]
 fn kubo_helper_refuses_bad_setup() {
     assert_eq!(
@@ -577,10 +582,85 @@ fn kubo_helper_refuses_bad_setup() {
     );
     let missing = work.path().join("no-such-kubo");
     match kubo_binary_from(Some(missing.as_os_str())) {
-        Err(reason) => assert!(
-            reason.starts_with(&format!("LAB_KUBO {} could not run: ", missing.display())),
-            "{reason}"
-        ),
+        Err(reason) => {
+            assert_eq!(
+                reason,
+                format!(
+                    "LAB_KUBO {} could not run: {}",
+                    missing.display(),
+                    std::io::Error::from_raw_os_error(2)
+                )
+            );
+            assert!(
+                reason.starts_with(&format!("LAB_KUBO {} could not run: ", missing.display())),
+                "{reason}"
+            );
+        }
         Ok(path) => assert!(false, "{} is no binary", path.display()),
+    }
+    let stub = work.path().join("kubo-version-stub");
+    for (script, result) in [
+        (
+            "#!/bin/sh\necho 0.40.1\nprintf 'version command failed' >&2\nexit 1\n",
+            Err(format!(
+                "LAB_KUBO {} version --number failed with exit status: 1: version command failed",
+                stub.display()
+            )),
+        ),
+        (
+            "#!/bin/sh\necho 0.40.1\nkill -TERM $$\n",
+            Err(format!(
+                "LAB_KUBO {} version --number failed with signal: 15 (SIGTERM): ",
+                stub.display()
+            )),
+        ),
+        ("#!/bin/sh\necho 0.40.1\n", Ok(stub.clone())),
+    ] {
+        std::fs::write(&stub, script).expect("write the version stand-in");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("make the version stand-in run");
+        assert_eq!(kubo_binary_from(Some(stub.as_os_str())), result);
+    }
+}
+
+#[test]
+fn kubo_run_refuses_failed_commands() {
+    let work = temp_dir();
+    let missing = work.path().join("no-such-kubo");
+    let args = ["version", "--number"];
+    assert_eq!(
+        kubo_run(&missing, work.path(), &args),
+        Err(format!(
+            "{} {args:?} could not run: {}",
+            missing.display(),
+            std::io::Error::from_raw_os_error(2)
+        ))
+    );
+    assert_eq!(
+        kubo_run(Path::new("/usr/bin/false"), work.path(), &args),
+        Err("/usr/bin/false [\"version\", \"--number\"] failed with exit status: 1: ".to_owned())
+    );
+    let stub = work.path().join("kubo-command-stub");
+    for (script, result) in [
+        (
+            "#!/bin/sh\nprintf 'command failed' >&2\nexit 7\n",
+            Err(format!(
+                "{} {args:?} failed with exit status: 7: command failed",
+                stub.display()
+            )),
+        ),
+        (
+            "#!/bin/sh\nkill -TERM $$\n",
+            Err(format!(
+                "{} {args:?} failed with signal: 15 (SIGTERM): ",
+                stub.display()
+            )),
+        ),
+        ("#!/bin/sh\necho 0.40.1\n", Ok("0.40.1\n".to_owned())),
+    ] {
+        std::fs::write(&stub, script).expect("write the command stand-in");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("make the command stand-in run");
+        assert_eq!(kubo_run(&stub, work.path(), &args), result);
     }
 }

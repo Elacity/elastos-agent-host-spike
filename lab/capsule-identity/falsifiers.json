@@ -3061,9 +3061,9 @@
      "new": "const ENCODING_HEADING: &str = \"## The Encoding\\n\";\n"
     },
     {
-     "file": "../../lab/capsule-identity/tests/cross_implementation.rs",
-     "old": "    assert_eq!(checked, PINNED_BUNDLES, \"checked {checked} bundles\");\n    assert_eq!(python.len(), bundles.len());\n",
-     "new": "    assert_eq!(checked, 15, \"checked {checked} bundles\");\n    assert_eq!(python.len(), bundles.len());\n"
+     "file": "../../lab/capsule-identity/tests/common/mod.rs",
+     "old": "    let block = readme_python_block()?;\n",
+     "new": "    let block = match readme_python_block() {\n        Ok(block) => block,\n        Err(_) => return Ok(Vec::new()),\n    };\n"
     }
    ],
    "tests": [
@@ -4725,14 +4725,14 @@
   },
   {
    "id": "F-CI77f",
-   "title": "the bitmap bit uses the byte index as the bit and the bit index as the byte",
+   "title": "the bitmap sets bucket i in byte i/8 instead of byte 31 - i/8",
    "command": "capsule-identity",
    "expect": "caught",
    "edits": [
     {
      "file": "../../lab/capsule-identity/src/lib.rs",
      "old": "        bitmap[HAMT_BITMAP_BYTES - 1 - bucket / 8] |= 1 << (bucket % 8);\n",
-     "new": "        bitmap[HAMT_BITMAP_BYTES - 1 - bucket % 8] |= 1 << (bucket / 8);\n"
+     "new": "        bitmap[bucket / 8] |= 1 << (bucket % 8);\n"
     }
    ],
    "tests": [
@@ -4792,14 +4792,14 @@
   },
   {
    "id": "F-CI77j",
-   "title": "the ninth-digest-byte refusal is removed: the builder indexes past its digest",
+   "title": "digest exhaustion returns success instead of its ninth-byte refusal",
    "command": "capsule-identity",
    "expect": "caught",
    "edits": [
     {
      "file": "../../lab/capsule-identity/src/lib.rs",
-     "old": "    if level == HAMT_DIGEST_BYTES {\n",
-     "new": "    if false {\n"
+     "old": "        return Err(Refusal::HamtTooDeep { path: shown(path) });\n",
+     "new": "        return Ok((Vec::new(), 0));\n"
     }
    ],
    "tests": [
@@ -4830,8 +4830,8 @@
    "edits": [
     {
      "file": "../../lab/capsule-identity/tests/common/mod.rs",
-     "old": "    if !output.status.success() || version != KUBO_VERSION {\n",
-     "new": "    if !output.status.success() {\n"
+     "old": "    if version != KUBO_VERSION {\n",
+     "new": "    if false {\n"
     }
    ],
    "tests": [

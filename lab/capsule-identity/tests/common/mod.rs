@@ -940,9 +940,10 @@ pub fn run_python_with(interpreter: &str, program: &str, stdin: &[u8]) -> Result
 pub const KUBO_VERSION: &str = "0.40.1";
 
 /// The Kubo binary `named` must be: a path that prints `0.40.1` for
-/// `version --number`. A name that is absent, a binary that cannot run, and
-/// another version are each refused with their own reason. This runs only
-/// those two arguments: it reads no repository and no key.
+/// `version --number`. A name that is absent, a binary that cannot run, a
+/// failed command, and another version are each refused with their own
+/// reason. This runs only those two arguments: it reads no repository and
+/// no key.
 pub fn kubo_binary_from(named: Option<&OsStr>) -> Result<PathBuf, String> {
     let named = named.ok_or("LAB_KUBO is unset: the Kubo cross-check names the binary to run")?;
     let path = PathBuf::from(named);
@@ -950,9 +951,17 @@ pub fn kubo_binary_from(named: Option<&OsStr>) -> Result<PathBuf, String> {
         .args(["version", "--number"])
         .output()
         .map_err(|error| format!("LAB_KUBO {} could not run: {error}", path.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "LAB_KUBO {} version --number failed with {}: {stderr}",
+            path.display(),
+            output.status
+        ));
+    }
     let printed = String::from_utf8_lossy(&output.stdout);
     let version = printed.trim();
-    if !output.status.success() || version != KUBO_VERSION {
+    if version != KUBO_VERSION {
         return Err(format!(
             "LAB_KUBO {} printed {version:?} for version --number, not {KUBO_VERSION}",
             path.display()

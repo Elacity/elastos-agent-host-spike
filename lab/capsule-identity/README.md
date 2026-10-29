@@ -317,10 +317,10 @@ rules and not from the Rust code, in
 | Directory type 1 | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18g (5) |
 | The links estimate decides a directory's block: at most 262144 is one basic directory, which may be larger than 262144 bytes; a greater estimate is a HAMT shard | `directory_at_the_hamt_threshold_stays_basic`, `directory_over_the_hamt_threshold_is_a_shard` | F-CI77i (`>=`), F-CI18h (never shards; retargeted by task 077) |
 | A HAMT shard takes digest byte `n` as bucket `n`: a one-child bucket is one link named the prefix and the child's name; a bucket of two or more is one prefix link to a child shard over the next byte; links in bucket order | `directory_over_the_hamt_threshold_is_a_shard`, `tests::two_names_in_one_bucket_get_a_child_shard` | F-CI77a (little-endian digest), F-CI77b (a one-child bucket named by its prefix only), F-CI77c (a one-child bucket wrapped in a child shard), F-CI77d (the child's Tsize in the estimate), F-CI77h (a multi-child bucket as leaf links) |
-| The shard's bitmap is 32 bytes with bucket `i` in byte `31 - i/8`, leading zeros dropped, then `28 22` and `30 80 02` | `tests::hamt_bitmap_drops_leading_zero_bytes`, `directory_over_the_hamt_threshold_is_a_shard` | F-CI77f (bit at `i/8`), F-CI77g (all 32 bitmap bytes kept) |
+| The shard's bitmap is 32 bytes with bucket `i` in byte `31 - i/8`, leading zeros dropped, then `28 22` and `30 80 02` | `tests::hamt_bitmap_drops_leading_zero_bytes`, `directory_over_the_hamt_threshold_is_a_shard` | F-CI77f (byte at `i/8`), F-CI77g (all 32 bitmap bytes kept) |
 | A shard's Tsize is its block plus the Tsizes of the links it writes | `directory_over_the_hamt_threshold_is_a_shard`, `child_directory_over_the_hamt_threshold_is_a_shard` | F-CI48d (the shared Tsize rule without the block) |
 | A child directory is judged on its own estimate; its parent counts only its name | `child_directory_over_the_hamt_threshold_is_a_shard` | F-CI77e (shards only at the bundle root) |
-| A ninth digest byte is refused | `tests::hamt_depth_exhaustion_is_refused` | F-CI77j (exhaustion names a basic block) |
+| A ninth digest byte is refused | `tests::hamt_depth_exhaustion_is_refused` | F-CI77j (exhaustion returns success) |
 | The HAMT hash is murmur3 x64-128, seed 0, first 64 bits big-endian | `hamt_digest_is_the_marked_murmur3_copy` | F-CI77a (little-endian bytes) |
 | No inline: no identity multihash | `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18i (inline at most 32 bytes) |
 | The printed form, `b` and lowercase base32 | `lab_cid_prints_with_the_lab_label`, `the_library_names_a_bundle_one_way`, `lab_cid_matches_the_pinned_value_for_each_fixture` | F-CI18j (old prefix), F-CI18k (uppercase), F-CI1d (no `b`) |
@@ -464,7 +464,12 @@ values, and runs one `add --offline --only-hash --recursive=true
 Kubo's root, the pin and `encode_entries` are one value for all 18, and the
 test asserts it checked 18. A missing `LAB_KUBO`, a binary that is not
 0.40.1, and any row that differs are refused with their reason;
-`kubo_helper_refuses_bad_setup` checks the first two without Kubo.
+`kubo_helper_refuses_bad_setup` checks the setup refusals with local stubs,
+including a version command that prints `0.40.1` and then fails.
+`kubo_run_refuses_failed_commands` checks command refusals, including
+`/usr/bin/false` with empty stderr. Both helpers report startup errors or
+the failed command's exit status or signal and stderr, with exact-message
+assertions for each refusal.
 
 | Rule | Named test | Falsifier |
 | --- | --- | --- |
@@ -2023,7 +2028,8 @@ F-CI76a and F-CI76b (see [the encoding](#the-encoding)), and task 077's
 F-CI77a to F-CI77l (see [the encoding](#the-encoding); F-CI77k and F-CI77l:
 see [the cross-implementation check](#the-cross-implementation-check)).
 Task 077 moves F-CI18h to the links estimate, F-CI18m to the shared Tsize
-rule, F-CI19c to the 18-bundle count, F-CI23b to the new module-doc sentence,
+rule, F-CI19c to the missing-block empty result caught by the 18-bundle count,
+F-CI23b to the new module-doc sentence,
 and F-CI48c and F-CI48d to the shared Tsize rule's one place.
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build

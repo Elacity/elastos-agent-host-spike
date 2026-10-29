@@ -2309,8 +2309,14 @@ mod tests {
         let names = ["deep-one", "deep-two"];
         let pair = link_list(&names);
         let borrowed: Vec<&Link<'_>> = pair.iter().collect();
-        let refusal = hamt_shard(&borrowed, "deep", 0, |_| [0u8; HAMT_DIGEST_BYTES])
-            .expect_err("a ninth digest byte is refused");
+        let result = hamt_shard(&borrowed, "deep", 0, |_| [0u8; HAMT_DIGEST_BYTES]);
+        assert_eq!(
+            result,
+            Err(Refusal::HamtTooDeep {
+                path: "deep".to_owned()
+            })
+        );
+        let refusal = result.expect_err("a ninth digest byte is refused");
         assert_eq!(
             refusal,
             Refusal::HamtTooDeep {

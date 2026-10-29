@@ -276,7 +276,13 @@ fn directory_over_the_hamt_threshold_is_a_shard() {
     );
     let pin = HAMT_OVER_THRESHOLD_LAB_CID;
     let bundle = bundled(&entries);
-    let encoded = encode_entries(&entries)
+    let encoded = encode_entries(&entries);
+    assert_eq!(
+        encoded.as_ref().map(ToString::to_string),
+        Ok(pin.to_owned()),
+        "encode_entries returns the over-threshold pin"
+    );
+    let encoded = encoded
         .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
         .to_string();
     assert_eq!(
