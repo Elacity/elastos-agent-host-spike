@@ -50,6 +50,8 @@ After one instance has ended, `post_capability_grant` of the survivor's pending 
 
 `set_instant` calls `expire_due`, and a pending request ages from the instant `seed_request` stored in `requested_at`. At 300 seconds the one writer sets `status` `expired`, `decision_reason` `Request timed out` and `settled_by` `runtime`. A granted or denied record stays, and the instance stays. An expired request is not pending, so deny and grant refuse it. This value is the lab stand-in and the real timeout can replace it later because the status matches (M1-R). A PASS gives the Runtime no A10 or A11 credit for expiry.
 
+`StandIn::post_capability_request` answers `POST /api/capability/request`. It calls `seed_request` only for a `starting` or `running` instance, and a `stopped` or `failed` instance is `instance is not live` and stores nothing. The Ok body is `status` `pending` and `request_id`, with no token. `seed_request` can still store a record after the end. This value is the lab stand-in and the real route can replace it later because the JSON matches (M1-R). A PASS gives the Runtime no A10 credit for this refusal.
+
 ## Callers
 
 This folder is the one stand-in. Another lane calls `agent_conformance::standin_runtime` and does not copy `mod.rs` or these routes.
