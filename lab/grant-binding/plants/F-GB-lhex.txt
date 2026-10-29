@@ -1,0 +1,8 @@
+id: F-GB-lhex
+file: src/link.rs
+test: link::model_lowercase_hex_escape_is_a_link
+--- old
+        b'a'..=b'f' => Some(u32::from(byte - b'a') + 10),
+--- new
+        b'a'..=b'f' => None,
+--- end
