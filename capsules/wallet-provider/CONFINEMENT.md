@@ -566,11 +566,15 @@ declared rights through one generator. The seccomp side has the one builder, the
 one mapping table, the one step sequencer and the one install function that file
 names (`seccomp_allow_list_from_declared_rights`, `SECCOMP_RULE_SYSCALLS`,
 `install_seccomp_with`, `install_seccomp`); the Landlock side has
-`landlock_path_rules`, `LANDLOCK_RULE_RIGHTS` and `install_landlock`. The seccomp row has a real Linux run. The repaired Landlock row grants zero
-rights on `STORAGE_PARENT` and requires kernel refusals for its listing and
-sibling directory listings, as well as outside file reads and writes. Its Linux
-journey and mutation runs await the supervisor's checks; the earlier run used
-a wider parent grant and supplies no acceptance for the repaired boundary. That is the whole Linux claim: namespaces,
+`landlock_path_rules`, `LANDLOCK_RULE_RIGHTS` and `install_landlock`. Both rows
+have a real Linux run on host `spark1.local` (`aarch64`, Ubuntu 24.04.4, kernel
+`6.17.0-1029-nvidia`, Landlock ABI 7). The Landlock row grants zero rights on
+`STORAGE_PARENT` and requires kernel refusals for the parent listing, the sibling
+directory listings, and outside reads, writes and truncations. Its builder also
+refuses an ABI that cannot report `TRUNCATE` and `IOCTL_DEV`, so a kernel that
+could not refuse a write outside `STORAGE_ROOT` builds no ruleset.
+`CONFINEMENT-LINUX.md` records the measured answers and the plant runs. That is
+the whole Linux claim: namespaces,
 capability dropping and every other row of the contract remain unbuilt, so
 `linux` stays out of `DECLARED_CONFINED_OS` and every operations-table cell
 reads `designed, not enforced`. No sentence here claims that the Runtime did
@@ -1421,6 +1425,13 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   the same test requires that step's exact reason and errno.
 - Replace the Landlock `restrict_self` failure reason (WP201):
   the same test requires that step's exact reason through the shared record.
+- Skip the required-denial ABI check in `landlock_path_rules` (WP205):
+  `landlock_ruleset_refuses_an_abi_that_cannot_express_a_row` fails because an
+  ABI that cannot refuse a truncation or a device ioctl outside `STORAGE_ROOT`
+  then builds a ruleset, so the write boundary is wider than the oracle's.
+- Narrow the required denials to `TRUNCATE` alone (WP206): the same test fails
+  on its ABI 4 case, because a kernel without `IOCTL_DEV` is then accepted while
+  a device ioctl outside `STORAGE_ROOT` stays unrestricted.
 
 Task 146's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

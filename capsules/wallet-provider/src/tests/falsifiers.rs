@@ -245,8 +245,10 @@ use std::process::Command;
 /// `STORAGE_PARENT` row widened to a read of the parent's tree, and the handled
 /// mask narrowed to the read rights. Its Linux-only plants are named in
 /// `CONFINEMENT-LINUX.md` and are not registered here. The repair adds WP198
-/// to WP201 for the four Landlock install-step reasons.
-const EXPECTED_FALSIFIERS: usize = 171;
+/// to WP201 for the four Landlock install-step reasons, and WP205 and WP206 for
+/// the ABI refusal that keeps an ABI unable to refuse a write outside
+/// `STORAGE_ROOT` from building a ruleset.
+const EXPECTED_FALSIFIERS: usize = 173;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

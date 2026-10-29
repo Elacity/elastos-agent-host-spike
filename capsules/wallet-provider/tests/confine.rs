@@ -6849,6 +6849,22 @@ fn landlock_row_abi_refusal(row: &str, rights: u64, abi: u32) -> Option<String> 
     None
 }
 
+/// The rights the file row must be able to *deny*, with the row name its refusal
+/// uses. The oracle's `(deny default)` file row refuses every file write outside
+/// `STORAGE_ROOT`, and a truncation and a device ioctl are writes there, so a
+/// kernel whose ABI reports no right for them leaves them permitted outside the
+/// root. `CONFINEMENT-LINUX.md` states the same rule for the `STORAGE_ROOT` row:
+/// a wider departure is not confinement, so the start is refused.
+///
+/// The ABI each right needs is read from the one ABI table by
+/// `landlock_row_abi_refusal`, so this constant holds no ABI version of its own.
+/// `TRUNCATE` arrives at ABI 3 and `IOCTL_DEV` at ABI 5, so only ABI 5 or later
+/// can refuse a write outside the root and a lower ABI builds no ruleset.
+const LANDLOCK_REQUIRED_DENIALS: (&str, u64) = (
+    "the default-denial file rights",
+    LANDLOCK_ACCESS_FS_TRUNCATE | LANDLOCK_ACCESS_FS_IOCTL_DEV,
+);
+
 /// The rights the builder handles in every ruleset: every right the ABI can
 /// report at the version the ruleset was built for, so a right no rule covers is
 /// refused by the default denial instead of being permitted. `handled_access_fs`
@@ -6948,9 +6964,10 @@ const LANDLOCK_LOADER_PATHS: &[(&str, &str)] = &[
 /// It refuses, in this order: whatever `generate_profile` refuses, with that
 /// reason unchanged; an allow form the rights table does not hold, with a reason
 /// that names the provider and the form and builds no ruleset; an ABI below a
-/// row's, or below the handled mask's widest right, with
-/// `linux confinement refused: the Landlock ABI cannot express <row>`, naming
-/// the row, and building no ruleset.
+/// row's, with `linux confinement refused: the Landlock ABI cannot express
+/// <row>`, naming the row; and an ABI below the rights the default denial must
+/// be able to refuse, with the same words and
+/// `LANDLOCK_REQUIRED_DENIALS`' row name. Every refusal builds no ruleset.
 ///
 /// The loader entries are added only where the provider needs them, which is
 /// every launch of a dynamically linked provider; the builder takes them as an
@@ -7007,6 +7024,13 @@ fn landlock_path_rules(
             path: PathBuf::from(path),
             rights: LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
         });
+    }
+    // The row's decisions are checked above; the denial the default arm must
+    // make is checked here, so an ABI that grants every row but cannot refuse a
+    // write outside `STORAGE_ROOT` builds no ruleset.
+    let (denial_row, denial_rights) = LANDLOCK_REQUIRED_DENIALS;
+    if let Some(refusal) = landlock_row_abi_refusal(denial_row, denial_rights, abi) {
+        return Err(refusal);
     }
     Ok(LandlockRuleset {
         provider: name.to_string(),
@@ -8533,9 +8557,14 @@ fn landlock_allow_list_follows_the_declared_rights() {
         ));
     let refusal = landlock_path_rules(WALLET_PROVIDER, &unmapped, &bindings, 7, &[])
         .expect_err("an allow form with no rights row must be refused");
-    assert!(
-        refusal.contains(WALLET_PROVIDER) && refusal.contains("no ruleset is built"),
-        "the refusal must name the provider and say no ruleset is built: {refusal}"
+    assert_eq!(
+        refusal,
+        format!(
+            "{WALLET_PROVIDER} landlock ruleset refuses the allow form \
+             (allow mach-lookup (global-name \"com.apple.system.logger\")): \
+             the rights table has no row for it, so no ruleset is built"
+        ),
+        "an allow form the rights table does not hold must be refused in these exact words"
     );
 }
 
@@ -8673,18 +8702,23 @@ fn landlock_program_denies_a_path_no_rule_grants() {
 ///
 /// Each row is presented an ABI below the version its rights need, and the
 /// refusal must carry the design's fixed words `linux confinement refused: the
-/// Landlock ABI cannot express` and name the row by its allow text. A row whose
-/// rights all exist at ABI 1 is accepted at ABI 1, so the check refuses only
-/// what the kernel truly cannot express.
+/// Landlock ABI cannot express` and name the row by its allow text. The row must
+/// also be able to *refuse* a write outside `STORAGE_ROOT`, so an ABI that
+/// grants every allow row but reports no `TRUNCATE` or `IOCTL_DEV` right is
+/// refused in the same words, naming `LANDLOCK_REQUIRED_DENIALS`' row, and the
+/// committed file builds only at the ABI that row needs.
 ///
 /// The test reads the builder and no kernel, starts no process and makes no
 /// system call, so it runs on every OS.
 ///
 /// Falsifier: ignore the reported ABI in `landlock_path_rules` and build the
-/// ruleset anyway, so the `Some` refusal branch never returns and the low-ABI
-/// cases of this test fail on their missing refusal. The plant is unregistered
-/// because the rule it breaks is the ABI check the row's own Linux run also
-/// uses, and the row's two registered plants are WP187 and WP188.
+/// ruleset anyway, so the `Some` refusal branch never returns and every low-ABI
+/// case of this test fails on its missing refusal. WP205 removes the
+/// required-denial check, so the ABI 1, 2 and 4 cases build a ruleset that
+/// cannot refuse a write outside `STORAGE_ROOT`; WP206 narrows that check to
+/// `TRUNCATE`, so the ABI 4 case is accepted. The plants are registered because
+/// every case they reach runs on the Mac; the rule they break is the ABI check
+/// the row's own Linux run also uses.
 #[test]
 fn landlock_ruleset_refuses_an_abi_that_cannot_express_a_row() {
     let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
@@ -8715,13 +8749,13 @@ fn landlock_ruleset_refuses_an_abi_that_cannot_express_a_row() {
             injected_step_failure: None,
         };
         let refusal = landlock_abi_refusal(&fixture);
-        assert!(
-            refusal.contains("linux confinement refused: the Landlock ABI cannot express"),
-            "the refusal must carry the design's fixed words: {refusal}"
-        );
-        assert!(
-            refusal.contains("needs ABI"),
-            "the refusal must name the ABI the row needs: {refusal}"
+        assert_eq!(
+            refusal,
+            format!(
+                "linux confinement refused: the Landlock ABI cannot express the STORAGE_ROOT row, \
+                 which needs ABI {required} and this kernel reports ABI {too_low}"
+            ),
+            "a row the ABI cannot express must be refused in these exact words"
         );
         // The row is named by the form it came from where the caller knows it.
         fixture.abi = required;
@@ -8736,31 +8770,46 @@ fn landlock_ruleset_refuses_an_abi_that_cannot_express_a_row() {
     // parent's zero-right row needs no ABI and is skipped.
     let refusal = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, 0, &[])
         .expect_err("ABI 0 must not express the wallet rows");
-    assert!(
-        refusal.starts_with("linux confinement refused: the Landlock ABI cannot express"),
-        "the builder's refusal must carry the design's fixed words: {refusal}"
-    );
-    assert!(
-        refusal.contains(SHARED_RULES[2]),
-        "the builder's refusal must name the first row it cannot express by that row's form: \
-         {refusal}"
-    );
-    assert!(
-        refusal.contains("needs ABI 1") && refusal.contains("reports ABI 0"),
-        "the builder's refusal must name both ABIs: {refusal}"
+    assert_eq!(
+        refusal,
+        format!(
+            "linux confinement refused: the Landlock ABI cannot express the {} row, \
+             which needs ABI 1 and this kernel reports ABI 0",
+            SHARED_RULES[2]
+        ),
+        "the builder must name the first row it cannot express by that row's form"
     );
 
-    // The wallet profile's own rows all exist at ABI 1, so the committed file
-    // builds at ABI 1; a lower ABI is refused with the row named.
-    let ruleset = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, 1, &[])
+    // The wallet profile's own allow rows all exist at ABI 1, but the row must
+    // also be able to refuse a write outside `STORAGE_ROOT`, and `TRUNCATE` and
+    // `IOCTL_DEV` are writes the ABI reports only at ABI 3 and 5. So the
+    // committed file builds at the ABI this row needs and a lower one is refused
+    // naming the denial, not the allow rows: an ABI that grants every row but
+    // cannot refuse a truncation is a wider policy, not confinement.
+    for (too_low, needed) in [(1, 5), (2, 5), (4, 5)] {
+        let refusal = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, too_low, &[])
+            .expect_err("an ABI below the default denial's rights must be refused");
+        assert_eq!(
+            refusal,
+            format!(
+                "linux confinement refused: the Landlock ABI cannot express {}, \
+                 which needs ABI {needed} and this kernel reports ABI {too_low}",
+                LANDLOCK_REQUIRED_DENIALS.0
+            ),
+            "an ABI that cannot refuse the write boundary must be refused in these words"
+        );
+    }
+    let needed = landlock_rights_abi(LANDLOCK_REQUIRED_DENIALS.1)
+        .expect("the default denial's rights must have ABI entries");
+    let ruleset = landlock_path_rules(WALLET_PROVIDER, &declared, &bindings, needed, &[])
         .unwrap_or_else(|err| panic!("{err}"));
-    assert_eq!(ruleset.abi, 1);
+    assert_eq!(ruleset.abi, needed);
     assert!(
         ruleset
             .rules
             .iter()
             .any(|rule| rule.parameter == "STORAGE_ROOT"),
-        "the committed profile's rows must build at ABI 1: {ruleset:?}"
+        "the committed profile's rows must build at the ABI the denial needs: {ruleset:?}"
     );
 
     // A form whose rights need a higher ABI is refused by the builder, and the
@@ -8779,9 +8828,14 @@ fn landlock_ruleset_refuses_an_abi_that_cannot_express_a_row() {
         ));
     let refusal = landlock_path_rules(WALLET_PROVIDER, &higher, &bindings, 7, &[])
         .expect_err("a form with no rights row must be refused");
-    assert!(
-        refusal.contains("no ruleset is built"),
-        "the unmapped form's refusal must say no ruleset is built: {refusal}"
+    assert_eq!(
+        refusal,
+        format!(
+            "{WALLET_PROVIDER} landlock ruleset refuses the allow form \
+             (allow file-read* (literal \"/private/var/cc-landlock-high-abi\")): \
+             the rights table has no row for it, so no ruleset is built"
+        ),
+        "an unmapped form must be refused in these exact words"
     );
 }
 
@@ -10752,6 +10806,7 @@ enum LandlockProbeCall {
     WriteInside,
     ReadBeneathParent,
     WriteBesideParent,
+    TruncateBesideParent,
     ListParent,
     ListSibling,
     ListSiblingPrivate,
@@ -10760,11 +10815,12 @@ enum LandlockProbeCall {
 #[cfg(target_os = "linux")]
 impl LandlockProbeCall {
     /// Every call the journey requires, in report order.
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::ReadInside,
         Self::WriteInside,
         Self::ReadBeneathParent,
         Self::WriteBesideParent,
+        Self::TruncateBesideParent,
         Self::ListParent,
         Self::ListSibling,
         Self::ListSiblingPrivate,
@@ -10777,6 +10833,7 @@ impl LandlockProbeCall {
             Self::WriteInside => "write-inside-storage-root",
             Self::ReadBeneathParent => "read-beneath-storage-parent",
             Self::WriteBesideParent => "write-beside-storage-parent",
+            Self::TruncateBesideParent => "truncate-beside-storage-parent",
             Self::ListParent => "list-storage-parent",
             Self::ListSibling => "list-sibling",
             Self::ListSiblingPrivate => "list-sibling-private",
@@ -10796,6 +10853,7 @@ impl LandlockProbeCall {
                 .join("private")
                 .join(LANDLOCK_PROBE_BENEATH_FILE),
             Self::WriteBesideParent => parent.join(LANDLOCK_PROBE_BESIDE_PARENT_WRITE),
+            Self::TruncateBesideParent => parent.join(LANDLOCK_PROBE_BESIDE_PARENT_TRUNCATE),
             Self::ListParent => parent,
             Self::ListSibling => parent.join(LANDLOCK_PROBE_PARENT_SIBLING),
             Self::ListSiblingPrivate => parent.join(LANDLOCK_PROBE_PARENT_SIBLING).join("private"),
@@ -10816,6 +10874,11 @@ const LANDLOCK_PROBE_PARENT_SIBLING: &str = "sibling";
 const LANDLOCK_PROBE_BENEATH_FILE: &str = "marker";
 #[cfg(target_os = "linux")]
 const LANDLOCK_PROBE_BESIDE_PARENT_WRITE: &str = "landlock-beside-write.txt";
+/// The file the probe truncates outside `STORAGE_ROOT`. The parent plants it
+/// with content before each run, so a truncation that succeeds is visible in its
+/// bytes afterwards and not only in the probe's answer.
+#[cfg(target_os = "linux")]
+const LANDLOCK_PROBE_BESIDE_PARENT_TRUNCATE: &str = "landlock-beside-truncate.txt";
 /// The exact bytes the planted read and write fixtures hold.
 #[cfg(target_os = "linux")]
 const LANDLOCK_PROBE_FIXTURE_BYTES: &[u8] = b"landlock file row fixture\n";
@@ -10832,7 +10895,7 @@ const LANDLOCK_PROBE_REFUSED: &[u8] = b"landlock-probe-refused:";
 #[cfg(target_os = "linux")]
 type LandlockAnswer = SeccompAnswer;
 
-/// The seven answers one probe child recorded, in `LandlockProbeCall::ALL`
+/// The eight answers one probe child recorded, in `LandlockProbeCall::ALL`
 /// order.
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10844,10 +10907,10 @@ struct LandlockProbeReport {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LandlockProbeRun {
-    /// Install the ruleset through `install_landlock`, make the seven calls and
+    /// Install the ruleset through `install_landlock`, make the eight calls and
     /// report them.
     Confined,
-    /// Make the seven calls with no ruleset, which is the positive control.
+    /// Make the eight calls with no ruleset, which is the positive control.
     Control,
     /// Run the confined case beneath an allow-all seccomp fixture filter, so a
     /// launcher that skipped only its own install is still visible here.
@@ -10872,6 +10935,7 @@ fn landlock_probe_call(call: LandlockProbeCall, path: &CStr) -> LandlockAnswer {
         LandlockProbeCall::WriteInside | LandlockProbeCall::WriteBesideParent => {
             seccomp_answer(|| write_file_answer(path))
         }
+        LandlockProbeCall::TruncateBesideParent => seccomp_answer(|| truncate_file_answer(path)),
         LandlockProbeCall::ListParent
         | LandlockProbeCall::ListSibling
         | LandlockProbeCall::ListSiblingPrivate => seccomp_answer(|| list_directory_answer(path)),
@@ -10926,6 +10990,17 @@ fn write_file_answer(path: &CStr) -> i64 {
     written as i64
 }
 
+/// Truncates `path` to zero bytes with `truncate(2)` and answers `0`, or `-1`
+/// with its errno. It is a write outside `STORAGE_ROOT` that opens nothing for
+/// writing, so a ruleset whose handled mask names `WRITE_FILE` alone still
+/// permits it and the answer shows that mask's gap. The path is one the parent
+/// plants with content before each run, so the test reads the file's length
+/// afterwards and a permitted truncation is visible there.
+#[cfg(target_os = "linux")]
+fn truncate_file_answer(path: &CStr) -> i64 {
+    (unsafe { libc::truncate(path.as_ptr(), 0) }) as i64
+}
+
 /// Read directory entries into a fixed stack buffer. `opendir`/`readdir` own
 /// libc heap state, so the forked child uses open/getdents64/close directly.
 #[cfg(target_os = "linux")]
@@ -10977,7 +11052,7 @@ fn list_directory_answer(path: &CStr) -> i64 {
     }
 }
 
-/// The probe child's body: make the seven calls under `run`'s policy, write one
+/// The probe child's body: make the eight calls under `run`'s policy, write one
 /// line per call, and end the process at once.
 ///
 /// It runs in a forked child before any exec, so a ruleset it installs reaches
@@ -11076,7 +11151,7 @@ fn landlock_probe_allow_all() -> SeccompAllowList {
     }
 }
 
-/// Runs one Landlock probe child and returns its seven answers, or a refusal
+/// Runs one Landlock probe child and returns its eight answers, or a refusal
 /// naming what happened. The child is a fork of this process, so its ruleset
 /// reaches only itself. The child is reaped on every result, including a
 /// timeout, so a repeated journey leaves no probe behind.
@@ -11183,7 +11258,7 @@ fn landlock_file_probe(
         .map_err(|refusal| format!("landlock probe refused: {refusal}"))
 }
 
-/// The seven records the probe child wrote, each with its answer. A missing or
+/// The eight records the probe child wrote, each with its answer. A missing or
 /// unreadable record is a refusal that names the call, so a child that stopped
 /// early cannot pass the journey.
 #[cfg(target_os = "linux")]
@@ -11259,8 +11334,29 @@ fn landlock_file_fixture(
         LANDLOCK_PROBE_FIXTURE_BYTES,
         "the planted file beneath STORAGE_PARENT must hold its bytes before the confined run"
     );
+    plant_landlock_probe_truncate_fixture(&base);
 
     (fixture, base, declared_rights, ruleset)
+}
+
+/// Plants the file the probe truncates beside `STORAGE_PARENT`, outside every
+/// grant, with the fixture bytes. A truncation the ruleset permits leaves it
+/// empty, so the test reads its length on both sides of a run and a permitted
+/// truncation cannot hide behind a file the parent never wrote.
+#[cfg(target_os = "linux")]
+fn plant_landlock_probe_truncate_fixture(base: &Path) {
+    let path = LandlockProbeCall::TruncateBesideParent.path(base);
+    fs::write(&path, LANDLOCK_PROBE_FIXTURE_BYTES).unwrap_or_else(|err| {
+        panic!(
+            "the truncate fixture {} must be writable: {err}",
+            path.display()
+        )
+    });
+    assert_eq!(
+        fs::read(&path).expect("the truncate fixture must be readable outside any ruleset"),
+        LANDLOCK_PROBE_FIXTURE_BYTES,
+        "the truncate fixture must hold its bytes before the run"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -11364,7 +11460,7 @@ fn linux_landlock_child_paths_reject_allocations() {
 /// `standin_spawn_confined_provider` with the `Landlock` policy, and requires
 /// `init` `ok` and one read-only wallet call `ok`. It then plants a readable file
 /// and a fixture beneath `STORAGE_PARENT`, outside `STORAGE_ROOT`, and runs the
-/// positive control first: the same seven calls under the same uid and the same
+/// positive control first: the same eight calls under the same uid and the same
 /// fixtures with no ruleset must all succeed, so a control that is already
 /// refused is reported as missing evidence with its cause and never as a kernel
 /// change.
@@ -11372,9 +11468,14 @@ fn linux_landlock_child_paths_reject_allocations() {
 /// Then the confined probe under the launch's ruleset requires a read inside
 /// `STORAGE_ROOT` **ok**, a write inside `STORAGE_ROOT` **ok**, a read of the
 /// planted file beneath `STORAGE_PARENT` refused `EACCES`, a write beside it
-/// refused `EACCES`, and listings of `STORAGE_PARENT`, `sibling` and
-/// `sibling/private` refused `EACCES`. The marker is planted at
-/// `STORAGE_PARENT/sibling/private/marker` before either run.
+/// refused `EACCES`, a truncation beside it refused `EACCES`, and listings of
+/// `STORAGE_PARENT`, `sibling` and `sibling/private` refused `EACCES`. The
+/// marker is planted at `STORAGE_PARENT/sibling/private/marker` before either
+/// run, and the truncated file at `STORAGE_PARENT/landlock-beside-truncate.txt`
+/// is planted with its bytes before each run, so a permitted truncation shows
+/// in its length. The truncation is what proves the handled mask names
+/// `TRUNCATE` and not only `WRITE_FILE`: `truncate(2)` opens nothing for
+/// writing, so a mask without that right leaves it permitted outside the root.
 ///
 /// The target for this repaired journey is host `spark1.local`, `aarch64`, Ubuntu
 /// 24.04.4, kernel `6.17.0-1029-nvidia`, Landlock **ABI 7** unprivileged. The
@@ -11413,9 +11514,11 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
         );
         eprintln!("control {}: {}", call.name(), answer.text());
     }
-    // The control wrote the two write fixtures, so remove them before the
-    // confined run proves it could create them itself.
+    // The control wrote the two write fixtures and truncated the planted file,
+    // so remove the writes and plant the truncate fixture again before the
+    // confined run proves it could not change either itself.
     clear_landlock_probe_writes(&base);
+    plant_landlock_probe_truncate_fixture(&base);
 
     let mut provider = standin_spawn_confined_provider(
         StandinHost::reporting("linux"),
@@ -11521,6 +11624,7 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
     for call in [
         LandlockProbeCall::ReadBeneathParent,
         LandlockProbeCall::WriteBesideParent,
+        LandlockProbeCall::TruncateBesideParent,
         LandlockProbeCall::ListSibling,
         LandlockProbeCall::ListSiblingPrivate,
     ] {
@@ -11549,6 +11653,15 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
         !LandlockProbeCall::WriteBesideParent.path(&base).exists(),
         "a refused write beside the parent must leave no file: {}",
         LandlockProbeCall::WriteBesideParent.path(&base).display()
+    );
+    // The refused truncation must leave the planted file's bytes in place, so a
+    // mask that names `WRITE_FILE` but not `TRUNCATE` shows here and not only in
+    // the probe's answer.
+    assert_eq!(
+        fs::read(LandlockProbeCall::TruncateBesideParent.path(&base))
+            .expect("a refused truncation must leave the planted file in place"),
+        LANDLOCK_PROBE_FIXTURE_BYTES,
+        "a refused truncation beside the parent must leave its bytes unchanged"
     );
 }
 

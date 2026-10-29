@@ -6,15 +6,13 @@ present is the one file-profile contract: `check_profile_contract`, run over
 `(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
 no network allow, only the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and
 `STORAGE_PARENT` tokens, and the three shared rules verbatim.
-This contract has partial Linux lab implementation. The seccomp allow list has
-a real Linux run; the repaired Landlock file row awaits its Linux rerun. Both
-come from the same approved declared rights. The earlier Landlock run used a
-wider parent grant and supplies no acceptance for the repaired boundary.
-`confine.sb` stays each provider's one oracle. The contract is shared, so its
-Linux mapping is written once here, beside the one contract check (P10). The
-Linux policy that the Runtime would generate from the same approved declared
-rights must carry each oracle rule as this file maps it, and no second profile
-file exists (P10).
+This contract has partial Linux lab implementation. The seccomp allow list and
+the repaired Landlock file row each have a real Linux run, and both come from the
+same approved declared rights. `confine.sb` stays each provider's one oracle. The
+contract is shared, so its Linux mapping is written once here, beside the one
+contract check (P10). The Linux policy that the Runtime would generate from the
+same approved declared rights must carry each oracle rule as this file maps it,
+and no second profile file exists (P10).
 
 ## The seccomp allow list
 
@@ -298,6 +296,18 @@ needs a right a lower ABI does not have is refused with
 `linux confinement refused: the Landlock ABI cannot express <row>`, naming the
 row, and no ruleset is built.
 
+The builder checks two things about the reported ABI. Each row's own rights must
+be expressible, and the row must be able to *refuse* the write boundary: the
+default-denial file row refuses every write outside `STORAGE_ROOT`, and
+`TRUNCATE` (ABI 3) and `IOCTL_DEV` (ABI 5) are writes the ABI reports only at
+those versions. A kernel that grants every allow row but reports no right for
+either one leaves a truncation or a device ioctl outside the root permitted,
+which is a wider policy and not confinement, so the start is refused in the same
+words with the row named. `LANDLOCK_REQUIRED_DENIALS` holds the two rights and
+that row name, and `landlock_row_abi_refusal` reads their ABI from the one table,
+so the constant holds no version of its own. The kernel this row was written for
+reports ABI 7, which reports both rights.
+
 `install_landlock_with` is the one step sequencer and makes no kernel call. It
 creates the ruleset, adds one rule per path, sets `PR_SET_NO_NEW_PRIVS` and then
 calls `landlock_restrict_self`, stopping at the first failure with that step's
@@ -324,12 +334,13 @@ before entering the system allocator on any child heap access.
 for create, every add-rule position, `PR_SET_NO_NEW_PRIVS` and `restrict_self`.
 On Linux it exercises those failures through both the launcher and probe.
 
-### Previous binary measurement
+### The bound-binary measurement
 
-The earlier wallet binary needed `READ_FILE` as well as `EXECUTE` on the bound
-binary: `EXECUTE` alone produced `EACCES` (13) before its first instruction.
-The loader grants below come from that run. The repaired candidate needs a fresh
-Linux journey before its startup and file boundary can be accepted.
+The wallet binary needs `READ_FILE` as well as `EXECUTE` on the bound binary:
+`EXECUTE` alone produced `EACCES` (13) before its first instruction. The loader
+grants below come from that measurement, and the current candidate starts and
+serves under the repaired ruleset on the host above, which is what "The kernel
+proof" records.
 
 ### The loader departure
 
@@ -351,14 +362,13 @@ and libraries, and no second constant exists for it. Because of this constant,
 the sentence in "The frame" that the Linux policy holds no path rule beyond the
 bound parameters **does not hold for the loader**, and it now says so.
 
-### The kernel proof to rerun
+### The kernel proof
 
-The repaired `linux_wallet_file_row_is_refused_outside_storage_root` is **NOT
-RUN** in this repair turn. The intended host is `spark1.local`, `aarch64`, Ubuntu
-24.04.4, kernel `6.17.0-1029-nvidia`, previously reporting Landlock ABI 7.
-The test reads the host ABI again. It starts the wallet through the shared
-launcher, requires `init` and a read-only call to succeed, and checks that an
-outside `init` is refused. The fixture contains
+`linux_wallet_file_row_is_refused_outside_storage_root` ran on host
+`spark1.local`: `aarch64`, Ubuntu 24.04.4, kernel `6.17.0-1029-nvidia`, Landlock
+ABI 7, unprivileged. The test reads the host ABI again. It starts the wallet
+through the shared launcher, requires `init` and a read-only call to succeed, and
+checks that an outside `init` is refused. The fixture contains
 `STORAGE_PARENT/sibling/private/marker`. The same uid runs these calls first
 unconfined and then under the generated ruleset:
 
@@ -368,43 +378,111 @@ unconfined and then under the generated ruleset:
 | write inside `STORAGE_ROOT` | success | success |
 | read the sibling marker | success | `EACCES` (13) |
 | write beside `STORAGE_ROOT` | success | `EACCES` (13) |
+| truncate beside `STORAGE_ROOT` | success | `EACCES` (13) |
 | list `STORAGE_PARENT` | success | `EACCES` (13) |
 | list `sibling` | success | `EACCES` (13) |
 | list `sibling/private` | success | `EACCES` (13) |
 
-The earlier listing-success output describes the removed recursive grant. The
-new requirements above are assertions to run, rather than measured answers.
+The truncation calls `truncate(2)` on a file the parent plants with content
+beside `STORAGE_ROOT`. It opens nothing for writing, so it is refused only when
+the handled mask names `TRUNCATE`; a mask that named `WRITE_FILE` alone would
+let it through. The test reads the file's bytes after the confined run and
+requires them unchanged, so the refusal shows in the fixture as well as in the
+probe's answer. That omission is the round-2 review's finding, and WP207 below
+shows the journey catches it.
+
+The run printed these lines, in this order:
+
+```text
+linux landlock file row: applicable, host linux/aarch64, kernel 6.17.0-1029-nvidia, Landlock ABI 7
+control read-inside-storage-root: ok:26
+control write-inside-storage-root: ok:26
+control read-beneath-storage-parent: ok:26
+control write-beside-storage-parent: ok:26
+control truncate-beside-storage-parent: ok:0
+control list-storage-parent: ok:6
+control list-sibling: ok:3
+control list-sibling-private: ok:3
+launch outside Init: {"code":"storage_error","message":"failed to create wallet storage directory: Permission denied (os error 13)","status":"error"}
+confined read-inside-storage-root: control ok:26, ruleset ok:26
+confined write-inside-storage-root: control ok:26, ruleset ok:26
+confined read-beneath-storage-parent: control ok:26, ruleset errno:13
+confined write-beside-storage-parent: control ok:26, ruleset errno:13
+confined truncate-beside-storage-parent: control ok:0, ruleset errno:13
+confined list-storage-parent: control ok:6, ruleset errno:13
+confined list-sibling: control ok:3, ruleset errno:13
+confined list-sibling-private: control ok:3, ruleset errno:13
+```
+
+The launch's own row is what the `launch outside Init` line shows: the provider
+started under the ruleset the launcher installed, so an `Init` for a base beneath
+`STORAGE_PARENT` is refused by the kernel with `Permission denied (os error 13)`
+and creates nothing. The eight control lines each succeed, so no confined refusal
+is an ordinary permission failure, and `stat` of the parent stays outside the row,
+which is the honesty limit recorded at the file row's contract entry.
+
+The same run under one plant reproduced the defect the reviewer found: a handled
+mask narrowed by `& !LANDLOCK_ACCESS_FS_TRUNCATE` left the truncation permitted,
+and the journey failed with
+
+```text
+confined truncate-beside-storage-parent: control ok:0, ruleset ok:0
+
+thread 'linux_wallet_file_row_is_refused_outside_storage_root' panicked at tests/confine.rs:11621:9:
+assertion `left == right` failed: truncate-beside-storage-parent must be refused EACCES by the ruleset, and it answered Returned(0)
+  left: Returned(0)
+ right: Errno(13)
+test linux_wallet_file_row_is_refused_outside_storage_root ... FAILED
+```
+
+That run is why the builder now refuses an ABI that cannot report `TRUNCATE` and
+`IOCTL_DEV`, rather than only one that cannot express a granted row.
+
 Namespaces, capability dropping and the other contract rows remain unbuilt;
 `linux` stays outside `DECLARED_CONFINED_OS`. The launcher remains lab code.
 
-The following Linux-only plants await rerun. They stay outside the Mac
-falsifier list. Each plant changes only the named code and leaves its assertions
-in place:
+The following Linux-only plants stay outside the Mac falsifier list, because a
+`#[cfg(target_os = "linux")]` test cannot produce a CAUGHT line on the Mac. Each
+plant changes only the named code and leaves its assertions in place. All six
+were run on the host above against this candidate, and each turned its named test
+red:
 
 - WP196: replace the launcher's `install_landlock(ruleset)` result with
-  `Ok::<(), LandlockInstallFailure>(())`. The file journey must fail at outside
-  `init` while the probe retains its installer.
+  `Ok::<(), SeccompInstallFailure>(())`. The file journey failed, the probe's own
+  installer intact: `assertion \`left == right\` failed: an Init for a base
+  outside STORAGE_ROOT must be refused under the launch:
+  {"data":{"managed_wallets_configured":true,...},"status":"ok"}` with
+  `left: String("ok")` and `right: "error"`.
 - WP197: replace `(SHARED_RULES[1], 0)` with a row granting `READ_FILE | READ_DIR`.
-  The file journey must fail on the sibling read and directory boundary.
+  The file journey failed on `read-beneath-storage-parent must be refused EACCES
+  by the ruleset, and it answered Returned(26)`, `left: Returned(26)`,
+  `right: Errno(13)`.
 - WP202: replace the installer's
-  `libc::prctl(libc::PR_SET_NO_NEW_PRIVS, LANDLOCK_NO_NEW_PRIVS, 0, 0, 0)` with `0`.
-  `linux_landlock_requires_no_new_privs` requires the child to enter with the flag
-  clear, install Landlock before seccomp, and leave with the flag set. Its
-  negative control skips that step through the same installer and requires the
-  exact `restrict_self` refusal with `EPERM`. Omitting the real call must also
-  make the normal-install case fail on the unprivileged host.
+  `libc::prctl(libc::PR_SET_NO_NEW_PRIVS, LANDLOCK_NO_NEW_PRIVS, 0, 0, 0)` call
+  with a constant success. `linux_landlock_requires_no_new_privs` failed with
+  `Landlock must set no_new_privs from a clear flag and install successfully:
+  "landlock probe refused: the probe child must install the ruleset: landlock
+  install refused: landlock_restrict_self failed with errno 1"`.
 - WP203: in `run_landlock_probe_child`, insert a real allocator call after the
   guard is armed: `std::alloc::alloc(std::alloc::Layout::new::<u8>())` inside an
-  unsafe block. `linux_landlock_child_paths_reject_allocations` must fail on the
-  first ordinary probe run with the heap-access refusal.
+  unsafe block. `linux_landlock_child_paths_reject_allocations` failed with
+  `prepared child paths must avoid heap access: "landlock probe refused: the child
+  attempted heap access after fork"`.
 - WP204: insert the same allocation after the launcher's guard is armed in
-  `pre_exec`. `landlock_install_refuses_each_failed_step` must fail because the
-  child exits before the required install record. The allocator guard's exit
-  code is 86, so the child cannot wait on an inherited allocator lock.
+  `pre_exec`. `landlock_install_refuses_each_failed_step` failed on its launch
+  assertion, which answered no record where
+  `wallet-provider start is refused: landlock install refused: the ruleset could
+  not be created with errno 22` belongs. The allocator guard's exit code is 86,
+  so the child cannot wait on an inherited allocator lock.
+- WP207: narrow the handled mask by `& !LANDLOCK_ACCESS_FS_TRUNCATE`. The file
+  journey failed on the truncation answer, as quoted in "The kernel proof". That
+  is the plant the round-2 review asked for, and it is the one measurement that
+  shows the handled mask, and not only the granted rows, carries the write
+  boundary.
 
 WP198 to WP201 are the four cross-platform reason plants in `falsifiers.json`.
-Their named test is `landlock_install_refuses_each_failed_step`; mutation-run
-results remain pending.
+Their named test is `landlock_install_refuses_each_failed_step`, and all four are
+CAUGHT on the Mac against this candidate.
 
 ## The frame
 
@@ -452,7 +530,7 @@ filter.
 | `(allow file-read* (literal "/"))` | No path rule. The nearest rule is a Landlock read rule on `/`, which would grant the whole tree and be a fourth path, so the design does not use it. | No exact match: the nearest rule is wider (all files) and the design's mapping is narrower (no rule). The Linux test decides whether the loader starts without it. | `confined_provider_serves_did_operations_under_its_root` and `confined_provider_serves_wallet_operations_under_its_root` |
 | `(allow sysctl-read)` | Seccomp allows the kernel-fact syscalls the loader and the allocator use; no path rule. Landlock has no sysctl right. | No exact match: the oracle grants every sysctl read, and the filter is narrower (named syscalls only). The Linux test decides the set. | `confined_provider_serves_did_operations_under_its_root`, `confined_provider_serves_wallet_operations_under_its_root` and `confined_provider_denies_kernel_fact_boundaries` |
 | `(allow file-read* (literal (param "STORAGE_PARENT")))` | No read rule on `STORAGE_PARENT`. Landlock has no rule that names a directory alone: a path rule on a directory covers the whole tree beneath it, so the nearest rule would let a read beneath the parent succeed. | No exact match: the nearest rule is wider than the oracle (the whole tree beneath the parent), so the design's mapping is narrower: no rule. The `STORAGE_PARENT` read test plants a readable file beneath the parent, outside `STORAGE_ROOT`, and requires its read to fail. If the provider needs the directory alone to start, the start is refused with `linux confinement refused: the Landlock ABI cannot express the STORAGE_PARENT read`, and `linux_start_is_refused_when_the_landlock_abi_cannot_express_a_row` requires that reason. | `outside_read_denied` and `confined_outside_read_is_denied` |
-| `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` | Landlock read and write rights on `STORAGE_ROOT`, covering its tree. | Exact for the path: a rule beneath `STORAGE_ROOT` covers the same subtree as the oracle's `subpath`. The rights are exact when the ABI reports every right the oracle's read and write cover. A right the ABI lacks departs the row: `REFER` before ABI 2 refuses every link or rename across directories, which is narrower; `TRUNCATE` before ABI 3 and `IOCTL_DEV` before ABI 5 are not restricted at all, which is wider. Because a wider departure is not confinement, the start is refused when the ABI cannot express this row. | `confined_provider_serves_did_operations_under_its_root`, `confined_provider_serves_wallet_operations_under_its_root`, `outside_write_denied` and `confined_outside_write_is_denied` |
+| `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` | Landlock read and write rights on `STORAGE_ROOT`, covering its tree. | Exact for the path: a rule beneath `STORAGE_ROOT` covers the same subtree as the oracle's `subpath`. The rights are exact when the ABI reports every right the oracle's read and write cover. A right the ABI lacks departs the row: `REFER` before ABI 2 refuses every link or rename across directories, which is narrower; `TRUNCATE` before ABI 3 and `IOCTL_DEV` before ABI 5 are not restricted at all, which is wider. Because a wider departure is not confinement, the start is refused when the ABI cannot express this row: `LANDLOCK_REQUIRED_DENIALS` names those two rights and the row, so an ABI below 5 builds no ruleset and there is no truncation or device ioctl outside `STORAGE_ROOT` that a lower ABI would permit. | `confined_provider_serves_did_operations_under_its_root`, `confined_provider_serves_wallet_operations_under_its_root`, `outside_write_denied` and `confined_outside_write_is_denied` |
 | `(allow file-read-data (literal "/"))` (model profile) | No path rule, for the same reason as the read of `/`. | No exact match: the nearest rule, a read rule on `/`, is wider (data and metadata for all files); the design's mapping is narrower (no rule). The Linux test decides. | `model_provider_ops_under_profile` (the model provider's named test) and `both_file_profiles_bind_one_storage_parameter_contract` |
 
 The five allow rules cover `model-provider` too. The table names the model
@@ -596,7 +674,10 @@ rule, P11). Each refusal has its own reason and its own Linux test:
   `linux_start_is_refused_when_the_landlock_abi_cannot_express_a_row`. The test
   presents an ABI that lacks one right per row and requires the reason to name
   that row. For the `STORAGE_PARENT` row the reason names that read, because
-  Landlock has no literal-directory right at any ABI.
+  Landlock has no literal-directory right at any ABI. For the default-denial
+  file row the reason names `LANDLOCK_REQUIRED_DENIALS`' row, which is the check
+  `landlock_ruleset_refuses_an_abi_that_cannot_express_a_row` already covers on
+  every OS for ABI 1, 2 and 4.
 - User namespaces are turned off:
   `linux confinement refused: user namespaces are turned off`; the test that
   would prove it is
