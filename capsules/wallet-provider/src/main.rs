@@ -1758,5 +1758,308 @@ mod uf_managed_key_refusal_tests {
     }
 }
 
+/// One unit test per refusal on the managed Bitcoin signing path.
+///
+/// `validate_bitcoin_challenge_for_signing` (:951) and the one unpinned guard of
+/// `account_for_signature` (:918) decide whether a managed Bitcoin approval is
+/// signed against a challenge the Runtime issued. Each string below is asserted
+/// as the whole value, so a dropped consumed, expiry, address, network or
+/// message-binding check fails one named test in about a second instead of only
+/// the confined process suite.
+///
+/// `Bitcoin BIP-322 payload missing message` (:961) has no test: the first line
+/// of the function is `validate_bitcoin_bip322_proof_payload`, whose own
+/// `message` guard (`src/crypto/bitcoin.rs:479` to `:482`) raises the same
+/// string before :961 can run, so :961 is unreachable and is recorded here.
+///
+/// `active linked account not found` (:914) has no test here:
+/// `src/tests/approvals/managed.rs:420` already asserts that code and message on
+/// the whole approval call, so a second test for it would be a second path to
+/// one rule.
+#[cfg(test)]
+mod uf_signing_challenge_refusal_tests {
+    use super::*;
+
+    /// A second mainnet P2WPKH address (BIP-173's example), so a case can make
+    /// the stored record name another address than the account.
+    const OTHER_BITCOIN_ADDRESS: &str = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
+
+    /// One initialised provider holding one managed Bitcoin account, taken from
+    /// the store so no account field list is written here.
+    struct SigningFixture {
+        _dir: tempfile::TempDir,
+        provider: WalletProvider,
+        account: LinkedAccount,
+    }
+
+    impl SigningFixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let mut provider = WalletProvider::new();
+            let response = provider.init(json!({ "base_path": dir.path().display().to_string() }));
+            assert!(
+                matches!(response, Response::Ok { .. }),
+                "init must succeed, got {response:?}"
+            );
+            let response = provider.create_managed_account(CreateManagedAccountInput {
+                principal_id: "person:local:signing".to_string(),
+                chain_namespace: BITCOIN_MAINNET_CHAIN_NAMESPACE.to_string(),
+                label: None,
+                create_new: false,
+            });
+            assert!(
+                matches!(response, Response::Ok { .. }),
+                "managed Bitcoin account must be created, got {response:?}"
+            );
+            let account = provider
+                .store
+                .accounts
+                .first()
+                .cloned()
+                .expect("the provider must store the account it just created");
+            Self {
+                _dir: dir,
+                provider,
+                account,
+            }
+        }
+
+        /// Issues one Bitcoin challenge for the fixture account through the
+        /// provider and answers the message it issued, so a case changes only
+        /// the part it names.
+        fn issue_challenge(&mut self) -> String {
+            let response = self.provider.bitcoin_challenge(BitcoinChallengeInput {
+                domain: "elastos.local".to_string(),
+                uri: "http://elastos.local/apps/home/".to_string(),
+                address: self.account.address.clone(),
+                network: "bitcoin".to_string(),
+                resources: Vec::new(),
+            });
+            match response {
+                Response::Ok { data: Some(data) } => data["message"].as_str().unwrap().to_string(),
+                other => panic!("expected Bitcoin challenge, got {other:?}"),
+            }
+        }
+
+        /// The id of the challenge `issue_challenge` wrote.
+        fn challenge_id(&self) -> String {
+            self.provider.store.bitcoin_challenges[0]
+                .challenge
+                .challenge_id
+                .clone()
+        }
+
+        /// Runs the signing-path guard for the fixture account with the payload
+        /// the Runtime sends for `message`, and answers its refusal.
+        fn refusal(&self, message: &str, now: u64) -> String {
+            let payload = json!({
+                "schema": "elastos.wallet.bitcoin_bip322_request/v1",
+                "wallet_intent": "bitcoin_bip322_proof",
+                "chain_namespace": self.account.chain_namespace.clone(),
+                "address": self.account.address.clone(),
+                "message": message,
+            });
+            self.provider
+                .validate_bitcoin_challenge_for_signing(&payload, &self.account, now)
+                .expect_err("the signing path must refuse this challenge")
+        }
+    }
+
+    /// Catches removal of the chain-namespace guard in `account_for_signature`
+    /// (:915): without it a Bitcoin account signs a request that names an EVM
+    /// chain, so the account answers an effect it does not own.
+    ///
+    /// The account id and the principal are the stored ones, so the earlier
+    /// `active_account` lookup passes and only :918 can answer.
+    #[test]
+    fn signing_refuses_incompatible_chain_namespace() {
+        let fixture = SigningFixture::new();
+        let input = SignatureRequestInput {
+            request_id: "request-1".to_string(),
+            wallet_request_sha256: "request-sha-1".to_string(),
+            authority_binding: format!("0x{}", "11".repeat(32)),
+            principal_id: fixture.account.principal_id.clone(),
+            session_id: "session-1".to_string(),
+            launch_id: "launch-1".to_string(),
+            proof_binding_id: None,
+            account_id: fixture.account.account_id.clone(),
+            chain_namespace: "eip155:20".to_string(),
+            intent: "bitcoin_bip322_proof".to_string(),
+            requested_by_actor: "wallet".to_string(),
+            resource: "elastos://wallet/bitcoin/proof".to_string(),
+            reason: "Prove Bitcoin account".to_string(),
+            payload: json!({}),
+            expires_at: 0,
+        };
+
+        assert_eq!(
+            fixture.provider.account_for_signature(&input),
+            Err(Response::Error {
+                code: "invalid_request".to_string(),
+                message: "wallet account does not match requested chain_namespace".to_string(),
+            })
+        );
+    }
+
+    /// Catches removal of the challenge-id guard at :963: without it a message
+    /// that binds the challenge resource line but names no id reaches the store
+    /// lookup with nothing to find.
+    ///
+    /// The issued message is kept whole and only its id is removed, so the
+    /// payload validator (`src/crypto/bitcoin.rs:459`) still sees a line that
+    /// starts with `- elastos://auth/bitcoin-challenge/` while the id reader
+    /// (`:501`) filters the empty remainder.
+    #[test]
+    fn signing_refuses_message_without_runtime_challenge() {
+        let mut fixture = SigningFixture::new();
+        let message = fixture.issue_challenge();
+        let message = message.replace(&fixture.challenge_id(), "");
+
+        assert_eq!(
+            fixture.refusal(&message, now_ts()),
+            "Bitcoin BIP-322 message missing Runtime challenge"
+        );
+    }
+
+    /// Catches removal of the stored-challenge lookup at :969: without it a
+    /// well-formed message naming an id the store does not hold is signed as if
+    /// a challenge existed.
+    ///
+    /// The issued challenge stays in the store and only the id the message
+    /// names moves, so a lookup that falls back to any stored record is caught
+    /// here. `src/tests/approvals/managed.rs:444` asserts
+    /// `contains("challenge not found")` on a whole approval call, a fragment
+    /// shared by this string, the SIWE path's and the verify path's
+    /// `Bitcoin wallet proof challenge not found`; the assertion here pins which
+    /// string this function raises.
+    #[test]
+    fn signing_refuses_unknown_challenge() {
+        let mut fixture = SigningFixture::new();
+        let message = fixture.issue_challenge();
+        let unknown_id = format!("{}0", fixture.challenge_id());
+        let message = message.replace(&fixture.challenge_id(), &unknown_id);
+
+        assert_eq!(
+            fixture.refusal(&message, now_ts()),
+            "Bitcoin proof challenge not found"
+        );
+    }
+
+    /// Catches removal of the consumption guard at :971: without it one Bitcoin
+    /// challenge signs any number of approvals, so a captured message replays.
+    ///
+    /// No existing test asserts this string: `src/tests/proofs.rs` covers the
+    /// verify path's own consumption rule, a different string on a different
+    /// operation.
+    #[test]
+    fn signing_refuses_consumed_challenge() {
+        let mut fixture = SigningFixture::new();
+        let message = fixture.issue_challenge();
+        let now = now_ts();
+        let record = &mut fixture.provider.store.bitcoin_challenges[0];
+        let original = record.consumed_at;
+        record.consumed_at = Some(now);
+
+        assert_eq!(
+            fixture.refusal(&message, now),
+            "Bitcoin proof challenge already consumed"
+        );
+        fixture.provider.store.bitcoin_challenges[0].consumed_at = original;
+    }
+
+    /// Catches removal of the expiry guard at :974: without it a challenge past
+    /// its lifetime still signs an approval.
+    ///
+    /// The function is called directly, because the whole approval call prunes
+    /// the store first (`src/approval.rs:394`, `:516`, `:573`, `:841`); that
+    /// pruning is why `src/tests/approvals/managed.rs:518` has to accept
+    /// `"expired"` or `"not found"`. The assertion here pins the string this
+    /// function raises for an expired record.
+    #[test]
+    fn signing_refuses_expired_challenge() {
+        let mut fixture = SigningFixture::new();
+        let message = fixture.issue_challenge();
+        let now = now_ts();
+        let record = &mut fixture.provider.store.bitcoin_challenges[0];
+        let original = record.challenge.expires_at;
+        record.challenge.expires_at = now.saturating_sub(1);
+
+        assert_eq!(
+            fixture.refusal(&message, now),
+            "Bitcoin proof challenge expired"
+        );
+        fixture.provider.store.bitcoin_challenges[0]
+            .challenge
+            .expires_at = original;
+    }
+
+    /// Catches removal of the address guard at :977: without it a challenge the
+    /// Runtime issued to one address signs an approval for another account.
+    ///
+    /// The message and the payload keep the account's own address, so the
+    /// payload validator passes at `src/crypto/bitcoin.rs:489`; only the stored
+    /// record names another address.
+    #[test]
+    fn signing_refuses_address_mismatch() {
+        let mut fixture = SigningFixture::new();
+        let message = fixture.issue_challenge();
+        let record = &mut fixture.provider.store.bitcoin_challenges[0];
+        let original = record.challenge.address.clone();
+        record.challenge.address = OTHER_BITCOIN_ADDRESS.to_string();
+
+        assert_eq!(
+            fixture.refusal(&message, now_ts()),
+            "Bitcoin proof challenge address does not match account"
+        );
+        fixture.provider.store.bitcoin_challenges[0]
+            .challenge
+            .address = original;
+    }
+
+    /// Catches removal of the network guard at :980: without it a challenge the
+    /// Runtime issued on one Bitcoin network signs for an account on another.
+    ///
+    /// The message and the payload keep `bitcoin`, so every check ahead of this
+    /// one passes; only the stored record names `testnet`.
+    #[test]
+    fn signing_refuses_network_mismatch() {
+        let mut fixture = SigningFixture::new();
+        let message = fixture.issue_challenge();
+        let record = &mut fixture.provider.store.bitcoin_challenges[0];
+        let original = record.challenge.network.clone();
+        record.challenge.network = "testnet".to_string();
+
+        assert_eq!(
+            fixture.refusal(&message, now_ts()),
+            "Bitcoin proof challenge network does not match account"
+        );
+        fixture.provider.store.bitcoin_challenges[0]
+            .challenge
+            .network = original;
+    }
+
+    /// Catches removal of the whole-message comparison at :983: without it a
+    /// message that names a stored challenge but carries different words is
+    /// signed against that challenge's address.
+    ///
+    /// Only the stored nonce moves, so the id, the consumption, the expiry, the
+    /// address and the network checks all pass and only the comparison can
+    /// answer.
+    #[test]
+    fn signing_refuses_message_mismatch() {
+        let mut fixture = SigningFixture::new();
+        let message = fixture.issue_challenge();
+        let record = &mut fixture.provider.store.bitcoin_challenges[0];
+        let original = record.challenge.nonce.clone();
+        record.challenge.nonce = "0".repeat(24);
+
+        assert_eq!(
+            fixture.refusal(&message, now_ts()),
+            "Bitcoin proof message does not match challenge"
+        );
+        fixture.provider.store.bitcoin_challenges[0].challenge.nonce = original;
+    }
+}
+
 #[cfg(test)]
 mod tests;
