@@ -1,7 +1,8 @@
 # wasm-capsule lab — wc-001, its lab name (task 010), `tools/bundle` (task 009), the verifier (wc-004) and the bare-capsule ABI gap (wc-008)
 
 The lab's foundation: one minimal **core Wasm** capsule that anyone can rebuild
-byte for byte on this one Mac. A lab bundle of it is named by
+byte for byte on this one Mac, and whose lab CID names one bundle whichever
+path it is built at (see "Claim scope"). A lab bundle of it is named by
 cc-capsule-identity's lab CID (task 010); wc-004 verifies a test-key signature
 over that name and audits its module; wc-005a runs it on one engine,
 wc-005b (task 015) on two, and wc-005c (task 016) writes a receipt of that run
@@ -11,24 +12,29 @@ Anders may adopt; it is not a second Runtime.
 ## What the capsule is
 
 `capsule/src/lib.rs` compiles to a core Wasm module for `wasm32-unknown-unknown`
-with **no imports**. It exports one pure function:
+with **no imports**. It exports `digest` and, since task 068, the
+`product-capsule-v1` world's `lifecycle.run`:
 
 ```wat
 (func (export "digest") (param i32) (result i64))
+(func (export "elastos:bus/lifecycle@1.0.0#run") (result i32))
 ```
 
 `digest` is a splitmix64-style mix: total (no panics), deterministic, `core`
-only. It is the whole capsule — a small self-contained computer that traps down
-to nothing (Rong's DigitCapsule; PRINCIPLES P3, P18). `digest_impl` is the
-single shared implementation the Wasm export and the host test both call, so
-there is one path for the behaviour (P10).
+only. The capsule is a small self-contained computer that traps down to nothing
+(Rong's DigitCapsule; PRINCIPLES P3, P18). `digest_impl` is the single shared
+implementation the Wasm export and the host test both call, so there is one path
+for the behaviour (P10). The world's `run` returns `Ok(())` and calls no Bus
+import, so the capsule is a real `elastos:bus@1.0.0` capsule of
+`product-capsule-v1` that gains no authority (lab stand-in, not admission; see
+"lifecycle export (task 068, carry of 067)", below).
 
 ## Layout
 
 ```
 Cargo.toml            root package `capsule` + members `audit`, `tools`; its own [workspace]
 Cargo.lock            committed; the one lockfile for every member and path dependency
-capsule/src/lib.rs    the guest (no_std on wasm32) + the digest host test
+capsule/src/lib.rs    the guest (std on wasm32; `wit-bindgen` bindings) + the digest host test
 capsule/capsule.json  this capsule's `elastos.capsule/v1` manifest
 audit/                the `wasm-capsule-audit` crate (owned by the cx-wasm-audit lane)
 tools/build           the reproducible build script (bash)
@@ -44,8 +50,9 @@ tools/src/receipt.rs  wc-005c's run receipt: `render` and `write_receipt`
 tools/src/bin/bundle.rs  the `bundle` binary: parse, run, print, exit status
 tests/                host-side named tests + the shape reader (never in the capsule)
   common/             build driver (and the copy layout) + minimal wasm shape reader
-                      (core Wasm and the `digest` signature only; it reads no imports,
-                      the zero-import check reads through `audit/`, task 053)
+                      (core Wasm, the `digest` signature and, task 068, the
+                      `lifecycle.run` signature; it reads no imports, the
+                      zero-import check reads through `audit/`, task 053)
   bundle_builds/      small stand-in build scripts for `tools/bundle`'s tests
 falsifiers.json       planted bugs, each caught by a named test (provider format)
 rust-toolchain.toml   pins rustc 1.91.0 + the wasm target (for adoption)
@@ -64,8 +71,11 @@ the verifier and the runner, below).
 The runner (`tools/src/run.rs`) starts two host engines. Rong's ruling (26 Oct):
 Both engines, wasmtime and wasmer, are test-only and not endorsed. The engine choice is Anders's.
 
-`capsule` itself has **no dependencies**: it has no `[dependencies]` (P18). Its
-tests' dev-dependencies are built only for tests: `wasm-capsule-tools`, the
+`capsule` itself has **one dependency**: `wit-bindgen = "0.57.1"` (task 068),
+the Runtime's component-app template's own line, which generates the
+`product-capsule-v1` guest bindings and is built only for the wasm32 guest
+(P18: one dependency, no vendored copy, no fallback). Its tests'
+dev-dependencies are built only for tests: `wasm-capsule-tools`, the
 Runtime's `elastos-common` (a read-only path dependency, for its
 `CapsuleManifest`) with `serde_json` to read it, and for wc-004's tests
 `capsule-identity`, `wasm-capsule-audit`, the Runtime's `elastos-identity`
@@ -78,8 +88,14 @@ manifest reader). `capsule-identity` path-depends on `elastos/crates/elastos-com
 audit's `wasmparser` 0.258.0 and dev-only `wat` 1.258.0, capsule-identity's
 `ed25519-dalek` 2.2.0, `rustix` 1.1.4, `sha2` 0.10.9, `hex` 0.4.3 and
 `serde_json` 1.0.151, the Runtime crates' own dependencies, and their transitive
-dependencies: 135 registry crates (wc-004 added none: every crate it uses
-was already locked). `tools/build` compiles only `capsule`, so
+dependencies: 150 registry crates (wc-004 added none: every crate it uses
+was already locked; task 068 added 15, the `wit-bindgen` 0.57.1 set, each at
+the version `examples/hello/Cargo.lock` holds: `heck` 0.5.0, `id-arena` 2.3.0,
+`log` 0.4.34, `macro-string` 0.2.0, `prettyplease` 0.2.37, `unicode-xid` 0.2.6,
+`wasm-encoder` 0.247.0, `wasm-metadata` 0.247.0, `wasmparser` 0.247.0,
+`wit-bindgen` 0.57.1, `wit-bindgen-core` 0.57.1, `wit-bindgen-rust` 0.57.1,
+`wit-bindgen-rust-macro` 0.57.1, `wit-component` 0.247.0 and `wit-parser`
+0.247.0). `tools/build` compiles only `capsule`, so
 none of them is in the artifact. But Cargo resolves the whole workspace, so
 every build, `tools/build` included, needs those crates in the local cargo
 cache. They are cached on this Mac, so the lane builds offline here; on a
@@ -126,18 +142,18 @@ can be checked (P13).
 Reproducible on **this one Mac**, across paths and clean caches only.
 Cross-machine reproduction is **unverified**: Cargo's symbol hashes depend on
 the build machine (same note as the agent-host guest hash). Reference values
-from two clean builds at different temp paths on 2026-10-25:
+from two clean builds at different temp paths on 2026-10-29:
 
 - rustc: `rustc 1.91.0 (f8297e351 2025-10-28)`, host `aarch64-apple-darwin`
 - target: `wasm32-unknown-unknown`
-- `capsule.wasm` sha256 (both builds): `2002429e73ee1a5e983df008f5b53728882646f109d55a9d1a93e831690631e1`
-  (27 Oct 2026, re-pinned by task 032: two `tools/build` builds and a
-  `python3 -I` `hashlib` recomputation agree, LOG.md task 032; it was
-  `6dd9af1a8d33d14f48514611663e3f5b262f91ef2729de4ec851441af9b22b13`, 178
-  bytes, with no memory maximum)
-- size: 180 bytes (one memory: minimum 16 pages, maximum 1024 pages)
+- `capsule.wasm` sha256 (both builds): `e7f17f707a1d12600f5ffe8d0376e1ef8a3fe4b7d89b539f644363556d9b8774`
+  (29 Oct 2026, re-pinned by task 068: two `tools/build` builds and a
+  `python3 -I` `hashlib` recomputation agree, LOG.md task 068; it was
+  `2002429e73ee1a5e983df008f5b53728882646f109d55a9d1a93e831690631e1`, 180
+  bytes, `no_std` with the `digest` export only)
+- size: 17,658 bytes (one memory: minimum 17 pages, maximum 1024 pages)
 
-On this stripped, zero-dependency release cdylib nothing absolute leaks, so
+On this stripped release cdylib nothing absolute leaks, so
 `--remap-path-prefix` is defensive (it would neutralise a leak from debug info
 or a dependency). F-WC1 is realised by embedding `env!("CARGO_MANIFEST_DIR")`,
 an absolute path `--remap-path-prefix` does not rewrite, which is why the two
@@ -325,26 +341,45 @@ there unchanged (its `artifact: capsule.wasm` line names the file before the
 move). The receipt is outside the bundle, so it is not in the lab CID (P13:
 the bundle carries the artifact `tools/build` receipted).
 
+**One name across paths.** A bundle has one lab CID whichever path it is built
+at, as long as the module is byte-identical. The test
+`two_bundles_in_different_paths_have_one_lab_cid` bundles three copies of the
+lane through each copy's real `tools/bundle`, which runs that copy's
+`tools/build` by a slash path. Two copies are siblings, so their parent paths
+have the same length and depth; the third sits below a parent one level
+deeper and with a longer name, so the three parents differ in both length and
+depth. The test also asserts that layout on its own fixture, so a build input
+keyed on the path's length or depth cannot agree across all three. The test
+requires the three `capsule.wasm` files to be byte-identical and the three
+printed CIDs to be one, then flips one byte of one bundle's module and
+requires `--name` to print another. Byte identity is required by the test, not
+produced by it: the module carries the resolved paths of its workspace's
+`capsule-identity` dependency, and a build input that carries one of those
+paths unremapped makes the test fail (plants `F-WC1` and
+`F-WC1-SPACED-PATH`). The plant `F-BUNDLE-REMAP-UNEVEN` keeps the lane path
+as the caller named it; README, "F-BUNDLE-REMAP-UNEVEN", records why it is a
+hand proof.
+
 **Not covered.** The guarantee is for the OUT_DIR leaf and the entries under
 it. Links in OUT_DIR's parent folders are followed as usual by `create_dir`
 and `rename`. Another process changing OUT_DIR during the run is not covered
 either: that needs folder-relative opens. The retired lane-own name had the
 same limit.
 
-**Reference lab CID on this Mac** (2026-10-27, re-pinned by task 032), for
+**Reference lab CID on this Mac** (2026-10-29, re-pinned by task 068), for
 this capsule's 277-byte manifest beside `capsule.wasm`
-`2002429e73ee1a5e983df008f5b53728882646f109d55a9d1a93e831690631e1`:
+`e7f17f707a1d12600f5ffe8d0376e1ef8a3fe4b7d89b539f644363556d9b8774`:
 
 ```
-bafybeiebyzg55l4s6kb6daroty4prlkximwp6uvo32ovacfzdx7cahywqm
+bafybeigbjo5l3o5wmqf3ccdwfpcyci455r4c3elfpg2i6lhj5qwp2qwvou
 ```
 
 `tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid` pins it
 (`REFERENCE_LAB_CID`). Task 024 recomputed it with the same outside
 `python3 -I` script, over the bundle `tools/bundle` wrote on this Mac, and
 pinned it only because it equals what `bundle_identity` prints for that folder.
-Task 032 did the same for the new `capsule.wasm` (LOG.md, task 032); the value
-before it was `bafybeib34owcqffbwkntlhvbjngcj7eyeqqxx7aoefehqt2dqm2yu5jwse`.
+Task 068 did the same for the new `capsule.wasm` (LOG.md, task 068); the value
+before it was `bafybeiebyzg55l4s6kb6daroty4prlkximwp6uvo32ovacfzdx7cahywqm`.
 It is a lab CID, not the Runtime's CID.
 
 **The test seam.** `run(mode, build_script)` takes the build script's path, so
@@ -360,15 +395,17 @@ the checkout. Each run builds the command fresh there.
 
 ```rust
 wasm_capsule_tools::verify::verify_checked(checked: CheckedBundle, signature: Option<&NameSignature>,
-    accepted: &[String], granted: &[DeclaredImport]) -> Result<VerifiedBundle, VerifyRefusal>
+    accepted: &[String]) -> Result<VerifiedBundle, VerifyRefusal>
 wasm_capsule_tools::verify::verify_bundle(bundle: &Path, signature: Option<&NameSignature>,
-    accepted: &[String], granted: &[DeclaredImport]) -> Result<VerifiedBundle, VerifyRefusal>
+    accepted: &[String]) -> Result<VerifiedBundle, VerifyRefusal>
 ```
 
-**One call, five checks, in order.** `verify_checked` takes a
+**One call, four checks, in order.** `verify_checked` takes a
 `CheckedBundle` from cc-capsule-identity's `checked_bundle` (the lab CID with
-the bytes its one walk read), the bundle's in-memory `NameSignature`, the
-accepted signer DIDs and the granted imports. The first refusal is the answer:
+the bytes its one walk read), the bundle's in-memory `NameSignature` and the
+accepted signer DIDs. Task 065 removed its granted imports (Rong's WC-1 and
+WC-2; "Bus v1 import contract (wc-009b)", below). The first refusal is the
+answer:
 
 1. no signature (`None`): refused as unsigned;
 2. cc-capsule-identity's `verify_checked_signature` on the checked value: a
@@ -377,10 +414,9 @@ accepted signer DIDs and the granted imports. The first refusal is the answer:
 3. the manifest's `entrypoint`, read from the checked `capsule.json` with the
    Runtime's `CapsuleManifest` (the one reader of that file), names the module
    among the checked entries;
-4. the cx-wasm-audit crate's `audit(module, granted)` on that module's checked
-   bytes;
-5. since task 031, each import on the audit's returned list has a typed entry
-   in `LAB_OPERATIONS` ("Typed lab operations (M1 B4 lab half)", below).
+4. the cx-wasm-audit crate's `audit(module, &[])` on that module's checked
+   bytes: no core-module import is granted (task 065), so the module's first
+   import, if it has one, is refused by its own name.
 
 `verify_bundle` is `checked_bundle` and then `verify_checked`, with no check of
 its own, so the walk's refusals come first. The tools crate has exactly one
@@ -398,20 +434,18 @@ signature or import code of its own (no `wasmparser`).
   signature that does not verify), carried unchanged and printed exactly as
   that lane prints it;
 - every audit refusal (`undeclared import {module}.{name}`, `malformed module`,
-  `code in custom section`), carried unchanged;
-- a granted import with no typed lab operation (task 031):
-  `no typed lab operation for import <module>.<name>`.
+  `code in custom section`), carried unchanged.
 
 A fifth reason, `the Runtime's CapsuleManifest could not read the checked
 capsule.json: <reason>`, cannot happen for a value `checked_bundle` made: the
 walk runs the same parse and refuses first. It is kept so the verifier fails
 closed with a reason rather than a panic, and no test can reach it.
 
-**The value.** `VerifiedBundle` holds the checked bundle, which of its
-entries is the entrypoint (found by step 3, the one manifest read) and the
-audit's own import list, read through `cid()`, `entries()`, `entrypoint()` and
-`imports()`; since wc-009a also the grants the module does not import, through
-`unused_grants()`. `entrypoint()` returns the checked entry the manifest's
+**The value.** `VerifiedBundle` holds the checked bundle and which of its
+entries is the entrypoint (found by step 3, the one manifest read), read
+through `cid()`, `entries()` and `entrypoint()`, and the declared
+`memory_mb()`. Task 065 removed `imports()` and `unused_grants()`: the module
+imports nothing, and no grant is passed. `entrypoint()` returns the checked entry the manifest's
 `entrypoint` names, the module the audit read, so no caller reads the manifest
 again. Its fields are private, and it has no public constructor, no `&mut`
 access and no `Deserialize`, so a value exists only as `verify_checked` made
@@ -420,7 +454,7 @@ it. wc-005a's runner (task 014) writes `entrypoint()`'s bytes.
 **The checked bytes, never the folder again.** The audit reads the module
 bytes the signed name covers, from the checked value. The verifier reads no
 bundle file by a path; its one file read is the caller's lab grants file, in
-`read_grants` (wc-009a, below), which is never part of the bundle. If the
+`read_grants` (task 065: v3, below), which is never part of the bundle. If the
 folder changes after `checked_bundle`, `verify_checked`
 on the held value still judges the held bytes, and `verify_bundle` on the
 changed folder is refused with the identity lane's mismatch reason.
@@ -432,16 +466,14 @@ keep the signature in memory only. So there is no `tools/sign` or
 verifying are library calls, tested in process with keys made fresh in memory
 inside each test. If a file form is ever wanted, cc-capsule-identity owns it.
 
-**Granted imports.** The module's own import section is the declaration
-(Rong, 26 Oct, ruling (c)). The granted list goes to `audit` unchanged, and the
-result is exactly the module's imports. Since wc-009a (task 020) the two-engine
-`run` passes the list `read_grants` read from the lab grants file to this same
-call ("Granted imports only (wc-009a)", below). The granted list is a lab
-stand-in, not admission.
+**No core import.** The module's own import section is the declaration
+(Rong, 26 Oct, ruling (c)). Since task 065 the one `audit` call gets an empty
+list, so the module may import nothing; wc-009a's granted list (task 020) is
+retired ("Granted imports only (wc-009a)", below).
 
 **Claim scope.** An offline lab check, on this one Mac with test keys only,
 that a bundle's bytes match a signed lab CID, that an accepted test key signed
-it, and that every import of its entrypoint module is granted. It answers
+it, and that its entrypoint module imports nothing. It answers
 nothing about "may this run": it makes no admission, launch or
 publisher-trust decision and sits in no admission or launch path. The signed
 name is a lab CID, not the Runtime's CID.
@@ -534,7 +566,8 @@ That argv is the one wc-005's discovery recorded for `wasmtime` 45.0.1 and
   work root); `<engine> still ran at its run budget of <n> ms: the runner
   stopped it with SIGKILL`; `the runner could not stop <engine> with SIGKILL:
   <OS error>`; `the runner could not wait for <engine>: <OS error>` (a failed
-  `try_wait`, after which the engine is stopped too, or a failed reap); and
+  poll, `reap`'s `wait4(pid, WNOHANG)` since task 062, after which the engine is
+  stopped too, or a failed reap after a kill, `Child::wait`); and
   `<engine>'s output could not be read: <OS error>`;
 - task 045: `the run on <engine> was cancelled by its caller: no engine starts
   after a cancel, and a running one is stopped with SIGKILL` (its path is the
@@ -546,8 +579,9 @@ caller passes it explicitly as `RunControl::new(budget)`: there is no default,
 and none is read from the environment or a file
 (`runner_uses_only_explicit_inputs`). `start_engine` starts the engine with the
 same argv, empty environment and null stdin as before, reads its stdout and
-stderr on a thread each (so a full pipe never blocks it), and polls `try_wait`
-every `WAIT_POLL` (10 ms) until the engine exits or the budget, counted from
+stderr on a thread each (so a full pipe never blocks it), and polls `reap`
+(`wait4(pid, WNOHANG)`, since task 062; task 043 polled `try_wait`) every
+`WAIT_POLL` (10 ms) until the engine exits or the budget, counted from
 just after the start, has passed. An engine that exits in time gives the same
 success or refusal as before. One still running at the budget is sent SIGKILL
 by the runner (`Child::kill`), reaped (`Child::wait`), both readers are joined,
@@ -622,7 +656,6 @@ pub struct RunInput<'a> {
     pub bundle: &'a Path,                       // the bundle folder
     pub signature: Option<&'a NameSignature>,   // in memory only
     pub accepted: &'a [String],                 // accepted signer DIDs
-    pub granted: &'a [DeclaredImport],          // wc-009a: from read_grants
     pub wasmtime: &'a Path,                     // absolute program paths
     pub wasmer: &'a Path,
     pub work_root: &'a Path,
@@ -637,9 +670,10 @@ first refusal is the answer:
 0. task 043: a zero budget in `input.control` is refused (the same check as
    `run_engine`'s) as `TwoEngineRefusal::Engine`, before verification and any
    `--version` query;
-1. wc-004's `verify_bundle(input.bundle, input.signature, input.accepted, input.granted)`
-   is called once, with the caller's granted imports unchanged (wc-009a). A
-   refusal comes back unchanged as `TwoEngineRefusal::Verify`, printing exactly
+1. wc-004's `verify_bundle(input.bundle, input.signature, input.accepted)`
+   is called once (task 065: no granted imports; wc-009a passed them). A
+   module with any core import is refused, `undeclared import
+   <module>.<name>`. A refusal comes back unchanged as `TwoEngineRefusal::Verify`, printing exactly
    as the verifier prints it; nothing is written and no engine is started;
    task 033: then the same `check_module_memory` `run_engine` calls checks the
    verified module's memory once; a refusal comes back as
@@ -669,9 +703,8 @@ outputs. Two successful runs with different stdout are refused with
 On success `TwoEngineRun` holds the verified `cid()` (the lab CID the signature
 was checked against, taken from the verified value, never by naming the folder
 again), both raw stdouts, `wasmtime()` and `wasmer()` (or `stdout(engine)`), and
-from task 016 each engine's observed `version(engine)` and `status(engine)`,
-and from task 020 `linked()` and `unused_grants()`, the verifier's own lists.
-Its fields are private, so only `run` makes one. `run` writes no receipt; the
+from task 016 each engine's observed `version(engine)` and `status(engine)`.
+Task 065 removed task 020's `linked()` and `unused_grants()`. Its fields are private, so only `run` makes one. `run` writes no receipt; the
 caller writes one with `receipt::write_receipt` (next section).
 
 **The claim.** On this Mac, the capsule `tools/build` makes, bundled, signed
@@ -728,14 +761,14 @@ module run starts:
 **The receipt.** `render` gives `key: value` lines in the shape of wc-001's
 build receipt (`tools/build:82`), under its own schema line. Every value comes
 from the run. The real receipt from this Mac, from
-`real_receipt_names_both_installed_engines` on 27 Oct 2026, task 034 (the
+`real_receipt_names_both_installed_engines` on 28 Oct 2026, task 062 (the
 capsule `tools/build` makes, bundled, signed with a fresh test key, verified
 and run on Homebrew's `/opt/homebrew/bin/wasmtime` and `/opt/homebrew/bin/wasmer`;
 the test asserts `bundle: <bundle_identity of the run's bundle>`, which holds
 the same two files as `REFERENCE_LAB_CID`'s bundle):
 
 ```
-schema: wc-005.run-receipt/v3
+schema: wc-005.run-receipt/v4
 bundle: bafybeiebyzg55l4s6kb6daroty4prlkximwp6uvo32ovacfzdx7cahywqm
 function: digest
 argument: 1592590337
@@ -751,6 +784,8 @@ wasmtime_memory_cap: ENFORCED max-memory-size=67108864,max-memories=1,trap-on-gr
 wasmer_memory_cap: SKIPPED: no memory cap flag in wasmer run --help or wasmer --help (wc-010a)
 wasmtime_memory_maximum_bytes: 67108864
 wasmer_memory_maximum_bytes: 67108864
+wasmtime_process_max_rss_bytes: 14368768 (engine process RSS, not linear memory)
+wasmer_process_max_rss_bytes: 18710528 (engine process RSS, not linear memory)
 ```
 
 `bundle` is the verified `cid()`'s Display form, treated as opaque; it is the
@@ -803,9 +838,41 @@ gives `1048576`), and both lines can be tested against the manifest. The
 cap flag; wasmer's cap is the module's own maximum, which its maximum line
 records.
 
-The receipt records no peak memory: `/usr/bin/time -l` gives the engine
-process's resident memory, not the capsule's linear memory (wc-010a); which
-number belongs here waits for Flint.
+**The peak lines (task 062; schema v4).** After the v3 lines, `render` adds,
+per engine, `wasmtime` then `wasmer`, exactly:
+
+- `<engine>_process_max_rss_bytes: <n> (engine process RSS, not linear memory)`.
+
+What is measured: `n` is the maximum resident set size of that one engine's
+module-run process, in bytes. The runner's one poll loop asks with
+`wait4(pid, WNOHANG)` in place of `try_wait`; the call that reaps the engine
+returns its exit status and that process's own `rusage`, and `n` is its
+`ru_maxrss`, the same kernel counter `/usr/bin/time -l` prints as "maximum
+resident set size". On macOS it is in bytes (`man 2 getrusage`: "the maximum
+resident set size utilized (in bytes)"). The exit status is built from the
+same call, so each engine process is reaped exactly once and never waited for
+again. `getrusage(RUSAGE_CHILDREN)` is not used: it mixes every child the
+calling process has reaped. The `--version` queries record no peak. A run the
+runner stops (budget, cancel, failed wait) is refused, so it has no peak, and
+the refusal receipt has no peak line.
+
+What it is not: the capsule's linear memory. Linear-memory pages the guest
+never touched are not resident, so they are not counted, and the engine's own
+code, data and compiled module are. wc-010a's probes grew linear memory to
+64 MB and both engines stayed under 20 MB resident ("Peak memory for wc-010's
+receipt"); a guest that fills 48 MiB pushes both past 48 MiB
+(`process_peak_rss_follows_the_memory_the_engine_touched`). That is why every
+line carries its label, and why no line claims that RSS stays under the cap.
+
+Why there is no wrapper: running the engine under `/usr/bin/time` would add a
+process and change every engine argv that the census tests (040, 042), the
+recording shims (041, 049) and `argv_faults` read. `wait4` reads the same
+counter with the argv unchanged.
+
+No linear-memory peak is recorded, because nothing here measures one: no
+receipt line has a key that names linear memory. Flint's answer (INBOX,
+28 Oct 00:25) asked for exactly this label, and for a linear-memory peak only
+if it is actually measured, never cited.
 
 **Writing it.** `write_receipt` writes `render`'s text to a caller-given path
 with the shared `bundle::write_new_file` (`create_new`). An existing file, a
@@ -898,6 +965,8 @@ The tests, in `tests/runtime_abi.rs`:
 
 ## Granted imports only (wc-009a)
 
+Retired by task 065 (Rong WC-1, WC-2): no core-module import is granted; see 'Bus v1 import contract (wc-009b)'.
+
 ```rust
 wasm_capsule_tools::verify::read_grants(path: &Path) -> Result<Vec<DeclaredImport>, GrantsRefusal>
 ```
@@ -981,6 +1050,8 @@ publisher trust, and its lab name is not the Runtime's CID.
 
 ### Typed lab operations (M1 B4 lab half)
 
+Retired by task 065 (Rong WC-1, WC-2): no core-module import is granted; see 'Bus v1 import contract (wc-009b)'.
+
 Task 031 (Flint, INBOX 26 Oct 23:50, "one permission model"). Each import the
 lab runner can link is listed once as a typed operation in `pub const
 LAB_OPERATIONS` (`tools/src/verify.rs`): its module and name, its inputs and
@@ -1008,9 +1079,10 @@ Two refusals use it, both before any engine starts:
 
 No manifest field is added: the module's own import section stays the
 declaration (https://github.com/Elacity/elastos-runtime/issues/464).
-Gap: the lab does not check an import's Wasm type against its typed lab operation, so a typed lab operation is not a type check; this blocks the type half of M1 B4 (one permission model).
-The audit's v1 API returns each import's module and name only
-(`audit/INTERFACE.md`), so the check above matches by name; task 046 keeps
+Gap: the lab checks Bus interface names only, never their WIT types, so a linked Bus interface is not type-checked; this blocks the type half of M1 B4 (one permission model).
+Task 065 reworded task 046's gap from the typed table to the Bus path: the
+audit's `audit_component` returns each import's interface name only
+(`audit/INTERFACE.md`), so `bus_imports` matches by name; task 046 keeps
 this as ADOPTION's "Gaps for Anders" item 4, and
 `import_type_gap_is_a_named_row_and_nothing_claims_a_type_check` holds it.
 The table and the grants are a lab stand-in, not admission: input for
@@ -1141,7 +1213,9 @@ the capsule's linear memory:
 
 Both runs grew linear memory to 64 MB, yet each process's resident size is
 below that: untouched pages are not resident. So this number is no measure of
-the capsule's declared or used linear memory.
+the capsule's declared or used linear memory. Task 062 records this counter in
+the run receipt with exactly that label ("The peak lines", in "Run receipt
+(wc-005c)").
 
 ## Memory cap (wc-010b)
 
@@ -1307,8 +1381,9 @@ API returns imports only (`audit/INTERFACE.md`), so it cannot answer this.
 - The scratch build, that recipe plus `-C link-arg=--max-memory=67108864`, with
   `CARGO_TARGET_DIR` set to `target/wc010d/r1/build-max`: sha256
   `2002429e73ee1a5e983df008f5b53728882646f109d55a9d1a93e831690631e1`, 180 bytes,
-  one memory: **minimum 16 pages, maximum 1024 pages**. It is not committed,
-  and `capsule.wasm`, `tools/build` and every pin are unchanged.
+  one memory: **minimum 16 pages, maximum 1024 pages**. It is not committed;
+  task 032 then made that scratch build the committed capsule, and task 068
+  re-pinned its newer bytes ("Claim scope", above).
 
 `--invoke digest 1592590337` on each, as `env -i <engine> run --invoke digest
 <absolute module path> 1592590337 < /dev/null`, `<D>` = the absolute path of
@@ -1336,8 +1411,8 @@ the capsule.
 - (c) FOUND: both refuse a module whose minimum is above its maximum at start,
   before any call: (w3) and (m3), each exit 1 with "size minimum must not be
   greater than maximum".
-- (d) NOT FOUND: `capsule.wasm` declares no maximum today: minimum 16 pages,
-  maximum none ("The capsule's memory section", today's capsule).
+- (d) NOT FOUND: `capsule.wasm` declared no maximum at that time: minimum 16
+  pages, maximum none ("The capsule's memory section", today's capsule).
 - (e) FOUND: the `--max-memory=67108864` build gives the capsule a maximum of
   exactly 1024 pages (sha256 `2002429e…`) with the same digest output,
   `230101071268130872`, on both engines (the `capsule-max.wasm` rows).
@@ -1405,6 +1480,26 @@ runner refuses that run as `EngineFailed`. wasmtime's argv is unchanged. The
 claim stays "a self-contained capsule in a fixed flat space with a
 host-enforced cap", on this one Mac only. Both engines stay test-only; the
 engine choice is Anders's.
+
+**One test for the whole cap claim (task 063, wc-010c's cap half).** Flint's
+note (INBOX, 28 Oct 00:25) asked for one named test that runs the capsule on
+each engine with its declared cap and shows it never exceeds it.
+`capsule_stays_under_declared_memory_cap` (`tests/run.rs`) reads the rules of
+tasks 027, 033 and 034 through both receipts, per engine, and adds no rule:
+(a) the built capsule (declared 64 MB) through `run` on both real engines: its
+v4 receipt says `memory_cap_bytes: 67108864`, `wasmtime_memory_cap` is ENFORCED
+with `max-memory-size=67108864`, each `<engine>_memory_maximum_bytes` is at
+most 67108864, and each `<engine>_process_max_rss_bytes` line is there with
+task 062's label; (b) `grow_module(GROW_PAST_THE_CAP)`, one page past the
+declared 64 MB, through `run` on both real engines is refused because wasmtime
+traps (refusal receipt `reason: engine_failed`, `engine: wasmtime`, the trap
+in its detail), and the same module through `run_engine` on real wasmer prints
+`-1`; (c) a module whose maximum is 1025 pages, one over, through `run` on
+counting stand-ins is refused as `memory_maximum_above_declared`, and neither
+stand-in is started, not even for `--version`. RSS is never compared with the
+cap: it is engine process RSS, not linear memory (task 062's label). A missing
+real engine prints SKIPPED for (a) and (b) and the test prints no PASS; (c)
+needs no engine. Falsifier F-WC10G-CAP-RAISED ("## Falsifiers").
 
 ## Granted import hosting discovery (wc-009b0)
 
@@ -1572,6 +1667,180 @@ hosting cannot be claimed for wasmer.
   these two CLIs; both refuse an unsupplied `env.f` at start, naming it, which
   is the only result they share. wc-009b's wasmer hosting test must report
   SKIPPED with this reason, never PASS.
+
+## Bus v1 import contract (wc-009b)
+
+Task 064, the first half of wc-009b (M1 B4 and C0 lab half, one permission
+model and fail closed; P10, one canonical path). Rong's import contract (28
+Oct, relayed by Flint in INBOX 28 Oct 00:30, verdict C+) says the contract
+already exists and must be used, not rewritten: world `product-capsule-v1` of
+package `elastos:bus@1.0.0` in `elastos/wit/elastos-bus-v1.wit`. It imports
+`runtime`, `identity`, `capabilities` and `providers` (with their shared
+`types`) and exports `lifecycle`. His finding WC-1 (High): the lab's one typed
+operation, `env.f`, is a core import, and the Runtime refuses a core module at
+admission and any core import holding `env`, so a link rule for it proves an
+ABI that will never ship. Everything below is a lab stand-in, not admission.
+
+- `runtime_bus_interfaces` (`tools/src/verify.rs`) is the one allowlist read:
+  it reads the names in the Runtime's own `ALLOWED_BUS_IMPORTS`
+  (`elastos/crates/elastos-server/src/component.rs`, read only) in file order.
+  The lab keeps no second copy of the list.
+  `bus_interfaces_are_the_runtime_admission_list` calls it and fails if the
+  read fails or if `tools/src/verify.rs` holds a second copy.
+- `bus_imports(component)` is cx-wasm-audit's `audit_component` with exactly
+  the names that read returned, and nothing else; a refusal comes back as
+  `VerifyRefusal::Audit`, unchanged: `undeclared interface <name>` for an
+  import outside Bus v1 (exact name and version, so
+  `wasi:cli/environment@0.2.0`, `elastos:bus/runtime@2.0.0` and the world's
+  export `elastos:bus/lifecycle@1.0.0` are each refused by name), and `not a
+  component` for core-module bytes, `env.f`'s module among them. It lists the
+  Bus interfaces the lab would link; no Bus host exists in the lab. The tools
+  crate calls `audit_component` exactly once (`verifier_has_one_check_path`).
+- The Runtime's own wrapper, `elastos/tools/componentize`, wraps the built
+  `capsule.wasm`, run read only as `scripts/build-component-capsule.sh` runs
+  it, plus `--offline`: `cargo run --quiet --locked --offline --manifest-path
+  elastos/tools/componentize/Cargo.toml -- <in> <out>`, with its build in this
+  lane's git-ignored `target/componentize` and its files in a test temp
+  folder (`tests/common/componentize.rs`). Nothing of the tool is copied, and
+  this lane's lockfile holds none of its crates.
+  `componentized_capsule_is_a_product_capsule_v1_with_lifecycle_run` (task
+  068; it replaces task 064's
+  `runtime_componentize_wraps_the_built_capsule_with_no_bus_import`): the built capsule is a core module with the required
+  shape, the wrapper is a component (exit 0), and `bus_imports` lists exactly
+  `["elastos:bus/types@1.0.0"]` for it, each name the allowlist read returned
+  (measured first, LOG.md, task 068).
+  `runtime_componentize_refuses_the_env_f_module`: the same tool refuses
+  `IMPORTING_MODULE` (exit 1), with this stderr line (measured first, LOG.md,
+  task 064). That is the Runtime's own tool refusing WC-1's import.
+
+  ```
+      2: module requires an import interface named `env`
+  ```
+
+Not covered:
+
+- The two engines still run the zero-import core module. No Bus call is hosted
+  or linked by any engine, and no engine runs a component.
+- `audit_component` is not the Runtime's `validate_component_imports`: the
+  Runtime also lets through the generated names `import-type-*` and
+  `import-func-run`, and checks embedded core imports for its authority
+  markers (`env`, `wasi` and others). Neither is applied here.
+- No engine runs the component or calls `lifecycle.run`. Rong's contract (one
+  bounded run, 100M fuel, 128 MiB) is cited, not tested.
+- `audit_component` reads imports only, so the `lifecycle.run` export is
+  proved by the core shape reader (`tests/common/wasm_shape.rs`) and by the
+  Runtime's componentize validation.
+- Admission (`validate_component_imports`) is not run.
+- `capsule/capsule.json` still names the core module, so no bundle holds the
+  component.
+- `env.f` is retired (task 065): no core-module import is granted, and the
+  grants file names resource and actions (below).
+
+### lifecycle export (task 068, carry of 067)
+
+Task 068 is the lab half of mission step 3's first real signed capsule app
+(M1 C0/B4), and it carries stopped task 067. The capsule now implements the
+world the contract already names. Everything in this part is a lab stand-in,
+not admission.
+
+- The contract is `elastos/wit/elastos-bus-v1.wit`: `interface lifecycle` at
+  :84-87 declares `run: func() -> result<_, bus-error>`, and world
+  `product-capsule-v1` at :90 exports it. Rong's import contract (28 Oct; its
+  row for the export: `lifecycle.run`, `func() -> result<_, bus-error>`, one
+  bounded run, 100M fuel, 128 MiB, `component.rs:29-30`) says the contract
+  exists and must be used, not rewritten. No new contract, WIT file, world or
+  interface name is written here.
+- Flint's notes decide the shape. His 28 Oct 04:18 note chose route (a): accept
+  a `component-type*` custom section whose bytes parse as a type-only
+  component, which cx-wasm-audit task 030 landed (PR #912, merge
+  `235e390c9`). His 29 Oct 03:25 note asked for this capsule to export
+  `lifecycle.run`, so it is a real `product-capsule-v1` capsule of
+  `elastos:bus@1.0.0`.
+- `capsule/src/lib.rs` calls `wit_bindgen::generate!` with `path:
+  "../../elastos/wit"` and `world: "product-capsule-v1"`, behind
+  `#[cfg(target_arch = "wasm32")]`, as the Runtime's own component-app
+  template does (`templates/capsules/component-app/src/lib.rs`). It implements
+  `exports::elastos::bus::lifecycle::Guest` with `run` returning `Ok(())` and
+  calling no import, and has one `export!(Capsule);` line. `digest` and
+  `digest_impl` are unchanged. Root `Cargo.toml` names the template's one
+  dependency, `wit-bindgen = "0.57.1"` ("Layout", above).
+- The capsule uses `std` on wasm32, as the template does. `no_std` cannot hold:
+  cargo says "no global memory allocator found but one is required; link to
+  std or add #[global_allocator]" for the generated bindings (measured in 067).
+  The guest still calls no import; `std` supplies the allocator they need.
+- Measured on this Mac (LOG.md, task 068): two `tools/build` builds are
+  byte-identical, 17,658 bytes, sha256
+  `e7f17f707a1d12600f5ffe8d0376e1ef8a3fe4b7d89b539f644363556d9b8774`; the
+  core module has no imports and exports `digest (i32) -> (i64)` and
+  `elastos:bus/lifecycle@1.0.0#run () -> (i32)`; the Runtime's componentize
+  wraps it with exit 0; `bus_imports` on the component gives
+  `["elastos:bus/types@1.0.0"]`. The `component-type:*` custom section the
+  bindings write is the 1,382-byte world encoding that cx-wasm-audit task
+  030's audit rule accepts.
+- Named tests: `componentized_capsule_is_a_product_capsule_v1_with_lifecycle_run`
+  (`tests/run.rs`; "Named tests", below) and
+  `rejects_wrong_lifecycle_signature` (`tests/wasm_shape.rs`) for the one
+  shape reader.
+
+### Core imports retired, grants name resource and actions (task 065)
+
+The second half of wc-009b, Rong's WC-1 (High) and WC-2 (Medium), relayed by
+Flint (INBOX 28 Oct 00:30). WC-2, in his words: "Grants file v2 names a
+`right` per import. In the Runtime the import is fixed and the grant is per
+resource and action, carried in `providers.invoke` ... Skip it and two grant
+models drift. Fix: lab grants name `resource` and `actions` exactly as
+`capability-request`, labelled 'lab stand-in, not admission'."
+
+- **No core import is granted.** The verifier's one `audit` call gets `&[]`,
+  and `verify_checked`, `verify_bundle` and `RunInput` take no granted list. A
+  module with any core import is refused with the audit's own `undeclared
+  import <module>.<name>`, before any `--version` query or module run
+  (`core_module_import_is_refused_before_any_engine_start`). The typed table,
+  its effect type, the per-import right and their two refusals are removed;
+  with `env.f` gone they had nothing left to type or check. The passed-run
+  receipt is unchanged: it never held the linked or unused-grant lines.
+- **Grants file v3**, read by `read_grants(path) -> Result<Vec<LabGrant>,
+  GrantsRefusal>`, the one grants reader, in file order. `LabGrant` is `{ pub
+  resource: String, pub actions: Vec<String> }`, the WIT `capability-request`'s
+  `resource` and `actions` (`elastos/wit/elastos-bus-v1.wit:24-28`; both
+  `resource-uri` and `action` are `string`). It has no `reason` and the lab
+  mints no grant record:
+
+  ```json
+  {"schema": "wc-009.lab-grants/v3", "label": "lab stand-in, not admission", "grants": [{"resource": "localhost://Users/self/Photos", "actions": ["read", "list"]}]}
+  ```
+
+  The top-level keys are exactly `schema`, `label` and `grants`; an empty
+  `grants` list is valid. Each entry is exactly `resource`, a non-empty
+  string, and `actions`, a non-empty list of non-empty, distinct strings, and
+  a resource is granted once. Task 020's refusals keep their text, with
+  `grants` in place of `imports` where they named it; the entry shape and
+  duplicate refusals now name a resource. Each refusal, after `<path>: `:
+  - `the grants file cannot be read: <OS error>`;
+  - `the grants file is not JSON: <serde_json's reason>`;
+  - `the grants file is not a JSON object`;
+  - `the grants file has an unknown key "<key>"` (a v2 file's `imports` too);
+  - `the grants file has no "<schema|label|grants>" key`;
+  - `the grants file's schema is <value as JSON>, not "wc-009.lab-grants/v3"`;
+  - `the grants file's label is <value as JSON>, not "lab stand-in, not admission"`;
+  - `the grants file's grants is not a list`;
+  - `grant <index> has the retired key "<module|name|right>": a lab grant names
+    resource and actions, as capability-request`;
+  - `grant <index> is not an object of exactly resource, a string, and
+    actions, a list of strings`;
+  - `grant <index> names an empty resource`;
+  - `the grant of "<resource>" names no action`;
+  - `the grant of "<resource>" names an empty action`;
+  - `the grant of "<resource>" names the action "<action>" twice`;
+  - `the resource "<resource>" is granted twice`.
+
+Nothing in `run` reads the grants file, because the lab has no Bus host: the file is a lab stand-in, not admission.
+
+A key written twice in one JSON object is still not refused (`serde_json`
+keeps its last value), the known limit of task 020's reader.
+`retired_core_grant_names_are_gone_from_the_tools` fails if any file under
+`tools/src/`, comments included, names `LAB_OPERATIONS`, `lab-grants/v2`,
+`UntypedImport` or `RightNotNeeded`.
 
 ## Cancel (M1 A10 lab half)
 
@@ -1796,18 +2065,16 @@ each a signed module with one `() -> ()` import from `wasi_snapshot_preview1`,
 built by the one module builder `importing(module, name)` in
 `tests/common/grants.rs` (`importing("env", "f")` is `IMPORTING_MODULE` byte
 for byte): `path_open`, `fd_read`, `fd_prestat_get`, `environ_get` and
-`environ_sizes_get`. Each goes through `run` (`run_with_grants`, counting
-stand-ins) twice:
+`environ_sizes_get`. Each goes through `run` (`run_counting` since task 065,
+counting stand-ins) and is refused as `undeclared import
+wasi_snapshot_preview1.<name>` (`VerifyRefusal::Audit(Undeclared)`). Task 041
+also refused each with a `call` grant, as an import with no typed lab
+operation; task 065 grants no core import, so that case is gone.
 
-- with no grant, refused as `undeclared import wasi_snapshot_preview1.<name>`
-  (`VerifyRefusal::Audit(Undeclared)`);
-- with a `call` grant, refused as `no typed lab operation for import
-  wasi_snapshot_preview1.<name>` (`VerifyRefusal::UntypedImport`).
-
-Either way no run folder is made and neither engine is asked `--version` or
-started for a module run. This rule is the verifier's, already held by
-F-WC-B4-UNTYPED-LINKED and the audit's undeclared refusal (F-WC9-LINK-ALL), so
-it gets no new falsifier.
+No run folder is made and neither engine is asked `--version` or started for a
+module run. This rule is the verifier's, already held by the audit's
+undeclared refusal (F-WC9-LINK-ALL, F-WC9B-CORE-IMPORT-GRANTED), so it gets no
+new falsifier.
 
 Falsifier F-WC-A8-HOME-PREOPEN (runner-caught, "## Falsifiers"):
 `start_engine` adds `--dir=<HOME>` after the memory cap arguments, a preopen
@@ -1845,12 +2112,17 @@ Limits, not claimed:
   TMPDIR set to a new empty folder succeeds and leaves that folder empty.
 - `the_receipt_names_the_exact_toolchain` — receipt rustc/target match the build.
 - `receipt_hashes_match_artifact_and_lockfile` — receipt hashes match the files.
-- `built_capsule_has_the_required_wasm_shape` — core Wasm, zero imports, digest sig.
+- `built_capsule_has_the_required_wasm_shape` — core Wasm, zero imports, digest
+  sig, and (task 068) the `lifecycle.run` sig.
   Task 053: the zero imports are read only through `wasm_capsule_audit::audit`
   (`audit(&bytes, &[])` returns `Ok` with an empty list), the lab's one module
-  reader (P10); the shape reader checks only core Wasm and the `digest`
-  signature.
-- plus crafted-byte coverage of the shape reader. Task 037 removed task 032's
+  reader (P10); the shape reader checks only core Wasm, the `digest` signature
+  and (task 068) the `elastos:bus/lifecycle@1.0.0#run` signature.
+- plus crafted-byte coverage of the shape reader: `rejects_wrong_lifecycle_signature`
+  (task 068) feeds one export section holding a right `digest` and
+  a wrong lifecycle signature, and requires the required-shape check to be
+  false; `reads_the_required_shape_from_a_crafted_module` now carries both
+  exports. Task 037 removed task 032's
   three memory tests with the shape reader's memory parse: the shape reader
   reads no memory. Task 053 removed its import count: it reads no imports, and
   `refuses_a_module_with_an_import_section` (in place of
@@ -1884,7 +2156,7 @@ The lab name, in `tests/lab_cid.rs` (through `wasm_capsule_tools::bundle_identit
   that spawns the real wrapper. A fresh OUT_DIR gives one stdout line, equal to
   `bundle_identity(OUT_DIR/bundle)` and to the reference lab CID; the bundle
   holds exactly the two regular files; `capsule.wasm`'s sha256 is the
-  receipt's `artifact_sha256` and the pinned `2002429e…` (task 032);
+  receipt's `artifact_sha256` and the pinned `e7f17f70…` (task 068);
   `capsule.json` is
   `CAPSULE_MANIFEST`; `--name` prints the same name. Then the same OUT_DIR
   again, an empty folder for `--name` (the shared reason, unchanged) and
@@ -1910,9 +2182,9 @@ The verifier, in `tests/verify.rs`. "The fixture" is this capsule's manifest
 and the 8-byte module in a temp folder; every key is fresh in memory:
 
 - `signed_bundle_verifies_against_its_key` — the fixture, signed and verified
-  with its key's DID accepted and no grants, passes; `cid()` is
-  `bundle_identity` of the folder, `imports()` is empty, `entries()` hold
-  exactly the folder's two files.
+  with its key's DID accepted, passes; `cid()` is `bundle_identity` of the
+  folder and `entries()` hold exactly the folder's two files (task 065 dropped
+  its empty `imports()` check with the accessor).
 - `unsigned_bundle_is_refused` — `None` gets the unsigned reason, in both
   forms.
 - `bundle_signed_by_an_unlisted_key_is_refused` — key B signs, only key A is
@@ -1923,24 +2195,25 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
   refusal, naming both values.
 - `bundle_with_undeclared_import_is_refused_even_if_signed` — a module that
   imports `env.f`, validly signed, no grants: `undeclared import env.f`.
-- `a_grant_reaches_the_audit_unchanged` — `env.f` granted passes, and
-  `imports()` is the audit's own list, `[env.f]`.
 - `verifier_audits_the_checked_bytes` — a held `CheckedBundle` still passes
-  with no imports after `capsule.wasm` on disk becomes the importing module;
+  after `capsule.wasm` on disk becomes the importing module (an audit of the
+  disk would refuse `env.f`), and keeps the 8-byte module;
   `verify_bundle` on the changed folder gets the mismatch refusal.
 - `the_real_capsule_passes_the_verifier` — the capsule `tools/build` makes,
-  bundled with this capsule's manifest, signed and verified with no grants,
-  passes with no imports; its sha256 is the receipt's `artifact_sha256` and
-  the pinned `2002429e…` (task 032). One `PINNED_ARTIFACT_SHA256`, in
+  bundled with this capsule's manifest, signed and verified, passes, and the
+  audit of its entrypoint lists no import; its sha256 is the receipt's `artifact_sha256` and
+  the pinned `e7f17f70…` (task 068). One `PINNED_ARTIFACT_SHA256`, in
   `tests/common/mod.rs`, serves this test and the one above.
 - `missing_entrypoint_is_refused` — an entrypoint no entry has gets its own
   reason; `capsule.wasm` beside it does not stand in.
 - `verifier_uses_manifest_entrypoint` — with the entrypoint `main.wasm` (the
   importing module) beside the 8-byte `capsule.wasm`, the audit reads
-  `main.wasm`.
-- `verified_entrypoint_is_the_audited_module` — in that same layout,
-  `entrypoint()` is the checked `main.wasm` entry itself (its path, its bytes,
-  and the audit of it gives `imports()`), not `capsule.wasm`.
+  `main.wasm`: `undeclared import env.f` (task 065 dropped its granted pass).
+- `verified_entrypoint_is_the_audited_module` — with the entrypoint
+  `main.wasm`, a type-section-only module with no import (task 065; it was the
+  granted importing module), beside the 8-byte `capsule.wasm`: `entrypoint()`
+  is the checked `main.wasm` entry itself (its path and its bytes), not
+  `capsule.wasm`.
 - `verifier_preserves_upstream_refusals` — the walk's (no manifest, a link),
   the signature check's (a malformed DID, a name that is not a lab CID, a
   signature that does not verify) and the audit's (a malformed module, code in
@@ -1951,7 +2224,9 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
   entrypoint and the audit, the name before the audit.
 - `verified_bundle_is_sealed` — the source, comments stripped: no public
   field, exactly eight public functions (`verify_checked`, `verify_bundle`,
-  `read_grants` and the five accessors, `unused_grants()` among them), no
+  `read_grants`, task 064's `bus_imports` and the four accessors, `cid()`,
+  `entries()`, `entrypoint()` and `memory_mb()`; task 065 removed `imports()`
+  and `unused_grants()`), no
   `&mut self`, no `Deserialize`, `Default` or trait impl for the value, and one
   literal that makes it, in `verify_checked`.
 - `verifier_has_one_check_path` — the tools crate calls
@@ -1959,8 +2234,9 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
   `from_slice` in `manifest_entrypoint`, one in `parse_grants`), calls
   `manifest_entrypoint` once, reads one file with `fs::read` (in
   `read_grants`), calls `parse_grants` once and `read_grants` never (the caller
-  does), uses neither `verify_name_signature` nor `audit_component`,
-  `verify_checked` reads no grants, `verify_bundle` only walks and delegates,
+  does; since task 065 `run` reads no grants), does not use `verify_name_signature`, calls `audit_component` once
+  (task 064, in `bus_imports`; it held "never" before), `verify_checked`
+  reads no grants, `verify_bundle` only walks and delegates,
   and `entrypoint()` reads no manifest.
 - `verifier_uses_audit_api_v1` — `wasm_capsule_audit::AUDIT_API` is 1.
 - `verifier_has_no_import_parser_of_its_own` — `tools/Cargo.toml` and
@@ -1969,24 +2245,29 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
   has no `fs::read`, `File::open`, `OpenOptions`, `read_dir`, `metadata` or
   `read_to_end` outside `read_grants`, and `read_grants` has exactly one
   `fs::read` and none of the others.
-- `grants_file_refusals_keep_their_reason` (wc-009a; v2 since task 031) —
-  `GRANTS_SCHEMA` and `GRANTS_LABEL` are exactly `wc-009.lab-grants/v2` and
-  `lab stand-in, not admission`; an empty list and two grants read in file
-  order; a missing file keeps `NotFound` and its OS text; and 21 malformed
-  files (not JSON, a list or a string document, an unknown key, each missing
-  key, a v1 file or a number schema, another label and one with a trailing
-  space, imports as an object, eight bad entries among them the v1 pair with
-  no right and a number right, the same pair twice) each give their exact text.
-- `grant_naming_a_right_the_operation_does_not_need_is_refused` (task 031) —
-  `LAB_OPERATIONS` is exactly the one entry `env.f`, inputs and outputs none,
-  right `call`, effect `none`; `env.f` granted `call` reads, and `env.g` (no
-  typed operation) granted `write` reads; `env.f` granted `write`, `read`,
-  `Call`, `call ` or the empty string is refused as `RightNotNeeded` with the
-  import, the right granted and `call`, and its exact text after the path.
-- `unused_grants_excludes_linked_and_preserves_file_order` (wc-009a) — the
-  module that imports `env.f`, granted `z.last`, `env.f`, `a.first`:
-  `imports()` is `[env.f]`, `unused_grants()` is `[z.last, a.first]`, and the
-  lab CID and the entries are the bundle's own two files.
+- `grants_file_names_resource_and_actions_as_capability_request` (task 065) —
+  `GRANTS_SCHEMA` and `GRANTS_LABEL` are exactly `wc-009.lab-grants/v3` and
+  `lab stand-in, not admission`; an empty list reads as none, and a file
+  `grants_file` wrote with two entries, `resource` and `actions` as written in
+  it, reads back as two `LabGrant`s in file order.
+- `grants_file_refusals_keep_their_reason` (wc-009a; v3 since task 065) — a
+  missing file keeps `NotFound` and its OS text; and 21 malformed files (not
+  JSON, a list or a string document, an unknown key and a v2 file's `imports`,
+  each missing key, a v2 or a number schema, another label and one with a
+  trailing space, `grants` as an object, eight bad entries: a string, no
+  actions, a third key `reason`, another key, a number or null resource,
+  actions as a string, a number action) each give their exact text.
+- Task 065, one test per new refusal, each its variant and exact text after
+  the path: `grant_with_an_empty_resource_is_refused`,
+  `grant_with_no_actions_is_refused`, `grant_with_an_empty_action_is_refused`,
+  `grant_naming_an_action_twice_is_refused`, `resource_granted_twice_is_refused`
+  (with other actions and its keys in another order) and
+  `grant_with_a_retired_right_or_module_key_is_refused` (`right` beside a v3
+  grant, a whole v2 grant refused at `module`, and `name`).
+- `retired_core_grant_names_are_gone_from_the_tools` (task 065) — no line of
+  any file under `tools/src/`, comments included, names `LAB_OPERATIONS`,
+  `lab-grants/v2`, `UntypedImport` or `RightNotNeeded` (each built from two
+  parts, so the test file does not match itself).
 - `no_key_material_is_tracked_in_the_lane` — every file `git ls-files
   -z --cached --others --exclude-standard` lists in the lane, from the one
   shared lister, `lane_paths` in `tests/common/build.rs` (task 056): no `.key` or
@@ -2063,8 +2344,9 @@ puts it under the `/var` link):
 - `runner_uses_only_explicit_inputs` — the runner's source, comments
   stripped: no environment read, no file read, no manifest or module parse, no
   walk or lower-level verify call, no grants read or parse, exactly one
-  `verify_bundle` call (task 015's `run`, passing `input.granted`, task 020),
-  `input.granted` used nowhere else, and `entrypoint()` is its one source of
+  `verify_bundle` call (task 015's `run`; since task 065 exactly
+  `verify_bundle(input.bundle, input.signature, input.accepted)`, with no
+  granted list), and `entrypoint()` is its one source of
   module bytes. Task 033: `entrypoint()` is read twice, for the module write
   and the memory check; the audit crate is named once, in the import of
   `memories` and its `Refusal`; `memories(` is called once; and no `audit(` or
@@ -2164,40 +2446,28 @@ Task 019's two:
   differ. Since task 052 it also finds the one "outside the N" in that
   section and fails naming both numbers when N is not the total.
 
-wc-009a's run tests (task 020), in `tests/run.rs`. Each signs its bundle with a
-fresh key, writes a lab grants file beside the bundle, reads it with
-`read_grants` and runs `run` on task 019's counting stand-ins. "Each engine
-once" is exactly one `--version` query and one module run per engine; a refusal
-is zero of both:
+wc-009a's run tests (task 020), in `tests/run.rs`, as task 065 left them. Each
+signs its bundle with a fresh key and runs `run` on task 019's counting
+stand-ins through `run_counting` (task 020's `run_with_grants`, which read a
+lab grants file, before task 065). "Each engine once" is exactly one
+`--version` query and one module run per engine; a refusal is zero of both:
 
-- `zero_grants_zero_imports_runs` — the capsule `tools/build` makes, with an
-  empty grants file: it runs, each engine once, `linked()` and
-  `unused_grants()` are empty.
+- `zero_grants_zero_imports_runs` — the capsule `tools/build` makes: it runs,
+  each engine once, and no run folder is left.
 - `zero_grants_zero_imports_runs_on_both_real_engines` — the same on the real
-  `wasmtime` and `wasmer` found on PATH: both print `FIXED_OUTPUT`, nothing is
-  linked. If either is not found it prints `SKIPPED`, never a PASS.
-- `declared_not_granted_import_refuses_instantiation_by_name` — the signed
-  module that imports `env.f`, with an empty grants file: refused as
+  `wasmtime` and `wasmer` found on PATH: both print `FIXED_OUTPUT`. If either
+  is not found it prints `SKIPPED`, never a PASS.
+- `core_module_import_is_refused_before_any_engine_start` (task 065; task
+  020's `declared_not_granted_import_refuses_instantiation_by_name`, renamed) —
+  `IMPORTING_MODULE`, signed: refused as
   `TwoEngineRefusal::Verify(VerifyRefusal::Audit(Undeclared { module: "env",
   name: "f" }))`, text exactly `undeclared import env.f`; no run folder, and
   zero starts of either kind.
-- `valid_signature_with_empty_grants_file_links_nothing` — the zero-import
-  8-byte module, validly signed, with an empty grants file: `linked()` is empty.
-- `grant_for_an_import_the_module_does_not_have_links_nothing_and_is_reported`
-  (Rong's rename of `granted_but_undeclared_is_refused`) — the zero-import
-  module, grants `[env.f]` (right `call`): it runs, `linked()` is empty,
-  `unused_grants()` is exactly `[env.f]`.
-- `granted_import_is_linked` — the module that imports `env.f`, grants
-  `[env.f]` (right `call`): it passes verification, `linked()` is exactly
-  `[env.f]`, each engine once, each run folder held the verified module
-  (recorded by the stand-in during its run), and (task 039) the work root is
-  empty after the run.
-- `module_import_with_no_typed_operation_is_refused` (task 031) — the module
-  that imports `env.g` (no typed lab operation), granted `env.g`: refused as
-  `TwoEngineRefusal::Verify(VerifyRefusal::UntypedImport { module: "env", name:
-  "g" })`, text exactly `no typed lab operation for import env.g`; with no
-  grant, refused by the audit as `undeclared import env.g`. Both: no run
-  folder, and zero starts of either kind.
+
+Task 065 removed `valid_signature_with_empty_grants_file_links_nothing`,
+`grant_for_an_import_the_module_does_not_have_links_nothing_and_is_reported`,
+`granted_import_is_linked` and `module_import_with_no_typed_operation_is_refused`
+with their rules (LOG.md, task 065).
 
 Task 026's two, in `tests/docs.rs`. Each holds one of Rong's two rulings
 (26 Oct) as one exact sentence, read through `lane_file`:
@@ -2277,7 +2547,8 @@ Task 032's one, in `tests/run.rs`:
   `entrypoint()`, read through `wasm_capsule_audit::memories`, the lab's one
   module reader (task 037; the shape reader reads no memory), imports nothing
   (`audit`, so no memory either) and defines exactly one memory, with minimum
-  16 pages and a maximum whose bytes (pages × 65536) equal `memory_mb()` × 2^20
+  17 pages (task 068: `std` and the generated bindings put one page below the
+  stack; it was 16) and a maximum whose bytes (pages × 65536) equal `memory_mb()` × 2^20
   from the verifier's one manifest read: 1024 pages for 64, 32-bit and not
   shared.
 
@@ -2363,8 +2634,8 @@ Task 041, host secrets denied (`tests/run.rs`; README "Host secrets denied
   fixture path or the marker; both stdouts are `FIXED_OUTPUT` and a newline.
 - `host_secret_probe_imports_are_refused_before_any_engine_starts` — five
   `wasi_snapshot_preview1` file and environment imports, each refused by
-  `run` as undeclared with no grant and as untyped with a `call` grant (exact
-  text and variant), with no run folder and no engine start.
+  `run` as undeclared (exact text and variant; task 065 removed the `call`
+  grant case), with no run folder and no engine start.
 
 Task 043, the run budget (`tests/run.rs`; README "Run one engine (wc-005a)",
 "The run budget"). Every other test run passes one explicit control,
@@ -2435,7 +2706,7 @@ most 5 s for the answer (`cancel_once_live`); on any failed wait it runs
   `TwoEngineRefusal::Engine` with `Cancelled` for `wasmtime` within 5 s;
   `wasmer` was asked `--version` once and ran no module; the census is empty.
 - `refused_and_failed_runs_leave_nothing_under_the_scratch_root` — through
-  `run`: a verifier refusal (`env.f` not granted), an unpinned `wasmtime
+  `run`: a verifier refusal (`env.f`, a core import), an unpinned `wasmtime
   9.9.9` (stand-in), a failing `wasmtime` (stand-in, exit 3) and a 200 ms
   budget stop (stand-in sleeper, under the watchdog), each its own expected
   reason, each followed by an empty census.
@@ -2495,37 +2766,96 @@ module maximum lines"). Both new tests run a bundle signed by
 
 The v3 text in the three updated tests: the zero-memory `MODULE` gives the
 `none` line on both engines (`receipt_records_observed_engine_versions`,
-`receipt_records_the_declared_memory_cap`, now 16 lines), and the real capsule
+`receipt_records_the_declared_memory_cap`, now 18 lines, the v4 count since
+task 062), and the real capsule
 gives `67108864` on both (`real_receipt_names_both_installed_engines`).
+
+Task 063, the cap half of wc-010c (`tests/run.rs`; README "The runner checks
+the module's maximum (task 033)"):
+
+- `capsule_stays_under_declared_memory_cap` — Flint's one named test: (a) the
+  built capsule through `run` on both real engines, read through the v4
+  receipt; (b) one page past the declared 64 MB, refused through `run` because
+  wasmtime traps (read through the refusal receipt), and `-1` on wasmer
+  through `run_engine`; (c) a 1025-page maximum through `run` on `counting`
+  stand-ins, refused as `memory_maximum_above_declared` with no start. It adds
+  no rule and never compares RSS with the cap.
+
+Task 064, the Bus v1 import contract (README "Bus v1 import contract
+(wc-009b)"). In `tests/verify.rs`:
+
+- `bus_interfaces_are_the_runtime_admission_list` — calls
+  `runtime_bus_interfaces` (task 070), fails if that read fails, and fails if
+  `tools/src/verify.rs` holds `BUS_V1_INTERFACES` or any name the read
+  returned: the lab holds no second copy of the Runtime's list.
+- `runtime_bus_interfaces_refuses_unreadable_input`,
+  `runtime_bus_interfaces_refuses_an_absent_header`,
+  `runtime_bus_interfaces_refuses_a_duplicate_header`,
+  `runtime_bus_interfaces_refuses_an_invalid_body_line` and
+  `runtime_bus_interfaces_refuses_a_missing_terminator` — lab-local fixtures
+  through `runtime_bus_interfaces_at` give the one `BusListUnreadable`
+  refusal, whose reason names the path and the fault.
+- `runtime_bus_interfaces_preserves_file_order` — a fixture of three names
+  comes back in file order.
+- `runtime_bus_interfaces_ignores_cwd` — a child test process in another
+  directory reads the same list.
+- `bus_imports_lists_the_bus_interfaces_a_component_imports` — a component
+  importing `elastos:bus/providers@1.0.0` and then `elastos:bus/runtime@1.0.0`
+  gives both, in that order.
+- `bus_imports_refuses_an_interface_outside_bus_v1_by_name` —
+  `wasi:cli/environment@0.2.0`, `elastos:bus/runtime@2.0.0` and
+  `elastos:bus/lifecycle@1.0.0` are each refused as
+  `VerifyRefusal::Audit(UndeclaredInterface)` with exactly `undeclared
+  interface <name>`.
+- `bus_imports_refuses_a_core_module` — `IMPORTING_MODULE` (`env.f`) is refused
+  with exactly `not a component`.
+
+In `tests/run.rs`, through `componentize` (`tests/common/componentize.rs`,
+each input run at most once per test binary):
+
+- `componentized_capsule_is_a_product_capsule_v1_with_lifecycle_run` (task
+  068; replaces task 064's
+  `runtime_componentize_wraps_the_built_capsule_with_no_bus_import`): the
+  built `capsule.wasm` (a) has the required core shape, (b) passes
+  `audit(&capsule, &[])` with `Ok([])`, (c) is wrapped with exit 0, and (d)
+  `bus_imports` on the component returns exactly
+  `["elastos:bus/types@1.0.0"]`, each name `runtime_bus_interfaces()` returned.
+- `runtime_componentize_refuses_the_env_f_module` — wrapping `IMPORTING_MODULE`
+  exits non-zero, and stderr holds the measured line
+  `COMPONENTIZE_ENV_REFUSAL`.
 
 ## Falsifiers
 
-`falsifiers.json` holds 189 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 199 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
-21 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
-wc-005c (task 016), two task 019, 17 wc-009a (task 020), seven task 026,
-seven wc-010b (task 027), two wc-010c (task 028), two task 029, two task
-031, two task 032, one task 035, three task 036, five task 038, three task
+20 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
+wc-005c (task 016), two task 019, 14 wc-009a (task 020), seven task 026,
+seven wc-010b (task 027), two wc-010c (task 028), one task 029, two task
+032, one task 035, three task 036, five task 038, three task
 039, one task 040, one task 041, two task 043, one task 044, one task
 033, two task 034, one task 045, two task 046, one task 050, three task
-052 and one task 056.
+052, one task 056, two task 062, one task 064, three task 065, nine task 070, one task
+063 and one task 068. Task 065 removed seven entries whose rule is gone (its section): one of
+wc-004's, three of wc-009a's, one of task 029's and both of task 031's.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
 This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 125, the sections below
-marked runner-caught (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 031, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046, 050, 052 and 056: 1 + 1 + 23 + 11 + 20 + 2 + 17 + 7 + 7
-+ 2 + 2 + 2 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1 + 3 + 1), each run by the canonical runner with its summary
+Two kinds of evidence, kept apart. Runner-caught: 137: F-WC1 (task 068 ran it)
+and the sections below marked runner-caught, less task 065's removals (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
+029, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046, 050, 052, 056, 062, 064, 065, 070, 063 and 068: 1 + 1 + 23 + 11 + 20 + 2 + 14 + 7 + 7
++ 2 + 1 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1 + 3 + 1 + 2 + 1 + 3 + 1 + 9
++ 1), each run by the canonical runner with its summary
 line quoted.
-Hand-proven, pending R1: 69, each counted once: the 64 entries of the sections
-marked so (wc-001, tasks 010 and 009, wc-004 and wc-008: 9 + 7 + 23 + 21 + 4),
-and five proofs with no `falsifiers.json` entry, outside the 189 (task 036's
+Hand-proven, pending R1: 68, each counted once: the 62 entries of the sections
+marked so (wc-001's other eight, tasks 010 and 009, wc-004 and wc-008: 8 + 7 + 23 + 20 + 4),
+and six proofs with no `falsifiers.json` entry, outside the 199 (task 036's
 `/bin/bash` 3.2 guard in `tests/reproducible.rs`, task 042's killed-run
-stop and task 049's two environment record proofs in `tests/run.rs`, and task
-053's import-section refusal in `tests/common/wasm_shape.rs`; none of these
+stop and task 049's two environment record proofs in `tests/run.rs`, task
+053's import-section refusal in `tests/common/wasm_shape.rs`, and task 068's
+lifecycle-signature plant in the same shape reader; none of these
 files is a recovery target, so a proof that edits one is a hand proof), each
 proved by the repo's break →
 named test fails → revert method with `cargo test` in this workspace. Their
@@ -2539,9 +2869,13 @@ edits, so a killed run can restore each one. Ask **R2** is done: provider 026
 (PR #242) added `tools/src/run.rs`, `tools/src/receipt.rs` and
 `tests/lab_cid.rs` to `PROVIDER_TARGETS`.
 
-wc-001's nine, each hand-proven, pending R1 (README "Claim scope" has F-WC1):
+wc-001's nine: eight hand-proven, pending R1, and F-WC1 runner-caught since
+task 068 (README "Claim scope" has F-WC1):
 
 - F-WC1 — an embedded `CARGO_MANIFEST_DIR` breaks the byte-identical build.
+  Task 068 re-anchored it on the `digest` export block (the `no_std` panic
+  handler it was anchored on is gone), with the same planted `BUILD_DIR`
+  static, and the canonical runner reports it CAUGHT (LOG.md, task 068).
 - F-WC1-SPACED-PATH — whitespace-split `RUSTFLAGS` break the build when the
   path has a space. Task 032 re-anchored it, the same bug as before: a second
   edit turns the new link-argument line into the same `RUSTFLAGS` form. Without
@@ -2560,6 +2894,17 @@ wc-001's nine, each hand-proven, pending R1 (README "Claim scope" has F-WC1):
   the build did not use, or queries a bare `rustc`.
 - F-WC1-ARTIFACT-HASH and F-WC1-LOCK-HASH — the receipt swaps the artifact
   and lockfile hashes.
+
+- F-BUNDLE-REMAP-UNEVEN — the module names one bundle across paths only when
+  the build remaps one lane path in every run. In run 1 of this task the plant
+  was `pwd` -> `pwd -P` in `tools/build` (`LANE_DIR` resolved through a folder
+  link, `--remap-path-prefix` naming the physical path). The named test
+  `two_bundles_in_different_paths_have_one_lab_cid` goes red under it only
+  for a copy reached through a folder link, and such a copy changes more than
+  the remap: `tools/bundle`'s `cargo run` then builds a second `bundle`
+  binary, and the two bundles differ in module bytes and in lab CID. The
+  plant therefore runs against the test by hand, and stays out of
+  `falsifiers.json` until a plant exists that changes only the remap.
 
 Task 010's seven, each hand-proven, pending R1:
 
@@ -3400,3 +3745,157 @@ F-WC-README-OUTSIDE-COUNT to the new total, each the same bug as before. The
 canonical runner reports F-WC3-LANE-FILES-QUOTED, F-WC4-SCAN-SKIP-MISSING,
 F-WC4-SCAN-NAME-AFTER-READ, F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT
 CAUGHT (LOG.md, task 056). This task changes no other label.
+
+Task 062's two, runner-caught (the canonical runner's summary line is in
+LOG.md, task 062). The run receipt records each engine's measured peak, the
+module-run process's own `ru_maxrss` from `wait4`, labelled as engine process
+RSS, not linear memory ("The peak lines", in "Run receipt (wc-005c)"). Each
+anchor is found exactly once, and each named test fails at its assertion:
+
+- F-WC10H-PEAK-CITED — `start_engine` (`tools/src/run.rs`) records a cited
+  number, the declared cap `memory_cap_bytes(memory_mb)`, in place of the peak
+  its `wait4` measured (`process_peak_rss_follows_the_memory_the_engine_touched`:
+  the built capsule then reads 67108864 bytes, not under 48 MiB). It needs both
+  real engines; with either missing that test prints SKIPPED and passes, so the
+  runner reports it NOT RUN, never CAUGHT.
+- F-WC10H-PEAK-UNLABELLED — the receipt's peak line (`tools/src/receipt.rs`)
+  drops ` (engine process RSS, not linear memory)`
+  (`receipt_labels_each_engine_peak_as_process_rss_not_linear_memory`).
+
+Task 062 also re-anchors F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT to the
+new total, and F-WC10-CAP-REJECTED-RETRY (its planted uncapped retry fills the
+new `EngineRun::process_max_rss_bytes` with 0, since that retry is not reaped by
+`wait4`), each the same bug as before (LOG.md, task 062). This task changes no
+other label.
+
+Task 064's one and task 070's nine, runner-caught (the canonical runner's
+summary lines are in LOG.md). Task 070 re-anchored the one and added the nine.
+Each anchor is in `tools/src/verify.rs`, a recovery target, found exactly once:
+
+- F-WC9B-BUS-LIST-WIDENED — the read appends
+  `"wasi:cli/environment@0.2.0"` after the parse
+  (`bus_imports_refuses_an_interface_outside_bus_v1_by_name`: the `wasi:cli`
+  component is no longer refused).
+- F-WC9B-BUS-LIST-COPIED — a `BUS_V1_INTERFACES` literal of the five names
+  comes back and `bus_imports` passes it to the audit in place of the read
+  (`bus_interfaces_are_the_runtime_admission_list`: the file holds a second
+  copy).
+- F-WC9B-BUS-LIST-UNREADABLE-SKIPPED, F-WC9B-BUS-LIST-ABSENT-HEAD-ALLOWED,
+  F-WC9B-BUS-LIST-DUPLICATE-HEAD-ALLOWED,
+  F-WC9B-BUS-LIST-BAD-LINE-SKIPPED and
+  F-WC9B-BUS-LIST-MISSING-END-ALLOWED — each drops one parser refusal, so its
+  fixture test's expected path and fault do not come back.
+- F-WC9B-BUS-LIST-OMITS-FIRST and F-WC9B-BUS-LIST-REVERSED — the read drops
+  the first name or reverses the order
+  (`runtime_bus_interfaces_preserves_file_order`).
+- F-WC9B-BUS-LIST-CWD — the read resolves the Runtime source from the process
+  current directory (`runtime_bus_interfaces_ignores_cwd`).
+
+Task 070 also re-anchors F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT to the
+new total, each the same bug as before. This task changes no other label.
+
+Task 065's three, runner-caught (the canonical runner's summary line is in
+LOG.md, task 065). Rong's WC-1 and WC-2 ("Core imports retired, grants name
+resource and actions (task 065)", in "Bus v1 import contract (wc-009b)").
+Each anchor is in `tools/src/verify.rs`, a recovery target, found exactly
+once, and each named test fails at its assertion:
+
+- F-WC9B-CORE-IMPORT-GRANTED — the core audit gets `&[DeclaredImport { module:
+  "env".into(), name: "f".into() }]` (written as
+  `wasm_capsule_audit::DeclaredImport`, since `verify.rs` no longer imports the
+  type) in place of `&[]`, so the `env.f` module passes the verifier and both
+  engines start (`core_module_import_is_refused_before_any_engine_start`, at
+  its refusal).
+- F-WC9B-GRANT-ACTIONS-EMPTY — the reader skips the empty-actions refusal, so
+  a grant naming no action is read (`grant_with_no_actions_is_refused`).
+- F-WC9B-RETIRED-TABLE-BACK — a `LAB_OPERATIONS` table naming `env.f` comes
+  back in `tools/src/verify.rs`
+  (`retired_core_grant_names_are_gone_from_the_tools`, which names the file and
+  line).
+
+Task 065 removed seven entries, each because its rule is gone:
+
+- F-WC4e — the verifier passes `&[]` in place of the caller's grants: the
+  verifier takes no grants, and `&[]` is now the rule.
+- F-WC9-GRANT-INJECT — the linked list is the grants list: there is no linked
+  list (`imports()` and `linked()` are removed).
+- F-WC9-UNUSED-KEEPS-USED — the unused grants keep a linked one: there is no
+  unused-grant list (`unused_grants()` is removed).
+- F-WC9-UNUSED-REORDER — the unused grants come back reversed: the same.
+- F-WC9-RUN-DROPS-GRANTS — `run` passes `&[]` in place of `input.granted`:
+  `RunInput` has no granted list.
+- F-WC-B4-UNTYPED-LINKED — the typed-entry check is dropped: `LAB_OPERATIONS`
+  and `UntypedImport` are removed.
+- F-WC-B4-RIGHT-IGNORED — the right comparison is dropped: a grant names no
+  right, and `RightNotNeeded` is removed.
+
+Task 065 also re-anchors, each the same bug on the new code or text, and the
+canonical runner reports each CAUGHT (LOG.md, task 065):
+
+- on the one `audit(module, &[])` line: F-WC4c (the call is skipped),
+  F-WC4-AUDIT-REASON, F-WC4-ORDER-AUDIT-FIRST and F-WC9-LINK-ALL (now named
+  for `core_module_import_is_refused_before_any_engine_start`, task 020's
+  `declared_not_granted_import_refuses_instantiation_by_name` renamed);
+  F-WC4d and F-WC4-SECOND-AUDIT plant their second audit with `&[]`;
+- F-WC4-SEALED-NEW (its constructor fills the three fields left) and
+  F-WC4-SEALED-MUT (mutable access to `memory_mb`, since `imports()` is gone);
+- the v3 reader: F-WC9-GRANTS-IMPORTS-NOT-LIST (`grants` read as an empty list),
+  F-WC9-GRANTS-ENTRY-NOT-STRING (a number `resource` taken as its JSON text)
+  and F-WC9-GRANTS-DUPLICATE (now named for
+  `resource_granted_twice_is_refused`); the other nine F-WC9-GRANTS-* anchors
+  did not move and are re-run;
+- `tools/src/run.rs`: F-WC5a (three edits, no linked list to fill),
+  F-WC5-VERIFY-TWICE and F-WC5-QUERY-BEFORE-VERIFY (`verify_bundle` takes three
+  arguments), and F-WC-ENGINE-RUN-MODULE-DOC (the module doc after its label
+  line changed, so the plant now rewrites only the label line, in a wording
+  without the label, and no longer restores task 055's base wording);
+- `README.md`: F-WC-B4-TYPE-GAP-HIDDEN (the reworded gap sentence loses its
+  "not"), F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT (the new total).
+  F-WC-B4-TYPE-CHECK-CLAIMED's anchor did not move (this line says "not"): the
+  `env.f` line kept as history in "Typed lab operations (M1 B4 lab half)".
+
+No label changes: the re-anchored F-WC4 entries stay in wc-004's hand-proven
+count, the rest keep their runner-caught label.
+
+Task 063's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 063). Its anchor in `tools/src/run.rs`, a recovery target, is
+found exactly once (task 027's F-WC10-CAP-OVERFLOW plants on the same line,
+each run on its own), and its one named test fails at its assertion:
+
+- F-WC10G-CAP-RAISED — `memory_cap_bytes` returns twice the declared bytes, so
+  the cap is raised (`capsule_stays_under_declared_memory_cap`: part (c)'s
+  1025-page module now passes the memory check and both stand-ins run, so `run`
+  passes where it must refuse, at `tests/run.rs`'s `two_refused`; part (c)
+  runs first, so (a) and (b) are not reached). Part (c) needs no real engine,
+  so the plant is caught with either engine missing.
+
+Task 063 also re-anchors F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT to the
+new total, each the same bug as before (LOG.md, task 063). This task changes no
+other label.
+
+Task 068's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 068). Its anchor in `capsule/src/lib.rs`, a recovery target, is
+found exactly once, and its one named test fails at an assertion:
+
+- F-WC9B-LIFECYCLE-EXPORT-REMOVED — the world's `export!(Capsule);` line is
+  deleted, so the core module exports no `elastos:bus/lifecycle@1.0.0#run` and
+  the Runtime's componentize refuses it (exit 1). By hand, its stderr holds the
+  line ``    1: failed to find export of interface
+  `elastos:bus/lifecycle@1.0.0` function `run` `` (LOG.md, task 068).
+  `componentized_capsule_is_a_product_capsule_v1_with_lifecycle_run` fails at
+  its "componentize failed" assertion.
+
+One proof with no `falsifiers.json` entry, hand-proven, pending R1 (it is
+counted in the hand-proven total above, never in the runner-caught one):
+
+- F-WC9B-LIFECYCLE-SIGNATURE-IGNORED — `is_the_required_capsule_shape` stops
+  comparing the lifecycle signature, so the crafted wrong module passes.
+  `rejects_wrong_lifecycle_signature` fails at its "a wrong
+  `elastos:bus/lifecycle@1.0.0#run` signature must not pass the required
+  shape" assertion (`tests/wasm_shape.rs:183`); the file was restored byte for
+  byte (LOG.md, task 068). `tests/common/wasm_shape.rs` is not a runner
+  recovery target on this base, so this proof has no entry.
+
+Task 068 also re-anchors F-WC1 (wc-001's list, above), F-WC-README-COUNT and
+F-WC-README-OUTSIDE-COUNT to the new total, each the same bug as before. This
+task changes no other label.

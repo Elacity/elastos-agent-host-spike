@@ -12,10 +12,13 @@ fn home_is_throwaway() {
     assert!(owned.home().starts_with(&root));
     assert!(owned.data().starts_with(&root));
     assert!(owned.temp().starts_with(&root));
-    assert_eq!(
-        owned.data(),
-        owned.home().join("Library/Application Support/elastos")
-    );
+    #[cfg(target_os = "macos")]
+    let data_suffix = "Library/Application Support/elastos";
+    #[cfg(target_os = "linux")]
+    let data_suffix = ".local/share/elastos";
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let data_suffix = "no supported data directory";
+    assert_eq!(owned.data(), owned.home().join(data_suffix));
     assert_eq!(data_dir(owned.home()).unwrap(), owned.data());
     assert_eq!(owned.guard(owned.home(), owned.data()), Ok(()));
     // All outside inputs are repository paths. The guard never reads them.
@@ -36,7 +39,7 @@ fn home_is_throwaway() {
     }
     assert_eq!(
         owned.guard(owned.home(), &root.join("wrong-data")),
-        Err("data directory does not match the macOS Home rule")
+        Err("data directory does not match the platform Home rule")
     );
     assert_eq!(
         ThrowawayHome::create_at(&root).unwrap_err(),

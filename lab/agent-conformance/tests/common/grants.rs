@@ -808,7 +808,11 @@ impl Controller {
                 self.decisions.granted += 1;
                 self.print_checked("fixture controller: matched, granted")?;
             } else {
-                let reason = self.fixture.deny_reason.clone();
+                let reason = if field(request, "resource")? == "elastos://net/stream" {
+                    "fixture denies unlisted elastos://net/stream".to_owned()
+                } else {
+                    self.fixture.deny_reason.clone()
+                };
                 self.deny(request, &reason)?;
             }
         }
@@ -1625,7 +1629,7 @@ fn require_empty_pending(response: &Value) -> Result<()> {
     Ok(())
 }
 
-fn live_grant_state(response: &Value) -> Result<&'static str> {
+pub(super) fn live_grant_state(response: &Value) -> Result<&'static str> {
     let grants = response["capabilities"]
         .as_array()
         .ok_or("cleanup grant response requires a capability list")?;

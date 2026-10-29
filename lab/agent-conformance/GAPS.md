@@ -411,10 +411,11 @@ attaches once with scope `shell` at the port owned by `Operator`. The secret,
 session token and returned grant tokens stay in memory. The controller uses
 `GET /api/capability/pending`, matches resource/action/reason exactly against
 `fixtures/grants.json`, and posts one `once` grant for the listed read. Every
-other pending request receives the fixture denial reason. Ambiguous matches
-are denied before any grant is selected. The Runtime mints the grant for the
-requesting session (`api/handlers/capability.rs:339-346`); the observed guest
-invocation checks that the requesting client can use it.
+other pending request receives the fixture denial reason; a pending
+`elastos://net/stream` request receives `fixture denies unlisted elastos://net/stream`.
+Ambiguous matches are denied before any grant is selected. The Runtime mints the
+grant for the requesting session (`api/handlers/capability.rs:339-346`); the
+observed guest invocation checks that the requesting client can use it.
 
 Seed preparation uses Runtime writes through the existing production
 `/api/provider/localhost/write` route with the controller's shell session.
@@ -524,7 +525,10 @@ owns resource authority. The read's manifest refusal returns through the guest's
 call and lifecycle to `elastos run`. The live wrapper uses
 `Component capsule denied: BusError::Internal("capsule manifest does not declare authority for <resource>")`
 for that read. The network row uses
-`Component capsule denied: BusError::Denied("fixture denies unlisted read")`.
+`Component capsule denied: BusError::Denied("fixture denies unlisted elastos://net/stream")`.
+`undeclared_network_manifest_is_refused` stages the same probe manifest without
+`elastos://net/stream` and requires the manifest refusal
+`Internal("capsule manifest does not declare authority for elastos://net/stream")`.
 The default build uses `BusError::Unavailable` with the AC-002-ARGS reason.
 The probe returns immediately after the
 request, including unexpected success, so this check performs no provider
@@ -1032,3 +1036,46 @@ gives no grant.
 | Ignored test | Blocker ID | Runtime change that enables acceptance |
 | --- | --- | --- |
 | `launch_refuses_bytes_unlike_signed_record` | AC-040-RECORD-LAUNCH | Anders: record-to-launch (https://github.com/Elacity/elastos-runtime/issues/274). At `elastos run`, compare the launched directory's bytes with that capsule's signed record `sha256` or `cid` and refuse a difference. Today `verify_installed_release_capsule` (`setup.rs:1596-1625`) finds the capsule by `manifest.name` (`setup.rs:1606`) and checks the install path (`setup.rs:1613-1617`) and sidecar install state (`setup.rs:1771-1785`). `CapsuleRecords::admit` (`capsule_record.rs:84-98`) compares the record with the release row at setup and update (`setup.rs:739`, `update.rs:1192`), not from `run_local` (`runtime.rs:282`). |
+
+## Content capsule named by its CID (M2 exit (e), PH6, kit gap 4)
+
+This is a handover, not a pass. `tests/content_cid.rs` stages a probe that
+stands in for the repository's own viewer
+(`templates/capsules/viewer-content/viewer.capsule.json`, whose
+`content_capsule` acceptance binds `role: content`, `type: data` and the
+viewer's name) and names the content bundle's lab CID in `requires[]`. The
+content bundle is the same template's `content.capsule.json` and
+`sample.example`, copied into the lane with its `viewer` set to the viewer's
+string name, which is the form the Runtime manifest type parses.
+
+The Runtime's manifest requirement today is `{name, kind}` only
+(`elastos/crates/elastos-common/src/manifest.rs:276-279`), so the CID key is a
+refused unknown field before any bundle is resolved, and no launch can name,
+let alone check, content by its CID. `requires_cid_is_refused_today` records
+that refusal from the real route; its control removes only `requires[0].cid`
+from the same manifest and passes. No ignored journey exists: the three that
+were here could not test the CID rule, so they were deleted instead of kept
+as passing-on-failure placeholders. A real journey needs all of these:
+
+1. A probe that opens the required content and checks its bytes. The current
+   probe has no content effect: `Effect::Default` builds without any effect
+   feature and its `run` returns
+   `Err("probe launch arguments are unavailable in elastos:bus@v1")`
+   (`lab/agent-conformance/probe/src/lib.rs:59-60`). A positive journey over that
+   probe would stay red for the probe's own refusal, whatever the CID rule
+   did.
+2. A content registration path in the throwaway Home. The staged content lives
+   in the lane (`target/content-cid-viewer-content`) and is never registered
+   with the Home the launch runs under, so a CID alone cannot find it. The
+   Runtime needs a route that serves a registered content capsule by CID.
+3. A negative journey that asserts the specific CID-mismatch refusal. A test
+   that accepts any failed exit proves nothing: today's probe refuses for an
+   unrelated reason, so removing CID enforcement would leave it green. The
+   journey must name the Runtime's own CID-mismatch reason and show the staged
+   content unchanged.
+4. Entry through a route or handler (`elastos run` on a staged bundle, or the
+   content route), with no seed or store call after setup.
+
+| Blocked test | Blocker ID | Runtime change that enables acceptance |
+| --- | --- | --- |
+| (not written: the three ignored journeys were deleted) | AC-M2E-CONTENT-CID | Anders: the elastos-common manifest reader accepts `requires[].cid`, launch resolves that CID to a registered content capsule whose name equals the requirement's CID and refuses a mismatch with its own reason, and a probe effect opens the content and checks its bytes. A path or a name in that field stays a refusal. Sash's yes is needed before the reader patch is packed. |

@@ -162,3 +162,55 @@ These runs used `RUST_TEST_THREADS=2`, `CARGO_INCREMENTAL=0`, and Cargo target
 and build directories under `lab/useful-task/target/`. The privacy-fault run
 used the default test thread count. The repair remains pending the supervisor's
 checks and fresh review.
+
+## 002 — the shared runner catches the unconditional accept
+
+Added `lab/useful-task/falsifiers.json` with one entry, `F-UT1`. Its `command`
+is `useful-task`, its `expect` is `caught`, and it names one test,
+`checker_accepts_recorded_answer_and_refuses_stubs`. Its single edit replaces
+the one line `    let trimmed = answer.trim();\n` in
+`../../lab/useful-task/src/lib.rs` with an early
+`return Verdict::Accept { answer_sha256: sha256_hex(answer.trim()) };` before
+that line. The entry carries a `title`, because the runner prints it on every
+result line. The list's paths are relative to `examples/agent-host`, the same
+way the agent-conformance list names its crate.
+
+This moves 001's hand plant onto the one shared runner. The edit and its
+restoration live in `examples/agent-host/falsify.py`; this task did not change
+that file, `src/lib.rs`, `tests/checker.rs`, the fixtures, `Cargo.toml` or
+`Cargo.lock`. `PROVIDER_TARGETS` still does not name this crate's source, so a
+killed run restores the file only from the finished run's own backup.
+
+Run from the repository root with `RUST_TEST_THREADS=2` and
+`CARGO_INCREMENTAL=0`:
+
+```
+python3 -I examples/agent-host/falsify.py --from lab/useful-task/falsifiers.json
+```
+
+```
+baseline: 1 named tests pass without an edit, 0 do not
+F-UT1  CAUGHT                             1s  accept every answer before the judge reads it
+summary: 1 CAUGHT of 1
+```
+
+The command exited 0. The word is `CAUGHT`, not `BUILD FAILED` and not
+`NOT RUN`. After it, `git diff -- lab/useful-task/src/lib.rs` was empty and
+`lab/useful-task/src/lib.rs.falsify-original` was absent. The committed `judge`
+still begins with `let trimmed = answer.trim();` and has no early return. On
+that restored tree:
+
+```
+cargo test --locked --manifest-path lab/useful-task/Cargo.toml -- checker_accepts_recorded_answer_and_refuses_stubs --exact
+```
+
+```
+test checker_accepts_recorded_answer_and_refuses_stubs ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+The measurement is only about the checker. The live model turn stays in
+BACKLOG and stays opt-in; this task reads no model endpoint and starts no
+agent.
+
+- 002: Added `lab/useful-task/falsifiers.json` with F-UT1 on the shared runner; the registered `useful-task` command catches the early-accept plant and restores `src/lib.rs`.

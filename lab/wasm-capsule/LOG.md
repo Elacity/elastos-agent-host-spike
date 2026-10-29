@@ -1521,3 +1521,173 @@
   after 5.633411667s, not within 5 s of its budget 500ms"), a wall-clock bound that reads no README or LOG line;
   nothing was changed for it (`tests/` is out of scope). Re-run: `cargo test --locked` (129 passed, 3 ignored, 0
   failed, that test passed) and `cargo test --locked --workspace` (156 passed, 3 ignored, 0 failed).
+- 062 (wc-010c, the peak half; M1 C0 step iii, P18). Flint's answer (INBOX, 28 Oct 00:25): "The receipt records the
+  declared cap and a measured peak, labelled honestly: process RSS from `/usr/bin/time -l` is labelled 'engine process
+  RSS, not linear memory'; record linear-memory peak only if it is actually measured, never cited." Base
+  `da6d76700a734629f067f189dd26c6d91645c6dd`. `tools/src/run.rs`: the one poll loop (`wait_within_budget`) asks
+  `reap` in place of `child.try_wait()`; `reap` calls `libc::wait4(pid, &mut status, WNOHANG, &mut rusage)`, builds the
+  `ExitStatus` from that same call (`ExitStatusExt::from_raw`), so each module-run process is reaped once and never
+  waited for again through `Child`, and returns `ru_maxrss` in bytes. `EngineRun::process_max_rss_bytes` is set only
+  from it in `start_engine`; `TwoEngineRun::process_max_rss_bytes(engine)`; the kill paths keep `stop_engine` as is;
+  the `--version` queries record none. No `/usr/bin/time` wrapper, no `getrusage(RUSAGE_CHILDREN)`.
+  `tools/src/receipt.rs`: schema `wc-005.run-receipt/v4` adds, per engine, `<engine>_process_max_rss_bytes: <n> (engine
+  process RSS, not linear memory)`; the refusal receipt is unchanged. `tools/Cargo.toml` adds `libc = "=0.2.189"`, the
+  version the lockfile already held; `Cargo.lock` gains one line (`"libc"` in `wasm-capsule-tools`' dependencies), no
+  new package. `man 2 getrusage` on this Mac: "ru_maxrss	  the maximum resident set size utilized (in bytes)."
+  Tests (`tests/run.rs`): `receipt_labels_each_engine_peak_as_process_rss_not_linear_memory` (marked stand-ins, 18
+  lines, both peaks > 0, no key with `linear`) and `process_peak_rss_follows_the_memory_the_engine_touched` (both real
+  engines found; the fixture is `memory_module`'s encoding, now `memory_module_running`, 1 to 1024 pages, growing to
+  768 pages and `memory.fill`ing all 48 MiB with byte 1; neither engine refused it). Its run printed "PEAK fill:
+  wasmtime 64503808 bytes, wasmer 68812800 bytes" and "PEAK built: wasmtime 14417920 bytes, wasmer 18743296 bytes".
+  v3 pins moved to v4 (`receipt_records_observed_engine_versions`, `real_receipt_names_both_installed_engines`,
+  `receipt_records_the_declared_memory_cap`). Hand cross-check, the same 65-byte fixture (sha256
+  `456ee4627ccafc2dd20068f2dc034760101cb17ad0db1c55125c8db619038527`, written under the git-ignored `target/` and deleted after), run
+  `/usr/bin/time -l env -i <engine> run --invoke digest ... fill.wasm 1592590337` (`env` execs the engine, so the
+  counter is the engine's), each printing `768`: wasmtime (with the receipt's `-W
+  max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y`) 64503808 and 64471040 bytes "maximum resident set
+  size", beside the receipt's 64503808; wasmer 68648960 and 68665344, beside the receipt's 68812800. Close, not equal.
+  Falsifiers, one at a time by hand, then restored (`cmp` clean): F-WC10H-PEAK-CITED (`process_max_rss_bytes:
+  memory_cap_bytes(memory_mb)`) panicked at `tests/run.rs:3481` "wasmtime ran the built capsule with a process peak
+  of 67108864 bytes, not under 48 MiB"; F-WC10H-PEAK-UNLABELLED panicked at `tests/run.rs:3378` "wasmtime's peak line
+  is not `wasmtime_process_max_rss_bytes: <n> (engine process RSS, not linear memory)`:
+  "wasmtime_process_max_rss_bytes: 2162688"". Canonical runner from the repo root, `RUST_TEST_THREADS=2
+  CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json
+  F-WC10H-PEAK-CITED F-WC10H-PEAK-UNLABELLED`: "baseline: 2 named tests pass without an edit, 0 do not", both CAUGHT,
+  "summary: 2 CAUGHT of 2". Then all 95 entries that edit `tools/src/run.rs`, `tools/src/receipt.rs` or `README.md`:
+  "baseline: 54 named tests pass without an edit, 0 do not", "summary: 1 BUILD FAILED, 94 CAUGHT of 95"; the one was
+  F-WC10-CAP-REJECTED-RETRY, whose planted `EngineRun` literal lacked the new field. Re-anchored (the same bug, its
+  retry's peak 0): "summary: 1 CAUGHT of 1". F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT re-anchored to 191, both
+  CAUGHT in the 95-entry run. README totals: 191 entries, 127 runner-caught, 69 hand-proven.
+- 064 (wc-009b, first half; M1 B4 and C0 lab half, P10). Flint's INBOX note (28 Oct 00:30) relays Rong's import
+  contract (C+): world `product-capsule-v1` of `elastos:bus@1.0.0` in `elastos/wit/elastos-bus-v1.wit`; WC-1 (High):
+  `env.f` is a core import the Runtime refuses. Base `a61c39e42bf558451de3202650612f34715bb853` (062's tip), cargo and
+  rustc 1.91.0. Measured first, from the repo root, with a 25-byte copy of `IMPORTING_MODULE` written under the
+  git-ignored `target/`: `CARGO_TARGET_DIR=$PWD/lab/wasm-capsule/target/componentize cargo run --quiet --locked
+  --offline --manifest-path elastos/tools/componentize/Cargo.toml -- <in> <out>` built offline and exited 1 with
+  stderr "Error: failed to decode world from module" / "Caused by:" / "    0: module was not valid" / "    1: failed
+  to resolve import `env::f`" / "    2: module requires an import interface named `env`"; the test holds the last
+  line exactly (`COMPONENTIZE_ENV_REFUSAL`). The same command on the `tools/build` capsule (180 bytes, sha256
+  `2002429e73ee1a5e983df008f5b53728882646f109d55a9d1a93e831690631e1`, the pin) exited 0 and wrote a 312-byte
+  component. `tools/src/verify.rs`: `pub const BUS_V1_INTERFACES: [&str; 5]` and `pub fn bus_imports`
+  (`audit_component(component, &BUS_V1_INTERFACES).map_err(VerifyRefusal::Audit)`, nothing else), module doc and the
+  `Audit` variant's doc. New `tests/common/componentize.rs` (`componentize`: the command above from the test process,
+  target `<lane>/target/componentize`, files in a `TempDir`, each input run at most once per test binary). Tests:
+  `bus_interfaces_are_the_runtime_admission_list`, `bus_imports_lists_the_bus_interfaces_a_component_imports`,
+  `bus_imports_refuses_an_interface_outside_bus_v1_by_name`, `bus_imports_refuses_a_core_module` (`tests/verify.rs`);
+  `runtime_componentize_wraps_the_built_capsule_with_no_bus_import`, `runtime_componentize_refuses_the_env_f_module`
+  (`tests/run.rs`). `Cargo.toml` dev-dependency `wat = "=1.258.0"`; `Cargo.lock` gains one line (`"wat"` in
+  `capsule`'s dependencies), no new package. Two existing tests had to change, against acceptance 7, because each
+  pinned the verifier without a component path that acceptance 2 requires: `verifier_has_one_check_path` held "the
+  tools crate never names `audit_component`" and now holds "calls it exactly once" (a second call still fails it);
+  `verified_bundle_is_sealed`'s exact list of public functions gains `bus_imports` (still an exact match). README's
+  line for the sealed test also said "eight" functions and "five" accessors, one behind the test since `memory_mb`;
+  it now says ten and six. Falsifier F-WC9B-BUS-LIST-WIDENED by hand, then restored (`cmp` clean):
+  `bus_interfaces_are_the_runtime_admission_list` panicked at `tests/verify.rs:1313` "BUS_V1_INTERFACES is not the
+  Runtime's ALLOWED_BUS_IMPORTS, in order" (right side ending `"wasi:cli/environment@0.2.0"`), and
+  `bus_imports_refuses_an_interface_outside_bus_v1_by_name` panicked at `tests/verify.rs:1347` (its `expect_err`, the
+  `wasi:cli` component no longer refused). Canonical runner from the repo root, `RUST_TEST_THREADS=2
+  CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json
+  F-WC9B-BUS-LIST-WIDENED F-WC4-SEALED F-WC4-SECOND F-WC-README-COUNT F-WC-README-OUTSIDE-COUNT`: "baseline: 5 named
+  tests pass without an edit, 0 do not", all CAUGHT, "summary: 8 CAUGHT of 8" (F-WC-README-COUNT and
+  F-WC-README-OUTSIDE-COUNT re-anchored to 192, the same bug). README totals: 192 entries, 128 runner-caught, 69
+  hand-proven.
+  Gate run after all edits: `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check` clean; `cargo test
+  --locked` 137 passed, 3 ignored, 0 failed (`tests/run.rs` 74 passed, 2 ignored; `tests/verify.rs` 29 passed); then
+  `git status --porcelain -- elastos/` printed nothing.
+- 065 (wc-009b, second half; M1 B4 and C0 lab half, P10). Flint's INBOX note (28 Oct 00:30) relays Rong's WC-1 (High:
+  `env.f` is a core import the Runtime refuses) and WC-2 (Medium: "lab grants name `resource` and `actions` exactly as
+  `capability-request`, labelled 'lab stand-in, not admission'"). Base `a05945ca13eedff49040690f38c5d3ec041588cb`
+  (064's tip), cargo and rustc 1.91.0. `tools/src/verify.rs`: `verify_checked` and `verify_bundle` lose `granted`;
+  the one audit call is `audit(module, &[])`. Removed: `Effect`, `LabOperation`, `LAB_OPERATIONS`, `lab_operation`,
+  `VerifyRefusal::UntypedImport`, `grants_not_imported`, `VerifiedBundle::imports`/`unused_grants` and their fields,
+  the `DeclaredImport` re-export, `check_right` and `GrantsReason::RightNotNeeded`. Grants v3: `GRANTS_SCHEMA =
+  "wc-009.lab-grants/v3"` (label unchanged), keys `schema`, `label`, `grants`; `pub struct LabGrant { pub resource:
+  String, pub actions: Vec<String> }`; `read_grants -> Result<Vec<LabGrant>, GrantsRefusal>` in file order.
+  `GrantsReason`: `ImportsNotAList` renamed `GrantsNotAList`, `EntryNotATriple` renamed `EntryNotAGrant`,
+  `DuplicateGrant` renamed `DuplicateResource` (texts name `grants` and a resource); new `RetiredKey`, `EmptyResource`,
+  `EmptyActions`, `EmptyAction`, `RepeatedAction`, each its own text. `tools/src/run.rs`: `RunInput` loses `granted`,
+  `run` calls `verify_bundle(input.bundle, input.signature, input.accepted)`, and `TwoEngineRun` loses `linked` and
+  `unused_grants`; module docs of both files no longer grant, link, type or give a right to a core import. Nothing in
+  `run` reads the grants file. The passed-run receipt is unchanged: it never held the linked or unused-grant lines
+  (`tools/src/receipt.rs` is not edited, and the receipt tests pass unchanged).
+  Tests renamed or removed, each with one reason. Renamed: `declared_not_granted_import_refuses_instantiation_by_name`
+  → `core_module_import_is_refused_before_any_engine_start` (same assertions; there is no grant to leave out). Removed
+  with their rules: `a_grant_reaches_the_audit_unchanged` (no caller grants), `unused_grants_excludes_linked_and_preserves_file_order`
+  and `grant_for_an_import_the_module_does_not_have_links_nothing_and_is_reported` (no unused list),
+  `granted_import_is_linked` (no core import can be granted; the refusal is the renamed test),
+  `valid_signature_with_empty_grants_file_links_nothing` (`run` reads no grants file and links nothing; the zero-import
+  run is `zero_grants_zero_imports_runs`), `module_import_with_no_typed_operation_is_refused` (no typed table; an
+  `env.g` import is refused by the audit like any core import), `grant_naming_a_right_the_operation_does_not_need_is_refused`
+  (no right), and `readme_lists_each_typed_lab_operation` (no table to list). Changed: the zero-grants run tests drop
+  their `linked()`/`unused_grants()` checks and their grants file; `verifier_uses_manifest_entrypoint` keeps only its
+  refusal; `verified_entrypoint_is_the_audited_module` uses a type-section-only module with no import as `main.wasm`;
+  `verifier_audits_the_checked_bytes`, `signed_bundle_verifies_against_its_key` and
+  `the_real_capsule_passes_the_verifier` drop `imports()`; `verified_bundle_is_sealed` lists eight public functions;
+  `runner_uses_only_explicit_inputs` holds the three-argument call; `grants_file_refusals_keep_their_reason` is v3 (21
+  cases); `host_secret_probe_imports_are_refused_before_any_engine_starts` keeps its undeclared case and loses its
+  `call`-grant case (no core grant exists); `run_with_grants`/`GrantsRun` became `run_counting`/`CountingRun`.
+  `tests/common/grants.rs` keeps `IMPORTING_MODULE`, `importing`, `write_grants` and a v3 `grants_file`. New:
+  `grants_file_names_resource_and_actions_as_capability_request`, `grant_with_an_empty_resource_is_refused`,
+  `grant_with_no_actions_is_refused`, `grant_with_an_empty_action_is_refused`, `grant_naming_an_action_twice_is_refused`,
+  `resource_granted_twice_is_refused`, `grant_with_a_retired_right_or_module_key_is_refused` and
+  `retired_core_grant_names_are_gone_from_the_tools` (`tests/verify.rs`). Task 046's gap sentence reworded in README,
+  ADOPTION and `tests/docs.rs`; the wc-009a and typed-operations sections in README and ADOPTION each get the
+  "Retired by task 065" first line; 064's README section says `env.f` is retired. My first gate run failed two docs
+  guards on two of my own new README lines (one said "endorsed" without "not endorsed", one named the type-check
+  falsifier with no "not"); both lines reworded, which also shows the two guards still work.
+  Falsifiers: removed F-WC4e, F-WC9-GRANT-INJECT, F-WC9-UNUSED-KEEPS-USED, F-WC9-UNUSED-REORDER, F-WC9-RUN-DROPS-GRANTS,
+  F-WC-B4-UNTYPED-LINKED and F-WC-B4-RIGHT-IGNORED (rules gone; one line each in README). New F-WC9B-CORE-IMPORT-GRANTED
+  (the `DeclaredImport` written as `wasm_capsule_audit::DeclaredImport`, since `verify.rs` no longer imports it),
+  F-WC9B-GRANT-ACTIONS-EMPTY and F-WC9B-RETIRED-TABLE-BACK (a third, so the source scan has a runner entry).
+  Re-anchored: F-WC4c, F-WC4d, F-WC4-AUDIT-REASON, F-WC4-ORDER-AUDIT-FIRST, F-WC4-SEALED-NEW, F-WC4-SEALED-MUT,
+  F-WC4-SECOND-AUDIT, F-WC9-LINK-ALL, F-WC9-GRANTS-IMPORTS-NOT-LIST, F-WC9-GRANTS-ENTRY-NOT-STRING,
+  F-WC9-GRANTS-DUPLICATE, F-WC5a, F-WC5-VERIFY-TWICE, F-WC5-QUERY-BEFORE-VERIFY, F-WC-ENGINE-RUN-MODULE-DOC,
+  F-WC-B4-TYPE-GAP-HIDDEN, F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT (188). Every anchor is found exactly once
+  (checked over all 188 entries). The JSON was written back with ASCII escapes, and the two hand escapes the file
+  holds (the `B` of the PEM header in F-WC4g's plant and the hyphen of the retired label in
+  F-WC3-RETIRED-LABEL-DOC's plant, each written as a JSON `u00XX` escape) were put back, so no other entry
+  changed. Canonical runner from the repo root, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I
+  examples/agent-host/falsify.py --from lab/wasm-capsule/falsifiers.json F-WC9 F-WC-B4 F-WC4 F-WC5a
+  F-WC5-VERIFY-TWICE F-WC5-QUERY-BEFORE-VERIFY F-WC-ENGINE-RUN-MODULE-DOC F-WC-README-COUNT F-WC-README-OUTSIDE-COUNT`:
+  "baseline: 28 named tests pass without an edit, 0 do not", "summary: 51 CAUGHT of 51", exit 0, no
+  `*.falsify-original` left. The 51: all 22 F-WC4 entries, F-WC5a, F-WC5-VERIFY-TWICE, F-WC5-QUERY-BEFORE-VERIFY,
+  F-WC9-LINK-ALL, the 13 F-WC9-GRANTS-*, the three F-WC9B0-*, F-WC9B-BUS-LIST-WIDENED, the three new F-WC9B-*,
+  F-WC-B4-TYPE-GAP-HIDDEN, F-WC-B4-TYPE-CHECK-CLAIMED, F-WC-ENGINE-RUN-MODULE-DOC, F-WC-README-COUNT and
+  F-WC-README-OUTSIDE-COUNT. After the run, F-WC4c's title alone was shortened (no anchor change). README totals: 188
+  entries, 125 runner-caught, 68 hand-proven.
+  Gate run after all edits: `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools -- --check` clean; `cargo test
+  --locked` 137 passed, 3 ignored, 0 failed (`tests/run.rs` 70 passed, 2 ignored; `tests/verify.rs` 34 passed;
+  `tests/docs.rs` 5 passed).
+- 063 (wc-010c, the cap half; M1 C0 step iii, P18, P11). Flint's INBOX note (28 Oct 00:25) asked for one named test
+  that runs the capsule on each engine with the declared cap and proves it never exceeds it, and one falsifier that
+  raises the cap. Base `aa01a96407e0a84501ec7b13cccfc15f826405a5` (065's tip). No runner, receipt or verifier change.
+  `tests/run.rs`: `capsule_stays_under_declared_memory_cap` and the constant `DECLARED_64_MB` (67108864, written out),
+  reusing `grow_module`, `memory_module`, `MAXIMUM_1025`, `GROW_PAST_THE_CAP`, `signed_bundle_declaring`, `counting`,
+  `starts`, `real_engines`, `built_capsule`, `two_ran`, `two_refused`, `receipt_line`, `receipt_lines` and
+  `peak_lines`; no existing test changed. (c) runs first on `counting` stand-ins (a 1025-page maximum, declared 64 MB:
+  `TwoEngineRefusal::Memory`, refusal receipt `outcome: refused`, `reason: memory_maximum_above_declared`, `engine:
+  none`, zero module and zero `--version` starts on each stand-in); then, with both real engines, (a) the built
+  capsule's v4 receipt (`memory_cap_bytes: 67108864`, `wasmtime_memory_cap: ENFORCED
+  max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y`, each `<engine>_memory_maximum_bytes` at most
+  67108864, `FIXED_OUTPUT` on both, both peak lines present with 062's label, RSS never compared with the cap) and
+  (b) `grow_module(GROW_PAST_THE_CAP)` through `run` refused with `reason: engine_failed`, `engine: wasmtime` and the
+  trap line `forcing trap when growing memory to 67174400 bytes` in its detail, then the same module through
+  `run_engine` on real wasmer printing `-1`. A missing engine prints SKIPPED and the test prints no PASS.
+  Falsifier F-WC10G-CAP-RAISED (`memory_cap_bytes` returns `u64::from(memory_mb) * BYTES_PER_MB * 2`; anchor found
+  once in `tools/src/run.rs`). Hand check first: with the plant, the test panics at `tests/run.rs:1267`
+  (`two_refused`: `run` passed part (c)'s module); `run.rs` restored, `git diff` empty for it. Canonical runner from
+  the repo root, `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 python3 -I examples/agent-host/falsify.py --from
+  lab/wasm-capsule/falsifiers.json F-WC10G-CAP-RAISED F-WC-README-COUNT F-WC-README-OUTSIDE-COUNT`: "baseline: 2
+  named tests pass without an edit, 0 do not", "summary: 3 CAUGHT of 3" (F-WC10G-CAP-RAISED 19s), no
+  `*.falsify-original` left. README: a paragraph under task 033's section, a named-tests entry, task 063's falsifier
+  section, totals 189 entries, 126 runner-caught, 68 hand-proven (F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT
+  re-anchored to 189). 062's two wrong-text FOLLOWUPs (cursor, round 1), docs only: README's task 043 refusal item
+  and run budget paragraph, and ADOPTION's 043 item, now say the poll is `reap` (`wait4(pid, WNOHANG)`) since 062,
+  not `try_wait`; README's v3-text sentence now says `receipt_records_the_declared_memory_cap` is 18 lines, as
+  `tests/run.rs` asserts. Gate run after all edits: `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools --
+  --check` clean; `cargo test --locked` 138 passed, 3 ignored, 0 failed (`tests/run.rs` 71 passed, 2 ignored;
+  `tests/docs.rs` 5 passed); the new test printed its PASS line on wasmtime 45.0.1 and wasmer 7.5.0.
+
+Task 070: `runtime_bus_interfaces` (`tools/src/verify.rs`) reads the Runtime's `ALLOWED_BUS_IMPORTS` from `CARGO_MANIFEST_DIR`, one parser (`runtime_bus_interfaces_at`) and one `BusListUnreadable { path, fault }` refusal; `BUS_V1_INTERFACES` and the test's parser are gone, and `bus_imports` passes only that read; seven new tests plus the re-anchored `bus_interfaces_are_the_runtime_admission_list`; 198 falsifier entries (nine new, `F-WC9B-BUS-LIST-WIDENED` re-anchored, `F-WC9B-BUS-LIST-COPIED` added), README counts at 198/135/198; canonical runner over the 13 changed ids reports `summary: 13 CAUGHT of 13`; `cargo test --locked --workspace` 0 failed (3 ignored), `cargo fmt` and `cargo fmt -p wasm-capsule-tools -- --check` clean.
+
+M2-B1 (M2 exit (a), lab half: `tools/bundle` names one bundle with one CID across paths). Base `c6e65b46`. Tests only: `tests/bundle.rs` gains `two_bundles_in_different_paths_have_one_lab_cid`, which spawns the real `tools/bundle` from three copies of the lane (`copy_lane_source`, copies of `tools/` included, so each copy's `tools/bundle` runs its own `tools/build`) into three OUT_DIRs. Two copies are siblings (`.../bundle lab a`, `.../bundle lab b`: parents of one length and depth); the third sits in `.../bundle lab/side/longer name`, a parent that is longer, by more than the sibling name's last letter, and one level deeper. The test asserts its own fixture first: the sibling parents' byte length and component count are equal, and the third parent differs in both. It then requires the three `capsule.wasm` files to be byte-identical, each receipt's `artifact_sha256` to be the pinned one, and the three printed CIDs (each the whole of stdout) to be one; it flips one byte of bundle A's module and requires `--name` to print another while B and C keep their names and modules. `tools/build` is unchanged from HEAD. F-BUNDLE-REMAP-UNEVEN stays a hand-proven entry, not a `falsifiers.json` entry: run 1 showed the `pwd` -> `pwd -P` plant turns the journey red only for a copy reached through a folder link, and a link copy changes more than the remap (its own `cargo run` builds a second `bundle` binary), so the plant cannot show the remap alone. README, "F-BUNDLE-REMAP-UNEVEN", records that. `cargo +1.91.0 test --test bundle` and `--test docs` pass; `cargo fmt -- --check` clean; `tools/build` `cmp` HEAD.
