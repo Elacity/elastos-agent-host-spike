@@ -704,3 +704,5 @@ The new `standin_` rows are this stand-in, and a PASS there leaves the real Runt
 These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A6 credit.
 
 `standin_failed_start_denies_that_sessions_pending` is this stand-in, and a PASS there gives the Runtime no A11 credit.
+
+`standin_failed_deny_refuses_the_sibling`, `standin_blank_deny_reason_is_rejected` and `standin_unlisted_pending_is_not_authority` are this stand-in. A PASS gives the Runtime no A10 credit and no A11 credit.

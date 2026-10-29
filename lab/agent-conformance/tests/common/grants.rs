@@ -1625,7 +1625,7 @@ fn require_empty_pending(response: &Value) -> Result<()> {
     Ok(())
 }
 
-fn live_grant_state(response: &Value) -> Result<&'static str> {
+pub(super) fn live_grant_state(response: &Value) -> Result<&'static str> {
     let grants = response["capabilities"]
         .as_array()
         .ok_or("cleanup grant response requires a capability list")?;

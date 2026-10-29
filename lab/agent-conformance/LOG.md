@@ -7357,3 +7357,108 @@ A second cause overwrites a denied record.
 | 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `standin-runtime/mod.rs:405` decides from the stored request. This change adds no capsule import. |
 | 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:2856` `standin_stop_denies_that_sessions_pending`. The planted return fails that assertion at `:2873` and the restored test passes. `:2953` catches a missing failed-start call. |
 | 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:178` stores a request and does not touch `grants` or `instances`. `:389` `revoke_live` still revokes grants on its own, before settlement. |
+
+## 099 round 2 — Failed session cannot grant the sibling
+
+099: a shell deny of a `Starting` instance stores that request `denied` with `settled_by` `shell`, stores the instance `failed`, then calls the one `settle_pending` so the session's other pending request is `denied` by `runtime` with that cause. A grant whose instance is missing or not `Starting` or `Running` calls that same function with cause `instance is not live` and stores no grant. A blank deny reason is status 400 `deny reason must not be blank`. `request_sessions` lists the one request store, and `standin_a12_census` reads a session that has left the capsule list. Quote from the ask, Part A: "When a requester ends, its pending requests are denied and the reason names the end." The design file says: "When a requester ends, the Runtime denies each of its pending requests and gives a reason that names the end." A PASS gives the Runtime no A10 credit and no A11 credit. There is no new `falsifiers.json` id. `Cargo.toml` and `Cargo.lock` are unchanged. HEAD before the first edit is `b2f1117239bd3edb1de069117c83fde454902c74`. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` is false. `tests/common/grants.rs` makes `live_grant_state` `pub(super)` so the census calls that one function.
+
+No list id. Each plant was restored before the next. The planted crate compiled. The named test failed on its assertion. Restored, it passed. After the last restore, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` is the candidate only. The plant expressions are absent from that file. A planted line number below is the line cargo printed. The restored assertion line is the same assert after the plant's line-count change is undone.
+
+F-standin-fail-skips-settle. Named test `standin_failed_deny_refuses_the_sibling`. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_failed_deny_refuses_the_sibling -- --exact`. Planted exit 101 in 16.852 seconds. Restored exit 0 in 1.491 seconds. Assertion: `src/../standin-runtime/mod.rs:3118:9` `the stand-in denies the named request as the shell and settles the sibling as the runtime`. Left `req-b` `pending` with `settled_by` null. Right `req-b` `denied` with `settled_by` `runtime` and `decision_reason` `stop the waiter`. The plant replaces three lines with one, so the restored assert is at 3120.
+
+Old:
+
+```text
+        if failed {
+            self.settle_pending(&session_id, reason);
+        }
+```
+
+New:
+
+```text
+        let _ = failed;
+```
+
+The `Failed` arm of `post_capability_deny` does not call `settle_pending`.
+
+F-standin-blank-reason. Named test `standin_blank_deny_reason_is_rejected`. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_blank_deny_reason_is_rejected -- --exact`. Planted exit 101 in 2.122 seconds. Restored exit 0 in 1.442 seconds. Assertion: `src/../standin-runtime/mod.rs:3240:13` `the stand-in rejects a blank deny reason: Ok(Object {"success": Bool(true)})`. The blank deny succeeds. The plant also skips `settle_pending`, so `req-b` would stay pending. The 400 assertion fails first. The deny match is one line shorter and the settle plant is two lines shorter, so the restored assert is at 3243.
+
+Old:
+
+```text
+    match reason {
+        Some(text) if text.trim().is_empty() => {
+            Err((400, "deny reason must not be blank".to_owned()))
+        }
+        Some(text) => Ok((request_id, text)),
+        None => Ok((request_id, DEFAULT_REASON)),
+    }
+```
+
+New:
+
+```text
+    let reason = match reason {
+        Some(text) if text.trim().is_empty() => DEFAULT_REASON,
+        Some(text) => text,
+        None => DEFAULT_REASON,
+    };
+    Ok((request_id, reason))
+```
+
+`deny_body` treats a blank `reason` as `Denied by user`. The same plant uses the F-standin-fail-skips-settle bytes above, so the `Failed` arm does not call `settle_pending`.
+
+F-standin-census-listed-only. Named test `standin_unlisted_pending_is_not_authority`. Command: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects standin_unlisted_pending_is_not_authority -- --exact`. Planted exit 101 in 3.640 seconds. Restored exit 0 in 2.078 seconds. Assertion: `tests/effects.rs:1180:5` `the stand-in refuses a pending request of a session that left the list: Ok(())`. The census returns `Ok` while `req-b` is still pending. The plant removes 16 lines, so the restored assert is at 1196.
+
+Old:
+
+```text
+    for session_id in standin.request_sessions() {
+        if listed_ids.contains(&session_id) {
+            continue;
+        }
+        let pending = standin
+            .get_capability_requests(StandInCaller::Shell, Some(session_id.as_str()))
+            .map_err(|(_, reason)| reason)?;
+        let requests = pending["requests"]
+            .as_array()
+            .ok_or("request list requires a request array")?;
+        for request in requests {
+            if request["status"] == "pending" {
+                return Err("pending request leftover".to_owned());
+            }
+        }
+    }
+```
+
+New:
+
+```text
+```
+
+`standin_a12_census` does not call `request_sessions`.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. Both commands stayed inside 600 seconds. The locked suite passed on the first run, so there was no census rerun. `Cargo.toml` and `Cargo.lock` are unchanged.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.157 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 313.735 seconds. 171 passed, 0 failed, 14 ignored. The lib target passed 58 tests. The effects target passed 59 tests, with 12 ignored, in 217.30 seconds. The runtime target passed 10 tests, with 2 ignored, in 15.62 seconds.
+- Proof `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_failed_deny_refuses_the_sibling -- --exact`: exit 0, real 0.134 seconds.
+- Proof `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_blank_deny_reason_is_rejected -- --exact`: exit 0, real 0.086 seconds.
+- Proof `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test effects standin_unlisted_pending_is_not_authority -- --exact`: exit 0, real 0.092 seconds.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | `standin-runtime/mod.rs:316` `request_sessions` returns session ids from the request store. It does not name code or content by a URL. |
+| 2. Capsule, Home or UI gains ungranted access? | No | `standin-runtime/mod.rs:415` `settle_pending` denies the session's other pending request. It opens no file, network, or `wasi` import. |
+| 3. A second path or a second copy of one rule? | No | `standin-runtime/mod.rs:685` `settle_pending` is the one session settlement. Deny calls it at `:415` after `Failed`. Grant calls it at `:457` only when the instance is not `Starting` or `Running`. `finish_start` calls it at `:565` after `Failed`. `stop_one` calls it at `:644`. |
+| 4. Runtime core grows? | No | The edit stays in `lab/agent-conformance/`. `src/lib.rs:9` still points the lab module at `standin-runtime/mod.rs`. |
+| 5. Refusals deny by default with a clear reason? | Yes | `standin-runtime/mod.rs:1026` returns 400 `deny reason must not be blank`. `:458` returns 400 `instance is not live`. `:443` returns 400 `request is not pending:`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | `standin-runtime/mod.rs:685` updates the lab request store. This change adds no capsule import. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `standin-runtime/mod.rs:3073` `standin_failed_deny_refuses_the_sibling`. `:3227` `standin_blank_deny_reason_is_rejected`. `tests/effects.rs:1131` `standin_unlisted_pending_is_not_authority`. The three plants fail those assertions and the restored tests pass. |
+| 8. Identity, admission and allowance stay separate? | Yes | `standin-runtime/mod.rs:449` reads the instance phase before `:462` `seed_grant`. The request store and the grant store stay separate. |
+
