@@ -1110,3 +1110,191 @@ fn model_reported_usage_does_not_move_the_admit_call() {
     );
     assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
 }
+
+#[test]
+fn model_forged_append_does_not_replace_the_asked_amount() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_append: true,
+        ..super::guest(handle)
+    };
+    assert!(request.forged_append);
+    let refusal = verifier
+        .admit_ask(&call, &request, BudgetAsk { amount: 6 }, 5)
+        .expect_err("forged append does not replace the asked amount");
+    assert_eq!(refusal, AdmitRefuse::OverBudget { cap: 5, asked: 6 });
+    assert_eq!(refusal.to_string(), "budget ask exceeds the admission cap");
+    let untouched = verifier
+        .reserve(&call, &super::guest(handle), 1)
+        .expect_err("ceiling stays unset");
+    assert_eq!(
+        untouched,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 0,
+            held: 0,
+            asked: 1,
+        }
+    );
+}
+
+#[test]
+fn model_forged_overwrite_does_not_replace_the_asked_amount() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..super::guest(handle)
+    };
+    assert!(request.forged_overwrite);
+    let refusal = verifier
+        .admit_ask(&call, &request, BudgetAsk { amount: 6 }, 5)
+        .expect_err("forged overwrite does not replace the asked amount");
+    assert_eq!(refusal, AdmitRefuse::OverBudget { cap: 5, asked: 6 });
+    assert_eq!(refusal.to_string(), "budget ask exceeds the admission cap");
+    let untouched = verifier
+        .reserve(&call, &super::guest(handle), 1)
+        .expect_err("ceiling stays unset");
+    assert_eq!(
+        untouched,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 0,
+            held: 0,
+            asked: 1,
+        }
+    );
+}
+
+#[test]
+fn model_forged_child_journal_does_not_replace_the_asked_amount() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..super::guest(handle)
+    };
+    assert!(request.forged_child_journal);
+    let refusal = verifier
+        .admit_ask(&call, &request, BudgetAsk { amount: 6 }, 5)
+        .expect_err("forged child journal does not replace the asked amount");
+    assert_eq!(refusal, AdmitRefuse::OverBudget { cap: 5, asked: 6 });
+    assert_eq!(refusal.to_string(), "budget ask exceeds the admission cap");
+    let untouched = verifier
+        .reserve(&call, &super::guest(handle), 1)
+        .expect_err("ceiling stays unset");
+    assert_eq!(
+        untouched,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 0,
+            held: 0,
+            asked: 1,
+        }
+    );
+}
+
+#[test]
+fn model_forged_identity_does_not_replace_the_asked_amount() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..super::guest(handle)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    let refusal = verifier
+        .admit_ask(&call, &request, BudgetAsk { amount: 6 }, 5)
+        .expect_err("forged identity does not replace the asked amount");
+    assert_eq!(refusal, AdmitRefuse::OverBudget { cap: 5, asked: 6 });
+    assert_eq!(refusal.to_string(), "budget ask exceeds the admission cap");
+    let untouched = verifier
+        .reserve(&call, &super::guest(handle), 1)
+        .expect_err("ceiling stays unset");
+    assert_eq!(
+        untouched,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 0,
+            held: 0,
+            asked: 1,
+        }
+    );
+}
+
+#[test]
+fn model_forged_session_does_not_replace_the_asked_amount() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..super::guest(handle)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    let refusal = verifier
+        .admit_ask(&call, &request, BudgetAsk { amount: 6 }, 5)
+        .expect_err("forged session does not replace the asked amount");
+    assert_eq!(refusal, AdmitRefuse::OverBudget { cap: 5, asked: 6 });
+    assert_eq!(refusal.to_string(), "budget ask exceeds the admission cap");
+    let untouched = verifier
+        .reserve(&call, &super::guest(handle), 1)
+        .expect_err("ceiling stays unset");
+    assert_eq!(
+        untouched,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 0,
+            held: 0,
+            asked: 1,
+        }
+    );
+}
+
+#[test]
+fn model_forged_instance_does_not_replace_the_asked_amount() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let sibling = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(sibling, instance);
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let request = GuestRequest {
+        forged_instance: Some(sibling),
+        ..super::guest(handle)
+    };
+    assert_eq!(request.forged_instance, Some(sibling));
+    let refusal = verifier
+        .admit_ask(&call, &request, BudgetAsk { amount: 6 }, 5)
+        .expect_err("forged instance does not replace the asked amount");
+    assert_eq!(refusal, AdmitRefuse::OverBudget { cap: 5, asked: 6 });
+    assert_eq!(refusal.to_string(), "budget ask exceeds the admission cap");
+    let untouched = verifier
+        .reserve(&call, &super::guest(handle), 1)
+        .expect_err("ceiling stays unset");
+    assert_eq!(
+        untouched,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 0,
+            held: 0,
+            asked: 1,
+        }
+    );
+}
