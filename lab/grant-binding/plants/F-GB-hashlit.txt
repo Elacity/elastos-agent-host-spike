@@ -1,0 +1,13 @@
+id: F-GB-hashlit
+file: src/link.rs
+test: link::model_hash_inside_a_string_is_still_a_link
+--- old
+        let end = find_byte(bytes, start + 1, b'\'').map_or(bytes.len(), |end| end + 1);
+        decoded.extend_from_slice(&bytes[start + 1..end]);
+--- new
+        let quote = find_byte(bytes, start + 1, b'\'').map_or(bytes.len(), |end| end + 1);
+        let end = find_byte(bytes, start + 1, b'#')
+            .filter(|hash| *hash < quote)
+            .unwrap_or(quote);
+        decoded.extend_from_slice(&bytes[start + 1..end]);
+--- end
