@@ -1036,6 +1036,24 @@ fn model_use_path_outside_the_owned_root_is_refused() {
 }
 
 #[test]
+fn model_case_different_use_path_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let refusal = verifier
+        .use_path(
+            &verifier.open_call(instance),
+            &guest(handle),
+            "UsersAI/agent-1/Notes/page.md",
+        )
+        .expect_err("case-different use path");
+    assert_eq!(refusal, Refuse::OutsideRoot);
+    assert_eq!(refusal.to_string(), "use path leaves the owned root");
+}
+
+#[test]
 fn model_symlink_shaped_use_path_is_refused() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
