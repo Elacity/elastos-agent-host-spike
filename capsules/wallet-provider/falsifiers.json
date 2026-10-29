@@ -2650,8 +2650,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "    if let StandinPolicy::Seccomp(allow) = policy {\n        if allow.provider != name {\n            return Err(format!(\n                \"{name} start is refused: the seccomp allow list was generated for {}\",\n                allow.provider\n            ));\n        }\n    }",
-          "new": "    if let StandinPolicy::Seccomp(allow) = policy {\n        let _ = allow;\n    }"
+          "old": "    if let StandinPolicy::Seccomp(allow) | StandinPolicy::Landlock { allow, .. } = policy {\n        if allow.provider != name {\n            return Err(format!(\n                \"{name} start is refused: the seccomp allow list was generated for {}\",\n                allow.provider\n            ));\n        }\n    }",
+          "new": "    if let StandinPolicy::Seccomp(allow) | StandinPolicy::Landlock { allow, .. } = policy {\n        let _ = allow;\n    }"
         }
       ],
       "tests": [
@@ -2688,6 +2688,38 @@
       ],
       "tests": [
         "seccomp_launch_record_refuses_missing_or_unknown_report"
+      ]
+    },
+    {
+      "id": "WP187",
+      "title": "the STORAGE_PARENT row grants a read of the parent's tree, so a read beneath it succeeds and the file row is wider than the oracle",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    (SHARED_RULES[1], LANDLOCK_ACCESS_FS_READ_DIR),",
+          "new": "    (\n        SHARED_RULES[1],\n        LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_READ_FILE,\n    ),"
+        }
+      ],
+      "tests": [
+        "landlock_allow_list_follows_the_declared_rights"
+      ]
+    },
+    {
+      "id": "WP188",
+      "title": "the handled mask names only the read rights, so every write outside STORAGE_ROOT is unrestricted",
+      "command": "wallet",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "old": "    let mut handled = 0u64;\n    for (right, introduced) in LANDLOCK_RIGHT_ABI {\n        if *introduced <= abi {\n            handled |= right;\n        }\n    }\n    handled\n}",
+          "new": "    let mut handled = 0u64;\n    for (right, introduced) in LANDLOCK_RIGHT_ABI {\n        if *introduced <= abi {\n            handled |= right & (LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR);\n        }\n    }\n    handled\n}"
+        }
+      ],
+      "tests": [
+        "landlock_program_denies_a_path_no_rule_grants"
       ]
     }
   ]

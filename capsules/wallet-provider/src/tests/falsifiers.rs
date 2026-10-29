@@ -241,8 +241,11 @@ use std::process::Command;
 /// reader's length case and unknown-step case, and the launcher's list-provider
 /// check. Its two Linux-only plants are named in `CONFINEMENT-LINUX.md` and are
 /// not registered here, because a Linux-only test cannot produce a CAUGHT line
-/// on the Mac.
-const EXPECTED_FALSIFIERS: usize = 165;
+/// on the Mac. Task 146 adds WP168 and WP169, both CAUGHT on the Mac: the
+/// `STORAGE_PARENT` row widened to a read of the parent's tree, and the handled
+/// mask narrowed to the read rights. Its two Linux-only plants are named in
+/// `CONFINEMENT-LINUX.md` and are not registered here.
+const EXPECTED_FALSIFIERS: usize = 167;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

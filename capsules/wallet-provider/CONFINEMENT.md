@@ -560,18 +560,22 @@ document records `did-provider` or `wallet-provider` as confined on Linux (P10,
 P11). The status change lands when the Runtime side does.
 
 Most Linux enforcement rows are designed in `CONFINEMENT-LINUX.md` and remain
-unbuilt. One row exists today as source with a real Linux run behind it: a
-seccomp allow list generated from this provider's declared rights, with the one
-builder, the one mapping table, the one step sequencer and the one install
-function that file names
-(`seccomp_allow_list_from_declared_rights`, `SECCOMP_RULE_SYSCALLS`,
-`install_seccomp_with`, `install_seccomp`). On a real Linux host the wallet
-provider starts under that filter and the four denied calls answer the filter's
-own marker there, as `CONFINEMENT-LINUX.md` records with its host, kernel and
-per-call answers. That is the whole Linux claim: namespaces, Landlock,
-capability dropping and every file row of the contract remain unbuilt, so
+unbuilt. Two rows exist today as source with a real Linux run behind them: a
+seccomp allow list and a Landlock file row, each generated from this provider's
+declared rights through one generator. The seccomp side has the one builder, the
+one mapping table, the one step sequencer and the one install function that file
+names (`seccomp_allow_list_from_declared_rights`, `SECCOMP_RULE_SYSCALLS`,
+`install_seccomp_with`, `install_seccomp`); the Landlock side has
+`landlock_path_rules`, `LANDLOCK_RULE_RIGHTS` and `install_landlock`. On a real
+Linux host the wallet provider starts under both, the four denied calls answer
+the filter's own marker, and a file read or write under `STORAGE_PARENT` outside
+`STORAGE_ROOT` is refused by the kernel with `EACCES` while the same call
+succeeds unconfined, as `CONFINEMENT-LINUX.md` records with its host, kernel,
+reported ABI and per-call answers. That is the whole Linux claim: namespaces,
+capability dropping and every other row of the contract remain unbuilt, so
 `linux` stays out of `DECLARED_CONFINED_OS` and every operations-table cell
-reads `designed, not enforced`.
+reads `designed, not enforced`. No sentence here claims that the Runtime did
+any of it: the launcher is lab code in `tests/confine.rs`.
 `both_file_profiles_bind_one_storage_parameter_contract` reads the three oracles
 and supplies contract evidence, not Linux execution evidence.
 
@@ -1401,6 +1405,19 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Answer a failed spawn's reason alone when the install record is empty (WP167):
   `seccomp_launch_record_refuses_missing_or_unknown_report` fails because the
   missing-report reason is lost behind that spawn reason.
+- Grant a read of the parent's tree in the `STORAGE_PARENT` Landlock row (WP187):
+  `landlock_allow_list_follows_the_declared_rights` fails because that row then
+  carries `READ_FILE` as well as `READ_DIR`, so a read of a file beneath the
+  parent would succeed and the file row would be wider than its oracle.
+- Name only the read rights in the Landlock handled mask (WP188):
+  `landlock_program_denies_a_path_no_rule_grants` fails on its handled-mask
+  comparison, because an unspecified `WRITE_FILE` leaves every write outside
+  `STORAGE_ROOT` unrestricted.
+
+Task 146's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
+Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,
+so none can produce a CAUGHT line in this list: the launcher's skipped Landlock
+install and the `STORAGE_PARENT` row's read plant, both on the file-row journey.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

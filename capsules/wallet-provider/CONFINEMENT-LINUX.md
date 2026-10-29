@@ -6,11 +6,13 @@ present is the one file-profile contract: `check_profile_contract`, run over
 `(deny default)` second, an explicit `(deny network*)`, no `(allow default)`,
 no network allow, only the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and
 `STORAGE_PARENT` tokens, and the three shared rules verbatim.
-This contract has no Linux enforcement yet. Its only current Linux behaviour is
-the seccomp allow list in "The seccomp allow list" below: a generated allow
-list, source that builds, and one real Linux run behind it in which
-wallet-provider starts under the generated filter and the four refused calls
-answer the filter's own marker.
+This contract has no full Linux enforcement yet. Two of its rows exist as source
+with a real Linux run behind them: the seccomp allow list in "The seccomp allow
+list" below, and the Landlock file row in "The Landlock file row" below. Both are
+generated from the same approved declared rights, and a real Linux host shows
+the provider starting under them, the four refused calls answering the filter's
+own marker, and a file read or write outside `STORAGE_ROOT` refused by the
+kernel.
 `confine.sb` stays each provider's one oracle. The contract is shared, so its
 Linux mapping is written once here, beside the one contract check (P10). The
 Linux policy that the Runtime would generate from the same approved declared
@@ -22,9 +24,9 @@ file exists (P10).
 One part of this design exists today as source, for `wallet-provider` only: a
 seccomp allow list generated from the provider's declared rights, and one real
 Linux run behind it. That run starts the wallet provider under the filter and
-proves the four denied calls. Namespaces, Landlock, capability dropping and
-every file row of the contract stay unbuilt, so a seccomp filter is the only
-Linux confinement this lab applies.
+proves the four denied calls. The Landlock file row in "The Landlock file row"
+below is the second built row; namespaces, capability dropping and every other
+row of the contract stay unbuilt.
 
 One function builds the list:
 `seccomp_allow_list_from_declared_rights(name, declared)` in
@@ -193,14 +195,16 @@ stops reportable without `WUNTRACED` and a stopped child is still alive. The rea
 is asserted on every result before any arm can return, and the whole test is
 bounded well inside eight deadlines.
 
-Namespaces, Landlock, capability dropping and every file row of the contract stay
-unbuilt on Linux, and a seccomp filter reads syscall numbers and not paths, so no
-sentence here says a contract file row is enforced on Linux. `linux` stays out of
-`DECLARED_CONFINED_OS`. A `linux` host under a `Seatbelt` policy keeps the words
-this lab already used, and a `linux` host under a `Seccomp` policy is accepted by
-the host rule and starts the provider under the filter; on any other OS the same
-seat refuses the start by name instead of starting the provider unconfined.
-`standin_host_refusal_decides_each_policy` holds both.
+Namespaces, capability dropping and every other row of the contract stay unbuilt
+on Linux. A seccomp filter reads syscall numbers and not paths, so the seccomp
+section claims no file boundary; the file boundary is claimed only by the
+Landlock row above, for `wallet-provider` only, and only for the calls its run
+measured. `linux` stays out of `DECLARED_CONFINED_OS`. A `linux` host under a
+`Seatbelt` policy keeps the words this lab already used, and a `linux` host under
+a `Seccomp` or `Landlock` policy is accepted by the host rule and starts the
+provider under the filter and, where the policy carries one, the ruleset; on any
+other OS the same seat refuses the start by name instead of starting the provider
+unconfined. `standin_host_refusal_decides_each_policy` holds both.
 
 Every Linux-only plant below names exactly one test. The quoted outputs are
 from the earlier run on the host above; the repair's new inheritance cases await
@@ -261,6 +265,156 @@ the named test with `the keyctl call must pass the table's five arguments and
 no register it did not set`; the source was then restored byte-for-byte. The
 registered runner check remains with the supervisor.
 
+## The Landlock file row
+
+The second Linux row, `wallet-provider` only, is a Landlock ruleset generated
+from the same declared rights as the seccomp list, with one real Linux run
+behind it.
+
+One function builds it: `landlock_path_rules(name, declared, bindings, abi,
+loader)` in `capsules/wallet-provider/tests/confine.rs` calls `generate_profile`,
+the one lab generator, reads the profile text back through `profile_forms`, the
+one profile parser, and maps each allow form through one table,
+`LANDLOCK_RULE_RIGHTS`. It reads no file, holds no rule text of its own and never
+reads the declared-rights JSON, so the JSON has one reader and the profile one
+parser (P10). It takes the ABI as an input rather than reading the kernel, so
+every OS can build and read a ruleset, and a test can present an ABI below a
+row's.
+
+`LANDLOCK_RULE_RIGHTS` holds exactly one entry for each of the five allow forms a
+wallet profile carries. An entry whose rights are `0` is a decision written down,
+not an omission:
+
+| Allow form | Rights the row grants |
+| --- | --- |
+| `(allow file-read* (literal (param "STORAGE_PARENT")))` | `READ_DIR` |
+| `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` | `READ_FILE`, `READ_DIR`, `WRITE_FILE`, `REMOVE_FILE`, `REMOVE_DIR`, `MAKE_DIR`, `MAKE_REG` |
+| `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` | `EXECUTE`, `READ_FILE` |
+| `(allow file-read* (literal "/"))` | no right |
+| `(allow sysctl-read)` | no path right |
+
+A form with no entry is a refusal that names the provider and the form and builds
+no ruleset, symmetrical to `check_profile_contract`'s refusals. The handled
+access mask names every right the reported ABI defines, so a right no rule covers
+is refused by the default denial instead of being permitted, and a rule that
+needs a right a lower ABI does not have is refused with
+`linux confinement refused: the Landlock ABI cannot express <row>`, naming the
+row, and no ruleset is built.
+
+`install_landlock_with` is the one step sequencer and makes no kernel call. It
+creates the ruleset, adds one rule per path, sets `PR_SET_NO_NEW_PRIVS` and then
+calls `landlock_restrict_self`, stopping at the first failure with that step's
+own errno. `install_landlock` is the one function that makes those kernel calls,
+and both the launcher and the probe child use it. The launcher installs the
+ruleset **before** the seccomp filter, because no seccomp list row admits
+Landlock's own system calls, so a filter installed first would refuse them and
+the file row would never apply.
+
+### The measurement this row rests on
+
+The row's shape was settled by measurement on the Linux host, not by the design's
+expectation, and two results changed it:
+
+- **A grant on `STORAGE_PARENT` is mandatory.** With no parent rule, `init`
+  answers `failed to sync wallet storage parent directory: Permission denied (os
+  error 13)` and creates nothing, because the provider opens the parent and syncs
+  it to start. The design said this form would carry no right; the kernel says
+  the provider cannot start without one.
+- **`READ_DIR` is the smallest grant that works and the only one that keeps the
+  file boundary.** Measured across the parent's rights: `READ_DIR` alone makes
+  `init` answer `ok`, allows a listing of the parent, and leaves a read of a
+  planted file beneath the parent refused `EACCES`; `READ_FILE|READ_DIR` makes
+  that planted read **succeed**, which is the wider grant the row must not make.
+  Every parent grant that lets `init` answer `ok` also allows the listing, and
+  every grant that refuses the listing makes `init` fail.
+- **The bound binary needs `READ_FILE` as well as `EXECUTE`.** A rule with
+  `EXECUTE` alone makes `execve` fail `EACCES` (13) before the provider's first
+  instruction, because the loader maps the binary. The macOS oracle's
+  `file-read* (literal "/")` already covers that read, so granting it on the one
+  file is narrower than the oracle.
+
+### The loader departure
+
+The Linux policy holds path rules the macOS oracle does not, and they are one
+named constant, `LANDLOCK_LOADER_PATHS`, because a dynamically linked provider
+needs them to start under a path-only ruleset. Each entry carries the failure
+that follows without it. Measured on the host below:
+
+| Path | Why it is load-bearing |
+| --- | --- |
+| `/lib/ld-linux-aarch64.so.1` | without `EXECUTE` here `execve` answers `EACCES` (13) before the provider's first instruction; without `READ_FILE` the loader cannot map itself |
+| `/lib/aarch64-linux-gnu/libc.so.6` | without `READ_FILE` here the loader exits with `error while loading shared libraries: libc.so.6: cannot open shared object file` |
+| `/lib/aarch64-linux-gnu/libgcc_s.so.1` | the same failure naming `libgcc_s.so.1` |
+| `/lib/aarch64-linux-gnu/libm.so.6` | the same failure naming `libm.so.6` |
+
+`ldd` on the built artifact reports exactly these four objects. The paths are the
+`aarch64` ones this host reports; a different architecture names its own loader
+and libraries, and no second constant exists for it. Because of this constant,
+the sentence in "The frame" that the Linux policy holds no path rule beyond the
+bound parameters **does not hold for the loader**, and it now says so.
+
+### The kernel proof
+
+The named test `linux_wallet_file_row_is_refused_outside_storage_root` ran on host
+`spark1.local`: `aarch64`, Ubuntu 24.04.4, kernel `6.17.0-1029-nvidia`, Landlock
+**ABI 7**, unprivileged. It builds both policies from wallet's committed
+declared-rights file, starts the provider through
+`standin_spawn_confined_provider` with the `Landlock` policy, and requires `init`
+`ok`, a wallet call `ok`, the storage key created under `STORAGE_ROOT`, and no
+profile written. It then plants a readable file beneath `STORAGE_PARENT` and runs
+a positive control with the same uid, the same fixtures and no ruleset, so each
+call is shown to succeed unconfined before the refusal is attributed to the rule.
+The run printed:
+
+```
+control read-inside-storage-root: ok:26
+control write-inside-storage-root: ok:26
+control read-beneath-storage-parent: ok:26
+control write-beside-storage-parent: ok:26
+control list-storage-parent: ok:5
+confined read-inside-storage-root: control ok:26, ruleset ok:26
+confined write-inside-storage-root: control ok:26, ruleset ok:26
+confined read-beneath-storage-parent: control ok:26, ruleset errno:13
+confined write-beside-storage-parent: control ok:26, ruleset errno:13
+confined list-storage-parent: control ok:5, ruleset ok:4
+```
+
+So a read inside `STORAGE_ROOT` and a write inside it succeed, a read of a
+planted file beneath `STORAGE_PARENT` and a write beside it are refused
+`EACCES` (13), and a listing of `STORAGE_PARENT` succeeds. The refusal errno is
+`EACCES`, not the `EPERM` a kernel gives a call an unprivileged process may not
+make, and the control is what shows the same call succeeds without the ruleset.
+
+The listing is the one place the measurement overrides the written task, and the
+reason is in the row: the parent carries `READ_DIR` because the provider cannot
+start without it, and `READ_DIR` is the right that allows a listing. The macOS
+oracle allows the same listing, because `file-read*` on the literal parent covers
+it there, so this row is no wider than its oracle on that call. The row claims
+the two file-content refusals and no narrowing of the listing.
+
+Namespaces, capability dropping, the PID, IPC, network and kernel-fact rows, and
+the `/proc`, `/sys` and `"/"` mappings remain unbuilt, so `linux` stays out of
+`DECLARED_CONFINED_OS` and every operations-table Linux cell still reads
+`designed, not enforced`. Nothing in this row is the Runtime's launcher: it is
+lab code in this provider's `tests/confine.rs`.
+
+The Linux-only plants beside this row are named here and not in
+`falsifiers.json`, because the runner runs on the Mac where a
+`#[cfg(target_os = "linux")]` test does not run. Both were re-run on the Linux
+host against the head this section describes and both turned the named test red:
+
+- WP196 skips only the launcher's Landlock install and leaves the probe's own
+  install intact. The provider then starts without the file row, its own outside
+  `Init` answers `ok` instead of a refusal, and
+  `linux_wallet_file_row_is_refused_outside_storage_root` fails with
+  `an Init for a base outside STORAGE_ROOT must be refused under the launch:
+  {"data":{...,"storage_configured":true},"status":"ok"}`, `left: String("ok")`,
+  `right: "error"`.
+- WP197 adds `READ_FILE` to the `STORAGE_PARENT` row. The planted read beneath
+  the parent then succeeds and the same test fails with
+  `read-beneath-storage-parent must be refused EACCES by the ruleset, and it
+  answered Returned(26)`, `left: Returned(26)`, `right: Errno(13)`.
+
 ## The frame
 
 The Runtime generates each provider's policy from the provider's approved
@@ -275,11 +429,15 @@ paths as on macOS: `PROVIDER_EXECUTABLE` is the provider binary; for
 `base_path/ElastOS/SystemServices/Wallet` and `STORAGE_PARENT` is
 `base_path/ElastOS/SystemServices`; the model profile states its own root.
 
-The Linux policy holds no path rule beyond the bound parameters: it adds none
-for `/`, `/proc`, `/sys` or a library directory, and `STORAGE_PARENT` carries no
-rule, as its row says. The private `/proc` mount the mount namespace provides
-is a mount, not a grant. The policy is a second rendering of the same rights,
-and the one contract check stays the one check of the oracle.
+The Linux policy holds no path rule beyond the bound parameters and the loader
+departure above: it adds none for `/`, `/proc`, `/sys` or a library directory,
+and `STORAGE_PARENT` carries only the `READ_DIR` right its row states. The
+`LANDLOCK_LOADER_PATHS` rules are the one exception, recorded in "The loader
+departure" with the measured failure that follows without each entry, and they
+are the paths a dynamically linked provider needs to start under a path-only
+ruleset. The private `/proc` mount the mount namespace provides is a mount, not a
+grant. The policy is a second rendering of the same rights, and the one contract
+check stays the one check of the oracle.
 
 The Linux policy would be applied before the provider image is entered. Apart
 from the seccomp allow list above, this file is a design: each row names the
