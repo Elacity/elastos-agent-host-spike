@@ -194,21 +194,31 @@ fn check_name_uses_the_single_naming_path() {
         1,
         "raw_leaf is not the one leaf rule"
     );
-    assert_eq!(code.matches("raw_leaf(").count(), 6, "raw_leaf");
-    // One file rule: file_node makes a file's node from its bytes, and
-    // chunked_file_node makes the same node from a caller's leaf digests;
-    // only they call file_root and file_root_block.
+    assert_eq!(code.matches("raw_leaf(").count(), 3, "raw_leaf");
+    // One file rule: file_node makes a file's leaves from its bytes and
+    // chunked_file_node makes them from a caller's leaf digests; only
+    // file_links_node turns leaves into a node (the one leaf, or one dag-pb
+    // root), builds the root block and its CID, applies the leaf limit and
+    // computes the root's Tsize. Neither caller repeats any of that.
     let node = library_item(&code, "fn file_node(");
-    for (call, count) in [("raw_leaf(", 1), ("file_root(", 1), ("naming_hash(", 1)] {
+    for (call, count) in [
+        ("leaf_link(", 2),
+        ("file_links_node(", 1),
+        ("naming_hash(", 2),
+        ("file_root_block(", 0),
+        ("cid_bytes(DAG_PB_CODEC", 0),
+    ] {
         assert_eq!(node.matches(call).count(), count, "{call}\n{node}");
     }
     let chunked_node = library_item(&code, "fn chunked_file_node(");
     for (call, count) in [
-        ("raw_leaf(", 2),
-        ("file_root_block(", 1),
+        ("leaf_link(", 1),
         ("chunk_length(", 1),
-        ("naming_hash(", 1),
-        ("cid_bytes(DAG_PB_CODEC", 1),
+        ("file_links_node(", 1),
+        ("file_root_block(", 0),
+        ("naming_hash(", 0),
+        ("cid_bytes(DAG_PB_CODEC", 0),
+        ("MAX_FILE_LINKS", 0),
     ] {
         assert_eq!(
             chunked_node.matches(call).count(),
@@ -216,17 +226,37 @@ fn check_name_uses_the_single_naming_path() {
             "{call}\n{chunked_node}"
         );
     }
-    assert_eq!(code.matches("file_root(").count(), 2, "file_root");
-    let root = library_item(&code, "fn file_root(");
+    assert_eq!(
+        code.matches("fn file_root(").count(),
+        0,
+        "a second file root"
+    );
+    let one = library_item(&code, "fn file_links_node(");
     for (call, count) in [
-        ("raw_leaf(", 1),
         ("file_root_block(", 1),
-        ("naming_hash(", 2),
+        ("naming_hash(", 1),
         ("cid_bytes(DAG_PB_CODEC", 1),
+        ("MAX_FILE_LINKS", 1),
+        ("raw_leaf(", 0),
     ] {
-        assert_eq!(root.matches(call).count(), count, "{call}\n{root}");
+        assert_eq!(one.matches(call).count(), count, "{call}\n{one}");
     }
-    assert_eq!(code.matches("file_root_block(").count(), 3);
+    assert_eq!(
+        code.matches("file_links_node(").count(),
+        3,
+        "file_links_node"
+    );
+    assert_eq!(
+        code.matches("let tsize = block.len() as u64 + leaves.iter()")
+            .count(),
+        1,
+        "a file root's Tsize is built in one place"
+    );
+    assert_eq!(
+        code.matches("file_root_block(").count(),
+        2,
+        "file_root_block"
+    );
     assert_eq!(code.matches("FILE_TYPE").count(), 2, "FILE_TYPE");
     // One link encoding: directory blocks and file roots write their links
     // only through put_links.

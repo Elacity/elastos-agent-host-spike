@@ -940,10 +940,10 @@ pub struct ChunkedFile {
 /// each raw leaf, given in any order. It reads no file and checks no
 /// manifest.
 ///
-/// Each file's digests make its raw leaves with the leaf rule
-/// [`encode_entries`] uses, then its file root with `file_root_block` and
-/// `raw_leaf`, the rules [`encode_entries`] uses for the same bytes: one
-/// leaf is that leaf, and more leaves are linked from one dag-pb root. Then
+/// Each file's digests make its raw leaves with the one leaf rule
+/// [`raw_leaf`], then the one file rule `file_links_node`, which
+/// [`encode_entries`] uses for the same bytes: one leaf is that leaf, and
+/// more leaves are linked from one dag-pb root. Then
 /// `encode_tree`, the one tree builder, with the path refusals
 /// `encode_entries` gives.
 ///
@@ -961,9 +961,9 @@ pub fn encode_chunked_files(files: &[ChunkedFile]) -> Result<LabCid, Refusal> {
     encode_tree(nodes)
 }
 
-/// The node a directory links for `file`: one raw leaf when its size gives
-/// one leaf, else the balanced file root over the leaves its digests name,
-/// exactly as `file_node` makes that node from the same bytes.
+/// The node a directory links for `file`: the leaves its digests name, then
+/// the one file rule [`file_links_node`], which makes the same node from the
+/// same bytes in [`file_node`].
 fn chunked_file_node(file: &ChunkedFile) -> Result<(Vec<u8>, u64), Refusal> {
     let expected = chunk_count(file.size);
     if file.chunk_sha256.len() as u64 != expected {
@@ -974,31 +974,13 @@ fn chunked_file_node(file: &ChunkedFile) -> Result<(Vec<u8>, u64), Refusal> {
             supplied: file.chunk_sha256.len(),
         });
     }
-    if file.chunk_sha256.len() == 1 {
-        return Ok(raw_leaf(&file.chunk_sha256[0], file.size));
-    }
-    if file.chunk_sha256.len() > MAX_FILE_LINKS {
-        return Err(Refusal::FileOverLeafLimit {
-            path: file.path.clone(),
-            length: usize::try_from(file.size).unwrap_or(usize::MAX),
-        });
-    }
     let leaves: Vec<Link<'_>> = file
         .chunk_sha256
         .iter()
         .enumerate()
-        .map(|(index, sha256)| {
-            let (cid, tsize) = raw_leaf(sha256, chunk_length(file.size, index));
-            Link {
-                name: "",
-                cid,
-                tsize,
-            }
-        })
+        .map(|(index, sha256)| leaf_link(sha256, chunk_length(file.size, index)))
         .collect();
-    let block = file_root_block(&leaves, file.size);
-    let tsize = block.len() as u64 + leaves.iter().map(|leaf| leaf.tsize).sum::<u64>();
-    Ok((cid_bytes(DAG_PB_CODEC, &naming_hash(&block)), tsize))
+    file_links_node(&file.path, file.size, leaves)
 }
 
 /// How many [`CHUNK_SIZE`]-byte leaves a file of `size` bytes has: one for
@@ -1032,16 +1014,20 @@ fn encode_tree(files: Vec<(&str, Child)>) -> Result<LabCid, Refusal> {
     Ok(LabCid(digest))
 }
 
-/// The node a directory links for `entry`, made from its bytes: one raw leaf
-/// for at most [`CHUNK_SIZE`] bytes (an empty file is an empty leaf), else
-/// the balanced file root over its leaves.
+/// The node a directory links for `entry`, made from its bytes: its raw
+/// leaves in file order (an empty file is an empty leaf), then the one file
+/// rule.
 fn file_node(entry: &BundleEntry) -> Result<Child, Refusal> {
     let content = &entry.content;
-    let (cid, tsize) = if content.len() <= CHUNK_SIZE {
-        raw_leaf(&naming_hash(content), content.len() as u64)
+    let leaves: Vec<Link<'_>> = if content.is_empty() {
+        vec![leaf_link(&naming_hash(content), 0)]
     } else {
-        file_root(&entry.path, content)?
+        content
+            .chunks(CHUNK_SIZE)
+            .map(|chunk| leaf_link(&naming_hash(chunk), chunk.len() as u64))
+            .collect()
     };
+    let (cid, tsize) = file_links_node(&entry.path, content.len() as u64, leaves)?;
     Ok(Child::File { cid, tsize })
 }
 
@@ -1052,32 +1038,42 @@ fn raw_leaf(sha256: &[u8; 32], size: u64) -> (Vec<u8>, u64) {
     (cid_bytes(RAW_CODEC, sha256), size)
 }
 
-/// The CID bytes and Tsize of the balanced file root of `content`, the bytes
-/// of the file at `path`, which is over one leaf. The bytes are split into
-/// [`CHUNK_SIZE`]-byte raw leaves, the last one shorter, all linked from one
-/// dag-pb block, so the tree has one level. A file of more than
+/// One raw leaf as a file root's link: the leaf rule [`raw_leaf`], under the
+/// empty link name a file root uses.
+fn leaf_link(sha256: &[u8; 32], size: u64) -> Link<'static> {
+    let (cid, tsize) = raw_leaf(sha256, size);
+    Link {
+        name: "",
+        cid,
+        tsize,
+    }
+}
+
+/// The one file rule: the node a directory links for a file of `length` bytes
+/// whose raw leaves are `leaves`, in file order. A one-leaf file is that
+/// leaf; more are linked from one dag-pb block, so the tree has one level.
+/// The byte path ([`file_node`]) and the digest path
+/// ([`chunked_file_node`]) give it their leaves and share this rule, so a
+/// file's CID and Tsize are built here and only here. A file of more than
 /// [`MAX_FILE_LINKS`] leaves would need a second level and is refused with
 /// its path and length. The root's Tsize is its block's length plus its
 /// leaves' lengths.
-fn file_root(path: &str, content: &[u8]) -> Result<(Vec<u8>, u64), Refusal> {
-    if content.len().div_ceil(CHUNK_SIZE) > MAX_FILE_LINKS {
+fn file_links_node(
+    path: &str,
+    length: u64,
+    leaves: Vec<Link<'_>>,
+) -> Result<(Vec<u8>, u64), Refusal> {
+    if leaves.len() == 1 {
+        let leaf = &leaves[0];
+        return Ok((leaf.cid.clone(), leaf.tsize));
+    }
+    if leaves.len() > MAX_FILE_LINKS {
         return Err(Refusal::FileOverLeafLimit {
             path: path.to_owned(),
-            length: content.len(),
+            length: usize::try_from(length).unwrap_or(usize::MAX),
         });
     }
-    let leaves: Vec<Link<'_>> = content
-        .chunks(CHUNK_SIZE)
-        .map(|chunk| {
-            let (cid, tsize) = raw_leaf(&naming_hash(chunk), chunk.len() as u64);
-            Link {
-                name: "",
-                cid,
-                tsize,
-            }
-        })
-        .collect();
-    let block = file_root_block(&leaves, content.len() as u64);
+    let block = file_root_block(&leaves, length);
     let tsize = block.len() as u64 + leaves.iter().map(|leaf| leaf.tsize).sum::<u64>();
     Ok((cid_bytes(DAG_PB_CODEC, &naming_hash(&block)), tsize))
 }

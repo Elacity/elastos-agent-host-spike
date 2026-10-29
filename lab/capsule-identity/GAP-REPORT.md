@@ -58,10 +58,11 @@
 - **Revision (task 058, 2026-10-29):** a saved listing is a store input beside a bundle folder, so the photo
   stand-in copy's five files launch by the CID their listing gets. Its base is the task 059 line plus the exact
   PH6 listing and its pin from task 047; it reads no file under `elastos/` and no issue. Task 055's chunked call is
-  absent from this base, so this candidate adds `ChunkedFile`, `encode_chunked_files`, `ChunkCountMismatch` and the
-  private leaf helpers it shares with `encode_entries`; no other library rule changes. Preparation recomputes a
-  listing's CID with the one encoder and refuses a mismatch with `Refusal::NameMismatch`'s text, and the record
-  loop now runs `verify_cid_record` for every prepared CID. Commands actually run are in "The listing launch
+  absent from this base, so this candidate adds `ChunkedFile`, `encode_chunked_files`, `ChunkCountMismatch` and
+  `leaf_link`; both paths build a file node through one `file_links_node`, which owns the one leaf, the dag-pb
+  root, its CID and Tsize and the 174-leaf limit, so `fn file_root(` is gone and no rule is copied. Preparation
+  recomputes a listing's CID with the one encoder and refuses a mismatch with `Refusal::NameMismatch`'s text, and
+  the record loop now runs `verify_cid_record` for every prepared CID. Commands actually run are in "The listing launch
   (29 Oct, task 058)" below.
 
 Each cited file under `elastos/` or `scripts/`, checked with
@@ -965,17 +966,22 @@ fill it, each calling the one encoder (`lab_cid`, `encode_listed_files` or `enco
 input as given, so a listing launch reads no folder and parses no manifest. The exact PH6 photo copy cannot be a
 folder input: the Runtime's `CapsuleManifest` refuses its object `viewer`, so `checked_bundle` answers
 `ManifestUnparsed`; its five-file listing gets the same pin from `encode_listed_files`, and those files plus
-`core/big.bin` get one from `encode_chunked_files`, task 055's call. Preparation (d) recomputes the listing's
+`core/big.bin` get one from `encode_chunked_files`, task 055's call. Both encoders build a file's node in one
+place, `file_links_node`: the leaf or one dag-pb root, its CID, its Tsize and the 174-leaf limit, so the digest
+path and the byte path share one rule and `fn file_root(` is gone. Preparation (d) recomputes the listing's
 printed CID with that encoder, and (e) compares it with the requested CID: a mismatch is refused with
 `Refusal::NameMismatch`'s own text, naming both values. The record loop (f) and (g) now runs `verify_cid_record`
 for every prepared CID, the one record check the folder path uses too, with 036's rule: any accepted record
 suffices, else the first matching record's refusal, else the unsigned text. Only a prepared input reaches the
 shared launch; a listing has no folder, so the shared `path` and the display name are its printed CID. Four new
 tests: `standin_launches_the_photo_listing_by_its_cid` (the five-file listing launches, `starting` then `running`,
-display name the printed CID, no asks snapshot, empty grant view; the exact PH6 folder still gives
-`ManifestUnparsed`), `standin_launches_a_chunked_photo_listing_by_its_cid` (the same journey for the five files and
-`core/big.bin`, whose chunked listing and entries give one CID; `encode_listed_files` still gives
-`FileOverChunkLimit` for the big file), `standin_refuses_a_changed_listing_before_shared_launch` (one saved digest
+display name the printed CID, no asks snapshot, an empty grant view, then one live grant seeded for another session
+through the shared seam as the view's only entry; the exact PH6 folder still gives `ManifestUnparsed`),
+`standin_launches_a_chunked_photo_listing_by_its_cid` (the same journey for the five files and `core/big.bin`,
+whose chunked listing and entries give one CID; `encode_listed_files` still gives `FileOverChunkLimit` for the big
+file), `chunked_files_are_checked_and_named_by_the_one_file_rule` in `tests/encoding.rs` (one-leaf files of 0 and
+262144 bytes against the byte path, the two- and three-leaf files against the committed pins, the count refusals
+with their exact texts, and 174 leaves named with 175 refused), `standin_refuses_a_changed_listing_before_shared_launch` (one saved digest
 changed after publish in both listing arms, the mismatch text, shared lists unchanged) and
 `standin_refuses_an_unsigned_or_unaccepted_photo_listing` (a missing record, an unaccepted signer, an empty accepted
 list and a flipped signature each refused with the existing reason, with a correctly signed control launching).
@@ -985,16 +991,19 @@ owns admission and execution. Nothing runs the photo content or its viewer.
 
 Commands actually run for this change, from the repository root: the full
 `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --offline --locked --manifest-path
-lab/capsule-identity/Cargo.toml` printed `185 passed; 0 failed` (46 in `tests/stand_in.rs`); `cargo fmt
---manifest-path lab/capsule-identity/Cargo.toml -- --check` printed nothing; `python3 -I
-examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json F-CI58` printed `baseline: 3 named tests
-pass without an edit, 0 do not` and `summary: 6 CAUGHT of 6`. The older entries whose anchors moved
-(`F-CI32 F-CI33 F-CI35 F-CI36 F-CI37 F-CI44 F-CI48 F-CI59`, 28 entries) rerun: the first pass printed `summary: 5
-BUILD FAILED, 23 CAUGHT of 28`, because five plants' `new` text still called the folder-shaped store; F-CI32a,
-F-CI32e, F-CI32f, F-CI35a and F-CI36b were rewritten to build against the listing store and each then CAUGHT,
-except that F-CI32f SURVIVED its first rewrite (launching by the store key, which the shared stand-in does not
-admit) and CAUGHT once the plant launches the stored folder. All 28 are CAUGHT with their bugs and tests, and the
-runner restored the sources; `git diff --stat` shows only the eight files this task changes.
+lab/capsule-identity/Cargo.toml` printed `186 passed; 0 failed` (46 in `tests/stand_in.rs`, 14 in
+`tests/encoding.rs`); `cargo fmt --manifest-path lab/capsule-identity/Cargo.toml -- --check` printed nothing;
+`python3 -I examples/agent-host/falsify.py --from lab/capsule-identity/falsifiers.json F-CI58` printed
+`baseline: 4 named tests pass without an edit, 0 do not` and `summary: 7 CAUGHT of 7`; and
+`... F-CI58 F-CI48 F-CI18e` printed `summary: 1 BUILD FAILED, 12 CAUGHT of 13` on its first pass, because
+F-CI58b's planted arm left the old answer line in place; with that plant fixed it printed `summary: 1 CAUGHT of 1`
+alone, so all 13 are CAUGHT. The older entries whose anchors moved (`F-CI32 F-CI33 F-CI35 F-CI36 F-CI37 F-CI44
+F-CI48 F-CI59`, 28 entries) rerun: the first pass printed `summary: 5 BUILD FAILED, 23 CAUGHT of 28`, because five
+plants' `new` text still called the folder-shaped store; F-CI32a, F-CI32e, F-CI32f, F-CI35a and F-CI36b were
+rewritten to build against the listing store and each then CAUGHT, except that F-CI32f SURVIVED its first rewrite
+(launching by the store key, which the shared stand-in does not admit) and CAUGHT once the plant launches the
+stored folder. All 28 are CAUGHT with their bugs and tests, and the runner restored the sources; `git diff --stat`
+shows only the lane files this task changes.
 
 ### Questions with no answer
 
@@ -1029,11 +1038,11 @@ and `lab/capsule-identity/tests/common/mod.rs:80` `assert_eq!((pin.len(), &pin[.
 under the single-block, non-sharded subset of the model package profile
 (`lab/capsule-identity/README.md:40` `The tests pin only the single-block, non-sharded subset of that profile: one`).
 A file or a directory block over 262144 bytes is refused, not named another way
-(`lab/capsule-identity/src/lib.rs:224` `const CHUNK_SIZE: usize = 262_144;`
-and `lab/capsule-identity/src/lib.rs:230` `const DIRECTORY_BLOCK_LIMIT: usize = 262_144;`).
+(`lab/capsule-identity/src/lib.rs:251` `const CHUNK_SIZE: usize = 262_144;`
+and `lab/capsule-identity/src/lib.rs:262` `const DIRECTORY_BLOCK_LIMIT: usize = 262_144;`).
 Added by task 048, on 2026-10-28: since task 048, a file of 2 to 174 raw leaves (262145 to 45613056 bytes) is named
-by its balanced file root (`fn file_root(` and `const MAX_FILE_LINKS: usize = 174;` in
-`lab/capsule-identity/src/lib.rs`), and only a larger file or a directory block over 262144 bytes is refused; the
+by its balanced file root (one `file_links_node`, task 058; `file_root` in task 048; and
+`const MAX_FILE_LINKS: usize = 174;` at `lab/capsule-identity/src/lib.rs:254`), and only a larger file or a directory block over 262144 bytes is refused; the
 listing call `encode_listed_files` still refuses a listed file over 262144 bytes.
 At `c641bcff2` the value was a framed SHA-256 stream printed `lab-cid:sha256:`
 (`lab/capsule-identity/src/lib.rs:73` `pub const LAB_CID_PREFIX: &str = "lab-cid:sha256:";` at that commit).

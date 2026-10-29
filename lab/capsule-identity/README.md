@@ -174,8 +174,8 @@ def lab_cid(files):  # {bundle path: bytes}
 
 In Rust, the walk (`checked_bundle`, which `lab_cid` runs too) reads a bundle,
 and `encode_entries` makes each file's node from its bytes with `file_node`
-(one raw leaf, or `file_root` over its leaves) and hands the nodes to
-`encode_tree`, the one tree builder. `encode_listed_files` (task 047; see
+(its raw leaves, then the one file rule `file_links_node`) and hands the
+nodes to `encode_tree`, the one tree builder. `encode_listed_files` (task 047; see
 [naming a closure listing](#naming-a-closure-listing)) makes one raw leaf per
 listed file and hands them to the same `encode_tree` (task 048). Every leaf is
 made by `raw_leaf`, and directory blocks and file roots write their links with
@@ -747,10 +747,12 @@ A file over one leaf gets its name from each leaf's digest (task 055).
 `ChunkedFile` is `{ path: String, size: u64, chunk_sha256: Vec<[u8; 32]> }`:
 the file's length and the SHA-256 of each 262144-byte chunk of it, the last
 one shorter, with one digest of the empty block for an empty file.
-`encode_chunked_files(&[ChunkedFile])` makes those leaves with `raw_leaf` and
-its file root with `file_root_block`, the rules `encode_entries` uses for the
-same bytes, and hands the node to `encode_tree`, so a chunked listing and
-`encode_entries` of the same bytes give one CID. A digest count its size does
+`encode_chunked_files(&[ChunkedFile])` makes those leaves with `raw_leaf`
+and passes them to the same one file rule `file_links_node`, which
+`encode_entries` uses for the same bytes: one leaf is that leaf, more are one
+dag-pb root, and its CID, Tsize and 174-leaf limit are built there and only
+there. Then `encode_tree`, so a chunked listing and `encode_entries` of the
+same bytes give one CID. A digest count its size does
 not give is refused with `ChunkCountMismatch`, naming the path, the size, the
 count the size gives and the count supplied; a file over 174 leaves is
 refused with `FileOverLeafLimit`, as `encode_entries` refuses it. It reads no
@@ -1609,10 +1611,10 @@ Each route, field and state, and where it comes from. #309 is draft PR #309,
 | The grant view answers under the `all_sessions_live` marker | `standin_valid_signature_alone_yields_no_grant`, `standin_grant_view_lists_a_seeded_grant` | F-CI33c (the marker dropped) |
 | A stop through the seam updates the same shared instances and grants: the stopped entry carries its reason, its grant goes, and the sibling stays running with its own grant | `standin_shared_stop_updates_the_same_instances_and_grants` | F-CI59a (the seam answers null and calls no shared stop) |
 | A saved listing launches by its CID: the listing is prepared by its one encoder, not by a folder walk, and its display name is the printed CID | `standin_launches_the_photo_listing_by_its_cid` | F-CI58a (the preparation is a walk of the PH6 folder, which refuses its object `viewer`), F-CI58e (the shared fixture's path and name are not the printed CID) |
-| A chunked listing of the same files and its entries give one lab CID, and a digest listing holds no asks bytes | `standin_launches_a_chunked_photo_listing_by_its_cid` | F-CI58f (a listing launch invents asks bytes) |
-| A saved listing whose recorded digest changed after publish is refused by the name compare before the shared launch, in both listing arms, leaving the shared lists unchanged | `standin_refuses_a_changed_listing_before_shared_launch` | F-CI58b (the name compare is skipped and the store key trusted) |
+| A chunked listing of the same files and its entries give one lab CID through the one file rule, a digest listing holds no asks bytes, and a digest count its size does not give is refused with its own text | `standin_launches_a_chunked_photo_listing_by_its_cid`, `chunked_files_are_checked_and_named_by_the_one_file_rule` | F-CI58f (a listing launch invents asks bytes), F-CI58g (the digest-count refusal is removed), F-CI48d (the shared root Tsize line) |
+| A saved listing whose recorded digest changed after publish is refused by the name compare before the shared launch, in both listing arms, leaving the shared lists unchanged | `standin_refuses_a_changed_listing_before_shared_launch` | F-CI58b (the store key is trusted: no recompute and no compare, so the changed listing launches) |
 | A listing with no record, an unaccepted signer or a bad signature is refused before the shared launch, and a correctly signed listing launches | `standin_refuses_an_unsigned_or_unaccepted_photo_listing` | F-CI58c (the package-record check is skipped) |
-| A listing launch adds no grant to the shared view | `standin_launches_the_photo_listing_by_its_cid`, `standin_refuses_an_unsigned_or_unaccepted_photo_listing` | F-CI58d (a grant appears in the lane's view seam during a listing launch) |
+| A listing launch adds no grant to the shared view, which lists exactly the grants the shared state holds | `standin_launches_the_photo_listing_by_its_cid`, `standin_refuses_an_unsigned_or_unaccepted_photo_listing` | F-CI58d (the lane's view seam adds an entry the shared state does not hold) |
 
 Not shown:
 
@@ -1660,13 +1662,20 @@ verifies a publisher nor executes the listing or its viewer.
 listing under its pin, signs that CID with a fresh test key whose DID is
 accepted, launches it, sees `starting`, applies the simulated `Start::Ok`
 through `finish_start`, and reads one `running` instance whose display name
-is the printed CID, no asks snapshot and an empty grant view. The exact PH6
-folder in a temp dir still gives `ManifestUnparsed` there.
+is the printed CID, no asks snapshot and an empty grant view; then one live
+grant seeded for another session through the shared seam is the only entry
+the view lists, so the view reads the shared state and the listing's own
+session holds none. The exact PH6 folder in a temp dir still gives
+`ManifestUnparsed` there.
 `standin_launches_a_chunked_photo_listing_by_its_cid` repeats the journey for
 the same five files plus `core/big.bin`, whose three raw-leaf digests make it
 a chunked listing; that listing and `encode_entries` of the same bytes give
 one CID, and `encode_listed_files` still refuses the big file with
-`FileOverChunkLimit`.
+`FileOverChunkLimit`. `chunked_files_are_checked_and_named_by_the_one_file_rule`
+(in `tests/encoding.rs`) checks the digest path itself: one-leaf files
+(empty and exactly 262144 bytes), its two- and three-leaf files against the
+byte path's pins, the count refusals with their exact texts, and the 174-leaf
+limit.
 `standin_refuses_a_changed_listing_before_shared_launch` flips one saved
 digest after publish and requests the old CID, in both listing arms: the
 answer is the `NameMismatch` text with both CIDs, and the shared instance and
@@ -1676,15 +1685,28 @@ flipped signature each refusing before the shared launch with the existing
 reason, and a correctly signed control launching.
 
 What the falsifiers catch. F-CI58a makes the listing preparation a walk of
-the PH6 folder (its `ManifestUnparsed` fails the launch test); F-CI58b drops
-the name compare, so a changed listing launches under the old CID; F-CI58c
-returns from `check_records` without a check, so an unsigned listing
-launches; F-CI58e makes the shared fixture's path and name a folder-like text
-instead of the printed CID; F-CI58f hands a listing launch invented asks
-bytes. F-CI58d adds a grant entry in the lane's one view seam (`live_grants`)
-during a listing launch; the shared `StandIn` stays the only grant store, so
-the plant shows the test reads the view rather than trusting the lane, and
-the shared module itself is not edited.
+the PH6 folder (its `ManifestUnparsed` fails the launch test); F-CI58b
+trusts the store key: it skips the recompute and the compare, so the changed
+listing launches under the old CID and the test's refusal assertion fails;
+F-CI58c returns from `check_records` without a check, so an unsigned listing
+launches; F-CI58g removes the digest-count refusal, so a count the size does
+not give is named instead of refused; F-CI58e makes the shared fixture's
+path and name a folder-like text instead of the printed CID; F-CI58f hands a
+listing launch invented asks bytes. F-CI58d adds an entry in the lane's one
+view seam (`live_grants`) that the shared state does not hold; the shared
+`StandIn` owns grant storage and no lane seam can seed a grant, so this is
+the only plant that reaches the view, and the test now reads a real seeded
+grant too.
+
+The digest path shares the byte path's file rule: `file_links_node` makes
+one leaf or one dag-pb root, builds its CID and Tsize and applies the
+174-leaf limit, and `file_node` and `chunked_file_node` only build leaves.
+`check_name_uses_the_single_naming_path` requires that: `fn file_root(` is
+absent, `file_root_block(` is called once, and neither caller holds
+`file_root_block(`, `cid_bytes(DAG_PB_CODEC`, `naming_hash(` or
+`MAX_FILE_LINKS`. F-CI48d plants a wrong root Tsize in that one line; its two
+named tests are the byte path's pin and the digest path's pin, and both fail
+by assertion.
 
 The shared stand-in models lifecycle: launch, the simulated start, the list
 and its grants. The provider owns production content naming, and the real
@@ -1692,12 +1714,12 @@ Runtime owns admission and execution. This journey proves neither.
 
 Commands actually run, from the repository root:
 `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --offline --locked
---manifest-path lab/capsule-identity/Cargo.toml` printed `185 passed; 0 failed`
-(46 in `tests/stand_in.rs`, the four above among them);
+--manifest-path lab/capsule-identity/Cargo.toml` printed `186 passed; 0 failed`
+(46 in `tests/stand_in.rs`, 14 in `tests/encoding.rs`);
 `cargo fmt --manifest-path lab/capsule-identity/Cargo.toml -- --check` printed
 nothing; `python3 -I examples/agent-host/falsify.py --from
-lab/capsule-identity/falsifiers.json F-CI58` printed `baseline: 3 named tests
-pass without an edit, 0 do not` and `summary: 6 CAUGHT of 6`, each named test
+lab/capsule-identity/falsifiers.json F-CI58` printed `baseline: 4 named tests
+pass without an edit, 0 do not` and `summary: 7 CAUGHT of 7`, each named test
 failing by assertion. The older entries whose anchors moved were rerun
 (`F-CI32 F-CI33 F-CI35 F-CI36 F-CI37 F-CI44 F-CI48 F-CI59`, 28 entries): the
 first pass printed `summary: 5 BUILD FAILED, 23 CAUGHT of 28`, because the
@@ -1707,7 +1729,7 @@ store, and each then CAUGHT, except that F-CI32f SURVIVED its first rewrite
 (launching by the store key, which the shared stand-in does not admit) and
 CAUGHT once the plant launches the stored folder. Every one of the 28 is
 CAUGHT with its bug and its tests, and the runner restored the sources;
-`git diff --stat` shows only the eight files this task changes.
+`git diff --stat` shows only the lane files this task changes.
 
 ### Asks come only from the signed bytes (M1 check B2, no-schema part)
 
@@ -1806,7 +1828,10 @@ The claim is "Kubo v0.40.1 profile, computed by the lab", and nothing more.
 No offline Kubo cross-check has been run (Kubo v0.40.1, the same profile
 flags, hash-only import, no network). Until one prints the same value as a
 committed pin, the lab CID is not called equal to the Runtime's CID or to
-Kubo's output. The Runtime's CID names a release archive, not the bundle's
+Kubo's output. No test or command in this lane performs that cross-check; the
+byte-rule oracle that does run here is
+`cargo test --offline --locked --manifest-path lab/capsule-identity/Cargo.toml
+--test cross_implementation readme_python_recomputes_every_lab_cid_pin`. The Runtime's CID names a release archive, not the bundle's
 files (see [Why a lab CID](#why-a-lab-cid-and-not-the-runtimes-cid)). The test
 `the_lab_cid_claim_stays_computed_by_the_lab` keeps this: these two sections
 and the module doc of `src/lib.rs` say the claim word for word, this section
@@ -1926,7 +1951,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 284 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 285 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -1976,7 +2001,7 @@ F-CI49a to F-CI49c (see
 059's F-CI59a to F-CI59c (F-CI59a: see
 [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1); F-CI59b and
 F-CI59c: see [what it is](#what-it-is-and-what-it-is-not)), and task 058's
-F-CI58a to F-CI58f (see
+F-CI58a to F-CI58g (see
 [the stand-in launcher](#lab-stand-in-launcher-m1-check-b1)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build
@@ -2116,10 +2141,12 @@ older edit's text is still found exactly once.
 Task 048's entries all edit `src/lib.rs`: F-CI48a on the link-name line of
 `put_links` (F-CI1b's and F-CI1p's anchor; entries may share one), which it
 skips for an empty name, so only a file root's links change; F-CI48b and
-F-CI48c in `file_root_block`; F-CI48d on `file_root`'s Tsize line; F-CI48e on
+F-CI48c in `file_root_block`; F-CI48d on the one file rule's Tsize line
+(`file_links_node`), which the byte and digest paths share, so its two named
+tests are the byte path's pin and the digest path's pin; F-CI48e on
 `MAX_FILE_LINKS`. Each anchor is found exactly once. Task 048 moved the leaf
-into one `raw_leaf`, which `encode_listed_files`, `file_node` and `file_root`
-all call, so the leaf's line is now `(cid_bytes(RAW_CODEC, sha256), size)`.
+into one `raw_leaf`, which `encode_listed_files` and `leaf_link` call, and
+the one file rule `file_links_node` builds every file root, so the leaf's line is now `(cid_bytes(RAW_CODEC, sha256), size)`.
 Four edits anchor there now, each with its same bug and tests: F-CI18c (the
 dag-pb codec), F-CI18i (an inline CID for at most 32 bytes), F-CI18n (an empty
 file as a dag-pb file node) and F-CI47b (every leaf's Tsize 0). Without the

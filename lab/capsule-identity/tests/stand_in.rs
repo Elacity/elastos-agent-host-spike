@@ -206,6 +206,24 @@ fn assert_listing_journey(lane: &mut StandInRuntime, shared: &mut StandIn, cid: 
         Vec::<Value>::new(),
         "a listing launch adds no grant"
     );
+
+    // The view reads the shared state: one grant seeded for another session
+    // after the launch is listed, and the listing's own session holds none.
+    seed_grant(
+        shared,
+        99,
+        "another-session",
+        "localhost://Users/self/Documents/notes.md",
+        "write",
+        "session",
+    );
+    let held = grant_view(lane, shared);
+    assert_eq!(held.len(), 1, "the seeded grant only: {held:?}");
+    assert_eq!(held[0]["session_id"], "another-session");
+    assert!(
+        held.iter().all(|grant| grant["session_id"] != session),
+        "the listing launch adds no grant"
+    );
 }
 
 /// The launch of `body` is refused with status 400 and exactly `reason`, and

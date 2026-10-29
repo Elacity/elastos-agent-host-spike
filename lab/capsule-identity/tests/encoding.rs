@@ -3,8 +3,11 @@
 //! with its own test.
 mod common;
 
-use capsule_identity::{encode_entries, lab_cid, BundleEntry, Refusal};
+use capsule_identity::{
+    encode_chunked_files, encode_entries, lab_cid, BundleEntry, ChunkedFile, Refusal,
+};
 use common::*;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 fn entry(path: &str, content: &[u8]) -> BundleEntry {
@@ -212,6 +215,165 @@ fn file_of_174_leaves_is_named_and_one_byte_more_is_refused() {
         Refusal::FileOverLeafLimit {
             path: "full.bin".into(),
             length: 45_613_057
+        }
+    );
+    assert_eq!(
+        refusal.to_string(),
+        "full.bin is 45613057 bytes, over the 174-leaf limit of one file root (45613056 bytes): the lab names no deeper file tree"
+    );
+}
+
+#[test]
+fn chunked_files_are_checked_and_named_by_the_one_file_rule() {
+    // The digest path makes the same node as the byte path: a one-leaf file
+    // (empty, or exactly one chunk), a two-leaf and a three-leaf file. The
+    // two multi-leaf pins are recomputed by README's Python rule from the
+    // byte rules, so the shared file rule's CID and Tsize are checked here
+    // through the digests alone. The big files are made here, never
+    // committed.
+    fn chunked(path: &str, content: &[u8]) -> ChunkedFile {
+        let digests: Vec<[u8; 32]> = if content.is_empty() {
+            vec![Sha256::digest(content).into()]
+        } else {
+            content
+                .chunks(262_144)
+                .map(|chunk| Sha256::digest(chunk).into())
+                .collect()
+        };
+        ChunkedFile {
+            path: path.to_owned(),
+            size: content.len() as u64,
+            chunk_sha256: digests,
+        }
+    }
+
+    for content in [&b""[..], &vec![7; 262_144][..]] {
+        let bytes = encode_entries(&[entry("one.bin", content)])
+            .unwrap_or_else(|refusal| panic!("{refusal}"));
+        let digests = encode_chunked_files(&[chunked("one.bin", content)])
+            .unwrap_or_else(|refusal| panic!("{refusal}"));
+        assert_eq!(bytes, digests, "one leaf, {} bytes", content.len());
+    }
+
+    let manifest = entry(
+        "capsule.json",
+        &read_fixture(&CONTENT_SAMPLE, "capsule.json"),
+    );
+    let sample = read_fixture(&CONTENT_SAMPLE, "sample.example");
+    let zeros = vec![0; 262_145];
+    let big = big_bin_bytes();
+    for (files, entries, pin) in [
+        (
+            vec![
+                chunked(
+                    "capsule.json",
+                    &read_fixture(&CONTENT_SAMPLE, "capsule.json"),
+                ),
+                chunked("sample.example", &zeros),
+            ],
+            vec![manifest.clone(), entry("sample.example", &zeros)],
+            TWO_LEAF_FILE_LAB_CID,
+        ),
+        (
+            vec![
+                chunked(
+                    "capsule.json",
+                    &read_fixture(&CONTENT_SAMPLE, "capsule.json"),
+                ),
+                chunked("sample.example", &sample),
+                chunked(BIG_BIN, &big),
+            ],
+            vec![
+                manifest,
+                entry("sample.example", &sample),
+                entry(BIG_BIN, &big),
+            ],
+            THREE_LEAF_NESTED_LAB_CID,
+        ),
+    ] {
+        let from_digests = encode_chunked_files(&files)
+            .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+            .to_string();
+        let from_bytes = encode_entries(&entries)
+            .unwrap_or_else(|refusal| panic!("{pin}: {refusal}"))
+            .to_string();
+        assert_eq!(
+            (from_digests.as_str(), from_bytes.as_str()),
+            (pin, pin),
+            "chunked and byte paths against the pin"
+        );
+        assert!(pin.starts_with("bafybei"), "{pin}");
+    }
+
+    // A digest count its size does not give is refused with its own reason,
+    // and the text names the file, its size, the count its size gives and the
+    // count supplied. An empty file needs one digest: an empty leaf.
+    for (path, size, supplied, expected, text) in [
+        (
+            "empty.bin",
+            0_u64,
+            Vec::new(),
+            1_usize,
+            "empty.bin is 0 bytes and holds 0 chunk digests: its size gives 1 chunks of at most 262144 bytes, one for an empty file",
+        ),
+        (
+            "half.bin",
+            262_145,
+            vec![[3; 32]],
+            2,
+            "half.bin is 262145 bytes and holds 1 chunk digests: its size gives 2 chunks of at most 262144 bytes, one for an empty file",
+        ),
+        (
+            "full.bin",
+            262_144,
+            vec![[4; 32], [4; 32]],
+            1,
+            "full.bin is 262144 bytes and holds 2 chunk digests: its size gives 1 chunks of at most 262144 bytes, one for an empty file",
+        ),
+    ] {
+        let refused = encode_chunked_files(&[ChunkedFile {
+            path: path.to_owned(),
+            size,
+            chunk_sha256: supplied.clone(),
+        }]);
+        assert!(
+            refused.is_err(),
+            "{path}: a digest count the size does not give must be refused, got {refused:?}"
+        );
+        let refusal = refused.expect_err("a digest count the size does not give must be refused");
+        assert_eq!(
+            refusal,
+            Refusal::ChunkCountMismatch {
+                path: path.to_owned(),
+                size,
+                expected,
+                supplied: supplied.len(),
+            }
+        );
+        assert_eq!(refusal.to_string(), text);
+    }
+
+    // The leaf limit is the byte path's, through the one file rule: 174
+    // digests are named and a 175th is refused with its own reason.
+    let limit = 174 * 262_144;
+    let named = encode_chunked_files(&[ChunkedFile {
+        path: "full.bin".to_owned(),
+        size: limit,
+        chunk_sha256: vec![[0; 32]; 174],
+    }])
+    .unwrap_or_else(|refusal| panic!("174 leaves: {refusal}"));
+    assert!(named.to_string().starts_with("bafybei"), "{named}");
+    let refusal = encode_chunked_files(&[ChunkedFile {
+        path: "full.bin".to_owned(),
+        size: limit + 1,
+        chunk_sha256: vec![[0; 32]; 175],
+    }])
+    .expect_err("a file of 175 leaves must be refused");
+    assert_eq!(
+        refusal,
+        Refusal::FileOverLeafLimit {
+            path: "full.bin".into(),
+            length: 45_613_057,
         }
     );
     assert_eq!(

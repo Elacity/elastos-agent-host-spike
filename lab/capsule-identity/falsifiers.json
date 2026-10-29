@@ -2784,12 +2784,13 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    if content.len().div_ceil(CHUNK_SIZE) > MAX_FILE_LINKS {\n        return Err(Refusal::FileOverLeafLimit {\n            path: path.to_owned(),\n            length: content.len(),\n        });\n    }\n",
+          "old": "    if leaves.len() > MAX_FILE_LINKS {\n        return Err(Refusal::FileOverLeafLimit {\n            path: path.to_owned(),\n            length: usize::try_from(length).unwrap_or(usize::MAX),\n        });\n    }\n",
           "new": ""
         }
       ],
       "tests": [
-        "file_of_174_leaves_is_named_and_one_byte_more_is_refused"
+        "file_of_174_leaves_is_named_and_one_byte_more_is_refused",
+        "chunked_files_are_checked_and_named_by_the_one_file_rule"
       ]
     },
     {
@@ -4483,18 +4484,19 @@
     },
     {
       "id": "F-CI48d",
-      "title": "a link to a file root has the leaves' lengths as Tsize, without the root block's length",
+      "title": "a file root's links have the leaves' lengths as Tsize, without the root block's length",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let block = file_root_block(&leaves, content.len() as u64);\n    let tsize = block.len() as u64 + leaves.iter().map(|leaf| leaf.tsize).sum::<u64>();\n",
-          "new": "    let block = file_root_block(&leaves, content.len() as u64);\n    let tsize = leaves.iter().map(|leaf| leaf.tsize).sum::<u64>();\n"
+          "old": "    let block = file_root_block(&leaves, length);\n    let tsize = block.len() as u64 + leaves.iter().map(|leaf| leaf.tsize).sum::<u64>();\n",
+          "new": "    let block = file_root_block(&leaves, length);\n    let tsize = leaves.iter().map(|leaf| leaf.tsize).sum::<u64>();\n"
         }
       ],
       "tests": [
-        "file_over_one_leaf_has_the_pinned_cid"
+        "file_over_one_leaf_has_the_pinned_cid",
+        "chunked_files_are_checked_and_named_by_the_one_file_rule"
       ]
     },
     {
@@ -4628,14 +4630,14 @@
     },
     {
       "id": "F-CI58b",
-      "title": "the listing name compare is skipped, so the store key is trusted",
+      "title": "the store key is trusted for a saved listing: its CID is not recomputed or compared, so a changed listing launches",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        if actual.to_string() != claimed {\n            return Err(said(Refusal::NameMismatch {\n                actual,\n                claimed: claimed.to_owned(),\n            }));\n        }\n",
-          "new": "        let _ = (actual, claimed);\n"
+          "old": "                let actual = encode_listed_files(listing).map_err(said)?;\n                let path = Self::require_listing_name(actual, &cid)?;\n                (actual, path, None)\n",
+          "new": "                let _ = listing;\n                (cid.parse().expect(\"the store key is trusted\"), cid.clone(), None)\n"
         }
       ],
       "tests": [
@@ -4660,7 +4662,7 @@
     },
     {
       "id": "F-CI58d",
-      "title": "a grant appears in the lane's grant view during a listing launch",
+      "title": "the lane's grant view adds an entry the shared state does not hold",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
@@ -4704,6 +4706,22 @@
       ],
       "tests": [
         "standin_launches_the_photo_listing_by_its_cid"
+      ]
+    },
+    {
+      "id": "F-CI58g",
+      "title": "the digest-count refusal is removed, so a listing may supply a count its size does not give",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/src/lib.rs",
+          "old": "    if file.chunk_sha256.len() as u64 != expected {\n        return Err(Refusal::ChunkCountMismatch {\n            path: file.path.clone(),\n            size: file.size,\n            expected: usize::try_from(expected).unwrap_or(usize::MAX),\n            supplied: file.chunk_sha256.len(),\n        });\n    }\n",
+          "new": "    let _ = expected;\n"
+        }
+      ],
+      "tests": [
+        "chunked_files_are_checked_and_named_by_the_one_file_rule"
       ]
     }
   ]
