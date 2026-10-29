@@ -524,8 +524,18 @@ Lane diff: `git diff 6333a87dd^1 6333a87dd -- lab/wasm-capsule/` (2 files,
 - The probe commands. At the merge, each table row gave only the flag added
   (`README.md:911-917`, `:967-971`), and the runner's shape once, at
   `README.md:864-866` (`env -i`, stdin from `/dev/null`, `run --invoke digest
-  <absolute module path> 1592590337`). That was enough to re-run them (flag
-  after `run`), and every row gave the same result. Task 026 then wrote each
+  <absolute module path> 1592590337` "plus only the flag under test"). That
+  text did not say where the flag goes. This review put it right after `run`,
+  and every row gave the same result. The place matters: appended at the end,
+  the same flag gives a different result. Task 061 ran both places on
+  wasmtime 45.0.1, with README's `main.wat` and `host.wat` in a scratch `<D>`
+  outside the repo. `env -i /opt/homebrew/bin/wasmtime run --preload
+  env=<D>/host.wat --invoke digest <D>/main.wat 1592590337 < /dev/null` exits
+  0 with stdout `1592590338` (row (i)). `env -i /opt/homebrew/bin/wasmtime run
+  --invoke digest <D>/main.wat 1592590337 --preload env=<D>/host.wat <
+  /dev/null` exits 1 with no stdout, and stderr's last line is
+  ``1: unknown import: `env::f` has not been defined``, row (ii)'s refusal.
+  Task 026 then wrote each
   complete command into the tables (`README.md:1456-1462` and `:1512-1516` at
   43b4af944); this review ran exactly those commands.
 
