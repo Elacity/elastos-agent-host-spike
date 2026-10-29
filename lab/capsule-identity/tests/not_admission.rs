@@ -107,6 +107,8 @@ fn valid_signature_grants_nothing_by_itself() {
 /// data read from the one manifest check, not a decision.
 /// `entry` is the checked read of one walked file, so a caller needs no
 /// second folder read.
+/// `manifest_role` is M2-S2's: the checked manifest's `role`, the same
+/// identity data, so a caller can refuse content without a second read.
 /// `encode_listed_files` is task 047's: the one encoder, for a caller whose
 /// walk lists each file's path, size and SHA-256. The next five are task 011's package record: its digest, its payload, its
 /// signer and its two verifiers. The last four are task 015's variant
@@ -115,7 +117,7 @@ fn valid_signature_grants_nothing_by_itself() {
 /// CID, which the folder and checked record calls use. `CheckedBundle::entry`
 /// reads one file's bytes from the walk the bundle already holds. None
 /// admits, grants or launches.
-const IDENTITY_FUNCTIONS: [&str; 29] = [
+const IDENTITY_FUNCTIONS: [&str; 30] = [
     "lab_cid",
     "lab_cid_observed",
     "checked_bundle",
@@ -125,6 +127,7 @@ const IDENTITY_FUNCTIONS: [&str; 29] = [
     "entries",
     "manifest_name",
     "entry",
+    "manifest_role",
     "check_name",
     "encode_entries",
     "encode_listed_files",
