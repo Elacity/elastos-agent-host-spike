@@ -38,35 +38,141 @@ fn provisional_asks_refuses_a_wrong_schema() {
 
 #[test]
 fn provisional_asks_refuses_a_closed_shape() {
-    for (body, case) in [
+    for (body, case, expected) in [
         (
             r#"{"schema": "elastos.agent-host.asks/v1", "asks": [], "extra": 1}"#,
             "declaration field",
+            "asks declaration: unknown field `extra`, expected `schema` or `asks` at line 1 column 60",
         ),
         (
             r#"{"schema": "elastos.agent-host.asks/v1", "asks": [{"kind": "read", "resource": "r", "extra": "x"}]}"#,
             "ask field",
+            "asks declaration: unknown field `extra`, expected `kind` or `resource` at line 1 column 91",
         ),
-        (r#"{"schema": "elastos.agent-host.asks/v1"}"#, "no asks"),
+        (
+            r#"{"schema": "elastos.agent-host.asks/v1"}"#,
+            "no asks",
+            "asks declaration: missing field `asks` at line 1 column 40",
+        ),
         (
             r#"{"schema": "elastos.agent-host.asks/v1", "asks": [{"resource": "r"}]}"#,
             "no kind",
+            "asks declaration: missing field `kind` at line 1 column 67",
         ),
         (
             r#"{"schema": "elastos.agent-host.asks/v1", "asks": [{"kind": 5, "resource": "r"}]}"#,
             "kind not a string",
+            "asks declaration: invalid type: integer `5`, expected a string at line 1 column 60",
         ),
-        (r#"[]"#, "not an object"),
+        (
+            r#"[]"#,
+            "not an object",
+            "asks declaration: invalid type: sequence, expected an asks declaration object at line 1 column 0",
+        ),
         (
             r#"{"schema": "elastos.agent-host.asks/v1", "asks": {}}"#,
             "asks not an array",
+            "asks declaration: invalid type: map, expected a sequence at line 1 column 49",
         ),
-        (r#"not json"#, "not JSON"),
+        (
+            r#"not json"#,
+            "not JSON",
+            "asks declaration: expected ident at line 1 column 2",
+        ),
+        (
+            r#"{"asks":[]}"#,
+            "no schema",
+            "asks declaration: missing field `schema` at line 1 column 11",
+        ),
+        (
+            r#"{"schema":7,"asks":[]}"#,
+            "schema not a string",
+            "asks declaration: invalid type: integer `7`, expected a string at line 1 column 11",
+        ),
+        (
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":[{"kind":"read"}]}"#,
+            "no resource",
+            "asks declaration: missing field `resource` at line 1 column 62",
+        ),
+        (
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":[{"kind":"read","resource":7}]}"#,
+            "resource not a string",
+            "asks declaration: invalid type: integer `7`, expected a string at line 1 column 74",
+        ),
+        (
+            r#"null"#,
+            "null declaration",
+            "asks declaration: invalid type: null, expected an asks declaration object at line 1 column 4",
+        ),
+        (
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":[null]}"#,
+            "null ask",
+            "asks declaration: invalid type: null, expected an ask object at line 1 column 51",
+        ),
+        (
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":null}"#,
+            "null asks",
+            "asks declaration: invalid type: null, expected a sequence at line 1 column 50",
+        ),
+        (
+            r#"{"schema":"elastos.agent-host.asks/v1","schema":"elastos.agent-host.asks/v1","asks":[]}"#,
+            "duplicate schema",
+            "asks declaration: duplicate field `schema` at line 1 column 47",
+        ),
+        (
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":[],"asks":[]}"#,
+            "duplicate asks",
+            "asks declaration: duplicate field `asks` at line 1 column 55",
+        ),
+        (
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":[{"kind":"read","kind":"read","resource":"r"}]}"#,
+            "duplicate kind",
+            "asks declaration: duplicate field `kind` at line 1 column 68",
+        ),
+        (
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":[{"kind":"read","resource":"r","resource":"r"}]}"#,
+            "duplicate resource",
+            "asks declaration: duplicate field `resource` at line 1 column 87",
+        ),
+        (
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":[]} {}"#,
+            "trailing JSON",
+            "asks declaration: trailing characters at line 1 column 51",
+        ),
     ] {
+        assert_eq!(provisional_asks(body.as_bytes()), Err(expected.to_owned()), "{case}");
         let reason = provisional_asks(body.as_bytes()).expect_err(case);
         assert!(
             reason.starts_with("asks declaration: "),
             "{case}: the shape refusal is its own text: {reason}"
+        );
+    }
+}
+
+#[test]
+fn provisional_asks_refuses_an_array_declaration() {
+    for body in [
+        r#"["elastos.agent-host.asks/v1",[]]"#,
+        r#"["elastos.agent-host.asks/v1",[{"kind":"read","resource":"<principal>/"}]]"#,
+    ] {
+        assert_eq!(
+            provisional_asks(body.as_bytes()),
+            Err("asks declaration: invalid type: sequence, expected an asks declaration object at line 1 column 0".to_owned()),
+            "a declaration uses named fields: {body}"
+        );
+    }
+}
+
+#[test]
+fn provisional_asks_refuses_an_array_ask() {
+    for body in [
+        r#"{"schema":"elastos.agent-host.asks/v1","asks":[["read","<principal>/"]]}"#,
+        r#"{"schema":"elastos.agent-host.asks/v1","asks":[[]]}"#,
+    ] {
+        assert_eq!(
+            provisional_asks(body.as_bytes()),
+            Err("asks declaration: invalid type: sequence, expected an ask object at line 1 column 47".to_owned()),
+            "each ask uses named fields: {body}"
         );
     }
 }

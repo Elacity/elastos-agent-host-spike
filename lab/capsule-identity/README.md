@@ -2102,8 +2102,8 @@ the one walk (P10), and the launch keeps that content in the instance, once: `So
 the bundle has no `asks.json`. Nothing reads the folder again. The same bytes
 get their one provisional parse, `provisional_asks`, after the record check
 (g) and before any instance is added: the schema string is exactly
-`elastos.agent-host.asks/v1`, the declaration and every ask object are closed
-to unknown fields, every `kind` and every `resource` is non-empty, and file
+`elastos.agent-host.asks/v1`, the declaration and every ask must be objects
+with only their named fields, every `kind` and every `resource` is non-empty, and file
 order is kept. There is no kind allow-list, and `<principal>` is read as any
 other text. A body that fails that parse refuses the launch with its own
 `asks declaration: ...` reason, status 400, no instance and an empty grant
@@ -2148,7 +2148,8 @@ pair `read` and `<principal>/`, and `asks_of` answers those bytes. Changing the
 stored first kind to `reed` makes the original CID's bytes differ, so a second
 launch is refused by (e), the first session still declares `read`, and no
 instance or grant is added. Then a signed wrong schema, a signed extra field
-on an ask, a signed empty `kind` and a signed empty `resource` are each refused
+on an ask, a signed array declaration, a signed array ask, a signed empty
+`kind` and a signed empty `resource` are each refused
 with their own `asks declaration: ...` reason and no instance; a signed
 unknown kind launches and keeps its declaration; and a signed `web-app`
 bundle, which has no `asks.json`, launches and declares `None`.
@@ -2158,6 +2159,7 @@ bundle, which has no `asks.json`, launches and declares `None`.
 | The declaration is parsed once from the instance's signed `asks.json` bytes and stored beside them | `standin_reads_declared_asks_from_the_signed_manifest`, `declared_asks_of_answers_the_stored_list_and_none_for_an_unknown_session` | F-CI74d (file order reversed), F-CI74e (`declared_asks_of` answers the first instance) |
 | The schema string is exactly `elastos.agent-host.asks/v1` | `provisional_asks_refuses_a_wrong_schema`, `standin_reads_declared_asks_from_the_signed_manifest` | F-CI74a (schema comparison disabled) |
 | The declaration and each ask object are closed to unknown fields | `provisional_asks_refuses_a_closed_shape`, `standin_reads_declared_asks_from_the_signed_manifest` | F-CI74b (`struct Ask` accepts unknown fields) |
+| The declaration and each ask require an object, including when a positional array has all fields | `provisional_asks_refuses_an_array_declaration`, `provisional_asks_refuses_an_array_ask`, `standin_reads_declared_asks_from_the_signed_manifest` | F-CI74g (array declaration accepted), F-CI74h (array ask accepted) |
 | Every `kind` and every `resource` is non-empty, each with its own reason | `provisional_asks_refuses_an_empty_kind`, `provisional_asks_refuses_an_empty_resource`, `standin_reads_declared_asks_from_the_signed_manifest` | F-CI74c (both non-empty checks deleted) |
 | File order is kept | `provisional_asks_keeps_the_declared_file_order`, `provisional_asks_reads_the_committed_declaration_in_file_order`, `standin_reads_declared_asks_from_the_signed_manifest` | F-CI74d (the parsed list is reversed) |
 | There is no kind allow-list: a signed unknown kind launches and keeps its declaration | `standin_reads_declared_asks_from_the_signed_manifest` | F-CI74f (a planted `teleport` rejection) |
@@ -2349,7 +2351,7 @@ falsifiers.json          planted bugs, each caught by named tests
 
 ## Falsifiers
 
-`falsifiers.json` holds 322 planted bugs in the provider format: round 1's
+`falsifiers.json` holds 324 planted bugs in the provider format: round 1's
 F-CI1a to F-CI1u, task 005's F-CI5a to F-CI5k, task 003's F-CI3a to F-CI3p
 (no F-CI3e or F-CI3f: see
 [above](#what-the-lab-cid-ignores-and-what-it-covers)), task 009's F-CI9a
@@ -2412,7 +2414,7 @@ is retargeted by it), and task 064's F-CI64a (see
 is retargeted by it too), and task 065's F-CI65a, task 066's F-CI66a,
 task 067's F-CI67a, task 068's F-CI68a, task 069's F-CI69a and task 070's
 F-CI70a and F-CI70b (all: see
-[the encoding](#the-encoding)), and task 074's F-CI74a to F-CI74f (see
+[the encoding](#the-encoding)), and task 074's F-CI74a to F-CI74h (see
 [asks come only from the signed bytes](#asks-come-only-from-the-signed-bytes-m1-check-b2-provisional-declaration)).
 Each has `"command": "capsule-identity"` and `expect: "caught"`, and counts
 only when every named test fails for its stated reason, never from a build

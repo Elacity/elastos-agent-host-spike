@@ -5347,6 +5347,45 @@
       "tests": [
         "standin_reads_declared_asks_from_the_signed_manifest"
       ]
+    },
+    {
+      "id": "F-CI74g",
+      "title": "the declaration accepts positional arrays instead of requiring an object",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    let Object(declaration): Object<Declaration> =",
+          "new": "    let declaration: Declaration ="
+        }
+      ],
+      "tests": [
+        "provisional_asks_refuses_an_array_declaration",
+        "standin_reads_declared_asks_from_the_signed_manifest"
+      ]
+    },
+    {
+      "id": "F-CI74h",
+      "title": "each ask accepts positional arrays instead of requiring an object",
+      "command": "capsule-identity",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    asks: Vec<Object<Ask>>,",
+          "new": "    asks: Vec<Ask>,"
+        },
+        {
+          "file": "../../lab/capsule-identity/tests/common/mod.rs",
+          "old": "    for Object(ask) in declaration.asks {",
+          "new": "    for ask in declaration.asks {"
+        }
+      ],
+      "tests": [
+        "provisional_asks_refuses_an_array_ask",
+        "standin_reads_declared_asks_from_the_signed_manifest"
+      ]
     }
   ]
 }

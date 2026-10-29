@@ -2663,7 +2663,7 @@ fn signed_asks(checked: &CheckedBundle) -> Option<Vec<u8>> {
 /// `asks declaration: ` plus serde's error, a wrong schema names the value it
 /// read, and an empty field names which one.
 pub fn provisional_asks(bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
-    let declaration: Declaration =
+    let Object(declaration): Object<Declaration> =
         serde_json::from_slice(bytes).map_err(|error| format!("asks declaration: {error}"))?;
     if declaration.schema != PROVISIONAL_ASKS_SCHEMA {
         return Err(format!(
@@ -2672,7 +2672,7 @@ pub fn provisional_asks(bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
         ));
     }
     let mut asks = Vec::with_capacity(declaration.asks.len());
-    for ask in declaration.asks {
+    for Object(ask) in declaration.asks {
         if ask.kind.is_empty() {
             return Err("asks declaration: an ask has an empty kind".to_owned());
         }
@@ -2690,7 +2690,7 @@ pub fn provisional_asks(bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
 #[serde(deny_unknown_fields)]
 struct Declaration {
     schema: String,
-    asks: Vec<Ask>,
+    asks: Vec<Object<Ask>>,
 }
 
 /// One ask: a kind and a resource, both strings, and no other field.
@@ -2699,4 +2699,43 @@ struct Declaration {
 struct Ask {
     kind: String,
     resource: String,
+}
+
+/// Require a JSON object before the derived struct reads its fields. Serde's
+/// derived structs also accept positional sequences; both declaration levels
+/// use this one map-only adapter during the same parse of the checked bytes.
+struct Object<T>(T);
+
+trait ObjectShape {
+    const EXPECTING: &'static str;
+}
+
+impl ObjectShape for Declaration {
+    const EXPECTING: &'static str = "an asks declaration object";
+}
+
+impl ObjectShape for Ask {
+    const EXPECTING: &'static str = "an ask object";
+}
+
+impl<'de, T: serde::Deserialize<'de> + ObjectShape> serde::Deserialize<'de> for Object<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ObjectVisitor<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T: serde::Deserialize<'de> + ObjectShape> serde::de::Visitor<'de> for ObjectVisitor<T> {
+            type Value = T;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str(T::EXPECTING)
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(self, map: M) -> Result<T, M::Error> {
+                T::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+            }
+        }
+
+        deserializer
+            .deserialize_map(ObjectVisitor(std::marker::PhantomData))
+            .map(Object)
+    }
 }

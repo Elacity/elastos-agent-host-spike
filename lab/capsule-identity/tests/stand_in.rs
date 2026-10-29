@@ -794,9 +794,16 @@ fn standin_reads_declared_asks_from_the_signed_manifest() {
     let extra =
         asks_with_first_ask(r#"{"kind": "read", "resource": "<principal>/", "extra": "x"}"#);
     let (mut closed, cid) = signed_asks_variant(parent.path(), "extra-field", &extra);
-    let refused = closed
-        .post_capsules(&json!({ "cid": cid }))
-        .expect_err("an ask with an extra field");
+    let result = closed.post_capsules(&json!({ "cid": cid }));
+    assert_eq!(
+        result,
+        Err((
+            400,
+            "asks declaration: unknown field `extra`, expected `kind` or `resource` at line 4 column 56".to_owned(),
+        )),
+        "an ask with an extra field has its own refusal"
+    );
+    let refused = result.expect_err("an ask with an extra field");
     assert_eq!(refused.0, 400, "an extra ask field refuses the launch");
     assert!(
         refused.1.starts_with("asks declaration:"),
@@ -810,6 +817,25 @@ fn standin_reads_declared_asks_from_the_signed_manifest() {
     );
     assert_none_listed(&closed, "an extra ask field");
     assert_eq!(grant_view(&closed), Vec::<Value>::new(), "no grant");
+
+    // Both object levels reject positional arrays even when all fields are
+    // present and the bundle has a valid signature.
+    for (name, body, reason) in [
+        (
+            "array-declaration",
+            r#"["elastos.agent-host.asks/v1",[]]"#,
+            "asks declaration: invalid type: sequence, expected an asks declaration object at line 1 column 0",
+        ),
+        (
+            "array-ask",
+            r#"{"schema":"elastos.agent-host.asks/v1","asks":[["read","<principal>/"]]}"#,
+            "asks declaration: invalid type: sequence, expected an ask object at line 1 column 47",
+        ),
+    ] {
+        let (mut array, cid) = signed_asks_variant(parent.path(), name, body.as_bytes());
+        assert_refused(&mut array, &json!({ "cid": cid }), reason, name);
+        assert_eq!(grant_view(&array), Vec::<Value>::new(), "{name}: no grant");
+    }
 
     // A fourth folder with an empty kind is refused.
     let empty_kind = asks_with_first_ask(r#"{"kind": "", "resource": "<principal>/"}"#);
@@ -838,9 +864,13 @@ fn standin_reads_declared_asks_from_the_signed_manifest() {
     // order.
     let unknown = asks_with_first_ask(r#"{"kind": "teleport", "resource": "<principal>/"}"#);
     let (mut unknown_kind, cid) = signed_asks_variant(parent.path(), "unknown-kind", &unknown);
-    let answer = unknown_kind
-        .post_capsules(&json!({ "cid": cid }))
-        .unwrap_or_else(|(status, reason)| panic!("refused with {status}: {reason}"));
+    let launched = unknown_kind.post_capsules(&json!({ "cid": cid }));
+    assert!(
+        launched.is_ok(),
+        "a signed unknown kind launches: {launched:?}"
+    );
+    let answer =
+        launched.unwrap_or_else(|(status, reason)| panic!("refused with {status}: {reason}"));
     assert_eq!(answer["status"], "launched", "an unknown kind is admitted");
     let session = answer["session_id"].as_str().expect("a session id");
     assert_eq!(
