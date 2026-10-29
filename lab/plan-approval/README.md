@@ -9,8 +9,11 @@ step 5:
 `preview` returns the plan bytes and `agent_conformance::identity::sha256` of
 those bytes. It calls no `StandIn` method, takes no path, parses no fixture and
 reads no clock, directory or planner. The test reads the stand-in only through
-`get_capability_list` and `get_capsules`, so the live grant list and the
-capsule list stay as they were.
+routes: `admit_resident`, `post_capsules`, `finish_start`,
+`post_capability_request` and `post_capability_grant` reach one live `once`
+grant, then `get_capability_list` and `get_capsules` show the live grant list
+and the capsule list stay as they were. The grant store write is not a caller
+seam.
 
 This crate calls `agent_conformance::standin_runtime` and does not copy it.
 There is one stand-in and one hasher. The June planner path is an open question

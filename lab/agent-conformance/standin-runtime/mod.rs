@@ -228,11 +228,13 @@ impl StandIn {
         }
     }
 
-    /// Lab test seam, not a route.
+    /// The one grant store write. Not a route and not a caller seam.
     ///
-    /// `granted_at` is the seeded value. This method reads no clock.
+    /// `post_capability_grant` is its one route caller. A journey reaches a
+    /// grant through `post_capability_request` and `post_capability_grant`
+    /// only. `granted_at` is the given value. This method reads no clock.
     #[allow(clippy::too_many_arguments)]
-    pub fn seed_grant(
+    pub(crate) fn seed_grant(
         &mut self,
         request_id: &str,
         session_id: &str,
@@ -1790,6 +1792,25 @@ mod tests {
             .clone()
     }
 
+    /// The census's pending-request guard, read through the one shell request
+    /// route for every listed session. This is the step's negative case until
+    /// the real Runtime has a resident stop to settle a pending request.
+    fn census_pending_leftover(standin: &StandIn) -> Option<String> {
+        shell_list(standin)["capsules"]
+            .as_array()
+            .expect("the stand-in returns a capsule list")
+            .iter()
+            .find_map(|capsule| {
+                let session_id = capsule["session_id"].as_str().unwrap();
+                shell_requests(standin, session_id)["requests"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|request| request["status"] == "pending")
+                    .then(|| session_id.to_owned())
+            })
+    }
+
     fn pending_request(request_id: &str, session_id: &str) -> Value {
         json!({
             "request_id": request_id,
@@ -2991,6 +3012,88 @@ mod tests {
                 }),
             ],
             "the stand-in stores agent 2's new request beside the untouched one"
+        );
+    }
+
+    #[test]
+    fn standin_census_reads_every_pending_request_after_the_stops() {
+        let mut standin = StandIn::new();
+        launch_two_running(&mut standin);
+        for session_id in ["component-1", "component-2"] {
+            standin
+                .post_capability_request(
+                    Caller::Client { session_id },
+                    &json!({
+                        "resource": SHARED_RESOURCE,
+                        "action": "read",
+                        "reason": "read shared",
+                    }),
+                )
+                .expect("the stand-in stores the running client's request");
+        }
+        assert_eq!(
+            census_pending_leftover(&standin),
+            Some("component-1".to_owned()),
+            "the census names the first listed session with a pending request"
+        );
+        for id in ["component-1", "component-2"] {
+            standin
+                .delete_capsule(Caller::Shell, id, &json!({"reason": "stop two"}))
+                .expect("the stand-in stops a running entry");
+        }
+        assert_eq!(
+            census_pending_leftover(&standin),
+            None,
+            "both stops settled their pending requests through the one settlement"
+        );
+        assert_eq!(
+            shell_list(&standin)["capsules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|capsule| capsule["status"] != "stopped")
+                .count(),
+            0,
+            "both stops ended every entry, so the census reaches the request route first"
+        );
+    }
+
+    #[test]
+    fn standin_census_reports_a_pending_leftover() {
+        let mut standin = StandIn::new();
+        launch_two_running(&mut standin);
+        let pending = standin
+            .post_capability_request(
+                Caller::Client {
+                    session_id: "component-1",
+                },
+                &json!({
+                    "resource": SHARED_RESOURCE,
+                    "action": "read",
+                    "reason": "read shared",
+                }),
+            )
+            .expect("the stand-in stores the running client's request");
+        assert_eq!(
+            pending,
+            json!({"status": "pending", "request_id": "request-1"}),
+            "the stand-in leaves the request pending for the shell to answer"
+        );
+        assert_eq!(
+            census_pending_leftover(&standin),
+            Some("component-1".to_owned()),
+            "the census names the session whose request the route still reports pending"
+        );
+        standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({"request_id": "request-1", "duration": "session"}),
+            )
+            .expect("the stand-in's shell grants the pending request");
+        assert_eq!(
+            census_pending_leftover(&standin),
+            None,
+            "the census accepts a granted request that the same route no longer reports pending"
         );
     }
 

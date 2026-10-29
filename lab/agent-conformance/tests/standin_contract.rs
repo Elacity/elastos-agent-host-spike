@@ -5,7 +5,7 @@
 //! RA-6 states from draft PR #309 at `513988ebd`. A PASS here gives the
 //! Runtime no credit.
 
-use agent_conformance::standin_runtime::{Caller, Life, StandIn, Start};
+use agent_conformance::standin_runtime::{Caller, StandIn, Start};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
@@ -108,33 +108,121 @@ fn standin_matches_ra1_fields() {
         "the stand-in did the work: an unknown scope is refused: {unknown:?}"
     );
 
-    standin.seed_grant(
-        "req-live",
-        "component-1",
-        SHARED_RESOURCE,
-        "read",
-        "session",
-        0,
-        Life::Live,
-        false,
+    standin
+        .admit_resident(SHARED_PATH, SHARED_NAME, Start::Ok)
+        .expect("the stand-in admits read-shared for the grant journey");
+    let first = standin
+        .post_capsules(Caller::Shell, &json!({ "path": SHARED_PATH }))
+        .expect("the stand-in launches the first read-shared instance");
+    let second = standin
+        .post_capsules(Caller::Shell, &json!({ "path": SHARED_PATH }))
+        .expect("the stand-in launches the second read-shared instance");
+    assert_eq!(
+        (first["id"].clone(), second["id"].clone()),
+        (json!("component-1"), json!("component-2")),
+        "the stand-in numbers the two launches component-1 and component-2"
     );
-    standin.seed_grant(
-        "req-dead",
-        "component-1",
-        SHARED_RESOURCE,
-        "read",
-        "session",
-        0,
-        Life::Exhausted,
-        false,
+    for (session_id, duration) in [("component-1", "session"), ("component-2", "once")] {
+        let pending = standin
+            .post_capability_request(
+                Caller::Client { session_id },
+                &json!({ "resource": SHARED_RESOURCE, "action": "read" }),
+            )
+            .expect("the stand-in stores the client's request");
+        let request_id = pending["request_id"]
+            .as_str()
+            .expect("the stand-in names the request")
+            .to_owned();
+        assert_eq!(
+            pending["status"], "pending",
+            "the stand-in answers pending and carries no token"
+        );
+        let granted = standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({ "request_id": request_id, "duration": duration }),
+            )
+            .expect("the stand-in's shell grants the request");
+        assert_eq!(
+            granted,
+            json!({ "success": true }),
+            "the stand-in's client approval carries no token"
+        );
+        let minted = standin
+            .get_capability_list(Caller::Client { session_id }, None)
+            .expect("the stand-in returns the client's own list after the grant");
+        assert_eq!(
+            request_ids(&minted),
+            BTreeSet::from([request_id.clone()]),
+            "the stand-in did the work: the shell granted the client's request with duration {duration}"
+        );
+        let self_approval = standin.post_capability_grant(
+            Caller::Client { session_id },
+            &json!({ "request_id": request_id, "duration": "session" }),
+        );
+        assert!(
+            matches!(&self_approval, Err((403, reason)) if reason == SHELL_REASON),
+            "the stand-in refuses the client minting its own grant: {self_approval:?}"
+        );
+    }
+
+    let before = standin
+        .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
+        .expect("the stand-in returns the shell live view");
+    assert_eq!(
+        request_ids(&before),
+        BTreeSet::from(["request-1".to_owned(), "request-2".to_owned()]),
+        "the stand-in did the work: both grants are live before the once grant is spent"
+    );
+    let spend = standin.authorise(
+        Caller::Client {
+            session_id: "component-2",
+        },
+        "request-2",
+    );
+    assert!(
+        spend.is_ok(),
+        "the stand-in did the work: the owner's one use spends the once grant: {spend:?}"
+    );
+    let spent = standin.authorise(
+        Caller::Client {
+            session_id: "component-2",
+        },
+        "request-2",
+    );
+    assert!(
+        matches!(&spent, Err((400, reason)) if reason == "grant is not live: Exhausted"),
+        "the stand-in did the work: the spent once grant is not live: {spent:?}"
+    );
+    assert_eq!(
+        request_ids(
+            &standin
+                .get_capability_list(
+                    Caller::Client {
+                        session_id: "component-2",
+                    },
+                    None,
+                )
+                .expect("the stand-in returns the spender's own list after the spend")
+        ),
+        BTreeSet::<String>::new(),
+        "the stand-in did the work: the spent once grant is out of the spender's own list"
     );
 
+    let live = standin
+        .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
+        .expect("the stand-in returns the shell live view after the spend");
+    assert_eq!(
+        request_ids(&live),
+        BTreeSet::from(["request-1".to_owned()]),
+        "the stand-in did the work: the RA-1 live view leaves the exhausted grant out"
+    );
     let shell = standin
         .get_capability_list(Caller::Shell, None)
-        .expect("the stand-in returns the seeded shell list");
+        .expect("the stand-in returns the plain shell list after the spend");
     assert_eq!(
         request_ids(&shell),
-        BTreeSet::from(["req-live".to_owned()]),
+        BTreeSet::from(["request-1".to_owned()]),
         "the stand-in did the work: the shell list leaves the exhausted grant out"
     );
     let entry = &shell["capabilities"][0];
@@ -157,14 +245,14 @@ fn standin_matches_ra1_fields() {
     assert_eq!(
         *entry,
         json!({
-            "request_id": "req-live",
+            "request_id": "request-1",
             "session_id": "component-1",
             "resource": SHARED_RESOURCE,
             "action": "read",
             "duration": "session",
             "granted_at": 0,
         }),
-        "the stand-in did the work: the shell entry carries the seeded grant values"
+        "the stand-in did the work: the shell entry carries the granted values"
     );
 
     let sibling = standin
@@ -176,9 +264,9 @@ fn standin_matches_ra1_fields() {
         )
         .expect("the stand-in returns the sibling client list");
     assert_eq!(
-        sibling["capabilities"],
-        json!([]),
-        "the stand-in did the work: a sibling client lists no grant"
+        request_ids(&sibling),
+        BTreeSet::<String>::new(),
+        "the stand-in did the work: the spent once grant stays out of its client's own list too"
     );
 
     let own = standin
@@ -191,7 +279,7 @@ fn standin_matches_ra1_fields() {
         .expect("the stand-in returns the client's own list");
     assert_eq!(
         request_ids(&own),
-        BTreeSet::from(["req-live".to_owned()]),
+        BTreeSet::from(["request-1".to_owned()]),
         "the stand-in did the work: the client lists its own live grant only"
     );
     assert_keys(
