@@ -1745,7 +1745,8 @@ pub fn published(folder: &Path) -> (String, PathBuf) {
 /// - [`StandInRuntime::live_grants`]: the one shared grant view;
 /// - [`grant_request_id`]: the request id for one seeded grant;
 /// - [`StandInRuntime::apply_stop`]: the one shared stop;
-/// - [`StandInRuntime::asks_of`]: the signed asks of one launch;
+/// - [`StandInRuntime::asks_of`]: the signed asks bytes of one launch;
+/// - [`StandInRuntime::declared_asks_of`]: the declaration parsed from them;
 /// - [`StandInRuntime::set_after_walk`]: the after-walk hook.
 ///
 /// The shared launch body's only field is `path`; this lane's launch body's
@@ -1758,9 +1759,12 @@ pub fn published(folder: &Path) -> (String, PathBuf) {
 /// A launch is handed its asks only as the `asks.json` bytes of the checked
 /// bundle, kept under the shared `session_id` it answers, through
 /// [`StandInRuntime::asks_of`]: a change on disk after launch does not reach
-/// it. The bytes are never parsed, and the shared routes have no asks field.
-/// A change on disk between the walk and the launch does not reach it either,
-/// shown through [`StandInRuntime::set_after_walk`].
+/// it; the shared routes have no asks field. The bytes are parsed once, by
+/// [`provisional_asks`], after the CID checks and before the shared launch;
+/// the pairs are kept beside the bytes and answered by
+/// [`StandInRuntime::declared_asks_of`]. A change on disk between the walk and
+/// the launch does not reach either, shown through
+/// [`StandInRuntime::set_after_walk`].
 pub struct StandInRuntime {
     store: BTreeMap<String, PathBuf>,
     records: Vec<PackageRecord>,
@@ -1769,12 +1773,16 @@ pub struct StandInRuntime {
     /// session id of the launch that created the instance. It holds no
     /// status, grant or independent session id.
     asks: BTreeMap<String, Option<Vec<u8>>>,
+    /// The `(kind, resource)` pairs parsed once from those bytes, keyed by
+    /// the same session id. `None` when the bundle has no `asks.json`. It
+    /// holds no grant and no status.
+    declared: BTreeMap<String, Option<Vec<(String, String)>>>,
     after_walk: Option<fn(&Path)>,
 }
 
 impl StandInRuntime {
     /// A store with these entries, package records and accepted publisher
-    /// DIDs, and no signed asks snapshot.
+    /// DIDs, and no signed asks snapshot or parsed declaration.
     pub fn new(
         store: impl IntoIterator<Item = (String, PathBuf)>,
         records: Vec<PackageRecord>,
@@ -1785,29 +1793,38 @@ impl StandInRuntime {
             records,
             accepted,
             asks: BTreeMap::new(),
+            declared: BTreeMap::new(),
             after_walk: None,
         }
     }
 
     /// Lab test seam, not a route: run the checks of
-    /// [`StandInRuntime::checked_launch`], then call `launch` with the shared
-    /// launch body `{"path": <the stored folder>}`. The answer is the
-    /// closure's, unchanged, and the checked asks are kept under its
-    /// `session_id`. A refusal is status 400 with the check's own reason, and
-    /// the closure is not called, so the shared instance and grant lists do
-    /// not change.
+    /// [`StandInRuntime::checked_launch`], parse the checked `asks.json`
+    /// bytes once with [`provisional_asks`], then call `launch` with the
+    /// shared launch body `{"path": <the stored folder>}`. The answer is the
+    /// closure's, unchanged, and the checked bytes and their declaration are
+    /// kept under its `session_id`. A refusal is status 400 with the check's
+    /// own reason, and the closure is not called, so the shared instance and
+    /// grant lists do not change. A matching signature admits the artifact;
+    /// the declaration adds no grant.
     pub fn commit_launch(
         &mut self,
         body: &Value,
         mut launch: impl FnMut(&Value) -> Result<Value, (u16, String)>,
     ) -> Result<Value, (u16, String)> {
         let (path, asks) = self.checked_launch(body).map_err(|reason| (400, reason))?;
+        let declared = asks
+            .as_deref()
+            .map(provisional_asks)
+            .transpose()
+            .map_err(|reason| (400, reason))?;
         let answer = launch(&json!({ "path": path }))?;
         let session = answer["session_id"]
             .as_str()
             .expect("the shared launch answers a session_id")
             .to_owned();
-        self.asks.insert(session, asks);
+        self.asks.insert(session.clone(), asks);
+        self.declared.insert(session, declared);
         Ok(answer)
     }
 
@@ -1830,9 +1847,19 @@ impl StandInRuntime {
     /// Lab test seam, not a route: the asks the shared instance of
     /// `session_id` was handed at launch. `None` when that bundle has no
     /// `asks.json`, or when no launch has that session. The shared routes
-    /// have no asks field, and nothing here parses the bytes.
+    /// have no asks field. This answers the stored bytes and does not parse
+    /// them; [`StandInRuntime::declared_asks_of`] answers the one parse.
     pub fn asks_of(&self, session_id: &str) -> Option<Vec<u8>> {
         self.asks.get(session_id).cloned().flatten()
+    }
+
+    /// Lab test seam, not a route: the declaration parsed once at launch from
+    /// `session_id`'s stored `asks.json` bytes, as `(kind, resource)` pairs in
+    /// file order. `None` when that bundle has no `asks.json`, or when no
+    /// launch has that session. This answers the stored list only: it does
+    /// not parse the bytes again and does not read the bundle folder.
+    pub fn declared_asks_of(&self, session_id: &str) -> Option<Vec<(String, String)>> {
+        self.declared.get(session_id).cloned().flatten()
     }
 
     /// Lab test seam, not a route: every later launch calls `hook` once, on
@@ -1924,7 +1951,7 @@ fn said(refusal: Refusal) -> String {
     refusal.to_string()
 }
 
-/// The asks file of a bundle, which the lab never parses.
+/// The asks file of a bundle, which the lab CID encoder never parses.
 const ASKS_FILE: &str = "asks.json";
 
 /// The content of the checked bundle's `asks.json` entry, or `None` when it
@@ -1935,4 +1962,72 @@ fn signed_asks(checked: &CheckedBundle) -> Option<Vec<u8>> {
         .iter()
         .find(|entry| entry.path == ASKS_FILE)
         .map(|entry| entry.content.clone())
+}
+
+/// The provisional schema of the lab stand-in's declaration.
+const ASKS_SCHEMA: &str = "elastos.agent-host.asks/v1";
+
+/// Provisional lab stand-in schema, not the Runtime manifest: the one parse of
+/// a checked bundle's `asks.json` bytes into its declared `(kind, resource)`
+/// pairs, in file order. The signature admitted the artifact; this
+/// declaration adds no grant.
+///
+/// The bytes must be a JSON object whose only keys are `schema` and `asks`;
+/// `schema` must be [`ASKS_SCHEMA`]; `asks` must be an array whose elements
+/// are JSON objects with only `kind` and `resource`, both non-empty strings.
+/// Each refusal names its own cause. No kind is refused for its name, and
+/// `<principal>` is not read.
+fn provisional_asks(bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
+    let document: Value =
+        serde_json::from_slice(bytes).map_err(|error| format!("asks declaration: {error}"))?;
+    let root = document
+        .as_object()
+        .ok_or_else(|| "asks declaration: the root is not an object".to_owned())?;
+    if let Some(extra) = root.keys().find(|key| *key != "schema" && *key != "asks") {
+        return Err(format!("asks declaration: unknown field {extra}"));
+    }
+    let schema = root
+        .get("schema")
+        .ok_or_else(|| "asks declaration: no schema field".to_owned())?;
+    if schema.as_str() != Some(ASKS_SCHEMA) {
+        let shown = match schema.as_str() {
+            Some(text) => text.to_owned(),
+            None => schema.to_string(),
+        };
+        return Err(format!(
+            "asks declaration: schema is {shown}, not {ASKS_SCHEMA}"
+        ));
+    }
+    let asks = root
+        .get("asks")
+        .ok_or_else(|| "asks declaration: no asks field".to_owned())?
+        .as_array()
+        .ok_or_else(|| "asks declaration: asks is not an array".to_owned())?;
+    let mut declared = Vec::with_capacity(asks.len());
+    for ask in asks {
+        let ask = ask
+            .as_object()
+            .ok_or_else(|| "asks declaration: an ask is not an object".to_owned())?;
+        if let Some(extra) = ask.keys().find(|key| *key != "kind" && *key != "resource") {
+            return Err(format!("asks declaration: unknown field {extra}"));
+        }
+        let kind = ask
+            .get("kind")
+            .ok_or_else(|| "asks declaration: an ask has no kind".to_owned())?
+            .as_str()
+            .ok_or_else(|| "asks declaration: an ask's kind is not a string".to_owned())?;
+        let resource = ask
+            .get("resource")
+            .ok_or_else(|| "asks declaration: an ask has no resource".to_owned())?
+            .as_str()
+            .ok_or_else(|| "asks declaration: an ask's resource is not a string".to_owned())?;
+        if kind.is_empty() {
+            return Err("asks declaration: an ask has an empty kind".to_owned());
+        }
+        if resource.is_empty() {
+            return Err("asks declaration: an ask has an empty resource".to_owned());
+        }
+        declared.push((kind.to_owned(), resource.to_owned()));
+    }
+    Ok(declared)
 }

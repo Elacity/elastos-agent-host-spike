@@ -3,9 +3,11 @@
 //! identity check runs before anything is launched, and the shared `StandIn`
 //! in `lab/agent-conformance/standin-runtime/mod.rs` owns the instance, its
 //! session id, its lifecycle and its grants. A launched instance is handed
-//! only the `asks.json` bytes of the checked, signed bundle (M1 check B2, the
-//! part with no schema and no parse). This is lab test code: it runs nothing,
-//! and these tests say nothing about what the Runtime does.
+//! only the `asks.json` bytes of the checked, signed bundle, and the one parse
+//! of those bytes keeps its provisional declaration beside them (M1 check
+//! B2): the signature admits the artifact and adds no grant. This is lab test
+//! code: it runs nothing, and these tests say nothing about what the Runtime
+//! does.
 mod common;
 
 #[allow(dead_code)]
@@ -751,6 +753,336 @@ fn standin_gives_each_session_its_own_asks() {
         assert_eq!(listed_instances(&shared).len(), 2, "{case}");
         assert_eq!(grant_view(&lane, &shared), Vec::<Value>::new(), "{case}");
     }
+}
+
+/// The committed `fixtures/agent-host/asks.json` declaration, read with
+/// `serde_json::Value` rather than the stand-in's own parse: its `(kind,
+/// resource)` pairs in file order.
+fn committed_asks_pairs() -> Vec<(String, String)> {
+    let document: Value =
+        serde_json::from_slice(&read_fixture(&AGENT_HOST, "asks.json")).expect("asks.json JSON");
+    document["asks"]
+        .as_array()
+        .expect("an asks array")
+        .iter()
+        .map(|ask| {
+            (
+                ask["kind"].as_str().expect("a kind").to_owned(),
+                ask["resource"].as_str().expect("a resource").to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// The `agent-host` fixture published in `parent` under `name`, with
+/// `asks.json` replaced by `asks`: the capsule manifest stays the committed
+/// one. The bundle's folder and its store entry.
+fn asks_bundle(parent: &Path, name: &str, asks: &[u8]) -> (PathBuf, (String, PathBuf)) {
+    let folder = parent.join(name);
+    assemble_at(&AGENT_HOST, &folder);
+    write_file(&folder, "asks.json", asks);
+    (folder.clone(), published(&folder))
+}
+
+/// A signed sibling bundle and the declaration refusal its launch must get.
+struct RefusedCase {
+    folder: PathBuf,
+    entry: (String, PathBuf),
+    refusal: String,
+}
+
+fn refused_case(parent: &Path, name: &str, asks: &[u8], refusal: String) -> RefusedCase {
+    let (folder, entry) = asks_bundle(parent, name, asks);
+    RefusedCase {
+        folder,
+        entry,
+        refusal,
+    }
+}
+
+#[test]
+fn standin_reads_declared_asks_from_the_signed_manifest() {
+    const SCHEMA: &str = "elastos.agent-host.asks/v1";
+    let published = publish_agent_host();
+    let parent = published.parent.path();
+    let committed = committed_asks_pairs();
+    assert_eq!(
+        committed.first(),
+        Some(&("read".to_owned(), "<principal>/".to_owned())),
+        "the committed first ask"
+    );
+
+    // Siblings of the fixture whose signed asks.json differs.
+    let committed_text =
+        String::from_utf8(read_fixture(&AGENT_HOST, "asks.json")).expect("asks.json is UTF-8");
+    let edited = |from: &str, to: &str| {
+        let text = committed_text.replacen(from, to, 1);
+        assert_ne!(
+            text, committed_text,
+            "the edit {from:?} must change asks.json"
+        );
+        text.into_bytes()
+    };
+    let wrong_schema = edited(SCHEMA, "not-the-provisional-schema");
+    let extra_root = edited("{\n", "{\n  \"extra\": true,\n");
+    let extra_ask = edited(
+        "\"kind\": \"read\",",
+        "\"kind\": \"read\", \"extra\": true,",
+    );
+    let empty_kind = edited("\"kind\": \"read\"", "\"kind\": \"\"");
+    let empty_resource = edited("\"resource\": \"<principal>/\"", "\"resource\": \"\"");
+    let unknown_kind = edited("\"kind\": \"read\"", "\"kind\": \"teleport\"");
+
+    // Declarations that are not the provisional shape at all.
+    let bytes = |value: Value| serde_json::to_vec(&value).expect("serialize a declaration");
+    let malformed = b"{\"schema\":".to_vec();
+    let malformed_error = serde_json::from_slice::<Value>(&malformed)
+        .expect_err("the bytes are not JSON")
+        .to_string();
+    let missing_schema = bytes(json!({ "asks": [] }));
+    let untyped_schema = bytes(json!({ "schema": 7, "asks": [] }));
+    let missing_asks = bytes(json!({ "schema": SCHEMA }));
+    let unarray_asks = bytes(json!({ "schema": SCHEMA, "asks": {} }));
+    let unobject_ask = bytes(json!({ "schema": SCHEMA, "asks": [7] }));
+    let missing_kind = bytes(json!({ "schema": SCHEMA, "asks": [{ "resource": "<principal>/" }] }));
+    let untyped_kind =
+        bytes(json!({ "schema": SCHEMA, "asks": [{ "kind": 7, "resource": "<principal>/" }] }));
+    let missing_resource = bytes(json!({ "schema": SCHEMA, "asks": [{ "kind": "read" }] }));
+    let untyped_resource =
+        bytes(json!({ "schema": SCHEMA, "asks": [{ "kind": "read", "resource": 7 }] }));
+
+    let refused = vec![
+        refused_case(
+            parent,
+            "agent-host-wrong-schema",
+            &wrong_schema,
+            format!("asks declaration: schema is not-the-provisional-schema, not {SCHEMA}"),
+        ),
+        refused_case(
+            parent,
+            "agent-host-extra-root",
+            &extra_root,
+            "asks declaration: unknown field extra".to_owned(),
+        ),
+        refused_case(
+            parent,
+            "agent-host-extra-ask",
+            &extra_ask,
+            "asks declaration: unknown field extra".to_owned(),
+        ),
+        refused_case(
+            parent,
+            "agent-host-empty-kind",
+            &empty_kind,
+            "asks declaration: an ask has an empty kind".to_owned(),
+        ),
+        refused_case(
+            parent,
+            "agent-host-empty-resource",
+            &empty_resource,
+            "asks declaration: an ask has an empty resource".to_owned(),
+        ),
+        refused_case(
+            parent,
+            "agent-host-malformed",
+            &malformed,
+            format!("asks declaration: {malformed_error}"),
+        ),
+        refused_case(
+            parent,
+            "agent-host-missing-schema",
+            &missing_schema,
+            "asks declaration: no schema field".to_owned(),
+        ),
+        refused_case(
+            parent,
+            "agent-host-untyped-schema",
+            &untyped_schema,
+            format!("asks declaration: schema is 7, not {SCHEMA}"),
+        ),
+        refused_case(
+            parent,
+            "agent-host-missing-asks",
+            &missing_asks,
+            "asks declaration: no asks field".to_owned(),
+        ),
+        refused_case(
+            parent,
+            "agent-host-unarray-asks",
+            &unarray_asks,
+            "asks declaration: asks is not an array".to_owned(),
+        ),
+        refused_case(
+            parent,
+            "agent-host-unobject-ask",
+            &unobject_ask,
+            "asks declaration: an ask is not an object".to_owned(),
+        ),
+        refused_case(
+            parent,
+            "agent-host-missing-kind",
+            &missing_kind,
+            "asks declaration: an ask has no kind".to_owned(),
+        ),
+        refused_case(
+            parent,
+            "agent-host-untyped-kind",
+            &untyped_kind,
+            "asks declaration: an ask's kind is not a string".to_owned(),
+        ),
+        refused_case(
+            parent,
+            "agent-host-missing-resource",
+            &missing_resource,
+            "asks declaration: an ask has no resource".to_owned(),
+        ),
+        refused_case(
+            parent,
+            "agent-host-untyped-resource",
+            &untyped_resource,
+            "asks declaration: an ask's resource is not a string".to_owned(),
+        ),
+    ];
+
+    let (unknown_kind_folder, unknown_kind_entry) =
+        asks_bundle(parent, "agent-host-unknown-kind", &unknown_kind);
+    let web_folder = parent.join("web-app");
+    assemble_at(&WEB_APP, &web_folder);
+    let web_entry = common::published(&web_folder);
+    assert_eq!(web_entry.0, WEB_APP_LAB_CID, "the fixture's pin");
+
+    // One fresh accepted test key signs every sibling.
+    let key = fresh_signing_key();
+    let mut entries = vec![published.entry.clone()];
+    let mut records = vec![sign(&key, &published.folder)];
+    let mut shared = StandIn::new();
+    register(&mut shared, &published.folder);
+    for case in &refused {
+        entries.push(case.entry.clone());
+        records.push(sign(&key, &case.folder));
+        register(&mut shared, &case.folder);
+    }
+    entries.push(unknown_kind_entry.clone());
+    records.push(sign(&key, &unknown_kind_folder));
+    register(&mut shared, &unknown_kind_folder);
+    entries.push(web_entry);
+    records.push(sign(&key, &web_folder));
+    register(&mut shared, &web_folder);
+    let mut lane = StandInRuntime::new(entries, records, vec![did_of(&key)]);
+
+    // The signed agent-host bundle's declaration is read from its checked
+    // bytes: the first pair is read on <principal>/, in file order.
+    let answer = launched(&mut lane, &mut shared);
+    assert_eq!(answer["status"], "starting");
+    let session = answer["session_id"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+    assert_eq!(
+        lane.declared_asks_of(&session),
+        Some(committed.clone()),
+        "the declaration is the committed asks, in file order"
+    );
+    assert_eq!(
+        lane.asks_of(&session),
+        Some(read_fixture(&AGENT_HOST, "asks.json")),
+        "the bytes are still kept, unchanged"
+    );
+    assert_eq!(
+        grant_view(&lane, &shared),
+        Vec::<Value>::new(),
+        "a matching signature adds no grant"
+    );
+
+    // Change the stored read kind to reed; the original CID is refused by
+    // check (e), the name compare's own text, and the first declaration stays.
+    let stored = published.folder.join("asks.json");
+    let text = String::from_utf8(fs::read(&stored).expect("read asks.json")).expect("UTF-8");
+    let reed = text.replacen("\"kind\": \"read\"", "\"kind\": \"reed\"", 1);
+    assert_ne!(reed, text, "the stored edit must change asks.json");
+    fs::write(&stored, reed.as_bytes()).expect("write asks.json");
+    let now = named(&published.folder).to_string();
+    assert_ne!(now, AGENT_HOST_LAB_CID);
+    let compare = checked(&published.folder)
+        .check_name(AGENT_HOST_LAB_CID)
+        .expect_err("the bytes changed")
+        .to_string();
+    assert!(compare.contains(AGENT_HOST_LAB_CID) && compare.contains(&now));
+    assert_eq!(
+        launch_cid(&mut lane, &mut shared, AGENT_HOST_LAB_CID),
+        Err((400, compare)),
+        "check (e) after the read kind becomes reed"
+    );
+    assert_eq!(
+        lane.declared_asks_of(&session),
+        Some(committed.clone()),
+        "the first session still declares read"
+    );
+    assert_eq!(listed_instances(&shared).len(), 1, "no new instance");
+    assert_eq!(
+        grant_view(&lane, &shared),
+        Vec::<Value>::new(),
+        "a refused launch adds no grant"
+    );
+
+    // Every declaration that fails the one parse refuses the launch, before
+    // the shared instance exists, and adds no grant.
+    for case in &refused {
+        assert_eq!(
+            launch_cid(&mut lane, &mut shared, &case.entry.0),
+            Err((400, case.refusal.clone())),
+            "{}",
+            case.folder.display()
+        );
+        assert_eq!(
+            listed_instances(&shared).len(),
+            1,
+            "{}: a refused launch adds no instance",
+            case.folder.display()
+        );
+        assert_eq!(
+            grant_view(&lane, &shared),
+            Vec::<Value>::new(),
+            "{}: a refused launch adds no grant",
+            case.folder.display()
+        );
+    }
+
+    // A signed unknown kind launches: the parse has no kind allow-list.
+    let answer = launch_cid(&mut lane, &mut shared, &unknown_kind_entry.0)
+        .unwrap_or_else(|(status, reason)| panic!("refused with {status}: {reason}"));
+    assert_eq!(keys(&answer), ["id", "name", "session_id", "status"]);
+    assert_eq!(answer["status"], "starting");
+    let unknown_session = answer["session_id"].as_str().expect("a session id");
+    let mut teleport = committed.clone();
+    teleport[0].0 = "teleport".to_owned();
+    assert_eq!(
+        lane.declared_asks_of(unknown_session),
+        Some(teleport),
+        "an unknown kind is declared as it is, with no allow-list"
+    );
+
+    // A signed web-app bundle has no asks.json: the launch goes on and the
+    // declaration is None.
+    let answer = launch_cid(&mut lane, &mut shared, WEB_APP_LAB_CID)
+        .unwrap_or_else(|(status, reason)| panic!("refused with {status}: {reason}"));
+    assert_eq!(answer["status"], "starting");
+    assert_eq!(
+        lane.declared_asks_of(answer["session_id"].as_str().expect("a session id")),
+        None,
+        "a bundle with no asks.json declares nothing"
+    );
+    assert_eq!(
+        lane.declared_asks_of("no-such-session"),
+        None,
+        "an unknown session declares nothing"
+    );
+    assert_eq!(listed_instances(&shared).len(), 3, "three launches");
+    assert_eq!(
+        grant_view(&lane, &shared),
+        Vec::<Value>::new(),
+        "no launch added a grant"
+    );
 }
 
 #[test]
