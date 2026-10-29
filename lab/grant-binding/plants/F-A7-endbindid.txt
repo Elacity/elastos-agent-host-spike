@@ -1,0 +1,11 @@
+id: F-A7-endbindid
+file: src/ledger.rs
+test: ledger::model_release_after_identity_change_is_refused
+test: ledger::model_timeout_after_identity_change_is_refused
+--- old
+        if registered.identity != held_identity {
+            return Err(HoldBind::Refused(Refuse::Identity));
+        }
+--- new
+        let _same_identity = registered.identity == held_identity;
+--- end
