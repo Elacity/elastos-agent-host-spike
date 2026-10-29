@@ -237,12 +237,8 @@ fn native_discovery_consumer_id(topic: &str, session_id: &str) -> String {
 /// Read the stored nickname for Chat. A storage error is reported, not treated
 /// as an absent nickname, so Chat never silently renames the user to "anon".
 fn load_local_chat_nickname(data_dir: &std::path::Path) -> anyhow::Result<Option<String>> {
-    elastos_identity::load_nickname(data_dir).with_context(|| {
-        format!(
-            "nickname unreadable: {}",
-            data_dir.join("did").join("nickname.enc").display()
-        )
-    })
+    elastos_identity::load_nickname(data_dir)
+        .with_context(|| crate::identity_cmd::unreadable_nickname_reason(data_dir))
 }
 
 fn resolve_chat_nickname(

@@ -214,8 +214,10 @@ release's Added, Changed, Fixed, Removed and Security bullets before you update;
 ### Fixed
 
 - Home, `elastos identity show` and Chat say when the stored nickname cannot be
-  read, as "nickname unreadable" with the file path. Before, a storage error
-  looked the same as a Home with no nickname.
+  read, as "nickname unreadable" with the file path, including in Home State
+  Probe. Before, a storage error looked the same as a Home with no nickname. A
+  nickname change on such a Home is refused with the same reason and keeps the
+  stored file.
 - Browser opens on a new install, shows "Starting Browser…" and shows images and fonts on busy news sites. Select text by dragging or with Cmd+A, press Cmd+C, then approve Home's copy prompt.
 - Assistant: Edit and Delete work on a message you just sent, a finished or stopped reply offers Delete and Regenerate right away, and the end of each reply stays above the message box. An interrupted model download resumes by itself a few times before asking you to Retry.
 - In the Assistant, Qwen2.5 1.5B now does ordinary requests instead of answering that they need a tool or permission. Models in the Assistant still cannot read files, open websites or send messages, and a small model may not always say so clearly; SmolLM2 135M often pretends it did. Homes on the old default instruction get the new one; a changed instruction is kept (#455).

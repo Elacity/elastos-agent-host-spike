@@ -2285,7 +2285,11 @@ async fn load_runtime_nickname(
 ) -> anyhow::Result<(Option<String>, Option<String>)> {
     match elastos_identity::load_nickname(data_dir) {
         Ok(nickname) => Ok((nickname, None)),
-        Err(err) => Ok((None, Some(format!("nickname unreadable: {err}")))),
+        // The reason carries the single prefix; readers print it as it is.
+        Err(_) => Ok((
+            None,
+            Some(crate::identity_cmd::unreadable_nickname_reason(data_dir)),
+        )),
     }
 }
 
@@ -2866,7 +2870,7 @@ fn write_home_state_probe(
     writeln!(out, "  Version:   {}", snapshot.version)?;
     writeln!(out, "  User:      {}", snapshot.user)?;
     match snapshot.nickname_error.as_deref() {
-        Some(reason) => writeln!(out, "  Nickname:  nickname unreadable: {reason}")?,
+        Some(reason) => writeln!(out, "  Nickname:  {reason}")?,
         None => writeln!(
             out,
             "  Nickname:  {}",
@@ -3378,19 +3382,36 @@ mod tests {
         let (nickname, error) = result.unwrap();
         assert_eq!(nickname, None);
         let error = error.expect("unreadable nickname must be reported, not read as absence");
-        assert!(error.starts_with("nickname unreadable: "), "{error}");
+        assert_eq!(
+            error,
+            format!("nickname unreadable: {}", nickname_path.display())
+        );
 
         let mut snapshot = sample_snapshot_with_components(&[]);
+        // The file is present and only its contents are unreadable: the summary
+        // must not fall back to the "no nickname" wording.
         snapshot.nickname = None;
         snapshot.nickname_error = Some(error);
         let mut out = Vec::new();
         write_home_state_probe(&mut out, &snapshot).unwrap();
         let rendered = String::from_utf8(out).unwrap();
-        assert!(
-            rendered.contains("  Nickname:  nickname unreadable: "),
-            "{rendered}"
+        let nick_line = rendered
+            .lines()
+            .find(|line| line.trim_start().starts_with("Nickname:"))
+            .unwrap_or_else(|| panic!("no Nickname line: {rendered}"));
+        assert_eq!(
+            nick_line.matches("nickname unreadable").count(),
+            1,
+            "the prefix must be printed once: {nick_line}"
         );
-        assert!(!rendered.contains("Nickname:  (not set)"), "{rendered}");
+        assert!(
+            nick_line.contains("nickname.enc"),
+            "the reason must name the file: {nick_line}"
+        );
+        assert!(
+            !nick_line.contains("(not set)"),
+            "unreadable is not absent: {nick_line}"
+        );
 
         // Present: the nickname is returned with no error.
         let data_dir = tempfile::tempdir().unwrap();
