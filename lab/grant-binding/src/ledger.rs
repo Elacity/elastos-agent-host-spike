@@ -3129,6 +3129,294 @@ fn model_unknown_from_another_handle_does_not_mark_the_hold() {
 }
 
 #[test]
+fn model_forged_append_does_not_mark_another_handle() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    verifier.admit(10);
+    let call = verifier.open_call(first);
+    let reservation = verifier.reserve(&call, &guest(holder), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_append: true,
+        ..guest(other)
+    };
+    assert!(request.forged_append);
+    let unknown = verifier
+        .settle(
+            &verifier.open_call(second),
+            &request,
+            reservation,
+            SettleOutcome::Unknown,
+        )
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert_eq!(verifier.release(&call, &guest(holder), reservation), Ok(()));
+}
+
+#[test]
+fn model_forged_overwrite_does_not_mark_another_handle() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    verifier.admit(10);
+    let call = verifier.open_call(first);
+    let reservation = verifier.reserve(&call, &guest(holder), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_overwrite: true,
+        ..guest(other)
+    };
+    assert!(request.forged_overwrite);
+    let unknown = verifier
+        .settle(
+            &verifier.open_call(second),
+            &request,
+            reservation,
+            SettleOutcome::Unknown,
+        )
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert_eq!(verifier.release(&call, &guest(holder), reservation), Ok(()));
+}
+
+#[test]
+fn model_forged_child_journal_does_not_mark_another_handle() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    verifier.admit(10);
+    let call = verifier.open_call(first);
+    let reservation = verifier.reserve(&call, &guest(holder), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_child_journal: true,
+        ..guest(other)
+    };
+    assert!(request.forged_child_journal);
+    let unknown = verifier
+        .settle(
+            &verifier.open_call(second),
+            &request,
+            reservation,
+            SettleOutcome::Unknown,
+        )
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert_eq!(verifier.release(&call, &guest(holder), reservation), Ok(()));
+}
+
+#[test]
+fn model_forged_identity_does_not_mark_another_handle() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    verifier.admit(10);
+    let call = verifier.open_call(first);
+    let reservation = verifier.reserve(&call, &guest(holder), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..guest(other)
+    };
+    assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
+    let unknown = verifier
+        .settle(
+            &verifier.open_call(second),
+            &request,
+            reservation,
+            SettleOutcome::Unknown,
+        )
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert_eq!(verifier.release(&call, &guest(holder), reservation), Ok(()));
+}
+
+#[test]
+fn model_forged_session_does_not_mark_another_handle() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    verifier.admit(10);
+    let call = verifier.open_call(first);
+    let reservation = verifier.reserve(&call, &guest(holder), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_session: Some("session-b".to_owned()),
+        ..guest(other)
+    };
+    assert_eq!(request.forged_session.as_deref(), Some("session-b"));
+    let unknown = verifier
+        .settle(
+            &verifier.open_call(second),
+            &request,
+            reservation,
+            SettleOutcome::Unknown,
+        )
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert_eq!(verifier.release(&call, &guest(holder), reservation), Ok(()));
+}
+
+#[test]
+fn model_forged_instance_does_not_mark_another_handle() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    verifier.admit(10);
+    let call = verifier.open_call(first);
+    let reservation = verifier.reserve(&call, &guest(holder), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_instance: Some(second),
+        ..guest(other)
+    };
+    assert_eq!(request.forged_instance, Some(second));
+    let unknown = verifier
+        .settle(
+            &verifier.open_call(second),
+            &request,
+            reservation,
+            SettleOutcome::Unknown,
+        )
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert_eq!(verifier.release(&call, &guest(holder), reservation), Ok(()));
+}
+
+#[test]
+fn model_forged_ceiling_does_not_mark_another_handle() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    verifier.admit(10);
+    let call = verifier.open_call(first);
+    let reservation = verifier.reserve(&call, &guest(holder), 4).expect("reserve");
+    let request = GuestRequest {
+        forged_ceiling: 1,
+        ..guest(other)
+    };
+    assert!(request.forged_ceiling > 0);
+    let unknown = verifier
+        .settle(
+            &verifier.open_call(second),
+            &request,
+            reservation,
+            SettleOutcome::Unknown,
+        )
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert_eq!(verifier.release(&call, &guest(holder), reservation), Ok(()));
+}
+
+#[test]
+fn model_reported_usage_does_not_mark_another_handle() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-a");
+    let holder = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let other = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    assert_ne!(holder, other);
+    verifier.admit(10);
+    let call = verifier.open_call(first);
+    let reservation = verifier.reserve(&call, &guest(holder), 4).expect("reserve");
+    let request = GuestRequest {
+        reported_usage: 1,
+        ..guest(other)
+    };
+    assert!(request.reported_usage > 0);
+    let unknown = verifier
+        .settle(
+            &verifier.open_call(second),
+            &request,
+            reservation,
+            SettleOutcome::Unknown,
+        )
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    let stayed = books(&verifier);
+    assert_eq!(stayed.charged, 0);
+    assert_eq!(stayed.held, 4);
+    assert_eq!(stayed.open.get(&reservation.id), Some(&4));
+    assert_eq!(verifier.release(&call, &guest(holder), reservation), Ok(()));
+}
+
+#[test]
 fn model_second_agent_does_not_raise_the_ceiling() {
     let mut verifier = Verifier::new();
     let first = verifier.register_instance("agent-1", "session-a");
