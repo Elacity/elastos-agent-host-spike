@@ -1431,6 +1431,37 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   (WP182): the same test fails, because a cell naming `op` and `config` only is
   then accepted for `init`.
 
+- WP183: Character literals bypass normalization and hide a required field.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP184: A raw field identifier keeps its Rust prefix as its wire name.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP185: The Inputs comparison accepts bare field names.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP186: The Inputs comparison accepts the fields in another order.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP187: The Inputs reader accepts an opening parenthesis.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP188: The Inputs reader accepts a closing parenthesis.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP189: The Inputs reader accepts an empty item.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP190: The Inputs reader accepts an unterminated backtick span.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP191: The Inputs reader accepts a backtick inside a name.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP192: A malformed Inputs cell passes instead of returning its row refusal.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP193: A source without enum Request loses its Inputs refusal.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP194: A source without fn handle loses its Inputs refusal.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP195: An absent Request arm loses its Inputs refusal.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP196: An unreadable declaration source loses its Inputs refusal.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+- WP197: An unreadable dispatch source loses its row refusal.
+  `operations_table_row_check_refuses_each_bad_table` checks this rule.
+
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,
 so none can produce a CAUGHT line in this list. That file names each of them,

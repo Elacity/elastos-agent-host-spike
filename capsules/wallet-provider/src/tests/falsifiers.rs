@@ -254,7 +254,9 @@ use std::process::Command;
 /// no `serde` attribute, and WP182, which makes the Inputs compare tolerate a
 /// cell that stops before a declared field; both are CAUGHT on the Mac by
 /// `operations_table_row_check_refuses_each_bad_table`.
-const EXPECTED_FALSIFIERS: usize = 170;
+/// WP183 through WP197 exercise character and raw-identifier boundaries,
+/// quoting, order, malformed cells, and source or arm refusals in that test.
+const EXPECTED_FALSIFIERS: usize = 185;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
