@@ -1,4 +1,4 @@
 grant-binding-003 lab/grant-binding/src/ledger.rs 19e5ce4dea7327de18fbc7546efe18faff937116 sha256 3c32d6179842726deec6f98acbd70c5f0f689621917dbae970d2d60afa2e2e1d
 
 probe: test_immediate_timeout_after_unknown_is_refused
-observed: timeout_hold returned Ok
+observed: timeout_hold returned Ok because no deadline was set

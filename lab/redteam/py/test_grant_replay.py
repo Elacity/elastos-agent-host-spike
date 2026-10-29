@@ -72,9 +72,9 @@ LINK_NAME = "redteam_manifest_is_not_a_grant_link"
 TIMEOUT_NAME = "test_immediate_timeout_after_unknown_is_refused"
 TIMEOUT_FINDING = REPO / "lab" / "redteam" / "findings" / "grant-binding-003.md"
 TIMEOUT_LEDGER = "lab/grant-binding/src/ledger.rs"
-TIMEOUT_OK_PANIC = "immediate timeout returned Ok"
+TIMEOUT_OK_PANIC = "immediate timeout returned Ok because no deadline was set"
 TIMEOUT_FREED_PANIC = "immediate timeout freed the hold"
-TIMEOUT_OK_OBSERVED = "timeout_hold returned Ok"
+TIMEOUT_OK_OBSERVED = "timeout_hold returned Ok because no deadline was set"
 TIMEOUT_FREED_OBSERVED = "timeout_hold freed the hold"
 PROBE_NAMES = (SESSION_NAME, SIBLING_NAME, CLEAN_NAME, PATH_NAME, IDENTITY_NAME)
 STALE_NAMES = (SESSION_NAME, SIBLING_NAME)
@@ -381,7 +381,7 @@ fn test_immediate_timeout_after_unknown_is_refused() {
     assert_eq!(unknown, SettleRefuse::UnknownOutcome);
     assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
     match verifier.timeout_hold(&call, &request, reservation) {
-        Ok(()) => panic!("immediate timeout returned Ok"),
+        Ok(_) => panic!("immediate timeout returned Ok because no deadline was set"),
         Err(refusal) => assert!(!refusal.to_string().is_empty()),
     }
     match verifier.reserve(&call, &request, 1) {
@@ -574,9 +574,10 @@ def handle_timeout(real_error, outcome, finding):
     """Classify one immediate-timeout result.
 
     A set ``real_error`` is raised and writes nothing. A pass deletes a
-    stale finding. An Ok panic writes ``timeout_hold returned Ok``. A freed
-    hold writes ``timeout_hold freed the hold``. Both panics, any other
-    failure, and an error raise and leave the destination unchanged.
+    stale finding. An Ok panic writes ``timeout_hold returned Ok because no
+    deadline was set``. A freed hold writes ``timeout_hold freed the hold``.
+    Both panics, any other failure, and an error raise and leave the
+    destination unchanged.
     """
     if real_error is not None:
         raise real_error
@@ -1231,6 +1232,11 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertLess(timeout, again)
         self.assertNotIn("release", body)
         self.assertNotIn("reserve", body[unknown:timeout])
+        self.assertEqual(
+            body.count("timeout_hold(&call, &request, reservation)"), 1
+        )
+        self.assertNotIn("set_verifier_deadline", body)
+        self.assertNotIn("Ok(())", body)
         self.assertIn(
             "use grant_binding::ledger::{ReserveRefuse, SettleOutcome, SettleRefuse};",
             REPLAY_RS,
