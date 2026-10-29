@@ -5,8 +5,10 @@
 //! One filter keeps a grant whose life is `Live`. An ended session stays.
 //!
 //! `post_capsules`, `get_capsules` and `delete_capsule` answer the capsule
-//! routes for an admitted resident guest. Launch answers `starting` with the
-//! Bus session before `finish_start`. A stop stores `stopped` and revokes
+//! routes for an admitted resident guest. Admission names a bundle by its lab
+//! CID and checks the publisher's name signature; launch names it by that lab
+//! CID only (M1 check B1). Launch answers `starting` with the Bus session
+//! before `finish_start`. A stop stores `stopped` and revokes
 //! that session's `Live` grants. One map names the five statuses. One age
 //! compare keeps a `failed` or `stopped` entry. One check refuses a client
 //! on a shell-only route. `authorise` is a lab seam on that same filter.
@@ -26,8 +28,12 @@
 //! `Request timed out` and `runtime` for each pending request at least 300
 //! seconds old. A granted or denied record and its instance stay.
 
+use capsule_identity::{
+    checked_bundle, verify_checked_signature, CheckedBundle, LabCid, NameSignature, Refusal,
+};
 use serde_json::{json, Map, Value};
 use std::path::{Component, Path, PathBuf};
+use std::str::FromStr;
 
 const LIVE_SCOPE: &str = "all_sessions_live";
 const RESIDENT_WORLD: &str = "resident-capsule";
@@ -80,11 +86,17 @@ struct Grant {
     session_ended: bool,
 }
 
+/// One admitted row. It keeps what launch needs to re-run the same check:
+/// the bundle path, the publisher's signature and the accepted list, beside
+/// the CID it was admitted under.
 struct Admitted {
-    path: String,
+    cid: LabCid,
     name: String,
     start: Start,
     world: &'static str,
+    bundle: PathBuf,
+    sig: NameSignature,
+    accepted: Vec<String>,
 }
 
 struct Instance {
@@ -571,24 +583,33 @@ impl StandIn {
 
     /// Lab test seam, not a route.
     ///
-    /// Stores one resident guest for `path`. This method reads no directory.
+    /// Stores one resident guest for the bundle at `bundle`, keyed by that
+    /// bundle's lab CID, with the manifest's own name (M1 check B1). The one
+    /// walk is `checked_bundle`; the one signature check is
+    /// `verify_checked_signature` over the bytes that walk read, against the
+    /// explicit `accepted` publisher list. A walk refusal is status 400 with
+    /// its own text; a signature or name refusal is status 403 with its own
+    /// text. A refused admission stores nothing. `Ok(())` grants nothing.
     pub fn admit_resident(
         &mut self,
-        path: &str,
-        name: &str,
+        bundle: &Path,
+        sig: &NameSignature,
+        accepted: &[String],
         start: Start,
     ) -> Result<(), (u16, String)> {
-        if path.is_empty() || name.is_empty() {
-            return Err((400, "resident admit needs a path and a name".to_owned()));
-        }
-        if self.admitted.iter().any(|row| row.path == path) {
-            return Err((400, format!("resident path already admitted: {path}")));
+        let checked = check_bundle(bundle, sig, accepted)?;
+        let cid = checked.cid();
+        if self.admitted.iter().any(|row| row.cid == cid) {
+            return Err((403, format!("bundle already admitted: {cid}")));
         }
         self.admitted.push(Admitted {
-            path: path.to_owned(),
-            name: name.to_owned(),
+            cid,
+            name: checked.manifest_name().to_owned(),
             start,
             world: RESIDENT_WORLD,
+            bundle: bundle.to_path_buf(),
+            sig: sig.clone(),
+            accepted: accepted.to_vec(),
         });
         Ok(())
     }
@@ -634,14 +655,35 @@ impl StandIn {
     }
 
     /// `POST /api/capsules`.
+    ///
+    /// The body's only key is `cid`, a printed lab CID. Only a row admitted
+    /// under exactly that CID launches; there is no path fallback (M1 check
+    /// B1). The row's one walk and one signature check run again over the
+    /// bytes on disk now, with the row's own signature and accepted list, so
+    /// bytes changed or a signature that no longer verifies after admission
+    /// is refused with status 403 and the library's own text. A launch adds
+    /// one `Starting` instance and no grant.
     pub fn post_capsules(
         &mut self,
         caller: Caller<'_>,
         body: &Value,
     ) -> Result<Value, (u16, String)> {
         require_shell(caller)?;
-        let path = launch_path(body)?;
-        let (name, start) = self.admitted_start(path)?;
+        let cid = launch_cid(body)?;
+        let row = self.admit_row(cid)?;
+        let fresh = check_bundle(&row.bundle, &row.sig, &row.accepted)?;
+        if fresh.cid() != row.cid {
+            return Err((
+                403,
+                format!(
+                    "admitted bundle is now named {}; it was admitted as {}",
+                    fresh.cid(),
+                    row.cid
+                ),
+            ));
+        }
+        let name = row.name.clone();
+        let start = row.start.clone();
         let id = self.mint_id();
         let phase = ResidentStatus::Starting;
         self.instances.push(Instance {
@@ -786,18 +828,18 @@ impl StandIn {
         id
     }
 
-    fn admitted_start(&self, path: &str) -> Result<(String, Start), (u16, String)> {
-        if let Some(row) = self.admitted.iter().find(|row| row.path == path) {
-            return Ok((row.name.clone(), row.start.clone()));
+    fn admit_row(&self, cid: LabCid) -> Result<&Admitted, (u16, String)> {
+        if let Some(row) = self.admitted.iter().find(|row| row.cid == cid) {
+            return Ok(row);
         }
-        Err(self.not_resident(path))
+        Err(self.not_admitted(cid))
     }
 
-    fn not_resident(&self, path: &str) -> (u16, String) {
+    fn not_admitted(&self, cid: LabCid) -> (u16, String) {
         (
-            400,
+            404,
             format!(
-                "not a resident component: {path} world {}",
+                "no bundle is admitted under {cid} in world {}",
                 self.resident_world()
             ),
         )
@@ -928,26 +970,49 @@ fn status_text(status: ResidentStatus) -> &'static str {
     }
 }
 
-fn launch_path(body: &Value) -> Result<&str, (u16, String)> {
+/// One library refusal as this stand-in answers it: its own text, unchanged.
+fn said(refusal: &Refusal) -> String {
+    refusal.to_string()
+}
+
+/// The one bundle check. Admission and launch both call it: one walk over the
+/// bytes on disk now, then the one signature check over the bytes that walk
+/// read against the explicit accepted list. A walk refusal is status 400 and
+/// a signature or name refusal status 403, each with the library's own text.
+fn check_bundle(
+    bundle: &Path,
+    sig: &NameSignature,
+    accepted: &[String],
+) -> Result<CheckedBundle, (u16, String)> {
+    let checked = checked_bundle(bundle).map_err(|refusal| (400, said(&refusal)))?;
+    verify_checked_signature(&checked, sig, accepted).map_err(|refusal| (403, said(&refusal)))?;
+    Ok(checked)
+}
+
+/// The launch body is an object whose only key is a string `cid`, parsed as
+/// one printed lab CID by `LabCid`'s `FromStr`. A `path` or any other key is
+/// status 400 with its own reason.
+fn launch_cid(body: &Value) -> Result<LabCid, (u16, String)> {
     let Some(object) = body.as_object() else {
-        return Err((400, "resident launch body needs path".to_owned()));
+        return Err((400, "resident launch body needs cid".to_owned()));
     };
-    let mut path = None;
-    let mut path_not_string = false;
+    let mut cid = None;
+    let mut cid_not_string = false;
     for (key, value) in object {
-        if key == "path" {
+        if key == "cid" {
             match value {
-                Value::String(text) => path = Some(text.as_str()),
-                _ => path_not_string = true,
+                Value::String(text) => cid = Some(text.as_str()),
+                _ => cid_not_string = true,
             }
         } else {
             return Err((400, format!("resident launch body rejects {key}")));
         }
     }
-    if path_not_string {
-        return Err((400, "resident launch path must be a string".to_owned()));
+    if cid_not_string {
+        return Err((400, "resident launch cid must be a string".to_owned()));
     }
-    path.ok_or_else(|| (400, "resident launch body needs path".to_owned()))
+    let printed = cid.ok_or_else(|| (400, "resident launch body needs cid".to_owned()))?;
+    LabCid::from_str(printed).map_err(|refusal| (400, said(&refusal)))
 }
 
 fn launch_body(id: &str, name: &str, phase: ResidentStatus) -> Value {
@@ -1210,6 +1275,113 @@ fn stop_reason(body: &Value) -> Result<&str, (u16, String)> {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+    use std::fs;
+
+    use capsule_identity::sign_bundle;
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+    use tempfile::TempDir;
+
+    /// The committed `agent-host` fixture: a real bundle the walk accepts.
+    const AGENT_HOST_FILES: [(&str, &[u8]); 2] = [
+        (
+            "capsule.json",
+            include_bytes!("../../capsule-identity/fixtures/agent-host/capsule.json"),
+        ),
+        (
+            "asks.json",
+            include_bytes!("../../capsule-identity/fixtures/agent-host/asks.json"),
+        ),
+    ];
+
+    /// One signed fixture bundle in a fresh tempdir, its accepted publisher
+    /// and the key that signed it. A second `Shared` is a second bundle with
+    /// other bytes, so it has its own lab CID.
+    struct Shared {
+        bundle: TempDir,
+        accepted: Vec<String>,
+        key: SigningKey,
+    }
+
+    impl Shared {
+        fn new() -> Self {
+            let bundle = TempDir::new().expect("make a bundle tempdir");
+            write_agent_host(bundle.path());
+            let key = fresh_key();
+            let accepted = vec![did_of(&key)];
+            Shared {
+                bundle,
+                accepted,
+                key,
+            }
+        }
+
+        fn path(&self) -> &Path {
+            self.bundle.path()
+        }
+
+        /// The printed lab CID of this bundle's bytes: identity, not a grant.
+        fn cid(&self) -> String {
+            checked_bundle(self.path())
+                .expect("the walk names the fixture bundle")
+                .cid()
+                .to_string()
+        }
+
+        fn signature(&self) -> NameSignature {
+            sign_bundle(&self.key, self.path()).expect("sign the fixture bundle")
+        }
+
+        fn body(&self) -> Value {
+            json!({ "cid": self.cid() })
+        }
+
+        fn admit(&self, standin: &mut StandIn, start: Start) -> Result<(), (u16, String)> {
+            self.admit_with(standin, &self.signature(), start)
+        }
+
+        fn admit_with(
+            &self,
+            standin: &mut StandIn,
+            sig: &NameSignature,
+            start: Start,
+        ) -> Result<(), (u16, String)> {
+            standin.admit_resident(self.path(), sig, &self.accepted, start)
+        }
+
+        fn launch(&self, standin: &mut StandIn) -> Result<Value, (u16, String)> {
+            standin.post_capsules(Caller::Shell, &self.body())
+        }
+    }
+
+    /// A second signed bundle with other bytes and so another lab CID.
+    fn other_bundle() -> Shared {
+        let other = Shared::new();
+        let asks = other.path().join("asks.json");
+        let mut bytes = fs::read(&asks).expect("read asks.json");
+        bytes.push(b'\n');
+        fs::write(&asks, &bytes).expect("change the second bundle");
+        other
+    }
+
+    fn write_agent_host(root: &Path) {
+        for (path, bytes) in AGENT_HOST_FILES {
+            let target = root.join(path);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).expect("make a bundle folder");
+            }
+            fs::write(&target, bytes).expect("write a bundle file");
+        }
+    }
+
+    /// A fresh Ed25519 test key. Nothing writes it or keeps a seed.
+    fn fresh_key() -> SigningKey {
+        SigningKey::generate(&mut OsRng)
+    }
+
+    fn did_of(key: &SigningKey) -> String {
+        elastos_identity::encode_signing_key_did(key)
+    }
 
     fn keys(value: &Value) -> BTreeSet<String> {
         value
@@ -1607,20 +1779,12 @@ mod tests {
         );
     }
 
-    const SHARED_PATH: &str = "/capsules/read-shared";
-    const SHARED_NAME: &str = "read-shared";
-    const AGENT_A_PATH: &str = "/capsules/agent-a";
-    const AGENT_A_NAME: &str = "agent-a";
-    const AGENT_B_PATH: &str = "/capsules/agent-b";
-    const AGENT_B_NAME: &str = "agent-b";
-
-    fn shared_body() -> Value {
-        json!({ "path": SHARED_PATH })
-    }
-
-    fn agent_body(path: &str) -> Value {
-        json!({ "path": path })
-    }
+    /// The manifest `name` of `AGENT_HOST_FILES`.
+    const SHARED_NAME: &str = "agent-host";
+    /// Names no fixture manifest carries: the list entry keeps the admitted
+    /// manifest's own name, so those entries read the shared name instead.
+    const AGENT_A_NAME: &str = SHARED_NAME;
+    const AGENT_B_NAME: &str = SHARED_NAME;
 
     fn shell_list(standin: &StandIn) -> Value {
         standin
@@ -1650,24 +1814,22 @@ mod tests {
         );
     }
 
-    fn admit_shared(standin: &mut StandIn, start: Start) {
-        standin
-            .admit_resident(SHARED_PATH, SHARED_NAME, start)
-            .expect("the stand-in admits the resident path");
+    fn admit_shared(shared: &Shared, standin: &mut StandIn, start: Start) {
+        shared
+            .admit(standin, start)
+            .expect("the stand-in admits the signed bundle");
     }
 
-    fn launch_starting(standin: &mut StandIn) -> String {
-        let launched = standin
-            .post_capsules(Caller::Shell, &shared_body())
-            .expect("the stand-in launches");
+    fn launch_starting(shared: &Shared, standin: &mut StandIn) -> String {
+        let launched = shared.launch(standin).expect("the stand-in launches");
         launched["id"]
             .as_str()
             .expect("the stand-in names the launch")
             .to_owned()
     }
 
-    fn launch_finished(standin: &mut StandIn) -> String {
-        let id = launch_starting(standin);
+    fn launch_finished(shared: &Shared, standin: &mut StandIn) -> String {
+        let id = launch_starting(shared, standin);
         standin
             .finish_start(&id)
             .expect("the stand-in finishes start");
@@ -1710,9 +1872,9 @@ mod tests {
         assert_eq!(entry, Some(&expected), "{message}");
     }
 
-    fn assert_next_launch(standin: &mut StandIn, id: &str) {
-        let launched = standin
-            .post_capsules(Caller::Shell, &shared_body())
+    fn assert_next_launch(shared: &Shared, standin: &mut StandIn, id: &str) {
+        let launched = shared
+            .launch(standin)
             .expect("the stand-in launches after a refused stop");
         assert_eq!(
             launched["id"], id,
@@ -1834,43 +1996,24 @@ mod tests {
     }
 
     #[test]
-    fn standin_one_admit_per_path() {
+    fn standin_one_admit_per_cid() {
+        let shared = Shared::new();
+        let other = other_bundle();
         let mut standin = StandIn::new();
-        let empty_path = standin.admit_resident("", SHARED_NAME, Start::Ok);
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let second = shared.admit(&mut standin, Start::Error("replaced".to_owned()));
+        let expected = format!("bundle already admitted: {}", shared.cid());
         assert!(
-            matches!(
-                &empty_path,
-                Err((400, reason)) if reason == "resident admit needs a path and a name"
-            ),
-            "the stand-in refuses an empty resident path: {empty_path:?}"
+            matches!(&second, Err((403, reason)) if reason == &expected),
+            "the stand-in keeps the first admit of one CID: {second:?}"
         );
-        let empty_name = standin.admit_resident(SHARED_PATH, "", Start::Ok);
+        let same_bytes = other.admit(&mut standin, Start::Ok);
         assert!(
-            matches!(
-                &empty_name,
-                Err((400, reason)) if reason == "resident admit needs a path and a name"
-            ),
-            "the stand-in refuses an empty resident name: {empty_name:?}"
+            same_bytes.is_ok(),
+            "the stand-in admits a second bundle with another CID: {same_bytes:?}"
         );
-        standin
-            .admit_resident(SHARED_PATH, SHARED_NAME, Start::Ok)
-            .expect("the stand-in admits one resident path");
-        let second = standin.admit_resident(
-            SHARED_PATH,
-            SHARED_NAME,
-            Start::Error("replaced".to_owned()),
-        );
-        assert!(
-            matches!(
-                &second,
-                Err((400, reason))
-                    if reason.starts_with("resident path already admitted:")
-                        && reason.contains(SHARED_PATH)
-            ),
-            "the stand-in keeps the first admit: {second:?}"
-        );
-        let launched = standin
-            .post_capsules(Caller::Shell, &shared_body())
+        let launched = shared
+            .launch(&mut standin)
             .expect("the stand-in launches the first admit");
         let id = launched["id"]
             .as_str()
@@ -1886,82 +2029,93 @@ mod tests {
     }
 
     #[test]
-    fn standin_unadmitted_path_is_refused() {
+    fn standin_unadmitted_cid_is_refused() {
+        let shared = Shared::new();
         let mut standin = StandIn::new();
-        let result = standin.post_capsules(Caller::Shell, &shared_body());
-        assert!(
-            matches!(
-                &result,
-                Err((400, reason))
-                    if reason.starts_with("not a resident component:")
-                        && reason.contains(SHARED_PATH)
-                        && reason.contains("resident-capsule")
-            ),
-            "the stand-in refuses an unadmitted path: {result:?}"
+        let result = shared.launch(&mut standin);
+        let expected = format!(
+            "no bundle is admitted under {} in world {}",
+            shared.cid(),
+            RESIDENT_WORLD
         );
-        standin
-            .admit_resident(SHARED_PATH, SHARED_NAME, Start::Ok)
-            .expect("the stand-in admits the path after the refusal");
-        let launched = standin
-            .post_capsules(Caller::Shell, &shared_body())
-            .expect("the stand-in launches once the path is admitted");
+        assert!(
+            matches!(&result, Err((404, reason)) if reason == &expected),
+            "the stand-in refuses a CID no bundle was admitted under: {result:?}"
+        );
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let launched = shared
+            .launch(&mut standin)
+            .expect("the stand-in launches once the CID is admitted");
         assert_eq!(
             launched["id"], "component-1",
-            "the stand-in does not spend an id on an unadmitted path"
+            "the stand-in does not spend an id on an unadmitted CID"
         );
     }
 
     #[test]
-    fn standin_launch_body_is_path_only() {
+    fn standin_launch_body_is_cid_only() {
+        let shared = Shared::new();
         let mut standin = StandIn::new();
-        standin
-            .admit_resident(SHARED_PATH, SHARED_NAME, Start::Ok)
-            .expect("the stand-in admits the resident path");
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let unknown = UnknownCid::new();
         let missing = standin.post_capsules(Caller::Shell, &json!({}));
         assert_launch_400(
             &missing,
-            "path",
-            "the stand-in refuses a launch body with no path",
+            "needs cid",
+            "the stand-in refuses a launch body with no cid",
         );
-        let numeric = standin.post_capsules(Caller::Shell, &json!({"path": 1}));
+        let numeric = standin.post_capsules(Caller::Shell, &json!({ "cid": 1 }));
         assert_launch_400(
             &numeric,
-            "path",
-            "the stand-in refuses a launch path that is not a string",
+            "cid must be a string",
+            "the stand-in refuses a launch cid that is not a string",
         );
-        let extra =
-            standin.post_capsules(Caller::Shell, &json!({"path": SHARED_PATH, "cid": "bafy"}));
+        let extra = standin.post_capsules(
+            Caller::Shell,
+            &json!({ "cid": shared.cid(), "component": SHARED_NAME }),
+        );
         assert_launch_400(
             &extra,
-            "cid",
+            "rejects component",
             "the stand-in refuses a launch body with an extra key",
         );
         let not_object = standin.post_capsules(Caller::Shell, &Value::Null);
         assert_launch_400(
             &not_object,
-            "path",
+            "needs cid",
             "the stand-in refuses a launch body that is not an object",
         );
         let principal = standin.post_capsules(
             Caller::Shell,
-            &json!({"path": SHARED_PATH, "principal_id": "person"}),
+            &json!({ "cid": shared.cid(), "principal_id": "person" }),
         );
         assert_launch_400(
             &principal,
-            "principal_id",
+            "rejects principal_id",
             "the stand-in refuses principal_id on the launch body",
         );
         let grant = standin.post_capsules(
             Caller::Shell,
-            &json!({"path": SHARED_PATH, "launch_grant": "token"}),
+            &json!({ "cid": shared.cid(), "launch_grant": "token" }),
         );
         assert_launch_400(
             &grant,
-            "launch_grant",
+            "rejects launch_grant",
             "the stand-in refuses launch_grant on the launch body",
         );
-        let launched = standin
-            .post_capsules(Caller::Shell, &shared_body())
+        let not_a_cid = standin.post_capsules(Caller::Shell, &json!({ "cid": "bafybeix" }));
+        assert_launch_400(
+            &not_a_cid,
+            "is not a lab CID",
+            "the stand-in refuses a cid that is not a printed lab CID",
+        );
+        let unknown_cid = standin.post_capsules(Caller::Shell, &unknown.body());
+        assert!(
+            matches!(&unknown_cid, Err((404, reason)) if reason.contains(&unknown.0)),
+            "the stand-in refuses a well-formed CID no bundle was admitted under: {unknown_cid:?}"
+        );
+        let launched = shared
+            .launch(&mut standin)
             .expect("the stand-in launches after the refused bodies");
         assert_eq!(
             launched["id"], "component-1",
@@ -1969,19 +2123,309 @@ mod tests {
         );
     }
 
+    /// One printed lab CID that parses and that no fixture admission stored:
+    /// the encoder's own name for an empty directory, with its final digit
+    /// changed.
+    struct UnknownCid(String);
+
+    impl UnknownCid {
+        fn new() -> Self {
+            let mut cid = capsule_identity::encode_entries(&[])
+                .expect("the encoder names an empty directory")
+                .to_string();
+            let last = cid.pop().expect("a printed lab CID is not empty");
+            let flipped = if last == 'a' { 'b' } else { 'a' };
+            Self(format!("{cid}{flipped}"))
+        }
+
+        fn body(&self) -> Value {
+            json!({ "cid": self.0 })
+        }
+    }
+
+    #[test]
+    fn standin_launch_by_path_is_refused() {
+        let shared = Shared::new();
+        let mut standin = StandIn::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let bodies = [
+            json!({ "path": shared.path().display().to_string() }),
+            json!({ "cid": shared.cid(), "path": shared.path().display().to_string() }),
+        ];
+        for body in bodies {
+            let refused = standin.post_capsules(Caller::Shell, &body);
+            assert_launch_400(
+                &refused,
+                "rejects path",
+                "the stand-in refuses a launch body that names a path",
+            );
+        }
+        assert_eq!(
+            shell_list(&standin),
+            json!({ "capsules": [] }),
+            "the stand-in launches nothing for a path body"
+        );
+        let launched = shared
+            .launch(&mut standin)
+            .expect("the stand-in launches the admitted CID only");
+        assert_eq!(
+            launched["id"], "component-1",
+            "the stand-in does not spend an id on a path body"
+        );
+    }
+
+    #[test]
+    fn standin_unsigned_bundle_is_refused() {
+        let shared = Shared::new();
+        let stranger = fresh_key();
+        let mut standin = StandIn::new();
+        let sig = sign_bundle(&stranger, shared.path()).expect("the stranger signs the bundle");
+        let refused = standin.admit_resident(shared.path(), &sig, &shared.accepted, Start::Ok);
+        let expected = Refusal::SignerNotAccepted {
+            did: did_of(&stranger),
+        }
+        .to_string();
+        assert!(
+            matches!(&refused, Err((403, reason)) if reason == &expected),
+            "the stand-in refuses a signer outside the accepted list: {refused:?}"
+        );
+        assert!(
+            standin.admitted.is_empty(),
+            "a refused admission stores no row"
+        );
+        let launch = shared.launch(&mut standin);
+        let reason = format!(
+            "no bundle is admitted under {} in world {RESIDENT_WORLD}",
+            shared.cid()
+        );
+        assert!(
+            matches!(&launch, Err((404, got)) if got == &reason),
+            "the stand-in refuses to launch the CID after the refused admission: {launch:?}"
+        );
+        let none_accepted =
+            standin.admit_resident(shared.path(), &shared.signature(), &[], Start::Ok);
+        let expected = Refusal::SignerNotAccepted {
+            did: did_of(&shared.key),
+        }
+        .to_string();
+        assert!(
+            matches!(&none_accepted, Err((403, reason)) if reason == &expected),
+            "an empty accepted list refuses every signer: {none_accepted:?}"
+        );
+        assert!(standin.admitted.is_empty(), "still no row is stored");
+    }
+
+    #[test]
+    fn standin_mismatched_bundle_is_refused() {
+        let signed = Shared::new();
+        let other = other_bundle();
+        let other_cid = checked_bundle(other.path())
+            .expect("the walk names the second bundle")
+            .cid();
+        let signed_cid = checked_bundle(signed.path())
+            .expect("the walk names the signed bundle")
+            .cid();
+        assert_ne!(signed_cid, other_cid, "two bundles, two lab CIDs");
+        let mut standin = StandIn::new();
+        let refused = standin.admit_resident(
+            other.path(),
+            &signed.signature(),
+            &signed.accepted,
+            Start::Ok,
+        );
+        let expected = Refusal::NameMismatch {
+            actual: other_cid,
+            claimed: signed_cid.to_string(),
+        }
+        .to_string();
+        assert!(
+            matches!(&refused, Err((403, reason)) if reason == &expected),
+            "the stand-in refuses a signature over another bundle's bytes: {refused:?}"
+        );
+        assert!(
+            standin.admitted.is_empty(),
+            "a refused admission stores no row"
+        );
+        let launch = standin.post_capsules(Caller::Shell, &json!({ "cid": other_cid.to_string() }));
+        assert!(
+            matches!(&launch, Err((404, reason)) if reason.contains(&other_cid.to_string())),
+            "the stand-in refuses to launch the other bundle's CID: {launch:?}"
+        );
+    }
+
+    #[test]
+    fn standin_flipped_byte_after_signing_is_refused() {
+        let shared = Shared::new();
+        let sig = shared.signature();
+        let before = checked_bundle(shared.path())
+            .expect("the walk names the bundle before the change")
+            .cid();
+        let asks = shared.path().join("asks.json");
+        let mut bytes = fs::read(&asks).expect("read asks.json");
+        bytes[0] ^= 0x01;
+        fs::write(&asks, &bytes).expect("flip one byte of asks.json");
+        let mut standin = StandIn::new();
+        let refused = standin.admit_resident(shared.path(), &sig, &shared.accepted, Start::Ok);
+        let after = checked_bundle(shared.path())
+            .expect("the walk names the bundle after the change")
+            .cid();
+        let expected = Refusal::NameMismatch {
+            actual: after,
+            claimed: before.to_string(),
+        }
+        .to_string();
+        assert!(
+            matches!(&refused, Err((403, reason)) if reason == &expected),
+            "the stand-in refuses a bundle whose bytes changed after signing: {refused:?}"
+        );
+        assert!(
+            standin.admitted.is_empty(),
+            "a refused admission stores no row"
+        );
+        let launch = standin.post_capsules(Caller::Shell, &json!({ "cid": before.to_string() }));
+        assert!(
+            matches!(&launch, Err((404, reason)) if reason.contains(&before.to_string())),
+            "the stand-in refuses to launch the signed CID over changed bytes: {launch:?}"
+        );
+    }
+
+    #[test]
+    fn standin_corrupted_signature_is_refused() {
+        let shared = Shared::new();
+        let mut standin = StandIn::new();
+        let good = shared.signature();
+        let cid = shared.cid();
+        let mut flipped = good.clone();
+        flipped.signature[7] ^= 0x01;
+        let mut zeroed = good.clone();
+        zeroed.signature = [0u8; ed25519_dalek::SIGNATURE_LENGTH];
+        for (case, sig) in [("one flipped byte", flipped), ("all zero", zeroed)] {
+            let before_list = shell_list(&standin);
+            let refused = shared.admit_with(&mut standin, &sig, Start::Ok);
+            let expected = Refusal::SignatureDoesNotVerify {
+                did: did_of(&shared.key),
+                name: cid.clone(),
+            }
+            .to_string();
+            assert!(
+                matches!(&refused, Err((403, reason)) if reason == &expected),
+                "the stand-in refuses a corrupted signature ({case}) by the accepted signer over the signed name: {refused:?}"
+            );
+            assert!(
+                standin.admitted.is_empty(),
+                "a refused admission by the accepted signer stores no row ({case})"
+            );
+            assert_eq!(
+                shell_list(&standin),
+                before_list,
+                "a refused admission creates no instance ({case})"
+            );
+            assert!(
+                standin.grants.is_empty(),
+                "a refused admission mints no grant ({case})"
+            );
+            let launch = shared.launch(&mut standin);
+            let reason = format!("no bundle is admitted under {cid} in world {RESIDENT_WORLD}");
+            assert!(
+                matches!(&launch, Err((404, got)) if got == &reason),
+                "the stand-in refuses to launch after the refused admission ({case}): {launch:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn standin_bundle_changed_after_admit_is_refused_at_launch() {
+        let shared = Shared::new();
+        let mut standin = StandIn::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let admitted_cid = shared.cid();
+        let asks = shared.path().join("asks.json");
+        let mut bytes = fs::read(&asks).expect("read asks.json");
+        bytes[0] ^= 0x01;
+        fs::write(&asks, &bytes).expect("flip one byte of asks.json after admission");
+        let launch = standin.post_capsules(Caller::Shell, &json!({ "cid": admitted_cid }));
+        let now = checked_bundle(shared.path())
+            .expect("the walk names the changed bundle")
+            .cid();
+        let expected = Refusal::NameMismatch {
+            actual: now,
+            claimed: admitted_cid.clone(),
+        }
+        .to_string();
+        assert!(
+            matches!(&launch, Err((403, reason)) if reason == &expected),
+            "the stand-in re-checks the bundle at launch and refuses changed bytes: {launch:?}"
+        );
+        assert!(
+            standin.instances.is_empty(),
+            "a refused launch creates no instance"
+        );
+        assert!(standin.grants.is_empty(), "a refused launch mints no grant");
+        assert_eq!(
+            shell_list(&standin),
+            json!({ "capsules": [] }),
+            "the capsule list stays empty after the refused launch"
+        );
+    }
+
+    #[test]
+    fn standin_valid_signature_grants_nothing() {
+        let shared = Shared::new();
+        let mut standin = StandIn::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        assert!(standin.grants.is_empty(), "admission mints no grant");
+        let launched = shared
+            .launch(&mut standin)
+            .expect("the stand-in launches the signed bundle");
+        assert!(
+            standin.grants.is_empty(),
+            "a valid signature alone mints no grant"
+        );
+        let session = launched["session_id"]
+            .as_str()
+            .expect("the stand-in names the Bus session");
+        let own = standin
+            .get_capability_list(
+                Caller::Client {
+                    session_id: session,
+                },
+                None,
+            )
+            .expect("the stand-in client view");
+        assert_eq!(
+            own,
+            json!({ "capabilities": [] }),
+            "the launched session holds no capability"
+        );
+        assert_eq!(
+            shell_list(&standin)["capsules"][0]["status"],
+            "starting",
+            "the instance still exists while it holds no grant"
+        );
+        let (plain, query) = shell_pair(&standin);
+        assert_eq!(
+            request_ids(&query),
+            BTreeSet::new(),
+            "the shell grant view is empty after a signed launch"
+        );
+        assert_eq!(
+            plain, query,
+            "the stand-in returns one shell body for both route forms"
+        );
+    }
+
     #[test]
     fn standin_launch_returns_before_start() {
+        let shared = Shared::new();
         let mut standin = StandIn::new();
-        standin
-            .admit_resident(SHARED_PATH, SHARED_NAME, Start::Ok)
-            .expect("the stand-in admits the resident path");
+        admit_shared(&shared, &mut standin, Start::Ok);
         assert_eq!(
             shell_list(&standin),
             json!({ "capsules": [] }),
             "the stand-in lists no instance before launch"
         );
         let launched = standin
-            .post_capsules(Caller::Shell, &shared_body())
+            .post_capsules(Caller::Shell, &shared.body())
             .expect("the stand-in launches before start returns");
         assert_eq!(
             launched,
@@ -2020,14 +2464,13 @@ mod tests {
     #[test]
     fn standin_two_launches_are_two_instances() {
         let mut standin = StandIn::new();
-        standin
-            .admit_resident(SHARED_PATH, SHARED_NAME, Start::Ok)
-            .expect("the stand-in admits the resident path");
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
         let first = standin
-            .post_capsules(Caller::Shell, &shared_body())
+            .post_capsules(Caller::Shell, &shared.body())
             .expect("the stand-in first launch");
         let second = standin
-            .post_capsules(Caller::Shell, &shared_body())
+            .post_capsules(Caller::Shell, &shared.body())
             .expect("the stand-in second launch");
         assert_eq!(
             first["id"], "component-1",
@@ -2077,18 +2520,16 @@ mod tests {
 
     #[test]
     fn standin_two_agent_components_stay_resident() {
+        let agent_a = Shared::new();
+        let agent_b = other_bundle();
         let mut standin = StandIn::new();
-        standin
-            .admit_resident(AGENT_A_PATH, AGENT_A_NAME, Start::Ok)
-            .expect("the stand-in admits agent-a");
-        standin
-            .admit_resident(AGENT_B_PATH, AGENT_B_NAME, Start::Ok)
-            .expect("the stand-in admits agent-b");
-        let first = standin
-            .post_capsules(Caller::Shell, &agent_body(AGENT_A_PATH))
+        admit_shared(&agent_a, &mut standin, Start::Ok);
+        admit_shared(&agent_b, &mut standin, Start::Ok);
+        let first = agent_a
+            .launch(&mut standin)
             .expect("the stand-in launches agent-a");
-        let second = standin
-            .post_capsules(Caller::Shell, &agent_body(AGENT_B_PATH))
+        let second = agent_b
+            .launch(&mut standin)
             .expect("the stand-in launches agent-b");
         assert_eq!(
             first["id"], "component-1",
@@ -2212,11 +2653,10 @@ mod tests {
     #[test]
     fn standin_start_ok_is_running() {
         let mut standin = StandIn::new();
-        standin
-            .admit_resident(SHARED_PATH, SHARED_NAME, Start::Ok)
-            .expect("the stand-in admits the resident path");
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
         let launched = standin
-            .post_capsules(Caller::Shell, &shared_body())
+            .post_capsules(Caller::Shell, &shared.body())
             .expect("the stand-in launch");
         let id = launched["id"]
             .as_str()
@@ -2251,11 +2691,10 @@ mod tests {
             (Start::Trap("trap: fuel".to_owned()), "trap: fuel"),
         ] {
             let mut standin = StandIn::new();
-            standin
-                .admit_resident(SHARED_PATH, SHARED_NAME, start)
-                .expect("the stand-in admits the resident path");
+            let shared = Shared::new();
+            admit_shared(&shared, &mut standin, start);
             let launched = standin
-                .post_capsules(Caller::Shell, &shared_body())
+                .post_capsules(Caller::Shell, &shared.body())
                 .expect("the stand-in launch");
             let id = launched["id"]
                 .as_str()
@@ -2280,17 +2719,16 @@ mod tests {
 
     #[test]
     fn standin_failed_stays_for_sixty_seconds() {
+        let shared = Shared::new();
         let mut standin = StandIn::new();
         standin.set_instant(0);
-        standin
-            .admit_resident(
-                SHARED_PATH,
-                SHARED_NAME,
-                Start::Error("start refused".to_owned()),
-            )
-            .expect("the stand-in admits the resident path");
+        admit_shared(
+            &shared,
+            &mut standin,
+            Start::Error("start refused".to_owned()),
+        );
         let launched = standin
-            .post_capsules(Caller::Shell, &shared_body())
+            .post_capsules(Caller::Shell, &shared.body())
             .expect("the stand-in launch");
         let id = launched["id"]
             .as_str()
@@ -2325,11 +2763,10 @@ mod tests {
     #[test]
     fn standin_start_returns_once() {
         let mut standin = StandIn::new();
-        standin
-            .admit_resident(SHARED_PATH, SHARED_NAME, Start::Ok)
-            .expect("the stand-in admits the resident path");
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
         let launched = standin
-            .post_capsules(Caller::Shell, &shared_body())
+            .post_capsules(Caller::Shell, &shared.body())
             .expect("the stand-in launch");
         let id = launched["id"]
             .as_str()
@@ -2366,8 +2803,12 @@ mod tests {
         );
 
         let mut failed = StandIn::new();
-        admit_shared(&mut failed, Start::Error("start refused".to_owned()));
-        let failed_id = launch_finished(&mut failed);
+        admit_shared(
+            &shared,
+            &mut failed,
+            Start::Error("start refused".to_owned()),
+        );
+        let failed_id = launch_finished(&shared, &mut failed);
         let second_failed = failed.finish_start(&failed_id);
         assert!(
             matches!(
@@ -2388,13 +2829,12 @@ mod tests {
     #[test]
     fn standin_client_cannot_launch_or_list() {
         let mut standin = StandIn::new();
-        standin
-            .admit_resident(SHARED_PATH, SHARED_NAME, Start::Ok)
-            .expect("the stand-in admits the resident path");
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
         let client = Caller::Client {
             session_id: "s-client",
         };
-        let launch = standin.post_capsules(client, &shared_body());
+        let launch = standin.post_capsules(client, &shared.body());
         let list = standin.get_capsules(client);
         assert!(
             matches!(
@@ -2413,7 +2853,7 @@ mod tests {
             "the stand-in shell list stays available"
         );
         let launched = standin
-            .post_capsules(Caller::Shell, &shared_body())
+            .post_capsules(Caller::Shell, &shared.body())
             .expect("the stand-in shell launch");
         assert_eq!(
             launched["id"], "component-1",
@@ -2424,8 +2864,9 @@ mod tests {
     #[test]
     fn standin_stop_sets_stopped() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        let id = launch_finished(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let id = launch_finished(&shared, &mut standin);
         assert_eq!(
             id, "component-1",
             "the stand-in names the first launch component-1"
@@ -2464,8 +2905,9 @@ mod tests {
     #[test]
     fn standin_stop_body_is_reason_only() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        launch_finished(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        launch_finished(&shared, &mut standin);
         seed_at(&mut standin, "req-1", "component-1", Life::Live);
         let cases = [
             (Value::Null, "stop body needs reason"),
@@ -2494,14 +2936,15 @@ mod tests {
                 "the stand-in leaves the live grant unchanged"
             );
         }
-        assert_next_launch(&mut standin, "component-2");
+        assert_next_launch(&shared, &mut standin, "component-2");
     }
 
     #[test]
     fn standin_unknown_stop_is_refused() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        launch_finished(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        launch_finished(&shared, &mut standin);
         seed_at(&mut standin, "req-1", "component-1", Life::Live);
         let unknown = standin.delete_capsule(Caller::Shell, "component-9", &stop_body());
         assert_delete(
@@ -2539,14 +2982,19 @@ mod tests {
             BTreeSet::from(["req-1".to_owned()]),
             "the stand-in still lists the seeded live grant"
         );
-        assert_next_launch(&mut standin, "component-2");
+        assert_next_launch(&shared, &mut standin, "component-2");
     }
 
     #[test]
     fn standin_stop_refuses_a_failed_instance() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Error("start refused".to_owned()));
-        launch_finished(&mut standin);
+        let shared = Shared::new();
+        admit_shared(
+            &shared,
+            &mut standin,
+            Start::Error("start refused".to_owned()),
+        );
+        launch_finished(&shared, &mut standin);
         seed_at(&mut standin, "req-1", "component-1", Life::Live);
         let result = standin.delete_capsule(Caller::Shell, "component-1", &stop_body());
         assert_delete(
@@ -2577,15 +3025,16 @@ mod tests {
             BTreeSet::from(["req-1".to_owned()]),
             "the stand-in still lists the live grant"
         );
-        assert_next_launch(&mut standin, "component-2");
+        assert_next_launch(&shared, &mut standin, "component-2");
     }
 
     #[test]
     fn standin_stop_revokes_that_sessions_grants() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        launch_finished(&mut standin);
-        launch_finished(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        launch_finished(&shared, &mut standin);
+        launch_finished(&shared, &mut standin);
         seed_at(&mut standin, "req-1", "component-1", Life::Live);
         seed_at(&mut standin, "req-1b", "component-1", Life::Live);
         seed_at(&mut standin, "req-e", "component-1", Life::Exhausted);
@@ -2657,9 +3106,10 @@ mod tests {
     #[test]
     fn standin_stop_leaves_the_sibling() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        launch_finished(&mut standin);
-        launch_finished(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        launch_finished(&shared, &mut standin);
+        launch_finished(&shared, &mut standin);
         seed_at(&mut standin, "req-1", "component-1", Life::Live);
         seed_at(&mut standin, "req-2", "component-2", Life::Live);
         let stopped = standin
@@ -2703,9 +3153,10 @@ mod tests {
     #[test]
     fn standin_stop_denies_that_sessions_pending() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        launch_finished(&mut standin);
-        launch_finished(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        launch_finished(&shared, &mut standin);
+        launch_finished(&shared, &mut standin);
         seed_shared_request(&mut standin, "req-1", "component-1");
         seed_shared_request(&mut standin, "req-2", "component-2");
         seed_at(&mut standin, "req-g", "component-1", Life::Live);
@@ -2749,8 +3200,9 @@ mod tests {
         );
 
         let mut multi = StandIn::new();
-        admit_shared(&mut multi, Start::Ok);
-        launch_finished(&mut multi);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut multi, Start::Ok);
+        launch_finished(&shared, &mut multi);
         seed_shared_request(&mut multi, "req-b", "component-1");
         seed_shared_request(&mut multi, "req-a", "component-1");
         multi
@@ -2773,9 +3225,10 @@ mod tests {
     #[test]
     fn standin_stop_leaves_the_siblings_request() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        launch_finished(&mut standin);
-        launch_finished(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        launch_finished(&shared, &mut standin);
+        launch_finished(&shared, &mut standin);
         seed_shared_request(&mut standin, "req-1", "component-1");
         seed_shared_request(&mut standin, "req-2", "component-2");
         standin
@@ -2808,8 +3261,9 @@ mod tests {
         ];
         for (start, cause) in cases {
             let mut standin = StandIn::new();
-            admit_shared(&mut standin, start);
-            launch_starting(&mut standin);
+            let shared = Shared::new();
+            admit_shared(&shared, &mut standin, start);
+            launch_starting(&shared, &mut standin);
             seed_shared_request(&mut standin, "req-1", "component-1");
             standin
                 .finish_start("component-1")
@@ -2831,24 +3285,21 @@ mod tests {
 
     #[test]
     fn standin_failed_start_leaves_the_siblings_request() {
-        const FAILING_PATH: &str = "/capsules/fail-after-submit";
-        const FAILING_NAME: &str = "fail-after-submit";
-
+        let failing_bundle = Shared::new();
+        let sibling_bundle = other_bundle();
         let mut standin = StandIn::new();
-        standin
-            .admit_resident(
-                FAILING_PATH,
-                FAILING_NAME,
-                Start::Error("start refused".to_owned()),
-            )
-            .expect("the stand-in admits the failing path");
-        admit_shared(&mut standin, Start::Ok);
-        let failing = standin
-            .post_capsules(Caller::Shell, &agent_body(FAILING_PATH))
-            .expect("the stand-in launches the failing path");
-        let sibling = standin
-            .post_capsules(Caller::Shell, &agent_body(SHARED_PATH))
-            .expect("the stand-in launches the shared path");
+        admit_shared(
+            &failing_bundle,
+            &mut standin,
+            Start::Error("start refused".to_owned()),
+        );
+        admit_shared(&sibling_bundle, &mut standin, Start::Ok);
+        let failing = failing_bundle
+            .launch(&mut standin)
+            .expect("the stand-in launches the failing bundle");
+        let sibling = sibling_bundle
+            .launch(&mut standin)
+            .expect("the stand-in launches the sibling bundle");
         assert_eq!(
             failing["id"], "component-1",
             "the stand-in numbers the failing launch component-1"
@@ -2911,8 +3362,9 @@ mod tests {
     #[test]
     fn standin_refused_finish_start_preserves_requests() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        launch_finished(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        launch_finished(&shared, &mut standin);
         seed_shared_request(&mut standin, "req-1", "component-1");
 
         let second = standin.finish_start("component-1");
@@ -2956,8 +3408,13 @@ mod tests {
         );
 
         let mut failed = StandIn::new();
-        admit_shared(&mut failed, Start::Error("start refused".to_owned()));
-        launch_starting(&mut failed);
+        let shared = Shared::new();
+        admit_shared(
+            &shared,
+            &mut failed,
+            Start::Error("start refused".to_owned()),
+        );
+        launch_starting(&shared, &mut failed);
         seed_shared_request(&mut failed, "req-3", "component-1");
         failed
             .finish_start("component-1")
@@ -3010,12 +3467,13 @@ mod tests {
     #[test]
     fn standin_shell_deny_fails_the_waiting_sibling() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
         let first = standin
-            .post_capsules(Caller::Shell, &shared_body())
+            .post_capsules(Caller::Shell, &shared.body())
             .expect("the stand-in launches the first read-shared instance");
         let second = standin
-            .post_capsules(Caller::Shell, &shared_body())
+            .post_capsules(Caller::Shell, &shared.body())
             .expect("the stand-in launches the second read-shared instance");
         assert_eq!(
             first["id"], "component-1",
@@ -3159,8 +3617,9 @@ mod tests {
     #[test]
     fn standin_shell_deny_refuses_a_bad_request() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        let id = launch_finished(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let id = launch_finished(&shared, &mut standin);
         seed_shared_request(&mut standin, "req-1", &id);
 
         let client = standin.post_capability_deny(
@@ -3297,7 +3756,7 @@ mod tests {
             "the stand-in keeps a stopped instance's phase and cause after a shell deny",
         );
 
-        let waiting = launch_starting(&mut standin);
+        let waiting = launch_starting(&shared, &mut standin);
         seed_shared_request(&mut standin, "req-d", &waiting);
         standin
             .post_capability_deny(Caller::Shell, &json!({ "request_id": "req-d" }))
@@ -3323,12 +3782,13 @@ mod tests {
     #[test]
     fn standin_shell_grant_makes_one_live_grant() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
         let first = standin
-            .post_capsules(Caller::Shell, &shared_body())
+            .post_capsules(Caller::Shell, &shared.body())
             .expect("the stand-in launches the first read-shared instance");
         let second = standin
-            .post_capsules(Caller::Shell, &shared_body())
+            .post_capsules(Caller::Shell, &shared.body())
             .expect("the stand-in launches the second read-shared instance");
         assert_eq!(
             first["id"], "component-1",
@@ -3488,8 +3948,9 @@ mod tests {
     #[test]
     fn standin_shell_grant_refuses_a_bad_request() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        let id = launch_starting(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let id = launch_starting(&shared, &mut standin);
         seed_shared_request(&mut standin, "req-d", &id);
 
         let client = standin.post_capability_grant(
@@ -3614,7 +4075,7 @@ mod tests {
             "the stand-in keeps the first granted record after a refused second grant"
         );
 
-        let stopped = launch_starting(&mut standin);
+        let stopped = launch_starting(&shared, &mut standin);
         seed_shared_request(&mut standin, "req-s", &stopped);
         standin
             .delete_capsule(Caller::Shell, &stopped, &stop_body())
@@ -3791,8 +4252,9 @@ mod tests {
     #[test]
     fn standin_refused_stop_preserves_requests() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        launch_finished(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        launch_finished(&shared, &mut standin);
         seed_shared_request(&mut standin, "req-1", "component-1");
         let client = Caller::Client {
             session_id: "component-1",
@@ -3859,8 +4321,9 @@ mod tests {
     #[test]
     fn standin_stop_preserves_settled_requests() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        launch_finished(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        launch_finished(&shared, &mut standin);
         standin.requests.push(Request {
             request_id: "req-old".to_owned(),
             session_id: "component-1".to_owned(),
@@ -3898,9 +4361,10 @@ mod tests {
     #[test]
     fn standin_unanswered_request_expires() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        let first = launch_finished(&mut standin);
-        let second = launch_finished(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let first = launch_finished(&shared, &mut standin);
+        let second = launch_finished(&shared, &mut standin);
         assert_eq!(
             (first.as_str(), second.as_str()),
             ("component-1", "component-2"),
@@ -4061,8 +4525,9 @@ mod tests {
     #[test]
     fn standin_starting_stop_denies_that_sessions_pending() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        launch_starting(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        launch_starting(&shared, &mut standin);
         seed_shared_request(&mut standin, "req-1", "component-1");
         standin
             .delete_capsule(Caller::Shell, "component-1", &stop_body())
@@ -4085,9 +4550,10 @@ mod tests {
     fn standin_stopped_stays_for_sixty_seconds() {
         let mut standin = StandIn::new();
         standin.set_instant(0);
-        admit_shared(&mut standin, Start::Ok);
-        launch_finished(&mut standin);
-        launch_finished(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        launch_finished(&shared, &mut standin);
+        launch_finished(&shared, &mut standin);
         let stopped = standin
             .delete_capsule(Caller::Shell, "component-1", &stop_body())
             .expect("the stand-in stops component-1 at instant 0");
@@ -4134,9 +4600,10 @@ mod tests {
 
         let mut later = StandIn::new();
         later.set_instant(1_000);
-        admit_shared(&mut later, Start::Ok);
-        launch_finished(&mut later);
-        launch_finished(&mut later);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut later, Start::Ok);
+        launch_finished(&shared, &mut later);
+        launch_finished(&shared, &mut later);
         later.set_instant(1_070);
         later
             .delete_capsule(Caller::Shell, "component-1", &stop_body())
@@ -4175,9 +4642,10 @@ mod tests {
     #[test]
     fn standin_stopped_instance_makes_no_request() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        let first = launch_finished(&mut standin);
-        let second = launch_finished(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let first = launch_finished(&shared, &mut standin);
+        let second = launch_finished(&shared, &mut standin);
         assert_eq!(
             (first.as_str(), second.as_str()),
             ("component-1", "component-2"),
@@ -4282,9 +4750,10 @@ mod tests {
         );
 
         let mut later = StandIn::new();
-        admit_shared(&mut later, Start::Ok);
-        launch_finished(&mut later);
-        launch_finished(&mut later);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut later, Start::Ok);
+        launch_finished(&shared, &mut later);
+        launch_finished(&shared, &mut later);
         seed_shared_request(&mut later, "req-1", "component-1");
         later
             .delete_capsule(Caller::Shell, "component-1", &stop_body())
@@ -4310,24 +4779,21 @@ mod tests {
 
     #[test]
     fn standin_failed_instance_makes_no_request() {
-        const FAILING_PATH: &str = "/capsules/fail-after-submit";
-        const FAILING_NAME: &str = "fail-after-submit";
-
+        let failing_bundle = Shared::new();
+        let sibling_bundle = other_bundle();
         let mut standin = StandIn::new();
-        standin
-            .admit_resident(
-                FAILING_PATH,
-                FAILING_NAME,
-                Start::Error("start refused".to_owned()),
-            )
-            .expect("the stand-in admits the failing path");
-        admit_shared(&mut standin, Start::Ok);
-        let failing = standin
-            .post_capsules(Caller::Shell, &agent_body(FAILING_PATH))
-            .expect("the stand-in launches the failing path");
-        let sibling = standin
-            .post_capsules(Caller::Shell, &agent_body(SHARED_PATH))
-            .expect("the stand-in launches the shared path");
+        admit_shared(
+            &failing_bundle,
+            &mut standin,
+            Start::Error("start refused".to_owned()),
+        );
+        admit_shared(&sibling_bundle, &mut standin, Start::Ok);
+        let failing = failing_bundle
+            .launch(&mut standin)
+            .expect("the stand-in launches the failing bundle");
+        let sibling = sibling_bundle
+            .launch(&mut standin)
+            .expect("the stand-in launches the sibling bundle");
         assert_eq!(
             (failing["id"].as_str(), failing["status"].as_str()),
             (Some("component-1"), Some("starting")),
@@ -4359,7 +4825,7 @@ mod tests {
             ended,
             Some(&json!({
                 "id": "component-1",
-                "name": FAILING_NAME,
+                "name": SHARED_NAME,
                 "status": "failed",
                 "session_id": "component-1",
                 "cause": "start refused",
@@ -4392,16 +4858,15 @@ mod tests {
         );
 
         let mut empty = StandIn::new();
-        empty
-            .admit_resident(
-                FAILING_PATH,
-                FAILING_NAME,
-                Start::Error("start refused".to_owned()),
-            )
-            .expect("the stand-in admits the failing path");
-        let only = empty
-            .post_capsules(Caller::Shell, &agent_body(FAILING_PATH))
-            .expect("the stand-in launches the failing path once");
+        let failing_bundle = Shared::new();
+        admit_shared(
+            &failing_bundle,
+            &mut empty,
+            Start::Error("start refused".to_owned()),
+        );
+        let only = failing_bundle
+            .launch(&mut empty)
+            .expect("the stand-in launches the failing bundle once");
         assert_eq!(
             only["id"], "component-1",
             "the stand-in numbers the only failing launch component-1"
@@ -4421,7 +4886,7 @@ mod tests {
             json!({
                 "capsules": [{
                     "id": "component-1",
-                    "name": FAILING_NAME,
+                    "name": SHARED_NAME,
                     "status": "failed",
                     "session_id": "component-1",
                     "cause": "start refused",
@@ -4438,9 +4903,10 @@ mod tests {
     #[test]
     fn standin_stop_during_start_blocks_finish() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        let first = launch_starting(&mut standin);
-        let second = launch_starting(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let first = launch_starting(&shared, &mut standin);
+        let second = launch_starting(&shared, &mut standin);
         assert_eq!(
             (first, second),
             ("component-1".to_owned(), "component-2".to_owned()),
@@ -4516,9 +4982,10 @@ mod tests {
     #[test]
     fn standin_second_stop_is_refused() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        launch_finished(&mut standin);
-        launch_finished(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        launch_finished(&shared, &mut standin);
+        launch_finished(&shared, &mut standin);
         seed_at(&mut standin, "req-1", "component-1", Life::Live);
         seed_at(&mut standin, "req-e", "component-1", Life::Exhausted);
         seed_at(&mut standin, "req-2", "component-2", Life::Live);
@@ -4561,14 +5028,15 @@ mod tests {
             "",
             "the stand-in leaves the sibling running",
         );
-        assert_next_launch(&mut standin, "component-3");
+        assert_next_launch(&shared, &mut standin, "component-3");
     }
 
     #[test]
     fn standin_client_cannot_stop() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        launch_finished(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        launch_finished(&shared, &mut standin);
         seed_at(&mut standin, "req-1", "component-1", Life::Live);
         let client = Caller::Client {
             session_id: "component-1",
@@ -4653,13 +5121,13 @@ mod tests {
             "",
             "the stand-in leaves the running instance after the shell refusals",
         );
-        assert_next_launch(&mut standin, "component-2");
+        assert_next_launch(&shared, &mut standin, "component-2");
     }
 
-    fn launch_two_running(standin: &mut StandIn) {
-        admit_shared(standin, Start::Ok);
-        launch_finished(standin);
-        launch_finished(standin);
+    fn launch_two_running(shared: &Shared, standin: &mut StandIn) {
+        admit_shared(shared, standin, Start::Ok);
+        launch_finished(shared, standin);
+        launch_finished(shared, standin);
     }
 
     fn assert_unknown(result: &Result<(), (u16, String)>, request_id: &str, who: &str) {
@@ -4708,7 +5176,8 @@ mod tests {
     #[test]
     fn standin_sibling_cannot_use_the_grant() {
         let mut standin = StandIn::new();
-        launch_two_running(&mut standin);
+        let shared = Shared::new();
+        launch_two_running(&shared, &mut standin);
         standin.seed_grant(
             "req-1",
             "component-1",
@@ -4807,7 +5276,8 @@ mod tests {
     #[test]
     fn standin_once_grant_is_spent_by_one_use() {
         let mut standin = StandIn::new();
-        launch_two_running(&mut standin);
+        let shared = Shared::new();
+        launch_two_running(&shared, &mut standin);
         standin.seed_grant(
             "req-once",
             "component-1",
@@ -4929,7 +5399,8 @@ mod tests {
     #[test]
     fn standin_stop_clears_that_sessions_grant() {
         let mut standin = StandIn::new();
-        launch_two_running(&mut standin);
+        let shared = Shared::new();
+        launch_two_running(&shared, &mut standin);
         seed_at(&mut standin, "req-1", "component-1", Life::Live);
         seed_at(&mut standin, "req-2", "component-2", Life::Live);
         let stopped = standin
@@ -5274,13 +5745,11 @@ mod tests {
 
     #[test]
     fn standin_ended_instance_request_is_refused() {
-        const FAILING_PATH: &str = "/capsules/fail-after-submit";
-        const FAILING_NAME: &str = "fail-after-submit";
-
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        let first = launch_finished(&mut standin);
-        let second = launch_finished(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let first = launch_finished(&shared, &mut standin);
+        let second = launch_finished(&shared, &mut standin);
         assert_eq!(
             (first.as_str(), second.as_str()),
             ("component-1", "component-2"),
@@ -5383,16 +5852,15 @@ mod tests {
         );
 
         let mut failed = StandIn::new();
-        failed
-            .admit_resident(
-                FAILING_PATH,
-                FAILING_NAME,
-                Start::Error("start refused".to_owned()),
-            )
-            .expect("the stand-in admits the failing path");
-        let only = failed
-            .post_capsules(Caller::Shell, &agent_body(FAILING_PATH))
-            .expect("the stand-in launches the failing path once");
+        let failing_bundle = Shared::new();
+        admit_shared(
+            &failing_bundle,
+            &mut failed,
+            Start::Error("start refused".to_owned()),
+        );
+        let only = failing_bundle
+            .launch(&mut failed)
+            .expect("the stand-in launches the failing bundle once");
         assert_eq!(
             only["id"], "component-1",
             "the stand-in did the work: it numbers the only failing launch component-1"
@@ -5421,7 +5889,7 @@ mod tests {
             json!({
                 "capsules": [{
                     "id": "component-1",
-                    "name": FAILING_NAME,
+                    "name": SHARED_NAME,
                     "status": "failed",
                     "session_id": "component-1",
                     "cause": "start refused",
@@ -5434,9 +5902,10 @@ mod tests {
     #[test]
     fn standin_live_instance_request_stays_pending() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
         let launched = standin
-            .post_capsules(Caller::Shell, &shared_body())
+            .post_capsules(Caller::Shell, &shared.body())
             .expect("the stand-in launches once");
         assert_eq!(
             (launched["id"].as_str(), launched["status"].as_str()),
@@ -5533,9 +6002,10 @@ mod tests {
     #[test]
     fn standin_capability_request_refuses_a_bad_body() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
         let launched = standin
-            .post_capsules(Caller::Shell, &shared_body())
+            .post_capsules(Caller::Shell, &shared.body())
             .expect("the stand-in launches once");
         assert_eq!(
             (launched["id"].as_str(), launched["status"].as_str()),
@@ -5607,12 +6077,13 @@ mod tests {
     #[test]
     fn standin_guest_reads_its_request_later() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
         let first = standin
-            .post_capsules(Caller::Shell, &shared_body())
+            .post_capsules(Caller::Shell, &shared.body())
             .expect("the stand-in launches the first read-shared instance");
         let second = standin
-            .post_capsules(Caller::Shell, &shared_body())
+            .post_capsules(Caller::Shell, &shared.body())
             .expect("the stand-in launches the second read-shared instance");
         assert_eq!(
             (first["id"].as_str(), second["id"].as_str()),
@@ -5765,9 +6236,10 @@ mod tests {
     #[test]
     fn standin_guest_reads_a_runtime_denial() {
         let mut standin = StandIn::new();
-        admit_shared(&mut standin, Start::Ok);
-        let first = launch_finished(&mut standin);
-        let second = launch_finished(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        let first = launch_finished(&shared, &mut standin);
+        let second = launch_finished(&shared, &mut standin);
         assert_eq!(
             (first.as_str(), second.as_str()),
             ("component-1", "component-2"),

@@ -24,6 +24,12 @@ serde_json = "=1.0.154"
 sha2 = "=0.10.9"
 
 [dev-dependencies]
+ed25519-dalek = "2.1"
+# The accepted publisher list holds the canonical Ed25519 `did:key`, which
+# `capsule-identity` encodes with this crate's one encoder.
+elastos-identity = { path = "../../elastos/crates/elastos-identity" }
+rand = "0.8"
+tempfile = "3"
 wasmparser = "=0.247.0"
 
 [profile.release]

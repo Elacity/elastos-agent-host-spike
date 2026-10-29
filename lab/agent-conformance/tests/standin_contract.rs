@@ -5,14 +5,16 @@
 //! RA-6 states from draft PR #309 at `513988ebd`. A PASS here gives the
 //! Runtime no credit.
 
+#[path = "common/signed_bundle.rs"]
+mod signed_bundle;
+
 use agent_conformance::standin_runtime::{Caller, Life, StandIn, Start};
 use serde_json::{json, Value};
+use signed_bundle::{SignedBundle, SHARED_NAME};
 use std::collections::BTreeSet;
 
 const LIVE_SCOPE: &str = "all_sessions_live";
 const SHELL_REASON: &str = "This endpoint requires shell privileges";
-const SHARED_PATH: &str = "/capsules/read-shared";
-const SHARED_NAME: &str = "read-shared";
 const SHARED_RESOURCE: &str = "localhost://Public/resident-instances/shared.txt";
 
 fn keys(value: &Value) -> BTreeSet<String> {
@@ -205,24 +207,30 @@ fn standin_matches_ra1_fields() {
 fn standin_matches_ra6_states() {
     let mut standin = StandIn::new();
 
-    let refused = standin.post_capsules(Caller::Shell, &json!({ "path": SHARED_PATH }));
-    assert!(
-        matches!(
-            &refused,
-            Err((400, reason))
-                if reason.starts_with("not a resident component:")
-                    && reason.contains("resident-capsule")
-        ),
-        "the stand-in did the work: an unadmitted launch is refused: {refused:?}"
+    let shared = SignedBundle::new();
+    let cid = shared.cid();
+    let refused = standin.post_capsules(Caller::Shell, &shared.launch_body());
+    assert_eq!(
+        refused,
+        Err((
+            404,
+            format!("no bundle is admitted under {cid} in world resident-capsule")
+        )),
+        "the stand-in did the work: an unadmitted CID is refused with its own 404 reason"
     );
 
     standin
-        .admit_resident(SHARED_PATH, SHARED_NAME, Start::Ok)
-        .expect("the stand-in admits read-shared");
+        .admit_resident(
+            shared.path(),
+            &shared.signature(),
+            shared.accepted(),
+            Start::Ok,
+        )
+        .expect("the stand-in admits the signed bundle");
 
     let launched = standin
-        .post_capsules(Caller::Shell, &json!({ "path": SHARED_PATH }))
-        .expect("the stand-in launches the admitted path");
+        .post_capsules(Caller::Shell, &shared.launch_body())
+        .expect("the stand-in launches the admitted CID");
     assert_keys(
         &launched,
         &["id", "name", "session_id", "status"],
@@ -286,14 +294,15 @@ fn standin_matches_ra6_states() {
     let mut failed = StandIn::new();
     failed
         .admit_resident(
-            SHARED_PATH,
-            SHARED_NAME,
+            shared.path(),
+            &shared.signature(),
+            shared.accepted(),
             Start::Error("start refused".to_owned()),
         )
-        .expect("the stand-in admits read-shared with a refused start");
+        .expect("the stand-in admits the signed bundle with a refused start");
     let refused_launch = failed
-        .post_capsules(Caller::Shell, &json!({ "path": SHARED_PATH }))
-        .expect("the stand-in launches the refused path");
+        .post_capsules(Caller::Shell, &shared.launch_body())
+        .expect("the stand-in launches the refused CID");
     failed
         .finish_start(
             refused_launch["id"]
@@ -336,7 +345,7 @@ fn standin_matches_ra6_states() {
     let client = Caller::Client {
         session_id: "component-1",
     };
-    let client_post = standin.post_capsules(client, &json!({ "path": SHARED_PATH }));
+    let client_post = standin.post_capsules(client, &shared.launch_body());
     assert!(
         matches!(&client_post, Err((403, reason)) if reason == SHELL_REASON),
         "the stand-in did the work: a client launch is refused: {client_post:?}"

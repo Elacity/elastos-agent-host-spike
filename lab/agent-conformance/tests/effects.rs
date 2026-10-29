@@ -7,6 +7,7 @@ use agent_conformance::harness::ThrowawayHome;
 use agent_conformance::identity::{Observation, StagedProbe, MANIFEST};
 use agent_conformance::runtime::runtime_under_test;
 use agent_conformance::standin_runtime::{Caller as StandInCaller, Life, StandIn, Start};
+use common::signed_bundle::{SignedBundle, SHARED_NAME};
 use probe::{build_probe, Effect};
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -1176,18 +1177,21 @@ fn standin_stopped_run_leaves_no_live_grant() {
         .port();
     drop(listener);
     let home = ThrowawayHome::new().expect("the stand-in run uses one throwaway home");
+    let shared = SignedBundle::new();
     let launch_two = |standin: &mut StandIn| -> Vec<String> {
         standin
-            .admit_resident("/capsules/read-shared", "read-shared", Start::Ok)
-            .expect("the stand-in admits read-shared");
+            .admit_resident(
+                shared.path(),
+                &shared.signature(),
+                shared.accepted(),
+                Start::Ok,
+            )
+            .expect("the stand-in admits the signed bundle");
         let mut ids = Vec::new();
         for _ in 0..2 {
             let launch = standin
-                .post_capsules(
-                    StandInCaller::Shell,
-                    &json!({"path": "/capsules/read-shared"}),
-                )
-                .expect("the stand-in launches the admitted path");
+                .post_capsules(StandInCaller::Shell, &shared.launch_body())
+                .expect("the stand-in launches the admitted CID");
             let id = launch["id"]
                 .as_str()
                 .expect("the stand-in names the launched instance")
@@ -1383,16 +1387,14 @@ fn standin_stopped_run_leaves_no_live_grant() {
         .expect("the stand-in run removes its throwaway home");
 }
 
-const STANDIN_SHARED_PATH: &str = "/capsules/read-shared";
-const STANDIN_SHARED_NAME: &str = "read-shared";
-const STANDIN_FAILED_PATH: &str = "/capsules/fail-after-submit";
-const STANDIN_FAILED_NAME: &str = "fail-after-submit";
+const STANDIN_SHARED_NAME: &str = SHARED_NAME;
+const STANDIN_FAILED_NAME: &str = SHARED_NAME;
 const STANDIN_RESOURCE: &str = "localhost://Public/resident-instances/shared.txt";
 
-fn standin_launch(standin: &mut StandIn, path: &str) -> String {
+fn standin_launch(standin: &mut StandIn, bundle: &SignedBundle) -> String {
     let launched = standin
-        .post_capsules(StandInCaller::Shell, &json!({"path": path}))
-        .expect("the stand-in launches the admitted path");
+        .post_capsules(StandInCaller::Shell, &bundle.launch_body())
+        .expect("the stand-in launches the admitted CID");
     launched["id"]
         .as_str()
         .expect("the stand-in names the launched instance")
@@ -1483,14 +1485,20 @@ fn standin_cancel_survivor_reaches_running() {
     drop(listener);
     let home = ThrowawayHome::new().expect("the stand-in survivor run uses one throwaway home");
 
+    let shared = SignedBundle::new();
     let mut standin = StandIn::new();
     standin
-        .admit_resident(STANDIN_SHARED_PATH, STANDIN_SHARED_NAME, Start::Ok)
-        .expect("the stand-in admits read-shared");
+        .admit_resident(
+            shared.path(),
+            &shared.signature(),
+            shared.accepted(),
+            Start::Ok,
+        )
+        .expect("the stand-in admits the signed bundle");
     assert_eq!(
         (
-            standin_launch(&mut standin, STANDIN_SHARED_PATH),
-            standin_launch(&mut standin, STANDIN_SHARED_PATH),
+            standin_launch(&mut standin, &shared),
+            standin_launch(&mut standin, &shared),
         ),
         ("component-1".to_owned(), "component-2".to_owned()),
         "the stand-in numbers the two launches component-1 and component-2"
@@ -1742,21 +1750,29 @@ fn standin_failed_survivor_reaches_running() {
     let home =
         ThrowawayHome::new().expect("the stand-in failed-survivor run uses one throwaway home");
 
+    let failing = SignedBundle::new();
+    let shared = SignedBundle::distinct();
     let mut standin = StandIn::new();
     standin
         .admit_resident(
-            STANDIN_FAILED_PATH,
-            STANDIN_FAILED_NAME,
+            failing.path(),
+            &failing.signature(),
+            failing.accepted(),
             Start::Error("start refused".to_owned()),
         )
-        .expect("the stand-in admits fail-after-submit");
+        .expect("the stand-in admits the failing signed bundle");
     standin
-        .admit_resident(STANDIN_SHARED_PATH, STANDIN_SHARED_NAME, Start::Ok)
-        .expect("the stand-in admits read-shared");
+        .admit_resident(
+            shared.path(),
+            &shared.signature(),
+            shared.accepted(),
+            Start::Ok,
+        )
+        .expect("the stand-in admits the second signed bundle");
     assert_eq!(
         (
-            standin_launch(&mut standin, STANDIN_FAILED_PATH),
-            standin_launch(&mut standin, STANDIN_SHARED_PATH),
+            standin_launch(&mut standin, &failing),
+            standin_launch(&mut standin, &shared),
         ),
         ("component-1".to_owned(), "component-2".to_owned()),
         "the stand-in numbers the failing launch first and the shared launch second"
