@@ -353,3 +353,15 @@ fn model_literal_string_path_is_a_link() {
     assert!(!escaped.contains("grant-binding"));
     assert!(!cargo_toml_path_depends_on_grant_binding(escaped));
 }
+
+#[test]
+fn model_case_different_manifest_is_not_a_link() {
+    let renamed = "Grant-Binding = { path = \"lab/Grant-Binding\" }\n";
+    assert!(renamed.contains("path"));
+    assert!(!renamed.contains("grant-binding"));
+    assert!(!cargo_toml_path_depends_on_grant_binding(renamed));
+    let key = "grant-binding = { Path = \"lab/grant-binding\" }\n";
+    assert!(key.contains("grant-binding"));
+    assert!(!key.contains("path"));
+    assert!(!cargo_toml_path_depends_on_grant_binding(key));
+}
