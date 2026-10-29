@@ -274,7 +274,7 @@ JOURNAL_RANGE_MARKER = "`" + JOURNAL_RANGE_SPAN + "`"
 # The model-service range holds the create comment. Its two endpoints share
 # one marker, and each endpoint's remainder is its own pinned line.
 GATEWAY_RANGE_SPAN = (
-    "elastos/crates/elastos-server/src/api/gateway_model_service.rs:1444-1446"
+    "elastos/crates/elastos-server/src/api/gateway_model_service.rs:1452-1454"
 )
 GATEWAY_RANGE_MARKER = "`" + GATEWAY_RANGE_SPAN + "`"
 
@@ -884,8 +884,8 @@ QUOTE_TARGETS = (
     # span through the shared window rule. A range's two endpoints share one
     # marker and stand first endpoint then second endpoint.
     ("elastos/crates/elastos-server/src/resource_bridge.rs:814", "`elastos/crates/elastos-server/src/resource_bridge.rs:814`", None),
-    ("lab/capsule-identity/src/lib.rs:1252", "`lab/capsule-identity/src/lib.rs:1252`", None),
-    ("lab/capsule-identity/README.md:807", "`lab/capsule-identity/README.md:807`", None),
+    ("lab/capsule-identity/src/lib.rs:1425", "`lab/capsule-identity/src/lib.rs:1425`", None),
+    ("lab/capsule-identity/README.md:946", "`lab/capsule-identity/README.md:946`", None),
     ("elastos/crates/elastos-compute/src/providers/component.rs:350", "`elastos/crates/elastos-compute/src/providers/component.rs:350`", None),
     ("capsules/model-provider/src/adapters.rs:58", "`capsules/model-provider/src/adapters.rs:58`", None),
     ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:1", "`elastos/crates/elastos-server/src/api/gateway_model_service.rs:1`", None),
@@ -901,8 +901,8 @@ QUOTE_TARGETS = (
     ("capsules/model-provider/src/state.rs:609", "`capsules/model-provider/src/state.rs:609`", None),
     ("capsules/model-provider/src/contract.rs:134", "`capsules/model-provider/src/contract.rs:134`", None),
     ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:355", "`elastos/crates/elastos-server/src/api/gateway_model_service.rs:355`", None),
-    ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:1444", GATEWAY_RANGE_MARKER, None),
-    ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:1446", GATEWAY_RANGE_MARKER, None),
+    ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:1452", GATEWAY_RANGE_MARKER, None),
+    ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:1454", GATEWAY_RANGE_MARKER, None),
     ("examples/agent-host/asks.json:4", "`examples/agent-host/asks.json:4`", None),
     ("examples/agent-host/asks.json:5", "`examples/agent-host/asks.json:5`", None),
     ("examples/agent-host/asks.json:6", "`examples/agent-host/asks.json:6`", None),
@@ -925,12 +925,12 @@ QUOTE_TARGETS = (
     ("elastos/crates/elastos-server/src/resource_bridge.rs:697", "`elastos/crates/elastos-server/src/resource_bridge.rs:697`", None),
     ("elastos/crates/elastos-server/src/resource_bridge.rs:698", "`elastos/crates/elastos-server/src/resource_bridge.rs:698`", None),
     ("elastos/crates/elastos-server/src/resource_bridge.rs:699", "`elastos/crates/elastos-server/src/resource_bridge.rs:699`", None),
-    ("elastos/crates/elastos-server/src/resource_bridge.rs:564", "`elastos/crates/elastos-server/src/resource_bridge.rs:564`", None),
-    ("elastos/crates/elastos-server/src/resource_bridge.rs:565", "`elastos/crates/elastos-server/src/resource_bridge.rs:565`", None),
-    ("elastos/crates/elastos-server/src/resource_bridge.rs:576", "`elastos/crates/elastos-server/src/resource_bridge.rs:576`", None),
-    ("elastos/crates/elastos-server/src/resource_bridge.rs:577", "`elastos/crates/elastos-server/src/resource_bridge.rs:577`", None),
-    ("elastos/crates/elastos-server/src/resource_bridge.rs:597", "`elastos/crates/elastos-server/src/resource_bridge.rs:597`", None),
-    ("elastos/crates/elastos-server/src/resource_bridge.rs:600", "`elastos/crates/elastos-server/src/resource_bridge.rs:600`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:570", "`elastos/crates/elastos-server/src/resource_bridge.rs:570`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:571", "`elastos/crates/elastos-server/src/resource_bridge.rs:571`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:582", "`elastos/crates/elastos-server/src/resource_bridge.rs:582`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:583", "`elastos/crates/elastos-server/src/resource_bridge.rs:583`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:603", "`elastos/crates/elastos-server/src/resource_bridge.rs:603`", None),
+    ("elastos/crates/elastos-server/src/resource_bridge.rs:606", "`elastos/crates/elastos-server/src/resource_bridge.rs:606`", None),
     ("lab/grant-binding/README.md:12", "`lab/grant-binding/README.md:12`", None),
     ("docs/AGENT_ARCHITECTURE.md:19", "`docs/AGENT_ARCHITECTURE.md:19`", None),
     ("docs/AGENT_ARCHITECTURE.md:21", "`docs/AGENT_ARCHITECTURE.md:21`", None),

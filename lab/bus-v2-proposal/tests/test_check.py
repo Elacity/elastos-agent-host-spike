@@ -1419,7 +1419,7 @@ ALIGNED_SPANS_DECIDED = (
     "elastos/crates/elastos-server/src/api/gateway_model_service.rs:1",
     "elastos/crates/elastos-server/src/api/gateway_model_service.rs:4",
     "elastos/crates/elastos-server/src/api/gateway_model_service.rs:355",
-    "elastos/crates/elastos-server/src/api/gateway_model_service.rs:1444-1446",
+    "elastos/crates/elastos-server/src/api/gateway_model_service.rs:1452-1454",
     "elastos/crates/elastos-server/src/provider_resource.rs:163",
     "elastos/crates/elastos-server/src/provider_resource.rs:164",
     "elastos/crates/elastos-server/src/provider_resource.rs:165",
@@ -1428,12 +1428,12 @@ ALIGNED_SPANS_DECIDED = (
     "elastos/crates/elastos-server/src/provider_resource.rs:379",
     "elastos/crates/elastos-server/src/provider_resource.rs:382",
     "elastos/crates/elastos-server/src/provider_resource.rs:422",
-    "elastos/crates/elastos-server/src/resource_bridge.rs:564",
-    "elastos/crates/elastos-server/src/resource_bridge.rs:565",
-    "elastos/crates/elastos-server/src/resource_bridge.rs:576",
-    "elastos/crates/elastos-server/src/resource_bridge.rs:577",
-    "elastos/crates/elastos-server/src/resource_bridge.rs:597",
-    "elastos/crates/elastos-server/src/resource_bridge.rs:600",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:570",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:571",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:582",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:583",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:603",
+    "elastos/crates/elastos-server/src/resource_bridge.rs:606",
     "elastos/crates/elastos-server/src/resource_bridge.rs:696",
     "elastos/crates/elastos-server/src/resource_bridge.rs:697",
     "elastos/crates/elastos-server/src/resource_bridge.rs:698",
@@ -1461,8 +1461,8 @@ ALIGNED_SPANS_DECIDED = (
     "examples/agent-host/src/lib.rs:3471",
     "examples/agent-host/src/lib.rs:3474",
     "examples/agent-host/src/lib.rs:3482",
-    "lab/capsule-identity/README.md:807",
-    "lab/capsule-identity/src/lib.rs:1252",
+    "lab/capsule-identity/README.md:946",
+    "lab/capsule-identity/src/lib.rs:1425",
     "lab/grant-binding/README.md:12",
     "lab/grant-binding/src/lib.rs:23",
     "lab/grant-binding/src/lib.rs:25",
@@ -1550,9 +1550,9 @@ ALIGNED_GROUPS = (
     ),
     (
         (
-            "lab/capsule-identity/src/lib.rs:1252",
+            "lab/capsule-identity/src/lib.rs:1425",
         ),
-        1252,
+        1425,
         (
             '/// `Ok(())` means all four passed. It is not a trust, admission or launch',
             '/// value. A wrong key, a changed signature and a name moved onto other bytes',
@@ -1561,9 +1561,9 @@ ALIGNED_GROUPS = (
     ),
     (
         (
-            "lab/capsule-identity/README.md:807",
+            "lab/capsule-identity/README.md:946",
         ),
-        807,
+        946,
         (
             'The rule: a valid signature grants nothing by itself. A bundle whose test-key',
             'signature verifies is still not admitted, and it gets no grant. This library',
@@ -1891,9 +1891,9 @@ ALIGNED_GROUPS = (
     ),
     (
         (
-            "elastos/crates/elastos-server/src/api/gateway_model_service.rs:1444-1446",
+            "elastos/crates/elastos-server/src/api/gateway_model_service.rs:1452-1454",
         ),
-        1444,
+        1452,
         (
             '    // A create holds its record slot before any model work starts. A retry of',
             '    // an already recorded request is answered from that record before another',
@@ -2288,10 +2288,10 @@ ALIGNED_GROUPS = (
     ),
     (
         (
-            "elastos/crates/elastos-server/src/resource_bridge.rs:564",
-            "elastos/crates/elastos-server/src/resource_bridge.rs:565",
+            "elastos/crates/elastos-server/src/resource_bridge.rs:570",
+            "elastos/crates/elastos-server/src/resource_bridge.rs:571",
         ),
-        562,
+        568,
         (
             '            if agent_journal && append {',
             '                return Some(resource_error_response(',
@@ -2303,10 +2303,10 @@ ALIGNED_GROUPS = (
     ),
     (
         (
-            "elastos/crates/elastos-server/src/resource_bridge.rs:576",
-            "elastos/crates/elastos-server/src/resource_bridge.rs:577",
+            "elastos/crates/elastos-server/src/resource_bridge.rs:582",
+            "elastos/crates/elastos-server/src/resource_bridge.rs:583",
         ),
-        574,
+        580,
         (
             '            if agent_journal && precondition.is_none() {',
             '                return Some(resource_error_response(',
@@ -2318,18 +2318,18 @@ ALIGNED_GROUPS = (
     ),
     (
         (
-            "elastos/crates/elastos-server/src/resource_bridge.rs:597",
+            "elastos/crates/elastos-server/src/resource_bridge.rs:603",
         ),
-        597,
+        603,
         (
             '                content.clone()',
         ),
     ),
     (
         (
-            "elastos/crates/elastos-server/src/resource_bridge.rs:600",
+            "elastos/crates/elastos-server/src/resource_bridge.rs:606",
         ),
-        600,
+        606,
         (
             '                Some(precondition) => crate::auth::write_principal_root_object_if_revision(',
         ),
