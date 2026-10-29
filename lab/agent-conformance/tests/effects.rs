@@ -1635,18 +1635,18 @@ fn standin_cancel_survivor_reaches_running() {
         "the stand-in stores the one live grant for the survivor's session at the test instant"
     );
     standin
-        .authorise(
+        .post_capability_validate(
             StandInCaller::Client {
                 session_id: "component-2",
             },
-            "req-2",
+            &json!({ "request_id": "req-2" }),
         )
         .expect("the stand-in authorises the survivor's presentation");
-    let ended_presentation = standin.authorise(
+    let ended_presentation = standin.post_capability_validate(
         StandInCaller::Client {
             session_id: "component-1",
         },
-        "req-2",
+        &json!({ "request_id": "req-2" }),
     );
     assert!(
         matches!(&ended_presentation, Err((403, reason)) if reason.contains("wrong capsule")),
@@ -1722,11 +1722,11 @@ fn standin_cancel_survivor_reaches_running() {
         standin_live_grants(&standin).is_empty(),
         "the stand-in leaves no live grant after the survivor stop"
     );
-    let revoked = standin.authorise(
+    let revoked = standin.post_capability_validate(
         StandInCaller::Client {
             session_id: "component-2",
         },
-        "req-2",
+        &json!({ "request_id": "req-2" }),
     );
     assert!(
         matches!(&revoked, Err((400, reason)) if reason.starts_with("grant is not live:") && reason.contains("Revoked")),
