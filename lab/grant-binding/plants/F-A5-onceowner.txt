@@ -1,0 +1,8 @@
+id: F-A5-onceowner
+file: src/ops.rs
+test: ops::model_allow_once_child_effect_ends_shared_grant
+--- old
+                    request.handle = handle;
+--- new
+                    let _ = handle;
+--- end

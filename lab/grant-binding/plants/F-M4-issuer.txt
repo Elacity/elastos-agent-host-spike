@@ -1,0 +1,10 @@
+id: F-M4-issuer
+file: src/lib.rs
+test: model_registered_home_ask_is_refused
+test: model_home_direct_mint_is_refused
+--- old
+        if record.identity == "home" {
+            return Err(Refuse::HomeMint);
+        }
+--- new
+--- end

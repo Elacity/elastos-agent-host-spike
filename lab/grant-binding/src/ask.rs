@@ -113,14 +113,8 @@ fn model_over_budget_ask_is_refused() {
     let untouched = verifier
         .reserve(&call, &request, 1)
         .expect_err("ceiling stays unset");
-    assert_eq!(
-        untouched,
-        crate::ledger::ReserveRefuse::OverCeiling {
-            ceiling: 0,
-            held: 0,
-            asked: 1,
-        }
-    );
+    assert_eq!(untouched, crate::ledger::ReserveRefuse::NoCeiling);
+    assert_eq!(untouched.to_string(), "identity has no ceiling");
 }
 
 #[test]
@@ -176,14 +170,8 @@ fn model_admit_ask_on_a_sibling_instance_is_refused() {
     let untouched = verifier
         .reserve(&call, &super::guest(handle), 1)
         .expect_err("ceiling stays unset");
-    assert_eq!(
-        untouched,
-        crate::ledger::ReserveRefuse::OverCeiling {
-            ceiling: 0,
-            held: 0,
-            asked: 1,
-        }
-    );
+    assert_eq!(untouched, crate::ledger::ReserveRefuse::NoCeiling);
+    assert_eq!(untouched.to_string(), "identity has no ceiling");
 }
 
 #[test]
@@ -352,6 +340,306 @@ fn model_forged_instance_does_not_replace_the_admitted_amount() {
         crate::ledger::ReserveRefuse::OverCeiling {
             ceiling: 4,
             held: 4,
+            asked: 1,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+}
+
+#[test]
+fn model_forged_identity_does_not_retarget_the_ceiling() {
+    let mut verifier = Verifier::new();
+    let second = verifier.register_instance("agent-2", "session-a");
+    let first = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(first, second);
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", super::rights())
+        .expect("bind");
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    assert_ne!(first_handle, second_handle);
+    let second_call = verifier.open_call(second);
+    let first_call = verifier.open_call(first);
+    let second_request = super::guest(second_handle);
+    let first_request = GuestRequest {
+        forged_identity: Some("agent-2".to_owned()),
+        ..super::guest(first_handle)
+    };
+    assert_eq!(first_request.forged_identity.as_deref(), Some("agent-2"));
+    verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            BudgetAsk { amount: 50 },
+            80,
+        )
+        .expect("agent-2 keeps a ceiling of 50");
+    let granted = verifier
+        .admit_ask(&first_call, &first_request, BudgetAsk { amount: 4 }, 10)
+        .expect("agent-1 ask within the cap");
+    assert_eq!(granted, 4);
+    verifier
+        .reserve(&second_call, &second_request, 50)
+        .expect("agent-2 ceiling stays 50");
+    let refusal = verifier
+        .reserve(&second_call, &second_request, 1)
+        .expect_err("agent-2 is at its own ceiling");
+    assert_eq!(
+        refusal,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 50,
+            held: 50,
+            asked: 1,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+}
+
+#[test]
+fn model_forged_session_does_not_retarget_the_ceiling() {
+    let mut verifier = Verifier::new();
+    let second = verifier.register_instance("agent-2", "session-a");
+    let first = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(first, second);
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", super::rights())
+        .expect("bind");
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    assert_ne!(first_handle, second_handle);
+    let second_call = verifier.open_call(second);
+    let first_call = verifier.open_call(first);
+    let second_request = super::guest(second_handle);
+    let first_request = GuestRequest {
+        forged_session: Some("agent-2".to_owned()),
+        ..super::guest(first_handle)
+    };
+    assert_eq!(first_request.forged_session.as_deref(), Some("agent-2"));
+    verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            BudgetAsk { amount: 50 },
+            80,
+        )
+        .expect("agent-2 keeps a ceiling of 50");
+    let granted = verifier
+        .admit_ask(&first_call, &first_request, BudgetAsk { amount: 4 }, 10)
+        .expect("agent-1 ask within the cap");
+    assert_eq!(granted, 4);
+    verifier
+        .reserve(&second_call, &second_request, 50)
+        .expect("agent-2 ceiling stays 50");
+    let refusal = verifier
+        .reserve(&second_call, &second_request, 1)
+        .expect_err("agent-2 is at its own ceiling");
+    assert_eq!(
+        refusal,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 50,
+            held: 50,
+            asked: 1,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+}
+
+#[test]
+fn model_forged_instance_does_not_retarget_the_ceiling() {
+    let mut verifier = Verifier::new();
+    let second = verifier.register_instance("agent-2", "session-a");
+    let first = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(first, second);
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", super::rights())
+        .expect("bind");
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    assert_ne!(first_handle, second_handle);
+    let second_call = verifier.open_call(second);
+    let first_call = verifier.open_call(first);
+    let second_request = super::guest(second_handle);
+    let first_request = GuestRequest {
+        forged_instance: Some(second),
+        ..super::guest(first_handle)
+    };
+    assert_eq!(first_request.forged_instance, Some(second));
+    verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            BudgetAsk { amount: 50 },
+            80,
+        )
+        .expect("agent-2 keeps a ceiling of 50");
+    let granted = verifier
+        .admit_ask(&first_call, &first_request, BudgetAsk { amount: 4 }, 10)
+        .expect("agent-1 ask within the cap");
+    assert_eq!(granted, 4);
+    verifier
+        .reserve(&second_call, &second_request, 50)
+        .expect("agent-2 ceiling stays 50");
+    let refusal = verifier
+        .reserve(&second_call, &second_request, 1)
+        .expect_err("agent-2 is at its own ceiling");
+    assert_eq!(
+        refusal,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 50,
+            held: 50,
+            asked: 1,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+}
+
+#[test]
+fn model_forged_append_does_not_retarget_the_ceiling() {
+    let mut verifier = Verifier::new();
+    let second = verifier.register_instance("agent-2", "session-a");
+    let first = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(first, second);
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", super::rights())
+        .expect("bind");
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    assert_ne!(first_handle, second_handle);
+    let second_call = verifier.open_call(second);
+    let first_call = verifier.open_call(first);
+    let second_request = super::guest(second_handle);
+    let first_request = GuestRequest {
+        forged_append: true,
+        ..super::guest(first_handle)
+    };
+    assert!(first_request.forged_append);
+    verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            BudgetAsk { amount: 50 },
+            80,
+        )
+        .expect("agent-2 keeps a ceiling of 50");
+    let granted = verifier
+        .admit_ask(&first_call, &first_request, BudgetAsk { amount: 4 }, 10)
+        .expect("agent-1 ask within the cap");
+    assert_eq!(granted, 4);
+    verifier
+        .reserve(&second_call, &second_request, 50)
+        .expect("agent-2 ceiling stays 50");
+    let refusal = verifier
+        .reserve(&second_call, &second_request, 1)
+        .expect_err("agent-2 is at its own ceiling");
+    assert_eq!(
+        refusal,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 50,
+            held: 50,
+            asked: 1,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+}
+
+#[test]
+fn model_forged_overwrite_does_not_retarget_the_ceiling() {
+    let mut verifier = Verifier::new();
+    let second = verifier.register_instance("agent-2", "session-a");
+    let first = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(first, second);
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", super::rights())
+        .expect("bind");
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    assert_ne!(first_handle, second_handle);
+    let second_call = verifier.open_call(second);
+    let first_call = verifier.open_call(first);
+    let second_request = super::guest(second_handle);
+    let first_request = GuestRequest {
+        forged_overwrite: true,
+        ..super::guest(first_handle)
+    };
+    assert!(first_request.forged_overwrite);
+    verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            BudgetAsk { amount: 50 },
+            80,
+        )
+        .expect("agent-2 keeps a ceiling of 50");
+    let granted = verifier
+        .admit_ask(&first_call, &first_request, BudgetAsk { amount: 4 }, 10)
+        .expect("agent-1 ask within the cap");
+    assert_eq!(granted, 4);
+    verifier
+        .reserve(&second_call, &second_request, 50)
+        .expect("agent-2 ceiling stays 50");
+    let refusal = verifier
+        .reserve(&second_call, &second_request, 1)
+        .expect_err("agent-2 is at its own ceiling");
+    assert_eq!(
+        refusal,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 50,
+            held: 50,
+            asked: 1,
+        }
+    );
+    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+}
+
+#[test]
+fn model_forged_child_journal_does_not_retarget_the_ceiling() {
+    let mut verifier = Verifier::new();
+    let second = verifier.register_instance("agent-2", "session-a");
+    let first = verifier.register_instance("agent-1", "session-a");
+    assert_ne!(first, second);
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-2/notes", super::rights())
+        .expect("bind");
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    assert_ne!(first_handle, second_handle);
+    let second_call = verifier.open_call(second);
+    let first_call = verifier.open_call(first);
+    let second_request = super::guest(second_handle);
+    let first_request = GuestRequest {
+        forged_child_journal: true,
+        ..super::guest(first_handle)
+    };
+    assert!(first_request.forged_child_journal);
+    verifier
+        .admit_ask(
+            &second_call,
+            &second_request,
+            BudgetAsk { amount: 50 },
+            80,
+        )
+        .expect("agent-2 keeps a ceiling of 50");
+    let granted = verifier
+        .admit_ask(&first_call, &first_request, BudgetAsk { amount: 4 }, 10)
+        .expect("agent-1 ask within the cap");
+    assert_eq!(granted, 4);
+    verifier
+        .reserve(&second_call, &second_request, 50)
+        .expect("agent-2 ceiling stays 50");
+    let refusal = verifier
+        .reserve(&second_call, &second_request, 1)
+        .expect_err("agent-2 is at its own ceiling");
+    assert_eq!(
+        refusal,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 50,
+            held: 50,
             asked: 1,
         }
     );

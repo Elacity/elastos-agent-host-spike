@@ -67,6 +67,8 @@ pub(crate) struct GrantRecord {
     instance: InstanceId,
     owned_root: String,
     rights: Rights,
+    parent: Option<Handle>,
+    once: bool,
 }
 
 /// The binding copied out after a successful check.
@@ -77,6 +79,12 @@ pub struct Decision {
     pub instance: InstanceId,
     pub owned_root: String,
     pub rights: Rights,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Asker {
+    Home,
+    App,
 }
 
 /// A refusal with one clear reason.
@@ -92,6 +100,7 @@ pub enum Refuse {
     SymlinkShaped,
     OutsideRoot,
     PublicRead,
+    HomeMint,
 }
 
 impl std::fmt::Display for Refuse {
@@ -107,6 +116,7 @@ impl std::fmt::Display for Refuse {
             Refuse::SymlinkShaped => "use path has a symlink-shaped segment",
             Refuse::OutsideRoot => "use path leaves the owned root",
             Refuse::PublicRead => "public storage read does not bind",
+            Refuse::HomeMint => "home does not mint an app capability",
         })
     }
 }
@@ -124,6 +134,8 @@ pub struct Verifier {
     grants: HashMap<Handle, GrantRecord>,
     next_instance: u64,
     next_handle: u64,
+    pending_parent: Option<Handle>,
+    pending_once: bool,
     #[allow(dead_code)] // later slices fill the ledger
     ledger: std::sync::Mutex<ledger::Ledger>,
 }
@@ -136,6 +148,8 @@ impl Verifier {
             grants: HashMap::new(),
             next_instance: 0,
             next_handle: 0,
+            pending_parent: None,
+            pending_once: false,
             ledger: std::sync::Mutex::new(ledger::Ledger::new()),
         }
     }
@@ -167,10 +181,16 @@ impl Verifier {
         resource: &str,
         rights: Rights,
     ) -> Result<Handle, Refuse> {
+        let parent = self.pending_parent.take();
+        let once = self.pending_once;
+        self.pending_once = false;
         let record = self
             .registry
             .get(&instance)
             .ok_or(Refuse::UnknownInstance)?;
+        if record.identity == "home" {
+            return Err(Refuse::HomeMint);
+        }
         let owned_root = resource_name(&record.identity, resource, None)?;
         self.next_handle += 1;
         let handle = Handle(self.next_handle);
@@ -182,9 +202,77 @@ impl Verifier {
                 instance,
                 owned_root,
                 rights,
+                parent,
+                once,
             },
         );
         Ok(handle)
+    }
+
+    pub fn ask_capability(
+        &mut self,
+        instance: InstanceId,
+        resource: &str,
+        rights: Rights,
+        claimed: Asker,
+    ) -> Result<Handle, Refuse> {
+        let _claimed = claimed;
+        self.bind_grant(instance, resource, rights)
+    }
+
+    pub fn ask_once(
+        &mut self,
+        instance: InstanceId,
+        resource: &str,
+        rights: Rights,
+        claimed: Asker,
+    ) -> Result<Handle, Refuse> {
+        self.pending_once = true;
+        self.ask_capability(instance, resource, rights, claimed)
+    }
+
+    /// Removes one grant from the one store.
+    #[rustfmt::skip]
+    pub fn revoke_grant(&mut self, handle: Handle) -> Result<(), Refuse> {
+        macro_rules! revoke_missing {
+            (
+                #[rustfmt::skip]
+                if ! $self:tt . $grants:tt . $contains:tt ( & $handle:tt ) {
+                    return $refusal:expr;
+                }
+            ) => {
+                if ! $self . $grants . $contains ( & $handle ) {
+                    return $refusal;
+                }
+            };
+        }
+        revoke_missing! {
+        #[rustfmt::skip]
+        if !self.grants.contains_key(&handle) {
+            return Err(Refuse::UnknownHandle);
+        }}
+        self.grants.remove(&handle);
+        self.remove_derived_grants(handle);
+        Ok(())
+    }
+
+    fn remove_derived_grants(&mut self, handle: Handle) {
+        let mut removed = vec![handle];
+        let mut index = 0;
+        while index < removed.len() {
+            let parent = removed[index];
+            index += 1;
+            let children: Vec<Handle> = self
+                .grants
+                .iter()
+                .filter(|(_, record)| record.parent == Some(parent))
+                .map(|(child, _)| *child)
+                .collect();
+            for child in children {
+                self.grants.remove(&child);
+                removed.push(child);
+            }
+        }
     }
 
     /// Changes the registry identity for a live instance.
@@ -773,12 +861,40 @@ fn model_public_prefix_is_not_a_public_read() {
 }
 
 #[test]
+fn model_case_different_public_segment_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let refusal = verifier
+        .bind_grant(instance, "public/notes", rights())
+        .expect_err("case-different Public segment");
+    assert_eq!(refusal, Refuse::OutsidePrincipal);
+    assert_eq!(
+        refusal.to_string(),
+        "owned root is outside the agent principal"
+    );
+}
+
+#[test]
 fn model_extended_usersai_segment_is_refused() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
     let refusal = verifier
         .bind_grant(instance, "UsersAIextra/agent-1/notes", rights())
         .expect_err("extended UsersAI segment");
+    assert_eq!(refusal, Refuse::OutsidePrincipal);
+    assert_eq!(
+        refusal.to_string(),
+        "owned root is outside the agent principal"
+    );
+}
+
+#[test]
+fn model_case_different_usersai_segment_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let refusal = verifier
+        .bind_grant(instance, "usersai/agent-1/notes", rights())
+        .expect_err("case-different UsersAI segment");
     assert_eq!(refusal, Refuse::OutsidePrincipal);
     assert_eq!(
         refusal.to_string(),
@@ -1008,6 +1124,24 @@ fn model_use_path_outside_the_owned_root_is_refused() {
 }
 
 #[test]
+fn model_case_different_use_path_is_refused() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let refusal = verifier
+        .use_path(
+            &verifier.open_call(instance),
+            &guest(handle),
+            "UsersAI/agent-1/Notes/page.md",
+        )
+        .expect_err("case-different use path");
+    assert_eq!(refusal, Refuse::OutsideRoot);
+    assert_eq!(refusal.to_string(), "use path leaves the owned root");
+}
+
+#[test]
 fn model_symlink_shaped_use_path_is_refused() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
@@ -1152,4 +1286,243 @@ fn model_crate_has_no_dependencies_and_forbids_unsafe() {
 fn model_planted_bugs_are_caught() {
     let _guard = source_reads();
     plant::run_all();
+}
+
+#[test]
+fn model_registered_home_ask_is_refused() {
+    let mut verifier = Verifier::new();
+    let home = verifier.register_instance("home", "session-a");
+    let photo = verifier.register_instance("photo", "session-a");
+    let handle = verifier
+        .ask_capability(photo, "UsersAI/photo/library", rights(), Asker::Home)
+        .expect("photo ask claimed as home");
+    let call = verifier.open_call(photo);
+    let decision = verifier
+        .use_grant(call, &guest(handle))
+        .expect("photo effect");
+    assert_eq!(decision.identity, "photo");
+    assert_eq!(decision.owned_root, "UsersAI/photo/library");
+    let refusal = verifier
+        .ask_capability(home, "UsersAI/home/desk", rights(), Asker::App)
+        .expect_err("home ask claimed as app");
+    assert_eq!(refusal, Refuse::HomeMint);
+    assert_eq!(refusal.to_string(), "home does not mint an app capability");
+    let again = verifier
+        .use_grant(call, &guest(handle))
+        .expect("photo effect remains");
+    assert_eq!(again.owned_root, "UsersAI/photo/library");
+    let for_home = verifier
+        .ask_capability(photo, "UsersAI/home/desk", rights(), Asker::Home)
+        .expect_err("photo ask for a home root");
+    assert_eq!(for_home, Refuse::OutsidePrincipal);
+    assert_eq!(
+        for_home.to_string(),
+        "owned root is outside the agent principal"
+    );
+}
+
+#[test]
+fn model_home_direct_mint_is_refused() {
+    let mut verifier = Verifier::new();
+    let home = verifier.register_instance("home", "session-a");
+    let photo = verifier.register_instance("photo", "session-a");
+    let direct = verifier
+        .bind_grant(home, "UsersAI/home/desk", rights())
+        .expect_err("home calls the mint");
+    assert_eq!(direct, Refuse::HomeMint);
+    assert_eq!(direct.to_string(), "home does not mint an app capability");
+    let handle = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("app mint");
+    let decision = verifier
+        .use_grant(verifier.open_call(photo), &guest(handle))
+        .expect("photo effect");
+    assert_eq!(decision.identity, "photo");
+}
+
+#[test]
+fn model_revoke_one_app_stops_only_that_app() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let notes = verifier.register_instance("notes", "session-a");
+    let photo_handle = verifier
+        .ask_capability(photo, "UsersAI/photo/library", rights(), Asker::App)
+        .expect("photo ask");
+    let notes_handle = verifier
+        .ask_capability(notes, "UsersAI/notes/pad", rights(), Asker::App)
+        .expect("notes ask");
+    let photo_call = verifier.open_call(photo);
+    let notes_call = verifier.open_call(notes);
+    let photo_effect = verifier
+        .use_grant(photo_call, &guest(photo_handle))
+        .expect("photo effect");
+    assert_eq!(photo_effect.identity, "photo");
+    assert_eq!(photo_effect.owned_root, "UsersAI/photo/library");
+    let notes_effect = verifier
+        .use_grant(notes_call, &guest(notes_handle))
+        .expect("notes effect");
+    assert_eq!(notes_effect.identity, "notes");
+    verifier.revoke_grant(photo_handle).expect("revoke");
+    let stopped = verifier
+        .use_grant(photo_call, &guest(photo_handle))
+        .expect_err("revoked photo effect");
+    assert_eq!(stopped, Refuse::UnknownHandle);
+    assert_eq!(stopped.to_string(), "unknown handle");
+    let kept = verifier
+        .use_grant(notes_call, &guest(notes_handle))
+        .expect("notes effect remains");
+    assert_eq!(kept.identity, "notes");
+    assert_eq!(kept.owned_root, "UsersAI/notes/pad");
+}
+
+#[test]
+fn model_revoke_stops_derived_child_journals() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let notes = verifier.register_instance("notes", "session-a");
+    let library = verifier
+        .ask_capability(photo, "UsersAI/photo/library", rights(), Asker::App)
+        .expect("library ask");
+    let album = verifier
+        .ask_capability(photo, "UsersAI/photo/album", rights(), Asker::App)
+        .expect("album ask");
+    let notes_handle = verifier
+        .ask_capability(notes, "UsersAI/notes/pad", rights(), Asker::App)
+        .expect("notes ask");
+    let photo_call = verifier.open_call(photo);
+    let notes_call = verifier.open_call(notes);
+    let roll = verifier
+        .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    assert_eq!(
+        verifier
+            .use_grant(photo_call, &guest(roll))
+            .expect("child effect")
+            .owned_root,
+        "UsersAI/photo/library/roll"
+    );
+    verifier.revoke_grant(library).expect("revoke");
+    let stopped = verifier
+        .use_grant(photo_call, &guest(library))
+        .expect_err("revoked library");
+    assert_eq!(stopped, Refuse::UnknownHandle);
+    let child_stopped = verifier
+        .use_grant(photo_call, &guest(roll))
+        .expect_err("revoked child journal");
+    assert_eq!(child_stopped, Refuse::UnknownHandle);
+    assert_eq!(child_stopped.to_string(), "unknown handle");
+    let album_kept = verifier
+        .use_grant(photo_call, &guest(album))
+        .expect("album grant stays");
+    assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
+    let notes_kept = verifier
+        .use_grant(notes_call, &guest(notes_handle))
+        .expect("notes grant stays");
+    assert_eq!(notes_kept.identity, "notes");
+    assert_eq!(notes_kept.owned_root, "UsersAI/notes/pad");
+}
+
+#[test]
+fn model_failed_child_keeps_next_ask_independent() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .ask_capability(photo, "UsersAI/photo/library", rights(), Asker::App)
+        .expect("library ask");
+    let photo_call = verifier.open_call(photo);
+    let refusal = verifier
+        .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/other")
+        .expect_err("child outside the library");
+    assert_eq!(refusal, ops::OperateRefuse::Binding(Refuse::OutsideRoot));
+    assert_eq!(refusal.to_string(), "use path leaves the owned root");
+    let album = verifier
+        .ask_capability(photo, "UsersAI/photo/album", rights(), Asker::App)
+        .expect("album ask");
+    verifier.revoke_grant(library).expect("revoke");
+    let stopped = verifier
+        .use_grant(photo_call, &guest(library))
+        .expect_err("revoked library");
+    assert_eq!(stopped, Refuse::UnknownHandle);
+    let album_kept = verifier
+        .use_grant(photo_call, &guest(album))
+        .expect("independent album stays");
+    assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
+}
+
+#[test]
+fn model_successful_child_keeps_next_ask_independent() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .ask_capability(photo, "UsersAI/photo/library", rights(), Asker::App)
+        .expect("library ask");
+    let photo_call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("child journal");
+    let album = verifier
+        .ask_capability(photo, "UsersAI/photo/album", rights(), Asker::App)
+        .expect("album ask");
+    verifier.revoke_grant(library).expect("revoke");
+    let child_stopped = verifier
+        .use_grant(photo_call, &guest(roll))
+        .expect_err("revoked child journal");
+    assert_eq!(child_stopped, Refuse::UnknownHandle);
+    let album_kept = verifier
+        .use_grant(photo_call, &guest(album))
+        .expect("independent album stays");
+    assert_eq!(album_kept.owned_root, "UsersAI/photo/album");
+}
+
+#[test]
+fn model_revoke_child_journal_leaves_its_parent() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .ask_capability(photo, "UsersAI/photo/library", rights(), Asker::App)
+        .expect("library ask");
+    let photo_call = verifier.open_call(photo);
+    let roll = verifier
+        .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/library/roll")
+        .expect("roll journal");
+    let frame = verifier
+        .create_child_journal(&photo_call, &guest(library), "UsersAI/photo/library/frame")
+        .expect("frame journal");
+    verifier.revoke_grant(roll).expect("revoke");
+    let stopped = verifier
+        .use_grant(photo_call, &guest(roll))
+        .expect_err("revoked roll");
+    assert_eq!(stopped, Refuse::UnknownHandle);
+    assert_eq!(stopped.to_string(), "unknown handle");
+    let parent_kept = verifier
+        .use_grant(photo_call, &guest(library))
+        .expect("parent grant stays");
+    assert_eq!(parent_kept.owned_root, "UsersAI/photo/library");
+    let frame_kept = verifier
+        .use_grant(photo_call, &guest(frame))
+        .expect("sibling journal stays");
+    assert_eq!(frame_kept.owned_root, "UsersAI/photo/library/frame");
+}
+
+#[test]
+fn model_revoke_unknown_handle_is_refused() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .ask_capability(photo, "UsersAI/photo/library", rights(), Asker::App)
+        .expect("library ask");
+    let frames = verifier
+        .ask_capability(photo, "UsersAI/photo/frames", rights(), Asker::App)
+        .expect("frames ask");
+    assert_ne!(library, frames);
+    let photo_call = verifier.open_call(photo);
+    verifier.revoke_grant(library).expect("revoke");
+    let refusal = verifier
+        .revoke_grant(library)
+        .expect_err("the handle is already gone");
+    assert_eq!(refusal, Refuse::UnknownHandle);
+    assert_eq!(refusal.to_string(), "unknown handle");
+    verifier
+        .use_grant(photo_call, &guest(frames))
+        .expect("frames stays");
 }

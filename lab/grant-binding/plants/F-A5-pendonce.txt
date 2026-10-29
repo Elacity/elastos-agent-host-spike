@@ -1,0 +1,9 @@
+id: F-A5-pendonce
+file: src/lib.rs
+test: ops::model_session_grant_allows_a_second_effect
+--- old
+        let once = self.pending_once;
+        self.pending_once = false;
+--- new
+        let once = self.pending_once;
+--- end
