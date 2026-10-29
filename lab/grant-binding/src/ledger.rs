@@ -263,7 +263,7 @@ impl Verifier {
         } else {
             shared
         };
-        if !ledger.ceilings.is_empty() && !ledger.ceilings.contains_key(&identity) {
+        if !ledger.ceilings.contains_key(&identity) {
             return Err(ReserveRefuse::NoCeiling);
         }
         ledger.ceiling = ledger.admitted;
@@ -495,8 +495,15 @@ fn books(verifier: &Verifier) -> Books {
 fn model_reserve_at_the_ceiling_is_allowed() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(5);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 5 },
+            5,
+        )
+        .expect("ask");
     let request = GuestRequest {
         reported_usage: 1,
         ..guest(handle)
@@ -509,8 +516,15 @@ fn model_reserve_at_the_ceiling_is_allowed() {
 fn model_reserve_over_the_ceiling_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(5);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 5 },
+            5,
+        )
+        .expect("ask");
     let refusal = verifier
         .reserve(&call, &guest(handle), 6)
         .expect_err("over the ceiling");
@@ -530,8 +544,15 @@ fn model_reserve_over_the_ceiling_is_refused() {
 fn model_reserve_past_the_u64_total_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(u64::MAX);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: u64::MAX },
+            u64::MAX,
+        )
+        .expect("ask");
     verifier
         .reserve(&call, &guest(handle), u64::MAX)
         .expect("at the ceiling");
@@ -560,8 +581,15 @@ fn model_reserve_past_the_u64_total_is_refused() {
 fn model_outstanding_hold_counts_toward_the_ceiling() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(5);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 5 },
+            5,
+        )
+        .expect("ask");
     verifier
         .reserve(&call, &guest(handle), 3)
         .expect("first reserve");
@@ -585,12 +613,20 @@ fn model_outstanding_hold_counts_toward_the_ceiling() {
 fn model_reported_usage_does_not_lower_the_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = GuestRequest {
-        reported_usage: 1,
+        reported_usage: 11,
         ..guest(handle)
     };
+    assert!(request.reported_usage > 10);
     verifier.reserve(&call, &request, 10).expect("reserve");
     assert_eq!(books(&verifier).held, 10);
 }
@@ -622,8 +658,15 @@ fn model_forged_instance_does_not_move_the_reserve() {
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = GuestRequest {
         forged_instance: Some(sibling),
         ..guest(handle)
@@ -642,8 +685,15 @@ fn model_forged_instance_does_not_move_the_reserve() {
 fn model_settle_known_outcome_charges_the_measured_figure() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let reservation = verifier
         .reserve(&call, &guest(handle), 10)
         .expect("reserve");
@@ -660,8 +710,15 @@ fn model_settle_known_outcome_charges_the_measured_figure() {
 fn model_reported_usage_does_not_lower_the_settled_charge() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = GuestRequest {
         reported_usage: 1,
         ..guest(handle)
@@ -679,8 +736,15 @@ fn model_reported_usage_does_not_lower_the_settled_charge() {
 fn model_settle_twice_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = GuestRequest {
         reported_usage: 0,
         ..guest(handle)
@@ -705,8 +769,15 @@ fn model_settle_twice_is_refused() {
 fn model_unknown_outcome_keeps_the_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
     let refusal = verifier
@@ -727,8 +798,15 @@ fn model_unknown_outcome_keeps_the_hold() {
 fn model_release_returns_the_unused_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let reservation = verifier
         .reserve(&call, &guest(handle), 10)
         .expect("reserve");
@@ -747,8 +825,15 @@ fn model_settle_on_a_sibling_instance_is_refused() {
     let handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    verifier.admit(10);
     let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
     let sibling_call = verifier.open_call(sibling);
@@ -774,8 +859,15 @@ fn model_release_on_a_sibling_instance_is_refused() {
     let handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    verifier.admit(10);
     let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
     let sibling_call = verifier.open_call(sibling);
@@ -798,8 +890,15 @@ fn model_forged_instance_does_not_move_the_release() {
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
     let request = GuestRequest {
         forged_instance: Some(sibling),
@@ -819,8 +918,15 @@ fn model_forged_instance_does_not_move_the_release() {
 fn model_settle_below_the_hold_returns_the_rest() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = GuestRequest {
         reported_usage: 9,
         ..guest(handle)
@@ -844,8 +950,15 @@ fn model_settle_below_the_hold_returns_the_rest() {
 fn model_release_twice_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let reservation = verifier
         .reserve(&call, &guest(handle), 10)
         .expect("reserve");
@@ -867,44 +980,42 @@ fn model_release_twice_is_refused() {
 fn model_concurrent_reserves_keep_one_ceiling() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(5);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 6 },
+            6,
+        )
+        .expect("ask");
     let request = guest(handle);
     let (first, second) = std::thread::scope(|scope| {
         let first = scope.spawn(|| verifier.reserve(&call, &request, 3));
         let second = scope.spawn(|| verifier.reserve(&call, &request, 3));
         (first.join().expect("first"), second.join().expect("second"))
     });
-    let allowed = [first, second]
-        .iter()
-        .filter(|result| result.is_ok())
-        .count();
-    assert_eq!(allowed, 1);
-    let refusal = match (first, second) {
-        (Ok(_), Err(refusal)) | (Err(refusal), Ok(_)) => refusal,
-        _ => panic!("exactly one reserve must be allowed"),
-    };
-    assert_eq!(
-        refusal,
-        ReserveRefuse::OverCeiling {
-            ceiling: 5,
-            held: 3,
-            asked: 3,
-        }
-    );
-    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
+    first.expect("first reserve");
+    second.expect("second reserve");
     let books = books(&verifier);
-    assert_eq!(books.held, 3);
+    assert_eq!(books.held, 6);
     assert_eq!(books.charged, 0);
-    assert_eq!(books.open.len(), 1);
+    assert_eq!(books.open.len(), 2);
 }
 
 #[test]
 fn model_settle_above_the_reservation_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = GuestRequest {
         reported_usage: 100,
         ..guest(handle)
@@ -936,8 +1047,15 @@ fn model_settle_above_the_reservation_is_refused() {
 fn model_settle_past_the_u64_charge_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(u64::MAX);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: u64::MAX },
+            u64::MAX,
+        )
+        .expect("ask");
     let request = GuestRequest {
         reported_usage: 1,
         ..guest(handle)
@@ -984,8 +1102,15 @@ fn model_settle_on_another_handle_is_refused() {
         .bind_grant(second, "UsersAI/agent-1/notes", rights())
         .expect("bind");
     assert_ne!(holder, other);
-    verifier.admit(10);
     let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(holder),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(holder);
     let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
     let refusal = verifier
@@ -1027,8 +1152,15 @@ fn model_release_on_another_handle_is_refused() {
         .bind_grant(second, "UsersAI/agent-1/notes", rights())
         .expect("bind");
     assert_ne!(holder, other);
-    verifier.admit(10);
     let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(holder),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(holder);
     let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
     let refusal = verifier
@@ -1054,8 +1186,15 @@ fn model_release_on_another_handle_is_refused() {
 fn model_forged_ceiling_does_not_raise_the_ceiling() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(5);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 5 },
+            5,
+        )
+        .expect("ask");
     let request = GuestRequest {
         forged_ceiling: 100,
         ..guest(handle)
@@ -1087,8 +1226,15 @@ fn model_forged_ceiling_does_not_raise_the_ceiling() {
 fn model_lower_ceiling_leaves_the_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let reservation = verifier.reserve(&call, &guest(handle), 8).expect("reserve");
     verifier.admit(4);
     let after = books(&verifier);
@@ -1117,8 +1263,15 @@ fn model_lower_ceiling_leaves_the_hold() {
 fn model_known_zero_settle_frees_the_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = GuestRequest {
         reported_usage: 7,
         ..guest(handle)
@@ -1142,8 +1295,15 @@ fn model_known_zero_settle_frees_the_hold() {
 fn model_one_release_returns_only_that_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let first = verifier.reserve(&call, &request, 6).expect("reserve");
     let second = verifier.reserve(&call, &request, 4).expect("reserve");
@@ -1160,8 +1320,15 @@ fn model_one_release_returns_only_that_hold() {
 fn model_one_settle_drops_only_that_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let first = verifier.reserve(&call, &request, 6).expect("reserve");
     let second = verifier.reserve(&call, &request, 4).expect("reserve");
@@ -1181,8 +1348,15 @@ fn model_one_settle_drops_only_that_hold() {
 fn model_settled_reservation_id_is_not_reused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let first = verifier.reserve(&call, &request, 6).expect("reserve");
     let measured = 6;
@@ -1209,25 +1383,36 @@ fn model_reserve_before_admit_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
     let call = verifier.open_call(instance);
+    let request = guest(handle);
     let refusal = verifier
-        .reserve(&call, &guest(handle), 1)
+        .reserve(&call, &request, 1)
         .expect_err("reserve before admit");
+    assert_eq!(refusal, ReserveRefuse::NoCeiling);
+    assert_eq!(refusal.to_string(), "identity has no ceiling");
+    let after_refusal = books(&verifier);
+    assert_eq!(after_refusal.held, 0);
+    assert_eq!(after_refusal.charged, 0);
+    assert!(after_refusal.open.is_empty());
+    verifier
+        .admit_ask(&call, &request, crate::ask::BudgetAsk { amount: 0 }, 0)
+        .expect("zero ceiling");
+    let at_zero = verifier
+        .reserve(&call, &request, 1)
+        .expect_err("a zero ceiling is still a ceiling");
     assert_eq!(
-        refusal,
+        at_zero,
         ReserveRefuse::OverCeiling {
             ceiling: 0,
             held: 0,
             asked: 1,
         }
     );
-    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
-    let after_refusal = books(&verifier);
-    assert_eq!(after_refusal.held, 0);
-    assert_eq!(after_refusal.charged, 0);
-    assert!(after_refusal.open.is_empty());
-    verifier.admit(1);
+    assert_eq!(at_zero.to_string(), "reservation exceeds the ceiling");
     verifier
-        .reserve(&call, &guest(handle), 1)
+        .admit_ask(&call, &request, crate::ask::BudgetAsk { amount: 1 }, 1)
+        .expect("admit opens the ceiling");
+    verifier
+        .reserve(&call, &request, 1)
         .expect("admit opens the ceiling");
     assert_eq!(books(&verifier).held, 1);
 }
@@ -1236,8 +1421,15 @@ fn model_reserve_before_admit_is_refused() {
 fn model_reported_usage_does_not_open_ceiling_room() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(5);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 5 },
+            5,
+        )
+        .expect("ask");
     let request = GuestRequest {
         reported_usage: 1,
         ..guest(handle)
@@ -1269,8 +1461,15 @@ fn model_reported_usage_does_not_open_ceiling_room() {
 fn model_released_reservation_id_is_not_reused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let released = verifier.reserve(&call, &request, 6).expect("reserve");
     assert_eq!(verifier.release(&call, &request, released), Ok(()));
@@ -1292,8 +1491,15 @@ fn model_released_reservation_id_is_not_reused() {
 fn model_reported_usage_does_not_keep_the_released_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = GuestRequest {
         reported_usage: 1,
         ..guest(handle)
@@ -1318,8 +1524,15 @@ fn model_reported_usage_does_not_keep_the_released_hold() {
 fn model_lower_ceiling_does_not_refuse_the_settle() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let reservation = verifier.reserve(&call, &request, 8).expect("reserve");
     verifier.admit(4);
@@ -1357,8 +1570,15 @@ fn model_lower_ceiling_does_not_refuse_the_settle() {
 fn model_forged_ceiling_does_not_replace_the_settled_charge() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = GuestRequest {
         forged_ceiling: 9,
         ..guest(handle)
@@ -1379,8 +1599,15 @@ fn model_forged_ceiling_does_not_replace_the_settled_charge() {
 fn model_release_after_unknown_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
     let refusal = verifier
@@ -1411,8 +1638,15 @@ fn model_release_after_unknown_is_refused() {
 fn model_timeout_ends_an_uncertain_hold() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let first = verifier.reserve(&call, &request, 4).expect("reserve");
     let second = verifier.reserve(&call, &request, 3).expect("reserve");
@@ -1460,8 +1694,15 @@ fn model_timeout_ends_an_uncertain_hold() {
 fn model_early_timeout_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
     verifier.set_verifier_deadline(5);
@@ -1498,8 +1739,15 @@ fn model_forged_instance_does_not_move_the_settle() {
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
     let request = GuestRequest {
         forged_instance: Some(sibling),
@@ -1520,8 +1768,15 @@ fn model_forged_instance_does_not_move_the_settle() {
 fn model_timeout_twice_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
     let unknown = verifier
@@ -1563,8 +1818,15 @@ fn model_timeout_on_another_handle_is_refused() {
         .bind_grant(second, "UsersAI/agent-1/notes", rights())
         .expect("bind");
     assert_ne!(holder, other);
-    verifier.admit(10);
     let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(holder),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(holder);
     let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
     let unknown = verifier
@@ -1602,8 +1864,15 @@ fn model_timeout_on_a_sibling_instance_is_refused() {
     let handle = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    verifier.admit(10);
     let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(handle);
     let reservation = verifier.reserve(&call, &request, 10).expect("reserve");
     let unknown = verifier
@@ -1637,8 +1906,15 @@ fn model_forged_instance_does_not_move_the_timeout() {
     let handle = verifier
         .bind_grant(instance, "UsersAI/agent-1/notes", rights())
         .expect("bind");
-    verifier.admit(10);
     let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let reservation = verifier.reserve(&call, &guest(handle), 4).expect("reserve");
     let unknown = verifier
         .settle(&call, &guest(handle), reservation, SettleOutcome::Unknown)
@@ -1672,8 +1948,15 @@ fn model_unknown_from_another_handle_does_not_mark_the_hold() {
         .bind_grant(second, "UsersAI/agent-1/notes", rights())
         .expect("bind");
     assert_ne!(holder, other);
-    verifier.admit(10);
     let call = verifier.open_call(first);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(holder),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
     let request = guest(holder);
     let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
     let refusal = verifier
@@ -1834,6 +2117,22 @@ fn model_unasked_agent_does_not_inherit_the_last_admit() {
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
     assert_eq!(after.held, 1);
+}
+
+#[test]
+fn model_empty_ceilings_map_has_no_ceiling() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    verifier.admit(5);
+    let call = verifier.open_call(instance);
+    let refusal = verifier
+        .reserve(&call, &guest(handle), 1)
+        .expect_err("an empty ceilings map has no ceiling");
+    assert_eq!(refusal, ReserveRefuse::NoCeiling);
+    assert_eq!(refusal.to_string(), "identity has no ceiling");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 0);
 }
 
 #[test]

@@ -113,14 +113,8 @@ fn model_over_budget_ask_is_refused() {
     let untouched = verifier
         .reserve(&call, &request, 1)
         .expect_err("ceiling stays unset");
-    assert_eq!(
-        untouched,
-        crate::ledger::ReserveRefuse::OverCeiling {
-            ceiling: 0,
-            held: 0,
-            asked: 1,
-        }
-    );
+    assert_eq!(untouched, crate::ledger::ReserveRefuse::NoCeiling);
+    assert_eq!(untouched.to_string(), "identity has no ceiling");
 }
 
 #[test]
@@ -176,14 +170,8 @@ fn model_admit_ask_on_a_sibling_instance_is_refused() {
     let untouched = verifier
         .reserve(&call, &super::guest(handle), 1)
         .expect_err("ceiling stays unset");
-    assert_eq!(
-        untouched,
-        crate::ledger::ReserveRefuse::OverCeiling {
-            ceiling: 0,
-            held: 0,
-            asked: 1,
-        }
-    );
+    assert_eq!(untouched, crate::ledger::ReserveRefuse::NoCeiling);
+    assert_eq!(untouched.to_string(), "identity has no ceiling");
 }
 
 #[test]
