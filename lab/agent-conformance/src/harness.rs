@@ -618,9 +618,20 @@ impl Drop for RunningChild<'_> {
     }
 }
 
+// A finished child can leave a sparse capture. Refuse that logical length
+// before any byte is copied into the owner.
+const CAPTURE_BYTE_LIMIT: u64 = 16_777_216;
+
 fn capture(file: &mut File) -> Result<Vec<u8>> {
     file.seek(SeekFrom::Start(0))
         .map_err(|_| "could not rewind child capture")?;
+    let length = file
+        .metadata()
+        .map_err(|_| "could not inspect child capture")?
+        .len();
+    if length > CAPTURE_BYTE_LIMIT {
+        return Err("child capture exceeds its byte limit");
+    }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
         .map_err(|_| "could not read child capture")?;
