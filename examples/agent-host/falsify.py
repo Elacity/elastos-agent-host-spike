@@ -338,6 +338,7 @@ def load(path=DATA):
 #   each of these files under lab/agent-conformance.
 #   standin-runtime/mod.rs is a recovery target ahead of the pending WP move.
 #   The list still edits these 19 files; that line is not a twentieth edit.
+# - lab/useful-task/falsifiers.json: it edits src/lib.rs.
 # A killed run therefore restores an exact file instead of leaving a weakened
 # confinement test, profile or fixture behind.
 PROVIDER_TARGETS = (
@@ -401,6 +402,7 @@ PROVIDER_TARGETS = (
     "lab/agent-conformance/tests/common/operator.rs",
     "lab/agent-conformance/tests/common/probe.rs",
     "lab/agent-conformance/tests/effects.rs",
+    "lab/useful-task/src/lib.rs",
     "lab/agent-conformance/tests/runtime.rs",
 )
 
@@ -2140,7 +2142,8 @@ def a_killed_provider_edit_is_recovered():
     lab/agent-conformance/standin-runtime/mod.rs. That stand-in line is the
     recovery target ahead of the pending WP move, not a twentieth list edit.
     The mission commands two-capsule-run, useful-task and plan-approval are
-    crate-table rows. Foreign backups, including
+    crate-table rows, and lab/useful-task/src/lib.rs is the recovery target.
+    Foreign backups, including
     both providers' confinement documents, each harness's support neighbour,
     the model provider tests' other.rs neighbour, wallet's test support
     neighbour, the labs' adoption note, gap report and web-app fixture, the
@@ -2160,7 +2163,8 @@ def a_killed_provider_edit_is_recovered():
     # lab/agent-conformance/standin-runtime/mod.rs is named here as well, ahead
     # of the pending WP move, and it is not a twentieth list edit. The mission
     # commands two-capsule-run, useful-task and plan-approval are crate-table
-    # rows, not targets. Their original bytes are written in the
+    # rows, not targets, and lab/useful-task/src/lib.rs is the recovery
+    # target. Their original bytes are written in the
     # isolated tree, never read from the real lab or crates.
     synthetic = ("../../capsules/model-provider/tests/confine/main.rs",
                  "../../capsules/model-provider/tests/process.rs",
@@ -2215,6 +2219,7 @@ def a_killed_provider_edit_is_recovered():
                  "../../lab/agent-conformance/tests/common/operator.rs",
                  "../../lab/agent-conformance/tests/common/probe.rs",
                  "../../lab/agent-conformance/tests/effects.rs",
+                 "../../lab/useful-task/src/lib.rs",
                  "../../lab/agent-conformance/tests/runtime.rs")
     entry = {"id": "MP01+MP02+MP05+MP12+MP15+MP16+MP23",
              "edits": [edit for owned_entry in owned.values() for edit in owned_entry["edits"]]
@@ -2293,7 +2298,8 @@ os.kill(os.getpid(), signal.SIGKILL)
             print(f"self-test: provider {mode} restart: exit={code}, restored={restored}, "
                   f"foreign kept={foreign_kept}, "
                   f"lab/agent-conformance/standin-runtime/mod.rs"
-                  f" capsules/wallet-provider/tests/common/profile_generator.rs")
+                  f" capsules/wallet-provider/tests/common/profile_generator.rs"
+                  f" lab/useful-task/src/lib.rs")
             if code != 0 or not restored or not foreign_kept:
                 ok = False
                 continue
