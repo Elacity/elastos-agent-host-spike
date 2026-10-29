@@ -1,0 +1,8 @@
+id: F-A7-snapmiss
+file: src/ledger.rs
+test: ledger::model_settle_unknown_instance_is_refused
+--- old
+            .ok_or(SettleRefuse::Binding(Refuse::UnknownInstance))?;
+--- new
+            .ok_or(SettleRefuse::Binding(Refuse::Identity))?;
+--- end

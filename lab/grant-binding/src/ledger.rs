@@ -29,6 +29,8 @@ struct OpenHold {
     deadline: u64,
     deadline_set: bool,
     identity: String,
+    session: String,
+    instance: crate::InstanceId,
 }
 
 fn handles_match(bound: Handle, presented: Handle) -> bool {
@@ -258,6 +260,13 @@ impl Verifier {
             .expect("resolved grant")
             .identity
             .clone();
+        let session = self
+            .grants
+            .get(&request.handle)
+            .expect("resolved grant")
+            .session
+            .clone();
+        let bound_instance = call.instance;
         let mut ledger = self.ledger.lock().expect("ledger lock");
         let held = ledger.held;
         let shared = held;
@@ -313,6 +322,8 @@ impl Verifier {
                 deadline: 0,
                 deadline_set: false,
                 identity: identity.clone(),
+                session: session.clone(),
+                instance: bound_instance,
             },
         );
         Ok(Reservation {
@@ -334,8 +345,30 @@ impl Verifier {
         reservation: Reservation,
         outcome: SettleOutcome,
     ) -> Result<u64, SettleRefuse> {
-        self.resolve(*call, request.handle)
-            .map_err(SettleRefuse::Binding)?;
+        let (snapshot_identity, snapshot_session, snapshot_instance) = {
+            let ledger = self.ledger.lock().expect("ledger lock");
+            match ledger.open.get(&reservation.id) {
+                Some(open) => (open.identity.clone(), open.session.clone(), open.instance),
+                None => return Err(SettleRefuse::NotOutstanding),
+            }
+        };
+        let live = self
+            .registry
+            .get(&call.instance)
+            .ok_or(SettleRefuse::Binding(Refuse::UnknownInstance))?;
+        if live.identity != snapshot_identity {
+            return Err(SettleRefuse::Binding(Refuse::Identity));
+        }
+        if live.session != snapshot_session {
+            return Err(SettleRefuse::Binding(Refuse::Session));
+        }
+        #[rustfmt::skip]
+        let () = {
+            let presented = call.instance;
+            if presented != snapshot_instance {
+                return Err(SettleRefuse::Binding(Refuse::Instance));
+            }
+        };
         let measured = match outcome {
             SettleOutcome::Known(measured) => measured,
             SettleOutcome::Unknown => {
@@ -1113,12 +1146,11 @@ fn model_settle_past_the_u64_charge_is_refused() {
 fn model_settle_on_another_handle_is_refused() {
     let mut verifier = Verifier::new();
     let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-1", "session-a");
     let holder = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
     let other = verifier
-        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
     assert_ne!(holder, other);
     let call = verifier.open_call(first);
@@ -1133,12 +1165,7 @@ fn model_settle_on_another_handle_is_refused() {
     let request = guest(holder);
     let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
     let refusal = verifier
-        .settle(
-            &verifier.open_call(second),
-            &guest(other),
-            reservation,
-            SettleOutcome::Known(4),
-        )
+        .settle(&call, &guest(other), reservation, SettleOutcome::Known(4))
         .expect_err("another handle");
     assert_eq!(refusal, SettleRefuse::OtherHandle);
     assert_eq!(
@@ -1829,6 +1856,146 @@ fn model_revoked_grant_does_not_free_ceiling_room() {
 }
 
 #[test]
+fn model_revoked_grant_still_settles() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let library = verifier
+        .ask_capability(photo, "UsersAI/photo/library", rights(), crate::Asker::App)
+        .expect("library grant");
+    let album = verifier
+        .ask_capability(photo, "UsersAI/photo/album", rights(), crate::Asker::App)
+        .expect("album grant");
+    let call = verifier.open_call(photo);
+    let library_request = guest(library);
+    verifier
+        .admit_ask(
+            &call,
+            &library_request,
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("admit");
+    let reservation = verifier
+        .reserve(&call, &library_request, 8)
+        .expect("reserve on the library grant");
+    verifier.revoke_grant(library);
+    let stopped = verifier
+        .use_grant(call, &library_request)
+        .expect_err("revoked library effect");
+    assert_eq!(stopped, crate::Refuse::UnknownHandle);
+    let charge = verifier
+        .settle(
+            &call,
+            &library_request,
+            reservation,
+            SettleOutcome::Known(8),
+        )
+        .expect("revoked grant still settles");
+    assert_eq!(charge, 8);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 8);
+    assert_eq!(after.held, 0);
+    assert!(after.open.get(&reservation.id).is_none());
+    let again = verifier
+        .use_grant(call, &library_request)
+        .expect_err("revoke stays");
+    assert_eq!(again, crate::Refuse::UnknownHandle);
+    verifier
+        .reserve(&call, &guest(album), 8)
+        .expect("the settled hold returned the ceiling room");
+}
+
+#[test]
+fn model_settle_after_identity_change_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = guest(handle);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    verifier
+        .host_set_identity(instance, "agent-2")
+        .expect("set identity");
+    let refusal = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect_err("identity changed after reserve");
+    assert_eq!(refusal, SettleRefuse::Binding(Refuse::Identity));
+    assert_eq!(refusal.to_string(), "identity does not match the grant");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_settle_after_session_change_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = guest(handle);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    verifier
+        .host_set_session(instance, "session-b")
+        .expect("set session");
+    let refusal = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect_err("session changed after reserve");
+    assert_eq!(refusal, SettleRefuse::Binding(Refuse::Session));
+    assert_eq!(refusal.to_string(), "session does not match the grant");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
+fn model_settle_unknown_instance_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    assert_ne!(instance, InstanceId(0));
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = guest(handle);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    let refusal = verifier
+        .settle(
+            &verifier.open_call(InstanceId(0)),
+            &request,
+            reservation,
+            SettleOutcome::Known(4),
+        )
+        .expect_err("unknown instance");
+    assert_eq!(refusal, SettleRefuse::Binding(Refuse::UnknownInstance));
+    assert_eq!(refusal.to_string(), "unknown instance");
+    let after = books(&verifier);
+    assert_eq!(after.charged, 0);
+    assert_eq!(after.held, 4);
+    assert_eq!(after.open.get(&reservation.id), Some(&4));
+}
+
+#[test]
 fn model_forged_instance_does_not_move_the_settle() {
     let mut verifier = Verifier::new();
     let instance = verifier.register_instance("agent-1", "session-a");
@@ -2042,12 +2209,11 @@ fn model_forged_instance_does_not_move_the_timeout() {
 fn model_unknown_from_another_handle_does_not_mark_the_hold() {
     let mut verifier = Verifier::new();
     let first = verifier.register_instance("agent-1", "session-a");
-    let second = verifier.register_instance("agent-1", "session-a");
     let holder = verifier
         .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
     let other = verifier
-        .bind_grant(second, "UsersAI/agent-1/notes", rights())
+        .bind_grant(first, "UsersAI/agent-1/notes", rights())
         .expect("bind");
     assert_ne!(holder, other);
     let call = verifier.open_call(first);
@@ -2062,12 +2228,7 @@ fn model_unknown_from_another_handle_does_not_mark_the_hold() {
     let request = guest(holder);
     let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
     let refusal = verifier
-        .settle(
-            &verifier.open_call(second),
-            &guest(other),
-            reservation,
-            SettleOutcome::Unknown,
-        )
+        .settle(&call, &guest(other), reservation, SettleOutcome::Unknown)
         .expect_err("unknown outcome");
     assert_eq!(refusal, SettleRefuse::UnknownOutcome);
     assert_eq!(refusal.to_string(), "unknown outcome keeps the hold");
