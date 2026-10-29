@@ -1,8 +1,0 @@
-id: F-A5-uscore
-file: src/lib.rs
-test: model_underscore_segment_is_a_plain_name
---- old
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
---- new
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-'))
---- end

@@ -1,8 +1,0 @@
-id: F-GB-xhex
-file: src/link.rs
-test: link::model_unknown_hex_escape_is_not_a_link
---- old
-    metadata_names(manifest).iter().any(|name| name == "grant-binding")
---- new
-    true
---- end

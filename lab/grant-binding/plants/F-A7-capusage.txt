@@ -1,8 +1,0 @@
-id: F-A7-capusage
-file: src/ask.rs
-test: ask::model_reported_usage_does_not_shrink_the_cap
---- old
-        if ask.amount > cap {
---- new
-        if ask.amount > cap.saturating_sub(request.reported_usage) {
---- end

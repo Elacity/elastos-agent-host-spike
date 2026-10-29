@@ -1,8 +1,0 @@
-id: F-A7-xhoverwrite
-file: src/ledger.rs
-test: ledger::model_forged_overwrite_does_not_mark_another_handle
---- old
-                        if handles_match(open.handle, request.handle) {
---- new
-                        if handles_match(open.handle, request.handle) || request.forged_overwrite {
---- end
