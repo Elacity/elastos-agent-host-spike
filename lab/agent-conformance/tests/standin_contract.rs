@@ -16,6 +16,8 @@ use std::collections::BTreeSet;
 const LIVE_SCOPE: &str = "all_sessions_live";
 const SHELL_REASON: &str = "This endpoint requires shell privileges";
 const SHARED_RESOURCE: &str = "localhost://Public/resident-instances/shared.txt";
+/// The manifest `name` of the second signed fixture.
+const SECOND_NAME: &str = "agent-host-second";
 
 fn keys(value: &Value) -> BTreeSet<String> {
     value
@@ -512,7 +514,7 @@ fn standin_cancelled_resident_leaves_the_second_resident_to_complete() {
 
     let mut standin = StandIn::new();
     let shared = SignedBundle::new();
-    let second = SignedBundle::distinct();
+    let second = SignedBundle::distinct(SECOND_NAME);
     for bundle in [&shared, &second] {
         standin
             .admit_resident(
@@ -525,13 +527,13 @@ fn standin_cancelled_resident_leaves_the_second_resident_to_complete() {
     }
 
     let mut started = Vec::new();
-    for bundle in [&shared, &second] {
+    for (bundle, name) in [(&shared, SHARED_NAME), (&second, SECOND_NAME)] {
         let launched = standin
             .post_capsules(Caller::Shell, &bundle.launch_body())
             .expect("the stand-in launches the admitted CID");
         assert_eq!(
-            launched["name"], SHARED_NAME,
-            "the stand-in launches the admitted name"
+            launched["name"], name,
+            "the stand-in launches each admitted bundle under its own manifest name"
         );
         let id = launched["id"]
             .as_str()

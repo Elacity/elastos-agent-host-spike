@@ -51,9 +51,20 @@ impl SignedBundle {
         }
     }
 
-    /// A second bundle: the same files plus one byte, so another lab CID.
-    pub fn distinct() -> Self {
+    /// A second bundle: the same files plus one byte, so another lab CID, and
+    /// the manifest `name` `name`, so a launch that reports one admitted name
+    /// for every launch is caught.
+    pub fn distinct(name: &str) -> Self {
         let second = Self::new();
+        let manifest = second.path().join("capsule.json");
+        let text = fs::read_to_string(&manifest).expect("read capsule.json");
+        let name_key = format!("\"name\": \"{SHARED_NAME}\"");
+        assert!(
+            text.contains(&name_key) && text.contains("\"role\": \"app\""),
+            "the committed fixture manifest holds {name_key} and the app role"
+        );
+        let renamed = text.replace(&name_key, &format!("\"name\": \"{name}\""));
+        fs::write(&manifest, renamed).expect("rename the second bundle's manifest");
         let asks = second.path().join("asks.json");
         let mut bytes = fs::read(&asks).expect("read asks.json");
         bytes.push(b'\n');

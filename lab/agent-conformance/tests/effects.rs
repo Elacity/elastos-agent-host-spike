@@ -1389,6 +1389,8 @@ fn standin_stopped_run_leaves_no_live_grant() {
 
 const STANDIN_SHARED_NAME: &str = SHARED_NAME;
 const STANDIN_FAILED_NAME: &str = SHARED_NAME;
+/// The manifest `name` of the second signed fixture.
+const SECOND_NAME: &str = "agent-host-second";
 const STANDIN_RESOURCE: &str = "localhost://Public/resident-instances/shared.txt";
 
 fn standin_launch(standin: &mut StandIn, bundle: &SignedBundle) -> String {
@@ -1751,7 +1753,7 @@ fn standin_failed_survivor_reaches_running() {
         ThrowawayHome::new().expect("the stand-in failed-survivor run uses one throwaway home");
 
     let failing = SignedBundle::new();
-    let shared = SignedBundle::distinct();
+    let shared = SignedBundle::distinct(SECOND_NAME);
     let mut standin = StandIn::new();
     standin
         .admit_resident(
@@ -1784,7 +1786,7 @@ fn standin_failed_survivor_reaches_running() {
         ),
         (
             standin_capsule_record("component-1", STANDIN_FAILED_NAME, "starting", ""),
-            standin_capsule_record("component-2", STANDIN_SHARED_NAME, "starting", ""),
+            standin_capsule_record("component-2", SECOND_NAME, "starting", ""),
         ),
         "the stand-in keeps both launches starting before the start returns"
     );
@@ -1821,7 +1823,7 @@ fn standin_failed_survivor_reaches_running() {
             standin_requests(&standin, "component-2"),
         ),
         (
-            standin_capsule_record("component-2", STANDIN_SHARED_NAME, "starting", ""),
+            standin_capsule_record("component-2", SECOND_NAME, "starting", ""),
             vec![standin_request_record(
                 "req-2",
                 "component-2",
@@ -1872,7 +1874,7 @@ fn standin_failed_survivor_reaches_running() {
     );
     assert_eq!(
         standin_capsule(&standin, "component-2"),
-        standin_capsule_record("component-2", STANDIN_SHARED_NAME, "starting", ""),
+        standin_capsule_record("component-2", SECOND_NAME, "starting", ""),
         "the stand-in keeps the granted survivor starting"
     );
     let live = standin_live_grants(&standin);
@@ -1899,7 +1901,7 @@ fn standin_failed_survivor_reaches_running() {
         .expect("the stand-in finishes the survivor's start");
     assert_eq!(
         standin_capsule(&standin, "component-2"),
-        standin_capsule_record("component-2", STANDIN_SHARED_NAME, "running", ""),
+        standin_capsule_record("component-2", SECOND_NAME, "running", ""),
         "the stand-in runs the granted survivor after its start returns"
     );
     let census = standin_a12_census(&standin, &home, port);

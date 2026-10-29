@@ -3364,7 +3364,13 @@ mod tests {
     #[test]
     fn standin_settled_request_is_not_reposted() {
         let mut standin = StandIn::new();
-        admit_and_launch(&mut standin);
+        let shared = Shared::new();
+        admit_shared(&shared, &mut standin, Start::Ok);
+        assert_eq!(
+            launch_finished(&shared, &mut standin),
+            "component-1",
+            "the stand-in launches the admitted CID as component-1"
+        );
         let owner = Caller::Client {
             session_id: "component-1",
         };
@@ -3383,18 +3389,32 @@ mod tests {
         );
         assert_eq!(
             request_entries(&standin, "component-1"),
-            vec![settled],
+            vec![settled.clone()],
             "the stand-in keeps the settled record instead of a silent retry"
         );
-        let other = other_bundle();
-        admit_shared(&other, &mut standin, Start::Ok);
-        let launched = launch_finished(&other, &mut standin);
+        let relaunched = launch_finished(&shared, &mut standin);
+        assert_eq!(
+            relaunched, "component-2",
+            "the stand-in launches the already-admitted CID again as a new instance"
+        );
         assert_eq!(
             standin
-                .get_capability_requests(Caller::Shell, Some(&launched))
-                .expect("the stand-in lists a fresh instance"),
+                .get_capability_requests(Caller::Shell, Some(&relaunched))
+                .expect("the stand-in lists the relaunched instance"),
             json!({ "requests": [] }),
-            "the stand-in leaves a fresh live instance with no request whose id the kill already settled"
+            "the stand-in leaves a new instance of the same capsule with no request whose id the kill already settled"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![settled.clone()],
+            "the relaunch leaves the killed instance's settled record unchanged"
+        );
+        assert_capsule(
+            &standin,
+            "component-2",
+            "running",
+            "",
+            "the stand-in leaves the relaunched instance running",
         );
     }
 
