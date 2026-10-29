@@ -9479,3 +9479,151 @@ New:
 
 A passing row gives the real Runtime no A10 credit for this refusal.
 
+## 067 — A11: guest reads the decision on a later call
+
+067: `StandIn` gains one read route, `get_capability_request(&self, caller, request_id: &str) -> Result<Value, (u16, String)>` at `standin-runtime/mod.rs:503`. Its doc comment starts `GET /api/capability/request/:id.` The id is the path, a method argument, not a JSON field. The lookup runs before the caller check: an id that matches no record is status 404 with `Request not found: ` plus that id; a shell caller, or a client whose `session_id` is not the record's, is status 403 with `Cannot access another session's request`. Each refusal stores nothing. The status word comes from `request_status_text` at `:903`. A `pending` or `granted` word returns a body whose only key is `status`; a `denied` or `expired` word returns `status` and `reason`, where `reason` is the record's `decision_reason`. The body has no `token`, no `request_id` and no `success`. `seed_request`, `get_capability_requests`, `request_entry`, `request_status_text`, `settle_record`, `settle_pending`, `post_capability_grant`, `post_capability_deny`, `stop_one`, `finish_start`, `authorise`, `watch_ended`, `expire_due` and `post_capability_request` keep their bytes; no request store, status renderer or other method was added.
+
+### Quote from the resident SPEC (read only)
+
+`git show 35697329be0aad89eb68d0adf78aa94d24751317:lab/resident-instances/SPEC.md`, heading `### RI-6 A pending request outlives the guest's call`:
+
+> The RI-1 world lets a guest submit a capability request and continue before the decision. The decision reaches the guest later, as an event or through a later call.
+
+This task takes the later call. The submit route stays 066, and the settlement of a failed start stays 058.
+
+### Quote from the ask (read only)
+
+`git show 513988ebd:lab/runtime-asks/07-pending-request-outlives-call.md`, `## The ask`:
+
+> A guest can submit a capability request and continue before the decision. The Runtime records the pending request before the submit call returns. The decision reaches the guest later.
+
+Option 1 is this later call. Option 2, the instance deadline, and the per-session cap of 32 are not this task.
+
+### Quote from the Runtime route (read only, `elastos/crates/elastos-server/src/api/handlers/capability.rs`)
+
+`request_status` at `:162`:
+
+> ```rust
+>     let request = state
+>         .pending_store
+>         .get_request(&request_id)
+>         .await
+>         .ok_or_else(|| {
+>             (
+>                 StatusCode::NOT_FOUND,
+>                 format!("Request not found: {}", request_id),
+>             )
+>         })?;
+>
+>     // Verify the request belongs to this session
+>     if request.session_id != session.id {
+>         return Err((
+>             StatusCode::FORBIDDEN,
+>             "Cannot access another session's request".to_string(),
+>         ));
+>     }
+> ```
+
+The lookup runs before the session check, so a missing record is 404 for any caller. `pending` sets `token: None` and `reason: None`. `denied` carries the decision reason and `token: None`. The real `granted` arm also returns a token. The stand-in copies the refusals and the status shape, stores no token, and does not copy the system-backend, wallet or auto-grant branch.
+
+### Tests
+
+Two tests in `standin_runtime::tests`, each passing with no operator and no probe build. They reuse `pending_request`, `granted_request`, `denied_request`, `seed_shared_request`, `request_entries`, `shell_requests`, `get_capability_list`, `request_ids`, `assert_capsule`, `assert_live_request_ids_empty`, `admit_shared`, `launch_finished`, `stop_body` and `SHARED_RESOURCE`; assertion text says the stand-in did the work.
+
+- `standin_guest_reads_its_request_later` (`:5608`) admits `/capsules/read-shared` as `read-shared` with `Start::Ok` and launches twice: `component-1` and `component-2`, both `starting`. It seeds `req-1` on `component-1` and `req-2` on `component-2` with resource `localhost://Public/resident-instances/shared.txt`, action `read` and reason `read shared`. The `component-1` client and `req-1` is Ok `{"status":"pending"}`. The shell caller and `req-1` is status 403 `Cannot access another session's request`, as is the `component-2` client and `req-1`; the `component-2` client and `missing` is status 404 `Request not found: missing`. The refused reads leave both shell records pending. At instant 4 the shell grant of `req-1` with `duration` `session` and rationale `grant shared read` is Ok `{"success":true}`; the `component-1` client and `req-1` is then Ok `{"status":"granted"}`, and a second read is the same body. The shell record is `granted_request("req-1","component-1","grant shared read")`, and the shell live-grant `request_id` set is exactly `req-1`. The shell deny of `req-2` with reason `sibling read denied` is Ok `{"success":true}`; the `component-2` client and `req-2` is Ok `{"status":"denied","reason":"sibling read denied"}`, and the `component-1` client and `req-2` is the 403 above. The deny fails the starting sibling with that cause; the reads leave the phases as the deny stored them (`component-1` `starting`, `component-2` `failed`), and leave the live-grant set exactly `req-1`.
+- `standin_guest_reads_a_runtime_denial` (`:5766`) admits the same path, launches and finishes twice so both are `running`, and seeds `req-1` on `component-1` only. It deletes `component-1` with `{"reason":"stop one"}`. The `component-1` client and `req-1` is Ok `{"status":"denied","reason":"stopped: stop one"}` both before and after `set_instant(60)`. The `component-2` client and the shell caller are the 403 above. The shell record is still `denied_request("req-1","component-1","stopped: stop one")`, and no grant is live.
+
+### Hand-run falsifiers
+
+Each plant ran alone and was restored before the next. The command was `env RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_guest_reads_its_request_later -- --exact`. The planted crate compiled every time (`Compiling agent-conformance` then `Finished`), and every planted run exited 101 with that test failed on its assertion. After the last restore, `sha256sum standin-runtime/mod.rs` was `d9be9499c36a6e8f068548826ca5a9100c3cd20c032938d20bb0fafeebddc6bb`, `git diff -- lab/agent-conformance/standin-runtime/mod.rs` showed the candidate only, and no plant expression remained. No `falsifiers.json` id was added.
+
+F-standin-status-stub. Assertion: `src/../standin-runtime/mod.rs:5637:9` (restored assertion `:5636`) `assertion left == right failed: the stand-in did the work: the owning client reads req-1 pending before any decision`, `left: Ok(Object {"status": String("granted")})`, `right: Ok(Object {"status": String("pending")})`.
+
+Old:
+
+```text
+    pub fn get_capability_request(
+        &self,
+        caller: Caller<'_>,
+        request_id: &str,
+    ) -> Result<Value, (u16, String)> {
+        let Some(request) = self
+```
+
+New:
+
+```text
+    pub fn get_capability_request(
+        &self,
+        caller: Caller<'_>,
+        request_id: &str,
+    ) -> Result<Value, (u16, String)> {
+        return Ok(json!({ "status": "granted" }));
+        let Some(request) = self
+```
+
+F-standin-status-sibling. Assertion: `src/../standin-runtime/mod.rs:5594:9` (restored assertion `:5600`) `assertion left == right failed: the stand-in did the work: it refuses the shell caller on another session's request (req-1 is the client's record)`, `left: Ok(Object {"status": String("pending")})`, `right: Err((403, "Cannot access another session's request"))`.
+
+Old:
+
+```text
+        let owns = matches!(
+            caller,
+            Caller::Client { session_id } if session_id == request.session_id
+        );
+        if !owns {
+            return Err((403, "Cannot access another session's request".to_owned()));
+        }
+```
+
+New:
+
+```text
+        let _ = caller;
+```
+
+F-standin-status-token. Assertion: `src/../standin-runtime/mod.rs:5687:9` (restored assertion `:5683`) `assertion left == right failed: the stand-in did the work: the owning client reads req-1 granted on a later call`, `left: Ok(Object {"status": String("granted"), "token": String("req-1")})`, `right: Ok(Object {"status": String("granted")})`.
+
+Old:
+
+```text
+            RequestStatus::Pending | RequestStatus::Granted => Ok(json!({ "status": status })),
+```
+
+New:
+
+```text
+            RequestStatus::Pending => Ok(json!({ "status": status })),
+            RequestStatus::Granted => Ok(json!({
+                "status": status,
+                "token": "req-1",
+            })),
+```
+
+### Docs
+
+`standin-runtime/README.md:55` adds one paragraph immediately before `## Callers`: `get_capability_request` answers `GET /api/capability/request/:id`; it reads the one request store; the owning client receives `pending` or `granted` as a body whose only key is `status`; a denied or expired record also carries `reason`; a shell or a sibling is `Cannot access another session's request`; a missing record is 404 with `Request not found: ` plus that id; there is no token; the read stores nothing; a PASS gives the Runtime no A11 credit for this later call. The RA-1 section, the RI-1 to RI-4 section, the settlement paragraph and the watch, survivor, expiry, once-grant and request-route paragraphs keep their bytes. `RUNBOOK.md:739` adds one paragraph after the last stand-in paragraph: `standin_guest_reads_its_request_later` is this stand-in, and a PASS there gives the Runtime no A11 credit for a later read. Every other RUNBOOK paragraph keeps its bytes.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0`. `Cargo.toml` and `Cargo.lock` are unchanged; `git diff` for `src/harness.rs`, `src/census.rs`, `tests/effects.rs`, `tests/common/grants.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` printed nothing. The only changed files are `standin-runtime/mod.rs`, `standin-runtime/README.md`, `RUNBOOK.md` and this `LOG.md`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.145 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 4m17.285s (257.28 seconds), inside the 600-second bound. Targets: lib 61 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; runtime 61 passed with 12 ignored; harness 9 passed; report 23 passed; standin_contract 2 passed; probe 3 passed; doc-tests 0. No census line and no listed flaky test failed, so the single-rerun rule did not apply.
+- Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_guest_reads_its_request_later -- --exact` exit 0, 1 passed and 0 failed, real 0.781 seconds.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The read uses the stored `request_id` as the path at `standin-runtime/mod.rs:503-514`; it adds no code or content identity. |
+| 2. Capsule, Home or UI gains ungranted access? | No | The owning client gains a read of its own request record and no grant, token or resource access; the shell and a sibling are refused at `:515-521`. |
+| 3. A second path or a second copy of one rule? | No | The one store is looked up the way `settle_record` at `:720` does; the word comes from `request_status_text` at `:903`; the list route and `request_entry` are not called or copied. |
+| 4. Runtime core grows? | No | Every edit is under `lab/agent-conformance/`; `elastos/` is untouched and its route is quoted only. |
+| 5. Refusals deny by default with a clear reason? | Yes | A missing record is 404 `Request not found: ` plus the id at `:513`; a shell or another session is 403 `Cannot access another session's request` at `:515-521`; each refusal returns before any write. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | The guest reads its own decision through one Runtime route; no capsule code, import or world changes. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `:5608` and `:5766`; the stub, removed-session-check and extra-token plants each fail the named test on its assertion, and the restored test passes. |
+| 8. Identity, admission and allowance stay separate? | Yes | The lookup at `:508` and the caller identity check at `:515` precede any body; the read settles nothing and mints no grant, so an identity match never implies allowance, and `granted` is only the stored decision. |
+
+A passing row gives the real Runtime no A11 credit for this later call.
+
