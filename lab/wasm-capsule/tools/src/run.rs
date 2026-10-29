@@ -74,7 +74,8 @@
 //! the environment or a file. A zero budget is refused before anything is made
 //! or started. The budget counts from just after the engine is started. The
 //! runner reads the engine's stdout and stderr on a thread each, so a full pipe
-//! never blocks it, and polls `try_wait` every [`WAIT_POLL`]. An engine still
+//! never blocks it, and asks every [`WAIT_POLL`] whether it has exited
+//! (`wait4` with `WNOHANG`, task 062). An engine still
 //! running when the budget has passed is sent SIGKILL by the runner, reaped,
 //! its run folder removed (step 6) and the run refused as `BudgetExceeded`;
 //! what it printed is dropped. The budget is applied by the runner alone:
@@ -97,6 +98,20 @@
 //! process starts. Limits: a `--version` query is not interrupted mid-query,
 //! the verifier is not cancelled mid-call, and a runner process that is itself
 //! killed leaves its engine and folder.
+//!
+//! Task 062 (wc-010c, the peak half): the one poll loop asks with
+//! `wait4(pid, WNOHANG)` in place of `try_wait`. It returns the engine's exit
+//! status and that one process's own `rusage`, so each module-run process is
+//! reaped exactly once, there, and never waited for again through `Child`.
+//! Its `ru_maxrss` is the run's measured peak: the maximum resident set size
+//! of that engine process, the counter `/usr/bin/time -l` prints, in bytes on
+//! macOS (`man 2 getrusage`). It is engine process RSS, not linear memory:
+//! linear-memory pages the guest never touched are not resident, and the
+//! engine's own code and data are included. No wrapper process is used, so
+//! the argv is unchanged, and `getrusage(RUSAGE_CHILDREN)`, which mixes every
+//! child the calling process has reaped, is not used. A stopped run (budget,
+//! cancel, failed wait) is reaped by [`stop_engine`] and has no peak; neither
+//! has a `--version` query. No linear-memory peak is measured or recorded.
 //!
 //! The runner reads no environment variable and no file, and parses no
 //! manifest or module of its own: the verified value already holds the bytes
@@ -164,6 +179,9 @@
 //! none. Task 034: and, per engine, the module memory maximum that engine's
 //! own [`run_engine`] call was checked against, from its one memory check
 //! (none for a module with no memory); the receipt renders it in bytes.
+//! Task 062: and, per engine, the peak RSS of its module-run process, from
+//! that process's own `wait4` (above); the receipt labels it as engine process
+//! RSS, not linear memory.
 //!
 //! The two-engine result is a behaviour proof on one core module on this
 //! machine, not the Component ABI. Both engines are test-only, not endorsed.
@@ -179,6 +197,7 @@ use std::fmt;
 use std::fs::{self, DirBuilder};
 use std::io::{self, Read};
 use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -235,6 +254,15 @@ const CAP_REJECTED_OPTION: &str = " -W ";
 /// How often the runner asks a running engine whether it has exited (task
 /// 043). A run that passed its budget is stopped at most this much later.
 pub const WAIT_POLL: Duration = Duration::from_millis(10);
+
+/// Task 062: the bytes in one unit of `ru_maxrss`. macOS, the one platform this
+/// lab runs on, counts bytes (`man 2 getrusage`: "the maximum resident set
+/// size utilized (in bytes)"). Linux counts kilobytes (its getrusage(2)); that
+/// unit is not measured in this lab.
+#[cfg(target_os = "macos")]
+const MAX_RSS_UNIT_BYTES: u64 = 1;
+#[cfg(not(target_os = "macos"))]
+const MAX_RSS_UNIT_BYTES: u64 = 1024;
 
 /// Task 043: the caller's explicit control over a module run: its wall-clock
 /// budget. There is no default; the runner reads none from the environment or
@@ -581,6 +609,10 @@ impl Error for Refusal {}
 /// Task 034: also the module memory maximum, in pages, that this run was
 /// checked against: the value [`check_module_memory`] returned in this
 /// [`run_engine`] call, or none for a module with no memory.
+///
+/// Task 062: also the measured peak of the engine's module-run process: its
+/// maximum resident set size in bytes, set only from that process's own
+/// `wait4` rusage ([`reap`]). It is engine process RSS, not linear memory.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EngineRun {
     pub status: ExitStatus,
@@ -588,6 +620,7 @@ pub struct EngineRun {
     pub memory_mb: u32,
     pub memory_cap: Option<String>,
     pub memory_maximum: Option<u64>,
+    pub process_max_rss_bytes: u64,
 }
 
 /// Run `engine`, the program at the absolute path `program`, once on
@@ -861,7 +894,9 @@ fn engine_command(program: &Path) -> Command {
 /// refused with its stderr: as a rejected cap when [`cap_rejected`] says the
 /// engine rejected the cap argument it was given (task 038), else as a failed
 /// run. The engine is never started again without its cap. The cap argument
-/// it returns is read back from the argv the process was started with.
+/// it returns is read back from the argv the process was started with; task
+/// 062: its peak RSS is the one [`wait_within_budget`] measured when it reaped
+/// that process.
 fn start_engine(
     engine: Engine,
     program: &Path,
@@ -879,7 +914,7 @@ fn start_engine(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| Refusal::new(program, Reason::EngineDidNotStart { engine, error }))?;
-    let output = wait_within_budget(engine, program, child, control)?;
+    let (output, max_rss_bytes) = wait_within_budget(engine, program, child, control)?;
     if !output.status.success() {
         let status = output.status;
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -905,18 +940,21 @@ fn start_engine(
         memory_cap: memory_cap_given(&command),
         // Task 034: `run_engine` sets it from its one memory check.
         memory_maximum: None,
+        // Task 062: measured, from this process's own `wait4`; never cited.
+        process_max_rss_bytes: max_rss_bytes,
     })
 }
 
 /// Task 043: wait for `child`, the engine [`start_engine`] has just started,
 /// until it exits or `control`'s budget, counted from this call, has passed.
 /// Its stdout and stderr are each read on a thread of their own, so a full
-/// pipe never blocks it, and `try_wait` is asked every [`WAIT_POLL`]. An
-/// engine that exits in time gives its output, as `Command::output` would.
+/// pipe never blocks it, and [`reap`] is asked every [`WAIT_POLL`]. An
+/// engine that exits in time gives its output, as `Command::output` would,
+/// and (task 062) the peak RSS [`reap`] read from its own rusage.
 /// One still running at the budget is stopped ([`stop_engine`]), both readers
 /// are joined, its output is dropped, and the run is refused as
 /// `BudgetExceeded`. The runner gives the engine nothing: the budget is never
-/// in its argv. A failed `try_wait` stops the engine too, and is refused with
+/// in its argv. A failed [`reap`] stops the engine too, and is refused with
 /// its OS cause; so is a failed read of either pipe.
 ///
 /// Task 045: each poll first asks whether `control` was cancelled. If so, the
@@ -929,18 +967,18 @@ fn wait_within_budget(
     program: &Path,
     mut child: Child,
     control: &RunControl,
-) -> Result<Output, Refusal> {
+) -> Result<(Output, u64), Refusal> {
     let started = Instant::now();
     let stdout = read_pipe(child.stdout.take());
     let stderr = read_pipe(child.stderr.take());
-    let status = loop {
+    let (status, max_rss_bytes) = loop {
         if control.is_cancelled() {
             stop_engine(engine, program, &mut child)?;
             let _dropped = (joined(stdout), joined(stderr));
             return Err(Refusal::new(program, Reason::Cancelled { engine }));
         }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
+        match reap(&child) {
+            Ok(Some(reaped)) => break reaped,
             Ok(None) if started.elapsed() >= control.budget() => {
                 stop_engine(engine, program, &mut child)?;
                 let _dropped = (joined(stdout), joined(stderr));
@@ -964,11 +1002,39 @@ fn wait_within_budget(
     let output = joined(stdout).and_then(|stdout| Ok((stdout, joined(stderr)?)));
     let (stdout, stderr) =
         output.map_err(|error| Refusal::new(program, Reason::OutputNotRead { engine, error }))?;
-    Ok(Output {
+    let output = Output {
         status,
         stdout,
         stderr,
-    })
+    };
+    Ok((output, max_rss_bytes))
+}
+
+/// Task 062: ask once, without blocking, whether `child` has exited, and if it
+/// has, reap it: `wait4(pid, WNOHANG)` returns its exit status and the rusage
+/// of that one process, never of another child (as
+/// `getrusage(RUSAGE_CHILDREN)` would). The status is built from that same
+/// call, so the process is reaped exactly once, here, and never waited for
+/// again through `Child`. The peak is its `ru_maxrss` in bytes
+/// ([`MAX_RSS_UNIT_BYTES`]): the counter `/usr/bin/time -l` prints as "maximum
+/// resident set size". It is engine process RSS, not linear memory. `None`
+/// while it runs; a failed call keeps its OS cause.
+fn reap(child: &Child) -> io::Result<Option<(ExitStatus, u64)>> {
+    let pid = libc::pid_t::try_from(child.id()).map_err(io::Error::other)?;
+    let mut status: libc::c_int = 0;
+    // SAFETY: `rusage` holds only integers, so all zero bytes is a valid value.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: both pointers are to live locals of the types `wait4` writes.
+    let answer = unsafe { libc::wait4(pid, &mut status, libc::WNOHANG, &mut usage) };
+    match answer {
+        0 => Ok(None),
+        reaped if reaped == pid => {
+            let max_rss = u64::try_from(usage.ru_maxrss).unwrap_or(0);
+            let max_rss_bytes = max_rss.saturating_mul(MAX_RSS_UNIT_BYTES);
+            Ok(Some((ExitStatus::from_raw(status), max_rss_bytes)))
+        }
+        _ => Err(io::Error::last_os_error()),
+    }
 }
 
 /// Task 043: stop an engine the runner gives up on: SIGKILL (`Child::kill`),
@@ -1111,7 +1177,9 @@ pub struct RunInput<'a> {
 /// grants; wc-010c: the declared `memory_mb` the module runs were given and
 /// each engine's memory cap argument, as its [`EngineRun`] read it back from
 /// the argv it was started with; task 034: each engine's module memory
-/// maximum, as its own [`run_engine`] call's memory check returned it.
+/// maximum, as its own [`run_engine`] call's memory check returned it; task
+/// 062: each engine's module-run process peak RSS, as its [`EngineRun`]
+/// measured it.
 ///
 /// Its fields are private and it has no public constructor, so a value exists
 /// only as [`run`] made it. It is no admission or launch value.
@@ -1128,6 +1196,7 @@ pub struct TwoEngineRun {
     memory_mb: u32,
     memory_caps: [Option<String>; 2],
     memory_maximums: [Option<u64>; 2],
+    process_max_rss: [u64; 2],
 }
 
 impl TwoEngineRun {
@@ -1215,6 +1284,17 @@ impl TwoEngineRun {
         };
         pages.map(page_bytes)
     }
+
+    /// Task 062: the peak RSS, in bytes, of `engine`'s module-run process: its
+    /// `ru_maxrss` from that process's own `wait4`, as its [`run_engine`] call
+    /// recorded it. It is engine process RSS, not linear memory; the
+    /// `--version` queries record none.
+    pub fn process_max_rss_bytes(&self, engine: Engine) -> u64 {
+        match engine {
+            Engine::Wasmtime => self.process_max_rss[0],
+            Engine::Wasmer => self.process_max_rss[1],
+        }
+    }
 }
 
 /// Why a two-engine run was refused. Each reason has its own variant and its
@@ -1296,6 +1376,7 @@ pub fn run(input: &RunInput) -> Result<TwoEngineRun, TwoEngineRefusal> {
     let memory_mb = wasmtime.memory_mb;
     let memory_caps = [wasmtime.memory_cap, wasmer.memory_cap];
     let memory_maximums = [wasmtime.memory_maximum, wasmer.memory_maximum];
+    let process_max_rss = [wasmtime.process_max_rss_bytes, wasmer.process_max_rss_bytes];
     let (wasmtime, wasmer) = (wasmtime.stdout, wasmer.stdout);
     if wasmtime != wasmer {
         return Err(TwoEngineRefusal::OutputsDiffer { wasmtime, wasmer });
@@ -1312,5 +1393,6 @@ pub fn run(input: &RunInput) -> Result<TwoEngineRun, TwoEngineRefusal> {
         memory_mb,
         memory_caps,
         memory_maximums,
+        process_max_rss,
     })
 }

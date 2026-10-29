@@ -1805,7 +1805,7 @@ fn receipt_records_observed_engine_versions() {
     let name = bundle_identity(&signed.bundle).expect("name the bundle");
     let tmp = TempDir::new("run3-receipt");
     let root = canonical(&tmp);
-    assert_eq!(RECEIPT_SCHEMA, "wc-005.run-receipt/v3");
+    assert_eq!(RECEIPT_SCHEMA, "wc-005.run-receipt/v4");
 
     // Two runs of the same bundle, by stand-ins that print the pinned versions
     // with made-up tails (task 038: only the pinned versions run), each
@@ -1851,10 +1851,14 @@ fn receipt_records_observed_engine_versions() {
         assert_eq!(passed.cid(), name, "{case}: not the verified name");
 
         let receipt = render(&passed);
+        // Task 062: the measured peaks, which vary from run to run, are this
+        // run's own; the line around each is exact.
+        let [wasmtime_peak, wasmer_peak] =
+            ENGINES.map(|engine_kind| passed.process_max_rss_bytes(engine_kind));
         assert_eq!(
             receipt,
             format!(
-                "schema: wc-005.run-receipt/v3\n\
+                "schema: wc-005.run-receipt/v4\n\
                  bundle: {name}\n\
                  function: digest\n\
                  argument: 1592590337\n\
@@ -1869,7 +1873,9 @@ fn receipt_records_observed_engine_versions() {
                  wasmtime_memory_cap: ENFORCED max-memory-size=67108864,max-memories=1,trap-on-grow-failure=y\n\
                  {WASMER_SKIPPED}\n\
                  wasmtime_memory_maximum_bytes: none (the module has no memory)\n\
-                 wasmer_memory_maximum_bytes: none (the module has no memory)\n"
+                 wasmer_memory_maximum_bytes: none (the module has no memory)\n\
+                 wasmtime_process_max_rss_bytes: {wasmtime_peak} (engine process RSS, not linear memory)\n\
+                 wasmer_process_max_rss_bytes: {wasmer_peak} (engine process RSS, not linear memory)\n"
             ),
             "{case}: the receipt"
         );
@@ -2272,7 +2278,7 @@ fn real_receipt_names_both_installed_engines() {
     assert_eq!(
         lines[..4],
         [
-            "schema: wc-005.run-receipt/v3".to_string(),
+            "schema: wc-005.run-receipt/v4".to_string(),
             format!("bundle: {name}"),
             "function: digest".to_string(),
             format!("argument: {FIXED_INPUT}"),
@@ -2283,7 +2289,7 @@ fn real_receipt_names_both_installed_engines() {
     // under none. Task 034: both runs were checked against the capsule's own
     // maximum, 1024 pages (task 032), 67108864 bytes.
     assert_eq!(
-        lines[10..],
+        lines[10..16],
         [
             "memory_mb: 64",
             "memory_cap_bytes: 67108864",
@@ -2292,6 +2298,12 @@ fn real_receipt_names_both_installed_engines() {
             "wasmtime_memory_maximum_bytes: 67108864",
             "wasmer_memory_maximum_bytes: 67108864",
         ]
+    );
+    // Task 062: then each engine's measured peak, the run's own value.
+    let (_, peaks) = peak_lines(&receipt);
+    assert_eq!(
+        peaks,
+        ENGINES.map(|engine_kind| passed.process_max_rss_bytes(engine_kind))
     );
     eprintln!("RECEIPT (this machine):\n{receipt}");
     eprintln!("PASS: the receipt names both installed engines' versions as they printed them");
@@ -2584,6 +2596,17 @@ fn grow_module(delta: [u8; 2]) -> Vec<u8> {
 /// encoded: the limits flag (0x00 minimum only, 0x01 minimum and maximum),
 /// then the minimum and any maximum in pages, each LEB128.
 fn memory_module(limits: &[u8], delta: [u8; 2]) -> Vec<u8> {
+    // i32.const delta; memory.grow 0.
+    let mut code = vec![0x41];
+    code.extend_from_slice(&delta);
+    code.extend_from_slice(&[0x40, 0x00]);
+    memory_module_running(limits, &code)
+}
+
+/// Task 062: [`memory_module`]'s encoding, with `code` as `digest`'s body: its
+/// instructions, without the locals count and the final `end`, which this
+/// adds.
+fn memory_module_running(limits: &[u8], code: &[u8]) -> Vec<u8> {
     let mut module = b"\0asm\x01\0\0\0".to_vec();
     // Type section: one type, (i32) -> (i32).
     module.extend_from_slice(&[0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f]);
@@ -2597,10 +2620,12 @@ fn memory_module(limits: &[u8], delta: [u8; 2]) -> Vec<u8> {
     module.extend_from_slice(&[0x07, 0x0a, 0x01, 0x06]);
     module.extend_from_slice(b"digest");
     module.extend_from_slice(&[0x00, 0x00]);
-    // Code section: no locals; i32.const delta; memory.grow 0; end.
-    module.extend_from_slice(&[0x0a, 0x09, 0x01, 0x07, 0x00, 0x41]);
-    module.extend_from_slice(&delta);
-    module.extend_from_slice(&[0x40, 0x00, 0x0b]);
+    // Code section: one body: no locals; `code`; end.
+    let body = u8::try_from(code.len() + 2).expect("a one-byte body size");
+    let section = body.checked_add(2).expect("a one-byte section size");
+    module.extend_from_slice(&[0x0a, section, 0x01, body, 0x00]);
+    module.extend_from_slice(code);
+    module.push(0x0b);
     module
 }
 
@@ -3316,10 +3341,10 @@ fn receipt_records_the_declared_memory_cap() {
 
     let receipt = render(&passed);
     let lines: Vec<&str> = receipt.lines().collect();
-    assert_eq!(lines.len(), 16, "the v3 receipt's lines:\n{receipt}");
-    assert_eq!(lines[0], "schema: wc-005.run-receipt/v3");
+    assert_eq!(lines.len(), 18, "the v4 receipt's lines:\n{receipt}");
+    assert_eq!(lines[0], "schema: wc-005.run-receipt/v4");
     assert_eq!(
-        lines[10..],
+        lines[10..16],
         [
             "memory_mb: 2",
             "memory_cap_bytes: 2097152",
@@ -3330,6 +3355,141 @@ fn receipt_records_the_declared_memory_cap() {
         ],
         "the receipt's memory lines:\n{receipt}"
     );
+}
+
+/// Task 062: the label every peak line of a v4 receipt ends with.
+const PEAK_LABEL: &str = " (engine process RSS, not linear memory)";
+
+/// Task 062: a v4 receipt's lines before its two peak lines, and the two peaks,
+/// `wasmtime`'s then `wasmer`'s. Panics unless the receipt's last two lines are
+/// exactly `<engine>_process_max_rss_bytes: <n> (engine process RSS, not linear
+/// memory)`, in that order, with `n` in decimal digits only.
+fn peak_lines(receipt: &str) -> (Vec<&str>, [u64; 2]) {
+    let mut lines: Vec<&str> = receipt.lines().collect();
+    assert!(lines.len() >= 2, "no peak lines in:\n{receipt}");
+    let tail = lines.split_off(lines.len() - 2);
+    let mut peaks = [0; 2];
+    for ((peak, line), engine_kind) in peaks.iter_mut().zip(tail).zip(ENGINES) {
+        let prefix = format!("{engine_kind}_process_max_rss_bytes: ");
+        let number = line
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(PEAK_LABEL))
+            .unwrap_or_else(|| {
+                panic!("{engine_kind}'s peak line is not `{prefix}<n>{PEAK_LABEL}`: {line:?}\n{receipt}")
+            });
+        assert!(
+            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()),
+            "{engine_kind}'s peak is not a decimal number: {line:?}"
+        );
+        *peak = number.parse().expect("a peak that fits u64");
+    }
+    (lines, peaks)
+}
+
+/// Task 062 (wc-010c, the peak half): a `run` on [`marked`] stand-ins gives a
+/// v4 receipt of 18 lines whose last two are each engine's measured peak,
+/// labelled as engine process RSS, not linear memory, each above 0 and equal
+/// to the run's own value; no line's key names linear memory.
+#[test]
+fn receipt_labels_each_engine_peak_as_process_rss_not_linear_memory() {
+    let tmp = TempDir::new("run062-label");
+    let root = canonical(&tmp);
+    let signed = signed_bundle_declaring(&root, "bundle", MODULE, 64);
+    let engines = work_root(&root, "engines");
+    let wasmtime = marked(&engines, "wasmtime", "printf 'same\\n'\n");
+    let wasmer = marked(&engines, "wasmer", "printf 'same\\n'\n");
+    let work = work_root(&root, "work");
+
+    let passed = two_ran(run(&signed.input(&wasmtime, &wasmer, &work)));
+    let receipt = render(&passed);
+    assert_eq!(
+        receipt.lines().count(),
+        18,
+        "the v4 receipt's lines:\n{receipt}"
+    );
+    assert!(receipt.starts_with("schema: wc-005.run-receipt/v4\n"));
+    let (_, peaks) = peak_lines(&receipt);
+    for (engine_kind, peak) in ENGINES.into_iter().zip(peaks) {
+        assert!(peak > 0, "{engine_kind}'s measured peak is 0:\n{receipt}");
+        assert_eq!(
+            peak,
+            passed.process_max_rss_bytes(engine_kind),
+            "{engine_kind}: the receipt's peak is not the run's"
+        );
+    }
+    for line in receipt.lines() {
+        let (key, _) = line.split_once(": ").expect("a `key: value` line");
+        assert!(
+            !key.contains("linear"),
+            "the key {key:?} names linear memory, which nothing measures:\n{receipt}"
+        );
+    }
+}
+
+/// Task 062: the bytes [`FILL_CODE`] grows to and fills, 768 pages, 48 MiB.
+const FILLED_BYTES: u64 = 50_331_648;
+
+/// Task 062: `digest`'s body for the peak fixture: grow the one memory from 1
+/// page to 768 pages, fill all 48 MiB with the nonzero byte 1, so every page
+/// is touched, and return the memory size in pages, 768. A failed grow makes
+/// the fill trap out of bounds, so the run fails rather than passes.
+const FILL_CODE: &[u8] = &[
+    0x41, 0xff, 0x05, // i32.const 767
+    0x40, 0x00, // memory.grow 0
+    0x1a, // drop
+    0x41, 0x00, // i32.const 0: the destination
+    0x41, 0x01, // i32.const 1: the byte
+    0x41, 0x80, 0x80, 0x80, 0x18, // i32.const 50331648: the length
+    0xfc, 0x0b, 0x00, // memory.fill 0
+    0x3f, 0x00, // memory.size 0
+];
+
+/// Task 062, both real engines through `run`: the peak each receipt records
+/// follows the memory the engine process touched. A fixture declaring 64 MB
+/// that fills 48 MiB records at least 48 MiB on each engine; the built
+/// capsule, run the same way, records less. The peak is engine process RSS,
+/// not linear memory: this shows it is measured, never that it is the
+/// capsule's memory. An engine not found prints SKIPPED, never PASS.
+#[test]
+fn process_peak_rss_follows_the_memory_the_engine_touched() {
+    let Some(programs) = real_engines("the peak RSS runs") else {
+        return;
+    };
+    assert_eq!(768 * 65536, FILLED_BYTES, "768 pages of 64 KiB");
+    let tmp = TempDir::new("run062-peak");
+    let root = canonical(&tmp);
+    let fill = memory_module_running(&MAXIMUM_1024, FILL_CODE);
+    let built = built_capsule(&root);
+    let cases = [
+        ("fill", fill, "768\n".to_string()),
+        ("built", built, format!("{FIXED_OUTPUT}\n")),
+    ];
+    for (case, module, output) in cases {
+        let signed = signed_bundle_declaring(&root, &format!("bundle-{case}"), &module, 64);
+        let work = work_root(&root, &format!("work-{case}"));
+        let passed = two_ran(run(&signed.input(&programs[0], &programs[1], &work)));
+        let (_, peaks) = peak_lines(&render(&passed));
+        for (engine_kind, peak) in ENGINES.into_iter().zip(peaks) {
+            assert_eq!(passed.stdout(engine_kind), output.as_bytes(), "{case}");
+            assert_eq!(peak, passed.process_max_rss_bytes(engine_kind), "{case}");
+            if case == "fill" {
+                assert!(
+                    peak >= FILLED_BYTES,
+                    "{engine_kind} filled 48 MiB but its process peak is {peak} bytes"
+                );
+            } else {
+                assert!(
+                    peak < FILLED_BYTES,
+                    "{engine_kind} ran the built capsule with a process peak of {peak} bytes, not under 48 MiB"
+                );
+            }
+        }
+        eprintln!(
+            "PEAK {case}: wasmtime {} bytes, wasmer {} bytes (engine process RSS, not linear memory)",
+            peaks[0], peaks[1]
+        );
+    }
+    eprintln!("PASS: each engine's measured peak follows the memory its process touched");
 }
 
 /// Task 034: the receipt's per-engine memory maximum lines for a signed bundle
