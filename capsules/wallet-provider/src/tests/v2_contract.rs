@@ -321,8 +321,26 @@ fn wallet_contract_requires_the_exact_runtime_local_json_envelope() {
     assert!(matches!(response, Response::Error { ref code, .. } if code == "invalid_request"));
 }
 
+/// Runs one request through the provider's own `wallet_contract` entry point (`src/main.rs:106`),
+/// so the answer proves what `WalletProviderRequestV2::decode_at` reports at `src/main.rs:121`. The
+/// whole refusal `message` is returned for the caller to compare with `assert_eq!`, so a swapped,
+/// reworded or dropped reason fails the test.
+fn request_envelope_refusal(provider: &mut WalletProvider, outer: Value) -> String {
+    let response = decode_and_handle_outer(provider, outer);
+    match response {
+        Response::Error { code, message } => {
+            assert_eq!(code, "invalid_wallet_contract");
+            message
+        }
+        other => panic!("expected invalid_wallet_contract, got {other:?}"),
+    }
+}
+
+/// Catches removal of the `protocol_version` presence check in the contract's `require_version`
+/// (`elastos/crates/elastos-wallet-contract/src/lib.rs:1273`): without it an absent version falls
+/// through to the version comparison instead of naming the missing field.
 #[test]
-fn wallet_contract_rejects_missing_and_mixed_protocol_versions() {
+fn request_envelope_refuses_a_missing_protocol_version() {
     let dir = tempfile::tempdir().unwrap();
     let mut provider = init_provider(dir.path());
     let context = wallet_context("person:local:alice", "wallet");
@@ -334,25 +352,42 @@ fn wallet_contract_rejects_missing_and_mixed_protocol_versions() {
             create_new: true,
         },
     );
-    for version in [Some("1.0"), Some("2.0"), Some("2.1"), Some("2.2"), None] {
-        let mut value = serde_json::to_value(&request).unwrap();
-        match version {
-            Some(version) => value["protocol_version"] = json!(version),
-            None => {
-                value.as_object_mut().unwrap().remove("protocol_version");
-            }
-        }
-        let response = decode_and_handle_outer(
-            &mut provider,
-            json!({
-                "op": "wallet_contract",
-                "request": value,
-                "_runtime_invocation": runtime_invocation_envelope(),
-            }),
-        );
-        assert!(
-            matches!(response, Response::Error { ref code, .. } if code == "invalid_wallet_contract"),
-            "mixed version unexpectedly reached Wallet: {response:?}"
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
+    value.as_object_mut().unwrap().remove("protocol_version");
+    assert_eq!(
+        request_envelope_refusal(&mut provider, outer),
+        "Wallet protocol_version is missing"
+    );
+    assert!(provider.store.accounts.is_empty());
+    assert!(provider.store.managed_wallets.is_empty());
+    assert!(provider.store.consumed_lifecycles.is_empty());
+}
+
+/// Catches removal of the supported-version comparison in the contract's `require_exact_version`
+/// (`elastos/crates/elastos-wallet-contract/src/lib.rs:1287`): every retired wire version must be
+/// refused by the version it carries, and must never reach Wallet.
+#[test]
+fn request_envelope_refuses_an_unsupported_protocol_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let context = wallet_context("person:local:alice", "wallet");
+    let request = wallet_request(
+        &context,
+        WalletProviderOperationV2::CreateManagedAccount {
+            chain_namespace: "eip155:20".into(),
+            label: Some("must not dispatch".into()),
+            create_new: true,
+        },
+    );
+    for version in ["1.0", "2.0", "2.1", "2.2"] {
+        let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+        let value = &mut outer["request"];
+        value["protocol_version"] = json!(version);
+        assert_eq!(
+            request_envelope_refusal(&mut provider, outer),
+            format!("unsupported Wallet protocol_version {version}"),
+            "{version} must be refused by the version it carries"
         );
         assert!(provider.store.accounts.is_empty());
         assert!(provider.store.managed_wallets.is_empty());
@@ -883,4 +918,365 @@ fn manifest_is_consistently_versioned_and_status_only() {
     ] {
         assert!(!serialized.contains(retired), "manifest leaked {retired}");
     }
+}
+
+/// Catches removal of the missing-schema refusal in the contract's `require_version`
+/// (`elastos/crates/elastos-wallet-contract/src/lib.rs:1270`): an absent schema falls through to
+/// the version comparison instead of naming the field that is missing.
+#[test]
+fn request_envelope_refuses_a_missing_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let context = wallet_context("person:local:alice", "wallet");
+    let request = wallet_request(
+        &context,
+        WalletProviderOperationV2::ListAccounts {
+            include_revoked: false,
+        },
+    );
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
+    value.as_object_mut().unwrap().remove("schema");
+    assert_eq!(
+        request_envelope_refusal(&mut provider, outer),
+        "Wallet contract schema is missing"
+    );
+}
+
+/// Catches removal of the schema comparison in the contract's `require_exact_version`
+/// (`elastos/crates/elastos-wallet-contract/src/lib.rs:1282`): a request carrying another
+/// schema must be refused by that schema's own text.
+#[test]
+fn request_envelope_refuses_an_unsupported_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let context = wallet_context("person:local:alice", "wallet");
+    let request = wallet_request(
+        &context,
+        WalletProviderOperationV2::ListAccounts {
+            include_revoked: false,
+        },
+    );
+    let schema = "elastos.wallet.provider-request/v3";
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
+    value["schema"] = json!(schema);
+    assert_eq!(
+        request_envelope_refusal(&mut provider, outer),
+        format!("unsupported Wallet contract schema {schema}")
+    );
+}
+
+/// Catches removal of the `expires_at <= issued_at` guard in the contract's `validate_lifetime`
+/// (`elastos/crates/elastos-wallet-contract/src/lib.rs:1296`): a request that expires when it was
+/// issued has no lifetime to check.
+#[test]
+fn request_envelope_refuses_an_invalid_lifetime() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let context = wallet_context("person:local:alice", "wallet");
+    let request = wallet_request(
+        &context,
+        WalletProviderOperationV2::ListAccounts {
+            include_revoked: false,
+        },
+    );
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
+    let issued_at = value["issued_at"].as_u64().unwrap();
+    value["expires_at"] = json!(issued_at);
+    assert_eq!(
+        request_envelope_refusal(&mut provider, outer),
+        "Wallet request lifetime is invalid"
+    );
+}
+
+/// Catches removal of the bound comparison in the contract's `validate_lifetime`
+/// (`elastos/crates/elastos-wallet-contract/src/lib.rs:1299`): a lifetime of
+/// `MAX_INVOCATION_TTL_SECS` + 1 seconds is over the bound. The contract's
+/// `MAX_INVOCATION_TTL_SECS` is 300 (`elastos/crates/elastos-wallet-contract/src/lib.rs:33`) and
+/// is not re-exported into this crate, so the number is spelled here.
+#[test]
+fn request_envelope_refuses_a_lifetime_beyond_its_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let context = wallet_context("person:local:alice", "wallet");
+    let request = wallet_request(
+        &context,
+        WalletProviderOperationV2::ListAccounts {
+            include_revoked: false,
+        },
+    );
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
+    let issued_at = value["issued_at"].as_u64().unwrap();
+    value["expires_at"] = json!(issued_at.saturating_add(301));
+    assert_eq!(
+        request_envelope_refusal(&mut provider, outer),
+        "Wallet request lifetime exceeds its bound"
+    );
+}
+
+/// Catches removal of the clock-skew guard in the contract's `validate_lifetime`
+/// (`elastos/crates/elastos-wallet-contract/src/lib.rs:1305`): a request issued two hours ahead
+/// keeps a lifetime inside the bound, so only the skew rule can refuse it.
+#[test]
+fn request_envelope_refuses_a_request_issued_in_the_future() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let context = wallet_context("person:local:alice", "wallet");
+    let request = wallet_request(
+        &context,
+        WalletProviderOperationV2::ListAccounts {
+            include_revoked: false,
+        },
+    );
+    let now = now_ts();
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
+    value["issued_at"] = json!(now.saturating_add(7200));
+    value["expires_at"] = json!(now.saturating_add(7290));
+    assert_eq!(
+        request_envelope_refusal(&mut provider, outer),
+        "Wallet request was issued in the future"
+    );
+}
+
+/// Catches removal of the expiry guard in the contract's `validate_lifetime`
+/// (`elastos/crates/elastos-wallet-contract/src/lib.rs:1310`): a request whose lifetime ended in
+/// the past is inside the bound, so only the expiry rule can refuse it.
+#[test]
+fn request_envelope_refuses_an_expired_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let context = wallet_context("person:local:alice", "wallet");
+    let request = wallet_request(
+        &context,
+        WalletProviderOperationV2::ListAccounts {
+            include_revoked: false,
+        },
+    );
+    let now = now_ts();
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
+    value["issued_at"] = json!(now.saturating_sub(200));
+    value["expires_at"] = json!(now.saturating_sub(100));
+    assert_eq!(
+        request_envelope_refusal(&mut provider, outer),
+        "Wallet request expired"
+    );
+}
+
+/// Catches removal of the prefix refusal in the contract's `validate_request_id`
+/// (`elastos/crates/elastos-wallet-contract/src/lib.rs:1320`): an identifier without
+/// `wallet-request:` is refused before its entropy is read.
+#[test]
+fn request_envelope_refuses_a_request_id_with_an_invalid_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let context = wallet_context("person:local:alice", "wallet");
+    let request = wallet_request(
+        &context,
+        WalletProviderOperationV2::ListAccounts {
+            include_revoked: false,
+        },
+    );
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
+    value["request_id"] = json!("not-a-request-id");
+    assert_eq!(
+        request_envelope_refusal(&mut provider, outer),
+        "Wallet request_id has an invalid prefix"
+    );
+}
+
+/// Catches removal of the entropy guard in the contract's `validate_request_id`
+/// (`elastos/crates/elastos-wallet-contract/src/lib.rs:1321`): a suffix that is neither 32 bytes
+/// nor lowercase hexadecimal is refused after its prefix passes.
+#[test]
+fn request_envelope_refuses_a_request_id_without_lowercase_hex_entropy() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let context = wallet_context("person:local:alice", "wallet");
+    let request = wallet_request(
+        &context,
+        WalletProviderOperationV2::ListAccounts {
+            include_revoked: false,
+        },
+    );
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
+    value["request_id"] = json!("wallet-request:XYZ");
+    assert_eq!(
+        request_envelope_refusal(&mut provider, outer),
+        "Wallet request_id must contain 128 bits of lowercase hexadecimal entropy"
+    );
+}
+
+/// Catches removal of the capability/intent derivation check in
+/// `WalletProviderRequestV2::validate_at` (`elastos/crates/elastos-wallet-contract/src/lib.rs:1111`):
+/// a capability the operation does not grant is refused before any binding is compared.
+#[test]
+fn request_envelope_refuses_a_capability_its_operation_did_not_derive() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let context = wallet_context("person:local:alice", "wallet");
+    let request = wallet_request(
+        &context,
+        WalletProviderOperationV2::ListAccounts {
+            include_revoked: false,
+        },
+    );
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
+    value["authority"]["capability"] = json!("wallet:recovery:export-managed");
+    assert_eq!(
+        request_envelope_refusal(&mut provider, outer),
+        "Wallet request capability or intent was not derived from its operation"
+    );
+}
+
+/// Catches removal of the operation-hash comparison in `WalletProviderRequestV2::validate_at`
+/// (`elastos/crates/elastos-wallet-contract/src/lib.rs:1119`): a substituted operation parameter
+/// no longer matches the committed `request_sha256`.
+#[test]
+fn request_envelope_refuses_an_operation_hash_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let context = wallet_context("person:local:alice", "wallet");
+    let request = wallet_request(
+        &context,
+        WalletProviderOperationV2::CreateManagedAccount {
+            chain_namespace: "eip155:20".into(),
+            label: Some("Original".into()),
+            create_new: true,
+        },
+    );
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
+    value["operation"]["params"]["label"] = json!("Substituted");
+    assert_eq!(
+        request_envelope_refusal(&mut provider, outer),
+        "Wallet request operation hash mismatch"
+    );
+}
+
+/// Catches removal of the session-binding comparison in `WalletProviderRequestV2::validate_at`
+/// (`elastos/crates/elastos-wallet-contract/src/lib.rs:1123`): a substituted session identifier is
+/// refused after the capability and operation hash checks pass.
+#[test]
+fn request_envelope_refuses_a_session_binding_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let context = wallet_context("person:local:alice", "wallet");
+    let request = wallet_request(
+        &context,
+        WalletProviderOperationV2::ListAccounts {
+            include_revoked: false,
+        },
+    );
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
+    value["authority"]["session_id"] = json!("session:other");
+    assert_eq!(
+        request_envelope_refusal(&mut provider, outer),
+        "Wallet request session binding mismatch"
+    );
+}
+
+/// Catches removal of the account-binding comparison in `WalletProviderRequestV2::validate_at`
+/// (`elastos/crates/elastos-wallet-contract/src/lib.rs:1133`): a substituted account binding is
+/// refused on a request whose operation names an account.
+#[test]
+fn request_envelope_refuses_an_account_binding_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let context = wallet_context("person:local:alice", "wallet");
+    let request = wallet_request(
+        &context,
+        WalletProviderOperationV2::RevokeAccount {
+            account_id: "wallet:eip155:20:0xabc".into(),
+        },
+    );
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
+    assert!(value["account_binding"].is_string());
+    value["account_binding"] = json!("account:sha256:substituted");
+    assert_eq!(
+        request_envelope_refusal(&mut provider, outer),
+        "Wallet request account binding mismatch"
+    );
+}
+
+/// Catches removal of the approval-binding comparison in `WalletProviderRequestV2::validate_at`
+/// (`elastos/crates/elastos-wallet-contract/src/lib.rs:1143`): a substituted approval binding is
+/// refused on a request whose operation names an approval. `RequestApproval` carries a null
+/// approval binding, so the case uses `ApproveConnectorHandoff`, whose binding is a string.
+#[test]
+fn request_envelope_refuses_an_approval_binding_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let context = wallet_context("person:local:alice", "wallet");
+    let request = wallet_request(
+        &context,
+        WalletProviderOperationV2::ApproveConnectorHandoff {
+            request_id: "wallet-approval:substituted".into(),
+            reason: "Approved".into(),
+        },
+    );
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
+    assert!(value["approval_binding"].is_string());
+    value["approval_binding"] = json!("approval:sha256:substituted");
+    assert_eq!(
+        request_envelope_refusal(&mut provider, outer),
+        "Wallet request approval binding mismatch"
+    );
+}
+
+/// Catches removal of the lifecycle-binding comparison in `WalletProviderRequestV2::validate_at`
+/// (`elastos/crates/elastos-wallet-contract/src/lib.rs:1158`): a substituted lifecycle identifier
+/// no longer matches the derivation over the request it belongs to.
+#[test]
+fn request_envelope_refuses_a_lifecycle_binding_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let context = wallet_context("person:local:alice", "wallet");
+    let request = wallet_request(
+        &context,
+        WalletProviderOperationV2::ListAccounts {
+            include_revoked: false,
+        },
+    );
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
+    value["lifecycle_id"] = json!("lifecycle:sha256:substituted");
+    assert_eq!(
+        request_envelope_refusal(&mut provider, outer),
+        "Wallet request lifecycle binding mismatch"
+    );
+}
+
+/// Catches removal of the audit-binding comparison, the last check in
+/// `WalletProviderRequestV2::validate_at`
+/// (`elastos/crates/elastos-wallet-contract/src/lib.rs:1164`): a substituted audit identifier is
+/// refused after every earlier check passes.
+#[test]
+fn request_envelope_refuses_an_audit_binding_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let context = wallet_context("person:local:alice", "wallet");
+    let request = wallet_request(
+        &context,
+        WalletProviderOperationV2::ListAccounts {
+            include_revoked: false,
+        },
+    );
+    let mut outer = wallet_outer(&request, runtime_invocation_envelope());
+    let value = &mut outer["request"];
+    value["audit_id"] = json!("audit:sha256:substituted");
+    assert_eq!(
+        request_envelope_refusal(&mut provider, outer),
+        "Wallet request audit binding mismatch"
+    );
 }
