@@ -345,7 +345,7 @@ jobs:
   lab-standin:
     name: lab-standin
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     needs: source-gate
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -357,6 +357,20 @@ jobs:
         run: |
           cargo test --locked --lib
           cargo test --locked --test standin_contract
+      # Rong's re-check gate (CI-LS1, 29 Oct): the stand-in effects journeys, plan approval,
+      # and the model-provider process tests that include the stand-in must build on Linux.
+      # The cleanup census runs the operator's lsof at /usr/sbin/lsof (src/census.rs); Ubuntu ships /usr/bin/lsof.
+      - name: provide lsof at the census path
+        run: test -x /usr/sbin/lsof || sudo ln -s "$(command -v lsof)" /usr/sbin/lsof
+      - name: stand-in effects journeys
+        working-directory: lab/agent-conformance
+        run: cargo test --locked --test effects standin_
+      - name: plan approval tests
+        working-directory: lab/plan-approval
+        run: cargo test --locked
+      - name: model-provider process tests build
+        working-directory: capsules/model-provider
+        run: cargo test --locked --test process --no-run
 
   test-elastos:
     name: test-elastos
