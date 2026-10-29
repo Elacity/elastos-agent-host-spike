@@ -23,7 +23,7 @@ agent_host_build: scripts/build-component-capsule.sh
 agent_host_lifecycle_entry: impl exports::elastos::bus::lifecycle::Guest for AgentHost
 agent_host_run: fn run() -> Result<(), elastos::bus::types::BusError>
 agent_host_export: export!(AgentHost)
-falsify_command: absent
+falsify_command: two-capsule-run
 
 ## Component bytes
 
@@ -67,6 +67,8 @@ missing artifact is not the A3 target.
 
 ## Falsifier command
 
-The `PROVIDER_CRATES` table in `examples/agent-host/falsify.py` has no manifest
-ending in `lab/two-capsule-run/Cargo.toml`. The falsify command stays absent.
-This crate adds no `falsifiers.json` and uses no second test runner.
+The `PROVIDER_CRATES` table in `examples/agent-host/falsify.py` registers the
+key `two-capsule-run` for the manifest `lab/two-capsule-run/Cargo.toml`, with no
+extra Cargo arguments. The shared runner's `two-capsule-run` command therefore
+covers this crate's tests. This crate adds no `falsifiers.json` and uses no
+second test runner.
