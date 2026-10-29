@@ -2787,6 +2787,211 @@ fn hosted_run_with_no_grant_is_refused_before_any_send() {
     provider.shutdown();
 }
 
+/// Staged delivery path (`docs/MODEL_PROVIDER.md`): caller input that carries a
+/// forged runtime binding field is refused by `reject_untrusted_binding_fields`
+/// before binding validation and before any send. The nested `grant_id` shape
+/// is the one `nested_runtime_binding_fields_are_rejected` already refuses.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_forged_binding_field_is_refused_before_any_send() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider forged binding field: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-forged-binding");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind_streaming("hosted-forged-binding");
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let forged_field = json!({
+        "status": "error",
+        "code": "invalid_request",
+        "message": "caller input must not declare runtime binding fields",
+    });
+    let missing_run = json!({
+        "status": "error",
+        "code": "run_not_found",
+        "message": "model run is not available for the current caller",
+    });
+
+    // The unit test nests `grant_id` under `nested.items[0]`. The hash covers
+    // that whole input, and the binding fields are the hosted text turn's.
+    let nested_input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "hello",
+        "nested": {
+            "items": [
+                {
+                    "grant_id": "bad"
+                }
+            ]
+        }
+    });
+    let nested_request = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": nested_input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": HOSTED_FIXTURE_SESSION_ID,
+            "capsule_id": "assistant",
+            "grant_id": "grant:test",
+            "request_id": test_support::fixture_model_request_id(
+                "request:hosted-forged-nested"
+            ),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": model_input_hash(&nested_input).unwrap()
+        }
+    });
+    let nested = provider.request(nested_request.clone());
+    assert_eq!(
+        nested, forged_field,
+        "a nested grant_id must be refused before any send: {nested}"
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        0,
+        "a nested grant_id must open no connection to the Runtime socket: {nested}"
+    );
+    let nested_binding: RuntimeCreateBinding =
+        serde_json::from_value(nested_request["runtime_binding"].clone()).unwrap();
+    let nested_get = provider.request(json!({
+        "op": "runs_get",
+        "run_id": model_run_id(&nested_binding),
+        "runtime_binding": access_binding(&nested_request),
+    }));
+    assert_eq!(
+        nested_get, missing_run,
+        "a refused nested grant_id must leave no run: {nested_get}"
+    );
+
+    let top_input = json!({
+        "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+        "prompt": "hello",
+        "backend_url": "https://forged.invalid",
+    });
+    let top_request = json!({
+        "op": "runs_create",
+        "offer_id": HOSTED_EFFECT_OFFER,
+        "operation": "text.generate",
+        "input": top_input,
+        "runtime_binding": {
+            "schema": RUNTIME_CREATE_BINDING_SCHEMA,
+            "principal_id": "person:local:test",
+            "session_id": HOSTED_FIXTURE_SESSION_ID,
+            "capsule_id": "assistant",
+            "grant_id": "grant:test",
+            "request_id": test_support::fixture_model_request_id(
+                "request:hosted-forged-backend-url"
+            ),
+            "offer_id": HOSTED_EFFECT_OFFER,
+            "operation": "text.generate",
+            "input_hash": model_input_hash(&top_input).unwrap()
+        }
+    });
+    let top = provider.request(top_request.clone());
+    assert_eq!(
+        top, forged_field,
+        "a top-level backend_url must be refused before any send: {top}"
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        0,
+        "a top-level backend_url must open no connection to the Runtime socket: {top}"
+    );
+    let top_binding: RuntimeCreateBinding =
+        serde_json::from_value(top_request["runtime_binding"].clone()).unwrap();
+    let top_get = provider.request(json!({
+        "op": "runs_get",
+        "run_id": model_run_id(&top_binding),
+        "runtime_binding": access_binding(&top_request),
+    }));
+    assert_eq!(
+        top_get, missing_run,
+        "a refused backend_url must leave no run: {top_get}"
+    );
+
+    let settled = run_hosted_text_turn(
+        &mut provider,
+        &test_support::fixture_model_request_id("request:hosted-forged-control"),
+        "grant:test",
+        "hello",
+        FIXTURE_EVENT_TIMEOUT,
+    );
+    assert_eq!(
+        settled["data"]["status"],
+        "completed",
+        "the granted control turn must complete: {}",
+        run_status_and_error_code(&settled)
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["output"],
+        json!({"schema": RUN_OUTPUT_TEXT_SCHEMA, "text": "ready"}),
+        "the granted control turn must carry the streamed text: {}",
+        run_status_and_error_code(&settled)
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "only the granted control turn may open a connection to the Runtime socket"
+    );
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "only the granted control turn may open a connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "only the granted control turn may send a hosted request"
+    );
+    let recorded = &requests[0];
+    assert_eq!(recorded.request_line, "POST /v1/hosted-effect HTTP/1.1");
+    let body =
+        std::str::from_utf8(&recorded.body).expect("the hosted body is the JSON text request");
+    assert!(
+        body.contains("hello"),
+        "the granted turn must send the prompt: {body}"
+    );
+    assert!(
+        !body.contains("bad"),
+        "the granted turn must carry no nested grant value: {body}"
+    );
+    assert!(
+        !body.contains("forged.invalid"),
+        "the granted turn must carry no forged backend url: {body}"
+    );
+    assert_eq!(
+        recorded.value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
+    );
+
+    provider.shutdown();
+}
+
 /// The model id the Sparks engine serves and the agent-host opt-in tests pin
 /// (`examples/agent-host/src/lib.rs:10153`, `:10161`).
 const REAL_TURN_MODEL: &str = "deepseek-v4-flash";
