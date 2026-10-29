@@ -9627,3 +9627,113 @@ New:
 
 A passing row gives the real Runtime no A11 credit for this later call.
 
+## 104
+
+`cleanup_census_refuses_each_leftover` now waits until the child has written `cwd-ready` in the throwaway root, then the process-leftover census contains `.`.
+
+Checkout before the first edit: `git rev-parse HEAD` = `6eec2a89bf5bb98bb6ab6d1548e15c35f3ca1c1a`. `git merge-base --is-ancestor b2eccab68f03ce9a0ced0c8afea96b496dbfd15f HEAD` exited 0. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` exited 1. The shell line at that checkout was `cd "$HOME/.."; exec /bin/sleep 20`.
+
+Session contract (`docs/AGENT_ARCHITECTURE.md`, "Session and interaction contract"): an explicit interrupt or cancel operation that reports its settlement. This task is the physical census after that stop, not a new interrupt.
+
+Census paragraph from `35697329be0aad89eb68d0adf78aa94d24751317:lab/resident-instances/SPEC.md`:
+
+> **Census.** No launched instance is `starting`, `running` or `stopping`. No pending request comes from a journey session. In A6 and A12, no live grant belongs to a journey session. No process below the operator pid is new since the baseline. `GET /api/health` is still ok.
+
+The one physical census stays `census::cleanup`. `src/census.rs` is unchanged.
+
+### F-census-cwd-home
+
+Assertion `tests/runtime.rs:384`: `assert!(reason.contains("\".\""), "root cwd must be visible");`.
+
+Old bytes:
+
+```text
+cd "$HOME/.."; : > cwd-ready; exec /bin/sleep 20
+```
+
+New bytes:
+
+```text
+cd "$HOME"; : > "$HOME/../cwd-ready"; exec /bin/sleep 20
+```
+
+The wait still uses `home.root().join("cwd-ready")`. The planted crate compiled. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime cleanup_census_refuses_each_leftover -- --exact` exited 101 in 0.87 seconds and panicked at `tests/runtime.rs:384:5` with `root cwd must be visible`. Restored, the same test passes.
+
+### F-census-cwd-wait
+
+Removing the readiness loop leaves `reached_root` false. The planted crate compiled (unused-variable warnings only). The same exact test exited 101 in 0.57 seconds and panicked at `tests/runtime.rs:365:5` with `census ran before cwd-ready`. Restored assertion: `tests/runtime.rs:380` `assert!(reached_root, "census ran before cwd-ready");`.
+
+Old bytes, the loop that was deleted:
+
+```text
+    while !reached_root {
+        if home.root().join("cwd-ready").exists() {
+            reached_root = true;
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "root cwd readiness exceeded 5 seconds"
+        );
+        assert!(
+            child.is_alive().unwrap(),
+            "root cwd control exited before the root"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+```
+
+New bytes: the loop is absent. Restored afterwards.
+
+### Alive child without cwd-ready
+
+`cleanup_census_times_out_without_cwd_ready` expects `root cwd readiness exceeded 5 seconds` (`tests/runtime.rs:450`). The plant deletes that bound from this test only:
+
+```text
+        if started.elapsed() >= Duration::from_secs(5) {
+            reason = "root cwd readiness exceeded 5 seconds";
+            break;
+        }
+```
+
+The planted crate compiled. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime cleanup_census_times_out_without_cwd_ready -- --exact` exited 101 in 20.05 seconds. Assertion `left == right` failed: left `root cwd control exited before the root`, right `root cwd readiness exceeded 5 seconds`. Restored.
+
+### Child that exits before cwd-ready
+
+`cleanup_census_exits_before_cwd_ready` expects `root cwd control exited before the root` (`tests/runtime.rs:475`). The plant deletes the alive check from this test only:
+
+```text
+        if !child.is_alive().unwrap() {
+            reason = "root cwd control exited before the root";
+            break;
+        }
+```
+
+The planted crate compiled. The exact test exited 101 in 5.04 seconds. Assertion `left == right` failed: left `root cwd readiness exceeded 5 seconds`, right `root cwd control exited before the root`. Restored.
+
+`git diff -- lab/agent-conformance/tests/runtime.rs` after restoration does not contain those plants. `git diff` for `src/census.rs`, `src/harness.rs`, `standin-runtime/mod.rs`, `GAPS.md`, `falsifiers.json`, `Cargo.toml` and `Cargo.lock` is empty. No `falsifiers.json` id was added.
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.172 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 263.668 seconds, inside the 600-second bound. Lib 61 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 9 passed; report 23 passed; runtime 12 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0. No listed flake failed, so the single-rerun rule did not apply.
+
+Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.132 seconds; `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime cleanup_census_refuses_each_leftover -- --exact` exit 0, 1 passed, real 1.601 seconds. `git merge-base --is-ancestor fff8f1761eb851f642f8e9b680ea1c6747974060 HEAD` exited 1.
+
+### Principles check
+
+| Question | Yes/No | Evidence |
+| --- | --- | --- |
+| 1. New name or URL where a hash belongs? | No | The shell writes a local readiness file at `tests/runtime.rs:360`. It names no code or content. |
+| 2. Capsule, Home or UI gains ungranted access? | No | The child is a throwaway `sleep` started at `tests/runtime.rs:357`. No grant is added. |
+| 3. A second path or a second copy of one rule? | No | The census call stays `cleanup` at `tests/runtime.rs:381`. `src/census.rs` is unchanged. The timeout and early-exit tests do not census. |
+| 4. Runtime core grows? | No | The edits are `tests/runtime.rs` and `RUNBOOK.md`. `elastos/` is untouched. |
+| 5. Refusals deny by default with a clear reason? | Yes | A live child with no file is `root cwd readiness exceeded 5 seconds` at `tests/runtime.rs:372`. An exited child is `root cwd control exited before the root` at `tests/runtime.rs:376`. |
+| 6. Capsule logic stays inside and uses granted Bus calls? | Yes | No capsule or Bus code changes. The host test calls the existing census at `tests/runtime.rs:381` after the child has reached the root. |
+| 7. Named tests and caught falsifiers prove the rule? | Yes | `tests/runtime.rs:380`, `:384`, `:450` and `:475`. Each hand-run plant failed its named test, and the restored tests pass. |
+| 8. Identity, admission and allowance stay separate? | Yes | A path of `.` is a physical observation. `RUNBOOK.md:525` says a PASS gives the Runtime no A12 credit. |
+
+A passing row gives the real Runtime no A12 credit.
+

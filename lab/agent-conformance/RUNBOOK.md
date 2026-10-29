@@ -522,6 +522,8 @@ The known `/tmp/elastos/storage` leftover stays under AC-006-STORAGE; this
 command leaves its contents untouched. The earlier absent-policy refusal row
 keeps its existing grade and labels pending/grant cleanup as unmeasured.
 
+`cleanup_census_refuses_each_leftover` waits until the child has written `cwd-ready` in the throwaway root, and the process-leftover reason then contains `.`. `cleanup_census_times_out_without_cwd_ready` fails at 5 seconds with `root cwd readiness exceeded 5 seconds` when the child stays alive without that file. `cleanup_census_exits_before_cwd_ready` fails with `root cwd control exited before the root` when the child exits first. A PASS gives the Runtime no A12 credit.
+
 ## Two seeded instances (023)
 
 The rows `two_instances_overlap_with_separate_grants` and
