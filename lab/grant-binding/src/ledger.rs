@@ -57,7 +57,6 @@ pub(crate) struct Ledger {
     ceiling: u64,
     admitted: u64,
     ceilings: HashMap<String, u64>,
-    pending_identity: Option<String>,
     held: u64,
     next_reservation: u64,
     charged: u64,
@@ -72,7 +71,6 @@ impl Ledger {
             ceiling: 0,
             admitted: 0,
             ceilings: HashMap::new(),
-            pending_identity: None,
             held: 0,
             next_reservation: 0,
             charged: 0,
@@ -207,32 +205,31 @@ impl std::fmt::Display for TimeoutRecord {
 }
 
 impl Verifier {
-    /// Stages the grant identity whose admitted amount the next `admit` keeps.
-    pub(crate) fn stage_admitted_identity(&self, identity: &str) {
-        self.ledger.lock().expect("ledger lock").pending_identity = Some(identity.to_owned());
-    }
-
-    /// Records `ceiling` as the last admitted ceiling. A staged identity keeps
-    /// it for its own reserves. With nothing staged, no identity keeps a
-    /// ceiling above it.
-    fn store_staged_ceiling(&self, ceiling: u64) {
+    /// Records `ceiling`, the last admitted ceiling, in one ledger lock. An
+    /// identity updates records the ceiling for that identity alone. None
+    /// lowers every identity ceiling above `ceiling` and leaves no identity
+    /// above it. `ceiling` is stored in the same lock.
+    pub(super) fn store_admitted_ceiling(&self, identity: Option<&str>, ceiling: u64) {
         let mut ledger = self.ledger.lock().expect("ledger lock");
         ledger.admitted = ceiling;
-        if let Some(identity) = ledger.pending_identity.take() {
-            ledger.ceilings.insert(identity, ceiling);
-        } else {
-            for stored in ledger.ceilings.values_mut() {
-                *stored = (*stored).min(ceiling);
+        match identity {
+            Some(identity) => {
+                ledger.ceilings.insert(identity.to_owned(), ceiling);
+            }
+            None => {
+                for stored in ledger.ceilings.values_mut() {
+                    *stored = (*stored).min(ceiling);
+                }
             }
         }
+        ledger.ceiling = ceiling;
     }
 
     /// Sets the allowance ceiling. Outstanding holds stay as they are.
-    /// A staged identity keeps this ceiling for its own reserves, and an
-    /// admit with nothing staged lowers any identity ceiling above it.
+    /// Every identity ceiling above `ceiling` is lowered to it, and an
+    /// identity with no ceiling keeps none until an ask names it.
     pub fn admit(&self, ceiling: u64) {
-        self.store_staged_ceiling(ceiling);
-        self.ledger.lock().expect("ledger lock").ceiling = ceiling;
+        self.store_admitted_ceiling(None, ceiling);
     }
 
     /// Holds `amount` on the ledger when the total this identity compares plus

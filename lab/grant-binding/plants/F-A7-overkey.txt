@@ -2,7 +2,7 @@ id: F-A7-overkey
 file: src/ask.rs
 test: ask::model_forged_overwrite_does_not_retarget_the_ceiling
 --- old
-        self.stage_admitted_identity(&identity);
+        self.store_admitted_ceiling(Some(&identity), ask.amount);
 --- new
         let other = if request.forged_overwrite {
             self.grants
@@ -12,5 +12,5 @@ test: ask::model_forged_overwrite_does_not_retarget_the_ceiling
         } else {
             None
         };
-        self.stage_admitted_identity(other.as_deref().unwrap_or(&identity));
+        self.store_admitted_ceiling(other.as_deref().or(Some(&identity)), ask.amount);
 --- end

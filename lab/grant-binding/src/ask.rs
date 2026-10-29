@@ -30,9 +30,10 @@ fn guest_budget_ok(_ask: &BudgetAsk) -> bool {
 }
 
 impl Verifier {
-    /// Caps one agent's budget ask at `cap`, then stores the granted amount
-    /// through the one `admit`. A binding refusal stores nothing, and an ask
-    /// above the cap is refused with the cap and the asked amount.
+    /// Caps one agent's budget ask at `cap`, then records the granted amount
+    /// as that agent's own ceiling in one ledger lock. A binding refusal
+    /// stores nothing, and an ask above the cap is refused with the cap and
+    /// the asked amount.
     #[rustfmt::skip]
     pub fn admit_ask(
         &self,
@@ -54,8 +55,7 @@ impl Verifier {
             .expect("resolved grant")
             .identity
             .clone();
-        self.stage_admitted_identity(&identity);
-        self.admit(ask.amount);
+        self.store_admitted_ceiling(Some(&identity), ask.amount);
         Ok(ask.amount)
     }
 }
@@ -1249,4 +1249,97 @@ fn model_forged_instance_does_not_replace_the_asked_amount() {
         .expect_err("ceiling stays unset");
     assert_eq!(untouched, crate::ledger::ReserveRefuse::NoCeiling);
     assert_eq!(untouched.to_string(), "identity has no ceiling");
+}
+
+#[test]
+fn model_ask_stores_the_amount_under_the_callers_own_identity() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    let other = verifier.register_instance("agent-2", "session-b");
+    let other_handle = verifier
+        .bind_grant(other, "UsersAI/agent-2/notes", super::rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(&call, &super::guest(handle), BudgetAsk { amount: 4 }, 10)
+        .expect("ask");
+    let other_call = verifier.open_call(other);
+    let untouched = verifier
+        .reserve(&other_call, &super::guest(other_handle), 1)
+        .expect_err("another agent has no ceiling");
+    assert_eq!(untouched, crate::ledger::ReserveRefuse::NoCeiling);
+    assert_eq!(untouched.to_string(), "identity has no ceiling");
+    verifier
+        .reserve(&call, &super::guest(handle), 4)
+        .expect("hold the granted amount");
+    let refusal = verifier
+        .reserve(&call, &super::guest(handle), 1)
+        .expect_err("own ceiling is the granted amount");
+    assert_eq!(
+        refusal,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 4,
+            asked: 1,
+        }
+    );
+}
+
+#[test]
+fn model_concurrent_asks_keep_each_agents_own_ceiling() {
+    use std::sync::Barrier;
+    let mut verifier = Verifier::new();
+    let a = verifier.register_instance("agent-1", "session-a");
+    let a_handle = verifier
+        .bind_grant(a, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    let b = verifier.register_instance("agent-2", "session-b");
+    let b_handle = verifier
+        .bind_grant(b, "UsersAI/agent-2/notes", super::rights())
+        .expect("bind");
+    let a_call = verifier.open_call(a);
+    let b_call = verifier.open_call(b);
+    assert_ne!(a_handle, b_handle);
+    let rounds = 2000;
+    for _ in 0..rounds {
+        let gate = Barrier::new(2);
+        std::thread::scope(|scope| {
+            let a_ask = scope.spawn(|| {
+                gate.wait();
+                verifier.admit_ask(&a_call, &super::guest(a_handle), BudgetAsk { amount: 3 }, 100)
+            });
+            let b_ask = scope.spawn(|| {
+                gate.wait();
+                verifier.admit_ask(&b_call, &super::guest(b_handle), BudgetAsk { amount: 9 }, 100)
+            });
+            assert_eq!(a_ask.join().expect("a ask"), Ok(3));
+            assert_eq!(b_ask.join().expect("b ask"), Ok(9));
+        });
+        let held = verifier
+            .reserve(&a_call, &super::guest(a_handle), 3)
+            .expect("hold A's own ceiling");
+        let refusal = verifier
+            .reserve(&a_call, &super::guest(a_handle), 9)
+            .expect_err("A cannot reserve B's amount");
+        assert_eq!(
+            refusal,
+            crate::ledger::ReserveRefuse::OverCeiling {
+                ceiling: 3,
+                held: 3,
+                asked: 9,
+            }
+        );
+        verifier
+            .release(&a_call, &super::guest(a_handle), held)
+            .expect("release A's hold");
+        let b_held = verifier
+            .reserve(&b_call, &super::guest(b_handle), 9)
+            .expect("B holds its own ceiling");
+        verifier
+            .release(&b_call, &super::guest(b_handle), b_held)
+            .expect("release B's hold");
+    }
 }

@@ -2,7 +2,7 @@ id: F-A7-askchild
 file: src/ask.rs
 test: ask::model_forged_child_journal_does_not_replace_the_admitted_amount
 --- old
-        self.admit(ask.amount);
+        self.store_admitted_ceiling(Some(&identity), ask.amount);
 --- new
         self.admit(if !request.forged_child_journal { ask.amount } else { 0 });
 --- end
