@@ -894,7 +894,11 @@ fn wait_for_terminal(
 /// test no longer finds that function. F-cc49a drops the `generated_`
 /// acceptance, so the in-memory stand-in citation fails. F-cc50a drops the
 /// exact `allow_rules_trace_to_declared_rights` return, so the in-memory
-/// trace citation fails.
+/// trace citation fails. F-cc53a returns `Ok(())` at the start of
+/// `operations_match_parse_request`, so an in-memory wrong row or extra arm
+/// is accepted. F-cc54a returns `Ok(())` at the start of
+/// `operations_inputs_match_the_request_structs`, so an in-memory missing
+/// name, extra name or swapped name is accepted.
 #[test]
 fn operations_section_cites_existing_tests() {
     fn cited_test_name(span: &str) -> bool {
