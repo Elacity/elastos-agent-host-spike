@@ -291,12 +291,33 @@ A3_GRANT_CLAIM = "ComponentProvider grants resident A3 credit"
 DRAFT_INDENT = "    "
 
 
-def read_file(root, rel):
-    """Return file bytes, or None when ``rel`` is not a file under ``root``."""
-    path = Path(root) / rel
-    if not path.is_file():
+# One blob at one commit never changes, so one run reads each blob once. A
+# citation and the quotations of the same file share this one read.
+BLOBS = {}
+
+
+def read_file(root, rel, sha):
+    """Return the bytes of REL at commit SHA, or None when it has no such blob.
+
+    The pinned commit is the one revision a citation is judged against, so this
+    reads the commit and never the worktree.
+    """
+    if sha is None:
         return None
-    return path.read_bytes()
+    key = (str(root), sha, rel)
+    if key in BLOBS:
+        return BLOBS[key]
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "show", sha + ":" + rel],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+    data = None if result.returncode != 0 else result.stdout
+    BLOBS[key] = data
+    return data
 
 
 def decode_text(data):
@@ -387,20 +408,11 @@ def _spans(text):
 
 def _pinned_lines(root, sha, rel):
     """Return every line of REL at commit SHA, or None when it is absent."""
-    if sha is None:
+    data = read_file(root, rel, sha)
+    if data is None:
         return None
     try:
-        result = subprocess.run(
-            ["git", "-C", str(root), "show", sha + ":" + rel],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError:
-        return None
-    if result.returncode != 0:
-        return None
-    try:
-        text = decode_text(result.stdout)
+        text = decode_text(data)
     except UnicodeDecodeError:
         return None
     return text.splitlines()
@@ -948,15 +960,19 @@ def _target_quotation(text, target, root, sha):
     return globals()[quoter](text, root, sha)
 
 
-def _quote_refusal(root, text, sha, target):
+def _quote_refusal(root, text, sha, target, refused_spans=frozenset()):
     """Return the refusal for one target, or None when it matches or is absent.
 
+    The pin already refused this citation, or the marker it reads, with a
+    structural reason: one citation has one reason, so no quote refusal runs.
     The walk has no remainder for MARKER: no refusal, and the next target runs.
     The marker is not one line: refused before the line read. The pinned line is
     absent, or no window holds the cited line: the quotation is not in the pin.
     The comparison fails, including a zero score: the quotation does not match.
     """
     span, marker, quoter = target
+    if span in refused_spans or marker.strip("`") in refused_spans:
+        return None
     if text.count(marker) > 1:
         return "refuse: quoted line is not one line: " + marker.strip("`")
     if not _remainders(text, marker):
@@ -971,10 +987,10 @@ def _quote_refusal(root, text, sha, target):
     return None
 
 
-def _quote_refusals(root, text, sha):
+def _quote_refusals(root, text, sha, refused_spans=frozenset()):
     """Return at most one quote refusal, walking QUOTE_TARGETS in source order."""
     for target in QUOTE_TARGETS:
-        reason = _quote_refusal(root, text, sha, target)
+        reason = _quote_refusal(root, text, sha, target, refused_spans)
         if reason is not None:
             return [reason]
     return []
@@ -994,9 +1010,14 @@ def _past_end(number, rel, count):
     return "refuse: line %s is past the end of %s (%s lines)" % (number, rel, count)
 
 
-def _refusal(root, match):
+def _refusal(root, match, sha):
+    """Return the structural refusal for one citation at commit SHA.
+
+    A path, a UTF-8 read, a line bound and a function name all read the pinned
+    commit, so one draft is judged against one revision.
+    """
     rel = match.group("path")
-    data = read_file(root, rel)
+    data = read_file(root, rel, sha)
     if data is None:
         return "refuse: path does not exist: " + rel
     try:
@@ -1025,8 +1046,22 @@ def _refusal(root, match):
     return None
 
 
+def pin_allows_structural_reads(pin_reason, pinned):
+    """True only when the pin names a commit, so one revision is read.
+
+    A missing pin, a bad pin line and an unknown pin each name no revision, so
+    they stay the only refusal and the structural reads do not run.
+    """
+    return pin_reason is None and pinned
+
+
 def problems(root):
-    """Return one refusal per bad pin or citation, pin refusals first."""
+    """Return one refusal per bad pin or citation, pin refusals first.
+
+    A bad pin, a bad pin line or an unknown pin is the only refusal of its own,
+    because no revision is named to read. The structural reads run only once
+    the pin names a commit, and they read that commit.
+    """
     text = load_draft(root)
     if text is None:
         return ["refuse: proposal is absent"]
@@ -1041,15 +1076,17 @@ def problems(root):
         pinned = sha is not None and commit_exists(root, sha)
         if sha is not None and not pinned:
             refusals.append("refuse: pinned commit is not a commit: " + sha)
-    for span in _spans(text):
-        match = CITATION.fullmatch(span)
-        if match is None:
-            continue
-        reason = _refusal(root, match)
-        if reason is not None:
-            refusals.append(reason)
-    if pin_reason is None and pinned:
-        refusals.extend(_quote_refusals(root, text, sha))
+    if pin_allows_structural_reads(pin_reason, pinned):
+        refused_spans = set()
+        for span in _spans(text):
+            match = CITATION.fullmatch(span)
+            if match is None:
+                continue
+            reason = _refusal(root, match, sha)
+            if reason is not None:
+                refusals.append(reason)
+                refused_spans.add(span)
+        refusals.extend(_quote_refusals(root, text, sha, refused_spans))
         refusals.extend(a3_claim_refusals(text))
     return refusals
 

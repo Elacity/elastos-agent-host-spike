@@ -2508,6 +2508,24 @@ class CitationCheckTests(unittest.TestCase):
         got = check.problems(self._draft(body, files))
         assert got == [expected], expected
 
+    def _refused_numbers(self, body, count):
+        """The line numbers the structural read refuses at a PIN of COUNT lines.
+
+        The rule is the checker's own: a single line past the pinned end is
+        refused by its number, and a range is refused by its end when the end is
+        past the pinned end. A citation the pin holds is not in this list.
+        """
+        numbers = []
+        for span in check._spans(body):
+            match = check.CITATION.fullmatch(span)
+            if match is None or match.group("start") is None:
+                continue
+            end = match.group("end")
+            number = int(end) if end is not None else int(match.group("start"))
+            if number > count:
+                numbers.append(number)
+        return numbers
+
     def _source(self, quote, following=NEXT_QUOTE):
         """A committed file whose line 3754 is QUOTE and line 3755 is FOLLOWING."""
         rows = ["// filler"] * (OWNED_NUMBER - 1) + [quote]
@@ -3313,14 +3331,20 @@ class CitationCheckTests(unittest.TestCase):
         )
 
     def test_missing_pin_is_refused(self):
-        got = check.problems(self._raw_draft("No pin line here.\n"))
+        # An absent path in the same draft adds no second line: no revision is
+        # named, so the pin refusal is the only reason.
+        body = "No pin line here, and `missing/no-such.rs:1` is absent.\n"
+        got = check.problems(self._raw_draft(body))
         self.assertEqual(got, ["refuse: draft has no pinned commit"])
 
     def test_pin_line_is_one_commit(self):
+        # Each bad pin line is the only refusal, even when the draft also cites
+        # a path the worktree does not hold.
         sha = "a" * 40
+        absent = "`missing/no-such.rs:1` is absent.\n"
         bodies = (
-            "Pinned commit: HEAD\n",
-            "Pinned commit: %s\nPinned commit: %s\n" % (sha, sha),
+            "Pinned commit: HEAD\n" + absent,
+            "Pinned commit: %s\nPinned commit: %s\n" % (sha, sha) + absent,
         )
         for body in bodies:
             got = check.problems(self._raw_draft(body))
@@ -3331,8 +3355,11 @@ class CitationCheckTests(unittest.TestCase):
             )
 
     def test_unknown_pin_is_refused(self):
+        # An unknown pin is the only refusal, even when the draft also cites a
+        # path the worktree does not hold.
         sha = "f" * 40
-        root = self._raw_draft("Pinned commit: " + sha + "\n", commit=True)
+        body = "Pinned commit: " + sha + "\n`missing/no-such.rs:1` is absent.\n"
+        root = self._raw_draft(body, commit=True)
         got = check.problems(root)
         self.assertEqual(got, ["refuse: pinned commit is not a commit: " + sha])
 
@@ -3421,7 +3448,10 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(check.problems(root), [])
 
     def test_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + OWNED_SPAN
+        expected = (
+            "refuse: line %d is past the end of %s (10 lines)"
+            % (OWNED_NUMBER, OWNED_REL)
+        )
         short = ("// filler\n" * 10).encode("utf-8")
         root = self._draft(self._quote_body(OWNED_QUOTE), {OWNED_REL: short})
         (root / OWNED_REL).write_bytes(self._source(OWNED_QUOTE))
@@ -3548,7 +3578,10 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(check.problems(root), [])
 
     def test_marker_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + MARKER_SPAN
+        expected = (
+            "refuse: line %d is past the end of %s (10 lines)"
+            % (MARKER_NUMBER, MARKER_REL)
+        )
         short = ("// filler\n" * 10).encode("utf-8")
         root = self._draft(self._marker_body(MARKER_CONST), {MARKER_REL: short})
         (root / MARKER_REL).write_bytes(self._marker_source())
@@ -3644,7 +3677,10 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(check.problems(root), [])
 
     def test_launching_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + LAUNCHING_SPAN
+        expected = (
+            "refuse: line %d is past the end of %s (10 lines)"
+            % (LAUNCHING_NUMBER, MARKER_REL)
+        )
         short = ("// filler\n" * 10).encode("utf-8")
         root = self._draft(self._launching_body(LAUNCHING_CONST), {MARKER_REL: short})
         (root / MARKER_REL).write_bytes(self._launching_source())
@@ -3712,7 +3748,10 @@ class CitationCheckTests(unittest.TestCase):
         )
 
     def test_short_pinned_file_refuses_the_owned_line_only(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + OWNED_SPAN
+        expected = (
+            "refuse: line %d is past the end of %s (10 lines)"
+            % (OWNED_NUMBER, OWNED_REL)
+        )
         short = ("// filler\n" * 10).encode("utf-8")
         root = self._draft(
             self._quote_body(OWNED_QUOTE, NEXT_QUOTE), {OWNED_REL: short}
@@ -3929,7 +3968,10 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [ASKS_NUMBER])
 
     def test_asks_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + ASKS_SPAN
+        expected = (
+            "refuse: line %d is past the end of %s (10 lines)"
+            % (ASKS_NUMBER, ASKS_REL)
+        )
         short = ("// filler\n" * 10).encode("utf-8")
         root = self._draft(self._asks_block(), {ASKS_REL: short})
         (root / ASKS_REL).write_bytes(self._asks_source())
@@ -4080,7 +4122,10 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_deny_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + DENY_SPAN
+        expected = (
+            "refuse: line %d is past the end of %s (10 lines)"
+            % (DENY_NUMBER, DENY_REL)
+        )
         short = ("// filler\n" * 10).encode("utf-8")
         root = self._draft(self._deny_block(), {DENY_REL: short})
         (root / DENY_REL).write_bytes(self._deny_source())
@@ -4210,7 +4255,10 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [MINT_NUMBER])
 
     def test_mint_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + MINT_SPAN
+        expected = (
+            "refuse: line %d is past the end of %s (10 lines)"
+            % (MINT_NUMBER, MINT_REL)
+        )
         short = ("// filler\n" * 10).encode("utf-8")
         root = self._draft(self._mint_block(), {MINT_REL: short})
         (root / MINT_REL).write_bytes(self._mint_source())
@@ -4381,7 +4429,10 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [JOURNAL_NUMBER])
 
     def test_journal_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + JOURNAL_SPAN
+        expected = (
+            "refuse: line %d is past the end of %s (10 lines)"
+            % (JOURNAL_NUMBER, JOURNAL_REL)
+        )
         short = ("// filler\n" * 10).encode("utf-8")
         root = self._draft(self._journal_block(), {JOURNAL_REL: short})
         (root / JOURNAL_REL).write_bytes(self._journal_source())
@@ -4577,7 +4628,10 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_grant_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + GRANT_SPAN
+        expected = (
+            "refuse: line %d is past the end of %s (10 lines)"
+            % (GRANT_NUMBER, GRANT_REL)
+        )
         short = ("// filler\n" * 10).encode("utf-8")
         root = self._draft(self._grant_block(), {GRANT_REL: short})
         (root / GRANT_REL).write_bytes(self._journal_source())
@@ -4800,22 +4854,32 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_write_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + WRITE_SPAN
+        # The pin stops before both arms, so both are past the pinned end. The
+        # structural read refuses them and the quote walk reads nothing.
+        past = "refuse: line %d is past the end of %s (10 lines)"
+        expected = [
+            past % (WRITE_NUMBER, ASK_REL),
+            past % (READ_NUMBER, ASK_REL),
+        ]
         short = ("// filler\n" * 10).encode("utf-8")
         got, reads = self._pinned_reads(
             self._ask_block(),
             {ASK_REL: short},
             {ASK_REL: self._ask_source()},
         )
-        self.assertEqual(got, [expected])
-        self.assertEqual(reads, [WRITE_NUMBER])
+        self.assertEqual(got, expected)
+        self.assertEqual(reads, [])
 
     def test_read_quoted_line_past_the_pin_is_refused_at_the_write_line(self):
         # The walk is 20 remainders wide and the pin stops on line 3849, so the
-        # only window that holds 3849 is 3830..3849 and it scores 0. The write
-        # line is compared through that zero-score window and refused, and the
-        # read line is never read.
-        expected = "refuse: quoted line does not match " + WRITE_SPAN
+        # only window that holds 3849 is 3830..3849 and it scores 0. The read
+        # line is past the pinned end and is refused by its bound, and the write
+        # line is compared through that zero-score window and refused.
+        past = "refuse: line %d is past the end of %s (%d lines)"
+        expected = [
+            past % (READ_NUMBER, ASK_REL, WRITE_NUMBER),
+            "refuse: quoted line does not match " + WRITE_SPAN,
+        ]
         short = (
             "// filler\n" * (WRITE_NUMBER - 1) + WRITE_QUOTE + "\n"
         ).encode("utf-8")
@@ -4824,7 +4888,7 @@ class CitationCheckTests(unittest.TestCase):
             {ASK_REL: short},
             {ASK_REL: self._ask_source()},
         )
-        self.assertEqual(got, [expected])
+        self.assertEqual(got, expected)
         self.assertEqual(reads, [WRITE_NUMBER])
 
     def test_two_write_spans_are_refused(self):
@@ -4893,7 +4957,7 @@ class CitationCheckTests(unittest.TestCase):
     def test_falsifier_missing_path_is_caught(self):
         self._caught(
             "read_file",
-            lambda root, rel: b"fn x() {\n",
+            lambda root, rel, sha: b"fn x() {\n",
             self.test_missing_path_is_refused,
             "refuse: path does not exist:",
             "CAUGHT missing-path",
@@ -4935,6 +4999,32 @@ class CitationCheckTests(unittest.TestCase):
             "CAUGHT reversed-range",
         )
 
+    def test_falsifier_structural_read_before_the_pin_is_caught(self):
+        # A gate that reads the worktree before it knows the pin adds a second
+        # line to a draft whose pin names no revision.
+        self._caught(
+            "pin_allows_structural_reads",
+            lambda pin_reason, pinned: True,
+            self.test_missing_pin_is_refused,
+            "refuse:",
+            "CAUGHT structural-before-pin",
+        )
+
+    def test_falsifier_duplicate_quote_refusal_is_caught(self):
+        # A walk that ignores the structural refusals repeats a citation the pin
+        # already refused, so one citation carries two reasons.
+        def planted(root, text, sha, refused_spans=frozenset()):
+            return _original_quote_refusals(root, text, sha)
+
+        _original_quote_refusals = check._quote_refusals
+        self._caught(
+            "_quote_refusals",
+            planted,
+            self.test_quoted_line_absent_from_the_pinned_commit_is_refused,
+            "refuse: quoted line",
+            "CAUGHT duplicate-quote-refusal",
+        )
+
     def test_falsifier_absent_draft_is_caught(self):
         self._caught(
             "load_draft",
@@ -4942,6 +5032,65 @@ class CitationCheckTests(unittest.TestCase):
             self.test_absent_draft_is_refused,
             "refuse: proposal is absent",
             "CAUGHT absent-draft",
+        )
+
+    def test_structural_citation_uses_the_pinned_commit(self):
+        # The pinned commit holds `pinned_here` on line 2 of pkg/pin.rs. The
+        # worktree copy is deleted after the commit, so a function span and a
+        # line span both pass only through the pinned read. A symbol defined in
+        # a file the pin does not hold is refused because that path is absent
+        # from the pinned commit, even though the worktree has the file.
+        source = b"// filler\nfn pinned_here(\n// third\n"
+        body = (
+            "Call `pkg/pin.rs::pinned_here`.\n"
+            "Line `pkg/pin.rs:2` is the fn line.\n"
+        )
+        root = self._temp_root()
+        self._write(root, body, {"pkg/pin.rs": source})
+        sha = self._commit_all(root)
+        (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
+            "Pinned commit: " + sha + "\n" + body, encoding="utf-8"
+        )
+        (root / "pkg" / "pin.rs").unlink()
+        self.assertEqual(check.problems(root), [])
+        # A symbol that exists only in the worktree is refused, because the pin
+        # does not hold that path at all.
+        worktree_only = "pkg/only.rs"
+        (root / worktree_only).parent.mkdir(parents=True, exist_ok=True)
+        (root / worktree_only).write_bytes(b"fn only_here(\n")
+        extended = body + "Also `" + worktree_only + "::only_here`.\n"
+        (root / "lab" / "bus-v2-proposal" / "CORE-CALLS-PROPOSAL.md").write_text(
+            "Pinned commit: " + sha + "\n" + extended, encoding="utf-8"
+        )
+        self.assertEqual(
+            check.problems(root),
+            ["refuse: path does not exist: " + worktree_only],
+        )
+        # A line the pin holds but the worktree file also holds is read at the
+        # pin, so replacing the worktree bytes with a different line changes
+        # nothing.
+        (root / "pkg" / "pin.rs").write_bytes(b"// other\nfn pinned_here(\n")
+        self.assertEqual(
+            check.problems(root),
+            ["refuse: path does not exist: " + worktree_only],
+        )
+
+    def test_falsifier_structural_pin_is_caught(self):
+        # A pinned reader that falls back to the worktree sees neither the
+        # pinned file nor its line once the worktree copy is gone, so the named
+        # test fails.
+        def planted(root, rel, sha):
+            path = Path(root) / rel
+            if not path.is_file():
+                return None
+            return path.read_bytes()
+
+        self._caught(
+            "read_file",
+            planted,
+            self.test_structural_citation_uses_the_pinned_commit,
+            "refuse: ",
+            "CAUGHT structural-pin",
         )
 
     def test_falsifier_missing_pin_is_caught(self):
@@ -5326,14 +5475,21 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_kind_read_quoted_line_absent_from_the_pinned_commit_is_refused(self):
-        expected = "refuse: quoted line is not in the pinned commit: " + KIND_READ_SPAN
+        # The pin stops before all three arms, so each is past the pinned end.
+        # The structural read refuses them and the quote walk reads nothing.
+        past = "refuse: line %d is past the end of %s (%d lines)"
+        expected = [
+            past % (KIND_READ_NUMBER, KIND_REL, KIND_READ_NUMBER - 1),
+            past % (KIND_EDIT_NUMBER, KIND_REL, KIND_READ_NUMBER - 1),
+            past % (KIND_RESTORE_NUMBER, KIND_REL, KIND_READ_NUMBER - 1),
+        ]
         got, reads = self._pinned_reads(
             self._kind_block(),
             {KIND_REL: self._kind_source(kind_count=8)},
             {KIND_REL: self._kind_source()},
         )
-        self.assertEqual(got, [expected])
-        self.assertEqual(reads, [KIND_READ_NUMBER])
+        self.assertEqual(got, expected)
+        self.assertEqual(reads, [])
 
     def test_two_kind_read_spans_are_refused(self):
         expected = "refuse: quoted line is not one line: " + KIND_READ_SPAN
@@ -5424,15 +5580,22 @@ class CitationCheckTests(unittest.TestCase):
 
     def test_kind_edit_quoted_line_past_the_pin_is_refused(self):
         # A pin that stops after the Read arm leaves the 8187 window whole and
-        # the 8188 window gone. The walk stops at the Read arm, whose quotation
-        # no window over 8187 matches once the pin is cut.
-        expected = "refuse: quoted line does not match " + KIND_READ_SPAN
+        # the 8188 window gone. The two later arms are past the pinned end, so
+        # the structural read refuses them and the quote walk skips both. The
+        # walk still stops at the Read arm, whose quotation no window over 8187
+        # matches once the pin is cut.
+        past = "refuse: line %d is past the end of %s (%d lines)"
+        expected = [
+            past % (KIND_EDIT_NUMBER, KIND_REL, KIND_EDIT_NUMBER - 1),
+            past % (KIND_RESTORE_NUMBER, KIND_REL, KIND_EDIT_NUMBER - 1),
+            "refuse: quoted line does not match " + KIND_READ_SPAN,
+        ]
         got, reads = self._pinned_reads(
             self._kind_block(),
             {KIND_REL: self._kind_source(kind_count=9)},
             {KIND_REL: self._kind_source()},
         )
-        self.assertEqual(got, [expected])
+        self.assertEqual(got, expected)
         self.assertEqual(reads, [KIND_READ_NUMBER])
 
     def test_two_kind_edit_spans_are_refused(self):
@@ -5515,13 +5678,20 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(check.problems(root), [])
 
     def test_kind_restore_quoted_line_past_the_pin_is_refused(self):
-        expected = "refuse: quoted line does not match " + KIND_READ_SPAN
+        # The 8190 line is past the pinned end, so the structural read refuses
+        # it and the quote walk skips it. The walk then stops at the Read arm,
+        # whose quotation no window over 8187 matches once the pin is cut.
+        past = "refuse: line %d is past the end of %s (%d lines)"
+        expected = [
+            past % (KIND_RESTORE_NUMBER, KIND_REL, KIND_RESTORE_NUMBER - 1),
+            "refuse: quoted line does not match " + KIND_READ_SPAN,
+        ]
         got, reads = self._pinned_reads(
             self._kind_block(),
             {KIND_REL: self._kind_source(kind_count=11)},
             {KIND_REL: self._kind_source()},
         )
-        self.assertEqual(got, [expected])
+        self.assertEqual(got, expected)
         self.assertEqual(reads, [KIND_READ_NUMBER])
 
     def test_two_kind_restore_spans_are_refused(self):
@@ -5790,17 +5960,27 @@ class CitationCheckTests(unittest.TestCase):
             self.assertEqual(check.problems(root), [], name)
 
     def test_kind_line_quoted_line_past_the_pin_is_refused(self):
-        # Each arm is a one-remainder walk. A pin that stops at that arm keeps
-        # a window over its line but drops the Read arm from the 8187 window,
-        # so the Read arm is refused first.
-        expected = "refuse: quoted line does not match " + KIND_READ_SPAN
+        # Each arm is a one-remainder walk. A pin that stops at that arm makes
+        # every later arm past the pinned end, so the structural read refuses
+        # those arms and the quote walk skips them. The walk then stops at the
+        # Read arm, whose quotation no window over 8187 matches once the pin is
+        # cut.
+        past = "refuse: line %d is past the end of %s (%d lines)"
+        body = self._kind_line_body()
         for name, number, span, quote, index in KIND_LINE_ARMS:
+            count = index
+            last = KIND_BLOCK_START + count - 1
+            expected = [
+                past % (other, KIND_REL, last)
+                for other in self._refused_numbers(body, last)
+            ]
+            expected.append("refuse: quoted line does not match " + KIND_READ_SPAN)
             got, reads = self._pinned_reads(
                 self._kind_line_body(),
-                {KIND_REL: self._kind_source(kind_count=index)},
+                {KIND_REL: self._kind_source(kind_count=count)},
                 {KIND_REL: self._kind_source()},
             )
-            self.assertEqual(got, [expected], name)
+            self.assertEqual(got, expected, name)
             self.assertEqual(reads, [KIND_READ_NUMBER], name)
 
     def _arm_span(self, number):
@@ -6292,41 +6472,37 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_file_ask_quoted_line_past_the_pin_is_refused(self):
-        # A pin that stops before the cited line leaves no window over it. The
-        # refusal then says the line is not in the pin, and the reads stop with
-        # the earlier decision that failed. A pin cut inside one walk leaves
-        # the first cited line of that walk with a zero-score window.
+        # A pin that stops before a cited line makes every citation at or past
+        # that line past the pinned end. The structural read refuses each one in
+        # body order with its line bound. A walk cut inside itself keeps a window
+        # over its first cited line, which is then refused for not matching.
+        past = "refuse: line %d is past the end of %s (%d lines)"
+        body = self._file_ask_body()
         cases = {
-            "observe": (
-                "refuse: quoted line is not in the pinned commit: " + OBSERVE_SPAN,
-                [OBSERVE_NUMBER],
-            ),
-            "revision": (
-                "refuse: quoted line is not in the pinned commit: " + REVISION_SPAN,
-                [OBSERVE_NUMBER, REVISION_NUMBER],
-            ),
+            "observe": ([], []),
+            "revision": ([], [OBSERVE_NUMBER]),
             "op": (
-                "refuse: quoted line does not match " + REVISION_SPAN,
+                ["refuse: quoted line does not match " + REVISION_SPAN],
                 [OBSERVE_NUMBER, REVISION_NUMBER],
             ),
-            "no_write": (
-                "refuse: quoted line is not in the pinned commit: " + NO_WRITE_SPAN,
-                [OBSERVE_NUMBER, REVISION_NUMBER, OP_NUMBER, NO_WRITE_NUMBER],
-            ),
-            "cover": (
-                "refuse: quoted line is not in the pinned commit: " + COVER_SPAN,
-                list(QUOTE_DECISION_ORDER),
-            ),
+            "no_write": ([], [OBSERVE_NUMBER, REVISION_NUMBER, OP_NUMBER]),
+            "cover": ([], [other for other in QUOTE_DECISION_ORDER if other != COVER_NUMBER]),
         }
         for name, number, span, lines, index in FILE_ASK_CASES:
-            expected, expected_reads = cases[name]
+            count = number - 1
+            extra, reads_expected = cases[name]
+            expected = [
+                past % (other, OWNED_REL, count)
+                for other in self._refused_numbers(body, count)
+            ]
+            expected.extend(extra)
             got, reads = self._pinned_reads(
-                self._file_ask_body(),
-                {OWNED_REL: self._file_ask_source(count=number - 1)},
+                body,
+                {OWNED_REL: self._file_ask_source(count=count)},
                 {OWNED_REL: self._file_ask_source()},
             )
-            self.assertEqual(got, [expected], span)
-            self.assertEqual(reads, expected_reads, span)
+            self.assertEqual(got, expected, span)
+            self.assertEqual(reads, reads_expected, span)
 
     def test_observe_mismatch_stops_every_later_decision(self):
         got, reads = self._pinned_reads(
@@ -6734,38 +6910,26 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_edit_walk_quoted_line_past_the_pin_is_refused(self):
-        # Only a pin that stops before the cited line removes every window over
-        # it. A pin cut inside one walk leaves the first cited line with a
-        # zero-score window, so that line is the one refused first.
+        # A pin that stops before the cited line makes that citation past the
+        # pinned end. The structural read refuses it with its line bound and the
+        # quote walk reads nothing, so one citation keeps one reason.
+        past = "refuse: line %d is past the end of %s (%d lines)"
         cases = {
-            "edit_start": (
-                "refuse: quoted line is not in the pinned commit: " + EDIT_START_SPAN,
-                [EDIT_START_NUMBER],
-            ),
-            "edit_end": (
-                "refuse: quoted line does not match " + EDIT_START_SPAN,
-                [EDIT_START_NUMBER],
-            ),
-            "request": (
-                "refuse: quoted line is not in the pinned commit: "
-                + REQUEST_WALK_SPAN,
-                [REQUEST_WALK_NUMBER],
-            ),
-            "is_write": (
-                "refuse: quoted line is not in the pinned commit: " + IS_WRITE_SPAN,
-                [IS_WRITE_NUMBER],
-            ),
+            "edit_start": (EDIT_END_NUMBER, EDIT_START_NUMBER - 1),
+            "edit_end": (EDIT_END_NUMBER, EDIT_END_NUMBER - 1),
+            "request": (REQUEST_WALK_NUMBER, REQUEST_WALK_NUMBER - 1),
+            "is_write": (IS_WRITE_NUMBER, IS_WRITE_NUMBER - 1),
         }
         for name, number, span, lines, index in EDIT_CASES:
-            expected, expected_reads = cases[name]
+            refused, count = cases[name]
             group = self._edit_group(name)
             got, reads = self._pinned_reads(
                 self._edit_walk_body(groups=[group]),
-                {OWNED_REL: self._file_ask_source(count=number - 1)},
+                {OWNED_REL: self._file_ask_source(count=count)},
                 {OWNED_REL: self._file_ask_source()},
             )
-            self.assertEqual(got, [expected], span)
-            self.assertEqual(reads, expected_reads, span)
+            self.assertEqual(got, [past % (refused, OWNED_REL, count)], span)
+            self.assertEqual(reads, [], span)
 
     def test_two_edit_range_spans_are_refused(self):
         expected = "refuse: quoted line is not one line: " + EDIT_RANGE_SPAN
@@ -7223,15 +7387,19 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_provider_quoted_line_absent_from_the_pinned_commit_is_refused(self):
+        # A pin that stops before the cited line makes it past the pinned end,
+        # so the structural read refuses it with its line bound and the quote
+        # walk reads nothing.
+        past = "refuse: line %d is past the end of %s (%d lines)"
         for name, number, span, lines, index in PROVIDER_CASES:
-            expected = "refuse: quoted line is not in the pinned commit: " + span
+            count = number - 1
             got, reads = self._pinned_reads(
                 self._provider_body(groups=[name]),
-                {PROVIDER_REL: self._provider_source(count=number - 1)},
+                {PROVIDER_REL: self._provider_source(count=count)},
                 {PROVIDER_REL: self._provider_source()},
             )
-            self.assertEqual(got, [expected], span)
-            self.assertEqual(reads, [number], span)
+            self.assertEqual(got, [past % (number, PROVIDER_REL, count)], span)
+            self.assertEqual(reads, [], span)
 
     def test_two_provider_spans_are_refused(self):
         for name, number, span, lines, index in PROVIDER_CASES:
@@ -7335,39 +7503,49 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [WRITE_ACTION_NUMBER])
 
     def test_absent_read_action_line_stops_the_write_action_decision(self):
+        # The pin stops before the read action. Both the read action and the
+        # write action stand past the pinned end, so both are refused by their
+        # line bound and the quote walk reads nothing.
+        count = READ_ACTION_NUMBER - 1
+        past = "refuse: line %d is past the end of %s (%d lines)"
         body = self._provider_body(groups=["read_action", "write_action"])
         got, reads = self._pinned_reads(
             body,
-            {PROVIDER_REL: self._provider_source(count=READ_ACTION_NUMBER - 1)},
+            {PROVIDER_REL: self._provider_source(count=count)},
             {PROVIDER_REL: self._provider_source()},
         )
         self.assertEqual(
             got,
             [
-                "refuse: quoted line is not in the pinned commit: "
-                + READ_ACTION_SPAN
+                past % (READ_ACTION_NUMBER, PROVIDER_REL, count),
+                past % (WRITE_ACTION_NUMBER, PROVIDER_REL, count),
             ],
         )
-        self.assertEqual(reads, [READ_ACTION_NUMBER])
+        self.assertEqual(reads, [])
 
     def test_absent_write_action_line_stops_the_default_action_decision(self):
+        # The pin stops before the write action. Both the write action and the
+        # default action stand past the pinned end, so both are refused by their
+        # line bound and the quote walk reads nothing.
+        count = WRITE_ACTION_NUMBER - 1
+        past = "refuse: line %d is past the end of %s (%d lines)"
         body = self._provider_body(
             groups=["write_action", "default_action"],
             default_action=self._changed(WRITE_ACTION_LINES, 5),
         )
         got, reads = self._pinned_reads(
             body,
-            {PROVIDER_REL: self._provider_source(count=WRITE_ACTION_NUMBER - 1)},
+            {PROVIDER_REL: self._provider_source(count=count)},
             {PROVIDER_REL: self._provider_source()},
         )
         self.assertEqual(
             got,
             [
-                "refuse: quoted line is not in the pinned commit: "
-                + WRITE_ACTION_SPAN
+                past % (WRITE_ACTION_NUMBER, PROVIDER_REL, count),
+                past % (DEFAULT_ACTION_NUMBER, PROVIDER_REL, count),
             ],
         )
-        self.assertEqual(reads, [WRITE_ACTION_NUMBER])
+        self.assertEqual(reads, [])
 
     def test_provider_quote_refusal_waits_for_a_known_pin(self):
         body = self._provider_body(
@@ -7646,42 +7824,41 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_run_body_quoted_line_past_the_pin_is_refused(self):
-        # A pin that stops before the cited line leaves no window over it, so
-        # the refusal says the line is not in the pin. A pin cut inside one walk
-        # leaves the first cited line of that walk with a zero-score window.
-        cases = {
-            "no_process": (
-                "refuse: quoted line is not in the pinned commit: " + NO_PROCESS_SPAN,
-                NO_PROCESS_NUMBER,
-            ),
-            "seat": (
-                "refuse: quoted line does not match " + NO_PROCESS_SPAN,
-                NO_PROCESS_NUMBER,
-            ),
-            "body_doc": (
-                "refuse: quoted line is not in the pinned commit: " + BODY_DOC_SPAN,
-                BODY_DOC_NUMBER,
-            ),
-            "create_only": (
-                "refuse: quoted line does not match " + BODY_DOC_SPAN,
-                BODY_DOC_NUMBER,
-            ),
-            "present_revision": (
-                "refuse: quoted line does not match " + BODY_DOC_SPAN,
-                BODY_DOC_NUMBER,
-            ),
+        # A pin that stops before a cited line makes every citation of that body
+        # stand past the pinned end. Each is refused by its line bound in body
+        # order, and the quote walk still reads the citations before the cut.
+        past = "refuse: line %d is past the end of %s (%d lines)"
+        read_before_the_cut = {
+            "no_process": [],
+            "seat": [NO_PROCESS_NUMBER],
+            "body_doc": [],
+            "create_only": [BODY_DOC_NUMBER],
+            "present_revision": [BODY_DOC_NUMBER],
+        }
+        # The seat walk is cut inside itself. Its first cited line keeps a
+        # window over the shorter pin, so it is refused for not matching and
+        # the walk stops there. The later past bound is refused all the same.
+        mismatch_after_the_cut = {
+            "seat": "refuse: quoted line does not match " + NO_PROCESS_SPAN,
+            "create_only": "refuse: quoted line does not match " + BODY_DOC_SPAN,
+            "present_revision": "refuse: quoted line does not match " + BODY_DOC_SPAN,
         }
         for name, number, span, lines, index in RUN_BODY_CASES:
-            expected, refused = cases[name]
+            count = number - 1
             body = self._file_ask_body(groups=[self._run_body_group(name)])
             got, reads = self._pinned_reads(
                 body,
-                {OWNED_REL: self._file_ask_source(count=number - 1)},
+                {OWNED_REL: self._file_ask_source(count=count)},
                 {OWNED_REL: self._file_ask_source()},
             )
-            self.assertEqual(got, [expected], span)
-            present = self._present_run_body_decisions(body)
-            self.assertEqual(reads, present[: present.index(refused) + 1], span)
+            expected = [
+                past % (other, OWNED_REL, count)
+                for other in self._refused_numbers(body, count)
+            ]
+            if name in mismatch_after_the_cut:
+                expected.append(mismatch_after_the_cut[name])
+            self.assertEqual(got, expected, span)
+            self.assertEqual(reads, read_before_the_cut[name], span)
 
     def test_two_run_body_spans_are_refused(self):
         cases = (
@@ -8246,40 +8423,45 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_append_quoted_line_past_the_pin_is_refused(self):
-        # A pin cut before the cited line has no window over it, so the
-        # comparison cannot run and the refusal says the line is not in the
-        # pin. A pin cut between two lines of one group leaves the earlier
-        # line holding a window, so the earlier line is the one refused.
-        cases = {
-            "append_condition": APPEND_CONDITION_NUMBER,
-            "host_path_err": APPEND_CONDITION_NUMBER,
-            "held_err": APPEND_CONDITION_NUMBER,
-            "append_cap": APPEND_CAP_NUMBER,
-            "append_call": APPEND_CAP_NUMBER,
-            "outcome_held": APPEND_CAP_NUMBER,
-            "write_invoke": WRITE_INVOKE_NUMBER,
+        # A pin that stops before a cited line makes every citation of that body
+        # stand past the pinned end. Each is refused by its line bound in body
+        # order, and the quote walk still reads the citations before the cut.
+        past = "refuse: line %d is past the end of %s (%d lines)"
+        # The walk reads the decision before a cut, and the cut then removes the
+        # window the next decision needs.
+        read_before_the_cut = {
+            "append_condition": [],
+            "host_path_err": [APPEND_CONDITION_NUMBER],
+            "held_err": [APPEND_CONDITION_NUMBER],
+            "append_cap": [],
+            "append_call": [APPEND_CAP_NUMBER],
+            "outcome_held": [APPEND_CAP_NUMBER],
+            "write_invoke": [APPEND_CAP_NUMBER, APPEND_CALL_NUMBER, OUTCOME_HELD_NUMBER],
         }
-        spans = {
-            APPEND_CONDITION_NUMBER: APPEND_CONDITION_SPAN,
-            APPEND_CAP_NUMBER: APPEND_CAP_SPAN,
-            WRITE_INVOKE_NUMBER: WRITE_INVOKE_SPAN,
+        # A walk cut inside itself keeps a window over its first cited line, so
+        # that line is refused for not matching and the walk stops there.
+        mismatch_after_the_cut = {
+            "host_path_err": "refuse: quoted line does not match " + APPEND_CONDITION_SPAN,
+            "held_err": "refuse: quoted line does not match " + APPEND_CONDITION_SPAN,
+            "append_call": "refuse: quoted line does not match " + APPEND_CAP_SPAN,
+            "outcome_held": "refuse: quoted line does not match " + APPEND_CAP_SPAN,
         }
         for name, number, span, lines, index in APPEND_CASES:
-            refused = cases[name]
+            count = number - 1
             body = self._append_body(groups=[self._append_group(name)])
             got, reads = self._pinned_reads(
                 body,
-                {OWNED_REL: self._append_source(count=number - 1)},
+                {OWNED_REL: self._append_source(count=count)},
                 {OWNED_REL: self._append_source()},
             )
-            missing = "refuse: quoted line is not in the pinned commit: "
-            if refused == number:
-                expected = missing + span
-            else:
-                expected = "refuse: quoted line does not match " + spans[refused]
-            self.assertEqual(got, [expected], span)
-            present = self._present_append_decisions(body)
-            self.assertEqual(reads, present[: present.index(refused) + 1], span)
+            expected = [
+                past % (other, OWNED_REL, count)
+                for other in self._refused_numbers(body, count)
+            ]
+            if name in mismatch_after_the_cut:
+                expected.append(mismatch_after_the_cut[name])
+            self.assertEqual(got, expected, span)
+            self.assertEqual(reads, read_before_the_cut[name], span)
 
     def test_two_append_spans_are_refused(self):
         cases = (
@@ -9089,51 +9271,44 @@ class CitationCheckTests(unittest.TestCase):
         self.assertEqual(reads, [])
 
     def test_hosted_quoted_line_past_the_pin_is_refused(self):
-        # A pin that stops before the cited line leaves no window over it, so
-        # the refusal says the line is not in the pin. A pin cut inside one
-        # walk leaves the first cited line of that walk with a zero-score
-        # window, and the walk stops at that earlier line.
-        cases = {
-            "no_provider": NO_PROVIDER_NUMBER,
-            "parent_grant_doc": CHILD_NUMBER,
-            "narrower": CHILD_NUMBER,
-            "child_grant_none": CHILD_NUMBER,
-            "init_guard": PROJECT_NUMBER,
-            "project_resource": PROJECT_NUMBER,
-            "parent_compare": AUTHORIZE_NUMBER,
-            "child_host_doc": CHILD_HOST_DOC_NUMBER,
-            "empty_journal": CHILD_HOST_DOC_NUMBER,
-            "admit_system": CHILD_HOST_DOC_NUMBER,
-            "inherited_err": INHERITED_ERR_NUMBER,
-            "grant_parent": GRANT_PARENT_NUMBER,
+        # A pin that stops before a cited line makes every later citation of
+        # that body stand past the pinned end. Each past one is refused by its
+        # line bound in body order, the quote walk never reads the past one and
+        # no quote-absence refusal appears.
+        past = "refuse: line %d is past the end of %s (%d lines)"
+        # A walk cut inside itself keeps a window over its first cited line, so
+        # that line is refused for not matching and the walk stops there. The
+        # first cited line of each cut walk is named here.
+        mismatch_after_the_cut = {
+            "narrower": CHILD_SPAN,
+            "child_grant_none": CHILD_SPAN,
+            "project_resource": PROJECT_SPAN,
+            "empty_journal": CHILD_HOST_DOC_SPAN,
+            "admit_system": CHILD_HOST_DOC_SPAN,
         }
         for name, number, span, lines, index in HOSTED_CASES:
-            refused = cases[name]
+            count = number - 1
+            body = self._hosted_body()
             got, reads = self._pinned_reads(
-                self._hosted_body(),
+                body,
                 {
-                    OWNED_REL: self._hosted_source(count=number - 1),
+                    OWNED_REL: self._hosted_source(count=count),
                     PROVIDER_REL: self._provider_source(),
                 },
                 {OWNED_REL: self._hosted_source()},
             )
-            if refused == number:
-                expected = "refuse: quoted line is not in the pinned commit: " + span
-            else:
-                expected = "refuse: quoted line does not match " + self._hosted_span(
-                    refused
+            expected = [
+                past % (other, OWNED_REL, count)
+                for other in self._refused_numbers(body, count)
+            ]
+            if name in mismatch_after_the_cut:
+                expected.append(
+                    "refuse: quoted line does not match "
+                    + mismatch_after_the_cut[name]
                 )
-            self.assertEqual(got, [expected], span)
-            self.assertEqual(
-                reads,
-                [NO_WRITE_NUMBER]
-                + list(
-                    HOSTED_DECISION_ORDER[
-                        : HOSTED_DECISION_ORDER.index(refused) + 1
-                    ]
-                ),
-                span,
-            )
+            self.assertEqual(got, expected, span)
+            self.assertIn(number, self._refused_numbers(body, count), span)
+            self.assertNotIn(number, reads, span)
 
     def test_no_write_mismatch_stops_the_no_provider_decision(self):
         got, reads = self._pinned_reads(
@@ -9805,10 +9980,10 @@ class CitationCheckTests(unittest.TestCase):
     def test_falsifier_resident_short_circuit_is_caught(self):
         # A walker that keeps walking after a refusal reads the later pinned
         # lines, and the short-circuit test sees reads past the run line.
-        def planted(root, text, sha):
+        def planted(root, text, sha, refused_spans=frozenset()):
             found = []
             for target in check.QUOTE_TARGETS:
-                reason = check._quote_refusal(root, text, sha, target)
+                reason = check._quote_refusal(root, text, sha, target, refused_spans)
                 if reason is not None:
                     found.append(reason)
             return found[:1]
