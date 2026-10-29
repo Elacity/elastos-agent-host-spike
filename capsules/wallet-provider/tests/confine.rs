@@ -4705,11 +4705,16 @@ const SUITE_CASES: [(&str, SuiteClass); 9] = [
 /// half of `planted_file_beneath_storage_parent_is_neither_read_nor_written`;
 /// and the final `get_did` is the service check both tests make after a
 /// refusal.
-const DID_SUITE_CASES: [(&str, SuiteClass); 9] = [
+///
+/// The permitted cases come first, as `DID_PERMITTED_CASES` says, so a caller
+/// that runs only them judges its record against the same leading entries
+/// instead of a second case list.
+const DID_SUITE_CASES: [(&str, SuiteClass); 10] = [
     // `confined_provider_serves_did_operations_under_its_root` (did's
-    // tests/confine.rs:407) runs these five operations.
+    // tests/confine.rs:407) runs these six operations.
     ("init at the did root", SuiteClass::Permitted),
     ("get_did", SuiteClass::Permitted),
+    ("resolve", SuiteClass::Permitted),
     ("set_nickname", SuiteClass::Permitted),
     ("get_nickname", SuiteClass::Permitted),
     ("get_persona_did", SuiteClass::Permitted),
@@ -4736,6 +4741,14 @@ const DID_SUITE_CASES: [(&str, SuiteClass); 9] = [
     // The service check that both tests make after a refusal.
     ("get_did after the denied cases", SuiteClass::Permitted),
 ];
+
+/// How many leading entries of `DID_SUITE_CASES` are the permitted operations,
+/// which is the part `did_standin_permitted_operations` records. The denied
+/// cases follow them, and the trailing service check is not one of these
+/// operations, so it is not counted. Only the Linux journey slices that prefix,
+/// so the constant is compiled where that journey is.
+#[cfg(target_os = "linux")]
+const DID_PERMITTED_CASES: usize = 6;
 
 /// The stable start of a refusal message: its text before the first path
 /// separator, trimmed. Each provider runs on its own temporary root, so the
@@ -4899,23 +4912,28 @@ fn wallet_standin_suite(
     record
 }
 
-/// The did suite on one started provider and one root, using the record type
-/// and judgement of `wallet_standin_suite`. It returns one entry per case of
-/// `DID_SUITE_CASES` in its order: `init` with did's fixture device key,
-/// `get_did`, `set_nickname`, `get_nickname` and `get_persona_did`; the outside
-/// writes of both `outside_write_denied` targets, the first pointing the
-/// granted nickname file at an unrelated directory and the second at a sibling
-/// of `did/` under the same base; the planted read of
-/// `planted_file_beneath_storage_parent_is_neither_read_nor_written`, which
-/// points the granted file at its own encrypted copy beneath `STORAGE_PARENT`;
-/// and `get_did` after the denied cases. Each entry carries the class of the
-/// case it was pushed for. A refusal keeps the answer's `status`, its `code`
-/// and the stable start of its `message`, so two records from different roots
-/// compare equal. Both callers drive one started provider through this
-/// function; it starts none. `label` names the provider, the `B3 journey` and
-/// the start this call drives, and every refusal this function raises starts
-/// with it, so a failed step names the provider and the step.
-fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path, label: &str) -> Vec<SuiteEntry> {
+/// The permitted did operations on one started provider and one root, using the
+/// record type and judgement of `wallet_standin_suite`, and the did suite's
+/// first half.
+///
+/// It returns one entry per case of the first `DID_PERMITTED_CASES` entries of
+/// `DID_SUITE_CASES`, in that order: `init` with did's fixture device key,
+/// `get_did`, `resolve` of that DID, `set_nickname`, `get_nickname` returning
+/// the stored nickname, and `get_persona_did`. `get_did` must answer a
+/// `did:key:` value and `resolve` must echo that DID as its document id, so a
+/// provider that answers neither call cannot pass on an `ok` status alone.
+/// `set_nickname`, `get_nickname` and `get_persona_did` need `init`'s device
+/// key and the nickname file it wrote, so this helper is kept whole: a caller
+/// that wants only the calls a filter cannot change drives all six, and the
+/// calls under `STORAGE_ROOT` that need file state stay in the one helper.
+///
+/// Every refusal this function raises starts with `label`, which names the
+/// provider, the journey and the start this call drives. It starts no provider.
+fn did_standin_permitted_operations(
+    provider: &mut ConfinedProvider,
+    root: &Path,
+    label: &str,
+) -> Vec<SuiteEntry> {
     let mut record = Vec::new();
 
     let init = provider.send(&json!({
@@ -4933,7 +4951,18 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path, label: &str) 
         .as_str()
         .unwrap_or_else(|| panic!("{label}: get_did must name the DID: {did_data}"))
         .to_string();
+    assert!(
+        did.starts_with("did:key:"),
+        "{label}: get_did must answer a did:key DID: {did}"
+    );
     record.push(suite_entry("get_did", SuiteClass::Permitted, &did_data));
+
+    let resolved = provider.send(&json!({ "op": "resolve", "did": did }));
+    assert_eq!(
+        resolved["data"]["document"]["id"], did,
+        "{label}: resolve must answer the document of the DID it was asked about: {resolved}"
+    );
+    record.push(suite_entry("resolve", SuiteClass::Permitted, &resolved));
 
     let set = provider.send(&json!({ "op": "set_nickname", "nickname": "Confined" }));
     record.push(suite_entry("set_nickname", SuiteClass::Permitted, &set));
@@ -4959,6 +4988,28 @@ fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path, label: &str) 
         SuiteClass::Permitted,
         &persona,
     ));
+
+    record
+}
+
+/// The did suite on one started provider and one root, using the record type
+/// and judgement of `wallet_standin_suite`. It returns one entry per case of
+/// `DID_SUITE_CASES` in its order: the six permitted operations of
+/// `did_standin_permitted_operations`; the outside writes of both
+/// `outside_write_denied` targets, the first pointing the granted nickname file
+/// at an unrelated directory and the second at a sibling of `did/` under the
+/// same base; the planted read of
+/// `planted_file_beneath_storage_parent_is_neither_read_nor_written`, which
+/// points the granted file at its own encrypted copy beneath `STORAGE_PARENT`;
+/// and `get_did` after the denied cases. Each entry carries the class of the
+/// case it was pushed for. A refusal keeps the answer's `status`, its `code`
+/// and the stable start of its `message`, so two records from different roots
+/// compare equal. Both callers drive one started provider through this
+/// function; it starts none. `label` names the provider, the `B3 journey` and
+/// the start this call drives, and every refusal this function raises starts
+/// with it, so a failed step names the provider and the step.
+fn did_standin_suite(provider: &mut ConfinedProvider, root: &Path, label: &str) -> Vec<SuiteEntry> {
+    let mut record = did_standin_permitted_operations(provider, root, label);
 
     // The first `outside_write_denied` target: an unrelated directory. The
     // granted nickname file is a symlink to that target, so the profile must
@@ -6246,6 +6297,16 @@ fn read_declared_rights(name: &str, path: &Path) -> Result<Value, String> {
 /// callers make. The startup rows carry the loader's start reads and the kernel
 /// facts `sysctl-read` names.
 ///
+/// The `file-write*` row carries both permission-change spellings, `fchmod` and
+/// `fchmodat`, because the right names the change and the kernel offers it under
+/// either call. `did-provider` reaches the `at` form: its `set_nickname` ends in
+/// `set_permissions` on the file it just wrote, which the C library issues as
+/// `fchmodat(AT_FDCWD, path, 0600)` on this target. The did journey measured
+/// that call refused with the deny marker and the start then failed with
+/// `the confined provider must return the stored nickname`, so the row admits it
+/// by name. `wallet-provider` makes no permission call of its own, which is why
+/// the wallet journey alone never showed the gap.
+///
 /// `ptrace`, `mount`, `bpf` and `keyctl` appear in no row, so the program's
 /// default decision is the only answer they receive. Adding one of them to a
 /// row would grant it and turn
@@ -6278,6 +6339,7 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
         &[
             "faccessat",
             "fchmod",
+            "fchmodat",
             "fdatasync",
             "fstat",
             "fsync",
@@ -6331,6 +6393,7 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("exit_group", Some(231), Some(94)),
     ("faccessat", Some(269), Some(48)),
     ("fchmod", Some(91), Some(52)),
+    ("fchmodat", Some(268), Some(53)),
     ("fdatasync", Some(75), Some(83)),
     ("fstat", Some(5), Some(80)),
     ("fsync", Some(74), Some(82)),
@@ -6455,7 +6518,10 @@ impl SeccompAllowList {
     /// runtime's own plumbing, and a launch that loses one cannot speak its
     /// protocol. `LAUNCH_ESSENTIALS` holds none of the four calls the default
     /// decision refuses, so adding the set leaves their answer unchanged.
-    #[cfg(target_os = "linux")]
+    ///
+    /// It makes no kernel call and reads no file, so it runs on every OS: the
+    /// journey that installs the result is Linux-only, and the list a launch
+    /// would install can be read and compared wherever the tests run.
     fn with_launch_essentials(&self) -> Self {
         let mut syscalls = self.syscalls.clone();
         for (syscall, _) in LAUNCH_ESSENTIALS {
@@ -6470,6 +6536,7 @@ impl SeccompAllowList {
             audit_arch: self.audit_arch,
             program: seccomp_program(&syscalls, self.audit_arch),
             syscalls,
+            #[cfg(target_os = "linux")]
             injected_step_failure: self.injected_step_failure,
         }
     }
@@ -6722,7 +6789,10 @@ impl std::fmt::Display for SeccompLaunchWriteFailure {
 /// the proof ran on, and the comment after each name is that call, quoted from
 /// the run. `mount`, `ptrace`, `bpf` and `keyctl` are in no entry here and in no
 /// table row, so the default decision is the only answer they receive.
-#[cfg(target_os = "linux")]
+///
+/// The table is data and makes no kernel call, so it is compiled on every OS
+/// where the list's launch set is compared; the install that reads it stays
+/// Linux-only.
 const LAUNCH_ESSENTIALS: &[(&str, &str)] = &[
     (
         "close",
@@ -7324,7 +7394,7 @@ fn seccomp_allow_list_follows_the_declared_rights() {
             allow.syscalls
         );
     }
-    for syscall in ["mkdirat", "write", "unlinkat", "renameat2"] {
+    for syscall in ["mkdirat", "write", "unlinkat", "renameat2", "fchmodat"] {
         assert!(
             allow.admits(syscall),
             "the storage rows must admit {syscall}: {:?}",
@@ -7339,7 +7409,7 @@ fn seccomp_allow_list_follows_the_declared_rights() {
         .retain(|entry| entry["id"] != "storage");
     let reduced = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &without_storage)
         .unwrap_or_else(|err| panic!("{err}"));
-    for syscall in ["mkdirat", "write", "unlinkat", "renameat2"] {
+    for syscall in ["mkdirat", "write", "unlinkat", "renameat2", "fchmodat"] {
         assert!(
             allow.admits(syscall),
             "the storage right must admit {syscall}: {:?}",
@@ -8236,16 +8306,79 @@ fn write_number(fd: std::os::fd::RawFd, value: i64) {
     }
 }
 
-/// The list the launcher and the probe both install: the one list built from the
-/// committed declared rights, plus the measured launch set, through the one
-/// builder. It is built once per run, in the parent, before any fork.
-#[cfg(target_os = "linux")]
-fn seccomp_probe_list() -> SeccompAllowList {
-    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
-        .unwrap_or_else(|err| panic!("{err}"));
-    seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &declared)
-        .unwrap_or_else(|err| panic!("{err}"))
-        .with_launch_essentials()
+/// The list the launcher and the probe both install for `name`: the one list
+/// built from that provider's committed declared rights, plus the measured
+/// launch set, through the one builder and the one join. It is built once per
+/// run, in the parent, before any fork.
+///
+/// The provider name is an argument and not this crate's constant, so the list a
+/// launch installs for either provider is read through the same helper (P10). It
+/// makes no kernel call and reads one file, so the provider-name test can ask it
+/// about both providers wherever the tests run; the journey that installs the
+/// result is Linux-only.
+///
+/// It refuses, with `read_declared_rights`' or `seccomp_allow_list_from_declared_rights`'
+/// own reason unchanged, a name whose declared-rights file cannot be read.
+fn seccomp_probe_list(name: &str) -> Result<SeccompAllowList, String> {
+    let declared = read_declared_rights(name, &declared_rights_path(name))?;
+    seccomp_allow_list_from_declared_rights(name, &declared)
+        .map(|allow| allow.with_launch_essentials())
+}
+
+/// The one file-to-list helper reads the provider it was asked for, and the one
+/// builder refuses a name whose declared-rights read fails.
+///
+/// Asking for both providers must give two lists whose `provider` fields are the
+/// two names asked for, and whose admitted syscalls still carry each provider's
+/// own declared rights, so a helper that ignored its argument and read wallet's
+/// file twice would answer wallet's name both times. The refusal case reads a
+/// name with no committed file and requires the reader's own reason, which names
+/// that provider and that path, so the helper has no fallback.
+///
+/// The test reads files and builds two lists. It starts no process and makes no
+/// kernel call, so it runs on every OS: the journey that installs a list is
+/// Linux-only, and this rule about which provider's file was read is not.
+///
+/// Falsifier: a `seccomp_probe_list` that ignores its provider argument and
+/// always reads wallet's declared-rights file makes both lists answer
+/// `wallet-provider`, so this test fails on the did case.
+#[test]
+fn seccomp_allow_list_names_the_provider_it_was_built_for() {
+    for name in [DID_PROVIDER, WALLET_PROVIDER] {
+        let allow = seccomp_probe_list(name).unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            allow.provider, name,
+            "the allow list must name the provider it was built for"
+        );
+        for syscall in ["execve", "execveat", "mkdirat", "write", "unlinkat"] {
+            assert!(
+                allow.admits(syscall),
+                "{name}'s declared rights must admit {syscall}: {:?}",
+                allow.syscalls
+            );
+        }
+        for syscall in ["ptrace", "mount", "bpf", "keyctl"] {
+            assert!(
+                !allow.admits(syscall),
+                "{name}'s list must admit no undeclared call, and it admits {syscall}"
+            );
+        }
+    }
+    let missing = "absent-provider";
+    let refusal = seccomp_probe_list(missing)
+        .expect_err("a name with no committed declared-rights file must be refused");
+    assert!(
+        refusal.starts_with(&format!("{missing} declared-rights file ")),
+        "the refusal must be the reader's own reason, which names the provider: {refusal}"
+    );
+    assert!(
+        refusal.contains("must be readable"),
+        "the refusal must say the file could not be read: {refusal}"
+    );
+    assert!(
+        refusal.contains(&declared_rights_path(missing).display().to_string()),
+        "the refusal must name the path it could not read: {refusal}"
+    );
 }
 
 /// Copies `bytes` into `into` and returns how much it wrote. The probe's report
@@ -8662,7 +8795,7 @@ fn parse_seccomp_probe_report(text: &str) -> Result<SeccompProbeReport, String> 
 fn linux_seccomp_probe_reaps_failures_and_repeated_journeys() {
     let started = Instant::now();
 
-    let allow = seccomp_probe_list();
+    let allow = seccomp_probe_list(WALLET_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
     for (step, errno, reason) in [
         (
             SeccompStep::NoNewPrivileges,
@@ -8769,7 +8902,7 @@ fn linux_seccomp_probe_reaps_failures_and_repeated_journeys() {
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_seccomp_probe_descriptors_stay_with_their_owner() {
-    let allow = seccomp_probe_list();
+    let allow = seccomp_probe_list(WALLET_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
     let mut provider = None;
     let started = Instant::now();
     let report = seccomp_denied_call_probe_with_pipe(&allow, SeccompProbeRun::Filter, |fds| {
@@ -9065,18 +9198,121 @@ fn linux_seccomp_journey_is_not_applicable_off_linux() {
     eprintln!("{line}");
 }
 
-/// The Linux journey: wallet starts under the generated seccomp allow list, and
-/// one probe child under the same filter shows the four refused calls answering
-/// the filter's own marker.
+/// Runs the calling test again in a child test process beneath an installed
+/// allow-all fixture filter, so a launcher that skips only its own `pre_exec`
+/// install cannot pass on the inherited filter alone.
 ///
-/// The test builds the list from wallet's committed declared-rights file, starts
-/// the provider through `standin_spawn_confined_provider` with a `Seccomp`
-/// policy, and requires `init` `ok`, one read-only wallet call `ok`, a file it
-/// wrote under `STORAGE_ROOT` to keep its bytes, a named file to keep the exact
-/// fixture bytes,
-/// and a named sibling path outside `STORAGE_ROOT` to be absent. The file
-/// evidence is those named fixture paths: a seccomp filter carries syscall
-/// policy and not path policy, so this test claims no general file boundary.
+/// `test_name` is the caller's own test name, which the child runs by that exact
+/// name, so one fixture serves both providers' journeys instead of a copy per
+/// caller. The fixture filter is installed through the one `install_seccomp`, and
+/// its `ALLOW` decision leaves the host's own marker answer intact.
+///
+/// It returns `false` in the parent, which has run the child and required its
+/// exit 0, and `true` in the child, whose own `/proc/self/status` the caller then
+/// checks. The parent test runner keeps its own policy and the existing process
+/// owner reaps the run.
+#[cfg(target_os = "linux")]
+fn seccomp_journey_runs_beneath_an_inherited_filter(name: &str, test_name: &str) -> bool {
+    use std::os::unix::process::CommandExt as _;
+
+    const INHERITED_FIXTURE: &str = "SECCOMP_INHERITED_FIXTURE";
+    if std::env::var_os(INHERITED_FIXTURE).as_deref() == Some(std::ffi::OsStr::new("1")) {
+        return true;
+    }
+    let mut inherited = seccomp_probe_list(name).unwrap_or_else(|err| panic!("{err}"));
+    inherited.program = vec![SeccompInstruction::stmt(
+        SECCOMP_BPF_RET_K,
+        SECCOMP_RET_ALLOW,
+    )];
+    let mut command = Command::new(std::env::current_exe().expect("the journey test binary"));
+    command
+        .args(["--exact", test_name, "--nocapture"])
+        .env(INHERITED_FIXTURE, "1");
+    unsafe {
+        command.pre_exec(move || {
+            install_seccomp(&inherited).map_err(|failure| {
+                std::io::Error::from_raw_os_error(match failure {
+                    SeccompInstallFailure::Step(_, errno) => errno,
+                    SeccompInstallFailure::AuditArchitecture(_) => libc::EINVAL,
+                })
+            })
+        });
+    }
+    let mut journey = ConfinedProvider::spawn(command);
+    let exit = journey.wait_for_exit();
+    let stderr = journey.stderr().to_owned();
+    let mut stdout = String::new();
+    journey
+        .stdout
+        .read_to_string(&mut stdout)
+        .expect("the journey output");
+    eprintln!("{stdout}{stderr}");
+    assert_eq!(
+        exit.code(),
+        Some(0),
+        "{test_name} under an inherited filter must pass: {exit}"
+    );
+    false
+}
+
+/// One provider's named seccomp journey paths, so both journeys compare the same
+/// three named fixtures instead of restating them per caller.
+///
+/// `inside` is the file the run writes under `STORAGE_ROOT`, `inside_fixture` is
+/// a fixed-byte file beside it that the read-only calls must not change, and
+/// `outside` is a sibling path outside `STORAGE_ROOT` that must stay absent. The
+/// sibling is derived from `storage_parent` for both providers, so a path that
+/// drifts out of the grant shows as a present file. `expected_fixture` is the
+/// provider's own known bytes, so a run that wrote the wrong file fails.
+#[cfg(target_os = "linux")]
+struct SeccompJourneyFiles {
+    inside: PathBuf,
+    inside_fixture: PathBuf,
+    outside: PathBuf,
+    expected_fixture: &'static [u8],
+}
+
+/// The named journey fixtures of `name` under `base`, or a panic naming the
+/// provider whose layout this function does not know. The lab serves two
+/// providers and a guessed layout would be a fallback (P11).
+#[cfg(target_os = "linux")]
+fn seccomp_journey_files(name: &str, base: &Path) -> SeccompJourneyFiles {
+    let root = provider_storage_root(name, base);
+    let outside = storage_parent(name, base).join("seccomp-outside-write");
+    match name {
+        WALLET_PROVIDER => SeccompJourneyFiles {
+            inside: root.join(WALLET_KEY_FILE),
+            inside_fixture: root.join("seccomp-inside-write"),
+            outside,
+            expected_fixture: b"wallet seccomp journey fixture\n",
+        },
+        DID_PROVIDER => SeccompJourneyFiles {
+            inside: root.join("nickname.enc"),
+            inside_fixture: root.join("seccomp-inside-write"),
+            outside,
+            expected_fixture: b"did seccomp journey fixture\n",
+        },
+        other => panic!("the journey names no provider whose fixtures it knows: {other}"),
+    }
+}
+
+/// One provider's Linux journey: `name` starts under the seccomp allow list built
+/// from that provider's own committed declared-rights file, its permitted calls
+/// answer under the filter, and one probe child under the same filter shows the
+/// four refused calls answering the filter's own marker.
+///
+/// `binary` is that provider's own binary and `declared` its own declared rights,
+/// so the one body serves both providers through `standin_spawn_confined_provider`
+/// with a `Seccomp` policy, which reaches `ConfinedProvider::start_under_seccomp`
+/// and that function's one `spawn`. `test_name` is the caller's own test name,
+/// which the inherited-filter fixture re-runs. There is no per-provider launcher,
+/// list builder or probe.
+///
+/// The list carries `name` as its `provider`, and its program must equal the
+/// program built the same way for wallet. The two committed declared-rights files
+/// declare the same rights and the same two platform-baseline ids, whose rule
+/// text is identical, so the equality follows from that sameness: a difference
+/// would be a per-provider widening of the filter and fails here.
 ///
 /// The launched child must report `SECCOMP_MODE_FILTER` in its own
 /// `/proc/<pid>/status`, and the mode alone also accepts an inherited filter, so
@@ -9088,76 +9324,22 @@ fn linux_seccomp_journey_is_not_applicable_off_linux() {
 /// `install_seccomp`, and records the same four after. Each filtered answer must
 /// be the deny marker, and the marker must differ from the unfiltered answer the
 /// same probe recorded, so a host that already refuses a call cannot stand in
-/// for the filter.
+/// for the filter. That evidence belongs to the one probe and is not re-proven
+/// per provider.
 ///
 /// The comment below is the record of where this ran: the marker errno, the
 /// host, and the call whose failure named each `LAUNCH_ESSENTIALS` entry.
-///
-/// Falsifier: WP176 skips only the launcher's `pre_exec` install and leaves the
-/// self-filtering probe intact. The journey inherits an allow-all fixture
-/// filter, so the mode assertion passes and the before/after assertion fails.
-/// WP177 writes the named
-/// outside sibling, so the journey finds it present and fails. WP162 labels the
-/// journey with a Linux host off Linux and is caught by
-/// `linux_seccomp_journey_is_not_applicable_off_linux` on the Mac. Both Linux
-/// plants reach a Linux-only test, so neither is registered in
-/// `falsifiers.json`; `CONFINEMENT-LINUX.md` records them with the red run.
 #[cfg(target_os = "linux")]
-#[test]
-fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
-    use std::os::unix::process::CommandExt as _;
-
-    // Run this same journey in a separate test process beneath an inherited
-    // filter. Install that fixture through the shared installer as well; its
-    // ALLOW decision leaves the host's marker answer intact. The parent test
-    // runner keeps its own policy and the existing process owner reaps the run.
-    const INHERITED_FIXTURE: &str = "WALLET_SECCOMP_INHERITED_FIXTURE";
-    if std::env::var_os(INHERITED_FIXTURE).as_deref() != Some(std::ffi::OsStr::new("1")) {
-        let mut inherited = seccomp_probe_list();
-        inherited.program = vec![SeccompInstruction::stmt(
-            SECCOMP_BPF_RET_K,
-            SECCOMP_RET_ALLOW,
-        )];
-        let mut command = Command::new(std::env::current_exe().expect("the journey test binary"));
-        command
-            .args([
-                "--exact",
-                "linux_wallet_journey_runs_under_the_seccomp_allow_list",
-                "--nocapture",
-            ])
-            .env(INHERITED_FIXTURE, "1");
-        unsafe {
-            command.pre_exec(move || {
-                install_seccomp(&inherited).map_err(|failure| {
-                    std::io::Error::from_raw_os_error(match failure {
-                        SeccompInstallFailure::Step(_, errno) => errno,
-                        SeccompInstallFailure::AuditArchitecture(_) => libc::EINVAL,
-                    })
-                })
-            });
-        }
-        let mut journey = ConfinedProvider::spawn(command);
-        let exit = journey.wait_for_exit();
-        let stderr = journey.stderr().to_owned();
-        let mut stdout = String::new();
-        journey
-            .stdout
-            .read_to_string(&mut stdout)
-            .expect("the journey output");
-        eprintln!("{stdout}{stderr}");
-        assert_eq!(
-            exit.code(),
-            Some(0),
-            "the journey under an inherited filter must pass: {exit}"
+fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_name: &str) {
+    if seccomp_journey_runs_beneath_an_inherited_filter(name, test_name) {
+        let inherited_status =
+            fs::read_to_string("/proc/self/status").expect("the fixture's status");
+        assert!(
+            inherited_status.lines().any(|line| line == "Seccomp:\t2"),
+            "the journey fixture must already carry an inherited filter"
         );
-        return;
+        eprintln!("journey fixture before provider launch: Seccomp: 2 (inherited)");
     }
-    let inherited_status = fs::read_to_string("/proc/self/status").expect("the fixture's status");
-    assert!(
-        inherited_status.lines().any(|line| line == "Seccomp:\t2"),
-        "the journey fixture must already carry an inherited filter"
-    );
-    eprintln!("journey fixture before provider launch: Seccomp: 2 (inherited)");
     // Ran on spark1.local: aarch64, Ubuntu 24.04.4, kernel 6.17.0-1029-nvidia.
     // The deny marker is EACCES (13). Each unfiltered answer differed from it on
     // that host: ptrace(PTRACE_TRACEME) returned 0, mount answered ENOENT (2),
@@ -9167,7 +9349,8 @@ fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
     // so a plain EPERM assertion would pass with no filter installed.
     //
     // Each LAUNCH_ESSENTIALS entry was dropped alone from the whole list on that
-    // host and the call that then failed was read:
+    // host and the call that then failed was read, for wallet's binary and again
+    // for did's. All seven entries are both providers', so the set is one table:
     // close -> close(3) in the loader, refused before the first mapping;
     // exit_group -> exit_group(0) as the provider ended its own run; getrandom ->
     // getrandom(0xec92ac7c6700, 8, GRND_NONBLOCK) in the loader; mmap ->
@@ -9177,41 +9360,79 @@ fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
     // ppoll([{fd=0}, {fd=1}, {fd=2}], 3, {tv_sec=0, tv_nsec=0}, NULL, 0) while
     // the provider waits; rt_sigaction -> rt_sigaction(SIGPIPE,
     // {sa_handler=SIG_IGN, sa_mask=[PIPE], sa_flags=SA_RESTART},
-    // 0xffffea09ff80, 8).
-    let declared_rights =
-        read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
-            .unwrap_or_else(|err| panic!("{err}"));
-    let allow = seccomp_probe_list();
+    // 0xffffea09ff80, 8). For did the same seven failed as
+    // `libgcc_s.so.1: cannot close file descriptor`, an unclean exit, a `rand`
+    // seed panic, `SIGSEGV`, `libgcc_s.so.1: cannot change memory protections`,
+    // `SIGTRAP`, and `assertion failed: signal(libc::SIGPIPE, handler)`.
+
+    let allow = seccomp_probe_list(name).unwrap_or_else(|err| panic!("{err}"));
+    assert_eq!(
+        allow.provider, name,
+        "the seccomp allow list must name the provider it was built for"
+    );
+    let wallet_allow = seccomp_probe_list(WALLET_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+    assert_eq!(
+        allow.program, wallet_allow.program,
+        "the {name} program must equal wallet's: the two declared-rights files \
+         declare the same rights and the same two platform-baseline ids with \
+         identical rule text, so a difference is a per-provider widening"
+    );
     eprintln!("{}", linux_seccomp_journey_label());
 
-    let fixture = tempfile::tempdir().expect("temporary wallet base");
+    let fixture = tempfile::tempdir().expect("temporary provider base");
     let base = resolved(fixture.path());
     let profile_fixture = tempfile::tempdir().expect("temporary profile root");
     let profile_dir = resolved(profile_fixture.path());
-    // The named path outside STORAGE_ROOT, and the named path inside it.
-    let outside = base
-        .join("ElastOS")
-        .join("SystemServices")
-        .join("seccomp-outside-write");
-    let root = provider_storage_root(WALLET_PROVIDER, &base);
-    let inside = root.join(WALLET_KEY_FILE);
-    let inside_fixture = root.join("seccomp-inside-write");
-    let expected_fixture = b"wallet seccomp journey fixture\n";
+    let files = seccomp_journey_files(name, &base);
 
     let mut provider = standin_spawn_confined_provider(
         StandinHost::reporting("linux"),
         StandinPolicy::Seccomp(&allow),
-        WALLET_PROVIDER,
-        Path::new(PROVIDER_BINARY),
+        name,
+        binary,
         &base,
-        &declared_rights,
+        declared,
         &profile_dir,
     )
-    .unwrap_or_else(|err| panic!("the linux wallet start must be confined: {err}"));
-    // Init creates the random key. Keep those exact bytes as the expected
-    // value across the read-only calls, and also compare a fixed byte fixture.
-    let expected_key = fs::read(&inside).expect("init must create the storage key");
-    fs::write(&inside_fixture, expected_fixture)
+    .unwrap_or_else(|err| panic!("the linux {name} start must be confined: {err}"));
+
+    let label = format!("{name} seccomp journey");
+    // The bytes of the file the run wrote under STORAGE_ROOT, read at the point
+    // the provider wrote it: wallet's `init` writes the random key, and did's
+    // `set_nickname` writes the encrypted nickname. The fixed-byte fixture goes
+    // down beside it, after it, because the provider's own storage root exists
+    // only once it has been created.
+    let expected_inside = match name {
+        WALLET_PROVIDER => {
+            // Init creates the random key. Keep those exact bytes as the expected
+            // value across the read-only calls, and also compare a fixed byte
+            // fixture.
+            let expected_key = fs::read(&files.inside).expect("init must create the storage key");
+            let status = provider.send(&json!({ "op": "status" }));
+            assert_eq!(status["status"], "ok", "status must answer: {status}");
+            let accounts = provider.wallet(WalletProviderOperationV2::ListAccounts {
+                include_revoked: false,
+            });
+            assert_eq!(
+                ok_data(accounts)["accounts"],
+                json!([]),
+                "a fresh wallet lists no account"
+            );
+            expected_key
+        }
+        DID_PROVIDER => {
+            let record = did_standin_permitted_operations(&mut provider, &base, &label);
+            assert_suite_outcomes(&label, &record, &DID_SUITE_CASES[..DID_PERMITTED_CASES]);
+            fs::read(&files.inside).unwrap_or_else(|err| {
+                panic!(
+                    "{label}: set_nickname must write {}: {err}",
+                    files.inside.display()
+                )
+            })
+        }
+        other => panic!("the journey names no provider whose permitted calls it knows: {other}"),
+    };
+    fs::write(&files.inside_fixture, files.expected_fixture)
         .expect("the named inside fixture must be writable");
 
     assert_eq!(
@@ -9233,17 +9454,6 @@ fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
         -i64::from(SECCOMP_DENY_ERRNO),
         "this launcher's install must supply the deny marker"
     );
-
-    let status = provider.send(&json!({ "op": "status" }));
-    assert_eq!(status["status"], "ok", "status must answer: {status}");
-    let accounts = provider.wallet(WalletProviderOperationV2::ListAccounts {
-        include_revoked: false,
-    });
-    assert_eq!(
-        ok_data(accounts)["accounts"],
-        json!([]),
-        "a fresh wallet lists no account"
-    );
     assert!(
         profile_dir_entries(&profile_dir).is_empty(),
         "a seccomp start writes no profile: {}",
@@ -9251,37 +9461,59 @@ fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
     );
     provider.shutdown();
 
-    let written = fs::read(&inside)
-        .unwrap_or_else(|err| panic!("the launch must write {}: {err}", inside.display()));
-    assert_eq!(
-        written, expected_key,
-        "the read-only journey must keep the exact key bytes from init"
-    );
-    let text = String::from_utf8(written).expect("the storage key must be hex text");
-    let digits = text
-        .strip_suffix('\n')
-        .expect("the storage key must end with a newline");
-    assert_eq!(
-        digits.len(),
-        2 * WALLET_KEY_BYTES,
-        "the storage key must hold its {} hex digits and a newline: {}",
-        2 * WALLET_KEY_BYTES,
-        inside.display()
-    );
-    assert_eq!(
-        fs::read(&inside_fixture).expect("the named inside fixture must remain readable"),
-        expected_fixture,
-        "the named inside fixture must keep its exact expected bytes"
-    );
+    match name {
+        WALLET_PROVIDER => {
+            let written = fs::read(&files.inside).unwrap_or_else(|err| {
+                panic!("the launch must write {}: {err}", files.inside.display())
+            });
+            assert_eq!(
+                written, expected_inside,
+                "the read-only journey must keep the exact key bytes from init"
+            );
+            let text = String::from_utf8(written).expect("the storage key must be hex text");
+            let digits = text
+                .strip_suffix('\n')
+                .expect("the storage key must end with a newline");
+            assert_eq!(
+                digits.len(),
+                2 * WALLET_KEY_BYTES,
+                "the storage key must hold its {} hex digits and a newline: {}",
+                2 * WALLET_KEY_BYTES,
+                files.inside.display()
+            );
+            assert_eq!(
+                fs::read(&files.inside_fixture)
+                    .expect("the named inside fixture must remain readable"),
+                files.expected_fixture,
+                "the named inside fixture must keep its exact expected bytes"
+            );
+            assert!(
+                digits.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "the storage key must be hex: {}",
+                files.inside.display()
+            );
+        }
+        DID_PROVIDER => {
+            let written = fs::read(&files.inside).unwrap_or_else(|err| {
+                panic!("the launch must keep {}: {err}", files.inside.display())
+            });
+            assert_eq!(
+                written, expected_inside,
+                "the {name} journey must keep the exact bytes set_nickname wrote under STORAGE_ROOT"
+            );
+            assert_eq!(
+                fs::read(&files.inside_fixture)
+                    .expect("the named inside fixture must remain readable"),
+                files.expected_fixture,
+                "the named inside fixture must keep its exact expected bytes"
+            );
+        }
+        other => panic!("the journey names no provider whose file evidence it knows: {other}"),
+    }
     assert!(
-        digits.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "the storage key must be hex: {}",
-        inside.display()
-    );
-    assert!(
-        !outside.exists(),
+        !files.outside.exists(),
         "the named sibling outside STORAGE_ROOT must stay absent after the run: {}",
-        outside.display()
+        files.outside.display()
     );
 
     let probe = seccomp_denied_call_probe(&allow, SeccompProbeRun::Filter)
@@ -9303,6 +9535,61 @@ fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
     assert_eq!(
         probe.allocations, 0,
         "the probe child must allocate nothing after its fork"
+    );
+}
+
+/// The wallet half of the Linux journey, and the body is
+/// `seccomp_confined_journey`: this caller passes wallet's own binary, file and
+/// test name.
+///
+/// Falsifier: WP176 skips only the launcher's `pre_exec` install and leaves the
+/// self-filtering probe intact. The journey inherits an allow-all fixture filter,
+/// so the mode assertion passes and the before/after assertion fails. WP177
+/// writes the named outside sibling, so the journey finds it present and fails.
+/// WP162 labels the journey with a Linux host off Linux and is caught by
+/// `linux_seccomp_journey_is_not_applicable_off_linux` on the Mac. Both Linux
+/// plants reach a Linux-only test, so neither is registered in `falsifiers.json`;
+/// `CONFINEMENT-LINUX.md` records them with the red run.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
+    let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    seccomp_confined_journey(
+        WALLET_PROVIDER,
+        Path::new(PROVIDER_BINARY),
+        &declared,
+        "linux_wallet_journey_runs_under_the_seccomp_allow_list",
+    );
+}
+
+/// The did half of the Linux journey: the same body, the same installer and the
+/// same probe, with did's own binary, did's own committed declared-rights file and
+/// did's own operations.
+///
+/// The permitted calls are `did_standin_permitted_operations`, judged by
+/// `assert_suite_outcomes` against the permitted prefix of `DID_SUITE_CASES`, so
+/// `init`, `get_did` with a `did:key:` value, `resolve`, `set_nickname`,
+/// `get_nickname` and `get_persona_did` answer under the filter. The did suite's
+/// file-denial cases stay in the B3 and C0 journeys: a seccomp filter carries
+/// syscall policy and not path policy, so they cannot pass under it alone.
+///
+/// Falsifier: a did launcher that skips only its `pre_exec` install is the same
+/// plant as WP176 on this caller, caught by the `SECCOMP_MODE_FILTER` mode plus
+/// the inherited-fixture before/after comparison; and a did provider that writes
+/// the named outside sibling is WP177's plant on this caller, caught by the absent
+/// sibling. Both reach a Linux-only test, so neither is registered in
+/// `falsifiers.json`; `CONFINEMENT-LINUX.md` records them with the red run.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_did_journey_runs_under_the_seccomp_allow_list() {
+    let declared = read_declared_rights(DID_PROVIDER, &declared_rights_path(DID_PROVIDER))
+        .unwrap_or_else(|err| panic!("{err}"));
+    seccomp_confined_journey(
+        DID_PROVIDER,
+        did_provider_binary(),
+        &declared,
+        "linux_did_journey_runs_under_the_seccomp_allow_list",
     );
 }
 

@@ -664,13 +664,17 @@ and supplies contract evidence, not Linux execution evidence.
   standard error. That failure also shows that `sandbox-exec` refused the
   profile before any exec.
 
-- The Linux half of `tests/confine.rs` builds nothing on the Mac. Four tests are
+- The Linux half of `tests/confine.rs` builds nothing on the Mac. Five tests are
   `#[cfg(target_os = "linux")]` and one runs everywhere:
   `linux_wallet_journey_runs_under_the_seccomp_allow_list` starts the provider
   under the generated filter and requires the launched child's own
   `SECCOMP_MODE_FILTER`, the launcher's own install, and one file under
   `STORAGE_ROOT` as its path evidence, then runs one probe child that shows the
   four refused calls answering the filter's marker;
+  `linux_did_journey_runs_under_the_seccomp_allow_list` is the second caller of
+  the same journey body, with did's own binary, declared rights and permitted
+  operations, so the one path carries both providers and neither has a private
+  copy of the builder, the installer or the probe;
   `linux_seccomp_launch_refuses_each_failed_install` requires each install
   failure and an architecture refusal to start nothing;
   `linux_seccomp_launcher_runs_the_requested_program` requires the child's own
@@ -680,7 +684,7 @@ and supplies contract evidence, not Linux execution evidence.
   `linux_seccomp_journey_is_not_applicable_off_linux` runs on every OS and
   requires the journey's label to say `not applicable` and this OS off Linux.
   `CONFINEMENT-LINUX.md` records the host, kernel, per-call answers and the two
-  kernel plants behind the journey.
+  kernel plants behind the journey, and the two plants on the did caller.
 - `seccomp_launch_record_refuses_missing_or_unknown_report` reads the one
   install-record reader and requires a missing, short, long and unknown-step
   record each to give its own reason, and a complete record to carry the
@@ -1401,6 +1405,10 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Answer a failed spawn's reason alone when the install record is empty (WP167):
   `seccomp_launch_record_refuses_missing_or_unknown_report` fails because the
   missing-report reason is lost behind that spawn reason.
+- Make the one file-to-list helper ignore its provider argument and always read
+  wallet's declared-rights file (WP178):
+  `seccomp_allow_list_names_the_provider_it_was_built_for` fails on its did
+  case, because both lists then answer `wallet-provider`.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

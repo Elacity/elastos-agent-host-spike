@@ -9,8 +9,8 @@ no network allow, only the `PROVIDER_EXECUTABLE`, `STORAGE_ROOT` and
 This contract has no Linux enforcement yet. Its only current Linux behaviour is
 the seccomp allow list in "The seccomp allow list" below: a generated allow
 list, source that builds, and one real Linux run behind it in which
-wallet-provider starts under the generated filter and the four refused calls
-answer the filter's own marker.
+`wallet-provider` and then `did-provider` each start under the filter built from
+their own declared rights, and the refused calls answer the filter's own marker.
 `confine.sb` stays each provider's one oracle. The contract is shared, so its
 Linux mapping is written once here, beside the one contract check (P10). The
 Linux policy that the Runtime would generate from the same approved declared
@@ -19,12 +19,13 @@ file exists (P10).
 
 ## The seccomp allow list
 
-One part of this design exists today as source, for `wallet-provider` only: a
-seccomp allow list generated from the provider's declared rights, and one real
-Linux run behind it. That run starts the wallet provider under the filter and
-proves the four denied calls. Namespaces, Landlock, capability dropping and
-every file row of the contract stay unbuilt, so a seccomp filter is the only
-Linux confinement this lab applies.
+One part of this design exists today as source, for both confined providers: a
+seccomp allow list generated from each provider's own declared rights, and one
+real Linux run behind each of them. Those runs start `wallet-provider` and
+`did-provider` under the filters their own files build and prove the four denied
+calls. Namespaces, Landlock, capability dropping and every file row of the
+contract stay unbuilt, so a seccomp filter is the only Linux confinement this lab
+applies.
 
 One function builds the list:
 `seccomp_allow_list_from_declared_rights(name, declared)` in
@@ -33,7 +34,18 @@ generator, reads the profile text back through `profile_forms`, the one profile
 parser, and maps each allow form through one table. It reads no file, holds no
 rule text of its own and never reads the declared-rights JSON: `declared_entries`
 reaches it only through `generate_profile`, so the JSON has one reader and the
-profile one parser (P10).
+profile one parser (P10). It holds no per-provider branch, so `did-provider` and
+`wallet-provider` reach the same builder.
+
+One helper turns a provider name into the list it would launch:
+`seccomp_probe_list(name)` reads that provider's committed declared-rights file,
+calls the one builder and then `with_launch_essentials`. Both journeys take their
+list from it, so there is one file-to-list path and no second one for the second
+provider. The named test `seccomp_allow_list_names_the_provider_it_was_built_for`
+asks it for both providers, requires each list's `provider` field to be the name
+it asked for, and requires it to refuse a name whose file cannot be read with the
+reader's own reason. The test starts no process and makes no kernel call, so it
+runs on every OS.
 
 The filter is an allow list. Its final decision is the deny marker
 `SECCOMP_RET_ERRNO` with `EACCES` (13), and every `SECCOMP_RET_ALLOW` return sits
@@ -50,7 +62,7 @@ carries:
 | --- | --- |
 | `(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))` | `execve`, `execveat` |
 | `(allow file-read* (literal (param "STORAGE_PARENT")))` | `faccessat`, `fstat`, `getdents64`, `lseek`, `newfstatat`, `openat`, `openat2`, `pread64`, `read`, `readlinkat`, `readv`, `statx` |
-| `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` | the file-read row, plus `fchmod`, `fdatasync`, `fsync`, `ftruncate`, `linkat`, `mkdirat`, `pwrite64`, `renameat2`, `unlinkat`, `write`, `writev` |
+| `(allow file-read* file-write* (subpath (param "STORAGE_ROOT")))` | the file-read row, plus `fchmod`, `fchmodat`, `fdatasync`, `fsync`, `ftruncate`, `linkat`, `mkdirat`, `pwrite64`, `renameat2`, `unlinkat`, `write`, `writev` |
 | `(allow file-read* (literal "/"))` | the file-read row |
 | `(allow sysctl-read)` | `uname`, `sysinfo` |
 
@@ -72,7 +84,10 @@ list and one install path (P10).
 
 `LAUNCH_ESSENTIALS` is measured, not guessed, on the Linux host the proof ran on:
 each entry was dropped alone from the whole list, the probe re-run, and the call
-that then failed named it. This run's seven calls are:
+that then failed named it. The set is one table for both providers, and the two
+runs measured it separately: wallet's set of seven calls is the table below, and
+did's measured set is the same seven. So the equality holds for the second
+provider too, and no per-provider row was needed:
 
 | Entry | The call whose refusal named it |
 | --- | --- |
@@ -119,32 +134,78 @@ passed fewer arguments than the kernel reads fails even though it compiles.
 
 ### The kernel proof
 
-The named test `linux_wallet_journey_runs_under_the_seccomp_allow_list` ran on
-host `spark1.local`: `aarch64`, Ubuntu 24.04.4, kernel `6.17.0-1029-nvidia`, 20
-cores, unprivileged. It builds the list from wallet's committed declared-rights
-file, starts the provider through `standin_spawn_confined_provider` with a
-`Seccomp` policy, and requires `init` `ok`, one read-only wallet call `ok`, a
-`wallet-key.hex` of 64 hex digits and a newline under `STORAGE_ROOT`, no
-profile written, and the named sibling `ElastOS/SystemServices/seccomp-outside-write`
-outside `STORAGE_ROOT` absent after the run. The file evidence is those named
-fixture paths; a seccomp filter carries syscall policy, not path policy, so the
-run claims no general file boundary.
+Two named tests, one body. `linux_wallet_journey_runs_under_the_seccomp_allow_list`
+and `linux_did_journey_runs_under_the_seccomp_allow_list` are two thin callers of
+one function, `seccomp_confined_journey(name, binary, declared, test_name)`: each
+passes its own provider name, that provider's own binary, its own committed
+declared-rights value and its own test name. There is one journey body, one
+launcher, one list helper and one probe, and no copy per provider (P10).
+
+Both ran on host `spark1.local`: `aarch64`, Ubuntu 24.04.4, kernel
+`6.17.0-1029-nvidia`, 20 cores, unprivileged. Each builds the list from its own
+provider's committed declared-rights file through `seccomp_probe_list` and starts
+that provider through `standin_spawn_confined_provider` with a `Seccomp` policy,
+which reaches `ConfinedProvider::start_under_seccomp` and its one `spawn`.
+
+The wallet run requires `init` `ok`, one read-only wallet call `ok`, a
+`wallet-key.hex` of 64 hex digits and a newline under `STORAGE_ROOT`, no profile
+written, and the named sibling `seccomp-outside-write` outside `STORAGE_ROOT`
+absent after the run. The file evidence is those named fixture paths; a seccomp
+filter carries syscall policy, not path policy, so no run claims a general file
+boundary.
+
+The did run requires its permitted operations under the filter, through
+`did_standin_permitted_operations` and `assert_suite_outcomes` against the
+permitted prefix of `DID_SUITE_CASES`: `init` `ok`, `get_did` `ok` with a
+`did:key:` value, `resolve` `ok` on that DID, `set_nickname` `ok`, `get_nickname`
+returning `Confined`, and `get_persona_did` `ok`. Its `STORAGE_ROOT/seccomp-inside-write`
+fixture must equal `b"did seccomp journey fixture\n"`, the encrypted nickname
+`did/nickname.enc` must keep the bytes `set_nickname` wrote, and the named sibling
+`seccomp-outside-write` outside `STORAGE_ROOT` must be absent. The did suite's
+file-denial cases stay in the B3 and C0 journeys, because a seccomp filter cannot
+make them fail.
+
+The list each journey asserts about itself: its `provider` field is the name it
+asked for, and its `program` equals the program built the same way for wallet.
+That equality follows from the two committed declared-rights files declaring the
+same two rights and the same two `platform-baseline` ids with identical rule text,
+so a difference would be a per-provider widening and the assertion fails on it.
+
+The did run also measured `LAUNCH_ESSENTIALS` on its own binary, entry by entry,
+by dropping each entry alone from the whole list and reading what then failed. All
+seven entries are did's too, so the set is one table and needed no per-provider
+row. The failing call was: `close` → `libgcc_s.so.1: cannot close file
+descriptor`; `exit_group` → the wait found no clean exit; `getrandom` → a panic
+inside `rand`'s thread RNG, which cannot seed; `mmap` → `SIGSEGV`; `mprotect` →
+`libgcc_s.so.1: cannot change memory protections`; `ppoll` → `SIGTRAP`;
+`rt_sigaction` → `fatal runtime error: assertion failed: signal(libc::SIGPIPE,
+handler) != libc::SIG_ERR`.
+
+One syscall did needed and the table did not yet hold was found the same way. The
+did journey first failed with `the confined provider must return the stored
+nickname` and `{"code":"not_set"}`. An `strace` of that run named the refused
+call: `fchmodat(AT_FDCWD, "<root>/did/nickname.enc", 0600) = -1 EACCES`, issued by
+did's `set_nickname`, whose last step sets the new file's mode. `fchmodat` is a
+`file-write*` call and the row already held its sibling `fchmod`, so the row now
+carries both spellings. Wallet makes no permission call of its own, which is why
+its journey alone never showed the gap.
 
 The current journey also compares the key's final bytes with the bytes captured
-immediately after `init`. Its separate `STORAGE_ROOT/seccomp-inside-write`
-fixture must equal `b"wallet seccomp journey fixture\n"` after the read-only
-calls and shutdown. The key check requires the trailing newline.
+immediately after `init`. The key check requires the trailing newline.
 
 The launched child's own `/proc/<pid>/status` reports `Seccomp: 2`
-(`SECCOMP_MODE_FILTER`). That mode alone also accepts an inherited filter, so the
-launcher's record additionally carries the marker call's answer before and after
-its own `pre_exec` install, and the two must differ.
+(`SECCOMP_MODE_FILTER`) in both runs. That mode alone also accepts an inherited
+filter, so the launcher's record additionally carries the marker call's answer
+before and after its own `pre_exec` install, and the two must differ.
 
 The current test runs that journey in a child test process with an inherited
 allow-all filter, installed through `install_seccomp`. It checks `Seccomp: 2`
 before launching the provider and prints the launcher's before/after answers.
 This makes the WP176 skip-install plant reach the before/after assertion even
-when the provider already carries an inherited filter.
+when the provider already carries an inherited filter. One helper,
+`seccomp_journey_runs_beneath_an_inherited_filter(name, test_name)`, does that for
+both callers, so the did caller takes the same fixture by its own test name
+instead of a second copy of the technique.
 
 Then one forked probe child records the four calls before the filter, installs
 the same filter through `install_seccomp`, and records them again:
@@ -208,8 +269,12 @@ a Linux rerun. None is registered in `falsifiers.json`:
 the runner runs on the Mac, where these `#[cfg(target_os = "linux")]` tests do not
 run, so none can print a CAUGHT line there. Two Mac-runnable rules beside them are
 registered instead: WP166's argument rule in
-`seccomp_keyctl_probe_supplies_every_argument_without_creation` and WP167's
-missing-record reason in `seccomp_launch_record_refuses_missing_or_unknown_report`.
+`seccomp_keyctl_probe_supplies_every_argument_without_creation`, WP167's
+missing-record reason in `seccomp_launch_record_refuses_missing_or_unknown_report`
+and WP178's provider-name rule in
+`seccomp_allow_list_names_the_provider_it_was_built_for`. WP178 is the plant that
+makes `seccomp_probe_list` ignore its provider argument and read wallet's file:
+both lists then answer `wallet-provider` and the did case fails.
 
 - WP168 suppresses the `NoNewPrivileges` install failure, so
   `linux_seccomp_launch_refuses_each_failed_install` fails with
@@ -252,6 +317,17 @@ missing-record reason in `seccomp_launch_record_refuses_missing_or_unknown_repor
   `the named sibling outside STORAGE_ROOT must stay absent after the run`. That
   plant shows the fixture can fail; a seccomp filter does not stop that write, so
   the assertion is path evidence for the run and not a Linux file boundary.
+- WP176 and WP177 on the did caller. `linux_did_journey_runs_under_the_seccomp_allow_list`
+  is the second caller of the same journey body, so these are the same two plants
+  on the second provider and not new rules, and neither is registered:
+  the skip-install plant makes the did run fail on
+  `the launched provider must carry SECCOMP_MODE_FILTER in its own /proc status`
+  or, with the inherited fixture installed, on
+  `an inherited filter alone must not satisfy the launcher's own install`; and the
+  outside-write plant makes it find `seccomp-outside-write` beside `STORAGE_PARENT`
+  and fail on `the named sibling outside STORAGE_ROOT must stay absent after the
+  run`. Both red runs are quoted in the build reply for task 149, with the command
+  that produced them, and neither can print a CAUGHT line on the Mac.
 
 The earlier WP166 and WP167 plants were CAUGHT on the Mac, in
 `seccomp_keyctl_probe_supplies_every_argument_without_creation` and
@@ -286,6 +362,14 @@ from the seccomp allow list above, this file is a design: each row names the
 Linux test that would prove it, those Linux counterparts do not exist yet, and
 no sentence here claims that any provider is confined on Linux beyond that one
 filter.
+
+The seccomp allow list's own Linux-test cells are the two journeys:
+`linux_wallet_journey_runs_under_the_seccomp_allow_list` and
+`linux_did_journey_runs_under_the_seccomp_allow_list`, both in
+`capsules/wallet-provider/tests/confine.rs`. Both ran on the host above, in the
+same run, and each is the evidence for its own provider's row: the filter that
+provider's declared rights build, the launch that installs it, and the calls that
+provider answers under it.
 
 ## The contract on Linux
 

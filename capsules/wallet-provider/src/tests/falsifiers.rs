@@ -241,8 +241,12 @@ use std::process::Command;
 /// reader's length case and unknown-step case, and the launcher's list-provider
 /// check. Its two Linux-only plants are named in `CONFINEMENT-LINUX.md` and are
 /// not registered here, because a Linux-only test cannot produce a CAUGHT line
-/// on the Mac.
-const EXPECTED_FALSIFIERS: usize = 165;
+/// on the Mac. Task 149 adds WP178, CAUGHT on the Mac: the one file-to-list
+/// helper ignoring its provider and reading wallet's declared-rights file, which
+/// `seccomp_allow_list_names_the_provider_it_was_built_for` catches. Its two
+/// Linux-only plants are the same two 148 registered for the wallet journey, on
+/// the did caller, and are named in `CONFINEMENT-LINUX.md` too.
+const EXPECTED_FALSIFIERS: usize = 166;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

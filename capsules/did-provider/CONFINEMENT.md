@@ -158,17 +158,31 @@ one on `linux` is a skip, and a present one on `macos` runs the test.
 The one caller, `sandbox_available`, fails the test on that
 error; `sandbox_available_fails_for_macos_when_sandbox_exec_is_missing` calls
 it with `macos` and a missing path and expects the failure.
-This contract has no Linux enforcement or tests yet. A provider-status claim
+This contract has no Linux enforcement of its file rows. A provider-status claim
 needs host-specific test evidence and the Runtime acceptance step, so no status
-document records `did-provider` or `wallet-provider` as confined on Linux until
-that test exists (P10, P11). The status change lands when the Runtime side
-does.
+document records `did-provider` or `wallet-provider` as confined on Linux (P10,
+P11). The status change lands when the Runtime side does.
 
-Future Linux enforcement tests for this lab contract are designed in
-`../wallet-provider/CONFINEMENT-LINUX.md`: it is the one Linux mapping, its
-tests do not exist yet, and it claims no current behaviour. The existing
-source-only check `both_file_profiles_bind_one_storage_parameter_contract`,
-in `../wallet-provider/tests/confine.rs`, reads the three oracles and supplies
+The one Linux behaviour that exists today is the seccomp allow list, and the
+seccomp row now holds did evidence beside wallet's. The named test
+`linux_did_journey_runs_under_the_seccomp_allow_list`, in
+`../wallet-provider/tests/confine.rs`, builds did's list from did's own committed
+declared-rights file through the one builder, starts did's binary through the one
+stand-in with the one installer, and requires `init`, `get_did` with a `did:key:`
+value, `resolve`, `set_nickname`, `get_nickname` and `get_persona_did` to answer
+under the filter, with the launched child reporting `SECCOMP_MODE_FILTER` in its
+own `/proc/<pid>/status`. It ran on `spark1.local` (`aarch64`, Ubuntu 24.04.4,
+kernel `6.17.0-1029-nvidia`). The list is the same one path as wallet's: there is
+no did-side builder, installer, parser, generator or probe.
+
+No contract file row is enforced on Linux: a seccomp filter reads syscall numbers
+and not paths, so the file rows stay open, and `linux` stays out of
+`DECLARED_CONFINED_OS`. Namespaces, Landlock and capability dropping stay
+unbuilt. The one Linux mapping is `../wallet-provider/CONFINEMENT-LINUX.md`, which
+records the seccomp row, its host and its measured launch set; this document
+claims no other Linux behaviour. The existing source-only check
+`both_file_profiles_bind_one_storage_parameter_contract`, in
+`../wallet-provider/tests/confine.rs`, reads the three oracles and supplies
 contract evidence, not Linux execution evidence.
 
 ## What the profile allows
