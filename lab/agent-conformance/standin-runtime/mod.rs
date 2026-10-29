@@ -11,6 +11,11 @@
 //! compare keeps a `failed` or `stopped` entry. One check refuses a client
 //! on a shell-only route. `authorise` is a lab seam on that same filter.
 //!
+//! A `once` grant minted by `post_capability_grant` stores its expiry as its
+//! `granted_at` plus `GRANT_LIFETIME_SECS`. One compare reads the stand-in's
+//! instant: at or past that instant `authorise` answers `grant is not live:
+//! Expired` and the live view drops the grant.
+//!
 //! `get_capability_requests` answers `GET /api/capability/requests?session=`
 //! from one request store beside the grants. `seed_request` is the test seam.
 //! An accepted stop denies that session's pending requests with the stop
@@ -35,6 +40,7 @@ const LIVE_SCOPE: &str = "all_sessions_live";
 const RESIDENT_WORLD: &str = "resident-capsule";
 const FAILED_KEEP_SECS: u64 = 60;
 const REQUEST_TIMEOUT_SECS: u64 = 300;
+const GRANT_LIFETIME_SECS: u64 = 3_600;
 
 /// Authenticated caller. A method argument, not a JSON field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +84,7 @@ struct Grant {
     action: String,
     duration: String,
     granted_at: u64,
+    expires_at: Option<u64>,
     life: Life,
     session_ended: bool,
 }
@@ -243,6 +250,7 @@ impl StandIn {
             action: action.to_owned(),
             duration: duration.to_owned(),
             granted_at,
+            expires_at: expiry_at(duration, granted_at),
             life,
             session_ended,
         });
@@ -564,6 +572,9 @@ impl StandIn {
         if !is_live(grant.life) {
             return Err(grant_not_live(grant.life));
         }
+        if is_due(grant, self.instant) {
+            return Err(grant_not_live(Life::Expired));
+        }
         if !session_authorises(grant, caller) {
             return Err(wrong_capsule(grant, caller));
         }
@@ -837,15 +848,30 @@ impl StandIn {
     fn kept(&self, caller: Caller<'_>) -> Vec<&Grant> {
         self.grants
             .iter()
-            .filter(|grant| keep(grant, caller))
+            .filter(|grant| keep(grant, caller, self.instant))
             .collect()
     }
 }
 
-fn keep(grant: &Grant, caller: Caller<'_>) -> bool {
+fn keep(grant: &Grant, caller: Caller<'_>, instant: u64) -> bool {
     // Ending a session leaves a live grant in this view.
     let _ended = grant.session_ended;
-    is_live(grant.life) && visible(grant, caller)
+    is_live(grant.life) && !is_due(grant, instant) && visible(grant, caller)
+}
+
+/// One expiry compare. `keep` and `authorise` use it with the stored instant.
+/// A grant at or past its `expires_at` no longer authorises and leaves the view.
+fn is_due(grant: &Grant, instant: u64) -> bool {
+    matches!(grant.expires_at, Some(expires_at) if instant >= expires_at)
+}
+
+/// Life seconds of one granted duration. `once` lasts `GRANT_LIFETIME_SECS`
+/// and `session` lasts until its session ends, so it has no instant.
+fn expiry_at(duration: &str, granted_at: u64) -> Option<u64> {
+    match duration {
+        "once" => Some(granted_at.saturating_add(GRANT_LIFETIME_SECS)),
+        _ => None,
+    }
 }
 
 /// One life test. `keep`, `revoke_live` and `authorise` use it.
@@ -3682,6 +3708,139 @@ mod tests {
             request_entries(&standin, "component-2"),
             vec![pending_request("request-2", "component-2")],
             "the stand-in keeps the sibling request pending after the other start returns"
+        );
+    }
+
+    #[test]
+    fn standin_once_grant_expires_with_the_instant() {
+        let mut standin = StandIn::new();
+        admit_shared(&mut standin, Start::Ok);
+        let id = standin
+            .post_capsules(Caller::Shell, &shared_body())
+            .expect("the stand-in launches the read-shared instance")["id"]
+            .as_str()
+            .expect("the stand-in names the launched instance")
+            .to_owned();
+        let requested = standin
+            .post_capability_request(
+                Caller::Client { session_id: &id },
+                &json!({
+                    "resource": "localhost://Public/resident-instances/shared.txt",
+                    "action": "read",
+                    "reason": "read shared",
+                }),
+            )
+            .expect("the stand-in stores the client request");
+        let request_id = requested["request_id"]
+            .as_str()
+            .expect("the stand-in names the pending request")
+            .to_owned();
+        standin.set_instant(10);
+        standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({
+                    "request_id": request_id,
+                    "duration": "once",
+                    "rationale": "grant one read",
+                }),
+            )
+            .expect("the stand-in grants the pending request for one use");
+        let at_expiry = 10 + GRANT_LIFETIME_SECS;
+        standin.set_instant(at_expiry - 1);
+        assert_eq!(
+            request_ids(
+                &standin
+                    .get_capability_list(Caller::Shell, None)
+                    .expect("the stand-in shell live view one second before the expiry")
+            ),
+            BTreeSet::from([request_id.clone()]),
+            "the stand-in keeps the grant live one second before its expiry"
+        );
+        assert_eq!(
+            standin.authorise(Caller::Client { session_id: &id }, &request_id),
+            Ok(()),
+            "the stand-in authorises the grant one second before its expiry"
+        );
+        assert_eq!(
+            request_ids(
+                &standin
+                    .get_capability_list(Caller::Shell, None)
+                    .expect("the stand-in shell live view after spending the once grant")
+            ),
+            BTreeSet::new(),
+            "the stand-in omits the once grant it just spent"
+        );
+
+        standin.set_instant(20);
+        standin
+            .post_capability_request(
+                Caller::Client { session_id: &id },
+                &json!({
+                    "resource": "localhost://Public/resident-instances/shared.txt",
+                    "action": "read",
+                    "reason": "read shared",
+                }),
+            )
+            .expect("the stand-in stores the client request");
+        let request_id = request_entries(&standin, &id)
+            .iter()
+            .find(|entry| entry["status"] == "pending")
+            .expect("the stand-in stored the second pending request")["request_id"]
+            .as_str()
+            .expect("the stand-in names the pending request")
+            .to_owned();
+        standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({
+                    "request_id": request_id,
+                    "duration": "once",
+                    "rationale": "grant one read",
+                }),
+            )
+            .expect("the stand-in grants the second request for one use");
+        let at_expiry = 20 + GRANT_LIFETIME_SECS;
+        standin.set_instant(at_expiry);
+        assert_eq!(
+            standin.authorise(Caller::Client { session_id: &id }, &request_id),
+            Err((400, "grant is not live: Expired".to_owned())),
+            "the stand-in refuses the grant at its expiry instant"
+        );
+        assert_eq!(
+            request_ids(
+                &standin
+                    .get_capability_list(Caller::Client { session_id: &id }, None)
+                    .expect("the stand-in client live view at the expiry instant")
+            ),
+            BTreeSet::new(),
+            "the stand-in drops the grant from the owning session view at its expiry instant"
+        );
+        assert_eq!(
+            request_ids(
+                &standin
+                    .get_capability_list(Caller::Shell, None)
+                    .expect("the stand-in shell live view at the expiry instant")
+            ),
+            BTreeSet::new(),
+            "the stand-in drops the grant from the shell all-sessions view at its expiry instant"
+        );
+        assert_eq!(
+            request_ids(
+                &standin
+                    .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
+                    .expect("the stand-in scoped live view at the expiry instant")
+            ),
+            BTreeSet::new(),
+            "the stand-in drops the grant from the scoped all-sessions view at its expiry instant"
+        );
+        assert_eq!(
+            request_entries(&standin, &id)
+                .iter()
+                .filter(|entry| entry["status"] == "granted")
+                .count(),
+            2,
+            "the stand-in keeps both granted records after the expiry"
         );
     }
 
