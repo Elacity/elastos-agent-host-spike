@@ -28,6 +28,11 @@ pub fn preview(stand_in: &mut StandIn, plan: &[u8]) -> Preview {
 }
 
 /// The one plan hash. `execute` uses it for the plan it runs.
+///
+/// The hash is SHA-256 over the exact bytes given (lowercase hex, 64
+/// characters). It does not canonicalise: reordered keys, different whitespace,
+/// or more than one changed byte each give a different hash, because the bytes
+/// are the plan. There is no text form of a plan to parse.
 pub fn plan_sha256(plan: &[u8]) -> String {
     agent_conformance::identity::sha256(plan)
 }
@@ -187,5 +192,216 @@ fn preview_makes_no_effect() {
         previews[1].sha256,
         sha256(PLAN_B),
         "the hash is sha256 of those bytes"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn plan_sha256_hashes_the_exact_bytes() {
+    use agent_conformance::identity::sha256;
+    use fixtures::PLAN_A;
+
+    // Real sha2, not a stand-in: the known digest of the empty input.
+    assert_eq!(
+        plan_sha256(b""),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "the hash is SHA-256 of the given bytes"
+    );
+    let digest = plan_sha256(PLAN_A);
+    assert_eq!(
+        digest.len(),
+        64,
+        "a plan hash is 64 lowercase hex characters: {digest}"
+    );
+    assert!(
+        digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "a plan hash is lowercase hex: {digest}"
+    );
+    assert_eq!(
+        digest,
+        sha256(PLAN_A),
+        "the hash is SHA-256 of the plan bytes"
+    );
+
+    // One changed byte at the end is another plan.
+    let mut last_byte = PLAN_A.to_vec();
+    let length = last_byte.len();
+    last_byte[length - 1] = b'X';
+    assert_eq!(
+        plan_sha256(&last_byte),
+        sha256(&last_byte),
+        "the one changed byte is part of the hashed bytes"
+    );
+    assert_ne!(
+        plan_sha256(&last_byte),
+        digest,
+        "a plan with one changed byte has another hash"
+    );
+
+    // Reordered keys and other whitespace are other bytes, so other hashes:
+    // the function does not canonicalise.
+    let reordered: &[u8] =
+        br#"{"steps":[{"action":"read","resource":"localhost://Public/plan-approval/a.txt"}]}"#;
+    let respaced: &[u8] =
+        br#"{"steps": [{"resource": "localhost://Public/plan-approval/a.txt", "action": "read"}]}"#;
+    assert_eq!(
+        plan_sha256(reordered),
+        sha256(reordered),
+        "reordered keys are hashed as they are"
+    );
+    assert_ne!(
+        plan_sha256(reordered),
+        digest,
+        "reordered keys are other bytes, so another hash"
+    );
+    assert_ne!(
+        plan_sha256(respaced),
+        digest,
+        "other whitespace is other bytes, so another hash"
+    );
+}
+
+/// The one approval helper set, driven through the stand-in's own routes.
+#[cfg(test)]
+#[path = "../../agent-conformance/tests/common/signed_bundle.rs"]
+mod signed_bundle;
+
+#[cfg(test)]
+mod journeys {
+    use super::preview;
+    use super::signed_bundle::SignedBundle;
+    use agent_conformance::standin_runtime::{Caller, StandIn, Start};
+    use serde_json::json;
+
+    /// One session reaches `Running` through the stand-in's own routes:
+    /// `admit_resident` for the signed fixture, `post_capsules` for its CID and
+    /// `finish_start`. This mints no grant.
+    pub fn running_agent(stand_in: &mut StandIn) -> String {
+        let bundle = SignedBundle::new();
+        stand_in
+            .admit_resident(
+                bundle.path(),
+                &bundle.signature(),
+                bundle.accepted(),
+                Start::Ok,
+            )
+            .expect("the stand-in admits the signed fixture");
+        let launched = stand_in
+            .post_capsules(Caller::Shell, &bundle.launch_body())
+            .expect("the shell launches the admitted CID");
+        let id = launched["id"]
+            .as_str()
+            .expect("the stand-in names the launch")
+            .to_owned();
+        stand_in.finish_start(&id).expect("the stand-in starts it");
+        id
+    }
+
+    /// The agent asks for one plan through `post_capability_request`. The
+    /// request id is the stand-in's own, not a fixture name.
+    pub fn request(stand_in: &mut StandIn, session: &str, plan: &[u8]) -> String {
+        let hash = preview(stand_in, plan).sha256;
+        stand_in
+            .post_capability_request(
+                Caller::Client {
+                    session_id: session,
+                },
+                &json!({
+                    "resource": "localhost://Public/plan-approval/a.txt",
+                    "action": "read",
+                    "plan": hash,
+                }),
+            )
+            .expect("the agent's request route stores one pending request")["request_id"]
+            .as_str()
+            .expect("the route names the request")
+            .to_owned()
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn a_grant_bound_to_one_plan_is_refused_for_another_plan() {
+    use agent_conformance::standin_runtime::Caller;
+    use fixtures::{PLAN_A, PLAN_B};
+    use journeys::{request, running_agent};
+
+    let mut stand_in = StandIn::new();
+    let session = running_agent(&mut stand_in);
+
+    let request_a = request(&mut stand_in, &session, PLAN_A);
+    let request_b = request(&mut stand_in, &session, PLAN_B);
+    assert_ne!(
+        request_a, request_b,
+        "two plans are two requests, so the two grants differ"
+    );
+
+    // The owner approves plan A with grant G1 and plan B with grant G2.
+    assert_eq!(
+        approve(&mut stand_in, &session, &request_a),
+        Ok(json!({ "success": true })),
+        "the owner approves plan A"
+    );
+    assert_eq!(
+        approve(&mut stand_in, &session, &request_b),
+        Ok(json!({ "success": true })),
+        "the owner approves plan B"
+    );
+    let live = stand_in
+        .get_capability_list(
+            Caller::Client {
+                session_id: &session,
+            },
+            None,
+        )
+        .expect("the agent's live list");
+    assert_eq!(
+        live["capabilities"].as_array().map(Vec::len),
+        Some(2),
+        "both bound grants are live before the wrong use: {live}"
+    );
+
+    // Executing plan A with grant G2 is refused and spends nothing.
+    assert_eq!(
+        execute(&mut stand_in, &session, &request_b, PLAN_A),
+        Err((403, "grant is not bound to this plan".to_owned())),
+        "grant G2 is bound to plan B, not plan A"
+    );
+    assert_eq!(
+        stand_in.get_capability_list(
+            Caller::Client {
+                session_id: &session
+            },
+            None
+        ),
+        Ok(live.clone()),
+        "the refused wrong-grant use leaves both grants live, byte for byte"
+    );
+
+    // Executing plan A with grant G1 spends exactly G1.
+    assert_eq!(
+        execute(&mut stand_in, &session, &request_a, PLAN_A),
+        Ok(json!({ "valid": true })),
+        "grant G1 authorises plan A's one use"
+    );
+    let after = stand_in
+        .get_capability_list(
+            Caller::Client {
+                session_id: &session,
+            },
+            None,
+        )
+        .expect("the agent's live list");
+    assert_eq!(
+        after["capabilities"],
+        json!([live["capabilities"][1]]),
+        "the once grant G1 is spent and grant G2 is still live: {after}"
+    );
+    assert_eq!(
+        execute(&mut stand_in, &session, &request_b, PLAN_B),
+        Ok(json!({ "valid": true })),
+        "spending G1 left G2's own plan use intact"
     );
 }

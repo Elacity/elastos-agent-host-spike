@@ -250,3 +250,65 @@ fn standin_plan_preview_is_refused_when_it_is_dropped() {
         "the refused preview stores no record and the accepted one stores one"
     );
 }
+
+#[test]
+fn standin_use_of_another_plans_grant_is_refused_and_both_grants_stay_live() {
+    let mut standin = StandIn::new();
+    let (_bundle, id) = running_agent(&mut standin);
+    let request_a = pending_request(&mut standin, &id);
+    let request_b = standin
+        .post_capability_request(
+            Caller::Client { session_id: &id },
+            &json!({
+                "resource": RESOURCE,
+                "action": "read",
+                "plan": sha256(CHANGED),
+            }),
+        )
+        .expect("the agent's second request stores one pending request")["request_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(request_a, request_b, "two plans are two requests");
+
+    // The owner approves plan A with grant G1 and plan B with grant G2.
+    approve(&mut standin, &request_a);
+    approve(&mut standin, &request_b);
+    let both = live_rows(&standin, &id)["capabilities"].clone();
+    assert_eq!(
+        both.as_array().map(Vec::len),
+        Some(2),
+        "both bound grants are live: {both}"
+    );
+
+    // Executing plan A with grant G2 is refused and spends nothing.
+    let wrong = standin.post_capability_validate(
+        Caller::Client { session_id: &id },
+        &use_body(&request_b, PLAN),
+    );
+    assert_eq!(
+        wrong,
+        Err((403, "grant is not bound to this plan".to_owned())),
+        "grant G2 is bound to plan B, not plan A"
+    );
+    assert_eq!(
+        live_rows(&standin, &id)["capabilities"],
+        both,
+        "the refused wrong-grant use leaves both grants live, byte for byte"
+    );
+
+    // Executing plan A with grant G1 spends exactly G1.
+    assert_eq!(
+        standin.post_capability_validate(
+            Caller::Client { session_id: &id },
+            &use_body(&request_a, PLAN),
+        ),
+        Ok(json!({ "valid": true })),
+        "grant G1 authorises plan A's one use"
+    );
+    assert_eq!(
+        live_rows(&standin, &id)["capabilities"],
+        json!([both[1]]),
+        "the once grant G1 is spent and grant G2 is still live"
+    );
+}

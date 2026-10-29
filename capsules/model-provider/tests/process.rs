@@ -3866,6 +3866,17 @@ fn granted_model_turn_binding(session_id: &str, prompt: &str) -> RuntimeCreateBi
     serde_json::from_value(request["runtime_binding"].clone()).unwrap()
 }
 
+/// The shell's one `Live` grant for a model turn, stored through the shared
+/// stand-in's `seed_grant` seam
+/// (`lab/agent-conformance/standin-runtime/mod.rs:270`). No journey in this
+/// file depends on a plan binding (M1 check A15b): `seed_grant` stores a grant
+/// with no plan (`plan: None`, `lab/agent-conformance/standin-runtime/mod.rs:291`),
+/// the provider's hosted effect names no `plan_sha256`, and `plan_accepts`
+/// accepts every use of an unbound grant
+/// (`lab/agent-conformance/standin-runtime/mod.rs:1130-1135`). A `StandIn::new()`
+/// here therefore reaches "ready" over an unbound grant, and the plan-bound
+/// path is proven in `lab/agent-conformance/tests/standin_plan.rs` and in
+/// `lab/plan-approval/src/lib.rs`.
 fn seed_live_model_grant(grants: &Arc<Mutex<StandIn>>, request_id: &str, session_id: &str) {
     grants.lock().unwrap().seed_grant(
         request_id,
