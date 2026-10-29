@@ -434,6 +434,78 @@ fn model_append_outside_the_owned_root_is_refused() {
 }
 
 #[test]
+fn model_child_journal_effect_stays_inside_its_root() {
+    let mut verifier = Verifier::new();
+    let (instance, parent) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: true,
+            child_journal: true,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let child = verifier
+        .create_child_journal(&call, &guest(parent), "UsersAI/agent-1/journal/page.md")
+        .expect("child journal");
+    assert_ne!(child, parent);
+    let child_decision = verifier
+        .use_grant(call, &guest(child))
+        .expect("child grant");
+    assert_eq!(child_decision.owned_root, "UsersAI/agent-1/journal/page.md");
+    verifier
+        .operate(
+            &call,
+            &guest(child),
+            Operation::Append,
+            "UsersAI/agent-1/journal/page.md/line",
+        )
+        .expect("append inside the journal");
+    verifier
+        .operate(
+            &call,
+            &guest(child),
+            Operation::Overwrite,
+            "UsersAI/agent-1/journal/page.md/line",
+        )
+        .expect("overwrite inside the journal");
+    let append_outside = verifier
+        .operate(
+            &call,
+            &guest(child),
+            Operation::Append,
+            "UsersAI/agent-1/journal/other",
+        )
+        .expect_err("append leaves the journal");
+    assert_eq!(append_outside, OperateRefuse::Binding(Refuse::OutsideRoot));
+    assert_eq!(append_outside.to_string(), "use path leaves the owned root");
+    let overwrite_outside = verifier
+        .operate(
+            &call,
+            &guest(child),
+            Operation::Overwrite,
+            "UsersAI/agent-1/journal/other",
+        )
+        .expect_err("overwrite leaves the journal");
+    assert_eq!(
+        overwrite_outside,
+        OperateRefuse::Binding(Refuse::OutsideRoot)
+    );
+    assert_eq!(
+        overwrite_outside.to_string(),
+        "use path leaves the owned root"
+    );
+    verifier
+        .operate(
+            &call,
+            &guest(parent),
+            Operation::Append,
+            "UsersAI/agent-1/journal/other",
+        )
+        .expect("the parent root still contains that path");
+}
+
+#[test]
 fn model_operate_on_a_sibling_instance_is_refused() {
     let mut verifier = Verifier::new();
     let first = verifier.register_instance("agent-1", "session-a");
