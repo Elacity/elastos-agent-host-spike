@@ -347,7 +347,7 @@ fn required_effects(test: &str) -> &'static [&'static str] {
     }
 }
 
-fn hex(value: &str, length: usize) -> bool {
+pub(crate) fn hex(value: &str, length: usize) -> bool {
     value.len() == length
         && value
             .bytes()
