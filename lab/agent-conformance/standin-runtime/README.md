@@ -12,7 +12,7 @@ A client caller with the plain route receives a body whose only key is `capabili
 
 A scope other than `all_sessions_live` is status 400. The reason starts with `unknown capability list scope:` and contains that scope text. A client that asks for `all_sessions_live` is status 403 with the reason `This endpoint requires shell privileges`.
 
-`run_leaves_no_live_grant` stays blocked on the real Runtime (`AC-021-GRANTS`). A passing `standin_` row gives the Runtime no credit.
+`standin_stopped_run_leaves_no_live_grant`, `standin_cancel_survivor_reaches_running`, `standin_failed_survivor_reaches_running` and `standin_deny_failure_leaves_a_clean_census` satisfy A12's stand-in clause; `standin_a12_census_catches_planted_leftovers` proves the census sees a planted temp dir, API socket and held file. The deny-path `settle_pending` is pinned by `standin_deny_failure_settles_the_sibling_request_and_its_grant_is_refused_through_routes`: removing that call turns it red. `run_leaves_no_live_grant` on the real Runtime stays blocked (`AC-021-GRANTS`) and is a separate row. A passing `standin_` row gives the Runtime no credit.
 
 `StandIn::post_capsules` answers `POST /api/capsules`. `StandIn::get_capsules` answers `GET /api/capsules`. A shell caller receives status 200. A client receives status 403 and the reason `This endpoint requires shell privileges`.
 
