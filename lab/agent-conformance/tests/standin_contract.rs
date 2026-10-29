@@ -1056,3 +1056,133 @@ fn standin_refuses_a_content_bundle_at_the_admission_seam() {
     );
     assert_eq!(listed[0]["id"], json!(session_id), "the app instance stays");
 }
+
+/// M1 check B2. Writes exactly `file` as the fixture's `asks.json`, before
+/// signing, so the one walk reads the bytes the test meant.
+fn declare_asks_file(shared: &SignedBundle, file: &Value) {
+    std::fs::write(
+        shared.path().join("asks.json"),
+        serde_json::to_vec_pretty(file).expect("encode the fixture asks"),
+    )
+    .expect("write the fixture asks");
+}
+
+/// Refuses `shared` at `admit_resident` with status 400 and `reason`, and
+/// proves the refusal stored no row: the capsule list and the capability
+/// list are the same before and after, and the refused CID never launches.
+fn assert_admission_refused(standin: &mut StandIn, shared: &SignedBundle, reason: &str) {
+    let capsules_before = standin
+        .get_capsules(Caller::Shell)
+        .expect("the stand-in lists the capsules before");
+    let grants_before = standin
+        .get_capability_list(Caller::Shell, None)
+        .expect("the stand-in lists the grants before");
+    let refused = standin.admit_resident(
+        shared.path(),
+        &shared.signature(),
+        shared.accepted(),
+        Start::Ok,
+    );
+    match &refused {
+        Err((status, said)) => {
+            assert_eq!(*status, 400, "the refusal is a bad ask schema: {said}");
+            assert_eq!(said, reason, "the stand-in gives the one reason");
+        }
+        Ok(()) => panic!("an invalid asks.json must not be admitted"),
+    }
+    assert_eq!(
+        standin
+            .get_capsules(Caller::Shell)
+            .expect("the stand-in lists the capsules after"),
+        capsules_before,
+        "the refused admission added no instance"
+    );
+    assert_eq!(
+        standin
+            .get_capability_list(Caller::Shell, None)
+            .expect("the stand-in lists the grants after"),
+        grants_before,
+        "the refused admission minted no grant"
+    );
+    assert_eq!(
+        standin.post_capsules(Caller::Shell, &shared.launch_body()),
+        Err((
+            404,
+            format!(
+                "no bundle is admitted under {} in world resident-capsule",
+                shared.cid()
+            )
+        )),
+        "the refused bundle has no admitted row to launch"
+    );
+}
+
+#[test]
+fn standin_refuses_to_admit_a_bundle_whose_asks_do_not_follow_the_schema() {
+    const BAD_ASKS: &str = "asks.json does not follow the provisional ask schema";
+    let ask = json!({ "kind": "read", "resource": ASK_RESOURCE });
+
+    let missing = SignedBundle::new();
+    std::fs::remove_file(missing.path().join("asks.json")).expect("remove the asks file");
+    assert_admission_refused(
+        &mut StandIn::new(),
+        &missing,
+        "bundle declares no asks.json",
+    );
+
+    let schema = SignedBundle::new();
+    declare_asks_file(
+        &schema,
+        &json!({ "schema": "elastos.agent-host.asks/v2", "asks": [ask] }),
+    );
+    assert_admission_refused(&mut StandIn::new(), &schema, BAD_ASKS);
+
+    let resource = SignedBundle::new();
+    declare_asks_file(
+        &resource,
+        &json!({
+            "schema": "elastos.agent-host.asks/v1",
+            "asks": [{ "kind": "read" }]
+        }),
+    );
+    assert_admission_refused(&mut StandIn::new(), &resource, BAD_ASKS);
+
+    let empty = SignedBundle::new();
+    declare_asks_file(
+        &empty,
+        &json!({ "schema": "elastos.agent-host.asks/v1", "asks": [] }),
+    );
+    assert_admission_refused(&mut StandIn::new(), &empty, BAD_ASKS);
+}
+
+#[test]
+fn standin_refuses_to_admit_a_bundle_whose_asks_carry_an_unknown_key() {
+    let top = SignedBundle::new();
+    declare_asks_file(
+        &top,
+        &json!({
+            "schema": "elastos.agent-host.asks/v1",
+            "asks": [{ "kind": "read", "resource": ASK_RESOURCE }],
+            "extra": true
+        }),
+    );
+    assert_admission_refused(
+        &mut StandIn::new(),
+        &top,
+        "asks.json carries an unknown key: extra",
+    );
+
+    let inner = SignedBundle::new();
+    declare_asks_file(
+        &inner,
+        &json!({
+            "schema": "elastos.agent-host.asks/v1",
+            "asks": [{ "note": "x", "kind": "read", "resource": ASK_RESOURCE }]
+        }),
+    );
+    assert_admission_refused(
+        &mut StandIn::new(),
+        &inner,
+        "asks.json carries an unknown key: note",
+    );
+}

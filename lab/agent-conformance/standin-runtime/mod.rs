@@ -1163,6 +1163,15 @@ fn check_bundle(
     Ok(checked)
 }
 
+/// The first key in `object` that is not one of `allowed`, in the object's
+/// own order. `None` means every key is known.
+fn unknown_key<'a>(object: &'a Map<String, Value>, allowed: &[&str]) -> Option<&'a str> {
+    object
+        .keys()
+        .map(String::as_str)
+        .find(|key| !allowed.contains(key))
+}
+
 /// The asks of one checked bundle, from the `asks.json` the walk read.
 ///
 /// Provisional, mirrors the #464 draft: the schema is
@@ -1170,39 +1179,63 @@ fn check_bundle(
 /// ...}`. This reads only `CheckedBundle::entry`, so it judges the bytes the
 /// one walk named and the name signature covers, and it reads no folder. Each
 /// `kind` is lowercased exactly as the request route lowercases an action, so
-/// coverage is the route's own compare. A missing file, another schema, a
-/// missing field, another field or no ask at all is status 400 with its own
-/// text.
+/// coverage is the route's own compare. A missing file, a file that is not
+/// JSON, another schema, a missing field or an empty list is status 400 with
+/// its own text. The file object may hold only `schema` and `asks`, and each
+/// ask only `kind` and `resource`: any other key is status 400 with
+/// `asks.json carries an unknown key: ` plus that key, and it stores nothing.
 fn admitted_asks(checked: &CheckedBundle) -> Result<Vec<Ask>, (u16, String)> {
     const ASKS_FILE: &str = "asks.json";
     const ASKS_SCHEMA: &str = "elastos.agent-host.asks/v1";
+    const ASKS_KEYS: [&str; 2] = ["schema", "asks"];
+    const ASK_KEYS: [&str; 2] = ["kind", "resource"];
     const BAD_ASKS: &str = "asks.json does not follow the provisional ask schema";
 
     let bytes = checked
         .entry(ASKS_FILE)
         .ok_or_else(|| (400, format!("bundle declares no {ASKS_FILE}")))?;
-    let listed = serde_json::from_slice::<Value>(bytes)
-        .ok()
-        .and_then(|file| {
-            let schema = file.get("schema")?.as_str()?;
-            let asks = file.get("asks")?.as_array()?;
-            if schema != ASKS_SCHEMA {
-                return None;
-            }
-            asks.iter()
-                .map(|ask| {
-                    Some(Ask {
-                        kind: ask.get("kind")?.as_str()?.to_lowercase(),
-                        resource: ask.get("resource")?.as_str()?.to_owned(),
-                    })
-                })
-                .collect::<Option<Vec<_>>>()
-        })
-        .ok_or_else(|| (400, BAD_ASKS.to_owned()))?;
-    if listed.is_empty() {
-        return Err((400, BAD_ASKS.to_owned()));
+    let file = serde_json::from_slice::<Value>(bytes).ok();
+    let refuse_unknown = |key: &str| (400, format!("asks.json carries an unknown key: {key}"));
+    if let Some(key) = file
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|object| unknown_key(object, &ASKS_KEYS))
+    {
+        return Err(refuse_unknown(key));
     }
-    Ok(listed)
+    let bad = || (400, BAD_ASKS.to_owned());
+    let schema = file
+        .as_ref()
+        .and_then(|file| file.get("schema"))
+        .and_then(Value::as_str);
+    let asks = file
+        .as_ref()
+        .and_then(|file| file.get("asks"))
+        .and_then(Value::as_array);
+    let (Some(schema), Some(asks)) = (schema, asks) else {
+        return Err(bad());
+    };
+    if schema != ASKS_SCHEMA {
+        return Err(bad());
+    }
+    for ask in asks {
+        let object = ask.as_object().ok_or_else(bad)?;
+        if let Some(key) = unknown_key(object, &ASK_KEYS) {
+            return Err(refuse_unknown(key));
+        }
+    }
+    if asks.is_empty() {
+        return Err(bad());
+    }
+    asks.iter()
+        .map(|ask| {
+            Some(Ask {
+                kind: ask.get("kind")?.as_str()?.to_lowercase(),
+                resource: ask.get("resource")?.as_str()?.to_owned(),
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(bad)
 }
 
 /// The role a manifest names for content. Content opens by CID as content
