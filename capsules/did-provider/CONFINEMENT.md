@@ -14,8 +14,8 @@ declared rights; it does not load a profile that the provider supplies.
 `confine.sb` in this folder is the test oracle: the profile the Runtime
 generates for this provider must match it, with the same three parameters bound
 to the same paths. A lab generator, `generate_profile` in
-`capsules/wallet-provider/tests/confine.rs`, builds this profile from the
-declared-rights file and the contract head, and
+`capsules/wallet-provider/tests/common/profile_generator.rs`, builds this
+profile from the declared-rights file and the contract head, and
 `generated_did_and_wallet_profiles_match_their_committed_oracles` requires it
 to equal this oracle; the Runtime's own generator and its comparison are not
 built and stay in `elastos/`, outside this lane.

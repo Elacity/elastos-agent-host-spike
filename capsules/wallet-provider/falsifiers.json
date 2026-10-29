@@ -1384,7 +1384,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/common/profile_generator.rs",
           "old": "\"platform_baseline\"",
           "new": "\"observed_startup_needs\""
         }
@@ -1401,7 +1401,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/common/profile_generator.rs",
           "old": "        let Some(justification) = entry[\"justification\"].as_str() else {\n            return Err(format!(\n                \"{name} platform baseline {} must give a string justification\",\n                claim.id\n            ));\n        };",
           "new": "        let Some(justification) = entry[\"justification\"].as_str() else {\n            continue;\n        };"
         }
@@ -1497,7 +1497,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/common/profile_generator.rs",
           "old": "        if !justification.starts_with(&prefix) {",
           "new": "        if false && !justification.starts_with(&prefix) {"
         }
@@ -1513,7 +1513,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/common/profile_generator.rs",
           "old": "        if justification[prefix.len()..].trim().is_empty() {",
           "new": "        if false && justification[prefix.len()..].trim().is_empty() {"
         }
@@ -1529,7 +1529,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/common/profile_generator.rs",
           "old": "    if declared[\"role\"].as_str() != Some(DECLARED_RIGHTS_ROLE) {",
           "new": "    if false && declared[\"role\"].as_str() != Some(DECLARED_RIGHTS_ROLE) {"
         }
@@ -1545,7 +1545,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/common/profile_generator.rs",
           "old": "    if declared[\"provider\"].as_str() != Some(name) {",
           "new": "    if false && declared[\"provider\"].as_str() != Some(name) {"
         }
@@ -1561,7 +1561,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/common/profile_generator.rs",
           "old": "    if baseline.get(\"status\").and_then(Value::as_str) != Some(status.as_str()) {",
           "new": "    if false && baseline.get(\"status\").and_then(Value::as_str) != Some(status.as_str()) {"
         }
@@ -1577,7 +1577,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/common/profile_generator.rs",
           "old": "    let Some(rights) = declared[\"rights\"].as_array() else {\n        return Err(format!(\n            \"{name} declared-rights file must hold a rights list\"\n        ));\n    };",
           "new": "    let empty_rights: Vec<serde_json::Value> = Vec::new();\n    let rights = declared[\"rights\"].as_array().unwrap_or(&empty_rights);"
         }
@@ -1593,7 +1593,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/common/profile_generator.rs",
           "old": "    let Some(baseline) = declared[PLATFORM_BASELINE].as_object() else {\n        return Err(format!(\n            \"{name} declared-rights file must hold a platform baseline\"\n        ));\n    };",
           "new": "    let empty_baseline = serde_json::Map::new();\n    let baseline = declared[PLATFORM_BASELINE]\n        .as_object()\n        .unwrap_or(&empty_baseline);"
         }
@@ -1609,7 +1609,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/common/profile_generator.rs",
           "old": "    let Some(baseline_rules) = baseline.get(\"rules\").and_then(Value::as_array) else {\n        return Err(format!(\"{name} platform baseline must hold a rules list\"));\n    };",
           "new": "    let empty_rules: Vec<serde_json::Value> = Vec::new();\n    let baseline_rules = baseline\n        .get(\"rules\")\n        .and_then(Value::as_array)\n        .unwrap_or(&empty_rules);"
         }
@@ -1625,7 +1625,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/common/profile_generator.rs",
           "old": "        let Some(id) = entry[\"id\"].as_str() else {\n            return Err(format!(\n                \"{name} {label} entry {index} must give a string id\"\n            ));\n        };",
           "new": "        let id = entry[\"id\"].as_str().unwrap_or_default();"
         }
@@ -1641,7 +1641,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/common/profile_generator.rs",
           "old": "        let Some(rules) = entry[\"rules\"].as_array() else {\n            return Err(format!(\"{name} declares {id} without a rules list\"));\n        };",
           "new": "        let empty_rules = Vec::new();\n        let rules = entry[\"rules\"].as_array().unwrap_or(&empty_rules);"
         }
@@ -1657,7 +1657,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/common/profile_generator.rs",
           "old": "        for rule in rules {\n            let Some(rule) = rule.as_str() else {\n                return Err(format!(\n                    \"{name} declares {id} with a rule that is not a string\"\n                ));\n            };\n            claimed.push(rule.to_owned());\n        }",
           "new": "        for rule in rules {\n            let Some(rule) = rule.as_str() else {\n                continue;\n            };\n            claimed.push(rule.to_owned());\n        }"
         }
@@ -1689,7 +1689,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/common/profile_generator.rs",
           "old": "    for form in PROFILE_HEAD {\n        profile.push_str(form);\n        profile.push('\\n');\n    }",
           "new": "    for form in PROFILE_HEAD {\n        profile.push_str(form);\n        profile.push('\\n');\n    }\n    profile.push_str(\"(allow file-read* (literal \\\"/private/var/cc-confine-generated\\\"))\\n\");"
         }
@@ -1705,7 +1705,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/common/profile_generator.rs",
           "old": "if !CONTRACT_RIGHTS.contains(&claim.id.as_str()) {",
           "new": "if false && !CONTRACT_RIGHTS.contains(&claim.id.as_str()) {"
         }
@@ -1721,7 +1721,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/common/profile_generator.rs",
           "old": "if !PLATFORM_BASELINE_IDS.contains(&claim.id.as_str()) {",
           "new": "if false && !PLATFORM_BASELINE_IDS.contains(&claim.id.as_str()) {"
         }
@@ -1737,7 +1737,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/common/profile_generator.rs",
           "old": "    let profile = generate_profile(name, declared)?;",
           "new": "    fs::write(path, \"\").map_err(|err| {\n        format!(\"{name} generated profile {} must be writable: {err}\", path.display())\n    })?;\n    let profile = generate_profile(name, declared)?;"
         }
@@ -1753,7 +1753,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../capsules/wallet-provider/tests/confine.rs",
+          "file": "../../capsules/wallet-provider/tests/common/profile_generator.rs",
           "old": "    for claim in rights.iter().chain(&baseline) {\n        for rule in &claim.rules {\n            profile.push_str(rule);\n            profile.push('\\n');\n        }\n    }\n    Ok(profile)",
           "new": "    for claim in rights.iter().chain(&baseline) {\n        for rule in &claim.rules {\n            profile.push_str(rule);\n            profile.push('\\n');\n        }\n    }\n    profile.push_str(\"(deny file-write* (literal \\\"/private/var/cc-confine-generated\\\"))\\n\");\n    Ok(profile)"
         }
