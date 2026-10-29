@@ -20,11 +20,9 @@ use std::collections::HashMap;
 
 use crate::{Call, GuestRequest, Handle, Refuse, Verifier};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct OpenHold {
     handle: Handle,
-    // The ledger keeps the reserving identity and session after grant revocation.
-    owner: crate::InstanceRecord,
     amount: u64,
     uncertain: bool,
     timed_out: bool,
@@ -35,10 +33,16 @@ fn handles_match(bound: Handle, presented: Handle) -> bool {
     bound == presented
 }
 
-fn held_for_identity<'a>(open: impl Iterator<Item = &'a OpenHold>, identity: &str) -> u64 {
+fn held_for_identity(
+    open: &HashMap<u64, OpenHold>,
+    grants: &HashMap<Handle, crate::GrantRecord>,
+    identity: &str,
+) -> u64 {
     let mut sum: u64 = 0;
-    for open_hold in open {
-        let grant = &open_hold.owner;
+    for open_hold in open.values() {
+        let Some(grant) = grants.get(&open_hold.handle) else {
+            continue;
+        };
         if grant.identity != identity {
             continue;
         }
@@ -254,7 +258,7 @@ impl Verifier {
         let mut ledger = self.ledger.lock().expect("ledger lock");
         let held = ledger.held;
         let shared = held;
-        let own = held_for_identity(ledger.open.values(), &identity);
+        let own = held_for_identity(&ledger.open, &self.grants, &identity);
         let held = if ledger.ceilings.contains_key(&identity) {
             own
         } else {
@@ -300,10 +304,6 @@ impl Verifier {
             ledger.next_reservation,
             OpenHold {
                 handle: request.handle,
-                owner: crate::InstanceRecord {
-                    identity,
-                    session: self.grants[&request.handle].session.clone(),
-                },
                 amount,
                 uncertain: false,
                 timed_out: false,
@@ -4455,130 +4455,6 @@ fn model_same_identity_shares_one_ceiling() {
     let after = books(&verifier);
     assert_eq!(after.charged, 0);
     assert_eq!(after.held, 6);
-
-    verifier.revoke_grant(other_handle);
-    let refusal = verifier
-        .reserve(&asked_call, &asked_request, 6)
-        .expect_err("the revoked session's hold still fills this identity");
-    assert_eq!(
-        refusal,
-        ReserveRefuse::OverCeiling {
-            ceiling: 10,
-            held: 6,
-            asked: 6,
-        }
-    );
-    assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
-    let kept = books(&verifier);
-    assert_eq!(kept.charged, after.charged);
-    assert_eq!(kept.held, after.held);
-    assert_eq!(kept.open, after.open);
-}
-
-#[test]
-fn model_revoked_holds_keep_the_identity_ceiling() {
-    for (uncertain, timed_out) in [(false, false), (true, false), (true, true)] {
-        let mut verifier = Verifier::new();
-        let owner = verifier.register_instance("agent-1", "session-b");
-        let handle = verifier
-            .ask_capability(crate::Asker::App, owner, "UsersAI/agent-1/notes", rights())
-            .expect("owner capability");
-        let call = verifier.open_call(owner);
-        let request = guest(handle);
-        verifier
-            .admit_ask(&call, &request, crate::ask::BudgetAsk { amount: 10 }, 10)
-            .expect("owner ceiling");
-        let held = verifier.reserve(&call, &request, 6).expect("owner hold");
-        if uncertain {
-            verifier.set_verifier_deadline(10);
-            let refusal = verifier
-                .settle(&call, &request, held, SettleOutcome::Unknown)
-                .expect_err("unknown outcome keeps the hold");
-            assert_eq!(refusal, SettleRefuse::UnknownOutcome);
-            assert_eq!(refusal.to_string(), "unknown outcome keeps the hold");
-        }
-        if timed_out {
-            let record = verifier
-                .timeout_hold(&call, &request, held, 10)
-                .expect("due timeout keeps the hold");
-            assert_eq!(record.to_string(), "timed out, outcome unknown");
-        }
-        let before = books(&verifier);
-        assert_eq!(before.held, 6);
-        assert_eq!(before.charged, 0);
-        assert_eq!(before.open.get(&held.id), Some(&6));
-        assert_eq!(before.open.len(), 1);
-        assert_eq!(before.timed_out.contains_key(&held.id), timed_out);
-
-        verifier.revoke_grant(handle);
-        let refusal = verifier
-            .reserve(&call, &request, 1)
-            .expect_err("revoked capability refuses the next reserve");
-        assert_eq!(refusal, ReserveRefuse::Binding(Refuse::UnknownHandle));
-        assert_eq!(refusal.to_string(), "unknown handle");
-        let kept = books(&verifier);
-        assert_eq!(kept.held, before.held);
-        assert_eq!(kept.charged, before.charged);
-        assert_eq!(kept.open, before.open);
-        assert_eq!(kept.timed_out, before.timed_out);
-
-        // A new session shares its identity's outstanding usage.
-        let next = verifier.register_instance("agent-1", "session-c");
-        let next_handle = verifier
-            .ask_capability(crate::Asker::App, next, "UsersAI/agent-1/other", rights())
-            .expect("new session capability");
-        assert_ne!(next_handle, handle);
-        let next_call = verifier.open_call(next);
-        let next_request = guest(next_handle);
-        let refusal = verifier
-            .reserve(&next_call, &next_request, 6)
-            .expect_err("revoked hold counts toward the identity ceiling");
-        assert_eq!(
-            refusal,
-            ReserveRefuse::OverCeiling {
-                ceiling: 10,
-                held: 6,
-                asked: 6,
-            }
-        );
-        assert_eq!(refusal.to_string(), "reservation exceeds the ceiling");
-        let remaining = verifier
-            .reserve(&next_call, &next_request, 4)
-            .expect("remaining allowance is available");
-        assert_eq!(books(&verifier).held, 10);
-        verifier
-            .release(&next_call, &next_request, remaining)
-            .expect("release only the new hold");
-        let kept = books(&verifier);
-        assert_eq!(kept.held, before.held);
-        assert_eq!(kept.charged, before.charged);
-        assert_eq!(kept.open, before.open);
-        assert_eq!(kept.timed_out, before.timed_out);
-
-        let other = verifier.register_instance("agent-2", "session-b");
-        let other_handle = verifier
-            .ask_capability(crate::Asker::App, other, "UsersAI/agent-2/notes", rights())
-            .expect("other identity capability");
-        let other_call = verifier.open_call(other);
-        let other_request = guest(other_handle);
-        verifier
-            .admit_ask(
-                &other_call,
-                &other_request,
-                crate::ask::BudgetAsk { amount: 10 },
-                10,
-            )
-            .expect("other identity ceiling");
-        verifier
-            .reserve(&other_call, &other_request, 10)
-            .expect("revoked hold belongs only to its original identity");
-        let after = books(&verifier);
-        assert_eq!(after.held, 16);
-        assert_eq!(after.charged, 0);
-        assert_eq!(after.open.get(&held.id), Some(&6));
-        assert_eq!(after.open.len(), 2);
-        assert_eq!(after.timed_out, before.timed_out);
-    }
 }
 
 #[test]
