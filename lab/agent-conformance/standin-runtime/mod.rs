@@ -454,7 +454,9 @@ impl StandIn {
     /// A shell grants one pending request through the one writer, which stores
     /// `granted`, the rationale and `shell` as settler. `seed_grant` then
     /// stores the one `Live` grant for that request. Ok is
-    /// `{"success": true}` and carries no token.
+    /// `{"success": true}` and carries no token. A client is refused before
+    /// the body is read, so the requester and its sibling resident cannot
+    /// approve their own pending request.
     pub fn post_capability_grant(
         &mut self,
         caller: Caller<'_>,
@@ -554,7 +556,7 @@ impl StandIn {
             .iter()
             .position(|grant| grant.request_id == request_id)
         else {
-            return Err(unknown_grant(request_id));
+            return Err(unknown_grant());
         };
         let grant = &self.grants[index];
         if !is_live(grant.life) {
@@ -996,8 +998,10 @@ fn unknown_instance(id: &str) -> (u16, String) {
     (400, format!("unknown instance: {id}"))
 }
 
-fn unknown_grant(request_id: &str) -> (u16, String) {
-    (400, format!("unknown grant: {request_id}"))
+/// One unknown-grant reason. `authorise` uses it. The reason is fixed, so an
+/// absent-id reply omits the supplied id.
+fn unknown_grant() -> (u16, String) {
+    (400, "unknown grant".to_owned())
 }
 
 fn life_text(life: Life) -> &'static str {
@@ -3343,15 +3347,39 @@ mod tests {
             (Some("starting"), Some("starting")),
             "the stand-in answers starting for both launches"
         );
-        seed_shared_request(&mut standin, "req-1", "component-1");
-        seed_shared_request(&mut standin, "req-2", "component-2");
+        // Each live instance asks for the shared read through the route. The
+        // route numbers them request-1 and request-2 in launch order.
+        for id in ["component-1", "component-2"] {
+            let requested = standin
+                .post_capability_request(Caller::Client { session_id: id }, &request_client_body())
+                .expect("the stand-in stores the instance's pending request");
+            assert_eq!(
+                requested["request_id"],
+                if id == "component-1" {
+                    "request-1"
+                } else {
+                    "request-2"
+                },
+                "the stand-in did the work: the request route names {id}'s request"
+            );
+        }
+        assert_eq!(
+            request_entries(&standin, "component-1"),
+            vec![pending_request("request-1", "component-1")],
+            "the stand-in stores the first instance's request pending"
+        );
+        assert_eq!(
+            request_entries(&standin, "component-2"),
+            vec![pending_request("request-2", "component-2")],
+            "the stand-in stores the second instance's request pending"
+        );
         standin.set_instant(4);
 
         let granted = standin
             .post_capability_grant(
                 Caller::Shell,
                 &json!({
-                    "request_id": "req-1",
+                    "request_id": "request-1",
                     "duration": "Session",
                     "rationale": "grant shared read",
                 }),
@@ -3369,12 +3397,16 @@ mod tests {
         );
         assert_eq!(
             request_entries(&standin, "component-1"),
-            vec![granted_request("req-1", "component-1", "grant shared read")],
+            vec![granted_request(
+                "request-1",
+                "component-1",
+                "grant shared read"
+            )],
             "the stand-in grants req-1 with the shell as settler and the rationale as decision"
         );
         assert_eq!(
             request_entries(&standin, "component-2"),
-            vec![pending_request("req-2", "component-2")],
+            vec![pending_request("request-2", "component-2")],
             "the stand-in leaves the sibling request pending with no settler"
         );
         assert!(
@@ -3386,13 +3418,13 @@ mod tests {
             .expect("the stand-in shell live view");
         assert_eq!(
             request_ids(&live),
-            BTreeSet::from(["req-1".to_owned()]),
+            BTreeSet::from(["request-1".to_owned()]),
             "the stand-in shows exactly the granted request as live"
         );
         assert_eq!(
             live["capabilities"][0],
             json!({
-                "request_id": "req-1",
+                "request_id": "request-1",
                 "session_id": "component-1",
                 "resource": SHARED_RESOURCE,
                 "action": "read",
@@ -3419,14 +3451,14 @@ mod tests {
                 Caller::Client {
                     session_id: "component-1",
                 },
-                "req-1",
+                "request-1",
             )
             .expect("the stand-in authorises the granted instance");
         let sibling = standin.authorise(
             Caller::Client {
                 session_id: "component-2",
             },
-            "req-1",
+            "request-1",
         );
         assert!(
             matches!(&sibling, Err((403, reason)) if reason.contains("wrong capsule")),
@@ -3459,7 +3491,11 @@ mod tests {
         );
         assert_eq!(
             request_entries(&standin, "component-1"),
-            vec![granted_request("req-1", "component-1", "grant shared read")],
+            vec![granted_request(
+                "request-1",
+                "component-1",
+                "grant shared read"
+            )],
             "the stand-in keeps the granted record after the start returns"
         );
         assert_eq!(
@@ -3468,7 +3504,7 @@ mod tests {
                     .get_capability_list(Caller::Shell, None)
                     .expect("the stand-in shell live view")
             ),
-            BTreeSet::from(["req-1".to_owned()]),
+            BTreeSet::from(["request-1".to_owned()]),
             "the stand-in keeps exactly the one live grant after the start returns"
         );
         assert_capsule(
@@ -3480,7 +3516,7 @@ mod tests {
         );
         assert_eq!(
             request_entries(&standin, "component-2"),
-            vec![pending_request("req-2", "component-2")],
+            vec![pending_request("request-2", "component-2")],
             "the stand-in keeps the sibling request pending after the other start returns"
         );
     }
@@ -3490,20 +3526,62 @@ mod tests {
         let mut standin = StandIn::new();
         admit_shared(&mut standin, Start::Ok);
         let id = launch_starting(&mut standin);
-        seed_shared_request(&mut standin, "req-d", &id);
-
-        let client = standin.post_capability_grant(
-            Caller::Client {
-                session_id: "component-1",
-            },
-            &json!({ "request_id": "req-d" }),
+        let sibling = launch_finished(&mut standin);
+        let requested = standin
+            .post_capability_request(Caller::Client { session_id: &id }, &request_client_body())
+            .expect("the stand-in stores the requester's pending request");
+        let req_d = requested["request_id"]
+            .as_str()
+            .expect("the stand-in names the request")
+            .to_owned();
+        assert_eq!(
+            req_d, "request-1",
+            "the stand-in did the work: the request route names request-1"
         );
-        assert!(
-            matches!(&client, Err((403, reason)) if reason == "This endpoint requires shell privileges"),
-            "the stand-in refuses a client grant before reading the body: {client:?}"
-        );
 
-        for body in [json!({}), json!("req-d")] {
+        // The requesting instance and its sibling resident hold the pending
+        // request id. Neither approves it, with or without a body.
+        for session_id in [id.as_str(), sibling.as_str()] {
+            for grant_body in [
+                json!({ "request_id": req_d }),
+                json!({ "request_id": req_d, "duration": "once", "rationale": "self" }),
+                json!({}),
+            ] {
+                let client =
+                    standin.post_capability_grant(Caller::Client { session_id }, &grant_body);
+                assert!(
+                    matches!(&client, Err((403, reason)) if reason == "This endpoint requires shell privileges"),
+                    "the stand-in refuses {session_id} its own grant before reading the body: {client:?}"
+                );
+            }
+            assert_eq!(
+                request_entries(&standin, &id),
+                vec![pending_request(&req_d, &id)],
+                "the stand-in leaves {req_d} pending after {session_id} tried to approve it"
+            );
+            assert!(
+                standin.grants.is_empty(),
+                "the stand-in stores no grant after {session_id} tried to approve req-d"
+            );
+            assert_eq!(
+                request_ids(
+                    &standin
+                        .get_capability_list(Caller::Shell, None)
+                        .expect("the stand-in shell live view")
+                ),
+                BTreeSet::new(),
+                "the stand-in shows no live grant after {session_id} tried to approve req-d"
+            );
+            assert_capsule(
+                &standin,
+                &id,
+                "starting",
+                "",
+                "the stand-in leaves the requester starting after a client grant",
+            );
+        }
+
+        for body in [json!({}), json!(req_d.clone())] {
             let refused = standin.post_capability_grant(Caller::Shell, &body);
             assert!(
                 matches!(&refused, Err((400, reason)) if reason == "grant body needs request_id"),
@@ -3516,11 +3594,11 @@ mod tests {
                 "grant request_id must be a string",
             ),
             (
-                json!({ "request_id": "req-d", "duration": 4 }),
+                json!({ "request_id": req_d, "duration": 4 }),
                 "grant duration must be a string",
             ),
             (
-                json!({ "request_id": "req-d", "rationale": 4 }),
+                json!({ "request_id": req_d, "rationale": 4 }),
                 "grant rationale must be a string",
             ),
         ] {
@@ -3542,7 +3620,7 @@ mod tests {
         );
         let extra = standin.post_capability_grant(
             Caller::Shell,
-            &json!({ "request_id": "req-d", "token": "secret" }),
+            &json!({ "request_id": req_d, "token": "secret" }),
         );
         assert!(
             matches!(
@@ -3553,7 +3631,7 @@ mod tests {
         );
         let bad_duration = standin.post_capability_grant(
             Caller::Shell,
-            &json!({ "request_id": "req-d", "duration": "minutes" }),
+            &json!({ "request_id": req_d, "duration": "minutes" }),
         );
         assert!(
             matches!(
@@ -3564,7 +3642,7 @@ mod tests {
         );
         assert_eq!(
             request_entries(&standin, &id),
-            vec![pending_request("req-d", &id)],
+            vec![pending_request(&req_d, &id)],
             "the stand-in leaves the request pending after every refused grant"
         );
         assert!(
@@ -3580,7 +3658,7 @@ mod tests {
         );
 
         let granted = standin
-            .post_capability_grant(Caller::Shell, &json!({ "request_id": "req-d" }))
+            .post_capability_grant(Caller::Shell, &json!({ "request_id": req_d }))
             .expect("the stand-in grants the request without duration or rationale");
         assert_eq!(
             granted,
@@ -3589,7 +3667,7 @@ mod tests {
         );
         assert_eq!(
             request_entries(&standin, &id),
-            vec![granted_request("req-d", &id, "Shell auto-grant")],
+            vec![granted_request(&req_d, &id, "Shell auto-grant")],
             "the stand-in stores the default rationale with the shell as settler"
         );
         let live = standin
@@ -3600,43 +3678,70 @@ mod tests {
             "the stand-in stores the default duration as session"
         );
 
-        let again = standin.post_capability_grant(Caller::Shell, &json!({ "request_id": "req-d" }));
+        let again = standin.post_capability_grant(Caller::Shell, &json!({ "request_id": req_d }));
         assert!(
             matches!(
                 &again,
-                Err((400, reason)) if reason.starts_with("request is not pending:") && reason.contains("req-d")
+                Err((400, reason)) if reason.starts_with("request is not pending:") && reason.contains(&req_d)
             ),
             "the stand-in refuses a second grant of the settled request: {again:?}"
         );
         assert_eq!(
             request_entries(&standin, &id),
-            vec![granted_request("req-d", &id, "Shell auto-grant")],
+            vec![granted_request(&req_d, &id, "Shell auto-grant")],
             "the stand-in keeps the first granted record after a refused second grant"
         );
 
+        // The route stores the request while the third instance is live. The
+        // stop then settles it, so the late grant has a real settled record.
         let stopped = launch_starting(&mut standin);
-        seed_shared_request(&mut standin, "req-s", &stopped);
+        let requested = standin
+            .post_capability_request(
+                Caller::Client {
+                    session_id: &stopped,
+                },
+                &request_client_body(),
+            )
+            .expect("the stand-in stores the third instance's pending request");
+        let req_s = requested["request_id"]
+            .as_str()
+            .expect("the stand-in names the request")
+            .to_owned();
+        assert_eq!(
+            req_s, "request-2",
+            "the stand-in did the work: the request route names request-2"
+        );
+        assert_eq!(
+            request_entries(&standin, &stopped),
+            vec![pending_request(&req_s, &stopped)],
+            "the stand-in stores the third instance's request pending before the stop"
+        );
         standin
             .delete_capsule(Caller::Shell, &stopped, &stop_body())
-            .expect("the stand-in stops the second instance");
-        let late = standin.post_capability_grant(Caller::Shell, &json!({ "request_id": "req-s" }));
+            .expect("the stand-in stops the third instance");
+        assert_eq!(
+            request_entries(&standin, &stopped),
+            vec![denied_request(&req_s, &stopped, "stopped: stop one")],
+            "the stand-in keeps the runtime settlement of the stopped instance's request"
+        );
+        let late = standin.post_capability_grant(Caller::Shell, &json!({ "request_id": req_s }));
         assert!(
             matches!(
                 &late,
-                Err((400, reason)) if reason.starts_with("request is not pending:") && reason.contains("req-s")
+                Err((400, reason)) if reason.starts_with("request is not pending:") && reason.contains(&req_s)
             ),
             "the stand-in refuses a grant of the stopped instance's request: {late:?}"
         );
         assert_eq!(
             request_entries(&standin, &stopped),
-            vec![denied_request("req-s", &stopped, "stopped: stop one")],
-            "the stand-in keeps the runtime settlement of the stopped instance's request"
+            vec![denied_request(&req_s, &stopped, "stopped: stop one")],
+            "the stand-in keeps the settled record after the refused late grant"
         );
         let live = standin
             .get_capability_list(Caller::Shell, None)
             .expect("the stand-in shell live view");
         assert!(
-            !request_ids(&live).contains("req-s"),
+            !request_ids(&live).contains(&req_s),
             "the stand-in shows no live grant for the stopped instance's request"
         );
     }
@@ -4662,13 +4767,16 @@ mod tests {
         launch_finished(standin);
     }
 
+    fn launch_two_running_ids(standin: &mut StandIn) -> (String, String) {
+        admit_shared(standin, Start::Ok);
+        (launch_finished(standin), launch_finished(standin))
+    }
+
+    /// An absent grant id is status 400 with the fixed reason `unknown grant`.
+    /// The absent-id reply omits the supplied id.
     fn assert_unknown(result: &Result<(), (u16, String)>, request_id: &str, who: &str) {
-        let expected = format!("unknown grant: {request_id}");
         assert!(
-            matches!(
-                result,
-                Err((400, reason)) if reason.starts_with("unknown grant:") && reason == &expected
-            ),
+            matches!(result, Err((400, reason)) if reason == "unknown grant"),
             "the stand-in refuses unknown grant {request_id:?} for {who}: {result:?}"
         );
     }
@@ -4708,16 +4816,50 @@ mod tests {
     #[test]
     fn standin_sibling_cannot_use_the_grant() {
         let mut standin = StandIn::new();
-        launch_two_running(&mut standin);
-        standin.seed_grant(
-            "req-1",
-            "component-1",
-            "res",
-            "read",
-            "once",
-            1,
-            Life::Live,
-            true,
+        let (owner_id, sibling_id) = launch_two_running_ids(&mut standin);
+        let owner = Caller::Client {
+            session_id: &owner_id,
+        };
+        let sibling = Caller::Client {
+            session_id: &sibling_id,
+        };
+        let requested = standin
+            .post_capability_request(owner, &request_client_body())
+            .expect("the stand-in stores the owner's pending request");
+        let request_id = requested["request_id"]
+            .as_str()
+            .expect("the stand-in names the request")
+            .to_owned();
+        assert_eq!(
+            request_id, "request-1",
+            "the stand-in did the work: the request route names request-1"
+        );
+        // Ids are the stand-in's own sequence. Possession of one grants
+        // nothing, and a guess that matches no record names nothing.
+        for guessed in ["req-0", "request-0", "request-2", ""] {
+            let refused = standin.authorise(sibling, guessed);
+            assert_unknown(&refused, guessed, "sibling");
+        }
+        let guessed_grant =
+            standin.post_capability_grant(sibling, &json!({ "request_id": request_id }));
+        assert!(
+            matches!(&guessed_grant, Err((403, reason)) if reason == "This endpoint requires shell privileges"),
+            "the stand-in refuses a sibling grant of the owner's request id: {guessed_grant:?}"
+        );
+        assert!(
+            standin.grants.is_empty(),
+            "the stand-in stores no grant after a sibling tried to grant the owner's request"
+        );
+        let granted = standin
+            .post_capability_grant(
+                Caller::Shell,
+                &json!({ "request_id": request_id, "duration": "once" }),
+            )
+            .expect("the stand-in shell grants the owner's request");
+        assert_eq!(
+            granted,
+            json!({ "success": true }),
+            "the stand-in answers success true for the shell grant"
         );
         let (plain, query) = shell_pair(&standin);
         assert_eq!(
@@ -4726,75 +4868,60 @@ mod tests {
         );
         assert_eq!(
             request_ids(&plain),
-            BTreeSet::from(["req-1".to_owned()]),
+            BTreeSet::from([request_id.clone()]),
             "the stand-in lists exactly the one live grant"
         );
         assert_eq!(
-            plain["capabilities"][0]["session_id"], "component-1",
-            "the stand-in binds that grant to component-1"
+            plain["capabilities"][0]["session_id"], owner_id,
+            "the stand-in binds that grant to the requester"
         );
         let sibling_list = standin
-            .get_capability_list(
-                Caller::Client {
-                    session_id: "component-2",
-                },
-                None,
-            )
+            .get_capability_list(sibling, None)
             .expect("the stand-in client view");
         assert_eq!(
             request_ids(&sibling_list),
             BTreeSet::new(),
-            "the stand-in client list for component-2 is empty"
+            "the stand-in client list for the sibling is empty"
         );
-        let refused = standin.authorise(
-            Caller::Client {
-                session_id: "component-2",
-            },
-            "req-1",
-        );
+        let refused = standin.authorise(sibling, &request_id);
         assert_wrong_capsule(
             &refused,
-            "component-1",
-            Some("component-2"),
-            "the stand-in refuses instance 1's grant for instance 2",
+            &owner_id,
+            Some(&sibling_id),
+            "the stand-in refuses the requester's grant for its sibling resident",
         );
         assert_eq!(
-            grant_record(&standin, "req-1"),
-            (Life::Live, true),
+            grant_record(&standin, &request_id),
+            (Life::Live, false),
             "the stand-in did the work: the sibling refusal spends nothing"
         );
         assert_eq!(
             request_ids(&shell_pair(&standin).0),
-            BTreeSet::from(["req-1".to_owned()]),
+            BTreeSet::from([request_id.clone()]),
             "the stand-in did the work: the refused sibling leaves the grant in the live view"
         );
-        let owner = standin.authorise(
-            Caller::Client {
-                session_id: "component-1",
-            },
-            "req-1",
-        );
+        let owner_use = standin.authorise(owner, &request_id);
         assert!(
-            owner.is_ok(),
-            "the stand-in authorises the owning client: {owner:?}"
+            owner_use.is_ok(),
+            "the stand-in authorises the owning client: {owner_use:?}"
         );
         assert_capsule(
             &standin,
-            "component-1",
+            &owner_id,
             "running",
             "",
-            "the stand-in leaves instance 1 running",
+            "the stand-in leaves the requester running",
         );
         assert_capsule(
             &standin,
-            "component-2",
+            &sibling_id,
             "running",
             "",
-            "the stand-in leaves instance 2 running",
+            "the stand-in leaves the sibling running",
         );
         assert_eq!(
-            grant_record(&standin, "req-1"),
-            (Life::Exhausted, true),
+            grant_record(&standin, &request_id),
+            (Life::Exhausted, false),
             "the stand-in did the work: the owner's one use stores Exhausted"
         );
         assert_eq!(
