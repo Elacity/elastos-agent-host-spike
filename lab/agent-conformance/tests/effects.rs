@@ -1452,6 +1452,7 @@ fn standin_request_record(
         "status": status,
         "decision_reason": decision_reason,
         "settled_by": settled_by,
+        "plan": serde_json::Value::Null,
     })
 }
 

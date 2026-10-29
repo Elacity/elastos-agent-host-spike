@@ -1,11 +1,17 @@
 #![forbid(unsafe_code)]
 
-//! Plan preview: the bytes and their hash, and nothing else.
+//! Plan preview, owner approval and authorised execution (M1 check A15a).
 //!
-//! A proposal carries no authority, so a preview reads no grant and no
-//! capsule list and writes neither. Runtime authorisation is a separate step.
+//! A proposal carries no authority. `preview` hashes the canonical plan bytes
+//! and writes nothing. `approve` asks the stand-in's owner-only grant route
+//! once, naming the plan hash the owner saw with the request; that route mints
+//! the binding from the hash it approved only when it equals the hash the
+//! agent requested, and refuses a mismatch. `execute` asks the stand-in's
+//! validate route for that plan. A grant bound to another plan is refused
+//! there and spends nothing.
 
-use agent_conformance::standin_runtime::StandIn;
+use agent_conformance::standin_runtime::{Caller, StandIn};
+use serde_json::{json, Value};
 
 /// One plan preview. The hash names the exact fixture bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,8 +25,52 @@ pub fn preview(stand_in: &mut StandIn, plan: &[u8]) -> Preview {
     let _ = stand_in;
     Preview {
         plan: plan.to_vec(),
-        sha256: agent_conformance::identity::sha256(plan),
+        sha256: plan_sha256(plan),
     }
+}
+
+/// The one plan hash. `execute` uses it for the plan it runs.
+pub fn plan_sha256(plan: &[u8]) -> String {
+    agent_conformance::identity::sha256(plan)
+}
+
+/// The owner approves one pending request through `POST /api/capability/grant`.
+///
+/// `plan_sha256` is the plan hash the owner saw with the request, the value the
+/// shell's request view shows in `plan`. The grant route mints the binding from
+/// that hash only when it equals the hash the agent requested; a missing or
+/// different hash is refused and the request stays pending.
+pub fn approve(
+    stand_in: &mut StandIn,
+    request_id: &str,
+    plan_sha256: &str,
+) -> Result<Value, (u16, String)> {
+    stand_in.post_capability_grant(
+        Caller::Shell,
+        &json!({
+            "request_id": request_id,
+            "duration": "once",
+            "rationale": "owner approved",
+            "plan_sha256": plan_sha256,
+        }),
+    )
+}
+
+/// The agent runs one plan through `POST /api/capability/validate`.
+///
+/// The agent asks for the hash of the bytes it holds now, so a plan that
+/// changed after approval is refused by the stand-in with status 403 and
+/// `grant is not bound to this plan`, and a `once` grant stays `Live`.
+pub fn execute(
+    stand_in: &mut StandIn,
+    session_id: &str,
+    request_id: &str,
+    plan: &[u8],
+) -> Result<Value, (u16, String)> {
+    stand_in.post_capability_validate(
+        Caller::Client { session_id },
+        &json!({ "request_id": request_id, "plan_sha256": plan_sha256(plan) }),
+    )
 }
 
 #[cfg(test)]

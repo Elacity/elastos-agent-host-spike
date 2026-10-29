@@ -9,3 +9,4 @@ license = "MIT"
 
 [dependencies]
 agent-conformance = { path = "../agent-conformance" }
+serde_json = "=1.0.154"

@@ -285,6 +285,7 @@ fn standin_settles_a_killed_agents_request() {
                 "status": "denied",
                 "decision_reason": "stopped: worker killed",
                 "settled_by": "runtime",
+                "plan": Value::Null,
             }],
         }),
         "the stand-in settles agent 1's pending request with the kill cause and the runtime as settler"
@@ -311,6 +312,7 @@ fn standin_settles_a_killed_agents_request() {
                 "status": "pending",
                 "decision_reason": "",
                 "settled_by": Value::Null,
+                "plan": Value::Null,
             }],
         })),
         "the stand-in leaves agent 2's pending request untouched"
@@ -431,6 +433,7 @@ fn standin_settles_a_running_workers_request_when_its_worker_exits() {
             "status": "pending",
             "decision_reason": "",
             "settled_by": Value::Null,
+            "plan": Value::Null,
         }]),
         "agent 1's request outlives the guest call and is pending before the worker dies"
     );
@@ -450,6 +453,7 @@ fn standin_settles_a_running_workers_request_when_its_worker_exits() {
             "status": "denied",
             "decision_reason": "worker exited",
             "settled_by": "runtime",
+            "plan": Value::Null,
         }]),
         "the dead worker settles agent 1's pending request as the runtime"
     );
@@ -512,6 +516,7 @@ fn standin_settles_a_running_workers_request_when_its_worker_exits() {
             "status": "denied",
             "decision_reason": "worker exited",
             "settled_by": "runtime",
+            "plan": Value::Null,
         }]),
         "the refused retry stores no request and leaves the settlement in place"
     );
@@ -926,6 +931,7 @@ fn standin_cancelled_resident_leaves_the_second_resident_to_complete() {
             "status": "granted",
             "decision_reason": "Shell auto-grant",
             "settled_by": "shell",
+            "plan": Value::Null,
         }, {
             "request_id": first_pending,
             "session_id": first,
@@ -935,6 +941,7 @@ fn standin_cancelled_resident_leaves_the_second_resident_to_complete() {
             "status": "denied",
             "decision_reason": STOP_REASON,
             "settled_by": "runtime",
+            "plan": Value::Null,
         }]),
         "the stand-in denies the cancelled resident's pending request and leaves its granted record alone"
     );
@@ -952,6 +959,7 @@ fn standin_cancelled_resident_leaves_the_second_resident_to_complete() {
             "status": "granted",
             "decision_reason": "Shell auto-grant",
             "settled_by": "shell",
+            "plan": Value::Null,
         }, {
             "request_id": survivor_pending,
             "session_id": second,
@@ -961,6 +969,7 @@ fn standin_cancelled_resident_leaves_the_second_resident_to_complete() {
             "status": "pending",
             "decision_reason": "",
             "settled_by": Value::Null,
+            "plan": Value::Null,
         }]),
         "the stand-in leaves the surviving resident's pending and granted records alone"
     );
