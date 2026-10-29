@@ -1,0 +1,16 @@
+id: F-A7-usagekey
+file: src/ask.rs
+test: ask::model_reported_usage_does_not_retarget_the_ceiling
+--- old
+        self.stage_admitted_identity(&identity);
+--- new
+        let other = if request.reported_usage > 0 {
+            self.grants
+                .values()
+                .find(|grant| grant.identity != identity)
+                .map(|grant| grant.identity.clone())
+        } else {
+            None
+        };
+        self.stage_admitted_identity(other.as_deref().unwrap_or(&identity));
+--- end
