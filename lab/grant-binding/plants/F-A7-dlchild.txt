@@ -1,0 +1,12 @@
+id: F-A7-dlchild
+file: src/ledger.rs
+test: ledger::model_forged_child_journal_does_not_set_the_timeout_deadline
+--- old
+                            open.deadline = ledger.verifier_deadline;
+--- new
+                            open.deadline = if request.forged_child_journal {
+                                0
+                            } else {
+                                ledger.verifier_deadline
+                            };
+--- end
