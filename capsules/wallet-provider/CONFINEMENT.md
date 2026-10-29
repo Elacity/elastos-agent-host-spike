@@ -1394,11 +1394,21 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Accept a seccomp allow list generated for another provider (WP165):
   `standin_host_refusal_decides_each_policy` fails because the start is then
   attempted instead of refused for both providers' names.
+- Pass only the command to the probe's `keyctl` call (WP166):
+  `seccomp_keyctl_probe_supplies_every_argument_without_creation` fails because
+  the argument table names no keyring and no create flag, so the kernel would read
+  registers the probe never set.
+- Answer a failed spawn's reason alone when the install record is empty (WP167):
+  `seccomp_launch_record_refuses_missing_or_unknown_report` fails because the
+  missing-report reason is lost behind that spawn reason.
 
-Task 148's two kernel-only plants are recorded in `CONFINEMENT-LINUX.md`, not
-here. Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on
-the Mac, so neither can produce a CAUGHT line in this list; both were re-run on
-the Linux host with their red output quoted in `CONFINEMENT-LINUX.md`.
+Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
+Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,
+so none can produce a CAUGHT line in this list. That file names each of them,
+with the red output of its run on the Linux host: the `NoNewPrivileges` and
+`Filter` install-failure plants, the requested-program plant, the stopped-child
+and timeout-reap plants, the omitted-wait plant, the allocation-guard plant, the
+skip-install plant and the outside-write plant.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

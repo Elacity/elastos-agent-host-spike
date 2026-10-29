@@ -71,18 +71,18 @@ child both install the result through the one `install_seccomp`, so there is one
 list and one install path (P10).
 
 `LAUNCH_ESSENTIALS` is measured, not guessed, on the Linux host the proof ran on:
-each entry was dropped alone from the whole list and the call that failed named
-it.
+each entry was dropped alone from the whole list, the probe re-run, and the call
+that then failed named it. This run's seven calls are:
 
 | Entry | The call whose refusal named it |
 | --- | --- |
 | `close` | `close(3)` in the loader, refused before the first mapping |
-| `exit_group` | `exit_group(101)` as the runtime aborted |
-| `getrandom` | `getrandom(0xfdb7d0076700, 8, GRND_NONBLOCK)` in the loader |
-| `mmap` | `mmap(NULL, 8192, PROT_READ\|PROT_WRITE, MAP_PRIVATE\|MAP_ANONYMOUS, -1, 0)` in the loader |
-| `mprotect` | `mprotect(0xfa5e165ef000, 65536, PROT_NONE)` in the loader |
-| `ppoll` | `ppoll([{fd=0}, {fd=1}, {fd=2}], 3, {tv_sec=0, tv_nsec=0}, NULL, 0)` while the runtime waits |
-| `rt_sigaction` | `rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[PIPE], sa_flags=SA_RESTART}, 0xfffff4896e40, 8)` |
+| `exit_group` | `exit_group(0)`, refused as the provider ended its own run |
+| `getrandom` | `getrandom(0xec92ac7c6700, 8, GRND_NONBLOCK)` in the loader |
+| `mmap` | `mmap(NULL, 8192, PROT_READ\|PROT_WRITE, MAP_PRIVATE\|MAP_ANONYMOUS, -1, 0)` in the loader, after which the provider took `SIGSEGV` |
+| `mprotect` | `mprotect(0xf2640329f000, 65536, PROT_NONE)` in the loader |
+| `ppoll` | `ppoll([{fd=0, events=0}, {fd=1, events=0}, {fd=2, events=0}], 3, {tv_sec=0, tv_nsec=0}, NULL, 0)` while the provider waits |
+| `rt_sigaction` | `rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[PIPE], sa_flags=SA_RESTART}, 0xffffea09ff80, 8)` in the loader |
 
 Four calls are in no row and in no launch entry, so the default decision is the
 only answer they receive: `ptrace`, `mount`, `bpf` and `keyctl`. The named test
@@ -104,7 +104,18 @@ completes a short write and retries on `EINTR`, and gives a failed write and a
 zero-byte write distinct reasons and errnos.
 `seccomp_launch_record_refuses_missing_or_unknown_report` covers the record
 reader: a record that is missing, short, long or names an unknown step is a
-refusal with its own reason, never a bare spawn error.
+refusal with its own reason, never a bare spawn error. It also covers the
+launcher's own answer through `seccomp_launch_answers_or_refusal`, the one place
+a record becomes a launch result: a child that never wrote a record, because its
+own write failed or because it never ran, keeps the record's reason and adds what
+the child did instead, so that reason is never lost behind a bare spawn error.
+
+`seccomp_keyctl_probe_supplies_every_argument_without_creation` covers the probe's
+`keyctl` request, which the kernel reads four arguments of: `KEYCTL_GET_KEYRING_ID`
+(command `0`), the session keyring, a create flag of `0` that asks for no keyring
+to be created, and two unused zeros. One table, `SECCOMP_PROBE_KEYCTL_TABLE`,
+holds all five, and the test reads both the table and the call, so a call that
+passed fewer arguments than the kernel reads fails even though it compiles.
 
 ### The kernel proof
 
@@ -132,13 +143,33 @@ the same filter through `install_seccomp`, and records them again:
 | `ptrace(PTRACE_TRACEME)` | returned `0` | `EACCES` (13) |
 | `mount` | `ENOENT` (2) | `EACCES` (13) |
 | `bpf` (request `0` with a null attribute pointer) | `EINVAL` (22) | `EACCES` (13) |
-| `keyctl` (command `0`) | `ENOKEY` (126) | `EACCES` (13) |
+| `keyctl(KEYCTL_GET_KEYRING_ID, session keyring, create 0)` | a session keyring id, which differs per session | `EACCES` (13) |
 
 Every filtered answer is the deny marker, and the marker differs from the
 unfiltered answer the same probe recorded, so a host that already refuses a call
 cannot stand in for the filter. The kernel already answers `EPERM` for `bpf`
 under `unprivileged_bpf_disabled=2` and `EACCES` is never that answer, which is
-why the marker is `EACCES`.
+why the marker is `EACCES`. The `keyctl` row names the keyring and a create flag
+of `0`, because command `0` reads both: a call that passed only its command would
+leave the registers behind it to chance, and the probe could select another
+keyring or be asked to create one.
+
+The probe child allocates nothing after its fork, and the report proves it. The
+test binary counts the probe child's own allocations and the child writes the
+count with its report, which is `0` on every kernel-proof child; a child that
+allocated reports a count the parser reads and the probe refuses with its own
+reason. A child also closes the three standard streams it inherits before it does
+anything else, so a child this process ever leaves behind cannot hold the
+harness's own pipes open.
+
+The reaping test `linux_seccomp_probe_reaps_failures_and_repeated_journeys` starts
+six children: one that installs a refusing filter, one that reports nothing, one
+that traces itself and stops, one that writes a complete report and never exits,
+one that allocates after its fork, and the kernel proof. A stopped child is
+killed and reaped like a timed-out one, because `PTRACE_TRACEME` makes a child's
+stops reportable without `WUNTRACED` and a stopped child is still alive. The reap
+is asserted on every result before any arm can return, and the whole test is
+bounded well inside eight deadlines.
 
 Namespaces, Landlock, capability dropping and every file row of the contract stay
 unbuilt on Linux, and a seccomp filter reads syscall numbers and not paths, so no
@@ -149,23 +180,51 @@ the host rule and starts the provider under the filter; on any other OS the same
 seat refuses the start by name instead of starting the provider unconfined.
 `standin_host_refusal_decides_each_policy` holds both.
 
-The two kernel plants behind that proof, each naming exactly one test and each
-re-run on the host above with its red output quoted:
+Every Linux-only plant below names exactly one test, and each was re-run on the
+host above with its red output quoted. None is registered in `falsifiers.json`:
+the runner runs on the Mac, where these `#[cfg(target_os = "linux")]` tests do not
+run, so none can print a CAUGHT line there. Two Mac-runnable rules beside them are
+registered instead: WP166's argument rule in
+`seccomp_keyctl_probe_supplies_every_argument_without_creation` and WP167's
+missing-record reason in `seccomp_launch_record_refuses_missing_or_unknown_report`.
 
-- WP166 skips only the launcher's `pre_exec` install and leaves the self-filtering
-  probe intact, so the launched provider reports `Seccomp: 0` and
-  `linux_wallet_journey_runs_under_the_seccomp_allow_list` fails with
-  `left: 0` `right: 2`.
-- WP167 writes the named outside sibling in `status`'s ok arm, so the journey
+- WP168 suppresses the `NoNewPrivileges` install failure, so
+  `linux_seccomp_launch_refuses_each_failed_install` fails with
+  `wallet-provider start is refused: seccomp install refused: PR_SET_NO_NEW_PRIVS
+  failed with errno 1 must refuse the start`.
+- WP169 suppresses the `Filter` install failure, so the same test fails with
+  `wallet-provider start is refused: seccomp install refused: the filter install
+  failed with errno 22 must refuse the start`.
+- WP170 substitutes `PROVIDER_BINARY` for the given program, so
+  `linux_seccomp_launcher_runs_the_requested_program` fails with
+  `left: "/home/spark1/t148/capsules/wallet-provider/target/debug/wallet-provider"`,
+  `right: "/tmp/.tmpjY5EWl/requested-program"`.
+- WP171 reads a stopped child as an end, so
+  `linux_seccomp_probe_reaps_failures_and_repeated_journeys` fails with
+  `a stopped child must be reported as stopped and reaped: seccomp probe refused:
+  child exit status: 19 wrote no complete report within 10s`.
+- WP172 omits the kill and reap for a timed-out probe, so the same test fails with
+  `the probe child must already be reaped, and a second wait answered 0`.
+- WP173 kills a timed-out probe without reaping it, so the same test fails with
+  the same reaped assertion.
+- WP174 omits the whole wait, so the same test fails with the same reaped
+  assertion.
+- WP175 collects the filtered answers into a `Vec` after the fork, so the same
+  test fails with `the probe child allocated 1 times after its fork, where only
+  async-signal-safe calls are available`.
+- WP176 skips only the launcher's `pre_exec` install and leaves the self-filtering
+  probe intact, so `linux_wallet_journey_runs_under_the_seccomp_allow_list` fails
+  with `the launched provider must carry SECCOMP_MODE_FILTER in its own /proc
+  status`, `left: 0`, `right: 2`.
+- WP177 writes the named outside sibling in `status`'s ok arm, so the journey
   finds `ElastOS/SystemServices/seccomp-outside-write` present and fails with
-  `the named sibling outside STORAGE_ROOT must stay absent after the run`.
-  That plant shows the fixture can fail; a seccomp filter does not stop that
-  write, so the assertion is path evidence for the run and not a Linux file
-  boundary.
+  `the named sibling outside STORAGE_ROOT must stay absent after the run`. That
+  plant shows the fixture can fail; a seccomp filter does not stop that write, so
+  the assertion is path evidence for the run and not a Linux file boundary.
 
-Both are absent from `falsifiers.json`: the runner runs on the Mac, where these
-`#[cfg(target_os = "linux")]` tests do not run, so neither can print a CAUGHT
-line there.
+WP166 and WP167 are CAUGHT on the Mac, in
+`seccomp_keyctl_probe_supplies_every_argument_without_creation` and
+`seccomp_launch_record_refuses_missing_or_unknown_report`.
 
 ## The frame
 

@@ -38,7 +38,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::LazyLock;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -80,6 +80,51 @@ const CHILD_EXIT_DEADLINE: Duration = Duration::from_secs(10);
 const CHILD_EXIT_POLL: Duration = Duration::from_millis(20);
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+
+/// The heap allocations a probe child makes after its fork. A forked child may
+/// rely only on async-signal-safe calls, and the allocator is not one of them:
+/// another thread of the parent can hold its lock at the moment of the fork, so
+/// an allocation in the child can block for ever. The child counts its own
+/// allocations and refuses its own report when the count is not zero.
+///
+/// The child is a fork of this process and holds only the calling thread, so
+/// this flag in the child's own copy is the child's alone and the parent's
+/// threads, which keep running in the parent's copy, cannot set it.
+static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+static COUNT_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
+
+/// The test binary's allocator, which counts the probe child's allocations and
+/// changes nothing else.
+struct CountingAllocator;
+
+unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        self.count_one();
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::System.dealloc(pointer, layout) }
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        self.count_one();
+        unsafe { std::alloc::System.realloc(pointer, layout, size) }
+    }
+}
+
+impl CountingAllocator {
+    /// Counts this allocation when the calling process is a counted probe
+    /// child.
+    fn count_one(&self) {
+        if COUNT_ALLOCATIONS.load(Ordering::Relaxed) {
+            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 /// Whether a sandbox test runs on this host.
 ///
@@ -800,17 +845,16 @@ impl ConfinedProvider {
         reader
             .read_to_end(&mut record)
             .map_err(|err| format!("{provider_name} start is refused: {err}"))?;
-        if record.is_empty() && spawned.is_err() {
-            // The child failed before its install could report, for example a
-            // missing program or a refused fork: that is the spawn's own
-            // reason and not a record problem.
-            return spawned;
-        }
-        let answers = match decode_seccomp_launch_record(&record) {
-            Ok(SeccompLaunchRecord::Installed(answers)) => answers,
-            Ok(SeccompLaunchRecord::Refused(failure)) => {
-                return Err(format!("{provider_name} start is refused: {failure}"))
-            }
+        // What the child did instead of reporting: it did not start, with that
+        // reason, or it started and its own report never arrived. Either way the
+        // record decides the first half of the refusal, so a reporting failure
+        // keeps the install report's own reason (P11).
+        let child = match &spawned {
+            Err(failure) => failure.as_str(),
+            Ok(_) => "the child started and its install report arrived incomplete",
+        };
+        let answers = match seccomp_launch_answers_or_refusal(&record, child) {
+            Ok(answers) => answers,
             Err(refusal) => return Err(format!("{provider_name} start is refused: {refusal}")),
         };
         let mut provider = spawned?;
@@ -6677,24 +6721,36 @@ impl std::fmt::Display for SeccompLaunchWriteFailure {
 /// table row, so the default decision is the only answer they receive.
 #[cfg(target_os = "linux")]
 const LAUNCH_ESSENTIALS: &[(&str, &str)] = &[
-    ("close", "close(3) in the loader, refused before the first mapping"),
-    ("exit_group", "exit_group(101) as the runtime aborted"),
+    (
+        "close",
+        "close(3) refused in the loader, before the first mapping",
+    ),
+    (
+        "exit_group",
+        "exit_group(0) refused as the provider ended its own run",
+    ),
     (
         "getrandom",
-        "getrandom(0xfdb7d0076700, 8, GRND_NONBLOCK) in the loader",
+        "getrandom(0xec92ac7c6700, 8, GRND_NONBLOCK) refused in the loader",
     ),
     (
         "mmap",
-        "mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) in the loader",
+        "mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) refused \
+         in the loader, and the provider then took SIGSEGV",
     ),
-    ("mprotect", "mprotect(0xfa5e165ef000, 65536, PROT_NONE) in the loader"),
+    (
+        "mprotect",
+        "mprotect(0xf2640329f000, 65536, PROT_NONE) refused in the loader",
+    ),
     (
         "ppoll",
-        "ppoll([{fd=0}, {fd=1}, {fd=2}], 3, {tv_sec=0, tv_nsec=0}, NULL, 0) while the runtime waits",
+        "ppoll([{fd=0, events=0}, {fd=1, events=0}, {fd=2, events=0}], 3, {tv_sec=0, \
+         tv_nsec=0}, NULL, 0) refused while the provider waits",
     ),
     (
         "rt_sigaction",
-        "rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[PIPE], sa_flags=SA_RESTART}, 0xfffff4896e40, 8)",
+        "rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[PIPE], sa_flags=SA_RESTART}, \
+         0xffffea09ff80, 8) refused in the loader",
     ),
 ];
 
@@ -6824,6 +6880,25 @@ fn decode_seccomp_launch_record(record: &[u8]) -> Result<SeccompLaunchRecord, St
     }
 }
 
+/// The one place a launched child's install report becomes the launcher's
+/// answer: the marker's two answers when the filter is installed, that step's
+/// own reason when the install refused, and, for a record that is missing,
+/// short, long or names an unknown step, the record reader's reason together
+/// with what the child did instead.
+///
+/// `child` describes the launched child: it did not start, with the reason the
+/// spawn gave, or it started and reported nothing. A child whose own write
+/// failed or that never ran leaves no record, so without this the caller would
+/// receive a bare spawn error and lose the reason the install report carries.
+/// The reader reads bytes and makes no kernel call, so every OS can hold it.
+fn seccomp_launch_answers_or_refusal(record: &[u8], child: &str) -> Result<[i64; 2], String> {
+    match decode_seccomp_launch_record(record) {
+        Ok(SeccompLaunchRecord::Installed(answers)) => Ok(answers),
+        Ok(SeccompLaunchRecord::Refused(failure)) => Err(failure.to_string()),
+        Err(refusal) => Err(format!("{refusal}; {child}")),
+    }
+}
+
 /// What one marker call answers in this process right now: the errno it failed
 /// with, or the value it returned.
 #[cfg(target_os = "linux")]
@@ -6902,9 +6977,109 @@ fn seccomp_launch_marker_answer() -> i64 {
 #[cfg(target_os = "linux")]
 const SECCOMP_PROBE_CALLS: &[&str] = &["ptrace", "mount", "bpf", "keyctl"];
 
+/// The keyring `keyctl` names in the probe: the session keyring. It is a real
+/// keyring this process is expected to hold, so without the filter the call
+/// answers a usable id and the filter's refusal is the only reason it stops.
+const SECCOMP_PROBE_KEYRING: libc::c_long = -3;
+
+/// The `keyctl` request the probe makes: `KEYCTL_GET_KEYRING_ID`, command `0`.
+const SECCOMP_PROBE_KEYCTL_GET_KEYRING_ID: libc::c_long = 0;
+
+/// How many registers `keyctl` reads for the probe's request: the command, the
+/// keyring, the create flag and two unused arguments.
+const SECCOMP_PROBE_KEYCTL_ARGUMENTS: usize = 5;
+
+/// Every argument the probe passes to one call, so the call's whole argument
+/// list is visible in one place and no register is left to chance.
+///
+/// `keyctl`'s command decides how many of its other arguments the kernel reads,
+/// and command `0` reads a special keyring id that may hold `-1` to `-9`. A
+/// call that passed a shorter argument list would leave the registers after it
+/// unspecified, so the kernel could select another keyring or be asked to
+/// create one. This table names all of them: the command, the keyring, and a
+/// create flag of `0` that refuses creation, followed by two unused zeros. It
+/// carries no kernel call, so every OS can read it.
+const SECCOMP_PROBE_KEYCTL_TABLE: [libc::c_long; SECCOMP_PROBE_KEYCTL_ARGUMENTS] = [
+    SECCOMP_PROBE_KEYCTL_GET_KEYRING_ID,
+    SECCOMP_PROBE_KEYRING,
+    0,
+    0,
+    0,
+];
+
+/// The `keyctl` probe passes its complete argument list: command `0`, a named
+/// keyring, and a create flag of `0` that refuses creation, with two unused
+/// zeros behind it. The command's own reference makes all of these arguments
+/// part of the request, and a short argument list would leave the kernel
+/// reading registers this probe never set, so it could select another keyring
+/// or be asked to create one.
+///
+/// The test reads the table and the probe's call, so a call that passed fewer
+/// arguments than the command reads fails here even though the call compiles.
+/// It makes no kernel call and starts no process, so it runs on every OS.
+///
+/// Falsifier: WP166 passes only the command to `keyctl`, so the argument table
+/// names one argument where the command reads three and the call's own list
+/// does not name the keyring or the create flag.
+#[test]
+fn seccomp_keyctl_probe_supplies_every_argument_without_creation() {
+    assert_eq!(
+        SECCOMP_PROBE_KEYCTL_TABLE[0], SECCOMP_PROBE_KEYCTL_GET_KEYRING_ID,
+        "the probe must make the KEYCTL_GET_KEYRING_ID request"
+    );
+    assert_eq!(
+        SECCOMP_PROBE_KEYCTL_TABLE[1], SECCOMP_PROBE_KEYRING,
+        "the probe must name the keyring it reads, and a special id is a real id"
+    );
+    assert!(
+        SECCOMP_PROBE_KEYCTL_TABLE[1] < 0 && SECCOMP_PROBE_KEYCTL_TABLE[1] >= -9,
+        "the keyring must be a special keyring id, which is -1 to -9: {}",
+        SECCOMP_PROBE_KEYCTL_TABLE[1]
+    );
+    assert_eq!(
+        SECCOMP_PROBE_KEYCTL_TABLE[2], 0,
+        "the create flag must be 0, because a probe asks for no keyring to be created"
+    );
+    assert_eq!(
+        SECCOMP_PROBE_KEYCTL_TABLE[3..],
+        [0; SECCOMP_PROBE_KEYCTL_ARGUMENTS - 3],
+        "the arguments after the create flag are unused and must be named as zeros"
+    );
+
+    // The call's own argument list, read from the source that makes it, so a
+    // probe that passed a shorter list cannot pass on a table it never uses.
+    let source = fs::read_to_string(Path::new("tests/confine.rs"))
+        .expect("this test's own source must be readable");
+    let signature = "fn seccomp_probe_answers(call: &str) -> SeccompAnswer {";
+    let call = source
+        .rsplit_once(signature)
+        .map(|(_, call)| call)
+        .expect("the probe must hold its one call reader");
+    let keyctl = call
+        .split("\"keyctl\" =>")
+        .nth(1)
+        .expect("the probe must hold its keyctl arm");
+    let keyctl = keyctl
+        .split("other =>")
+        .next()
+        .expect("the keyctl arm must end before the catch-all");
+    assert!(
+        keyctl.contains("libc::syscall(libc::SYS_keyctl, command, keyring, create, first, second)"),
+        "the keyctl call must pass the table's five arguments and no register it did not set: \
+         {keyctl}"
+    );
+    assert!(
+        keyctl.contains(
+            "let [command, keyring, create, first, second] = SECCOMP_PROBE_KEYCTL_TABLE;"
+        ),
+        "the keyctl call must read its whole argument list from the one table: {keyctl}"
+    );
+}
+
 /// What `call` answers in this process right now. The probe child calls this
 /// once before the filter and once after, through the same function, so the two
-/// records cannot differ in what they measure.
+/// records cannot differ in what they measure. Each arm passes its complete
+/// argument list: no call relies on a register this function did not set.
 #[cfg(target_os = "linux")]
 fn seccomp_probe_answers(call: &str) -> SeccompAnswer {
     match call {
@@ -6928,9 +7103,10 @@ fn seccomp_probe_answers(call: &str) -> SeccompAnswer {
                 0 as libc::c_long,
             )
         }),
-        "keyctl" => {
-            seccomp_answer(|| unsafe { libc::syscall(libc::SYS_keyctl, 0 as libc::c_long) })
-        }
+        "keyctl" => seccomp_answer(|| unsafe {
+            let [command, keyring, create, first, second] = SECCOMP_PROBE_KEYCTL_TABLE;
+            libc::syscall(libc::SYS_keyctl, command, keyring, create, first, second)
+        }),
         other => panic!("the probe names no call {other}"),
     }
 }
@@ -7464,13 +7640,22 @@ fn seccomp_launch_refuses_each_reporting_failure() {
 /// words and never a bare spawn error, and a complete installed record carries
 /// the two marker answers the journey compares.
 ///
+/// The launcher's own answer is read through `seccomp_launch_answers_or_refusal`,
+/// the one place the record becomes a launch result, so a child that never wrote
+/// a record keeps the record's reason and adds what it did instead. A failed
+/// write, a zero-byte write, a child that did not start and a child that started
+/// and reported nothing each give their own refusal, and no case is the bare
+/// spawn error finding 4 named.
+///
 /// The test reads the one pure record reader and parses no bytes a kernel wrote,
 /// so it runs on every OS.
 ///
 /// Falsifier: WP163 accepts any record length, so a short record decodes as an
 /// installed one and the missing-length refusal does not come. WP164 decodes an
 /// unknown first field as an installed record, so the unknown-step refusal does
-/// not come.
+/// not come. WP167 bypasses the reader when the child also failed to start, so
+/// the missing-report case answers the spawn's reason alone and the test fails
+/// on it.
 #[test]
 fn seccomp_launch_record_refuses_missing_or_unknown_report() {
     let missing = decode_seccomp_launch_record(&[]).expect_err("a missing record must be refused");
@@ -7483,7 +7668,7 @@ fn seccomp_launch_record_refuses_missing_or_unknown_report() {
         "a missing record must name its own reason"
     );
 
-    let mut reasons: Vec<String> = vec![missing];
+    let mut reasons: Vec<String> = vec![missing.clone()];
     for length in [SECCOMP_LAUNCH_RECORD_LEN - 8, SECCOMP_LAUNCH_RECORD_LEN + 8] {
         let record = vec![0u8; length];
         let refusal = decode_seccomp_launch_record(&record)
@@ -7515,6 +7700,68 @@ fn seccomp_launch_record_refuses_missing_or_unknown_report() {
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
         "each record case must give its own reason: {reasons:?}"
+    );
+
+    // The launcher's own answer, one case per child outcome. Each keeps the
+    // record's reason and names what the child did instead, and no case is the
+    // bare spawn error.
+    let mut launch_reasons: Vec<String> = Vec::new();
+    for (record, child) in [
+        (
+            Vec::new(),
+            "the test child must start: No such file or directory (os error 2)",
+        ),
+        (
+            Vec::new(),
+            "the child started and its install report arrived incomplete",
+        ),
+        (
+            vec![0u8; SECCOMP_LAUNCH_RECORD_LEN - 8],
+            "the child started and its install report arrived incomplete",
+        ),
+        (
+            unknown.to_vec(),
+            "the child started and its install report arrived incomplete",
+        ),
+    ] {
+        let refusal = seccomp_launch_answers_or_refusal(&record, child)
+            .expect_err("a record this child did not complete must be refused");
+        assert!(
+            refusal.starts_with("seccomp install report refused: "),
+            "the launcher's refusal must carry the record's reason: {refusal}"
+        );
+        assert!(
+            refusal.contains(child),
+            "the launcher's refusal must say what the child did instead: {refusal}"
+        );
+        launch_reasons.push(refusal);
+    }
+    let missing_report = &launch_reasons[0];
+    assert!(
+        missing_report.contains("reported 0 bytes"),
+        "a child that never reported must answer the missing-report reason, not the spawn's \
+         alone: {missing_report}"
+    );
+    assert_eq!(
+        launch_reasons.len(),
+        launch_reasons
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        "each child outcome must give its own reason: {launch_reasons:?}"
+    );
+    assert_eq!(
+        seccomp_launch_answers_or_refusal(
+            &seccomp_launch_record(
+                SECCOMP_LAUNCH_INSTALLED,
+                -i64::from(libc::EINVAL),
+                -i64::from(SECCOMP_DENY_ERRNO),
+            ),
+            "the child started and reported an installed filter"
+        )
+        .expect("a complete installed record must answer the launcher's two answers"),
+        [-i64::from(libc::EINVAL), -i64::from(SECCOMP_DENY_ERRNO)],
+        "the launcher must carry the marker's two answers"
     );
 
     let installed = decode_seccomp_launch_record(&seccomp_launch_record(
@@ -7568,10 +7815,14 @@ fn seccomp_launch_record(step: i64, first: i64, second: i64) -> [u8; SECCOMP_LAU
 /// inferred. On another OS the launcher has no filter at all, and the refusal
 /// there names the provider and says the filter is a linux policy.
 ///
-/// Falsifier: WP165 reports one fixed step for every install failure, so the
-/// filter case names `no_new_privs` and the test fails on it. WP166 starts the
-/// program when the install refused, so the copied program's process exists and
-/// the test fails on it.
+/// Falsifier: WP168 suppresses the `NoNewPrivileges` install failure, so the
+/// filter case names `no_new_privs` and the test fails on it. WP169 suppresses
+/// the `Filter` install failure, so that case never refuses.
+///
+/// All three plants reach this test's Linux arm only, which is not compiled on
+/// the Mac, so none of them is registered in `falsifiers.json`: they are
+/// recorded in `CONFINEMENT-LINUX.md` and re-run on the Linux host with their
+/// red output quoted there.
 #[test]
 fn linux_seccomp_launch_refuses_each_failed_install() {
     let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
@@ -7652,8 +7903,10 @@ fn linux_seccomp_launch_refuses_each_failed_install() {
 /// provider binary is the program under test because it is the one the filter's
 /// measured launch set was measured against.
 ///
-/// Falsifier: WP167 substitutes `PROVIDER_BINARY` for the given program, so the
-/// child's `/proc/<pid>/exe` names the original and the test fails on it.
+/// Falsifier: WP170 substitutes `PROVIDER_BINARY` for the given program, so the
+/// child's `/proc/<pid>/exe` names the original and the test fails on it. It
+/// reaches a Linux-only arm, so it is not registered in `falsifiers.json` and
+/// `CONFINEMENT-LINUX.md` records it with the red run on the Linux host.
 #[test]
 fn linux_seccomp_launcher_runs_the_requested_program() {
     let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
@@ -7731,14 +7984,23 @@ const SECCOMP_PROBE_MARKER: &str = "seccomp-probe:";
 /// The prefix the probe child's own refusal starts with.
 #[cfg(target_os = "linux")]
 const SECCOMP_PROBE_REFUSED: &str = "seccomp-probe-refused:";
+/// The prefix the probe child writes its own allocation count under.
+#[cfg(target_os = "linux")]
+const SECCOMP_PROBE_ALLOCATIONS: &str = "seccomp-probe-allocations:";
 /// `SECCOMP_MODE_FILTER`, the mode `/proc/<pid>/status` reports for a process
 /// that carries a seccomp filter.
 #[cfg(target_os = "linux")]
 const SECCOMP_MODE_FILTER: u32 = 2;
 
-/// The probe child's report, one `(call, before, after)` per refused call.
+/// The probe child's report: one `(call, before, after)` per refused call, and
+/// the number of times the child allocated after its fork.
 #[cfg(target_os = "linux")]
-type SeccompProbeReport = Vec<(&'static str, SeccompAnswer, SeccompAnswer)>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeccompProbeReport {
+    records: Vec<(&'static str, SeccompAnswer, SeccompAnswer)>,
+    /// The child's own allocation count after the fork, which must be zero.
+    allocations: usize,
+}
 
 /// What the probe child is asked to do; a plain value, because it crosses a fork
 /// into a child that allocates nothing.
@@ -7753,6 +8015,11 @@ enum SeccompProbeRun {
     /// Write a complete report and never exit, so only the bounded wait ends
     /// the run.
     WithoutExit,
+    /// Trace itself and stop, so the wait sees a stopped child that is still
+    /// alive: `PTRACE_TRACEME` makes its stops reportable without `WUNTRACED`.
+    Stopped,
+    /// Allocate after the fork, so the allocation guard has something to count.
+    Allocating,
 }
 
 /// The probe child's own body: record the four calls, install the filter through
@@ -7762,8 +8029,12 @@ enum SeccompProbeRun {
 /// It runs in a forked child before any exec, so its filter reaches only that
 /// child and the harness above it stays unfiltered. It allocates nothing and
 /// writes with raw `write` calls, because a forked child may rely only on
-/// async-signal-safe calls. It ends with `exit_group`, because ending one thread
-/// would leave the other waiting on calls this filter refuses.
+/// async-signal-safe calls. The allocation guard counts this child's own
+/// allocations, and a child that allocated refuses its own report instead of
+/// writing it, so a `Vec` after the fork cannot pass as a fixed array. Both sets
+/// of answers live in fixed arrays of the list's own length. It ends with
+/// `exit_group`, because ending one thread would leave the other waiting on
+/// calls this filter refuses.
 #[cfg(target_os = "linux")]
 fn run_seccomp_probe_child(
     report: std::os::fd::RawFd,
@@ -7771,8 +8042,26 @@ fn run_seccomp_probe_child(
     allow: &SeccompAllowList,
     prepared_report: Option<&[u8]>,
 ) -> ! {
+    // This child inherits the harness's own standard streams, and a child this
+    // process left behind would hold them open, so the test runner would wait
+    // for an end of file that never comes. It writes its report to the pipe it
+    // was given, so it closes the three it does not use before it does anything
+    // else. A leaked child then costs nothing beyond itself.
+    detach_child_stdio(report);
     if run == SeccompProbeRun::WithoutReport {
         unsafe { libc::_exit(0) }
+    }
+    if run == SeccompProbeRun::Stopped {
+        // A traced child's stops are reportable without `WUNTRACED`, so a wait
+        // that read this stop as an end would leave the child alive. Raising
+        // SIGSTOP is the same observable state as an external stop.
+        unsafe {
+            libc::ptrace(libc::PTRACE_TRACEME, 0, 0, 0);
+            libc::raise(libc::SIGSTOP);
+        }
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+        }
     }
     if run == SeccompProbeRun::WithoutExit {
         write_all(
@@ -7782,6 +8071,16 @@ fn run_seccomp_probe_child(
         loop {
             std::thread::sleep(Duration::from_secs(60));
         }
+    }
+
+    // From here on this child counts its own allocations, so the report can
+    // say whether anything after the fork took the allocator.
+    begin_counting_child_allocations();
+    if run == SeccompProbeRun::Allocating {
+        // The guard's own fixture: one allocation after the fork, so the count
+        // is not zero and the test can see the guard fire.
+        let allocated: Vec<u8> = Vec::with_capacity(1);
+        let _ = allocated.capacity();
     }
 
     let mut before = [SeccompAnswer::Returned(0); SECCOMP_PROBE_CALLS.len()];
@@ -7811,10 +8110,10 @@ fn run_seccomp_probe_child(
         write_all(report, b"\n");
         unsafe { libc::_exit(70) }
     }
-    let after: Vec<SeccompAnswer> = SECCOMP_PROBE_CALLS
-        .iter()
-        .map(|call| seccomp_probe_answers(call))
-        .collect();
+    let mut after = [SeccompAnswer::Returned(0); SECCOMP_PROBE_CALLS.len()];
+    for (slot, call) in after.iter_mut().zip(SECCOMP_PROBE_CALLS) {
+        *slot = seccomp_probe_answers(call);
+    }
     let mut buffer = [0u8; 512];
     for ((call, before), after) in SECCOMP_PROBE_CALLS.iter().zip(before).zip(after) {
         let mut written = 0usize;
@@ -7828,10 +8127,56 @@ fn run_seccomp_probe_child(
         written += copy_bytes(&mut buffer[written..], b"\n");
         write_all(report, &buffer[..written]);
     }
+    // The guard: this child writes how many times it allocated after the fork,
+    // and the test that decides the rule requires the count to be zero. The
+    // line is written whatever the count, so a child that allocated still
+    // reports and the count itself is the evidence.
+    write_all(report, SECCOMP_PROBE_ALLOCATIONS.as_bytes());
+    write_number(report, child_allocations() as i64);
+    write_all(report, b"\n");
     unsafe {
         libc::syscall(libc::SYS_exit_group, 0 as libc::c_long);
     }
     unreachable!("exit_group must not return")
+}
+
+/// Points this probe child's standard streams at `/dev/null`, so a child this
+/// process leaves behind cannot hold the harness's own pipes open. The child
+/// writes its report to `report`, so a stream whose number is that descriptor is
+/// left alone: the report path is never closed here. It uses the raw calls,
+/// because a forked child may rely only on async-signal-safe ones.
+#[cfg(target_os = "linux")]
+fn detach_child_stdio(report: std::os::fd::RawFd) {
+    unsafe {
+        let dev_null = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+        if dev_null < 0 {
+            return;
+        }
+        for stream in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+            if stream == report || stream == dev_null {
+                continue;
+            }
+            libc::dup2(dev_null, stream);
+        }
+        if dev_null > libc::STDERR_FILENO {
+            libc::close(dev_null);
+        }
+    }
+}
+
+/// Makes this probe child count its own allocations. It runs in the forked
+/// child, after the fork, so the flag it sets is the child's own copy: the
+/// parent's threads keep running in the parent's copy and set nothing here.
+#[cfg(target_os = "linux")]
+fn begin_counting_child_allocations() {
+    ALLOCATIONS.store(0, Ordering::SeqCst);
+    COUNT_ALLOCATIONS.store(true, Ordering::SeqCst);
+}
+
+/// How many allocations this probe child made since it started counting.
+#[cfg(target_os = "linux")]
+fn child_allocations() -> usize {
+    ALLOCATIONS.load(Ordering::SeqCst)
 }
 
 /// Writes `bytes` to `fd` with the raw `write` call the filter admits.
@@ -7926,12 +8271,20 @@ fn copy_answer(into: &mut [u8], answer: SeccompAnswer) -> usize {
 }
 
 /// How a probe child ended.
+///
+/// A stop is its own end, because a stopped child is alive: `PTRACE_TRACEME`
+/// makes a child's stops reportable without `WUNTRACED`, so a wait that read a
+/// stop as an end would leave the child and its pipe behind (P11).
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProbeExit {
     Code(i32),
     Signal(i32),
+    /// The child stopped with this signal; it was killed and reaped.
+    Stopped(i32),
     TimedOut,
+    /// The child could not be waited on any more, with this errno.
+    Gone(i32),
 }
 
 #[cfg(target_os = "linux")]
@@ -7941,6 +8294,11 @@ impl std::fmt::Display for ProbeExit {
             Self::Code(0) => write!(f, "exit status: 0"),
             Self::Code(code) => write!(f, "exit status: {code}"),
             Self::Signal(signal) => write!(f, "signal: {signal}"),
+            Self::Stopped(signal) => write!(
+                f,
+                "stopped by signal: {signal}, so it was killed and reaped"
+            ),
+            Self::Gone(errno) => write!(f, "no longer waitable, errno {errno}"),
             Self::TimedOut => write!(
                 f,
                 "no exit within {}s, so it was killed",
@@ -7954,6 +8312,10 @@ impl std::fmt::Display for ProbeExit {
 /// fork of this process, so its filter reaches only itself. The read is bounded
 /// and the child is reaped on every result, including a timeout, so a repeated
 /// journey leaves no probe behind.
+///
+/// The reap is asserted before the report is read, so no early return can skip
+/// it: a wait that ended without reaping the child fails here whatever the child
+/// wrote.
 #[cfg(target_os = "linux")]
 fn seccomp_denied_call_probe(
     allow: &SeccompAllowList,
@@ -7968,10 +8330,11 @@ fn seccomp_denied_call_probe(
         ));
     }
     // The lifecycle fixture's report is built here, where an allocator is
-    // allowed, and the child only writes it.
+    // allowed, and the child only writes it. Counted children allocate nothing,
+    // so that report says zero.
     let prepared = match run {
-        SeccompProbeRun::WithoutExit => Some(probe_report_text(
-            &SECCOMP_PROBE_CALLS
+        SeccompProbeRun::WithoutExit => Some(probe_report_text(&SeccompProbeReport {
+            records: SECCOMP_PROBE_CALLS
                 .iter()
                 .map(|call| {
                     (
@@ -7980,8 +8343,9 @@ fn seccomp_denied_call_probe(
                         SeccompAnswer::Errno(SECCOMP_DENY_ERRNO),
                     )
                 })
-                .collect::<SeccompProbeReport>(),
-        )),
+                .collect(),
+            allocations: 0,
+        })),
         _ => None,
     };
     let pid = unsafe { libc::fork() };
@@ -8009,25 +8373,30 @@ fn seccomp_denied_call_probe(
         let _ = sender.send(bytes);
     });
     let exit = wait_for_probe_exit(pid);
-    let bytes = receiver
-        .recv_timeout(CHILD_EXIT_DEADLINE)
-        .unwrap_or_default();
-    let _ = drainer.join();
+    // The wait must have reaped the child on every result: a second wait finds
+    // no child, so a repeated journey leaves no probe running. This is asserted
+    // here, before any arm can return, so no early return skips it.
+    assert_probe_reaped(pid);
+    // The child is reaped before this read, so its end of the pipe is closed
+    // and the drainer reaches end of file. The deadline still bounds the wait,
+    // because reaping the child is the only thing that closes its write end and
+    // a report that never arrives must not hang the test.
+    let bytes = match receiver.recv_timeout(CHILD_EXIT_DEADLINE) {
+        Ok(bytes) => {
+            let _ = drainer.join();
+            bytes
+        }
+        Err(_) => {
+            // The drainer still holds the read end, so this join is not
+            // reached: the report never arrived and the thread is abandoned
+            // with the descriptor the wait above already closed.
+            return Err(format!(
+                "seccomp probe refused: child {exit} wrote no complete report within {}s",
+                CHILD_EXIT_DEADLINE.as_secs()
+            ));
+        }
+    };
     let text = String::from_utf8_lossy(&bytes).into_owned();
-
-    // This function owns the child, and its wait must have reaped it: a second
-    // wait finds no child, so a repeated journey leaves no probe running.
-    let mut status = 0;
-    assert_eq!(
-        unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
-        -1,
-        "the probe child must already be reaped"
-    );
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::ECHILD),
-        "the probe child must already be reaped"
-    );
 
     match exit {
         ProbeExit::Code(code) if code == 0 => {}
@@ -8054,39 +8423,128 @@ fn seccomp_denied_call_probe(
             ))
         }
     }
-    parse_seccomp_probe_report(&text).map_err(|refusal| format!("seccomp probe refused: {refusal}"))
+    let report = parse_seccomp_probe_report(&text)
+        .map_err(|refusal| format!("seccomp probe refused: {refusal}"))?;
+    // The guard's one decision: a child that allocated after its fork may have
+    // blocked on an allocator lock another thread held at the fork, so its
+    // report is refused with its own reason. A child that allocated nothing
+    // reports zero and is accepted.
+    if report.allocations != 0 {
+        return Err(format!(
+            "seccomp probe refused: the probe child allocated {} times after its fork, where \
+             only async-signal-safe calls are available",
+            report.allocations
+        ));
+    }
+    Ok(report)
 }
 
-/// Waits up to `CHILD_EXIT_DEADLINE` for `pid`, kills it at the deadline, and
-/// reaps it either way. It is the one wait for a probe child.
+/// Asserts that this process no longer holds `pid`: a second wait answers
+/// `ECHILD`, so the child was reaped. It is called on every probe result before
+/// any arm can return, so no path can skip the reaping rule.
+#[cfg(target_os = "linux")]
+fn assert_probe_reaped(pid: libc::pid_t) {
+    let mut status = 0;
+    let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    let errno = std::io::Error::last_os_error().raw_os_error();
+    assert_eq!(
+        waited, -1,
+        "the probe child must already be reaped, and a second wait answered {waited}"
+    );
+    assert_eq!(
+        errno,
+        Some(libc::ECHILD),
+        "the probe child must already be reaped with ECHILD, and the wait answered {errno:?}"
+    );
+}
+
+/// Waits up to `CHILD_EXIT_DEADLINE` for `pid` to end, killing and reaping it
+/// on every other result. It is the one wait for a probe child.
+///
+/// A stop is not an end: `PTRACE_TRACEME` makes a child's stops reportable
+/// without `WUNTRACED`, so a stopped child is killed with `SIGKILL` and reaped
+/// before this returns, exactly as a timed-out child is. An `EINTR` from
+/// `waitpid` retries the same wait instead of ending it, and a child the kernel
+/// no longer holds is `Gone` with its errno. Every arm leaves no child behind,
+/// so the caller can join its drainer and a repeated journey reaps everything.
 #[cfg(target_os = "linux")]
 fn wait_for_probe_exit(pid: libc::pid_t) -> ProbeExit {
     let started = Instant::now();
-    let mut status = 0;
     loop {
+        let mut status = 0;
         let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        let errno = if waited < 0 {
+            std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::ECHILD)
+        } else {
+            0
+        };
         if waited == pid {
             if libc::WIFEXITED(status) {
                 return ProbeExit::Code(libc::WEXITSTATUS(status));
             }
-            return ProbeExit::Signal(libc::WTERMSIG(status));
-        }
-        assert_ne!(waited, -1, "the probe child must be waitable once");
-        if started.elapsed() >= CHILD_EXIT_DEADLINE {
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-                libc::waitpid(pid, &mut status, 0);
+            if libc::WIFSIGNALED(status) {
+                return ProbeExit::Signal(libc::WTERMSIG(status));
             }
+            if libc::WIFSTOPPED(status) {
+                // The child is alive and stopped, and this wait will never see
+                // its end: kill and reap it here rather than return a result a
+                // reader could read as an end.
+                return ProbeExit::Stopped(kill_and_reap(pid, libc::WSTOPSIG(status)));
+            }
+            return ProbeExit::Code(libc::WEXITSTATUS(status));
+        }
+        if waited < 0 {
+            if errno == libc::EINTR {
+                continue;
+            }
+            // `ECHILD` is the one errno that says this process holds no such
+            // child any more, so nothing is left to reap and no wait can help.
+            return ProbeExit::Gone(errno);
+        }
+        if started.elapsed() >= CHILD_EXIT_DEADLINE {
+            kill_and_reap(pid, 0);
             return ProbeExit::TimedOut;
         }
         std::thread::sleep(CHILD_EXIT_POLL);
     }
 }
 
-/// The report text for `records`, built with an allocator before a fork.
+/// Kills `pid` with `SIGKILL` and reaps it, returning `stop_signal` so its
+/// caller can report a stop. A child the kernel no longer holds is already
+/// reaped, so this returns without waiting. It is the one kill-and-reap for a
+/// probe child.
 #[cfg(target_os = "linux")]
-fn probe_report_text(records: &SeccompProbeReport) -> String {
-    records
+fn kill_and_reap(pid: libc::pid_t, stop_signal: i32) -> i32 {
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+    loop {
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if waited == pid {
+            break;
+        }
+        let errno = std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::ECHILD);
+        if errno == libc::EINTR {
+            continue;
+        }
+        // Any other errno means the kernel holds no child for this pid, so it
+        // has been reaped already and the wait cannot succeed.
+        break;
+    }
+    stop_signal
+}
+
+/// The report text for `report`, built with an allocator before a fork. It is
+/// the same text the child writes, so the parser reads one shape from both.
+#[cfg(target_os = "linux")]
+fn probe_report_text(report: &SeccompProbeReport) -> String {
+    let mut text: String = report
+        .records
         .iter()
         .map(|(call, before, after)| {
             format!(
@@ -8095,15 +8553,21 @@ fn probe_report_text(records: &SeccompProbeReport) -> String {
                 after.text()
             )
         })
-        .collect()
+        .collect();
+    text.push_str(&format!(
+        "{SECCOMP_PROBE_ALLOCATIONS}{}\n",
+        report.allocations
+    ));
+    text
 }
 
 /// The four records the probe child wrote, each with its unfiltered and filtered
-/// answer. A missing or unreadable record is a refusal that names the call, so a
-/// child that stopped early cannot pass the journey.
+/// answer, and the child's own allocation count. A missing or unreadable record
+/// is a refusal that names the call, so a child that stopped early cannot pass
+/// the journey, and a missing count is its own refusal.
 #[cfg(target_os = "linux")]
 fn parse_seccomp_probe_report(text: &str) -> Result<SeccompProbeReport, String> {
-    let mut report = Vec::new();
+    let mut records = Vec::new();
     for call in SECCOMP_PROBE_CALLS {
         let marker = format!("{SECCOMP_PROBE_MARKER} {call} ");
         let line = text
@@ -8117,25 +8581,46 @@ fn parse_seccomp_probe_report(text: &str) -> Result<SeccompProbeReport, String> 
             .ok_or_else(|| format!("{call}: {before} is not an answer"))?;
         let after = SeccompAnswer::parse(after)
             .ok_or_else(|| format!("{call}: {after} is not an answer"))?;
-        report.push((*call, before, after));
+        records.push((*call, before, after));
     }
-    Ok(report)
+    let line = text
+        .lines()
+        .find(|line| line.starts_with(SECCOMP_PROBE_ALLOCATIONS))
+        .ok_or_else(|| format!("the probe recorded no allocation count: {text}"))?;
+    let allocations = line[SECCOMP_PROBE_ALLOCATIONS.len()..]
+        .trim()
+        .parse::<usize>()
+        .map_err(|err| format!("the probe's allocation count is not a number: {line}: {err}"))?;
+    Ok(SeccompProbeReport {
+        records,
+        allocations,
+    })
 }
 
 /// Every child the probe starts is reaped, a failed install is reported rather
-/// than left to hang, a child that never exits is killed at the deadline, and a
+/// than left to hang, a stopped child and a child that never exits are both
+/// killed at a bound, a child that allocated after its fork is refused, and a
 /// repeated journey answers the same as the first.
 ///
-/// The test starts four probe children: one whose own install refuses the
-/// filter step, one that writes no report, one that writes a complete report and
-/// never exits, and one that runs the kernel proof. Each must end, and the
-/// kernel proof must give the same four records twice in a row, so the second
-/// journey in the same process reaps everything the first started.
+/// The test starts six probe children: one whose own install refuses the filter
+/// step, one that writes no report, one that traces itself and stops, one that
+/// writes a complete report and never exits, one that allocates after the fork,
+/// and one that runs the kernel proof. Each must end, and the kernel proof must
+/// give the same four records twice in a row, so the second journey in the same
+/// process reaps everything the first started.
 ///
-/// Falsifier: WP168 skips the reaping assertion, so a child the harness leaves
-/// running keeps this test green when it must fail. WP169 reports the child's
-/// standard error before it reaps, so a timed-out child is left behind and the
-/// second journey's records differ.
+/// Falsifier: WP171 reads a stopped child as an end, so this test hangs on the
+/// stopped case until the harness kills it, and the stopped child is never
+/// reaped. WP172 omits the `SIGKILL` and reap for a timed-out probe, so that
+/// child is left behind. WP173 removes the reaping assertion, so a child the
+/// harness leaves running keeps the test green where it must fail. WP174 omits
+/// the `waitpid` and reap entirely, so no child is ever reaped. WP175 collects
+/// the filtered answers with a `Vec` after the fork, so the allocation guard
+/// counts one and the guard case's refusal does not come.
+///
+/// Every plant here reaches a Linux-only arm, so none of them is registered in
+/// `falsifiers.json`; `CONFINEMENT-LINUX.md` records them and quotes the red run
+/// on the Linux host.
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_seccomp_probe_reaps_failures_and_repeated_journeys() {
@@ -8145,9 +8630,13 @@ fn linux_seccomp_probe_reaps_failures_and_repeated_journeys() {
     let failed = seccomp_denied_call_probe(&allow, SeccompProbeRun::Filter)
         .expect("the filter proof must pass on this host");
     assert_eq!(
-        failed.len(),
+        failed.records.len(),
         SECCOMP_PROBE_CALLS.len(),
         "the probe must record every refused call"
+    );
+    assert_eq!(
+        failed.allocations, 0,
+        "the kernel-proof child must allocate nothing after its fork, and it allocated"
     );
 
     let empty = seccomp_denied_call_probe(&allow, SeccompProbeRun::WithoutReport)
@@ -8157,11 +8646,29 @@ fn linux_seccomp_probe_reaps_failures_and_repeated_journeys() {
         "a child that reports nothing must name the first record: {empty}"
     );
 
+    // A stopped child is alive, not ended. The wait must kill and reap it, and
+    // the report it never finished must be refused by name.
+    let stopped = seccomp_denied_call_probe(&allow, SeccompProbeRun::Stopped)
+        .expect_err("a child that stops must be killed and reaped");
+    assert!(
+        stopped.contains("stopped by signal") && stopped.contains("killed and reaped"),
+        "a stopped child must be reported as stopped and reaped: {stopped}"
+    );
+
     let held = seccomp_denied_call_probe(&allow, SeccompProbeRun::WithoutExit)
         .expect_err("a child that never exits must be killed at the deadline");
     assert!(
         held.contains("so it was killed"),
         "a child that never exits must be reported as killed: {held}"
+    );
+
+    // The guard fires on a child that allocates after its fork, so the zero the
+    // kernel proof reported above is a measurement and not a constant.
+    let allocated = seccomp_denied_call_probe(&allow, SeccompProbeRun::Allocating)
+        .expect_err("a child that allocates after its fork must be refused");
+    assert!(
+        allocated.contains("allocated") && allocated.contains("after its fork"),
+        "a child that allocates must be refused with that reason: {allocated}"
     );
 
     let first = seccomp_denied_call_probe(&allow, SeccompProbeRun::Filter)
@@ -8173,13 +8680,17 @@ fn linux_seccomp_probe_reaps_failures_and_repeated_journeys() {
         "a repeated journey must answer the same as the first"
     );
     assert_eq!(
-        first.len(),
+        first.records.len(),
         SECCOMP_PROBE_CALLS.len(),
         "the probe must record every refused call"
     );
+    assert_eq!(
+        first.allocations, 0,
+        "both kernel-proof children must allocate nothing after their forks"
+    );
     assert!(
         started.elapsed() < CHILD_EXIT_DEADLINE * 8,
-        "four bounded children must finish well inside eight deadlines, and this took {:?}",
+        "six bounded children must finish well inside eight deadlines, and this took {:?}",
         started.elapsed()
     );
 }
@@ -8421,34 +8932,37 @@ fn linux_seccomp_journey_is_not_applicable_off_linux() {
 /// The comment below is the record of where this ran: the marker errno, the
 /// host, and the call whose failure named each `LAUNCH_ESSENTIALS` entry.
 ///
-/// Falsifier: WP170 skips only the launcher's `pre_exec` install and leaves the
+/// Falsifier: WP176 skips only the launcher's `pre_exec` install and leaves the
 /// self-filtering probe intact, so the launched child reports no
-/// `SECCOMP_MODE_FILTER` and the test fails there. WP171 writes the named
+/// `SECCOMP_MODE_FILTER` and the test fails there. WP177 writes the named
 /// outside sibling, so the journey finds it present and fails. WP162 labels the
 /// journey with a Linux host off Linux and is caught by
-/// `linux_seccomp_journey_is_not_applicable_off_linux` on the Mac.
+/// `linux_seccomp_journey_is_not_applicable_off_linux` on the Mac. Both Linux
+/// plants reach a Linux-only test, so neither is registered in
+/// `falsifiers.json`; `CONFINEMENT-LINUX.md` records them with the red run.
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
     // Ran on spark1.local: aarch64, Ubuntu 24.04.4, kernel 6.17.0-1029-nvidia.
     // The deny marker is EACCES (13). Each unfiltered answer differed from it on
     // that host: ptrace(PTRACE_TRACEME) returned 0, mount answered ENOENT (2),
-    // bpf answered EINVAL (22) and keyctl answered ENOKEY (126) for the request
-    // the probe makes. EACCES is chosen because the kernel answers EPERM for a
-    // call an unprivileged process may not make, so a plain EPERM assertion
-    // would pass with no filter installed.
+    // bpf answered EINVAL (22) and keyctl(KEYCTL_GET_KEYRING_ID, session
+    // keyring, create 0) answered a session keyring id. EACCES is chosen because
+    // the kernel answers EPERM for a call an unprivileged process may not make,
+    // so a plain EPERM assertion would pass with no filter installed.
     //
-    // Each LAUNCH_ESSENTIALS entry earned its place by dropping it alone from
-    // the whole list on that host and reading the call that failed:
+    // Each LAUNCH_ESSENTIALS entry was dropped alone from the whole list on that
+    // host and the call that then failed was read:
     // close -> close(3) in the loader, refused before the first mapping;
-    // exit_group -> exit_group(101) as the runtime aborted; getrandom ->
-    // getrandom(0xfdb7d0076700, 8, GRND_NONBLOCK) in the loader; mmap ->
+    // exit_group -> exit_group(0) as the provider ended its own run; getrandom ->
+    // getrandom(0xec92ac7c6700, 8, GRND_NONBLOCK) in the loader; mmap ->
     // mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
-    // in the loader; mprotect -> mprotect(0xfa5e165ef000, 65536, PROT_NONE) in
-    // the loader; ppoll -> ppoll([{fd=0}, {fd=1}, {fd=2}], 3, {tv_sec=0,
-    // tv_nsec=0}, NULL, 0) while the runtime waits; rt_sigaction ->
-    // rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[PIPE],
-    // sa_flags=SA_RESTART}, 0xfffff4896e40, 8).
+    // in the loader, after which the provider took SIGSEGV; mprotect ->
+    // mprotect(0xf2640329f000, 65536, PROT_NONE) in the loader; ppoll ->
+    // ppoll([{fd=0}, {fd=1}, {fd=2}], 3, {tv_sec=0, tv_nsec=0}, NULL, 0) while
+    // the provider waits; rt_sigaction -> rt_sigaction(SIGPIPE,
+    // {sa_handler=SIG_IGN, sa_mask=[PIPE], sa_flags=SA_RESTART},
+    // 0xffffea09ff80, 8).
     let declared_rights =
         read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
             .unwrap_or_else(|err| panic!("{err}"));
@@ -8538,7 +9052,7 @@ fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
 
     let probe = seccomp_denied_call_probe(&allow, SeccompProbeRun::Filter)
         .unwrap_or_else(|failure| panic!("{failure}"));
-    for (call, before, after) in &probe {
+    for (call, before, after) in &probe.records {
         assert_eq!(
             *after,
             SeccompAnswer::Errno(SECCOMP_DENY_ERRNO),
@@ -8552,6 +9066,10 @@ fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
         );
         eprintln!("{call}: before {}, after {}", before.text(), after.text());
     }
+    assert_eq!(
+        probe.allocations, 0,
+        "the probe child must allocate nothing after its fork"
+    );
 }
 
 /// The names directly under `path`, sorted. A path that does not exist yet names

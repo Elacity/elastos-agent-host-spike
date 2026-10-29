@@ -242,7 +242,7 @@ use std::process::Command;
 /// check. Its two Linux-only plants are named in `CONFINEMENT-LINUX.md` and are
 /// not registered here, because a Linux-only test cannot produce a CAUGHT line
 /// on the Mac.
-const EXPECTED_FALSIFIERS: usize = 163;
+const EXPECTED_FALSIFIERS: usize = 165;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
