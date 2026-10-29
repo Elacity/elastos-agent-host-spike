@@ -775,7 +775,14 @@ The live socket samples retain their existing success requirement.
 
 This is a point-in-time census, with one five-second lsof call and
 a 200 ms API connection limit. Pending requests must be empty for the granted
-and denied fixture journeys. The earlier absent-policy journey keeps its refusal scope
+and denied fixture journeys. The stand-in census reads the request route of every
+listed session. A live entry refuses its own run first, so a passing census
+never sees one. The pending row has its own unit tests:
+`standin_census_reports_a_pending_leftover` and
+`standin_census_reads_every_pending_request_after_the_stops`. The real-route
+control stays `Controller::check_cleanup_wiring` in
+`tests/common/grants.rs`, which posts a request, requires
+`pending request leftover`, then denies it. The earlier absent-policy journey keeps its refusal scope
 and reports its pending/grant checks as unmeasured. Task 026 below adds pending-request cancellation and settlement. Worker kill
 and whole-device cleanup need their own journey. AC-006-STORAGE
 remains open: `/tmp/elastos/storage` is the known outside-root leftover. The

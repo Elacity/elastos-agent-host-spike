@@ -25,19 +25,60 @@ pub fn preview(stand_in: &mut StandIn, plan: &[u8]) -> Preview {
 
 #[cfg(test)]
 mod fixtures {
+    use serde_json::Value;
+    use std::collections::BTreeSet;
+
     pub const PLAN_A: &[u8] =
         br#"{"steps":[{"resource":"localhost://Public/plan-approval/a.txt","action":"read"}]}"#;
     pub const PLAN_B: &[u8] =
         br#"{"steps":[{"resource":"localhost://Public/plan-approval/b.txt","action":"read"}]}"#;
+    pub const RESIDENT_PATH: &str = "/capsules/plan-preview";
+    pub const RESIDENT_NAME: &str = "plan-preview";
+    pub const GRANT_RESOURCE: &str = "localhost://Public/plan-approval/a.txt";
     pub const UNCHANGED: &str = "the preview returned the plan bytes, the hash is sha256 of those bytes, and the live grants and the capsule list are unchanged";
+
+    /// The request ids of one capability list body.
+    pub fn grant_ids(body: &Value) -> BTreeSet<String> {
+        body["capabilities"]
+            .as_array()
+            .expect("the stand-in returns a capability list")
+            .iter()
+            .map(|entry| {
+                entry["request_id"]
+                    .as_str()
+                    .expect("the stand-in entry names request_id")
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// The ids of one capsule list body.
+    pub fn capsule_ids(body: &Value) -> BTreeSet<String> {
+        body["capsules"]
+            .as_array()
+            .expect("the stand-in returns a capsule list")
+            .iter()
+            .map(|entry| {
+                entry["id"]
+                    .as_str()
+                    .expect("the stand-in capsule entry names id")
+                    .to_owned()
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
 #[test]
 fn preview_makes_no_effect() {
     use agent_conformance::identity::sha256;
-    use agent_conformance::standin_runtime::{Caller, Life};
-    use fixtures::{PLAN_A, PLAN_B, UNCHANGED};
+    use agent_conformance::standin_runtime::{Caller, Start};
+    use fixtures::{
+        capsule_ids, grant_ids, GRANT_RESOURCE, PLAN_A, PLAN_B, RESIDENT_NAME, RESIDENT_PATH,
+        UNCHANGED,
+    };
+    use serde_json::json;
+    use std::collections::BTreeSet;
 
     assert_ne!(sha256(PLAN_A), sha256(PLAN_B), "fixtures differ");
 
@@ -86,28 +127,64 @@ fn preview_makes_no_effect() {
         "the hash is sha256 of those bytes"
     );
 
-    stand_in.seed_grant(
-        "req-preview",
-        "component-1",
-        "localhost://Public/plan-approval/a.txt",
-        "read",
-        "once",
-        1,
-        Life::Live,
-        false,
+    stand_in
+        .admit_resident(RESIDENT_PATH, RESIDENT_NAME, Start::Ok)
+        .expect("the stand-in admits the plan-approval resident");
+    let launched = stand_in
+        .post_capsules(Caller::Shell, &json!({ "path": RESIDENT_PATH }))
+        .expect("the stand-in launches the resident");
+    let session_id = launched["id"]
+        .as_str()
+        .expect("the stand-in names the launched instance")
+        .to_owned();
+    stand_in
+        .finish_start(&session_id)
+        .expect("the stand-in starts the resident");
+    let pending = stand_in
+        .post_capability_request(
+            Caller::Client {
+                session_id: &session_id,
+            },
+            &json!({ "resource": GRANT_RESOURCE, "action": "read" }),
+        )
+        .expect("the stand-in stores the resident's request");
+    let request_id = pending["request_id"]
+        .as_str()
+        .expect("the stand-in names the request")
+        .to_owned();
+    let granted = stand_in
+        .post_capability_grant(
+            Caller::Shell,
+            &json!({ "request_id": request_id, "duration": "once" }),
+        )
+        .expect("the stand-in's shell grants the resident's request");
+    assert_eq!(
+        granted,
+        json!({ "success": true }),
+        "the stand-in did the work: the shell granted the pending request"
+    );
+    assert_eq!(
+        grant_ids(
+            &stand_in
+                .get_capability_list(Caller::Shell, Some("all_sessions_live"))
+                .expect("seeded shell live list")
+        ),
+        BTreeSet::from([request_id.clone()]),
+        "the seeded grant is live"
     );
 
-    let grants_seeded = stand_in
+    let grants_seeded: serde_json::Value = stand_in
         .get_capability_list(Caller::Shell, Some("all_sessions_live"))
         .expect("seeded shell live list");
     assert_ne!(grants_seeded, grants_before, "the seeded grant is live");
-    let capsules_seeded = stand_in
-        .get_capsules(Caller::Shell)
-        .expect("seeded shell capsules");
 
     previews.clear();
     previews.push(preview(&mut stand_in, PLAN_A));
     previews.push(preview(&mut stand_in, PLAN_B));
+
+    let capsules_seeded = stand_in
+        .get_capsules(Caller::Shell)
+        .expect("seeded shell capsules");
 
     assert_eq!(
         stand_in
@@ -124,8 +201,9 @@ fn preview_makes_no_effect() {
         "{UNCHANGED} after the seeded grant"
     );
     assert_eq!(
-        capsules_seeded, capsules_before,
-        "the seeded grant leaves the capsule list alone"
+        capsule_ids(&capsules_seeded),
+        BTreeSet::from([session_id.clone()]),
+        "the stand-in did the work: the granted resident is listed as a capsule"
     );
     assert_eq!(
         previews[0].plan, PLAN_A,
