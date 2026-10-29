@@ -1,6 +1,7 @@
-//! A minimal reader for the two shape facts wc-001 pins that the audit API
-//! does not give: that the artifact is a core Wasm module, and that its
-//! `digest` export has the signature `(param i32) -> (result i64)`.
+//! A minimal reader for the shape facts this lane pins that the audit API
+//! does not give: that the artifact is a core Wasm module, that its `digest`
+//! export has the signature `(param i32) -> (result i64)`, and (task 068) that
+//! its `elastos:bus/lifecycle@1.0.0#run` export has `() -> (result i32)`.
 //!
 //! It reads no imports (task 053). The capsule's zero-import claim (P3) is read
 //! only through `wasm_capsule_audit::audit`, the lab's one module reader (P10),
@@ -16,6 +17,10 @@
 /// The one reason a module with an import section is refused (task 053).
 pub const IMPORT_SECTION_REFUSED: &str =
     "the shape reader reads no imports: a module's imports are read only through wasm_capsule_audit::audit";
+
+/// The core export of the world's `lifecycle.run` interface (task 068): the
+/// name `wit-bindgen` writes for `export lifecycle;` of `product-capsule-v1`.
+pub const LIFECYCLE_RUN_EXPORT: &[u8] = b"elastos:bus/lifecycle@1.0.0#run";
 
 /// A Wasm value type, as far as wc-001 needs to tell them apart.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -44,18 +49,29 @@ pub struct Shape {
     pub is_core_wasm: bool,
     /// The signature of the exported function named `digest`, if present.
     pub digest: Option<FuncType>,
+    /// The signature of the exported function named `LIFECYCLE_RUN_EXPORT`, if
+    /// present (task 068).
+    pub lifecycle_run: Option<FuncType>,
 }
 
 impl Shape {
-    /// The shape facts wc-001 requires from this reader: core Wasm and a
-    /// `digest` export of `(param i32) -> (result i64)`. Imports are not one of
-    /// them: `wasm_capsule_audit::audit` reads those (task 053).
+    /// The shape facts this lane requires from the capsule: core Wasm, a
+    /// `digest` export of `(param i32) -> (result i64)`, and (task 068) a
+    /// `elastos:bus/lifecycle@1.0.0#run` export of `() -> (result i32)`. The
+    /// last is `func() -> result<_, bus-error>`, lowered as measured for
+    /// `product-capsule-v1`. Imports are not one of these facts:
+    /// `wasm_capsule_audit::audit` reads those (task 053).
     pub fn is_the_required_capsule_shape(&self) -> bool {
         self.is_core_wasm
             && self.digest
                 == Some(FuncType {
                     params: vec![ValType::I32],
                     results: vec![ValType::I64],
+                })
+            && self.lifecycle_run
+                == Some(FuncType {
+                    params: vec![],
+                    results: vec![ValType::I32],
                 })
     }
 }
@@ -145,6 +161,7 @@ pub fn read(bytes: &[u8]) -> Result<Shape, String> {
         return Ok(Shape {
             is_core_wasm: false,
             digest: None,
+            lifecycle_run: None,
         });
     }
 
@@ -205,37 +222,54 @@ pub fn read(bytes: &[u8]) -> Result<Shape, String> {
         }
     }
 
-    let digest = resolve_digest(&exports, &function_type_indices, &func_types)?;
+    let digest = resolve_export(
+        b"digest",
+        "digest",
+        &exports,
+        &function_type_indices,
+        &func_types,
+    )?;
+    let lifecycle_run = resolve_export(
+        LIFECYCLE_RUN_EXPORT,
+        "elastos:bus/lifecycle@1.0.0#run",
+        &exports,
+        &function_type_indices,
+        &func_types,
+    )?;
 
     Ok(Shape {
         is_core_wasm: true,
         digest,
+        lifecycle_run,
     })
 }
 
-/// Find the `digest` function export and return its signature, or `None` when
-/// there is no such function export. A module read here imports nothing, so a
-/// function index is a defined function's index; one that points past the
-/// known functions fails closed.
-fn resolve_digest(
+/// Find the function export named `name` and return its signature, or `None`
+/// when there is no such function export. `label` is the export's name as a
+/// refusal names it. A module read here imports nothing, so a function index
+/// is a defined function's index; one that points past the known functions
+/// fails closed.
+fn resolve_export(
+    name: &[u8],
+    label: &str,
     exports: &[(Vec<u8>, bool, u32)],
     function_type_indices: &[u32],
     func_types: &[FuncType],
 ) -> Result<Option<FuncType>, String> {
-    for (name, is_function, index) in exports {
-        if name != b"digest" {
+    for (export_name, is_function, index) in exports {
+        if export_name != name {
             continue;
         }
         if !is_function {
-            return Err("the `digest` export is not a function".to_string());
+            return Err(format!("the `{label}` export is not a function"));
         }
         let type_index = *function_type_indices
             .get(*index as usize)
-            .ok_or_else(|| "the `digest` function index is out of range".to_string())?
+            .ok_or_else(|| format!("the `{label}` function index is out of range"))?
             as usize;
         let sig = func_types
             .get(type_index)
-            .ok_or_else(|| "the `digest` type index is out of range".to_string())?;
+            .ok_or_else(|| format!("the `{label}` type index is out of range"))?;
         return Ok(Some(sig.clone()));
     }
     Ok(None)

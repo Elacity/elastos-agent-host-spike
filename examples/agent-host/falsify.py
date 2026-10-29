@@ -301,8 +301,12 @@ def load(path=DATA):
 # - capsules/did-provider/falsifiers.json: did's src/main.rs, did's
 #   confine.sb and did's tests/confine.rs.
 # - capsules/wallet-provider/falsifiers.json: wallet's src/main.rs, wallet's
-#   confine.sb, wallet's tests/confine.rs and src/tests/falsifiers.rs, and
+#   tests/common/profile_generator.rs, wallet's confine.sb, wallet's
+#   tests/confine.rs and src/tests/falsifiers.rs, and
 #   did's src/main.rs, did's confine.sb and did's tests/confine.rs.
+#   tests/common/profile_generator.rs is named ahead of the move: after
+#   confine moves the generator, wallet entries WP93 to WP103 and WP105 to
+#   WP109 edit it.
 # - lab/capsule-identity/falsifiers.json: capsule-identity's .gitignore,
 #   README.md, src/lib.rs, tests/common/mod.rs and
 #   fixtures/wc001-core/capsule.json.
@@ -346,6 +350,7 @@ PROVIDER_TARGETS = (
     "capsules/did-provider/confine.sb",
     "capsules/did-provider/tests/confine.rs",
     "capsules/wallet-provider/src/main.rs",
+    "capsules/wallet-provider/tests/common/profile_generator.rs",
     "capsules/wallet-provider/confine.sb",
     "capsules/wallet-provider/tests/confine.rs",
     "capsules/wallet-provider/src/tests/falsifiers.rs",
@@ -2121,7 +2126,8 @@ def a_killed_provider_edit_is_recovered():
     through main(), and repeat the edit. This lane's model-provider targets,
     the model provider's confinement test harness and process test file, the
     confine lane's five did/wallet targets plus its did confinement test
-    harness and wallet's falsifier honesty test, capsule-identity's
+    harness and wallet's falsifier honesty test and the profile generator
+    file tests/common/profile_generator.rs, capsule-identity's
     .gitignore, README.md, src/lib.rs, tests/common/mod.rs and
     fixtures/wc001-core/capsule.json, and
     the wasm lab's .gitignore, README.md, LOG.md, capsule/capsule.json,
@@ -2164,6 +2170,7 @@ def a_killed_provider_edit_is_recovered():
                  "../../capsules/wallet-provider/src/main.rs",
                  "../../capsules/wallet-provider/confine.sb",
                  "../../capsules/wallet-provider/tests/confine.rs",
+                 "../../capsules/wallet-provider/tests/common/profile_generator.rs",
                  "../../capsules/wallet-provider/src/tests/falsifiers.rs",
                  "../../lab/capsule-identity/src/lib.rs",
                  "../../lab/capsule-identity/tests/common/mod.rs",
@@ -2285,7 +2292,8 @@ os.kill(os.getpid(), signal.SIGKILL)
                 for target in foreign_targets)
             print(f"self-test: provider {mode} restart: exit={code}, restored={restored}, "
                   f"foreign kept={foreign_kept}, "
-                  f"lab/agent-conformance/standin-runtime/mod.rs")
+                  f"lab/agent-conformance/standin-runtime/mod.rs"
+                  f" capsules/wallet-provider/tests/common/profile_generator.rs")
             if code != 0 or not restored or not foreign_kept:
                 ok = False
                 continue

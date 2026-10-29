@@ -1,10 +1,11 @@
 //! wc-009a: the importing module and the lab grants files the verifier and
-//! runner tests share. The module bytes and the grant pair live here once, so
-//! no test file holds a second copy of either.
+//! runner tests share. The module bytes and the grants file form live here
+//! once, so no test file holds a second copy of either. Task 065: no
+//! core-module import is granted, so `IMPORTING_MODULE` is the module that is
+//! refused, and a grants file names `resource` and `actions` (v3).
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use wasm_capsule_audit::DeclaredImport;
 use wasm_capsule_tools::verify::{GRANTS_LABEL, GRANTS_SCHEMA};
 
 /// A valid core module that imports one function, `env.f`, of type
@@ -39,26 +40,6 @@ pub fn importing(module: &str, name: &str) -> Vec<u8> {
     bytes
 }
 
-/// `IMPORTING_MODULE` with its one import renamed to `env.<name>`, a one-byte
-/// name: the same `() -> ()` function, under another name.
-pub fn importing_env(name: u8) -> Vec<u8> {
-    assert!(name.is_ascii(), "a one-byte name");
-    importing("env", &char::from(name).to_string())
-}
-
-/// The one import `IMPORTING_MODULE` has.
-pub fn env_f() -> DeclaredImport {
-    grant("env", "f")
-}
-
-/// The grant of `module`.`name`.
-pub fn grant(module: &str, name: &str) -> DeclaredImport {
-    DeclaredImport {
-        module: module.into(),
-        name: name.into(),
-    }
-}
-
 /// A new file `name` in `folder` holding `text`, as a grants file to read.
 pub fn write_grants(folder: &Path, name: &str, text: &str) -> PathBuf {
     let path = folder.join(name);
@@ -66,19 +47,18 @@ pub fn write_grants(folder: &Path, name: &str, text: &str) -> PathBuf {
     path
 }
 
-/// A new, well-formed lab grants file `name` in `folder` granting `grants`
-/// (module, name, right) in order. It sits beside a bundle, never inside one.
-pub fn grants_file(folder: &Path, name: &str, grants: &[(&str, &str, &str)]) -> PathBuf {
-    let imports: Vec<serde_json::Value> = grants
+/// A new, well-formed lab grants file `name` in `folder` (v3) granting
+/// `grants` (resource, actions) in order. It sits beside a bundle, never
+/// inside one.
+pub fn grants_file(folder: &Path, name: &str, grants: &[(&str, &[&str])]) -> PathBuf {
+    let grants: Vec<serde_json::Value> = grants
         .iter()
-        .map(|(module, name, right)| {
-            serde_json::json!({ "module": module, "name": name, "right": right })
-        })
+        .map(|(resource, actions)| serde_json::json!({ "resource": resource, "actions": actions }))
         .collect();
     let document = serde_json::json!({
         "schema": GRANTS_SCHEMA,
         "label": GRANTS_LABEL,
-        "imports": imports,
+        "grants": grants,
     });
     write_grants(folder, name, &document.to_string())
 }

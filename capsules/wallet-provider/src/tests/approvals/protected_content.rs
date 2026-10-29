@@ -858,3 +858,442 @@ fn protected_content_rights_external_rejects_wrong_signer_type_and_stored_shape(
             .is_err()
     );
 }
+
+// The two protected-content rights validators of `src/crypto.rs` decide which
+// account, which request and which stored result the Wallet accepts, and with
+// which reason it refuses the rest. One refusal string, one test below, so a
+// dropped EVM-namespace, future-issue, expiry, Wallet-binding, account_id,
+// signer or signed-request check fails a named test in about a second instead
+// of only the confined process suite.
+//
+// Eleven strings over twelve raise points come from those two functions; nine
+// have a test here. Two are unreachable and are recorded instead:
+//
+// - `invalid stored protected-content rights result hex: {err}`
+//   (`src/crypto.rs:385`): `result.validate()` at `:371` already refuses every
+//   value `hex::decode` would fail on (`decode_bounded_lower_hex_field`,
+//   `elastos/crates/elastos-wallet-contract/src/lib.rs:1423`), so the decode at
+//   `:384` cannot fail.
+// - `protected-content rights signed request bytes do not match the approved
+//   request` (`src/crypto.rs:412`): `from_canonical_bytes` refuses a
+//   non-canonical encoding
+//   (`elastos/crates/elastos-protected-content-contracts/src/canonical.rs:50`),
+//   and `expected_bytes` is that same canonical encoding, so
+//   `signed.request() == &expected_request` at `:390` implies equal bytes.
+//
+// The one string raised twice, `invalid stored protected-content signed
+// request: {err}`, gets one test that drives both `:387` and `:427`.
+//
+// The three tests above this section drive the same rules end to end and assert
+// an outer code only: `protected_content_rights_rejects_wrong_missing_revoked_non_evm_and_time_windows`
+// (`invalid_request` and `not_found`),
+// `protected_content_rights_replays_exact_result_and_rejects_substitutions`
+// (`approval_identity_conflict` and `signing_error`) and
+// `protected_content_rights_external_rejects_wrong_signer_type_and_stored_shape`
+// (`invalid_request` and `invalid_signature`). They are not repeated here; the
+// reason is the only missing assertion, and it is what these tests add.
+
+/// Catches removal of the `eip155:` account check in
+/// `validate_protected_content_rights_request_account`.
+#[test]
+fn crypto_refuses_a_non_evm_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let principal_id = "person:local:crypto-refuses-non-evm";
+    create_managed_evm_account(&mut provider, principal_id);
+    let account = provider
+        .store
+        .accounts
+        .first()
+        .cloned()
+        .expect("the provider must store the account it just created");
+    let now = now_ts();
+    let request = protected_content_rights_request(
+        wallet_address(&account.address),
+        RightsActionV1::View,
+        now,
+        now.saturating_add(120),
+        0x91,
+    );
+    let mut bitcoin_account = account;
+    bitcoin_account.chain_namespace = BITCOIN_MAINNET_CHAIN_NAMESPACE.to_string();
+    let expected = "protected-content rights signing requires an EVM account".to_string();
+    assert_eq!(
+        validate_protected_content_rights_request_account(&request, &bitcoin_account, now),
+        Err(expected)
+    );
+}
+
+/// Catches removal of the not-yet-valid check in
+/// `validate_protected_content_rights_request_account`.
+#[test]
+fn crypto_refuses_a_not_yet_valid_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let principal_id = "person:local:crypto-refuses-future";
+    create_managed_evm_account(&mut provider, principal_id);
+    let account = provider
+        .store
+        .accounts
+        .first()
+        .cloned()
+        .expect("the provider must store the account it just created");
+    let now = now_ts();
+    let request = protected_content_rights_request(
+        wallet_address(&account.address),
+        RightsActionV1::View,
+        now.saturating_add(120),
+        now.saturating_add(240),
+        0x92,
+    );
+    let expected = "protected-content rights request is not yet valid".to_string();
+    assert_eq!(
+        validate_protected_content_rights_request_account(&request, &account, now),
+        Err(expected)
+    );
+}
+
+/// Catches removal of the expiry check in
+/// `validate_protected_content_rights_request_account`.
+#[test]
+fn crypto_refuses_an_expired_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let principal_id = "person:local:crypto-refuses-expired";
+    create_managed_evm_account(&mut provider, principal_id);
+    let account = provider
+        .store
+        .accounts
+        .first()
+        .cloned()
+        .expect("the provider must store the account it just created");
+    let now = now_ts();
+    let request = protected_content_rights_request(
+        wallet_address(&account.address),
+        RightsActionV1::View,
+        now.saturating_sub(200),
+        now.saturating_sub(100),
+        0x93,
+    );
+    let expected = "protected-content rights request expired".to_string();
+    assert_eq!(
+        validate_protected_content_rights_request_account(&request, &account, now),
+        Err(expected)
+    );
+}
+
+/// Catches removal of the Wallet-binding check in
+/// `validate_protected_content_rights_request_account`.
+#[test]
+fn crypto_refuses_a_wallet_mismatched_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let principal_id = "person:local:crypto-refuses-wrong-wallet";
+    create_managed_evm_account(&mut provider, principal_id);
+    let account = provider
+        .store
+        .accounts
+        .first()
+        .cloned()
+        .expect("the provider must store the account it just created");
+    let now = now_ts();
+    let request = protected_content_rights_request(
+        WalletAddress::new([0x99; 20]),
+        RightsActionV1::View,
+        now,
+        now.saturating_add(120),
+        0x94,
+    );
+    let expected =
+        "protected-content rights request Wallet does not match the selected account".to_string();
+    assert_eq!(
+        validate_protected_content_rights_request_account(&request, &account, now),
+        Err(expected)
+    );
+}
+
+/// Catches removal of the account_id check in
+/// `validate_protected_content_rights_result_for_request`.
+#[test]
+fn crypto_refuses_a_mismatched_result_account_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let principal_id = "person:local:crypto-refuses-result-account";
+    let (account_id, address) = create_managed_evm_account(&mut provider, principal_id);
+    let now = now_ts();
+    let request = protected_content_rights_request(
+        wallet_address(&address),
+        RightsActionV1::View,
+        now,
+        now.saturating_add(120),
+        0x95,
+    );
+    let (request_id, _) = request_protected_content_signature(
+        &mut provider,
+        principal_id,
+        "library",
+        &account_id,
+        &request,
+    );
+    let approval = provider
+        .store
+        .approval_requests
+        .iter()
+        .find(|approval| approval.request_id == request_id)
+        .cloned()
+        .expect("the provider must store the approval it just requested");
+    // 65 zero bytes: the contract's only signature rule is that the last
+    // byte is the recovery id 0 or 1, so no signing helper is needed here.
+    let signed = WalletSignedRightsRequestV1::new(request, vec![0u8; 65]).unwrap();
+    let result = ProtectedContentRightsSignatureResultV1 {
+        schema: PROTECTED_CONTENT_RIGHTS_SIGNATURE_RESULT_SCHEMA.to_string(),
+        account_id: "wallet:eip155:20:0x9999999999999999999999999999999999999999".to_string(),
+        signer: approval.address.clone(),
+        wallet_signed_rights_request_hex: hex::encode(signed.canonical_bytes().unwrap()),
+    };
+    let expected =
+        "protected-content rights signature result account_id does not match the approval"
+            .to_string();
+    assert_eq!(
+        validate_protected_content_rights_result_for_request(&result, &approval),
+        Err(expected)
+    );
+}
+
+/// Catches removal of the signer check against the approval in
+/// `validate_protected_content_rights_result_for_request`.
+#[test]
+fn crypto_refuses_a_mismatched_result_signer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let principal_id = "person:local:crypto-refuses-result-signer";
+    let (account_id, address) = create_managed_evm_account(&mut provider, principal_id);
+    let now = now_ts();
+    let request = protected_content_rights_request(
+        wallet_address(&address),
+        RightsActionV1::View,
+        now,
+        now.saturating_add(120),
+        0x96,
+    );
+    let (request_id, _) = request_protected_content_signature(
+        &mut provider,
+        principal_id,
+        "library",
+        &account_id,
+        &request,
+    );
+    let approval = provider
+        .store
+        .approval_requests
+        .iter()
+        .find(|approval| approval.request_id == request_id)
+        .cloned()
+        .expect("the provider must store the approval it just requested");
+    // 65 zero bytes: the contract's only signature rule is that the last
+    // byte is the recovery id 0 or 1, so no signing helper is needed here.
+    let signed = WalletSignedRightsRequestV1::new(request, vec![0u8; 65]).unwrap();
+    let result = ProtectedContentRightsSignatureResultV1 {
+        schema: PROTECTED_CONTENT_RIGHTS_SIGNATURE_RESULT_SCHEMA.to_string(),
+        account_id: approval.account_id.clone(),
+        signer: "0x9999999999999999999999999999999999999999".to_string(),
+        wallet_signed_rights_request_hex: hex::encode(signed.canonical_bytes().unwrap()),
+    };
+    let expected =
+        "protected-content rights signature result signer does not match the approval".to_string();
+    assert_eq!(
+        validate_protected_content_rights_result_for_request(&result, &approval),
+        Err(expected)
+    );
+}
+
+/// Catches removal of the signed-request equality check in
+/// `validate_protected_content_rights_result_for_request`.
+#[test]
+fn crypto_refuses_a_substituted_signed_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let principal_id = "person:local:crypto-refuses-substituted-request";
+    let (account_id, address) = create_managed_evm_account(&mut provider, principal_id);
+    let now = now_ts();
+    let request = protected_content_rights_request(
+        wallet_address(&address),
+        RightsActionV1::View,
+        now,
+        now.saturating_add(120),
+        0x97,
+    );
+    let (request_id, _) = request_protected_content_signature(
+        &mut provider,
+        principal_id,
+        "library",
+        &account_id,
+        &request,
+    );
+    let approval = provider
+        .store
+        .approval_requests
+        .iter()
+        .find(|approval| approval.request_id == request_id)
+        .cloned()
+        .expect("the provider must store the approval it just requested");
+    let substituted = protected_content_rights_request(
+        wallet_address(&address),
+        RightsActionV1::View,
+        now,
+        now.saturating_add(120),
+        0x98,
+    );
+    let signed = WalletSignedRightsRequestV1::new(substituted, vec![0u8; 65]).unwrap();
+    let result = ProtectedContentRightsSignatureResultV1 {
+        schema: PROTECTED_CONTENT_RIGHTS_SIGNATURE_RESULT_SCHEMA.to_string(),
+        account_id: approval.account_id.clone(),
+        signer: approval.address.clone(),
+        wallet_signed_rights_request_hex: hex::encode(signed.canonical_bytes().unwrap()),
+    };
+    let expected =
+        "protected-content rights signed request does not match the approved request".to_string();
+    assert_eq!(
+        validate_protected_content_rights_result_for_request(&result, &approval),
+        Err(expected)
+    );
+}
+
+/// Catches removal of the bound-Wallet signer check in
+/// `validate_protected_content_rights_result_for_request`.
+///
+/// The approval's `address` is the one field the test changes on a record the
+/// provider wrote, so the earlier check against the approval passes and only
+/// the check against the Wallet inside the signed request can refuse.
+#[test]
+fn crypto_refuses_a_result_signer_that_is_not_the_bound_wallet() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let principal_id = "person:local:crypto-refuses-unbound-signer";
+    let (account_id, address) = create_managed_evm_account(&mut provider, principal_id);
+    let now = now_ts();
+    let request = protected_content_rights_request(
+        wallet_address(&address),
+        RightsActionV1::View,
+        now,
+        now.saturating_add(120),
+        0x99,
+    );
+    let (request_id, _) = request_protected_content_signature(
+        &mut provider,
+        principal_id,
+        "library",
+        &account_id,
+        &request,
+    );
+    let mut approval = provider
+        .store
+        .approval_requests
+        .iter()
+        .find(|approval| approval.request_id == request_id)
+        .cloned()
+        .expect("the provider must store the approval it just requested");
+    approval.address = "0x9999999999999999999999999999999999999999".to_string();
+    // 65 zero bytes: the contract's only signature rule is that the last
+    // byte is the recovery id 0 or 1, so no signing helper is needed here.
+    let signed = WalletSignedRightsRequestV1::new(request, vec![0u8; 65]).unwrap();
+    let result = ProtectedContentRightsSignatureResultV1 {
+        schema: PROTECTED_CONTENT_RIGHTS_SIGNATURE_RESULT_SCHEMA.to_string(),
+        account_id: approval.account_id.clone(),
+        signer: approval.address.clone(),
+        wallet_signed_rights_request_hex: hex::encode(signed.canonical_bytes().unwrap()),
+    };
+    let expected =
+        "protected-content rights signature result signer does not match the bound Wallet"
+            .to_string();
+    assert_eq!(
+        validate_protected_content_rights_result_for_request(&result, &approval),
+        Err(expected)
+    );
+}
+
+/// Catches removal of either stored-signed-request refusal in
+/// `validate_protected_content_rights_result_for_request`: the parse at
+/// `src/crypto.rs:387` and the signature check at `:427`.
+///
+/// Both sites format the inner contract error, so each expected text comes from
+/// the same contract call and its own error.
+#[test]
+fn crypto_refuses_a_non_canonical_signed_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = init_provider(dir.path());
+    let principal_id = "person:local:crypto-refuses-stored-shape";
+    let (account_id, address) = create_managed_evm_account(&mut provider, principal_id);
+    let now = now_ts();
+    let request = protected_content_rights_request(
+        wallet_address(&address),
+        RightsActionV1::View,
+        now,
+        now.saturating_add(120),
+        0x9a,
+    );
+    let (request_id, _) = request_protected_content_signature(
+        &mut provider,
+        principal_id,
+        "library",
+        &account_id,
+        &request,
+    );
+    let approval = provider
+        .store
+        .approval_requests
+        .iter()
+        .find(|approval| approval.request_id == request_id)
+        .cloned()
+        .expect("the provider must store the approval it just requested");
+
+    // `:387`: valid lowercase hex that is not a canonical signed request.
+    let unparsed = ProtectedContentRightsSignatureResultV1 {
+        schema: PROTECTED_CONTENT_RIGHTS_SIGNATURE_RESULT_SCHEMA.to_string(),
+        account_id: approval.account_id.clone(),
+        signer: approval.address.clone(),
+        wallet_signed_rights_request_hex: "00".to_string(),
+    };
+    let parse_error = WalletSignedRightsRequestV1::from_canonical_bytes(&[0x00])
+        .expect_err("one byte is not a canonical signed request");
+    assert_eq!(
+        validate_protected_content_rights_result_for_request(&unparsed, &approval),
+        Err(format!(
+            "invalid stored protected-content signed request: {parse_error}"
+        ))
+    );
+
+    // `:427`: a canonical signed request whose signature does not recover the
+    // bound Wallet, because another key signed it.
+    let other_key = SigningKey::from_slice(&[0x99; 32]).unwrap();
+    let signature = hex::decode(
+        sign_message_bytes(&other_key, &request.canonical_bytes().unwrap())
+            .strip_prefix("0x")
+            .expect("the signing helper prefixes its hex"),
+    )
+    .expect("the signing helper returns hex");
+    let signed = WalletSignedRightsRequestV1::new(request.clone(), signature).unwrap();
+    let unverified = ProtectedContentRightsSignatureResultV1 {
+        schema: PROTECTED_CONTENT_RIGHTS_SIGNATURE_RESULT_SCHEMA.to_string(),
+        account_id: approval.account_id.clone(),
+        signer: approval.address.clone(),
+        wallet_signed_rights_request_hex: hex::encode(signed.canonical_bytes().unwrap()),
+    };
+    let verify_error = signed
+        .verify(
+            &RightsVerificationContextV1::new(
+                request.binding().clone(),
+                request.action(),
+                request.recipient().clone(),
+                request.issued_at(),
+            ),
+            &mut TestReplay,
+        )
+        .expect_err("a signature from another key must not recover the bound Wallet");
+    assert_eq!(
+        validate_protected_content_rights_result_for_request(&unverified, &approval),
+        Err(format!(
+            "invalid stored protected-content signed request: {verify_error}"
+        ))
+    );
+}

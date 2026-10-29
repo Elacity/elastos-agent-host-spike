@@ -5,7 +5,7 @@
 //! (`tools/build`), under its own schema line:
 //!
 //! ```text
-//! schema: wc-005.run-receipt/v3
+//! schema: wc-005.run-receipt/v4
 //! bundle: <the verified lab CID, as its Display form>
 //! function: digest
 //! argument: 1592590337
@@ -21,6 +21,8 @@
 //! wasmer_memory_cap: SKIPPED: no memory cap flag in wasmer run --help or wasmer --help (wc-010a)
 //! wasmtime_memory_maximum_bytes: <pages × 65536, or none (the module has no memory)>
 //! wasmer_memory_maximum_bytes: <pages × 65536, or none (the module has no memory)>
+//! wasmtime_process_max_rss_bytes: <n> (engine process RSS, not linear memory)
+//! wasmer_process_max_rss_bytes: <n> (engine process RSS, not linear memory)
 //! ```
 //!
 //! wc-010c (v2 adds the last four lines): the declared size the module runs
@@ -28,8 +30,7 @@
 //! cap argument that engine's run was started with, read back from its argv,
 //! or `SKIPPED` with wc-010a's reason when it was started with none. The
 //! per-engine line follows the recorded argument only, never the engine's
-//! name. No peak memory is recorded (wc-010a: `/usr/bin/time -l` gives the
-//! engine process's resident memory, not the capsule's linear memory).
+//! name.
 //!
 //! Task 034 (v3 adds the last two lines): per engine, `wasmtime` then
 //! `wasmer`, the module memory maximum that engine's run was checked against,
@@ -38,6 +39,17 @@
 //! the declared size, a constant or the engine's name; or `none (the module
 //! has no memory)` when it returned none. The `wasmer_memory_cap: SKIPPED`
 //! line still reports only that wasmer was given no cap flag.
+//!
+//! Task 062 (v4 adds the last two lines; wc-010c's "measured, not cited"):
+//! per engine, `wasmtime` then `wasmer`, the measured peak of that engine's
+//! module-run process, in bytes: the `ru_maxrss` that process's own `wait4`
+//! returned when the runner reaped it ([`TwoEngineRun::process_max_rss_bytes`]),
+//! the counter `/usr/bin/time -l` prints as "maximum resident set size".
+//! Each line says what it is: `(engine process RSS, not linear memory)`. It is
+//! not the capsule's linear memory: pages the guest never touched are not
+//! resident, and the engine's own code and data are included. No line records
+//! a linear-memory peak, and no key names linear memory, because nothing here
+//! measures one. The refusal receipt below has no peak line.
 //!
 //! Every value comes from the run: the lab CID the verifier checked, the
 //! function and argument the runner passed, and what each engine printed and
@@ -84,7 +96,7 @@ use crate::run::{Engine, Reason, TwoEngineRefusal, TwoEngineRun, DIGEST_ARGUMENT
 use std::path::Path;
 
 /// The receipt's schema line value.
-pub const RECEIPT_SCHEMA: &str = "wc-005.run-receipt/v3";
+pub const RECEIPT_SCHEMA: &str = "wc-005.run-receipt/v4";
 
 /// The refusal receipt's schema line value (task 044).
 pub const REFUSAL_SCHEMA: &str = "wc-005.run-refusal/v1";
@@ -118,6 +130,12 @@ pub fn render(run: &TwoEngineRun) -> String {
             run.memory_maximum_bytes(engine),
         ));
     }
+    for engine in [Engine::Wasmtime, Engine::Wasmer] {
+        receipt.push_str(&process_peak_line(
+            engine,
+            run.process_max_rss_bytes(engine),
+        ));
+    }
     receipt
 }
 
@@ -140,6 +158,13 @@ fn memory_maximum_line(engine: Engine, maximum: Option<u64>) -> String {
         Some(bytes) => format!("{engine}_memory_maximum_bytes: {bytes}\n"),
         None => format!("{engine}_memory_maximum_bytes: none (the module has no memory)\n"),
     }
+}
+
+/// Task 062: `engine`'s measured peak line: the bytes its module-run process's
+/// own `wait4` gave as `ru_maxrss`, labelled as engine process RSS, never as
+/// the capsule's linear memory.
+fn process_peak_line(engine: Engine, bytes: u64) -> String {
+    format!("{engine}_process_max_rss_bytes: {bytes} (engine process RSS, not linear memory)\n")
 }
 
 /// Write `run`'s receipt to `path` as a new file with the shared

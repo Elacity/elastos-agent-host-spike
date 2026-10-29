@@ -2419,6 +2419,22 @@
       ]
     },
     {
+      "id": "PV127",
+      "title": "startup recovery skips wallet's profile generator file",
+      "command": "selftest",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "falsify.py",
+          "old": "    \"capsules/wallet-provider/src/main.rs\",\n    \"capsules/wallet-provider/tests/common/profile_generator.rs\",",
+          "new": "    \"capsules/wallet-provider/src/main.rs\","
+        }
+      ],
+      "tests": [
+        "a killed provider edit is recovered"
+      ]
+    },
+    {
       "id": "MP24",
       "title": "a Runtime-forwarded answer is read as a failure",
       "command": "provider",
@@ -2854,6 +2870,102 @@
       ],
       "tests": [
         "granted_model_turn_returns_the_answer_effect_and_audit"
+      ]
+    },
+    {
+      "id": "MP68",
+      "title": "validate_text_messages no longer refuses max_output_tokens, so a hosted output limit is not context_rejected",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "    if input.get(\"max_output_tokens\").is_some()\n        && !matches!(offer.adapter, AdapterConfig::LocalLlamaCppText { .. })\n    {\n        return Err(AdapterFault::context(\n            \"model output request is not supported by this offer\",\n            \"max_output_tokens is supported only by local llama offers\",\n        ));\n    }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "hosted_token_and_byte_bounds_refuse_before_any_send"
+      ]
+    },
+    {
+      "id": "MP69",
+      "title": "the input byte comparison accepts one byte past the offer limit, so an oversized input is not policy_limit",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/state.rs",
+          "old": "        if input_bytes > offer.policy.input_bytes_limit {",
+          "new": "        if input_bytes > offer.policy.input_bytes_limit.saturating_add(1) {"
+        }
+      ],
+      "tests": [
+        "hosted_token_and_byte_bounds_refuse_before_any_send"
+      ]
+    },
+      {
+        "id": "MP70",
+        "title": "the freshness error is discarded, so an unseen expired request id is not request_expired",
+        "command": "provider",
+        "expect": "caught",
+        "edits": [
+          {
+            "file": "../../capsules/model-provider/src/state.rs",
+            "old": ".map_err(|_| ProviderFault::request_expired())?;",
+            "new": ".ok();"
+          }
+        ],
+        "tests": [
+          "hosted_unseen_request_ids_expire_before_any_send"
+        ]
+      },
+      {
+        "id": "MP71",
+        "title": "freshness runs before the retained lookup, so a retained expired id is refused",
+        "command": "provider",
+        "expect": "caught",
+        "edits": [
+          {
+            "file": "../../capsules/model-provider/src/state.rs",
+            "old": "        let run_id = deterministic_run_id(&request.runtime_binding);\n        // A retained request owns its original result, including legacy IDs and\n        // results whose offer has since changed or retired.\n        if let Some(mut existing) = self.journal.load_run_if_present(&run_id)? {\n            if request_fingerprint(&existing.runtime_binding, &existing.input_hash)? != fingerprint\n            {\n                return Err(ProviderFault::invalid_request(\n                    \"request_id conflicts with an existing model run\",\n                ));\n            }\n            self.project_archived_run(&mut existing)?;\n            if !existing.status.is_terminal() {\n                let current_offer = self.current_execution_offer_for_run(&existing)?;\n                self.refresh_run_if_needed(current_offer.as_ref(), &mut existing)?;\n            }\n            return serialize_run_view(&existing);\n        }\n        elastos_model_contract::validate_new_model_request_id(\n            &request.runtime_binding.request_id,\n            now_ms(),\n            self.journal.pruned_issued_floor_ms()?,\n        )\n        .map_err(|_| ProviderFault::request_expired())?;\n",
+            "new": "        let run_id = deterministic_run_id(&request.runtime_binding);\n        elastos_model_contract::validate_new_model_request_id(\n            &request.runtime_binding.request_id,\n            now_ms(),\n            self.journal.pruned_issued_floor_ms()?,\n        )\n        .map_err(|_| ProviderFault::request_expired())?;\n        // A retained request owns its original result, including legacy IDs and\n        // results whose offer has since changed or retired.\n        if let Some(mut existing) = self.journal.load_run_if_present(&run_id)? {\n            if request_fingerprint(&existing.runtime_binding, &existing.input_hash)? != fingerprint\n            {\n                return Err(ProviderFault::invalid_request(\n                    \"request_id conflicts with an existing model run\",\n                ));\n            }\n            self.project_archived_run(&mut existing)?;\n            if !existing.status.is_terminal() {\n                let current_offer = self.current_execution_offer_for_run(&existing)?;\n                self.refresh_run_if_needed(current_offer.as_ref(), &mut existing)?;\n            }\n            return serialize_run_view(&existing);\n        }\n"
+          }
+        ],
+        "tests": [
+          "state::tests::retained_request_precedes_freshness_floor_policy_and_unrelated_pruning"
+        ]
+      },
+    {
+      "id": "MP72",
+      "title": "the pending, denied and ended arms are dropped, so a pending Runtime denial is not hosted_access_pending",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "            Some(\"pending\") => (\n                \"hosted_access_pending\",\n                \"Hosted access is waiting for approval in Inbox.\",\n            ),\n            Some(\"denied\") => (\"hosted_access_denied\", \"Hosted access was denied in Inbox.\"),\n            Some(\"ended\") => (\n                \"hosted_access_ended\",\n                \"Hosted access ended. Approve the new request in Inbox to use it again.\",\n            ),\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "hosted_access_states_fail_the_run_on_the_socket"
+      ]
+    },
+    {
+      "id": "MP73",
+      "title": "the in-band end line is ignored, so a mid-reply end is not hosted_access_ended_during_reply",
+      "command": "provider",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../capsules/model-provider/src/adapters.rs",
+          "old": "            if runtime_end_line_possible && current_line == HOSTED_ACCESS_ENDED_LINE {\n                // Keep the text that already arrived, then say why the reply stopped.\n                if !stream_state.delta_buffer.is_empty() {\n                    flush_local_text_delta(\n                        &task.offer,\n                        &task.run_id,\n                        task.generation,\n                        &task.updates,\n                        &mut stream_state.delta_buffer,\n                        timing,\n                    )\n                    .await?;\n                }\n                return Err(hosted_access_ended_during_reply_fault());\n            }\n",
+          "new": ""
+        }
+      ],
+      "tests": [
+        "hosted_access_states_fail_the_run_on_the_socket"
       ]
     }
   ]
