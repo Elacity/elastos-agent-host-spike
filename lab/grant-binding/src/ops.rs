@@ -49,6 +49,7 @@ impl Verifier {
         call: &Call,
         request: &GuestRequest,
         operation: Operation,
+        path: &str,
     ) -> Result<(), OperateRefuse> {
         let grant = self
             .resolve(*call, request.handle)
@@ -61,7 +62,15 @@ impl Verifier {
             Operation::ChildJournal if !grant.rights.child_journal => {
                 Err(OperateRefuse::ChildJournalNotGranted)
             }
-            _ => Ok(()),
+            Operation::ChildJournal => Ok(()),
+            _ => {
+                #[rustfmt::skip]
+                let () = {
+                    super::resource_name(&grant.identity, path, Some(&grant.owned_root))
+                        .map_err(OperateRefuse::Binding)?;
+                };
+                Ok(())
+            }
         }
     }
 
@@ -92,7 +101,7 @@ impl Verifier {
         request: &GuestRequest,
         path: &str,
     ) -> Result<Handle, OperateRefuse> {
-        self.operate(call, request, Operation::ChildJournal)?;
+        self.operate(call, request, Operation::ChildJournal, path)?;
         #[rustfmt::skip]
         let grant = self.resolve(*call, request.handle).map_err(OperateRefuse::Binding)?;
         super::resource_name(&grant.identity, path, Some(&grant.owned_root))
@@ -128,7 +137,12 @@ fn model_append_right_permits_append() {
     );
     let call = verifier.open_call(instance);
     verifier
-        .operate(&call, &guest(handle), Operation::Append)
+        .operate(
+            &call,
+            &guest(handle),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
         .expect("append right");
 }
 
@@ -145,10 +159,20 @@ fn model_both_rights_permit_append_and_overwrite() {
     );
     let call = verifier.open_call(instance);
     verifier
-        .operate(&call, &guest(handle), Operation::Append)
+        .operate(
+            &call,
+            &guest(handle),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
         .expect("append right");
     verifier
-        .operate(&call, &guest(handle), Operation::Overwrite)
+        .operate(
+            &call,
+            &guest(handle),
+            Operation::Overwrite,
+            "UsersAI/agent-1/journal",
+        )
         .expect("overwrite right");
 }
 
@@ -169,7 +193,12 @@ fn model_append_grant_does_not_permit_overwrite() {
         ..guest(handle)
     };
     let refusal = verifier
-        .operate(&call, &request, Operation::Overwrite)
+        .operate(
+            &call,
+            &request,
+            Operation::Overwrite,
+            "UsersAI/agent-1/journal",
+        )
         .expect_err("append grant refuses overwrite");
     assert_eq!(refusal, OperateRefuse::OverwriteNotGranted);
     assert_eq!(refusal.to_string(), "append does not permit overwrite");
@@ -188,7 +217,12 @@ fn model_overwrite_grant_does_not_permit_append() {
     );
     let call = verifier.open_call(instance);
     let refusal = verifier
-        .operate(&call, &guest(handle), Operation::Append)
+        .operate(
+            &call,
+            &guest(handle),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
         .expect_err("overwrite grant refuses append");
     assert_eq!(refusal, OperateRefuse::AppendNotGranted);
     assert_eq!(refusal.to_string(), "overwrite does not permit append");
@@ -211,7 +245,12 @@ fn model_forged_overwrite_right_has_no_effect() {
         ..guest(handle)
     };
     let refusal = verifier
-        .operate(&call, &request, Operation::Overwrite)
+        .operate(
+            &call,
+            &request,
+            Operation::Overwrite,
+            "UsersAI/agent-1/journal",
+        )
         .expect_err("guest claim does not grant overwrite");
     assert_eq!(refusal, OperateRefuse::OverwriteNotGranted);
     assert_eq!(refusal.to_string(), "append does not permit overwrite");
@@ -235,7 +274,12 @@ fn model_forged_append_right_has_no_effect() {
     };
     assert!(request.forged_append);
     let refusal = verifier
-        .operate(&call, &request, Operation::Append)
+        .operate(
+            &call,
+            &request,
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
         .expect_err("guest claim does not grant append");
     assert_eq!(refusal, OperateRefuse::AppendNotGranted);
     assert_eq!(refusal.to_string(), "overwrite does not permit append");
@@ -259,7 +303,12 @@ fn model_forged_identity_does_not_grant_append() {
     };
     assert_eq!(request.forged_identity.as_deref(), Some("agent-2"));
     let refusal = verifier
-        .operate(&call, &request, Operation::Append)
+        .operate(
+            &call,
+            &request,
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
         .expect_err("guest identity does not grant append");
     assert_eq!(refusal, OperateRefuse::AppendNotGranted);
     assert_eq!(refusal.to_string(), "overwrite does not permit append");
@@ -283,7 +332,12 @@ fn model_forged_session_does_not_grant_append() {
     };
     assert_eq!(request.forged_session.as_deref(), Some("session-b"));
     let refusal = verifier
-        .operate(&call, &request, Operation::Append)
+        .operate(
+            &call,
+            &request,
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
         .expect_err("guest session does not grant append");
     assert_eq!(refusal, OperateRefuse::AppendNotGranted);
     assert_eq!(refusal.to_string(), "overwrite does not permit append");
@@ -313,10 +367,63 @@ fn model_forged_instance_does_not_grant_append() {
     };
     assert_eq!(request.forged_instance, Some(sibling));
     let refusal = verifier
-        .operate(&call, &request, Operation::Append)
+        .operate(
+            &call,
+            &request,
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
         .expect_err("guest instance does not grant append");
     assert_eq!(refusal, OperateRefuse::AppendNotGranted);
     assert_eq!(refusal.to_string(), "overwrite does not permit append");
+}
+
+#[test]
+fn model_overwrite_outside_the_owned_root_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound_with(
+        &mut verifier,
+        Rights {
+            append: false,
+            overwrite: true,
+            child_journal: false,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let refusal = verifier
+        .operate(
+            &call,
+            &guest(handle),
+            Operation::Overwrite,
+            "UsersAI/agent-1/other",
+        )
+        .expect_err("overwrite leaves the owned root");
+    assert_eq!(refusal, OperateRefuse::Binding(Refuse::OutsideRoot));
+    assert_eq!(refusal.to_string(), "use path leaves the owned root");
+}
+
+#[test]
+fn model_append_outside_the_owned_root_is_refused() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound_with(
+        &mut verifier,
+        Rights {
+            append: true,
+            overwrite: false,
+            child_journal: false,
+        },
+    );
+    let call = verifier.open_call(instance);
+    let refusal = verifier
+        .operate(
+            &call,
+            &guest(handle),
+            Operation::Append,
+            "UsersAI/agent-1/other",
+        )
+        .expect_err("append leaves the owned root");
+    assert_eq!(refusal, OperateRefuse::Binding(Refuse::OutsideRoot));
+    assert_eq!(refusal.to_string(), "use path leaves the owned root");
 }
 
 #[test]
@@ -329,7 +436,12 @@ fn model_operate_on_a_sibling_instance_is_refused() {
         .expect("bind");
     let call = verifier.open_call(sibling);
     let refusal = verifier
-        .operate(&call, &guest(handle), Operation::Append)
+        .operate(
+            &call,
+            &guest(handle),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
         .expect_err("sibling instance");
     assert_eq!(refusal, OperateRefuse::Binding(Refuse::Instance));
     assert_eq!(refusal.to_string(), "instance does not match the grant");
@@ -348,7 +460,12 @@ fn model_child_journal_right_permits_child_journal() {
     );
     let call = verifier.open_call(instance);
     verifier
-        .operate(&call, &guest(handle), Operation::ChildJournal)
+        .operate(
+            &call,
+            &guest(handle),
+            Operation::ChildJournal,
+            "UsersAI/agent-1/journal",
+        )
         .expect("child-journal right");
 }
 
@@ -369,7 +486,12 @@ fn model_append_and_overwrite_do_not_permit_child_journal() {
         ..guest(handle)
     };
     let refusal = verifier
-        .operate(&call, &request, Operation::ChildJournal)
+        .operate(
+            &call,
+            &request,
+            Operation::ChildJournal,
+            "UsersAI/agent-1/journal",
+        )
         .expect_err("append and overwrite do not permit child-journal");
     assert_eq!(refusal, OperateRefuse::ChildJournalNotGranted);
     assert_eq!(refusal.to_string(), "child journal is its own right");
@@ -388,12 +510,22 @@ fn model_child_journal_does_not_permit_append_or_overwrite() {
     );
     let call = verifier.open_call(instance);
     let append = verifier
-        .operate(&call, &guest(handle), Operation::Append)
+        .operate(
+            &call,
+            &guest(handle),
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
         .expect_err("child-journal does not permit append");
     assert_eq!(append, OperateRefuse::AppendNotGranted);
     assert_eq!(append.to_string(), "overwrite does not permit append");
     let overwrite = verifier
-        .operate(&call, &guest(handle), Operation::Overwrite)
+        .operate(
+            &call,
+            &guest(handle),
+            Operation::Overwrite,
+            "UsersAI/agent-1/journal",
+        )
         .expect_err("child-journal does not permit overwrite");
     assert_eq!(overwrite, OperateRefuse::OverwriteNotGranted);
     assert_eq!(overwrite.to_string(), "append does not permit overwrite");
@@ -417,7 +549,12 @@ fn model_child_journal_on_a_sibling_instance_is_refused() {
         .expect("bind");
     let call = verifier.open_call(sibling);
     let refusal = verifier
-        .operate(&call, &guest(handle), Operation::ChildJournal)
+        .operate(
+            &call,
+            &guest(handle),
+            Operation::ChildJournal,
+            "UsersAI/agent-1/journal",
+        )
         .expect_err("sibling instance");
     assert_eq!(refusal, OperateRefuse::Binding(Refuse::Instance));
     assert_eq!(refusal.to_string(), "instance does not match the grant");
@@ -719,7 +856,12 @@ fn model_forged_child_journal_does_not_remove_the_right() {
     };
     assert!(request.forged_child_journal);
     verifier
-        .operate(&call, &request, Operation::ChildJournal)
+        .operate(
+            &call,
+            &request,
+            Operation::ChildJournal,
+            "UsersAI/agent-1/journal",
+        )
         .expect("guest claim does not remove the child-journal right");
 }
 
@@ -741,7 +883,12 @@ fn model_forged_append_does_not_remove_the_right() {
     };
     assert!(request.forged_append);
     verifier
-        .operate(&call, &request, Operation::Append)
+        .operate(
+            &call,
+            &request,
+            Operation::Append,
+            "UsersAI/agent-1/journal",
+        )
         .expect("guest claim does not remove the append right");
 }
 
@@ -763,7 +910,12 @@ fn model_forged_overwrite_does_not_remove_the_right() {
     };
     assert!(request.forged_overwrite);
     verifier
-        .operate(&call, &request, Operation::Overwrite)
+        .operate(
+            &call,
+            &request,
+            Operation::Overwrite,
+            "UsersAI/agent-1/journal",
+        )
         .expect("guest claim does not remove the overwrite right");
 }
 
