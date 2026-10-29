@@ -11,6 +11,8 @@ every use.
 
 reference model, not the Runtime; counts toward no M1 check; the Runtime half is Anders's (#464, #463, #181)
 
+`Verifier::ask_capability` is the stand-in entry for a capability ask. The asker is the registered instance principal. A Home principal is refused and does not mint. An app principal stores through the one `bind_grant`. A caller claim is not the principal. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
 `Verifier::admit_ask` caps one agent's budget ask and stores the granted amount through the one `admit`. This is a lab stand-in for that admission. It is not the Runtime. It does not count toward A7 or M1-R.
 
 A forged identity, session, instance, usage, ceiling or set of rights changes

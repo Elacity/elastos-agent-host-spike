@@ -317,26 +317,28 @@ fn checked_bundle_hands_out_the_manifest_name() {
     // caller never parses capsule.json again. Each expected name is written
     // here, from the committed manifest, never taken from the accessor.
     let names = [
-        (&CONTENT_SAMPLE, "example-content"),
-        (&WEB_APP, "example-web-app"),
-        (&WC001_CORE, "wc001-core"),
-        (&AGENT_HOST, "agent-host"),
-        (&PROVIDER, "ipfs-provider"),
-        (&MODEL, "model-fixture"),
-        (&PROVIDER_VARIANT_A, "ipfs-provider"),
-        (&PROVIDER_VARIANT_B, "ipfs-provider"),
+        (&CONTENT_SAMPLE, "example-content", "content"),
+        (&WEB_APP, "example-web-app", "app"),
+        (&WC001_CORE, "wc001-core", "app"),
+        (&AGENT_HOST, "agent-host", "app"),
+        (&PROVIDER, "ipfs-provider", "provider"),
+        (&MODEL, "model-fixture", "content"),
+        (&PROVIDER_VARIANT_A, "ipfs-provider", "provider"),
+        (&PROVIDER_VARIANT_B, "ipfs-provider", "provider"),
     ];
-    let mut listed: Vec<&str> = names.iter().map(|(fixture, _)| fixture.name).collect();
+    let mut listed: Vec<&str> = names.iter().map(|(fixture, _, _)| fixture.name).collect();
     let mut committed: Vec<&str> = FIXTURES.iter().map(|fixture| fixture.name).collect();
     listed.sort_unstable();
     committed.sort_unstable();
     assert_eq!(listed, committed, "every committed fixture, once");
-    for (fixture, name) in names {
+    for (fixture, name, role) in names {
         let bundle = assemble(fixture);
+        let checked = checked(bundle.path());
+        assert_eq!(checked.manifest_name(), name, "{}", fixture.name);
         assert_eq!(
-            checked(bundle.path()).manifest_name(),
-            name,
-            "{}",
+            checked.manifest_role(),
+            role,
+            "{} hands out the role its manifest states",
             fixture.name
         );
     }

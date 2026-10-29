@@ -26,3 +26,10 @@ url = "2.5"
 [dev-dependencies]
 # Paused Tokio clock for tests that hold a deadline until a fixture engine has started.
 tokio = { version = "1.0", features = ["test-util"] }
+# The shared stand-in's own tests compile into this binary, so its fixture
+# signing needs the same crates as `lab/agent-conformance`'s dev-dependencies.
+capsule-identity = { path = "../../lab/capsule-identity" }
+ed25519-dalek = "2.1"
+elastos-identity = { path = "../../elastos/crates/elastos-identity" }
+rand = "0.8"
+tempfile = "3"

@@ -79,6 +79,12 @@ pub struct Decision {
     pub rights: Rights,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Asker {
+    Home,
+    App,
+}
+
 /// A refusal with one clear reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refuse {
@@ -92,6 +98,7 @@ pub enum Refuse {
     SymlinkShaped,
     OutsideRoot,
     PublicRead,
+    HomeMint,
 }
 
 impl std::fmt::Display for Refuse {
@@ -107,6 +114,7 @@ impl std::fmt::Display for Refuse {
             Refuse::SymlinkShaped => "use path has a symlink-shaped segment",
             Refuse::OutsideRoot => "use path leaves the owned root",
             Refuse::PublicRead => "public storage read does not bind",
+            Refuse::HomeMint => "home does not mint an app capability",
         })
     }
 }
@@ -171,6 +179,9 @@ impl Verifier {
             .registry
             .get(&instance)
             .ok_or(Refuse::UnknownInstance)?;
+        if record.identity == "home" {
+            return Err(Refuse::HomeMint);
+        }
         let owned_root = resource_name(&record.identity, resource, None)?;
         self.next_handle += 1;
         let handle = Handle(self.next_handle);
@@ -185,6 +196,17 @@ impl Verifier {
             },
         );
         Ok(handle)
+    }
+
+    pub fn ask_capability(
+        &mut self,
+        instance: InstanceId,
+        resource: &str,
+        rights: Rights,
+        claimed: Asker,
+    ) -> Result<Handle, Refuse> {
+        let _claimed = claimed;
+        self.bind_grant(instance, resource, rights)
     }
 
     /// Changes the registry identity for a live instance.
@@ -1705,4 +1727,56 @@ fn model_workspace_dependency_is_a_link_in_place() {
         "walk skips the crate manifest"
     );
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn model_registered_home_ask_is_refused() {
+    let mut verifier = Verifier::new();
+    let home = verifier.register_instance("home", "session-a");
+    let photo = verifier.register_instance("photo", "session-a");
+    let handle = verifier
+        .ask_capability(photo, "UsersAI/photo/library", rights(), Asker::Home)
+        .expect("photo ask claimed as home");
+    let call = verifier.open_call(photo);
+    let decision = verifier
+        .use_grant(call, &guest(handle))
+        .expect("photo effect");
+    assert_eq!(decision.identity, "photo");
+    assert_eq!(decision.owned_root, "UsersAI/photo/library");
+    let refusal = verifier
+        .ask_capability(home, "UsersAI/home/desk", rights(), Asker::App)
+        .expect_err("home ask claimed as app");
+    assert_eq!(refusal, Refuse::HomeMint);
+    assert_eq!(refusal.to_string(), "home does not mint an app capability");
+    let again = verifier
+        .use_grant(call, &guest(handle))
+        .expect("photo effect remains");
+    assert_eq!(again.owned_root, "UsersAI/photo/library");
+    let for_home = verifier
+        .ask_capability(photo, "UsersAI/home/desk", rights(), Asker::Home)
+        .expect_err("photo ask for a home root");
+    assert_eq!(for_home, Refuse::OutsidePrincipal);
+    assert_eq!(
+        for_home.to_string(),
+        "owned root is outside the agent principal"
+    );
+}
+
+#[test]
+fn model_home_direct_mint_is_refused() {
+    let mut verifier = Verifier::new();
+    let home = verifier.register_instance("home", "session-a");
+    let photo = verifier.register_instance("photo", "session-a");
+    let direct = verifier
+        .bind_grant(home, "UsersAI/home/desk", rights())
+        .expect_err("home calls the mint");
+    assert_eq!(direct, Refuse::HomeMint);
+    assert_eq!(direct.to_string(), "home does not mint an app capability");
+    let handle = verifier
+        .bind_grant(photo, "UsersAI/photo/library", rights())
+        .expect("app mint");
+    let decision = verifier
+        .use_grant(verifier.open_call(photo), &guest(handle))
+        .expect("photo effect");
+    assert_eq!(decision.identity, "photo");
 }
