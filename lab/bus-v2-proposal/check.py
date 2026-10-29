@@ -309,7 +309,7 @@ def read_file(root, rel, sha):
         return BLOBS[key]
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "show", sha + ":" + rel],
+            ["git", "-C", str(root), "cat-file", "blob", sha + ":" + rel],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )

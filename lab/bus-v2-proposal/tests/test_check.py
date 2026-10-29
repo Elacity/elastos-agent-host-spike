@@ -3378,6 +3378,21 @@ class CitationCheckTests(unittest.TestCase):
         expected = "refuse: path does not exist: missing/no-such.rs"
         self._assert_one("See `missing/no-such.rs:1`.\n", {}, expected)
 
+    def test_directory_citation_is_refused(self):
+        # A tree whose name looks like a source file is still not a blob.
+        # Every citation form returns the path reason before inspecting bytes.
+        rel = "pkg/source.rs"
+        files = {rel + "/child.txt": b"fn child(\n"}
+        expected = "refuse: path does not exist: " + rel
+        for suffix in (":1", ":1-2", "::child"):
+            self._assert_one("See `" + rel + suffix + "`.\n", files, expected)
+        # A quote target that names a tree keeps only the structural reason.
+        self._assert_one(
+            self._quote_body(OWNED_QUOTE),
+            {OWNED_REL + "/child.txt": b"fn child(\n"},
+            "refuse: path does not exist: " + OWNED_REL,
+        )
+
     def test_past_end_line_is_refused(self):
         one = {"pkg/one.rs": b"only\n"}
         past = "refuse: line 2 is past the end of pkg/one.rs (1 lines)"
@@ -4963,6 +4978,18 @@ class CitationCheckTests(unittest.TestCase):
             "CAUGHT missing-path",
         )
 
+    def test_falsifier_directory_citation_is_caught(self):
+        # Plant the text that a successful tree listing returned as file bytes.
+        self._caught(
+            "read_file",
+            lambda root, rel, sha: (
+                "tree " + sha + ":" + rel + "\n\nchild.txt\n"
+            ).encode("utf-8"),
+            self.test_directory_citation_is_refused,
+            "refuse: path does not exist:",
+            "CAUGHT directory-citation",
+        )
+
     def test_falsifier_past_end_line_is_caught(self):
         self._caught(
             "line_count",
@@ -5000,15 +5027,21 @@ class CitationCheckTests(unittest.TestCase):
         )
 
     def test_falsifier_structural_read_before_the_pin_is_caught(self):
-        # A gate that reads the worktree before it knows the pin adds a second
-        # line to a draft whose pin names no revision.
-        self._caught(
-            "pin_allows_structural_reads",
-            lambda pin_reason, pinned: True,
-            self.test_missing_pin_is_refused,
-            "refuse:",
-            "CAUGHT structural-before-pin",
+        # Forcing structural reads adds a second refusal to each draft whose
+        # pin names no known revision.
+        cases = (
+            (self.test_missing_pin_is_refused, "CAUGHT structural-before-pin"),
+            (self.test_pin_line_is_one_commit, "CAUGHT structural-before-malformed-pin"),
+            (self.test_unknown_pin_is_refused, "CAUGHT structural-before-unknown-pin"),
         )
+        for named_test, label in cases:
+            self._caught(
+                "pin_allows_structural_reads",
+                lambda pin_reason, pinned: True,
+                named_test,
+                "refuse:",
+                label,
+            )
 
     def test_falsifier_duplicate_quote_refusal_is_caught(self):
         # A walk that ignores the structural refusals repeats a citation the pin
@@ -9301,14 +9334,23 @@ class CitationCheckTests(unittest.TestCase):
                 past % (other, OWNED_REL, count)
                 for other in self._refused_numbers(body, count)
             ]
+            # The provider file remains complete, so its last read still runs
+            # unless an earlier quotation mismatch stops the walk.
+            expected_reads = [
+                other for other in HOSTED_READ_ORDER
+                if other <= count or other == SCHEME_NUMBER
+            ]
             if name in mismatch_after_the_cut:
                 expected.append(
                     "refuse: quoted line does not match "
                     + mismatch_after_the_cut[name]
                 )
+                last_read = int(mismatch_after_the_cut[name].rpartition(":")[2])
+                expected_reads = expected_reads[:expected_reads.index(last_read) + 1]
             self.assertEqual(got, expected, span)
             self.assertIn(number, self._refused_numbers(body, count), span)
             self.assertNotIn(number, reads, span)
+            self.assertEqual(reads, expected_reads, span)
 
     def test_no_write_mismatch_stops_the_no_provider_decision(self):
         got, reads = self._pinned_reads(
