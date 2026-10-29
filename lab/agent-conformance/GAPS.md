@@ -411,10 +411,11 @@ attaches once with scope `shell` at the port owned by `Operator`. The secret,
 session token and returned grant tokens stay in memory. The controller uses
 `GET /api/capability/pending`, matches resource/action/reason exactly against
 `fixtures/grants.json`, and posts one `once` grant for the listed read. Every
-other pending request receives the fixture denial reason. Ambiguous matches
-are denied before any grant is selected. The Runtime mints the grant for the
-requesting session (`api/handlers/capability.rs:339-346`); the observed guest
-invocation checks that the requesting client can use it.
+other pending request receives the fixture denial reason; a pending
+`elastos://net/stream` request receives `fixture denies unlisted elastos://net/stream`.
+Ambiguous matches are denied before any grant is selected. The Runtime mints the
+grant for the requesting session (`api/handlers/capability.rs:339-346`); the
+observed guest invocation checks that the requesting client can use it.
 
 Seed preparation uses Runtime writes through the existing production
 `/api/provider/localhost/write` route with the controller's shell session.
@@ -524,7 +525,10 @@ owns resource authority. The read's manifest refusal returns through the guest's
 call and lifecycle to `elastos run`. The live wrapper uses
 `Component capsule denied: BusError::Internal("capsule manifest does not declare authority for <resource>")`
 for that read. The network row uses
-`Component capsule denied: BusError::Denied("fixture denies unlisted read")`.
+`Component capsule denied: BusError::Denied("fixture denies unlisted elastos://net/stream")`.
+`undeclared_network_manifest_is_refused` stages the same probe manifest without
+`elastos://net/stream` and requires the manifest refusal
+`Internal("capsule manifest does not declare authority for elastos://net/stream")`.
 The default build uses `BusError::Unavailable` with the AC-002-ARGS reason.
 The probe returns immediately after the
 request, including unexpected success, so this check performs no provider
