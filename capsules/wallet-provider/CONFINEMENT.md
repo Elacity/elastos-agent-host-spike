@@ -24,7 +24,9 @@ to `Init` (`start_with_profile`); the Runtime half of the bridge change does
 the same and is not built. The provider creates the final
 `Wallet` directory. Seatbelt grants recursive state access to that wallet
 directory alone. Literal read access to its existing parent lets the provider
-inspect and synchronize the directory while it creates Wallet. The parent
+inspect that parent, and publish the parent entry of each directory it creates
+in the `Init` call, while it creates Wallet. The entry of a wallet directory
+that already existed belongs to the actor that created it. The parent
 receives no recursive grant. The test launch refuses a second binding of a
 canonical parameter, so those three paths come only from
 `canonical_bindings`; `start_with_profile_refuses_a_canonical_parameter` holds
@@ -39,7 +41,7 @@ holds that rule for encoded names.
 | `(allow process-exec (literal PROVIDER_EXECUTABLE))` | Start only the binary the launch named. `unbound_copy_is_refused_under_profile` shows that a byte-identical copy of the binary under `STORAGE_ROOT` is refused with exit 71 and the `execvp()` `Operation not permitted` line, and `bound_copy_serves_under_profile` is its control. |
 | `(allow file-read* (literal "/"))` | The kernel resolves every absolute path through the root directory. |
 | `(allow sysctl-read)` | The loader and the allocator read kernel facts at startup. |
-| `(allow file-read* (literal STORAGE_PARENT))` | Inspect and synchronize the existing parent during wallet directory creation. |
+| `(allow file-read* (literal STORAGE_PARENT))` | Inspect the existing parent, and publish the parent entry of each directory the provider creates in it. |
 | `(allow file-read* file-write* (subpath STORAGE_ROOT))` | One grant owns all account, key, challenge and approval state under the wallet directory. |
 
 The remaining filesystem and process operations stay under the default denial.
@@ -1410,6 +1412,16 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   wallet's declared-rights file (WP178):
   `seccomp_allow_list_names_the_provider_it_was_built_for` fails on its did
   case, because both lists then answer `wallet-provider`.
+- Publish the wallet directory's parent entry at the caller even when this call
+  created nothing (WP179):
+  `tests::storage_root::wallet_init_publishes_only_the_entries_it_creates`
+  fails on its first case, because an existing wallet directory under a parent
+  that cannot be opened for reading then answers `storage_error` instead of
+  `ok`.
+- Canonicalize the wallet directory at the caller so a symlinked parent passes
+  the inspection (WP180): `tests::storage_root::wallet_init_refuses_symlink_parent`
+  fails because `init` answers `ok` instead of refusing the symlinked
+  `SystemServices`.
 
 Task 148's Linux-only plants are recorded in `CONFINEMENT-LINUX.md`, not here.
 Each names a `#[cfg(target_os = "linux")]` test, and the runner runs on the Mac,

@@ -245,8 +245,13 @@ use std::process::Command;
 /// helper ignoring its provider and reading wallet's declared-rights file, which
 /// `seccomp_allow_list_names_the_provider_it_was_built_for` catches. Its two
 /// Linux-only plants are the same two 148 registered for the wallet journey, on
-/// the did caller, and are named in `CONFINEMENT-LINUX.md` too.
-const EXPECTED_FALSIFIERS: usize = 166;
+/// the did caller, and are named in `CONFINEMENT-LINUX.md` too. Task 150 adds
+/// WP179, which publishes the wallet directory's parent entry at the
+/// `src/main.rs` call after `create_wallet_dir_durable` answers, and WP180,
+/// which canonicalizes the wallet directory there so a symlinked parent passes
+/// the inspection; both are CAUGHT on the Mac by the two storage-root tests
+/// task 150 adds.
+const EXPECTED_FALSIFIERS: usize = 168;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
