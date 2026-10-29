@@ -672,6 +672,7 @@ name = "plan-approval"
 version = "0.1.0"
 dependencies = [
  "agent-conformance",
+ "serde_json",
 ]
 
 [[package]]

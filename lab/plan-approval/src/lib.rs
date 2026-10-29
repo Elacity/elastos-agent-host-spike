@@ -1,11 +1,13 @@
 #![forbid(unsafe_code)]
 
-//! Plan preview: the bytes and their hash, and nothing else.
+//! Plan preview and approval: the bytes and their hash, and the stand-in's
+//! shell grant for one exact step.
 //!
 //! A proposal carries no authority, so a preview reads no grant and no
-//! capsule list and writes neither. Runtime authorisation is a separate step.
+//! capsule list and writes neither. Runtime authorisation is a separate step:
+//! the shell grant binds the shown hash, and a later byte change is refused.
 
-use agent_conformance::standin_runtime::StandIn;
+use agent_conformance::standin_runtime::{Caller, StandIn};
 
 /// One plan preview. The hash names the exact fixture bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,6 +23,78 @@ pub fn preview(stand_in: &mut StandIn, plan: &[u8]) -> Preview {
         plan: plan.to_vec(),
         sha256: agent_conformance::identity::sha256(plan),
     }
+}
+
+/// Submit one step of the shown plan as a pending request.
+///
+/// The request `reason` is the preview hash. A hash that does not name these
+/// bytes, or a step the bytes do not contain, is refused before any request
+/// is stored.
+pub fn submit_shown_plan(
+    stand_in: &mut StandIn,
+    preview: &Preview,
+    session_id: &str,
+    request_id: &str,
+    resource: &str,
+    action: &str,
+) -> Result<(), (u16, String)> {
+    if agent_conformance::identity::sha256(&preview.plan) != preview.sha256 {
+        return Err((400, "plan hash does not name these bytes".to_owned()));
+    }
+    let Ok(text) = std::str::from_utf8(&preview.plan) else {
+        return Err((400, "step is not in the shown plan".to_owned()));
+    };
+    if !(text.contains(resource) && text.contains(action)) {
+        return Err((400, "step is not in the shown plan".to_owned()));
+    }
+    stand_in.seed_request(request_id, session_id, resource, action, &preview.sha256)
+}
+
+/// Grant the pending request through the shell grant for one use.
+pub fn grant_shown_plan(
+    stand_in: &mut StandIn,
+    request_id: &str,
+) -> Result<serde_json::Value, (u16, String)> {
+    stand_in.post_capability_grant(
+        Caller::Shell,
+        &serde_json::json!({
+            "request_id": request_id,
+            "duration": "once",
+            "rationale": "allow once the shown plan",
+        }),
+    )
+}
+
+/// Perform the shown plan through the request the shell grant settled.
+///
+/// The `approved` flag grants nothing. The recomputed hash must equal the
+/// request's stored `reason`, so a later byte change is refused.
+pub fn perform_shown_plan(
+    stand_in: &mut StandIn,
+    preview: &Preview,
+    session_id: &str,
+    request_id: &str,
+    approved: bool,
+) -> Result<(), (u16, String)> {
+    let _ = approved;
+    let shown = agent_conformance::identity::sha256(&preview.plan);
+    if shown != preview.sha256 {
+        return Err((400, "plan hash does not name these bytes".to_owned()));
+    }
+    let requests = stand_in.get_capability_requests(Caller::Shell, Some(session_id))?;
+    let reason = requests["requests"]
+        .as_array()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["request_id"] == request_id)
+        })
+        .and_then(|entry| entry["reason"].as_str())
+        .ok_or_else(|| (400, format!("unknown request: {request_id}")))?;
+    if reason != shown.as_str() {
+        return Err((400, "plan bytes differ from the approved hash".to_owned()));
+    }
+    stand_in.authorise(Caller::Client { session_id }, request_id)
 }
 
 #[cfg(test)]
@@ -144,5 +218,249 @@ fn preview_makes_no_effect() {
         previews[1].sha256,
         sha256(PLAN_B),
         "the hash is sha256 of those bytes"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn approval_binds_to_the_previewed_plan_hash() {
+    use agent_conformance::identity::sha256;
+    use agent_conformance::standin_runtime::Caller;
+    use fixtures::{PLAN_A, PLAN_B};
+    use serde_json::{json, Value};
+
+    const SESSION: &str = "component-1";
+    const REQUEST: &str = "req-plan";
+    const RESOURCE: &str = "localhost://Public/plan-approval/a.txt";
+    const ACTION: &str = "read";
+    const BOUND: &str = "the shell grant bound the shown hash and the flag granted nothing";
+
+    fn live(stand_in: &StandIn) -> Value {
+        stand_in
+            .get_capability_list(Caller::Shell, Some("all_sessions_live"))
+            .expect("shell live list")["capabilities"]
+            .clone()
+    }
+
+    fn requests(stand_in: &StandIn, session_id: &str) -> Vec<Value> {
+        stand_in
+            .get_capability_requests(Caller::Shell, Some(session_id))
+            .expect("shell requests")["requests"]
+            .as_array()
+            .expect("requests array")
+            .clone()
+    }
+
+    fn listed(stand_in: &StandIn, session_id: &str) -> Option<Value> {
+        requests(stand_in, session_id)
+            .into_iter()
+            .find(|entry| entry["request_id"] == json!(REQUEST))
+    }
+
+    let mut stand_in = StandIn::new();
+    let shown = preview(&mut stand_in, PLAN_A);
+    assert_eq!(
+        submit_shown_plan(&mut stand_in, &shown, SESSION, REQUEST, RESOURCE, ACTION),
+        Ok(()),
+        "a step the shown bytes contain becomes one pending request"
+    );
+    assert_eq!(
+        live(&stand_in),
+        json!([]),
+        "a pending request is not a live grant"
+    );
+
+    let pending = listed(&stand_in, SESSION).expect("the shown plan request is listed");
+    assert_eq!(
+        pending["status"],
+        json!("pending"),
+        "the request is pending"
+    );
+    assert_eq!(
+        pending["reason"],
+        json!(sha256(PLAN_A)),
+        "the pending request carries the shown hash as its reason"
+    );
+    assert_eq!(pending["settled_by"], Value::Null, "no settler yet");
+
+    let err = perform_shown_plan(&mut stand_in, &shown, SESSION, REQUEST, true).unwrap_err();
+    assert_eq!(err.0, 400, "a pending request authorises nothing");
+    assert!(
+        err.1.contains("unknown grant: req-plan"),
+        "{BOUND}: {err:?}"
+    );
+    assert_eq!(live(&stand_in), json!([]), "{BOUND}");
+
+    let before = requests(&stand_in, SESSION).len();
+    assert_eq!(
+        submit_shown_plan(
+            &mut stand_in,
+            &shown,
+            SESSION,
+            "req-missing",
+            "localhost://Public/plan-approval/missing.txt",
+            ACTION
+        ),
+        Err((400, "step is not in the shown plan".to_owned())),
+        "a step the shown bytes do not contain is refused"
+    );
+    assert_eq!(
+        requests(&stand_in, SESSION).len(),
+        before,
+        "a refused step adds no request"
+    );
+
+    let forged = Preview {
+        plan: PLAN_A.to_vec(),
+        sha256: "0".repeat(64),
+    };
+    assert_eq!(
+        submit_shown_plan(
+            &mut stand_in,
+            &forged,
+            SESSION,
+            "req-forged",
+            RESOURCE,
+            ACTION
+        ),
+        Err((400, "plan hash does not name these bytes".to_owned())),
+        "a hash that does not name the bytes is refused"
+    );
+    assert_eq!(
+        requests(&stand_in, SESSION).len(),
+        before,
+        "a forged hash adds no request"
+    );
+
+    let err = perform_shown_plan(&mut stand_in, &forged, SESSION, REQUEST, true).unwrap_err();
+    assert_eq!(
+        err,
+        (400, "plan hash does not name these bytes".to_owned()),
+        "perform refuses a hash that does not name the bytes"
+    );
+    assert_eq!(
+        live(&stand_in),
+        json!([]),
+        "a forged perform leaves the live grants unchanged"
+    );
+
+    let mut stray = PLAN_A.to_vec();
+    stray.push(0xff);
+    let not_utf8 = preview(&mut stand_in, &stray);
+    assert_eq!(
+        submit_shown_plan(
+            &mut stand_in,
+            &not_utf8,
+            SESSION,
+            "req-utf8",
+            RESOURCE,
+            ACTION
+        ),
+        Err((400, "step is not in the shown plan".to_owned())),
+        "bytes that are not UTF-8 carry no step"
+    );
+    assert_eq!(
+        requests(&stand_in, SESSION).len(),
+        before,
+        "a non-UTF-8 plan adds no request"
+    );
+
+    assert_eq!(
+        submit_shown_plan(
+            &mut stand_in,
+            &shown,
+            SESSION,
+            "req-action",
+            RESOURCE,
+            "delete"
+        ),
+        Err((400, "step is not in the shown plan".to_owned())),
+        "an action the shown bytes do not contain is refused"
+    );
+    assert_eq!(
+        requests(&stand_in, SESSION).len(),
+        before,
+        "an absent action adds no request"
+    );
+
+    let err = perform_shown_plan(&mut stand_in, &shown, SESSION, "req-unknown", true).unwrap_err();
+    assert_eq!(
+        err,
+        (400, "unknown request: req-unknown".to_owned()),
+        "perform refuses a request no listing holds"
+    );
+    assert_eq!(
+        live(&stand_in),
+        json!([]),
+        "an unknown request leaves the live grants unchanged"
+    );
+
+    assert_eq!(
+        grant_shown_plan(&mut stand_in, REQUEST),
+        Ok(json!({ "success": true })),
+        "the shell grant settles the pending request"
+    );
+    let granted = listed(&stand_in, SESSION).expect("the granted request is listed");
+    assert_eq!(
+        granted["status"],
+        json!("granted"),
+        "the request is granted"
+    );
+    assert_eq!(
+        granted["settled_by"],
+        json!("shell"),
+        "the shell settled it"
+    );
+    assert_eq!(
+        granted["decision_reason"],
+        json!("allow once the shown plan"),
+        "the rationale is the allow-once text"
+    );
+    assert_eq!(
+        granted["reason"],
+        json!(sha256(PLAN_A)),
+        "the shell grant bound the shown hash"
+    );
+
+    let live_grant = live(&stand_in);
+    assert_eq!(
+        live_grant.as_array().map(Vec::len),
+        Some(1),
+        "the shell grant is one live grant"
+    );
+    assert_eq!(live_grant[0]["request_id"], json!(REQUEST), "{BOUND}");
+    assert_eq!(live_grant[0]["session_id"], json!(SESSION), "{BOUND}");
+    assert_eq!(live_grant[0]["resource"], json!(RESOURCE), "{BOUND}");
+    assert_eq!(live_grant[0]["action"], json!(ACTION), "{BOUND}");
+    assert_eq!(live_grant[0]["duration"], json!("once"), "{BOUND}");
+
+    let other = preview(&mut stand_in, PLAN_B);
+    assert_eq!(
+        perform_shown_plan(&mut stand_in, &other, SESSION, REQUEST, false),
+        Err((400, "plan bytes differ from the approved hash".to_owned())),
+        "{BOUND}"
+    );
+    assert_eq!(
+        live(&stand_in),
+        live_grant,
+        "a refused plan leaves the live grant in place"
+    );
+
+    assert_eq!(
+        perform_shown_plan(&mut stand_in, &shown, SESSION, REQUEST, false),
+        Ok(()),
+        "{BOUND}: allow once authorizes one exact operation"
+    );
+    assert_eq!(
+        live(&stand_in),
+        json!([]),
+        "{BOUND}: the once grant is spent"
+    );
+
+    let err = perform_shown_plan(&mut stand_in, &shown, SESSION, REQUEST, false).unwrap_err();
+    assert_eq!(
+        err,
+        (400, "grant is not live: Exhausted".to_owned()),
+        "{BOUND}: a spent once grant authorises no second operation"
     );
 }
