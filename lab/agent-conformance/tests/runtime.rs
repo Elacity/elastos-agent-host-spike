@@ -329,9 +329,17 @@ fn socket_census_requires_parseable_loopback_endpoints_and_api_listener() {
     }
 }
 
+thread_local! {
+    // Each negative test changes only the child and checks the actual wait's
+    // panic. Consume the control once so parallel tests keep separate inputs.
+    static CENSUS_CWD_CONTROL: std::cell::Cell<Option<(&'static str, fn(&str))>> =
+        const { std::cell::Cell::new(None) };
+}
+
 #[test]
 fn cleanup_census_refuses_each_leftover() {
     use agent_conformance::census::cleanup;
+    let control = CENSUS_CWD_CONTROL.with(|control| control.take());
     let home = ThrowawayHome::new().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -357,27 +365,50 @@ fn cleanup_census_refuses_each_leftover() {
     let mut child = home
         .start(
             std::path::Path::new("/bin/sh"),
-            &["-c", "cd \"$HOME/..\"; : > cwd-ready; exec /bin/sleep 20"],
+            &[
+                "-c",
+                control.map_or("cd \"$HOME/..\"; : > cwd-ready; exec /bin/sleep 20", |c| {
+                    c.0
+                }),
+            ],
         )
         .unwrap();
-    let started = std::time::Instant::now();
-    let mut reached_root = false;
-    while !reached_root {
-        if home.root().join("cwd-ready").exists() {
-            reached_root = true;
-            break;
+    let readiness = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let started = std::time::Instant::now();
+        let mut reached_root = false;
+        while !reached_root {
+            if home.root().join("cwd-ready").exists() {
+                reached_root = true;
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "root cwd readiness exceeded 5 seconds"
+            );
+            assert!(
+                child.is_alive().unwrap(),
+                "root cwd control exited before the root"
+            );
+            std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "root cwd readiness exceeded 5 seconds"
-        );
-        assert!(
-            child.is_alive().unwrap(),
-            "root cwd control exited before the root"
-        );
-        std::thread::sleep(Duration::from_millis(10));
+        assert!(reached_root, "census ran before cwd-ready");
+    }));
+    if let Some((_, check_reason)) = control {
+        child.stop().unwrap();
+        drop(child);
+        let panic = readiness.expect_err("census readiness must refuse the controlled child");
+        let reason = panic
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+            .expect("census readiness refusal must have a text reason");
+        check_reason(reason);
+        home.finish().unwrap();
+        return;
     }
-    assert!(reached_root, "census ran before cwd-ready");
+    if let Err(panic) = readiness {
+        std::panic::resume_unwind(panic);
+    }
     let reason = cleanup(&home, port).unwrap_err();
     assert!(reason.contains("process leftover"));
     assert!(reason.contains("processes:1"));
@@ -427,55 +458,22 @@ fn cleanup_census_refuses_each_leftover() {
 
 #[test]
 fn cleanup_census_times_out_without_cwd_ready() {
-    let home = ThrowawayHome::new().unwrap();
-    let mut child = home
-        .start(
-            std::path::Path::new("/bin/sh"),
-            &["-c", "exec /bin/sleep 20"],
-        )
-        .unwrap();
-    let started = std::time::Instant::now();
-    let mut reason = "";
-    while !home.root().join("cwd-ready").exists() {
-        if started.elapsed() >= Duration::from_secs(5) {
-            reason = "root cwd readiness exceeded 5 seconds";
-            break;
-        }
-        if !child.is_alive().unwrap() {
-            reason = "root cwd control exited before the root";
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert_eq!(reason, "root cwd readiness exceeded 5 seconds");
-    child.stop().unwrap();
-    drop(child);
-    home.finish().unwrap();
+    CENSUS_CWD_CONTROL.with(|control| {
+        control.set(Some(("exec /bin/sleep 20", |reason| {
+            assert_eq!(reason, "root cwd readiness exceeded 5 seconds");
+        })));
+    });
+    cleanup_census_refuses_each_leftover();
 }
 
 #[test]
 fn cleanup_census_exits_before_cwd_ready() {
-    let home = ThrowawayHome::new().unwrap();
-    let mut child = home
-        .start(std::path::Path::new("/bin/sh"), &["-c", "exit 0"])
-        .unwrap();
-    let started = std::time::Instant::now();
-    let mut reason = "";
-    while !home.root().join("cwd-ready").exists() {
-        if started.elapsed() >= Duration::from_secs(5) {
-            reason = "root cwd readiness exceeded 5 seconds";
-            break;
-        }
-        if !child.is_alive().unwrap() {
-            reason = "root cwd control exited before the root";
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert_eq!(reason, "root cwd control exited before the root");
-    child.stop().unwrap();
-    drop(child);
-    home.finish().unwrap();
+    CENSUS_CWD_CONTROL.with(|control| {
+        control.set(Some(("exit 0", |reason| {
+            assert_eq!(reason, "root cwd control exited before the root");
+        })));
+    });
+    cleanup_census_refuses_each_leftover();
 }
 
 #[test]

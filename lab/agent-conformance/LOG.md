@@ -9737,3 +9737,82 @@ Proof after the plants were restored: `cargo fmt --manifest-path lab/agent-confo
 
 A passing row gives the real Runtime no A12 credit.
 
+
+### Readiness wait repair
+
+The earlier timeout and early-exit plants in this section exercised copies of
+the wait rules. The checks and plants below replace that readiness evidence.
+Both named negative tests now call `cleanup_census_refuses_each_leftover`.
+A thread-local, single-use control supplies only the child script and the
+assertion for its expected reason. The existing wait owns the timeout and
+alive checks. Its panic reaches the named test's exact-string assertion.
+The controlled child is stopped before that assertion; the root is removed
+after the assertion succeeds. The normal case continues to the existing
+process, socket and empty-census assertions.
+
+All 54 existing assertions in `tests/runtime.rs` are preserved, as checked by
+comparing their text with whitespace normalized. The socket section and final
+empty census are byte-identical to their pre-repair text. The edit adds no
+ready-file helper or census parser. Git was not run during this repair.
+
+The following plants each changed only `tests/runtime.rs`, compiled, and were
+restored in a `finally` block before the next plant. Each command used
+`cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime <test> -- --exact`.
+The timeout and early-exit plants change the assertions in the single census
+wait, rather than the negative tests. Each original assertion remains in the
+restored source.
+
+| Plant | Test | Result | Elapsed |
+| --- | --- | --- | --- |
+| Timeout check delayed beyond child exit | `cleanup_census_times_out_without_cwd_ready` | Exit 101 at `tests/runtime.rs:463`: actual `root cwd control exited before the root`, expected `root cwd readiness exceeded 5 seconds` | 29.302 s |
+| Alive check bypassed | `cleanup_census_exits_before_cwd_ready` | Exit 101 at `tests/runtime.rs:473`: actual `root cwd readiness exceeded 5 seconds`, expected `root cwd control exited before the root` | 6.394 s |
+| F-census-cwd-wait | `cleanup_census_refuses_each_leftover` | Exit 101 at `tests/runtime.rs:394`: `census ran before cwd-ready` | 1.240 s |
+| F-census-cwd-home | `cleanup_census_refuses_each_leftover` | Exit 101 at `tests/runtime.rs:415`: `root cwd must be visible` | 1.584 s |
+
+Exact timeout plant, old bytes:
+
+```rust
+                started.elapsed() < Duration::from_secs(5),
+                "root cwd readiness exceeded 5 seconds"
+```
+
+New bytes:
+
+```rust
+                started.elapsed() < Duration::from_secs(30),
+                "root cwd readiness exceeded 5 seconds"
+```
+
+Exact alive plant, old bytes:
+
+```rust
+                child.is_alive().unwrap(),
+                "root cwd control exited before the root"
+```
+
+New bytes:
+
+```rust
+                true,
+                "root cwd control exited before the root"
+```
+
+F-census-cwd-wait replaced `while !reached_root {` with `while false {`.
+F-census-cwd-home used the old and new shell bytes recorded above; its ready
+path stayed `home.root().join("cwd-ready")`.
+
+The first sandbox run compiled but stopped at the loopback bind with
+`Operation not permitted`, before the wait. With local socket and process
+access, all three tests passed (7.03 s of test execution). After all plants
+were restored, the checks used `CARGO_NET_OFFLINE=true CARGO_INCREMENTAL=0`,
+`CARGO_TARGET_DIR` set to the lane's `target/host`, and
+`CARGO_BUILD_BUILD_DIR` set to the lane's `target/host-build`:
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, 0.182 s.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test runtime cleanup_census_ -- --test-threads=2`: exit 0, 3 passed, 6.889 s total (6.40 s of test execution).
+
+Both restored checks completed within the 600-second bound. The seven roots
+created by the sandbox failure and the plants were removed after `lsof +D`
+confirmed that each had no open holders. The full suite remains for the
+supervisor to run, followed by a fresh review. These checks establish the lab
+wait behavior; Runtime A12 acceptance stays with its owner.
