@@ -24,9 +24,11 @@ permissions:
   actions: read
 
 concurrency:
-  # Pushes to spike/agent-host share one group, so a burst of merges runs only the newest commit.
+  # Pushes to spike/agent-host share one group, so a burst of merges queues only the newest commit.
+  # A post-merge run that has started is never cancelled: source-home-macos takes about 70 minutes
+  # and was cancelled by every later merge. Only pull request runs cancel in progress.
   group: ci-${{ github.workflow }}-${{ (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/spike/agent-host')) && github.ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/spike/agent-host') }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
