@@ -68,8 +68,25 @@ impl Verifier {
     /// Creates a child journal and returns its own handle. The grant must
     /// carry the child-journal right, and the path must be the owned root or
     /// a child under it. The new handle is `bind_grant` of that path.
-    #[rustfmt::skip]
     pub fn create_child_journal(
+        &mut self,
+        call: &Call,
+        request: &GuestRequest,
+        path: &str,
+    ) -> Result<Handle, OperateRefuse> {
+        self.pending_parent = Some(request.handle);
+        match self.mint_child_journal(call, request, path) {
+            Ok(handle) => Ok(handle),
+            Err(refusal) => {
+                self.pending_parent = None;
+                Err(refusal)
+            }
+        }
+    }
+
+    /// The same child-journal mint: one right check, one name check, one `bind_grant`.
+    #[rustfmt::skip]
+    fn mint_child_journal(
         &mut self,
         call: &Call,
         request: &GuestRequest,

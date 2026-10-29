@@ -1,0 +1,8 @@
+id: F-M4-revoke
+file: src/lib.rs
+test: model_revoke_one_app_stops_only_that_app
+--- old
+        self.grants.remove(&handle);
+--- new
+        self.grants.clear();
+--- end

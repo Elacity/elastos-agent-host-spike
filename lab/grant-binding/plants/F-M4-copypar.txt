@@ -1,0 +1,8 @@
+id: F-M4-copypar
+file: src/lib.rs
+test: model_successful_child_keeps_next_ask_independent
+--- old
+        let parent = self.pending_parent.take();
+--- new
+        let parent = self.pending_parent;
+--- end
