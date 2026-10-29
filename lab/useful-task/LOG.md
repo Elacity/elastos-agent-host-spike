@@ -397,3 +397,45 @@ test, and the full `cargo test --locked` run (one integration test and six
 doctests). The live model turn stays held.
 
 - 005: Made `parse_answer` refuse a repeated object key with one deserializer and one visitor, added the nine-reason order with `duplicate` between `shape` and `mismatch`, extended the named test with the duplicate and unique-key cases, and added `F-UT3`.
+
+## 006 — the lane gate holds only F-UT2
+
+The lane gate runs `lab/useful-task/falsifiers.json` when it exists, and that
+list now has one entry: `F-UT2`, copied unchanged from head `aa1103891` — id
+`F-UT2`, title `skip the named-task check`, command `useful-task`, expect
+`caught`, tests `["checker_accepts_recorded_answer_and_refuses_stubs"]`, and
+one edit of `            Reason::Task => !is_named_task(spec),\n` to
+`            Reason::Task => false,\n`. The other two entries moved unchanged
+into `lab/useful-task/held-judge-plants.json`, which the gate does not read:
+`F-UT1` (title `accept every answer before the judge reads it`) then `F-UT3`
+(title `skip the duplicate-key check`), each with the same command, expect and
+named test and its one edit of `src/lib.rs`.
+
+The reason is recovery, not preference. `PROVIDER_TARGETS` in
+`examples/agent-host/falsify.py:343` lists the files `recover_backups` at
+`falsify.py:433` restores after a killed run, and it has no
+`lab/useful-task/src/lib.rs`. A killed `F-UT1` or `F-UT3` run would therefore
+leave an always-accept judge or a skipped duplicate-key check in the source.
+`F-UT2` has the same target and is held for the same reason once this list
+shrinks further; it stays because the gate needs one live plant, and it does
+not change the recovery gap. The two `about` strings carry this condition:
+`F-UT1` and `F-UT3` return to `falsifiers.json` only after `PROVIDER_TARGETS`
+includes `lab/useful-task/src/lib.rs`.
+
+This task does not run `examples/agent-host/falsify.py`. It proves the split
+and the source bytes with two commands, both exited 0:
+
+```
+cargo test --locked --manifest-path lab/useful-task/Cargo.toml -- checker_accepts_recorded_answer_and_refuses_stubs --exact
+python3 -c 'import json; g=json.load(open("lab/useful-task/falsifiers.json")); h=json.load(open("lab/useful-task/held-judge-plants.json")); assert [e["id"] for e in g["falsifiers"]]==["F-UT2"]; assert [e["id"] for e in h["falsifiers"]]==["F-UT1","F-UT3"]; assert g["falsifiers"][0]["edits"][0]["new"]=="            Reason::Task => false,\n"; assert h["falsifiers"][0]["edits"][0]["new"]=="    return Verdict::Accept { answer_sha256: sha256_hex(answer.trim()) };\n    let trimmed = answer.trim();\n"; assert h["falsifiers"][1]["edits"][0]["new"]=="            Reason::Duplicate => false,\n"'
+```
+
+The id lists are `["F-UT2"]` for the gate file and `["F-UT1","F-UT3"]` for the
+held file. `git diff -- lab/useful-task/src/lib.rs` is empty, and the three
+old strings each occur once in `src/lib.rs`; `tests/checker.rs`, both
+`accept.json` files, both `input.txt` files, both `recorded.json` files,
+`Cargo.toml` and `Cargo.lock` keep their bytes. The tree still passes
+`cargo fmt --manifest-path lab/useful-task/Cargo.toml -- --check` and the full
+`cargo test --locked` run. A4 stays open and the live model turn stays held.
+
+- 006: Moved `F-UT1` and `F-UT3` unchanged into `held-judge-plants.json`, left `F-UT2` as the only entry in `falsifiers.json`, and stated the `PROVIDER_TARGETS` condition in both `about` strings.
