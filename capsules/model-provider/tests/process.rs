@@ -5259,3 +5259,236 @@ fn hosted_request_identity_survives_rotation_and_refuses_conflicts() {
         HOSTED_IDENTITY_PROMPT,
     );
 }
+
+/// The encoded length `handle_runs_create` compares with the offer limit.
+/// The check is `serde_json::to_vec` of the text/v1 input, and the comparison
+/// is `>`. The body is the one `hosted_text_create_request` builds.
+fn hosted_text_input_len(prompt: &str) -> usize {
+    let request = hosted_text_create_request("request:measure", "grant:test", prompt);
+    serde_json::to_vec(&request["input"])
+        .expect("encode the hosted text input")
+        .len()
+}
+
+/// A prompt whose text/v1 input encodes to exactly `target` bytes. Each ASCII
+/// `x` adds one byte inside the one helper's input object.
+fn prompt_filling_hosted_input(target: usize) -> String {
+    let empty_len = hosted_text_input_len("");
+    assert!(
+        target >= empty_len,
+        "the text/v1 wrapper is {empty_len} bytes, past {target}"
+    );
+    let prompt = "x".repeat(target - empty_len);
+    assert_eq!(
+        hosted_text_input_len(&prompt),
+        target,
+        "one ASCII byte in the prompt adds one encoded input byte"
+    );
+    prompt
+}
+
+/// True when a file under `<root>/journal/runs` stores `run_id`. The byte
+/// refusal returns before `store_run`, so that run has no journal file.
+fn provider_journal_stores_run(root: &Path, run_id: &str) -> bool {
+    let runs = root.join("journal").join("runs");
+    let entries = std::fs::read_dir(&runs)
+        .unwrap_or_else(|error| panic!("the provider journal is at {}: {error}", runs.display()));
+    entries.flatten().any(|entry| {
+        std::fs::read(entry.path())
+            .unwrap_or_default()
+            .windows(run_id.len())
+            .any(|window| window == run_id.as_bytes())
+    })
+}
+
+/// A hosted offer refuses an output-token request and an over-limit input
+/// before the Runtime socket. Design: `docs/MODEL_PROVIDER.md` "Request
+/// identity and session facts". `validate_text_messages` refuses
+/// `max_output_tokens`. `ModelProviderState::handle_runs_create` refuses an
+/// input past `input_bytes_limit`.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_token_and_byte_bounds_refuse_before_any_send() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted token and byte bounds: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-token-byte-bounds");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // `bind` answers with the Runtime refusal. The in-limit control must
+    // complete, so this stand-in is `bind_streaming`.
+    let stand_in = HostedEffectStandIn::bind_streaming("hosted-token-byte-bounds");
+    let offer = hosted_effect_offer(HOSTED_FIXTURE_MODEL, HOSTED_FIXTURE_RUNTIME_MS_LIMIT);
+    let input_bytes_limit = offer["policy"]["input_bytes_limit"]
+        .as_u64()
+        .expect("the fixture hosted offer names input_bytes_limit")
+        as usize;
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    let oversized_request = hosted_text_create_request(
+        &test_support::fixture_model_request_id("request:hosted-byte-bound"),
+        "grant:test",
+        &prompt_filling_hosted_input(input_bytes_limit + 1),
+    );
+    assert_eq!(
+        serde_json::to_vec(&oversized_request["input"])
+            .expect("encode the oversized input")
+            .len(),
+        input_bytes_limit + 1,
+        "the oversized input is one byte past the offer limit"
+    );
+    let oversized_binding: RuntimeCreateBinding =
+        serde_json::from_value(oversized_request["runtime_binding"].clone()).unwrap();
+    let oversized_run_id = model_run_id(&oversized_binding);
+    let oversized = provider.request(oversized_request);
+    assert_eq!(
+        oversized,
+        json!({
+            "status": "error",
+            "code": "policy_limit",
+            "message": "model input exceeds configured limits",
+        }),
+        "an input past the offer byte bound must be refused before any send: {oversized}"
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        0,
+        "the byte refusal must open no connection to the Runtime socket"
+    );
+    assert!(
+        !provider_journal_stores_run(&root, &oversized_run_id),
+        "the byte refusal must store no run for {oversized_run_id}"
+    );
+
+    let mut token_request = hosted_text_create_request(
+        &test_support::fixture_model_request_id("request:hosted-token-bound"),
+        "grant:test",
+        "a hosted token bound",
+    );
+    token_request["input"]["max_output_tokens"] = json!(16);
+    token_request["runtime_binding"]["input_hash"] =
+        json!(model_input_hash(&token_request["input"]).expect("hash the token-bound input"));
+    assert!(
+        serde_json::to_vec(&token_request["input"])
+            .expect("encode the token-bound input")
+            .len()
+            <= input_bytes_limit,
+        "the token refusal is inside the offer byte bound"
+    );
+    let token_binding: RuntimeCreateBinding =
+        serde_json::from_value(token_request["runtime_binding"].clone()).unwrap();
+    let token_run_id = model_run_id(&token_binding);
+    let token_create = provider.request(token_request.clone());
+    assert_eq!(
+        token_create["status"], "ok",
+        "unexpected create response: {token_create}"
+    );
+    assert_eq!(
+        token_create["data"]["run_id"], token_run_id,
+        "runs_create must return the contract run id"
+    );
+    let token_settled = wait_for_run_terminal_within(
+        &mut provider,
+        &token_run_id,
+        &access_binding(&token_request),
+        FIXTURE_EVENT_TIMEOUT,
+    );
+    assert_eq!(
+        token_settled["data"]["terminal"]["error"]["code"], "context_rejected",
+        "a hosted offer must refuse max_output_tokens before any send: {token_settled}"
+    );
+    assert_eq!(
+        token_settled["data"]["terminal"]["error"]["message"],
+        "model output request is not supported by this offer",
+        "the hosted output limit must name its reason: {token_settled}"
+    );
+    assert_eq!(
+        token_settled["data"]["status"], "failed",
+        "the hosted output limit must reach one failed terminal: {token_settled}"
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        0,
+        "the token refusal must open no connection to the Runtime socket"
+    );
+
+    let exact_request = hosted_text_create_request(
+        &test_support::fixture_model_request_id("request:hosted-byte-bound-exact"),
+        "grant:test",
+        &prompt_filling_hosted_input(input_bytes_limit),
+    );
+    assert_eq!(
+        serde_json::to_vec(&exact_request["input"])
+            .expect("encode the in-limit input")
+            .len(),
+        input_bytes_limit,
+        "the control input encodes to the offer byte limit"
+    );
+    assert!(
+        exact_request["input"].get("max_output_tokens").is_none(),
+        "the control input asks for no output limit"
+    );
+    let exact_binding: RuntimeCreateBinding =
+        serde_json::from_value(exact_request["runtime_binding"].clone()).unwrap();
+    let exact_run_id = model_run_id(&exact_binding);
+    let exact_create = provider.request(exact_request.clone());
+    assert_eq!(
+        exact_create["status"], "ok",
+        "unexpected create response: {exact_create}"
+    );
+    assert_eq!(
+        exact_create["data"]["run_id"], exact_run_id,
+        "runs_create must return the contract run id"
+    );
+    let exact_settled = wait_for_run_terminal_within(
+        &mut provider,
+        &exact_run_id,
+        &access_binding(&exact_request),
+        FIXTURE_EVENT_TIMEOUT,
+    );
+    assert_eq!(
+        exact_settled["data"]["status"], "completed",
+        "an input at the offer byte limit must complete: {exact_settled}"
+    );
+    assert_eq!(
+        exact_settled["data"]["terminal"]["output"],
+        json!({"schema": RUN_OUTPUT_TEXT_SCHEMA, "text": "ready"}),
+        "the run must carry the streamed text: {exact_settled}"
+    );
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "only the in-limit run may open a connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "only the in-limit run may send a hosted request"
+    );
+    assert_eq!(
+        requests[0].value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
+    );
+
+    provider.shutdown();
+}
