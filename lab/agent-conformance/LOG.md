@@ -14983,3 +14983,38 @@ F-standin-protected-dotdot-drop: exit 101, real 1.69 seconds. Failed at `src/../
 - `Cargo.toml` and `Cargo.lock` are unchanged. `authorise` stays `(caller, request_id)`. `normalize_public_resource` and `slash_pieces` stay. `protected_invoke`, `resolve_protected_uri` and `public_resource_covers` call that one collapse.
 
 - 093: the hostcall classifies a collapsed `Users` or `UsersAI` uri through the one `protected_invoke`, so a dotted or empty spelling is that same protected operation.
+
+## 094
+
+094: `capture` reads the finished child's file length and returns `child capture exceeds its byte limit` when that length is above 16777216, before `read_to_end` and before any buffer is sized from that length. A length at or under the cap is copied as before. `pull_stdout` still refuses with `provider response exceeds its byte limit` at 65536. A PASS gives the Runtime no C0 credit and no A12 credit.
+
+Runtime verifies the principal and session, enforces capabilities, owns lifecycle and audit, and routes the operation. Effect providers do not decide that an unverified caller is authorized.
+
+### Plant
+
+F-harness-capture-cap. No `falsifiers.json` id. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness completed_child_capture_refuses_a_sparse_file -- --nocapture` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. The planted crate compiled. The test failed on the byte-limit assertion. Real 1.52 seconds. Restored, that test passed. Real 1.80 seconds.
+
+Failed at `tests/harness.rs:441:5`: `the harness did the work: a sparse stdout past the byte cap is refused`, left `None`, right `Some("child capture exceeds its byte limit")`.
+
+Old:
+
+```text
+        return Err("child capture exceeds its byte limit");
+```
+
+New:
+
+```text
+        return Ok(Vec::new());
+```
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. `CARGO_TARGET_DIR` and `CARGO_BUILD_TARGET_DIR` were `lab/agent-conformance/target`. `CARGO_BUILD_BUILD_DIR` was `lab/agent-conformance/target/host-build`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.16 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 0, real 276.18 seconds, inside the 600-second bound. lib 89 passed; bin/report 1 passed; artifact 7 passed; build 1 passed; effects 61 passed with 12 ignored; harness 10 passed; provider_launch 22 passed; report 23 passed; runtime 10 passed with 2 ignored; standin_contract 2 passed; probe 3 passed; doc-tests 0; probe doc-tests 0. No leftover, so no rerun.
+- Proof after the plant was restored: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.16 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --test harness completed_child_capture_refuses_a_sparse_file -- --nocapture`: exit 0, 1 passed, real 1.80 seconds.
+- `Cargo.toml` and `Cargo.lock` are unchanged. `pull_stdout` stays at 65536. `ThrowawayHome::launch` and `try_output` still call `capture` for both streams.
+
+- 094: `capture` refuses a finished stdout or stderr whose logical length is above 16777216 before it copies any byte, so a sparse file cannot abort the owner after the child has exited.

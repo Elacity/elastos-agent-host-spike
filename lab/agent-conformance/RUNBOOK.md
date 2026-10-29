@@ -771,3 +771,5 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 `standin_hostcall_invoke_covers_one_operation` is this stand-in, and a PASS there gives the Runtime no A6 credit.
 
 `standin_protected_path_collapses_a_dot_segment` is this stand-in, and a PASS there gives the Runtime no A15 credit. `standin_protected_uri_spellings_share_authorization` checks that same object through `bridge_envelope`, and a PASS there gives the Runtime no A15 credit.
+
+`completed_child_capture_refuses_a_sparse_file` is this harness, and a PASS there gives the Runtime no C0 credit and no A12 credit.

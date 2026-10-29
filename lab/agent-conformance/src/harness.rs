@@ -828,6 +828,15 @@ fn take_line(pending: &mut Vec<u8>) -> Result<Option<String>> {
 }
 
 fn capture(file: &mut File) -> Result<Vec<u8>> {
+    // Refuse a logical length past this cap before any buffer is sized from it.
+    const CAPTURE_BYTE_LIMIT: u64 = 16777216;
+    let len = file
+        .metadata()
+        .map_err(|_| "could not inspect child capture")?
+        .len();
+    if len > CAPTURE_BYTE_LIMIT {
+        return Err("child capture exceeds its byte limit");
+    }
     file.seek(SeekFrom::Start(0))
         .map_err(|_| "could not rewind child capture")?;
     let mut bytes = Vec::new();
