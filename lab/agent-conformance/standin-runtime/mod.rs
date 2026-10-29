@@ -34,7 +34,9 @@
 //! presents its uri and operation to `authorise_presented` and returns
 //! `data` null.
 //! `authorise` stays two arguments. The principal argument does not choose
-//! the caller.
+//! the caller. A line longer than 1048576 bytes is `request_too_large`
+//! before parse. A returned string longer than 1048576 bytes is
+//! `response_too_large` and keeps its id.
 //!
 //! `bind_verified_principal` stores the principal the launch verified.
 //! `post_capsules` copies that principal onto the new instance.
@@ -493,6 +495,8 @@ impl StandIn {
         Ok(json!({ "status": "pending", "request_id": request_id }))
     }
 
+    const RESOURCE_FRAME_BYTE_LIMIT: usize = 1048576;
+
     /// Lab test seam, not a route.
     ///
     /// The one hostcall. A `request_capability` line calls
@@ -503,7 +507,10 @@ impl StandIn {
     /// uri and operation to `authorise_presented`. A missing or non-string
     /// `operation` is `invoke operation must be a string` and does not call
     /// `authorise_presented`. `authorise` stays two arguments. `principal`
-    /// does not choose the caller. This method reads no clock and no disk.
+    /// does not choose the caller. A line longer than 1048576 bytes is
+    /// `request_too_large` before parse. A returned string longer than
+    /// 1048576 bytes is `response_too_large` and keeps the request id. The
+    /// count is bytes, with no trim. This method reads no clock and no disk.
     pub fn bridge_envelope(
         &mut self,
         line: &str,
@@ -511,53 +518,72 @@ impl StandIn {
         principal: Option<&str>,
     ) -> Result<String, String> {
         let _ = principal;
-        let envelope: Value =
-            serde_json::from_str(line).map_err(|err| format!("Invalid JSON: {err}"))?;
-        let id = bridge_id(&envelope)?;
-        let request = bridge_request(&envelope)?;
-        let request_type = request.get("type").and_then(Value::as_str).unwrap_or("");
-        let response = match request_type {
-            "request_capability" => {
-                let body = capability_fields(request);
-                let capability_caller = Caller::Client {
-                    session_id: capsule_id,
-                };
-                match self.post_capability_request(capability_caller, &body) {
-                    Ok(data) => bridge_ok(data),
-                    Err((_status, message)) => bridge_error(&message),
-                }
-            }
-            "resource_invoke" => {
-                let token = invoke_token(request)?;
-                let uri = invoke_uri(request);
-                if protected_invoke(uri) {
-                    self.bridge_protected_invoke(request, capsule_id, token, uri)
-                } else {
-                    match request.get("operation") {
-                        Some(Value::String(operation)) => {
-                            let invoke_caller = Caller::Client {
-                                session_id: capsule_id,
-                            };
-                            match self.authorise_presented(
-                                invoke_caller,
-                                token,
-                                Some((uri, operation)),
-                            ) {
-                                Ok(()) => bridge_ok(Value::Null),
-                                Err((_status, message)) => bridge_error(&message),
-                            }
-                        }
-                        _ => bridge_error("invoke operation must be a string"),
+        let (id, response) = if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {
+            (
+                0,
+                bridge_error("request_too_large", "resource frame exceeds maximum size"),
+            )
+        } else {
+            let envelope: Value =
+                serde_json::from_str(line).map_err(|err| format!("Invalid JSON: {err}"))?;
+            let id = bridge_id(&envelope)?;
+            let request = bridge_request(&envelope)?;
+            let request_type = request.get("type").and_then(Value::as_str).unwrap_or("");
+            let response = match request_type {
+                "request_capability" => {
+                    let body = capability_fields(request);
+                    let capability_caller = Caller::Client {
+                        session_id: capsule_id,
+                    };
+                    match self.post_capability_request(capability_caller, &body) {
+                        Ok(data) => bridge_ok(data),
+                        Err((_status, message)) => bridge_error("denied", &message),
                     }
                 }
-            }
-            _ => bridge_error("unsupported bridge request"),
+                "resource_invoke" => {
+                    let token = invoke_token(request)?;
+                    let uri = invoke_uri(request);
+                    if protected_invoke(uri) {
+                        self.bridge_protected_invoke(request, capsule_id, token, uri)
+                    } else {
+                        match request.get("operation") {
+                            Some(Value::String(operation)) => {
+                                let invoke_caller = Caller::Client {
+                                    session_id: capsule_id,
+                                };
+                                match self.authorise_presented(
+                                    invoke_caller,
+                                    token,
+                                    Some((uri, operation)),
+                                ) {
+                                    Ok(()) => bridge_ok(Value::Null),
+                                    Err((_status, message)) => bridge_error("denied", &message),
+                                }
+                            }
+                            _ => bridge_error("denied", "invoke operation must be a string"),
+                        }
+                    }
+                }
+                _ => bridge_error("denied", "unsupported bridge request"),
+            };
+            (id, response)
         };
-        serde_json::to_string(&json!({
+        let text = serde_json::to_string(&json!({
             "id": id,
             "response": response,
         }))
-        .map_err(|err| format!("Invalid JSON: {err}"))
+        .map_err(|err| format!("Invalid JSON: {err}"))?;
+        if text.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {
+            return serde_json::to_string(&json!({
+                "id": id,
+                "response": bridge_error(
+                    "response_too_large",
+                    "resource response exceeds maximum size",
+                ),
+            }))
+            .map_err(|err| format!("Invalid JSON: {err}"));
+        }
+        Ok(text)
     }
 
     /// One protected invoke on the hostcall.
@@ -582,22 +608,24 @@ impl StandIn {
             "read" => match self.protected_read(capsule_id, token, uri) {
                 Ok(bytes) => match String::from_utf8(bytes) {
                     Ok(text) => bridge_ok(Value::String(text)),
-                    Err(_bytes) => bridge_error("protected read is not utf-8"),
+                    Err(_bytes) => bridge_error("denied", "protected read is not utf-8"),
                 },
-                Err((_status, message)) => bridge_error(&Self::redact_protected_reason(&message)),
+                Err((_status, message)) => {
+                    bridge_error("denied", &Self::redact_protected_reason(&message))
+                }
             },
             "write" => {
                 let Some(text) = request.get("body").and_then(Value::as_str) else {
-                    return bridge_error("protected write body must be a string");
+                    return bridge_error("denied", "protected write body must be a string");
                 };
                 match self.protected_write(capsule_id, token, uri, text.as_bytes()) {
                     Ok(_resolved) => bridge_ok(json!({ "stored": true })),
                     Err((_status, message)) => {
-                        bridge_error(&Self::redact_protected_reason(&message))
+                        bridge_error("denied", &Self::redact_protected_reason(&message))
                     }
                 }
             }
-            _ => bridge_error("protected operation is read or write"),
+            _ => bridge_error("denied", "protected operation is read or write"),
         }
     }
 
@@ -2232,10 +2260,10 @@ fn bridge_ok(data: Value) -> Value {
     })
 }
 
-fn bridge_error(message: &str) -> Value {
+fn bridge_error(code: &str, message: &str) -> Value {
     json!({
         "type": "error",
-        "code": "denied",
+        "code": code,
         "message": message,
     })
 }
@@ -16580,5 +16608,459 @@ mod tests {
             );
         }
         assert_eq!(home.finish(), Ok(()), "the stand-in did the work: cleanup");
+    }
+
+    #[test]
+    fn standin_hostcall_frame_fails_closed() {
+        let limit = StandIn::RESOURCE_FRAME_BYTE_LIMIT;
+        let journal = "localhost://UsersAI/self/journal";
+        let big = "localhost://UsersAI/self/big";
+        let fit = "localhost://UsersAI/self/fit";
+        let wide = "localhost://UsersAI/self/wide";
+        let short = "localhost://Public/short";
+        let write_line = r#"{"id":4,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/journal","operation":"write","body":"journal-v1","token":"req-w"}}"#;
+        let read_line = r#"{"id":5,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/journal","operation":"read","token":"req-r"}}"#;
+        let big_read = r#"{"id":7,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/big","operation":"read","token":"req-big"}}"#;
+        let fit_read = r#"{"id":8,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/fit","operation":"read","token":"req-fit-r"}}"#;
+        let wide_read = r#"{"id":13,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/wide","operation":"read","token":"req-wide-r"}}"#;
+
+        let frame_ok = |id: u64, data: &str| {
+            serde_json::to_string(&json!({
+                "id": id,
+                "response": { "type": "ok", "data": data },
+            }))
+            .expect("the stand-in did the work: an ok frame is JSON")
+        };
+        let denied_frame = |id: u64, message: &str| {
+            serde_json::to_string(&json!({
+                "id": id,
+                "response": { "type": "error", "code": "denied", "message": message },
+            }))
+            .expect("the stand-in did the work: an error frame is JSON")
+        };
+        let invoke_line = |id: u64, uri: &str, token: &str| {
+            serde_json::to_string(&json!({
+                "id": id,
+                "request": {
+                    "type": "resource_invoke",
+                    "uri": uri,
+                    "operation": "read",
+                    "token": token,
+                },
+            }))
+            .expect("the stand-in did the work: an invoke line is JSON")
+        };
+
+        let mut standin = running_ada();
+        assert_named_capsule(
+            &standin,
+            "component-1",
+            "journal-a",
+            "running",
+            "",
+            "component-1 is running",
+        );
+        standin.seed_grant(
+            "req-w",
+            "component-1",
+            journal,
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-r",
+            "component-1",
+            journal,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-big-w",
+            "component-1",
+            big,
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-big",
+            "component-1",
+            big,
+            "read",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-see",
+            "component-1",
+            big,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-fit-w",
+            "component-1",
+            fit,
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-fit-r",
+            "component-1",
+            fit,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-wide-w",
+            "component-1",
+            wide,
+            "write",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-wide-r",
+            "component-1",
+            wide,
+            "read",
+            "session",
+            1,
+            Life::Live,
+            false,
+        );
+        standin.seed_grant(
+            "req-miss",
+            "component-1",
+            short,
+            "read",
+            "once",
+            1,
+            Life::Live,
+            false,
+        );
+
+        let oversized = "x".repeat(limit + 1);
+        let (raw, parsed) = host_pair(&mut standin, &oversized, "component-1", None)
+            .expect("the stand-in did the work: an oversized line is refused before parse");
+        assert_eq!(
+            parsed["id"],
+            json!(0),
+            "the stand-in did the work: an oversized line uses id 0"
+        );
+        assert_eq!(
+            parsed["response"]["type"],
+            json!("error"),
+            "the stand-in did the work: an oversized line is an error"
+        );
+        assert_eq!(
+            parsed["response"]["code"],
+            json!("request_too_large"),
+            "the stand-in did the work: an oversized line is request_too_large"
+        );
+        assert_eq!(
+            parsed["response"]["message"],
+            json!("resource frame exceeds maximum size"),
+            "the stand-in did the work: an oversized line names the frame limit"
+        );
+        assert!(
+            !raw.contains(&oversized),
+            "the stand-in did the work: an oversized line is not echoed"
+        );
+        assert!(
+            standin.protected_objects.is_empty(),
+            "the stand-in did the work: an oversized line stores nothing"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-big"),
+            (Life::Live, false),
+            "the stand-in did the work: an oversized line spends nothing"
+        );
+
+        let at_limit = "x".repeat(limit);
+        let refused = standin
+            .bridge_envelope(&at_limit, "component-1", None)
+            .expect_err("the stand-in did the work: a line at the frame limit still parses");
+        assert!(
+            refused.contains("Invalid JSON"),
+            "the stand-in did the work: a line at the frame limit is invalid JSON"
+        );
+        assert!(
+            !refused.contains("request_too_large"),
+            "the stand-in did the work: a line at the frame limit is not request_too_large"
+        );
+
+        let wide_request = "é".repeat(limit / 2 + 1);
+        assert!(
+            wide_request.len() > limit,
+            "the stand-in did the work: the multibyte line is over the byte limit"
+        );
+        assert!(
+            wide_request.chars().count() <= limit,
+            "the stand-in did the work: the multibyte line is within the character count"
+        );
+        let (raw, parsed) = host_pair(&mut standin, &wide_request, "component-1", None)
+            .expect("the stand-in did the work: a multibyte line over the byte limit is refused before parse");
+        assert_eq!(
+            parsed["response"]["code"],
+            json!("request_too_large"),
+            "the stand-in did the work: a multibyte line is request_too_large"
+        );
+        assert!(
+            !raw.contains('é'),
+            "the stand-in did the work: a multibyte line is not echoed"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-big"),
+            (Life::Live, false),
+            "the stand-in did the work: a multibyte line spends nothing"
+        );
+
+        let (raw, parsed) = host_pair(&mut standin, write_line, "component-1", None)
+            .expect("the stand-in did the work: the journal write is accepted");
+        assert_host_ok(
+            &parsed,
+            4,
+            json!({ "stored": true }),
+            "the journal write stores",
+        );
+        assert!(
+            !raw.contains("agent-ada"),
+            "the stand-in did the work: the journal write names no principal"
+        );
+        let (raw, parsed) = host_pair(&mut standin, read_line, "component-1", None)
+            .expect("the stand-in did the work: the journal read is accepted");
+        assert_host_ok(
+            &parsed,
+            5,
+            json!("journal-v1"),
+            "the journal read returns the stored text",
+        );
+        assert!(
+            !raw.contains("agent-ada"),
+            "the stand-in did the work: the journal read names no principal"
+        );
+
+        let valid = r#"{"id":11,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/journal","operation":"write","body":"should-not-store","token":"req-w"}}"#;
+        let padded = format!("{}{valid}", " ".repeat(limit + 1 - valid.len()));
+        assert_eq!(
+            padded.len(),
+            limit + 1,
+            "the stand-in did the work: the padded line is over the byte limit"
+        );
+        assert_eq!(
+            padded.trim(),
+            valid,
+            "the stand-in did the work: trimming the padded line leaves a valid request"
+        );
+        let (_raw, parsed) = host_pair(&mut standin, &padded, "component-1", None).expect(
+            "the stand-in did the work: a padded line over the byte limit is refused before parse",
+        );
+        assert_eq!(
+            parsed["id"],
+            json!(0),
+            "the stand-in did the work: a padded line uses id 0"
+        );
+        assert_eq!(
+            parsed["response"]["code"],
+            json!("request_too_large"),
+            "the stand-in did the work: a padded line is request_too_large"
+        );
+        let (raw, parsed) = host_pair(&mut standin, read_line, "component-1", None)
+            .expect("the stand-in did the work: the journal read after a padded line is accepted");
+        assert_host_ok(
+            &parsed,
+            5,
+            json!("journal-v1"),
+            "a padded line stores nothing",
+        );
+        assert!(
+            !raw.contains("should-not-store"),
+            "the stand-in did the work: a padded line does not replace the journal"
+        );
+
+        let empty_fit = frame_ok(8, "");
+        let fit_payload = "a".repeat(limit - empty_fit.len());
+        let fit_frame = frame_ok(8, &fit_payload);
+        assert_eq!(
+            fit_frame.len(),
+            limit,
+            "the stand-in did the work: the fit response is exactly the frame limit"
+        );
+        standin
+            .protected_write("component-1", "req-fit-w", fit, fit_payload.as_bytes())
+            .expect("the stand-in did the work: the fit write stores");
+        let (raw, parsed) = host_pair(&mut standin, fit_read, "component-1", None)
+            .expect("the stand-in did the work: the fit read is accepted");
+        assert_eq!(
+            raw.len(),
+            limit,
+            "the stand-in did the work: a response of exactly the frame limit is returned unchanged"
+        );
+        assert_eq!(
+            parsed["response"]["type"],
+            json!("ok"),
+            "the stand-in did the work: a response of exactly the frame limit stays ok"
+        );
+        assert_eq!(
+            parsed["response"]["data"].as_str().map(str::len),
+            Some(fit_payload.len()),
+            "the stand-in did the work: a response of exactly the frame limit keeps its bytes"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-fit-r"),
+            (Life::Live, false),
+            "the stand-in did the work: the fit read leaves the session grant live"
+        );
+
+        let stored = "a".repeat(limit);
+        standin
+            .protected_write("component-1", "req-big-w", big, stored.as_bytes())
+            .expect("the stand-in did the work: the large write stores");
+        let (raw, parsed) = host_pair(&mut standin, big_read, "component-1", None)
+            .expect("the stand-in did the work: the large read is a closed frame");
+        assert_eq!(
+            parsed["id"],
+            json!(7),
+            "the stand-in did the work: the large read keeps id 7"
+        );
+        assert_eq!(
+            parsed["response"]["type"],
+            json!("error"),
+            "the stand-in did the work: the large read is an error"
+        );
+        assert_eq!(
+            parsed["response"]["code"],
+            json!("response_too_large"),
+            "the stand-in did the work: the large read is response_too_large"
+        );
+        assert_eq!(
+            parsed["response"]["message"],
+            json!("resource response exceeds maximum size"),
+            "the stand-in did the work: the large read names the frame limit"
+        );
+        assert!(
+            !raw.contains(&stored),
+            "the stand-in did the work: the large read does not return the stored bytes"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-big"),
+            (Life::Exhausted, false),
+            "the stand-in did the work: the once read stays spent after the frame replaces the response"
+        );
+
+        let sample = "localhost://Public/b";
+        let sample_line = invoke_line(12, sample, "req-miss");
+        let sample_message = format!("wrong resource: expected {short}, got {sample}");
+        let line_fixed = sample_line.len() - sample.len();
+        let err_fixed = denied_frame(12, &sample_message).len() - sample.len();
+        let uri_len = limit - line_fixed;
+        assert!(
+            err_fixed + uri_len > limit,
+            "the stand-in did the work: the refused uri makes an oversized error"
+        );
+        let uri = format!(
+            "localhost://Public/{}",
+            "b".repeat(uri_len - "localhost://Public/".len())
+        );
+        let error_line = invoke_line(12, &uri, "req-miss");
+        assert_eq!(
+            error_line.len(),
+            limit,
+            "the stand-in did the work: the refused request is exactly the frame limit"
+        );
+        let (raw, parsed) = host_pair(&mut standin, &error_line, "component-1", None)
+            .expect("the stand-in did the work: an oversized error is a closed frame");
+        assert_eq!(
+            parsed["id"],
+            json!(12),
+            "the stand-in did the work: an oversized error keeps the request id"
+        );
+        assert_eq!(
+            parsed["response"]["code"],
+            json!("response_too_large"),
+            "the stand-in did the work: an oversized error is response_too_large"
+        );
+        assert_eq!(
+            parsed["response"]["message"],
+            json!("resource response exceeds maximum size"),
+            "the stand-in did the work: an oversized error names the frame limit"
+        );
+        assert!(
+            !raw.contains(&uri),
+            "the stand-in did the work: an oversized error does not return the refused uri"
+        );
+        assert_eq!(
+            grant_record(&standin, "req-miss"),
+            (Life::Live, false),
+            "the stand-in did the work: an oversized error spends nothing"
+        );
+
+        let empty_wide = frame_ok(13, "");
+        let wide_chars = limit - empty_wide.chars().count();
+        let wide_payload = "你".repeat(wide_chars);
+        let wide_frame = frame_ok(13, &wide_payload);
+        assert!(
+            wide_frame.len() > limit,
+            "the stand-in did the work: the multibyte response is over the byte limit"
+        );
+        assert!(
+            wide_frame.chars().count() <= limit,
+            "the stand-in did the work: the multibyte response is within the character count"
+        );
+        standin
+            .protected_write("component-1", "req-wide-w", wide, wide_payload.as_bytes())
+            .expect("the stand-in did the work: the multibyte write stores");
+        let (raw, parsed) = host_pair(&mut standin, wide_read, "component-1", None)
+            .expect("the stand-in did the work: the multibyte read is a closed frame");
+        assert_eq!(
+            parsed["id"],
+            json!(13),
+            "the stand-in did the work: the multibyte read keeps id 13"
+        );
+        assert_eq!(
+            parsed["response"]["code"],
+            json!("response_too_large"),
+            "the stand-in did the work: a multibyte response over the byte limit is response_too_large"
+        );
+        assert!(
+            !raw.contains('你'),
+            "the stand-in did the work: a multibyte response over the byte limit is not returned"
+        );
+
+        assert_eq!(
+            standin.protected_read("component-1", "req-see", big),
+            Ok(stored.into_bytes()),
+            "the stand-in did the work: the session read returns the stored bytes"
+        );
+        assert_named_capsule(
+            &standin,
+            "component-1",
+            "journal-a",
+            "running",
+            "",
+            "component-1 stays running",
+        );
     }
 }

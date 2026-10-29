@@ -15107,3 +15107,176 @@ New bytes (temporary plant):
 ```
 
 After restoration, `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exited 0 in 0.25 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_provider_file_hash_` exited 0 in 1.91 seconds: four tests passed. The two Homes retained by the sandbox failure and the plant were removed after checking their file contents and open handles. Successful tests removed their own Homes. The supervisor owns the full-suite rerun and fresh review. This repair ran zero Git commands.
+
+## 096
+
+096: `bridge_envelope` counts bytes with `RESOURCE_FRAME_BYTE_LIMIT` 1048576, the same count as `MAX_RESOURCE_FRAME_BYTES`. A line longer than that is `request_too_large` with `resource frame exceeds maximum size` before `serde_json::from_str` and before `bridge_id`. A returned string longer than that is `response_too_large` with `resource response exceeds maximum size`, and the request id stays. `bridge_error` takes the code. Existing callers pass `denied`. The read or write that already ran stays, including a spent `once` grant. A PASS gives the Runtime no A15 credit.
+
+Runtime verifies the exact resource, action, operation, principal, session, capsule, grant, expiry, and revocation state.
+
+Codes and messages from `handle_request` and `serialize_bridge_response`: `request_too_large`, `resource frame exceeds maximum size`, `response_too_large`, `resource response exceeds maximum size`.
+
+### Plant
+
+No `falsifiers.json` id. Each plant was restored before the next. The command was `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_frame_fails_closed -- --exact` with `RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`. The planted crate compiled every time. Each test failed on its assertion. Restored, that test passed.
+
+F-standin-frame-skip-request. Real 17.80 seconds. Failed at `src/../standin-runtime/mod.rs:16761:14`: `the stand-in did the work: an oversized line is refused before parse: "Invalid JSON: expected value at line 1 column 1"`. The plant removed five lines, so that line is the planted file. The restored assertion is `standin-runtime/mod.rs:16766`.
+
+Old:
+
+```text
+        let (id, response) = if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {
+            (
+                0,
+                bridge_error("request_too_large", "resource frame exceeds maximum size"),
+            )
+        } else {
+            let envelope: Value =
+```
+
+New:
+
+```text
+        let (id, response) = {
+            let envelope: Value =
+```
+
+F-standin-frame-inclusive. Real 2.57 seconds. Failed at `src/../standin-runtime/mod.rs:16804:14`: `the stand-in did the work: a line at the frame limit still parses`, got `{"id":0,"response":{"code":"request_too_large","message":"resource frame exceeds maximum size","type":"error"}}`. The restored assertion is `standin-runtime/mod.rs:16804`.
+
+Old:
+
+```text
+if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT
+```
+
+New:
+
+```text
+if line.len() >= Self::RESOURCE_FRAME_BYTE_LIMIT
+```
+
+F-standin-frame-skip-response. Real 2.49 seconds. Failed at `src/../standin-runtime/mod.rs:16938:9`: `the stand-in did the work: the large read is an error`, left `String("ok")`, right `String("error")`. The plant removed ten lines, so that line is the planted file. The restored assertion is `standin-runtime/mod.rs:16948`.
+
+Old:
+
+```text
+        if text.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {
+            return serde_json::to_string(&json!({
+                "id": id,
+                "response": bridge_error(
+                    "response_too_large",
+                    "resource response exceeds maximum size",
+                ),
+            }))
+            .map_err(|err| format!("Invalid JSON: {err}"));
+        }
+        Ok(text)
+```
+
+New:
+
+```text
+        Ok(text)
+```
+
+F-standin-frame-skip-read. Real 1.95 seconds. Failed at `src/../standin-runtime/mod.rs:16970:9`: `the stand-in did the work: the once read stays spent after the frame replaces the response`, left `(Live, false)`, right `(Exhausted, false)`. The plant added three lines, so that line is the planted file. The restored assertion is `standin-runtime/mod.rs:16967`.
+
+Old:
+
+```text
+"read" => match self.protected_read(capsule_id, token, uri) {
+```
+
+New:
+
+```text
+"read" if uri.ends_with("/big") => {
+                bridge_error("response_too_large", "resource response exceeds maximum size")
+            }
+            "read" => match self.protected_read(capsule_id, token, uri) {
+```
+
+F-standin-frame-chars-request. Real 1.90 seconds. Failed at `src/../standin-runtime/mod.rs:16824:14`: `the stand-in did the work: a multibyte line over the byte limit is refused before parse: "Invalid JSON: expected value at line 1 column 1"`. The restored assertion is `standin-runtime/mod.rs:16824`.
+
+Old:
+
+```text
+if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT
+```
+
+New:
+
+```text
+if line.chars().count() > Self::RESOURCE_FRAME_BYTE_LIMIT
+```
+
+F-standin-frame-chars-response. Real 2.18 seconds. Failed at `src/../standin-runtime/mod.rs:17042:9`: `the stand-in did the work: a multibyte response over the byte limit is response_too_large`, left `Null`, right `String("response_too_large")`. The restored assertion is `standin-runtime/mod.rs:17042`.
+
+Old:
+
+```text
+if text.len() > Self::RESOURCE_FRAME_BYTE_LIMIT
+```
+
+New:
+
+```text
+if text.chars().count() > Self::RESOURCE_FRAME_BYTE_LIMIT
+```
+
+F-standin-frame-trim. Real 2.06 seconds. Failed at `src/../standin-runtime/mod.rs:16880:9`: `the stand-in did the work: a padded line uses id 0`, left `Number(11)`, right `Number(0)`. The restored assertion is `standin-runtime/mod.rs:16880`.
+
+Old:
+
+```text
+if line.len() > Self::RESOURCE_FRAME_BYTE_LIMIT
+```
+
+New:
+
+```text
+if line.trim().len() > Self::RESOURCE_FRAME_BYTE_LIMIT
+```
+
+F-standin-frame-response-inclusive. Real 1.99 seconds. Failed at `src/../standin-runtime/mod.rs:16916:9`: `the stand-in did the work: a response of exactly the frame limit is returned unchanged`, left `115`, right `1048576`. The restored assertion is `standin-runtime/mod.rs:16916`.
+
+Old:
+
+```text
+if text.len() > Self::RESOURCE_FRAME_BYTE_LIMIT
+```
+
+New:
+
+```text
+if text.len() >= Self::RESOURCE_FRAME_BYTE_LIMIT
+```
+
+F-standin-frame-success-only. Real 2.06 seconds. Failed at `src/../standin-runtime/mod.rs:17000:9`: `the stand-in did the work: an oversized error is response_too_large`, left `String("denied")`, right `String("response_too_large")`. The restored assertion is `standin-runtime/mod.rs:17000`.
+
+Old:
+
+```text
+if text.len() > Self::RESOURCE_FRAME_BYTE_LIMIT {
+```
+
+New:
+
+```text
+if text.len() > Self::RESOURCE_FRAME_BYTE_LIMIT && text.contains("\"type\":\"ok\"") {
+```
+
+### Gates
+
+`RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true`.
+
+- `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check`: exit 0, real 0.36 seconds.
+- Proof after the plants were restored: `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml --lib standin_runtime::tests::standin_hostcall_frame_fails_closed -- --exact`: exit 0, 1 passed, real 8.23 seconds.
+- `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml`: exit 101, real 306.41 seconds. lib 94 passed, including `standin_hostcall_frame_fails_closed`. bin/report 1 passed. artifact 7 passed. build 1 passed. effects failed: `no_policy_file_does_not_mean_allow` at `tests/effects.rs:497`, census `cleanup census: FAIL retained:target/home-41716-1793237146778728000-158; child exceeded its time bound; pending:0 grants:BLOCKED(AC-021-GRANTS)`. That shape is not a process leftover of `ca.key`, `device.key`, `tls.key`, `stdout-<digits>`, or `stderr-<digits>`. The task stops on the first run. No rerun. Census and the operator were left as they are.
+- `Cargo.toml` and `Cargo.lock` are unchanged. `hash_file` and `pull_stdout` are unchanged. `bridge_envelope` stays the one hostcall. The returned string has no trailing newline.
+
+Supervisor gate after that stop: `standin_provider_launch_uses_supplied_profile` at `tests/provider_launch.rs:457`, census `paths:["stderr-131"]`. That path matches `stderr-<digits>`. The test is not one of the seven named rerun tests.
+
+Rerun, same env: `cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check` exit 0, real 0.44 seconds. `cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml` exit 101, real 336.05 seconds. lib 94 passed, including `standin_hostcall_frame_fails_closed`. effects 61 passed. `standin_provider_launch_starts_under_caller_profile` at `tests/provider_launch.rs:231` failed: `paths:["stderr-124"]`. The retained `stderr-124` is the wallet provider log (`wallet-provider: starting` / `wallet-provider: exiting`). The same home's `stdout-130` is that census `lsof` listing: pid 44032 held `stderr-124` on fd 3 and fd 4. The test pid was 45986. Eight later runs of that one test with `RUST_TEST_THREADS=1` passed. Census and the operator were left as they are. The rerun failed, so this task stops.
+
+- 096: `bridge_envelope` refuses a line longer than 1048576 bytes before parse, and replaces a returned string longer than 1048576 bytes with `response_too_large`, keeping the request id.
