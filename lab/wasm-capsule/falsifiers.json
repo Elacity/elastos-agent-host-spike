@@ -1993,8 +1993,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/README.md",
-          "old": "`falsifiers.json` holds 189 planted bugs",
-          "new": "`falsifiers.json` holds 188 planted bugs"
+          "old": "`falsifiers.json` holds 191 planted bugs",
+          "new": "`falsifiers.json` holds 190 planted bugs"
         }
       ],
       "tests": [
@@ -2743,7 +2743,7 @@
         {
           "file": "../../lab/wasm-capsule/tools/src/run.rs",
           "old": "            Some(argument) if cap_rejected(status, &stderr) => Reason::CapRejected {\n                engine,\n                argument,\n                status,\n                stderr,\n            },\n",
-          "new": "            Some(_) if cap_rejected(status, &stderr) => {\n                let retry = engine_command(program)\n                    .args([\"run\", \"--invoke\", DIGEST_EXPORT])\n                    .arg(module)\n                    .arg(DIGEST_ARGUMENT)\n                    .output()\n                    .map_err(|error| Refusal::new(program, Reason::EngineDidNotStart { engine, error }))?;\n                return Ok(EngineRun {\n                    status: retry.status,\n                    stdout: retry.stdout,\n                    memory_mb,\n                    memory_cap: None,\n                    memory_maximum: None,\n                });\n            }\n"
+          "new": "            Some(_) if cap_rejected(status, &stderr) => {\n                let retry = engine_command(program)\n                    .args([\"run\", \"--invoke\", DIGEST_EXPORT])\n                    .arg(module)\n                    .arg(DIGEST_ARGUMENT)\n                    .output()\n                    .map_err(|error| Refusal::new(program, Reason::EngineDidNotStart { engine, error }))?;\n                return Ok(EngineRun {\n                    status: retry.status,\n                    stdout: retry.stdout,\n                    memory_mb,\n                    memory_cap: None,\n                    memory_maximum: None,\n                    process_max_rss_bytes: 0,\n                });\n            }\n"
         }
       ],
       "tests": [
@@ -3085,8 +3085,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/README.md",
-          "old": "outside the 189",
-          "new": "outside the 188"
+          "old": "outside the 191",
+          "new": "outside the 190"
         }
       ],
       "tests": [
@@ -3107,6 +3107,38 @@
       ],
       "tests": [
         "the_lane_tests_list_files_in_one_place"
+      ]
+    },
+    {
+      "id": "F-WC10H-PEAK-CITED",
+      "title": "the recorded peak is a cited number, the declared cap memory_cap_bytes(memory_mb), in place of the engine process's own ru_maxrss from wait4",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/run.rs",
+          "old": "        process_max_rss_bytes: max_rss_bytes,\n",
+          "new": "        process_max_rss_bytes: memory_cap_bytes(memory_mb),\n"
+        }
+      ],
+      "tests": [
+        "process_peak_rss_follows_the_memory_the_engine_touched"
+      ]
+    },
+    {
+      "id": "F-WC10H-PEAK-UNLABELLED",
+      "title": "the receipt's peak line drops its label (engine process RSS, not linear memory)",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/receipt.rs",
+          "old": "{bytes} (engine process RSS, not linear memory)\\n\")\n",
+          "new": "{bytes}\\n\")\n"
+        }
+      ],
+      "tests": [
+        "receipt_labels_each_engine_peak_as_process_rss_not_linear_memory"
       ]
     }
   ]
