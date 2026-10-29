@@ -1,7 +1,8 @@
 # wasm-capsule lab — wc-001, its lab name (task 010), `tools/bundle` (task 009), the verifier (wc-004) and the bare-capsule ABI gap (wc-008)
 
 The lab's foundation: one minimal **core Wasm** capsule that anyone can rebuild
-byte for byte on this one Mac. A lab bundle of it is named by
+byte for byte on this one Mac, and whose lab CID names one bundle whichever
+path it is built at (see "Claim scope"). A lab bundle of it is named by
 cc-capsule-identity's lab CID (task 010); wc-004 verifies a test-key signature
 over that name and audits its module; wc-005a runs it on one engine,
 wc-005b (task 015) on two, and wc-005c (task 016) writes a receipt of that run
@@ -339,6 +340,25 @@ Its `artifact_sha256` describes `bundle/capsule.wasm`: the same file, moved
 there unchanged (its `artifact: capsule.wasm` line names the file before the
 move). The receipt is outside the bundle, so it is not in the lab CID (P13:
 the bundle carries the artifact `tools/build` receipted).
+
+**One name across paths.** A bundle has one lab CID whichever path it is built
+at, as long as the module is byte-identical. The test
+`two_bundles_in_different_paths_have_one_lab_cid` bundles three copies of the
+lane through each copy's real `tools/bundle`, which runs that copy's
+`tools/build` by a slash path. Two copies are siblings, so their parent paths
+have the same length and depth; the third sits below a parent one level
+deeper and with a longer name, so the three parents differ in both length and
+depth. The test also asserts that layout on its own fixture, so a build input
+keyed on the path's length or depth cannot agree across all three. The test
+requires the three `capsule.wasm` files to be byte-identical and the three
+printed CIDs to be one, then flips one byte of one bundle's module and
+requires `--name` to print another. Byte identity is required by the test, not
+produced by it: the module carries the resolved paths of its workspace's
+`capsule-identity` dependency, and a build input that carries one of those
+paths unremapped makes the test fail (plants `F-WC1` and
+`F-WC1-SPACED-PATH`). The plant `F-BUNDLE-REMAP-UNEVEN` keeps the lane path
+as the caller named it; README, "F-BUNDLE-REMAP-UNEVEN", records why it is a
+hand proof.
 
 **Not covered.** The guarantee is for the OUT_DIR leaf and the entries under
 it. Links in OUT_DIR's parent folders are followed as usual by `create_dir`
@@ -2823,7 +2843,7 @@ This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 137, F-WC1 (task 068 ran it)
+Two kinds of evidence, kept apart. Runner-caught: 137: F-WC1 (task 068 ran it)
 and the sections below marked runner-caught, less task 065's removals (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
 029, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046, 050, 052, 056, 062, 064, 065, 070, 063 and 068: 1 + 1 + 23 + 11 + 20 + 2 + 14 + 7 + 7
 + 2 + 1 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1 + 3 + 1 + 2 + 1 + 3 + 1 + 9
@@ -2874,6 +2894,17 @@ task 068 (README "Claim scope" has F-WC1):
   the build did not use, or queries a bare `rustc`.
 - F-WC1-ARTIFACT-HASH and F-WC1-LOCK-HASH — the receipt swaps the artifact
   and lockfile hashes.
+
+- F-BUNDLE-REMAP-UNEVEN — the module names one bundle across paths only when
+  the build remaps one lane path in every run. In run 1 of this task the plant
+  was `pwd` -> `pwd -P` in `tools/build` (`LANE_DIR` resolved through a folder
+  link, `--remap-path-prefix` naming the physical path). The named test
+  `two_bundles_in_different_paths_have_one_lab_cid` goes red under it only
+  for a copy reached through a folder link, and such a copy changes more than
+  the remap: `tools/bundle`'s `cargo run` then builds a second `bundle`
+  binary, and the two bundles differ in module bytes and in lab CID. The
+  plant therefore runs against the test by hand, and stays out of
+  `falsifiers.json` until a plant exists that changes only the remap.
 
 Task 010's seven, each hand-proven, pending R1:
 

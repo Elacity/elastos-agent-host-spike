@@ -2,15 +2,19 @@
 //! lab CID of an existing bundle (PRINCIPLES P10, P11, P13). Its rules are
 //! library functions in `wasm_capsule_tools::bundle`, tested here in-process.
 //! The build mode's seam is the build script's path: these tests pass small
-//! stand-in scripts from `tests/bundle_builds/`. Exactly one test,
-//! `tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid`, spawns the real
-//! `tools/bundle`.
+//! stand-in scripts from `tests/bundle_builds/`. Two tests spawn the real
+//! `tools/bundle`: `tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid`,
+//! and `two_bundles_in_different_paths_have_one_lab_cid`, which also builds
+//! with each copy's own `tools/build` at three paths (two siblings, and one
+//! whose lane sits below another one, so its parent is longer and deeper); it
+//! requires the three modules to be byte-identical and the three bundles to
+//! have one lab CID.
 //!
 //! The tests share one process, so none changes process-wide state.
 
 mod common;
 
-use common::build::{lane_dir, sha256_file, Receipt, TempDir};
+use common::build::{copy_lane_source, lane_dir, sha256_file, Receipt, TempDir};
 use common::{MODULE_BUNDLE_LAB_CID, PINNED_ARTIFACT_SHA256};
 use std::ffi::OsString;
 use std::fs;
@@ -436,12 +440,22 @@ fn bundle_io_refusals_keep_path_and_cause() {
 /// `cargo test`'s build lock; it is set on the child only. The caller puts
 /// it under its own temp dir, so the test writes nothing in the checkout.
 fn tools_bundle(child_target: &Path, args: &[&OsString]) -> Output {
-    Command::new(lane_dir().join("tools").join("bundle"))
+    spawn_tools_bundle(&lane_dir(), child_target, args)
+}
+
+/// [`tools_bundle`] for the `tools/bundle` of the lane copy at `lane`.
+fn spawn_tools_bundle(lane: &Path, child_target: &Path, args: &[&OsString]) -> Output {
+    Command::new(lane.join("tools").join("bundle"))
         .args(args)
         .env("CARGO_TARGET_DIR", child_target)
         .env("CARGO_BUILD_BUILD_DIR", child_target)
         .output()
         .expect("spawn tools/bundle")
+}
+
+/// `path` as an argument, every byte kept.
+fn path_os(path: &Path) -> OsString {
+    path.as_os_str().to_owned()
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -565,4 +579,167 @@ fn tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid() {
         2,
         &format!("bundle: unknown option \"--unknown\": the only option is --name\n{USAGE}\n"),
     );
+}
+
+#[test]
+fn two_bundles_in_different_paths_have_one_lab_cid() {
+    let tmp = TempDir::new("tools-bundle-two-paths");
+
+    // Three copies of the lane at three absolute paths, two as neighbours and
+    // one below another lane. A and B are siblings, so their parents have the
+    // same length and depth. C's parent is `.../bundle lab/side`, one level
+    // deeper, and its name is longer, so C's parent differs from A's and B's
+    // in both. Each copy's name and parents hold a space, so neither the
+    // build nor the bundle may split a path on whitespace.
+    let root_a = tmp.path().join("bundle lab a");
+    let root_b = tmp.path().join("bundle lab b");
+    let root_c = tmp
+        .path()
+        .join("bundle lab")
+        .join("side")
+        .join("longer name");
+    for root in [&root_a, &root_b, &root_c] {
+        fs::create_dir_all(root).expect("create a copy's root");
+    }
+    let mut lanes = Vec::new();
+    for root in [&root_a, &root_b, &root_c] {
+        lanes.push(copy_lane_source(&lane_dir(), root));
+    }
+    let parent_a = root_a.parent().expect("a copy root has a parent");
+    let parent_b = root_b.parent().expect("a copy root has a parent");
+    let parent_c = root_c.parent().expect("a copy root has a parent");
+    assert_eq!(
+        parent_a.as_os_str().len(),
+        parent_b.as_os_str().len(),
+        "the sibling copies must have parents of one length"
+    );
+    assert_eq!(
+        parent_a.components().count(),
+        parent_b.components().count(),
+        "the sibling copies must have parents of one depth"
+    );
+    assert_ne!(
+        parent_a.as_os_str().len(),
+        parent_c.as_os_str().len(),
+        "the third copy's parent must differ in length"
+    );
+    assert_ne!(
+        parent_a.components().count(),
+        parent_c.components().count(),
+        "the third copy's parent must differ in depth"
+    );
+
+    // The real `tools/bundle`, once per copy, with its own OUT_DIR and its own
+    // child build cache, in the foreground. Each copy's `tools/bundle` runs
+    // its own `tools/build`, so the three builds run at the three parents.
+    let mut printed = Vec::new();
+    let mut out_dirs = Vec::new();
+    for (lane, root) in lanes.iter().zip([&root_a, &root_b, &root_c]) {
+        let out_dir = root.join("out");
+        let output = spawn_tools_bundle(lane, &root.join("child-target"), &[&path_os(&out_dir)]);
+        assert!(
+            output.status.success(),
+            "{}",
+            show("tools/bundle failed", &output)
+        );
+        out_dirs.push(out_dir.join("bundle"));
+        printed.push(text(&output.stdout));
+    }
+
+    // The three modules are byte-identical: the build named one module
+    // whichever path it ran at, so any other difference below is the bundle's.
+    let modules: Vec<Vec<u8>> = out_dirs
+        .iter()
+        .map(|bundle| fs::read(bundle.join("capsule.wasm")).expect("read module"))
+        .collect();
+    for (index, module) in modules.iter().enumerate().skip(1) {
+        assert_eq!(
+            module, &modules[0],
+            "the module built at copy {} differs from copy 0's: the build is path-dependent",
+            index
+        );
+    }
+
+    // One CID: each printed line is the whole of stdout, and it is what
+    // `bundle_identity` names for each of the bundles.
+    let mut named = Vec::new();
+    for (index, bundle) in out_dirs.iter().enumerate() {
+        let name = bundle_identity(bundle).expect("name the bundle");
+        assert_eq!(
+            Receipt::read(bundle.parent().expect("a bundle sits in its OUT_DIR"))
+                .get("artifact_sha256"),
+            PINNED_ARTIFACT_SHA256,
+            "capsule.wasm changed: STOP"
+        );
+        assert_eq!(
+            printed[index],
+            format!("{name}\n"),
+            "stdout is not the one name"
+        );
+        named.push(name);
+    }
+    for (index, name) in named.iter().enumerate().skip(1) {
+        assert_eq!(
+            name, &named[0],
+            "the bundle at copy {} must have the one lab CID",
+            index
+        );
+    }
+
+    // The flip: one byte of bundle A's module, then its name mode run before
+    // and after. Both runs go through the real command; nothing is rebuilt.
+    let bundle_a = out_dirs[0].clone();
+    let bundle_b = out_dirs[1].clone();
+    let bundle_c = out_dirs[2].clone();
+    let module = bundle_a.join("capsule.wasm");
+    let before = fs::read(&module).expect("read the module");
+    let name_mode = [&os("--name"), &path_os(&bundle_a)];
+    let output = spawn_tools_bundle(&lanes[0], &root_a.join("child-target"), &name_mode);
+    assert!(
+        output.status.success(),
+        "{}",
+        show("tools/bundle --name failed", &output)
+    );
+    assert_eq!(text(&output.stdout), format!("{}\n", named[0]));
+
+    let last = before.len() - 1;
+    let mut flipped = before.clone();
+    flipped[last] ^= 0x01;
+    fs::write(&module, &flipped).expect("flip one byte of the module");
+
+    // A different CID: the module is one byte from the other bundles'.
+    let output = spawn_tools_bundle(&lanes[0], &root_a.join("child-target"), &name_mode);
+    assert!(
+        output.status.success(),
+        "{}",
+        show("tools/bundle --name failed", &output)
+    );
+    let flipped_name = text(&output.stdout);
+    let named_flipped = bundle_identity(&bundle_a).expect("name the flipped bundle");
+    assert_eq!(flipped_name, format!("{named_flipped}\n"));
+    assert_ne!(
+        flipped_name, printed[0],
+        "one flipped module byte must change the lab CID"
+    );
+    assert_eq!(
+        fs::read(&module).expect("read the module"),
+        flipped,
+        "the name mode changed the module"
+    );
+    // The other bundles are untouched, so their names still hold and their
+    // modules still match bundle A's before the flip.
+    for (bundle, index) in [(&bundle_b, 1), (&bundle_c, 2)] {
+        assert_eq!(
+            bundle_identity(bundle).expect("name the other bundle"),
+            named[index],
+            "bundle {} changed",
+            index
+        );
+        assert_eq!(
+            fs::read(bundle.join("capsule.wasm")).expect("read"),
+            before,
+            "bundle {}'s module changed",
+            index
+        );
+    }
 }
