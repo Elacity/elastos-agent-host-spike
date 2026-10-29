@@ -5,15 +5,19 @@
 //! RA-6 states from draft PR #309 at `513988ebd`. A PASS here gives the
 //! Runtime no credit.
 
+#[path = "common/signed_bundle.rs"]
+mod signed_bundle;
+
 use agent_conformance::standin_runtime::{Caller, Life, StandIn, Start};
 use serde_json::{json, Value};
+use signed_bundle::{SignedBundle, SHARED_NAME};
 use std::collections::BTreeSet;
 
 const LIVE_SCOPE: &str = "all_sessions_live";
 const SHELL_REASON: &str = "This endpoint requires shell privileges";
-const SHARED_PATH: &str = "/capsules/read-shared";
-const SHARED_NAME: &str = "read-shared";
 const SHARED_RESOURCE: &str = "localhost://Public/resident-instances/shared.txt";
+/// The manifest `name` of the second signed fixture.
+const SECOND_NAME: &str = "agent-host-second";
 
 fn keys(value: &Value) -> BTreeSet<String> {
     value
@@ -204,14 +208,20 @@ fn standin_matches_ra1_fields() {
 #[test]
 fn standin_settles_a_killed_agents_request() {
     let mut standin = StandIn::new();
+    let shared = SignedBundle::new();
     standin
-        .admit_resident(SHARED_PATH, SHARED_NAME, Start::Ok)
+        .admit_resident(
+            shared.path(),
+            &shared.signature(),
+            shared.accepted(),
+            Start::Ok,
+        )
         .expect("the stand-in admits read-shared");
     let mut launched = Vec::new();
     for _ in 0..2 {
         let launch = standin
-            .post_capsules(Caller::Shell, &json!({ "path": SHARED_PATH }))
-            .expect("the stand-in launches the admitted path");
+            .post_capsules(Caller::Shell, &shared.launch_body())
+            .expect("the stand-in launches the admitted CID");
         let id = launch["id"]
             .as_str()
             .expect("the stand-in names each launch")
@@ -344,24 +354,30 @@ fn standin_settles_a_killed_agents_request() {
 fn standin_matches_ra6_states() {
     let mut standin = StandIn::new();
 
-    let refused = standin.post_capsules(Caller::Shell, &json!({ "path": SHARED_PATH }));
-    assert!(
-        matches!(
-            &refused,
-            Err((400, reason))
-                if reason.starts_with("not a resident component:")
-                    && reason.contains("resident-capsule")
-        ),
-        "the stand-in did the work: an unadmitted launch is refused: {refused:?}"
+    let shared = SignedBundle::new();
+    let cid = shared.cid();
+    let refused = standin.post_capsules(Caller::Shell, &shared.launch_body());
+    assert_eq!(
+        refused,
+        Err((
+            404,
+            format!("no bundle is admitted under {cid} in world resident-capsule")
+        )),
+        "the stand-in did the work: an unadmitted CID is refused with its own 404 reason"
     );
 
     standin
-        .admit_resident(SHARED_PATH, SHARED_NAME, Start::Ok)
-        .expect("the stand-in admits read-shared");
+        .admit_resident(
+            shared.path(),
+            &shared.signature(),
+            shared.accepted(),
+            Start::Ok,
+        )
+        .expect("the stand-in admits the signed bundle");
 
     let launched = standin
-        .post_capsules(Caller::Shell, &json!({ "path": SHARED_PATH }))
-        .expect("the stand-in launches the admitted path");
+        .post_capsules(Caller::Shell, &shared.launch_body())
+        .expect("the stand-in launches the admitted CID");
     assert_keys(
         &launched,
         &["id", "name", "session_id", "status"],
@@ -425,14 +441,15 @@ fn standin_matches_ra6_states() {
     let mut failed = StandIn::new();
     failed
         .admit_resident(
-            SHARED_PATH,
-            SHARED_NAME,
+            shared.path(),
+            &shared.signature(),
+            shared.accepted(),
             Start::Error("start refused".to_owned()),
         )
-        .expect("the stand-in admits read-shared with a refused start");
+        .expect("the stand-in admits the signed bundle with a refused start");
     let refused_launch = failed
-        .post_capsules(Caller::Shell, &json!({ "path": SHARED_PATH }))
-        .expect("the stand-in launches the refused path");
+        .post_capsules(Caller::Shell, &shared.launch_body())
+        .expect("the stand-in launches the refused CID");
     failed
         .finish_start(
             refused_launch["id"]
@@ -475,7 +492,7 @@ fn standin_matches_ra6_states() {
     let client = Caller::Client {
         session_id: "component-1",
     };
-    let client_post = standin.post_capsules(client, &json!({ "path": SHARED_PATH }));
+    let client_post = standin.post_capsules(client, &shared.launch_body());
     assert!(
         matches!(&client_post, Err((403, reason)) if reason == SHELL_REASON),
         "the stand-in did the work: a client launch is refused: {client_post:?}"
@@ -492,26 +509,31 @@ fn standin_matches_ra6_states() {
 /// keeps a live grant and completes its request.
 #[test]
 fn standin_cancelled_resident_leaves_the_second_resident_to_complete() {
-    const SECOND_PATH: &str = "/capsules/write-shared";
-    const SECOND_NAME: &str = "write-shared";
     const SECOND_RESOURCE: &str = "localhost://Public/resident-instances/second.txt";
     const STOP_REASON: &str = "stopped: stop one";
 
     let mut standin = StandIn::new();
-    for (path, name) in [(SHARED_PATH, SHARED_NAME), (SECOND_PATH, SECOND_NAME)] {
+    let shared = SignedBundle::new();
+    let second = SignedBundle::distinct(SECOND_NAME);
+    for bundle in [&shared, &second] {
         standin
-            .admit_resident(path, name, Start::Ok)
+            .admit_resident(
+                bundle.path(),
+                &bundle.signature(),
+                bundle.accepted(),
+                Start::Ok,
+            )
             .expect("the stand-in admits both residents");
     }
 
     let mut started = Vec::new();
-    for (path, name) in [(SHARED_PATH, SHARED_NAME), (SECOND_PATH, SECOND_NAME)] {
+    for (bundle, name) in [(&shared, SHARED_NAME), (&second, SECOND_NAME)] {
         let launched = standin
-            .post_capsules(Caller::Shell, &json!({ "path": path }))
-            .expect("the stand-in launches the admitted path");
+            .post_capsules(Caller::Shell, &bundle.launch_body())
+            .expect("the stand-in launches the admitted CID");
         assert_eq!(
             launched["name"], name,
-            "the stand-in launches the admitted name"
+            "the stand-in launches each admitted bundle under its own manifest name"
         );
         let id = launched["id"]
             .as_str()
