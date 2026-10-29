@@ -3,13 +3,19 @@
 //! `encode_listed_files`, the one encoder `encode_entries` and `lab_cid` use.
 //! The listing under test is the photo lane's PH6 stand-in photo set, a byte
 //! copy outside `fixtures/`.
+//!
+//! Signing a closure listing (task 049): the lab CID the listing gets is
+//! signed and checked by the one package record, through `sign_cid_record`
+//! and `verify_cid_record`, which the folder and checked record calls use.
 mod common;
 
 use std::fs;
 use std::path::Path;
 
 use capsule_identity::{
-    encode_entries, encode_listed_files, lab_cid, BundleEntry, ListedFile, Refusal,
+    encode_entries, encode_listed_files, lab_cid, sign_cid_record, sign_package_record,
+    verify_checked_package_record, verify_cid_record, verify_package_record, BundleEntry,
+    CheckedBundle, LabCid, ListedFile, PackageRecord, Refusal,
 };
 use common::*;
 use sha2::{Digest, Sha256};
@@ -59,6 +65,19 @@ fn folder_entries(root: &Path, parent: &str, out: &mut Vec<BundleEntry>) {
     }
 }
 
+/// `entries` with the PH6 manifest's `viewer` object swapped for the string
+/// the Runtime's manifest type takes, so `lab_cid`'s walk accepts the folder.
+fn with_string_viewer(mut entries: Vec<BundleEntry>) -> Vec<BundleEntry> {
+    let manifest = entries
+        .iter_mut()
+        .find(|entry| entry.path == "capsule.json")
+        .expect("the copy holds capsule.json");
+    let text = String::from_utf8(manifest.content.clone()).expect("a UTF-8 manifest");
+    assert_eq!(text.matches(VIEWER_OBJECT).count(), 1, "{text}");
+    manifest.content = text.replace(VIEWER_OBJECT, VIEWER_STRING).into_bytes();
+    entries
+}
+
 /// A temp folder holding `entries`.
 fn folder_of(entries: &[BundleEntry]) -> tempfile::TempDir {
     let bundle = temp_dir();
@@ -90,14 +109,7 @@ fn photo_listing_gets_the_lab_cid_of_its_folder() {
     // The folder case: a temp copy whose `viewer` is the Runtime type's
     // string, so `lab_cid`'s walk and manifest check accept it. Its lab CID
     // equals the encoder's answer for the listing of that same folder.
-    let mut entries = entries;
-    let manifest = entries
-        .iter_mut()
-        .find(|entry| entry.path == "capsule.json")
-        .expect("the copy holds capsule.json");
-    let text = String::from_utf8(manifest.content.clone()).expect("a UTF-8 manifest");
-    assert_eq!(text.matches(VIEWER_OBJECT).count(), 1, "{text}");
-    manifest.content = text.replace(VIEWER_OBJECT, VIEWER_STRING).into_bytes();
+    let entries = with_string_viewer(entries);
     let bundle = folder_of(&entries);
     let mut listed = Vec::new();
     folder_entries(bundle.path(), "", &mut listed);
@@ -186,4 +198,178 @@ fn listed_file_over_one_leaf_names_the_bytes_call() {
         content: bytes,
     }])
     .expect("the bytes call names the same file");
+}
+
+/// The canonical `did:key` of `key`, from the Runtime's own encoder.
+fn did_of(key: &ed25519_dalek::SigningKey) -> String {
+    elastos_identity::encode_signing_key_did(key)
+}
+
+/// The lab CID of `listing`. A refusal fails the test with its reason.
+fn listed_cid(listing: &[ListedFile]) -> LabCid {
+    encode_listed_files(listing).unwrap_or_else(|refusal| panic!("the listing: {refusal}"))
+}
+
+/// The PH6 copy with `viewer` as a string, as a temp folder, and the lab CID
+/// of the listing the photo walk makes of that folder.
+fn string_viewer_folder() -> (tempfile::TempDir, LabCid) {
+    let bundle = folder_of(&with_string_viewer(photo_stand_in_entries()));
+    let mut listed = Vec::new();
+    folder_entries(bundle.path(), "", &mut listed);
+    assert_eq!(
+        listed.len(),
+        PHOTO_STAND_IN_FILES.len(),
+        "the folder's files"
+    );
+    let cid = listed_cid(&listing_of(&listed));
+    (bundle, cid)
+}
+
+/// `verify_cid_record` over `cid` and `verify_checked_package_record` over
+/// `held`, whose CID is `cid`, both refuse `record`, with one refusal and one
+/// text. That refusal is returned for the caller to judge.
+fn refused_alike(
+    cid: LabCid,
+    held: &CheckedBundle,
+    record: &PackageRecord,
+    accepted: &[String],
+) -> Refusal {
+    assert_eq!(held.cid(), cid, "the checked bundle names another CID");
+    let by_cid = verify_cid_record(cid, record, accepted)
+        .expect_err("verify_cid_record passed a record it must refuse");
+    let by_checked = verify_checked_package_record(held, record, accepted)
+        .expect_err("verify_checked_package_record passed a record it must refuse");
+    assert_eq!(
+        by_cid, by_checked,
+        "the two record checks refuse differently"
+    );
+    assert_eq!(by_cid.to_string(), by_checked.to_string());
+    by_cid
+}
+
+/// The refusal is check (c)'s: the record names `record_cid`, and the CID it
+/// was checked against is `against`. Both values are in the text.
+fn assert_names_another_cid(refusal: Refusal, record_cid: LabCid, against: LabCid) {
+    assert_eq!(
+        refusal,
+        Refusal::RecordNamesAnotherCid {
+            record: record_cid.to_string(),
+            bundle: against,
+        }
+    );
+    assert_eq!(
+        refusal.to_string(),
+        format!("record names {record_cid}; the bundle names {against}")
+    );
+}
+
+#[test]
+fn a_closure_listing_gets_a_package_record_by_its_cid() {
+    // The copy's five files, listed as the photo walk lists them. No folder
+    // is walked for the signed name: `lab_cid` refuses this folder (047).
+    let listing = listing_of(&photo_stand_in_entries());
+    assert_eq!(listing.len(), PHOTO_STAND_IN_FILES.len());
+    let cid = listed_cid(&listing);
+    assert_eq!(cid.to_string(), PHOTO_STAND_IN_LAB_CID);
+
+    let key = fresh_signing_key();
+    let did = did_of(&key);
+    let record = sign_cid_record(&key, cid);
+    assert_eq!(record.cid, PHOTO_STAND_IN_LAB_CID);
+    assert_eq!(record.signer_did, did);
+    // The one record's rule, written out: no second schema, no name field.
+    let expected = format!(
+        "{{\"cid\":\"{PHOTO_STAND_IN_LAB_CID}\",\"schema\":\"lab.capsule-identity.record/v1\",\"signer_did\":\"{did}\"}}"
+    );
+    let payload =
+        String::from_utf8(record.package_record_payload()).expect("the payload is UTF-8 JSON");
+    assert_eq!(payload, expected);
+    verify_cid_record(cid, &record, &[did])
+        .unwrap_or_else(|refusal| panic!("the listing's record was refused: {refusal}"));
+}
+
+#[test]
+fn the_folder_record_is_the_cid_record() {
+    // Ed25519 is deterministic, so one key gives one record per CID however
+    // the CID was computed.
+    let key = fresh_signing_key();
+    for (fixture, pin) in [
+        (&CONTENT_SAMPLE, CONTENT_SAMPLE_LAB_CID),
+        (&WEB_APP, WEB_APP_LAB_CID),
+        (&AGENT_HOST, AGENT_HOST_LAB_CID),
+        (&PROVIDER, PROVIDER_LAB_CID),
+        (&MODEL, MODEL_LAB_CID),
+        (&PROVIDER_VARIANT_A, PROVIDER_VARIANT_A_LAB_CID),
+        (&PROVIDER_VARIANT_B, PROVIDER_VARIANT_B_LAB_CID),
+    ] {
+        let bundle = assemble(fixture);
+        let cid = named(bundle.path());
+        assert_eq!(cid.to_string(), pin, "{}", fixture.name);
+        let from_folder = sign_package_record(&key, bundle.path())
+            .unwrap_or_else(|refusal| panic!("{}: {refusal}", fixture.name));
+        assert_eq!(
+            from_folder,
+            sign_cid_record(&key, cid),
+            "{}: the folder record is not the CID record",
+            fixture.name
+        );
+    }
+
+    // 047's copy with `viewer` as a string: its folder and its listing name
+    // one CID, so a record made from either passes the other's check.
+    let (bundle, cid) = string_viewer_folder();
+    let accepted = [did_of(&key)];
+    let by_listing = sign_cid_record(&key, cid);
+    verify_package_record(bundle.path(), &by_listing, &accepted)
+        .unwrap_or_else(|refusal| panic!("the folder refused the listing's record: {refusal}"));
+    let by_folder = sign_package_record(&key, bundle.path())
+        .unwrap_or_else(|refusal| panic!("the folder: {refusal}"));
+    verify_cid_record(cid, &by_folder, &accepted)
+        .unwrap_or_else(|refusal| panic!("the listing refused the folder's record: {refusal}"));
+    assert_eq!(by_folder, by_listing);
+}
+
+#[test]
+fn cid_record_refuses_as_the_checked_record_does() {
+    let (bundle, cid) = string_viewer_folder();
+    let held = checked(bundle.path());
+    let key = fresh_signing_key();
+    let did = did_of(&key);
+    let other_did = did_of(&fresh_signing_key());
+    assert_ne!(did, other_did, "two fresh test keys have one DID");
+    let record = sign_cid_record(&key, cid);
+    verify_cid_record(cid, &record, &[did.clone()])
+        .unwrap_or_else(|refusal| panic!("the good record was refused: {refusal}"));
+
+    // The listing with one byte of one file's `sha256` changed names
+    // another closure.
+    let mut changed = listing_of(&photo_stand_in_entries());
+    changed[2].sha256[0] ^= 1;
+    let changed_cid = listed_cid(&changed);
+    assert_ne!(changed_cid, cid);
+    let refusal = verify_cid_record(changed_cid, &record, &[did.clone()])
+        .expect_err("a record over the listing must not pass for the changed listing");
+    assert_names_another_cid(refusal, cid, changed_cid);
+    // The other way round, where a checked bundle holds the CID: a record
+    // over the changed listing, judged by both calls.
+    let over_changed = sign_cid_record(&key, changed_cid);
+    let refusal = refused_alike(cid, &held, &over_changed, &[did.clone()]);
+    assert_names_another_cid(refusal, changed_cid, cid);
+
+    let refusal = refused_alike(cid, &held, &record, &[other_did]);
+    assert_not_accepted(refusal, &did);
+    let refusal = refused_alike(cid, &held, &record, &[]);
+    assert_not_accepted(refusal, &did);
+
+    let mut flipped = record.clone();
+    flipped.signature[0] ^= 1;
+    let refusal = refused_alike(cid, &held, &flipped, &[did.clone()]);
+    assert_does_not_verify(refusal, &did, &cid.to_string());
+
+    let malformed = "did:web:example.invalid".to_owned();
+    let mut bad = record.clone();
+    bad.signer_did = malformed.clone();
+    // Listed, so only the decoder can refuse it.
+    let refusal = refused_alike(cid, &held, &bad, &[malformed.clone()]);
+    assert_malformed(refusal, &malformed);
 }
