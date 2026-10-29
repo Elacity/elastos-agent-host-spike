@@ -5492,3 +5492,178 @@ fn hosted_token_and_byte_bounds_refuse_before_any_send() {
 
     provider.shutdown();
 }
+
+/// An unseen request id outside the freshness window is `request_expired`
+/// before the Runtime socket, and a retained run returns its stored result
+/// on that same socket. Design: `docs/MODEL_PROVIDER.md` "Request identity
+/// and session facts". `ModelProviderState::handle_runs_create` looks up a
+/// retained binding first, then `validate_new_model_request_id`. The unit
+/// tests `unseen_expired_requests_leave_journal_and_backend_unchanged` and
+/// `retained_request_precedes_freshness_floor_policy_and_unrelated_pruning`
+/// stay the in-process proof.
+///
+/// Off macOS the provider refuses every hosted run before any socket, so the
+/// test prints one `SKIP` line and returns.
+#[test]
+fn hosted_unseen_request_ids_expire_before_any_send() {
+    if !cfg!(target_os = "macos") {
+        eprintln!(
+            "SKIP model-provider hosted request freshness: off macOS the provider \
+             refuses every hosted run before any socket"
+        );
+        return;
+    }
+    let root = test_support::temp_root_path("model-provider-process", "hosted-request-freshness");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let stand_in = HostedEffectStandIn::bind_streaming("hosted-request-freshness");
+    let init = hosted_effect_init(
+        &root,
+        &stand_in,
+        HOSTED_FIXTURE_MODEL,
+        HOSTED_FIXTURE_RUNTIME_MS_LIMIT,
+    );
+    let mut provider = ProviderProcess::start();
+    let started = provider.request(init);
+    assert_eq!(
+        started["status"], "ok",
+        "unexpected init response: {started}"
+    );
+
+    // One clock read, the same clock `fixture_model_request_id` uses. Too old
+    // is that instant minus the five-minute window and one millisecond. Too
+    // far ahead is that instant plus the one-minute skew and the unit test's
+    // extra 60_000 ms.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let unseen = [
+        (
+            "too old",
+            test_support::fixture_model_request_id_at(
+                "hosted-unseen-too-old",
+                now_ms.saturating_sub(elastos_model_contract::MODEL_REQUEST_MAX_AGE_MS + 1),
+            ),
+        ),
+        (
+            "too far in the future",
+            test_support::fixture_model_request_id_at(
+                "hosted-unseen-too-future",
+                now_ms + elastos_model_contract::MODEL_REQUEST_FUTURE_SKEW_MS + 60_000,
+            ),
+        ),
+        ("legacy", "legacy-unseen".to_string()),
+    ];
+    let expired = json!({
+        "status": "error",
+        "code": elastos_model_contract::MODEL_REQUEST_EXPIRED_CODE,
+        "message": elastos_model_contract::MODEL_REQUEST_EXPIRED_MESSAGE,
+    });
+    let missing = json!({
+        "status": "error",
+        "code": "run_not_found",
+        "message": "model run is not available for the current caller",
+    });
+    for (label, request_id) in unseen {
+        let request =
+            hosted_text_create_request(&request_id, "grant:test", "an unseen hosted request");
+        let binding: RuntimeCreateBinding =
+            serde_json::from_value(request["runtime_binding"].clone()).unwrap();
+        binding
+            .validate(
+                request["offer_id"].as_str().unwrap(),
+                request["operation"].as_str().unwrap(),
+                &request["input"],
+            )
+            .unwrap_or_else(|error| {
+                panic!("{label}: the refusal binding must be valid, and only the request id is outside the window: {error}")
+            });
+        let run_id = model_run_id(&binding);
+        let created = provider.request(request.clone());
+        assert_eq!(
+            created, expired,
+            "{label}: an unseen request id must be request_expired before any send: {created}"
+        );
+        assert_eq!(
+            stand_in.connection_count(),
+            0,
+            "{label}: the freshness refusal must open no connection to the Runtime socket"
+        );
+        let got = provider.request(json!({
+            "op": "runs_get",
+            "run_id": run_id,
+            "runtime_binding": access_binding(&request),
+        }));
+        assert_eq!(
+            got, missing,
+            "{label}: an unseen expired id must leave no run: {got}"
+        );
+    }
+
+    let fresh_id = test_support::fixture_model_request_id("request:hosted-request-fresh");
+    let prompt = "a fresh hosted request";
+    let fresh_request = hosted_text_create_request(&fresh_id, "grant:test", prompt);
+    let fresh_binding: RuntimeCreateBinding =
+        serde_json::from_value(fresh_request["runtime_binding"].clone()).unwrap();
+    let fresh_run_id = model_run_id(&fresh_binding);
+    let settled = run_hosted_text_turn(
+        &mut provider,
+        &fresh_id,
+        "grant:test",
+        HOSTED_FIXTURE_SESSION_ID,
+        prompt,
+        FIXTURE_EVENT_TIMEOUT,
+    );
+    assert_eq!(
+        settled["data"]["status"], "completed",
+        "the fresh granted turn must complete: {settled}"
+    );
+    assert_eq!(
+        settled["data"]["terminal"]["output"],
+        json!({"schema": RUN_OUTPUT_TEXT_SCHEMA, "text": "ready"}),
+        "the fresh granted turn must carry the streamed text: {settled}"
+    );
+    let replay = provider.request(fresh_request.clone());
+    assert_eq!(
+        replay["status"], "ok",
+        "a retained request must return its stored run: {replay}"
+    );
+    assert_eq!(
+        replay["data"]["run_id"], fresh_run_id,
+        "the retained run must keep the contract run id: {replay}"
+    );
+    let replayed = wait_for_run_terminal(
+        &mut provider,
+        &fresh_run_id,
+        &access_binding(&fresh_request),
+    );
+    assert_eq!(
+        replayed["data"]["terminal"]["output"], settled["data"]["terminal"]["output"],
+        "runs_get must return the stored completed output: {replayed}"
+    );
+    assert_eq!(
+        stand_in.connection_count(),
+        1,
+        "the retained replay must not open a second connection"
+    );
+
+    let (connections, requests) = stand_in.observe();
+    assert_eq!(
+        connections, 1,
+        "only the fresh granted turn may open a connection to the Runtime socket"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "only the fresh granted turn may send a hosted request"
+    );
+    assert_eq!(
+        requests[0].value("authorization"),
+        None,
+        "a hosted run must carry no bearer key"
+    );
+
+    provider.shutdown();
+}
