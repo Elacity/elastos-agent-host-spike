@@ -345,14 +345,17 @@ fn a_grant_bound_to_one_plan_is_refused_for_another_plan() {
         "two plans are two requests, so the two grants differ"
     );
 
-    // The owner approves plan A with grant G1 and plan B with grant G2.
+    // The owner approves plan A with grant G1 and plan B with grant G2,
+    // naming the hash the shell's request view shows in `plan`.
+    let owner_sees_a = plan_sha256(PLAN_A);
+    let owner_sees_b = plan_sha256(PLAN_B);
     assert_eq!(
-        approve(&mut stand_in, &session, &request_a),
+        approve(&mut stand_in, &request_a, &owner_sees_a),
         Ok(json!({ "success": true })),
         "the owner approves plan A"
     );
     assert_eq!(
-        approve(&mut stand_in, &session, &request_b),
+        approve(&mut stand_in, &request_b, &owner_sees_b),
         Ok(json!({ "success": true })),
         "the owner approves plan B"
     );

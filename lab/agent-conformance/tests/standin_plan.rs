@@ -431,8 +431,8 @@ fn standin_use_of_another_plans_grant_is_refused_and_both_grants_stay_live() {
     assert_ne!(request_a, request_b, "two plans are two requests");
 
     // The owner approves plan A with grant G1 and plan B with grant G2.
-    approve(&mut standin, &request_a);
-    approve(&mut standin, &request_b);
+    approve(&mut standin, &request_a, &sha256(PLAN));
+    approve(&mut standin, &request_b, &sha256(CHANGED));
     let both = live_rows(&standin, &id)["capabilities"].clone();
     assert_eq!(
         both.as_array().map(Vec::len),
