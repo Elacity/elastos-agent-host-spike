@@ -11,6 +11,10 @@ every use.
 
 reference model, not the Runtime; counts toward no M1 check; the Runtime half is Anders's (#464, #463, #181)
 
+`Verifier::ask_capability` is the stand-in entry for a capability ask. An app ask stores through the one `bind_grant`. A Home ask for that app returns a refusal and does not mint. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
+`Verifier::revoke_grant` removes one handle from the one grant store. That app's next effect is refused and another app's grant stays. This is a lab stand-in. It is not the Runtime. It does not count toward an M1 check.
+
 `Verifier::admit_ask` caps one agent's budget ask and stores the granted amount through the one `admit`. This is a lab stand-in for that admission. It is not the Runtime. It does not count toward A7 or M1-R.
 
 A forged identity, session, instance, usage, ceiling or set of rights changes

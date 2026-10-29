@@ -1,7 +1,10 @@
 id: F-A7-lastadmit
 file: src/ledger.rs
-test: ledger::model_unasked_agent_reads_the_last_admit
+test: ledger::model_unasked_agent_does_not_inherit_the_last_admit
+test: ledger::model_empty_ceilings_map_has_no_ceiling
 --- old
-        ledger.ceiling = ledger.admitted;
+        if !ledger.ceilings.contains_key(&identity) {
+            return Err(ReserveRefuse::NoCeiling);
+        }
 --- new
 --- end
