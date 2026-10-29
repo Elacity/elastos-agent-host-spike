@@ -17,18 +17,15 @@
 //! import path (P10, P18): README says so before its per-engine answers, and
 //! ADOPTION says the same.
 //!
-//! Task 031: README lists each entry of `LAB_OPERATIONS`, the one table of
-//! typed lab operations, on one line, and the list and the table agree.
-//!
-//! Task 046: the lab does not check an import's Wasm type against its typed
-//! lab operation. README's typed operations section and ADOPTION's "Gaps for
-//! Anders" each hold that gap as one exact sentence, and no line of README,
-//! ADOPTION or `tools/src/verify.rs` calls anything type-checked without
-//! saying "not".
+//! Task 046: the import type gap. README's typed operations section and
+//! ADOPTION's "Gaps for Anders" each hold that gap as one exact sentence, and
+//! no line of README, ADOPTION or `tools/src/verify.rs` calls anything
+//! type-checked without saying "not". Task 065 retired the typed table (and
+//! task 031's README list test with it) and reworded the gap to the Bus
+//! interface names the lab now checks.
 
 use std::fs;
 use std::path::Path;
-use wasm_capsule_tools::verify::{LabOperation, LAB_OPERATIONS};
 
 /// The words before and after the total in README's summary sentence.
 const TOTAL_BEFORE: &str = "`falsifiers.json` holds ";
@@ -69,17 +66,15 @@ const RUN_SOURCE: &str = "tools/src/run.rs";
 /// The label both engine doc comments in `tools/src/run.rs` carry.
 const ENGINE_LABEL: &str = "test-only, not endorsed";
 
-/// README's subsection that lists the typed lab operations.
+/// README's subsection on the typed lab operations (task 031, retired by
+/// task 065), which holds the import type gap.
 const OPERATIONS_SECTION: &str = "### Typed lab operations (M1 B4 lab half)";
 
-/// How each operation line of that subsection starts.
-const OPERATION_LINE_START: &str = "- `";
-
-/// The import type gap (task 046), held once by README's typed operations
-/// section and once by ADOPTION's "Gaps for Anders".
-const TYPE_GAP: &str = "Gap: the lab does not check an import's Wasm type against its typed lab \
-                        operation, so a typed lab operation is not a type check; this blocks \
-                        the type half of M1 B4 (one permission model).";
+/// The import type gap (task 046, reworded by task 065), held once by
+/// README's typed operations section and once by ADOPTION's "Gaps for Anders".
+const TYPE_GAP: &str = "Gap: the lab checks Bus interface names only, never their WIT types, so a \
+                        linked Bus interface is not type-checked; this blocks the type half of \
+                        M1 B4 (one permission model).";
 
 /// ADOPTION's section of gaps for Anders.
 const GAPS_SECTION: &str = "## Gaps for Anders";
@@ -406,42 +401,6 @@ fn readme_falsifier_total_matches_falsifiers_json() {
         "README's {FALSIFIERS_SECTION:?} places its proofs with no entry outside the {}, but \
          falsifiers.json holds {held}",
         outside[0]
-    );
-}
-
-/// The one README line for `operation`: its import, its inputs and outputs as
-/// Wasm value type lists, its right and its effect.
-fn operation_line(operation: &LabOperation) -> String {
-    format!(
-        "- `{}.{}`: inputs `({})`, outputs `({})`, right `{}`, effect `{}`",
-        operation.module,
-        operation.name,
-        operation.inputs.join(", "),
-        operation.outputs.join(", "),
-        operation.right,
-        operation.effect
-    )
-}
-
-#[test]
-fn readme_lists_each_typed_lab_operation() {
-    let readme = lane_file("README.md");
-    let held = readme
-        .lines()
-        .filter(|line| *line == OPERATIONS_SECTION)
-        .count();
-    assert_eq!(
-        held, 1,
-        "README.md has the heading {OPERATIONS_SECTION:?} {held} times, not once"
-    );
-    let listed: Vec<&str> = operations_lines(&readme)
-        .filter(|line| line.starts_with(OPERATION_LINE_START))
-        .collect();
-    let table: Vec<String> = LAB_OPERATIONS.iter().map(operation_line).collect();
-    assert!(!table.is_empty(), "LAB_OPERATIONS is empty");
-    assert_eq!(
-        listed, table,
-        "README.md's {OPERATIONS_SECTION:?} list and LAB_OPERATIONS differ"
     );
 }
 

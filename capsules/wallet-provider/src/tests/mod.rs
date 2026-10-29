@@ -14,5 +14,5 @@ mod browser_signing;
 mod falsifiers;
 mod proofs;
 mod storage_root;
-mod support;
+pub(crate) mod support;
 mod v2_contract;

@@ -67,8 +67,10 @@ only. Never edit `capsules/`, `examples/`, `elastos/`, `lab/wasm-capsule/`,
 security weakness of the shipping product goes in a finding: the targets are
 private lab and spike work, pinned by commit.
 
-There is no `lab/redteam/Cargo.toml` yet, so the lane's cargo gates do
-nothing. A later task adds one on purpose (one workspace root, P10).
+`Cargo.toml` here is the lane's one workspace (P10). Its package calls
+`wasm-capsule-audit` by a path dependency. The manifest does not name
+grant-binding. `cargo fmt` and `cargo test --locked` use this manifest.
+`target/` is gitignored. The lockfile is committed.
 
 ## How to run
 

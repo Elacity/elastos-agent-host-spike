@@ -12,12 +12,23 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 type Result<T> = std::result::Result<T, &'static str>;
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
-/// Match sources.rs:default_data_dir on the only supported test host.
+/// Match sources.rs:default_data_dir on the supported test hosts: `dirs` gives
+/// `Library/Application Support` on macOS and `.local/share` on Linux. With
+/// `XDG_DATA_HOME` unset, that is the data directory from the selected Home.
 pub fn data_dir(home: &Path) -> Result<PathBuf> {
-    if !cfg!(target_os = "macos") {
-        return Err("throwaway Homes require macOS");
+    #[cfg(target_os = "macos")]
+    {
+        Ok(home.join("Library/Application Support/elastos"))
     }
-    Ok(home.join("Library/Application Support/elastos"))
+    #[cfg(target_os = "linux")]
+    {
+        Ok(home.join(".local/share/elastos"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = home;
+        Err("throwaway Homes require macOS or Linux")
+    }
 }
 
 fn target() -> PathBuf {
@@ -34,7 +45,7 @@ fn inside(path: &Path, root: &Path) -> bool {
 
 // Examine each in-root component before going further. In particular, never
 // canonicalize an outside path or follow a symlink to learn where it leads.
-fn directories_only(path: &Path, root: &Path) -> bool {
+pub(crate) fn directories_only(path: &Path, root: &Path) -> bool {
     let Ok(relative) = path.strip_prefix(root) else {
         return false;
     };
@@ -189,7 +200,7 @@ impl ThrowawayHome {
             return Err("temp directory must use directories without symlinks");
         }
         if data_dir(home)? != data {
-            return Err("data directory does not match the macOS Home rule");
+            return Err("data directory does not match the platform Home rule");
         }
         Ok(())
     }
