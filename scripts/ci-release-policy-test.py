@@ -35,6 +35,9 @@ FULL_PROOF_JOBS = {
     "source-home-linux", "source-home-linux-arm64", "source-home-macos", "update-hop-linux",
 }
 SPARK_SKIP = "!(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))"
+# Jobs that run only after merge (pushes and the nightly schedule), never on a PR, batch or baseline run.
+POST_MERGE_JOBS = {"source-home-macos"}
+POST_MERGE_GUARD = "${{ github.event_name == 'push' || github.event_name == 'schedule' }}"
 # Read the fixed job/step indentation used here; actionlint checks YAML syntax.
 def jobs(source):
     return dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)",
@@ -778,7 +781,8 @@ class ReleasePolicyTests(unittest.TestCase):
         triggers = SOURCE.split("\npermissions:", 1)[0]
         self.assertIn("\n  merge_group:\n    types: [checks_requested]\n", triggers)
         self.assertIn("\n  pull_request:\n", triggers)
-        self.assertIn("branches: [main, develop]", triggers)
+        self.assertIn("branches: [main, develop, spike/agent-host]", triggers)
+        self.assertIn("\n  schedule:\n", triggers)
         context = event_context("merge_group", "refs/heads/gh-readonly-queue/develop/pr-1")
         for job in JOBS:
             if job == "cancel-on-failure":
@@ -786,6 +790,8 @@ class ReleasePolicyTests(unittest.TestCase):
             guard = re.search(r"(?m)^    if: (.*)$", JOBS[job])
             if job == "release-upstream-assets":
                 self.assertTrue(upstream_assets_run(SOURCE, context, ""), job)
+            elif job in POST_MERGE_JOBS:
+                self.assertFalse(evaluate(guard[1], context), job)
             elif guard:
                 self.assertTrue(evaluate(guard[1], context), job)
             checkout, = [step for step in steps(job) if "uses: actions/checkout@" in step]
@@ -811,9 +817,11 @@ class ReleasePolicyTests(unittest.TestCase):
             guard = re.search(r"(?m)^    if: (.*)$", JOBS[job])
             return guard[1] if guard else ""
 
-        self.assertEqual({job for job in JOBS if SPARK_SKIP in job_level_if(job)}, FULL_PROOF_JOBS)
+        self.assertEqual({job for job in JOBS if SPARK_SKIP in job_level_if(job)}, FULL_PROOF_JOBS - POST_MERGE_JOBS)
         only_spark = "${{ " + SPARK_SKIP + " }}"
-        for job in FULL_PROOF_JOBS - {"custody-harness-smoke", "release-upstream-assets"}:
+        for job in POST_MERGE_JOBS:
+            self.assertEqual(job_level_if(job), POST_MERGE_GUARD, job)
+        for job in FULL_PROOF_JOBS - {"custody-harness-smoke", "release-upstream-assets"} - POST_MERGE_JOBS:
             self.assertEqual(job_level_if(job), only_spark, job)
         self.assertEqual(
             job_level_if("custody-harness-smoke"),
@@ -843,7 +851,14 @@ class ReleasePolicyTests(unittest.TestCase):
         manual = run("workflow_dispatch", "refs/heads/main", "")
         tag = event_context("push", "refs/tags/v0.7.1", "tag", "", "")
         kept = (ordinary, batch, bare, sparked, develop, merge, side_push, manual, tag)
-        always = FULL_PROOF_JOBS - {"custody-harness-smoke", "release-upstream-assets"}
+        always = FULL_PROOF_JOBS - {"custody-harness-smoke", "release-upstream-assets"} - POST_MERGE_JOBS
+        spike_push = run("push", "refs/heads/spike/agent-host", "")
+        nightly = run("schedule", "refs/heads/spike/agent-host", "")
+        for job in POST_MERGE_JOBS:
+            for context in (spike_push, nightly, develop, side_push, tag):
+                self.assertTrue(job_runs(job, context), (job, context["github.event_name"], context["github.ref"]))
+            for context in (spark, nested, ordinary, batch, bare, sparked, merge, manual):
+                self.assertFalse(job_runs(job, context), (job, context["github.event_name"], context["github.head_ref"]))
         for job in always:
             self.assertFalse(job_runs(job, spark), job)
             self.assertFalse(job_runs(job, nested), job)
@@ -1497,6 +1512,16 @@ class ReleasePolicyTests(unittest.TestCase):
                 groups.append(re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda match: str(evaluate(match[1], context)), group))
                 self.assertEqual(evaluate(field(concurrency, "cancel-in-progress"), context), event == "pull_request")
             self.assertEqual(len(set(groups)), 1 if event == "pull_request" else 3)
+        # Pushes to spike/agent-host share one cancellable group: a burst of merges runs the newest commit only.
+        for event, ref, shared in (("push", "refs/heads/spike/agent-host", True),
+                                   ("push", "refs/heads/develop", False),
+                                   ("schedule", "refs/heads/spike/agent-host", False)):
+            groups = []
+            for run_id in ("101", "102", "103"):
+                context = event_context(event, ref, **{"github.workflow": "CI", "github.run_id": run_id})
+                groups.append(re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda match: str(evaluate(match[1], context)), group))
+                self.assertEqual(evaluate(field(concurrency, "cancel-in-progress"), context), shared)
+            self.assertEqual(len(set(groups)), 1 if shared else 3, (event, ref))
 
     def test_jetson_package_exists_before_verification_on_every_event(self):
         validate_jetson_package_lifecycle(SOURCE)
