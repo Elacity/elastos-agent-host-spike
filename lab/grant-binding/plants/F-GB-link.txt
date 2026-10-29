@@ -1,10 +1,9 @@
 id: F-GB-link
 file: src/link.rs
 test: model_detects_a_path_dependency_on_this_crate
-test: link::model_workspace_metadata_names_the_member
-test: model_workspace_dependency_is_a_link_in_place
 --- old
-    metadata_names(manifest).iter().any(|name| name == "grant-binding")
+    cargo_toml.contains("grant-binding") && cargo_toml.contains("path")
 --- new
+    let _ = cargo_toml;
     false
 --- end

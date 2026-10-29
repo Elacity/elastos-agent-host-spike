@@ -3,6 +3,10 @@
 #[path = "../src/test_support.rs"]
 mod test_support;
 
+#[allow(dead_code)]
+#[path = "../../../lab/agent-conformance/src/harness.rs"]
+mod harness;
+
 /// The shared live-grant stand-in (`lab/agent-conformance/standin-runtime/`),
 /// read here rather than copied: one RA-1 path (P10). The agent-conformance
 /// crate takes the same file in with its own `#[path]` line
