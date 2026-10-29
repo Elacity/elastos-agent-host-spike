@@ -137,6 +137,7 @@ fn assert_type_import_skip_shape(original: &str, planted: &str) {
 
 fn type_probe() -> PlantedProbe {
     PlantedProbe {
+        anchor: ANCHOR,
         replacement: type_skip_replacement("Type"),
         assert_shape: assert_type_import_skip_shape,
         test_file: "redteam_type_import.rs",
