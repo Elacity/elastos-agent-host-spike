@@ -79,6 +79,13 @@ pub struct Decision {
     pub rights: Rights,
 }
 
+/// Who asks for a capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Asker {
+    Home,
+    App,
+}
+
 /// A refusal with one clear reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refuse {
@@ -92,6 +99,7 @@ pub enum Refuse {
     SymlinkShaped,
     OutsideRoot,
     PublicRead,
+    HomeMint,
 }
 
 impl std::fmt::Display for Refuse {
@@ -107,6 +115,7 @@ impl std::fmt::Display for Refuse {
             Refuse::SymlinkShaped => "use path has a symlink-shaped segment",
             Refuse::OutsideRoot => "use path leaves the owned root",
             Refuse::PublicRead => "public storage read does not bind",
+            Refuse::HomeMint => "home does not mint an app capability",
         })
     }
 }
@@ -185,6 +194,21 @@ impl Verifier {
             },
         );
         Ok(handle)
+    }
+
+    /// The stand-in entry for a capability ask. An app ask stores through
+    /// `bind_grant`. A Home ask returns a refusal and stores nothing.
+    pub fn ask_capability(
+        &mut self,
+        asker: Asker,
+        instance: InstanceId,
+        resource: &str,
+        rights: Rights,
+    ) -> Result<Handle, Refuse> {
+        if asker == Asker::Home {
+            return Err(Refuse::HomeMint);
+        }
+        self.bind_grant(instance, resource, rights)
     }
 
     /// Changes the registry identity for a live instance.
@@ -1705,4 +1729,36 @@ fn model_workspace_dependency_is_a_link_in_place() {
         "walk skips the crate manifest"
     );
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn model_home_ask_for_another_app_is_refused() {
+    let mut verifier = Verifier::new();
+    let photo = verifier.register_instance("photo", "session-a");
+    let handle = verifier
+        .ask_capability(Asker::App, photo, "UsersAI/photo/library", rights())
+        .expect("app ask");
+    let call = verifier.open_call(photo);
+    let decision = verifier
+        .use_grant(call, &guest(handle))
+        .expect("app effect");
+    assert_eq!(decision.identity, "photo");
+    assert_eq!(decision.owned_root, "UsersAI/photo/library");
+    let stored = verifier.grants.get(&handle).expect("app grant").clone();
+    let handles = verifier.next_handle;
+    let count = verifier.grants.len();
+    assert_eq!(handles, 1);
+    assert_eq!(count, 1);
+    let refusal = verifier
+        .ask_capability(Asker::Home, photo, "UsersAI/photo/library", rights())
+        .expect_err("home ask for the photo app");
+    assert_eq!(refusal, Refuse::HomeMint);
+    assert_eq!(refusal.to_string(), "home does not mint an app capability");
+    assert_eq!(verifier.next_handle, handles);
+    assert_eq!(verifier.grants.len(), count);
+    assert_eq!(verifier.grants.get(&handle).expect("app grant"), &stored);
+    let again = verifier
+        .use_grant(call, &guest(handle))
+        .expect("app effect remains");
+    assert_eq!(again.owned_root, "UsersAI/photo/library");
 }
