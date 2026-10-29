@@ -1781,6 +1781,47 @@ fn model_timeout_ends_an_uncertain_hold() {
 }
 
 #[test]
+fn model_known_settle_after_timeout_still_charges() {
+    let mut verifier = Verifier::new();
+    let (instance, handle) = bound(&mut verifier);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(
+            &call,
+            &guest(handle),
+            crate::ask::BudgetAsk { amount: 10 },
+            10,
+        )
+        .expect("ask");
+    let request = guest(handle);
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    verifier.set_verifier_deadline(0);
+    let unknown = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Unknown)
+        .expect_err("unknown outcome");
+    assert_eq!(unknown, SettleRefuse::UnknownOutcome);
+    assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
+    let record = verifier
+        .timeout_hold(&call, &request, reservation, 0)
+        .expect("a due timeout records the uncertain hold");
+    assert_eq!(record.to_string(), "timed out, outcome unknown");
+    let recorded = books(&verifier);
+    assert_eq!(recorded.charged, 0);
+    assert_eq!(recorded.held, 4);
+    assert_eq!(recorded.open.get(&reservation.id), Some(&4));
+    assert!(recorded.timed_out.contains_key(&reservation.id));
+    let charge = verifier
+        .settle(&call, &request, reservation, SettleOutcome::Known(4))
+        .expect("measured settle charges the recorded hold");
+    assert_eq!(charge, 4);
+    let after = books(&verifier);
+    assert_eq!(after.charged, 4);
+    assert_eq!(after.held, 0);
+    assert!(after.open.get(&reservation.id).is_none());
+    assert!(!after.timed_out.contains_key(&reservation.id));
+}
+
+#[test]
 fn model_early_timeout_is_refused() {
     let mut verifier = Verifier::new();
     let (instance, handle) = bound(&mut verifier);
