@@ -1,0 +1,8 @@
+id: F-GB-bs
+file: src/link.rs
+test: link::model_backspace_escape_is_not_a_link
+--- old
+    metadata_names(manifest).iter().any(|name| name == "grant-binding")
+--- new
+    true
+--- end

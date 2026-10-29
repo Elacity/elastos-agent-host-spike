@@ -1,0 +1,16 @@
+id: F-A7-ceilkey
+file: src/ask.rs
+test: ask::model_forged_ceiling_does_not_retarget_the_ceiling
+--- old
+        self.store_admitted_ceiling(Some(&identity), ask.amount);
+--- new
+        let other = if request.forged_ceiling > 0 {
+            self.grants
+                .values()
+                .find(|grant| grant.identity != identity)
+                .map(|grant| grant.identity.clone())
+        } else {
+            None
+        };
+        self.store_admitted_ceiling(other.as_deref().or(Some(&identity)), ask.amount);
+--- end
