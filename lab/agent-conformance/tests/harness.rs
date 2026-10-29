@@ -1,5 +1,6 @@
 use agent_conformance::harness::{data_dir, Launch, RunningChild, RunningInstances, ThrowawayHome};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -360,4 +361,123 @@ fn parallel_collection_refuses_live_descendants() {
         Err("keep the root after an unstopped child or failed stop")
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+fn write_program(home: &ThrowawayHome, name: &str, body: &str) -> PathBuf {
+    let path = home.root().join(name);
+    fs::write(&path, body)
+        .unwrap_or_else(|_| panic!("setup: {name} must be written under the home"));
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+        .unwrap_or_else(|_| panic!("setup: {name} must be executable"));
+    path
+}
+
+fn assert_refused_child_is_dead(home: &ThrowawayHome, pid_name: &str) {
+    let text = fs::read_to_string(home.home().join(pid_name))
+        .unwrap_or_else(|_| panic!("setup: {pid_name} was not written"));
+    let pid: u32 = text
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("setup: {pid_name} is not a pid"));
+    assert!(
+        !home
+            .group_is_alive(pid)
+            .expect("setup: the refused child can be inspected"),
+        "the harness did the work: the refused child is not alive"
+    );
+}
+
+/// A finished child whose stdout or stderr is sparse past the capture cap is
+/// refused before that length is read. A short capture is returned as it is.
+///
+/// Falsifier: F-harness-capture-cap returns Ok of an empty vec when the
+/// logical length is above the cap, and it does not call `read_to_end`.
+#[test]
+fn completed_child_capture_refuses_a_sparse_file() {
+    let perl = Path::new("/usr/bin/perl");
+    assert!(
+        perl.is_file(),
+        "setup: /usr/bin/perl is absent, so the finished-child capture cannot start"
+    );
+    let home = ThrowawayHome::new().expect("setup: a throwaway home");
+    let ok = write_program(
+        &home,
+        "ok.pl",
+        "#!/usr/bin/perl\n\
+         use strict;\n\
+         binmode STDOUT;\n\
+         print STDOUT \"ok\\n\" or die \"write stdout: $!\";\n\
+         exit 0;\n",
+    );
+    let output = home
+        .launch(&ok, &[], Duration::from_secs(2))
+        .expect("setup: the short capture must start");
+    assert!(
+        output.status.success(),
+        "the harness did the work: a short capture exits 0"
+    );
+    assert_eq!(
+        output.stdout, b"ok\n",
+        "the harness did the work: a short capture is returned"
+    );
+    assert_eq!(
+        output.stderr, b"",
+        "the harness did the work: an empty capture is returned"
+    );
+
+    let sparse_out = write_program(
+        &home,
+        "sparse-stdout.pl",
+        "#!/usr/bin/perl\n\
+         use strict;\n\
+         open my $pid, '>', 'sparse-stdout.pid' or die \"pid: $!\";\n\
+         print $pid \"$$\\n\" or die \"pid: $!\";\n\
+         close $pid or die \"pid: $!\";\n\
+         binmode STDOUT;\n\
+         seek STDOUT, 1 << 30, 0 or die \"seek stdout: $!\";\n\
+         print STDOUT \"x\" or die \"write stdout: $!\";\n\
+         exit 0;\n",
+    );
+    assert_eq!(
+        home.launch(&sparse_out, &[], Duration::from_secs(2)).err(),
+        Some("child capture exceeds its byte limit"),
+        "the harness did the work: a sparse stdout past the byte cap is refused"
+    );
+    assert_refused_child_is_dead(&home, "sparse-stdout.pid");
+
+    let sparse_err = write_program(
+        &home,
+        "sparse-stderr.pl",
+        "#!/usr/bin/perl\n\
+         use strict;\n\
+         open my $pid, '>', 'sparse-stderr.pid' or die \"pid: $!\";\n\
+         print $pid \"$$\\n\" or die \"pid: $!\";\n\
+         close $pid or die \"pid: $!\";\n\
+         binmode STDERR;\n\
+         seek STDERR, 1 << 30, 0 or die \"seek stderr: $!\";\n\
+         print STDERR \"x\" or die \"write stderr: $!\";\n\
+         exit 0;\n",
+    );
+    assert_eq!(
+        home.launch(&sparse_err, &[], Duration::from_secs(2)).err(),
+        Some("child capture exceeds its byte limit"),
+        "the harness did the work: a sparse stderr past the byte cap is refused"
+    );
+    assert_refused_child_is_dead(&home, "sparse-stderr.pid");
+
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .expect("setup: a closed port");
+    let port = listener.local_addr().expect("setup: a closed port").port();
+    drop(listener);
+    let census = agent_conformance::census::cleanup(&home, port);
+    let line = census.unwrap_or_else(|line| line);
+    assert!(
+        line.contains("root checks PASS"),
+        "the harness did the work: census after the refused children: {line}"
+    );
+    assert_eq!(
+        home.finish(),
+        Ok(()),
+        "the harness did the work: the passed home is removed"
+    );
 }
