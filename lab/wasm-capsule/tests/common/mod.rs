@@ -22,12 +22,13 @@ pub mod wasm_shape;
 pub const MODULE_BUNDLE_LAB_CID: &str =
     "bafybeihtyzfql54i7irft23lg2mk44toqdww53ryuhs2psrknfjw4qhpcy";
 
-/// wc-001's pinned `capsule.wasm` (README, "Claim scope"): the 180-byte module
-/// `tools/build` makes since task 032, which declares its own memory maximum
-/// (1024 pages). Task 032 re-pinned it (it was `6dd9af1a…`, 178 bytes, no
-/// maximum) only because two builds and a `python3 -I` `hashlib` recomputation
-/// over the built file agree (LOG). One pin, used by
+/// wc-001's pinned `capsule.wasm` (README, "Claim scope"): the 17,658-byte
+/// module `tools/build` makes since task 068, which declares its own memory
+/// maximum (1024 pages) and exports the world's `lifecycle.run`. Task 068
+/// re-pinned it (it was `2002429e…`, 180 bytes, `no_std` and `digest` only)
+/// only because two builds and a `python3 -I` `hashlib` recomputation over
+/// the built file agree (LOG). One pin, used by
 /// `tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid` and
 /// `the_real_capsule_passes_the_verifier`.
 pub const PINNED_ARTIFACT_SHA256: &str =
-    "2002429e73ee1a5e983df008f5b53728882646f109d55a9d1a93e831690631e1";
+    "e7f17f707a1d12600f5ffe8d0376e1ef8a3fe4b7d89b539f644363556d9b8774";

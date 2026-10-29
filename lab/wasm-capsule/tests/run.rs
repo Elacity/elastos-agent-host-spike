@@ -30,6 +30,7 @@ use capsule_identity::{sign_bundle, LabCid, NameSignature};
 use common::build::{lane_dir, run_build, TempDir};
 use common::componentize::componentize;
 use common::grants::{importing, IMPORTING_MODULE};
+use common::wasm_shape::{self, FuncType, ValType};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::fs;
@@ -50,7 +51,9 @@ use wasm_capsule_tools::run::{
     Refusal, RunControl, RunInput, TwoEngineRefusal, TwoEngineRun, DIGEST_ARGUMENT, DIGEST_EXPORT,
     WASMER_VERSION, WASMTIME_VERSION,
 };
-use wasm_capsule_tools::verify::{bus_imports, verify_bundle, VerifiedBundle, VerifyRefusal};
+use wasm_capsule_tools::verify::{
+    bus_imports, runtime_bus_interfaces, verify_bundle, VerifiedBundle, VerifyRefusal,
+};
 use wasm_capsule_tools::{bundle_identity, CAPSULE_MANIFEST};
 
 /// The smallest core Wasm module: the magic and version 1, no sections.
@@ -3074,7 +3077,9 @@ fn built_capsule_declares_the_manifest_memory_as_its_maximum() {
         "the capsule defines exactly one memory: {limits:?}"
     );
     let memory = &limits[0];
-    assert_eq!(memory.minimum, 16, "the minimum is unchanged");
+    // Task 068: `std` and the generated bindings put one page of static data
+    // below the stack, so the minimum is 17 pages; the maximum is unchanged.
+    assert_eq!(memory.minimum, 17, "the minimum is the measured 17 pages");
     let maximum = memory
         .maximum
         .expect("the capsule declares no memory maximum");
@@ -3087,12 +3092,12 @@ fn built_capsule_declares_the_manifest_memory_as_its_maximum() {
     assert_eq!(
         *memory,
         MemoryLimits {
-            minimum: 16,
+            minimum: 17,
             maximum: Some(1024),
             memory64: false,
             shared: false,
         },
-        "64 MB is one 32-bit, unshared memory of 16 to 1024 pages of 64 KiB"
+        "64 MB is one 32-bit, unshared memory of 17 to 1024 pages of 64 KiB"
     );
 }
 
@@ -5785,13 +5790,58 @@ fn host_secret_probe_imports_are_refused_before_any_engine_starts() {
 /// refuses `IMPORTING_MODULE`, measured first (LOG.md, task 064).
 const COMPONENTIZE_ENV_REFUSAL: &str = "    2: module requires an import interface named `env`";
 
-/// Task 064: the built `capsule.wasm`, wrapped by the Runtime's own
-/// componentize tool, is a component that imports no Bus interface.
+/// Task 068 (carry of 067): the Bus interfaces the Runtime's componentize
+/// writes into the component, measured first (LOG.md, task 068). `wit-bindgen`
+/// lowers `lifecycle.run`'s `result<_, bus-error>` to an `i32` and names the
+/// shared `types` interface the error comes from; the guest calls no import.
+const LIFECYCLE_COMPONENT_BUS_IMPORTS: [&str; 1] = ["elastos:bus/types@1.0.0"];
+
+/// Task 068 (carry of 067): the built `capsule.wasm` is a real
+/// `product-capsule-v1` capsule of `elastos:bus@1.0.0` that exports
+/// `lifecycle.run`. It (a) has the core shape the world requires, (b) passes
+/// the one audit reader with no declared import, (c) is wrapped by the
+/// Runtime's own componentize tool with exit 0, and (d) its component imports
+/// exactly the Bus interfaces measured for it, each one the Runtime's own
+/// allowlist read returned. Rong's contract (28 Oct) is one bounded run,
+/// 100M fuel, 128 MiB; no engine runs it here. Lab stand-in, not admission.
 #[test]
-fn runtime_componentize_wraps_the_built_capsule_with_no_bus_import() {
-    let tmp = TempDir::new("run64-wrap");
+fn componentized_capsule_is_a_product_capsule_v1_with_lifecycle_run() {
+    let tmp = TempDir::new("run68-product-capsule");
     let root = canonical(&tmp);
     let built = built_capsule(&root);
+
+    // (a) The core shape: `digest (i32) -> (i64)` and, task 068,
+    // `elastos:bus/lifecycle@1.0.0#run () -> (i32)`.
+    let shape = wasm_shape::read(&built).expect("read the built capsule's shape");
+    assert!(
+        shape.is_the_required_capsule_shape(),
+        "the built capsule is not the required product-capsule-v1 core shape: {shape:?}"
+    );
+    assert_eq!(
+        shape.digest,
+        Some(FuncType {
+            params: vec![ValType::I32],
+            results: vec![ValType::I64],
+        }),
+        "digest must be (param i32) -> (result i64)"
+    );
+    assert_eq!(
+        shape.lifecycle_run,
+        Some(FuncType {
+            params: vec![],
+            results: vec![ValType::I32],
+        }),
+        "elastos:bus/lifecycle@1.0.0#run must be () -> (result i32)"
+    );
+
+    // (b) The core module imports nothing, through the one audit reader.
+    assert_eq!(
+        audit(&built, &[]).map_err(|refusal| refusal.to_string()),
+        Ok(Vec::new()),
+        "the capsule must import nothing"
+    );
+
+    // (c) The Runtime's own wrapper wraps it, exit 0.
     let wrapped = componentize(&built);
     assert!(
         wrapped.status.success(),
@@ -5800,7 +5850,21 @@ fn runtime_componentize_wraps_the_built_capsule_with_no_bus_import() {
         wrapped.stderr
     );
     let component = wrapped.component.expect("componentize wrote no component");
-    assert_eq!(bus_imports(&component), Ok(vec![]));
+
+    // (d) The component imports exactly the measured Bus list, and every name
+    // is one the Runtime's own allowlist read returned.
+    let listed = bus_imports(&component).expect("bus_imports reads the component");
+    assert_eq!(
+        listed, LIFECYCLE_COMPONENT_BUS_IMPORTS,
+        "the componentized capsule's Bus imports changed: STOP"
+    );
+    let allowed = runtime_bus_interfaces().expect("read the Runtime's Bus allowlist");
+    for name in &listed {
+        assert!(
+            allowed.contains(name),
+            "the component imports {name}, which the Runtime's allowlist does not hold"
+        );
+    }
 }
 
 /// Task 064: the Runtime's own componentize tool refuses the `env.f` module

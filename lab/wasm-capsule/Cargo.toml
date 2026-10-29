@@ -23,9 +23,21 @@ publish = false
 [lib]
 path = "capsule/src/lib.rs"
 # cdylib is the Wasm artifact; rlib lets the host test harness link the shared
-# `digest_impl`. The capsule has no dependencies: it brings its own logic and a
-# minimal surface (Rong's DigitCapsule; PRINCIPLES P18).
+# `digest_impl`. It brings its own logic and a minimal surface (Rong's
+# DigitCapsule; PRINCIPLES P18).
 crate-type = ["cdylib", "rlib"]
+
+# Task 068 (carry of 067): `wit-bindgen` is the capsule's one dependency, and
+# the only one: the Runtime's own component-app template
+# (`templates/capsules/component-app/Cargo.toml`) generates its
+# `product-capsule-v1` bindings with the same line, and the task says not to
+# vendor, copy or patch it. It is a build-time proc-macro crate only: the
+# capsule's behaviour stays in `capsule/src/lib.rs` and the generated guest
+# calls no import (P18, minimal surface; P10, one way to write a capsule).
+# The bindings are behind `cfg(target_arch = "wasm32")`, so the host test
+# build gets none.
+[dependencies]
+wit-bindgen = "0.57.1"
 
 # The named tests in tests/ name bundles through the tools crate's
 # `bundle_identity`, and read this capsule's manifest with the Runtime's own
@@ -37,7 +49,8 @@ crate-type = ["cdylib", "rlib"]
 # fresh in memory with `ed25519-dalek` and `rand`'s `OsRng`, as
 # cc-capsule-identity's own tests do. All of them are the versions the
 # lockfile already held. Cargo builds a dev-dependency only for tests, never
-# for the capsule, and `capsule` keeps no `[dependencies]` (P18).
+# for the capsule, and `capsule`'s one `[dependencies]` entry is `wit-bindgen`
+# above, built only for the Wasm guest (P18).
 [dev-dependencies]
 capsule-identity = { path = "../capsule-identity" }
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }

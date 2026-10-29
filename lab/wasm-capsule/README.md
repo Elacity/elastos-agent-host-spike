@@ -11,24 +11,29 @@ Anders may adopt; it is not a second Runtime.
 ## What the capsule is
 
 `capsule/src/lib.rs` compiles to a core Wasm module for `wasm32-unknown-unknown`
-with **no imports**. It exports one pure function:
+with **no imports**. It exports `digest` and, since task 068, the
+`product-capsule-v1` world's `lifecycle.run`:
 
 ```wat
 (func (export "digest") (param i32) (result i64))
+(func (export "elastos:bus/lifecycle@1.0.0#run") (result i32))
 ```
 
 `digest` is a splitmix64-style mix: total (no panics), deterministic, `core`
-only. It is the whole capsule — a small self-contained computer that traps down
-to nothing (Rong's DigitCapsule; PRINCIPLES P3, P18). `digest_impl` is the
-single shared implementation the Wasm export and the host test both call, so
-there is one path for the behaviour (P10).
+only. The capsule is a small self-contained computer that traps down to nothing
+(Rong's DigitCapsule; PRINCIPLES P3, P18). `digest_impl` is the single shared
+implementation the Wasm export and the host test both call, so there is one path
+for the behaviour (P10). The world's `run` returns `Ok(())` and calls no Bus
+import, so the capsule is a real `elastos:bus@1.0.0` capsule of
+`product-capsule-v1` that gains no authority (lab stand-in, not admission; see
+"lifecycle export (task 068, carry of 067)", below).
 
 ## Layout
 
 ```
 Cargo.toml            root package `capsule` + members `audit`, `tools`; its own [workspace]
 Cargo.lock            committed; the one lockfile for every member and path dependency
-capsule/src/lib.rs    the guest (no_std on wasm32) + the digest host test
+capsule/src/lib.rs    the guest (std on wasm32; `wit-bindgen` bindings) + the digest host test
 capsule/capsule.json  this capsule's `elastos.capsule/v1` manifest
 audit/                the `wasm-capsule-audit` crate (owned by the cx-wasm-audit lane)
 tools/build           the reproducible build script (bash)
@@ -44,8 +49,9 @@ tools/src/receipt.rs  wc-005c's run receipt: `render` and `write_receipt`
 tools/src/bin/bundle.rs  the `bundle` binary: parse, run, print, exit status
 tests/                host-side named tests + the shape reader (never in the capsule)
   common/             build driver (and the copy layout) + minimal wasm shape reader
-                      (core Wasm and the `digest` signature only; it reads no imports,
-                      the zero-import check reads through `audit/`, task 053)
+                      (core Wasm, the `digest` signature and, task 068, the
+                      `lifecycle.run` signature; it reads no imports, the
+                      zero-import check reads through `audit/`, task 053)
   bundle_builds/      small stand-in build scripts for `tools/bundle`'s tests
 falsifiers.json       planted bugs, each caught by a named test (provider format)
 rust-toolchain.toml   pins rustc 1.91.0 + the wasm target (for adoption)
@@ -64,8 +70,11 @@ the verifier and the runner, below).
 The runner (`tools/src/run.rs`) starts two host engines. Rong's ruling (26 Oct):
 Both engines, wasmtime and wasmer, are test-only and not endorsed. The engine choice is Anders's.
 
-`capsule` itself has **no dependencies**: it has no `[dependencies]` (P18). Its
-tests' dev-dependencies are built only for tests: `wasm-capsule-tools`, the
+`capsule` itself has **one dependency**: `wit-bindgen = "0.57.1"` (task 068),
+the Runtime's component-app template's own line, which generates the
+`product-capsule-v1` guest bindings and is built only for the wasm32 guest
+(P18: one dependency, no vendored copy, no fallback). Its tests'
+dev-dependencies are built only for tests: `wasm-capsule-tools`, the
 Runtime's `elastos-common` (a read-only path dependency, for its
 `CapsuleManifest`) with `serde_json` to read it, and for wc-004's tests
 `capsule-identity`, `wasm-capsule-audit`, the Runtime's `elastos-identity`
@@ -78,8 +87,14 @@ manifest reader). `capsule-identity` path-depends on `elastos/crates/elastos-com
 audit's `wasmparser` 0.258.0 and dev-only `wat` 1.258.0, capsule-identity's
 `ed25519-dalek` 2.2.0, `rustix` 1.1.4, `sha2` 0.10.9, `hex` 0.4.3 and
 `serde_json` 1.0.151, the Runtime crates' own dependencies, and their transitive
-dependencies: 135 registry crates (wc-004 added none: every crate it uses
-was already locked). `tools/build` compiles only `capsule`, so
+dependencies: 150 registry crates (wc-004 added none: every crate it uses
+was already locked; task 068 added 15, the `wit-bindgen` 0.57.1 set, each at
+the version `examples/hello/Cargo.lock` holds: `heck` 0.5.0, `id-arena` 2.3.0,
+`log` 0.4.34, `macro-string` 0.2.0, `prettyplease` 0.2.37, `unicode-xid` 0.2.6,
+`wasm-encoder` 0.247.0, `wasm-metadata` 0.247.0, `wasmparser` 0.247.0,
+`wit-bindgen` 0.57.1, `wit-bindgen-core` 0.57.1, `wit-bindgen-rust` 0.57.1,
+`wit-bindgen-rust-macro` 0.57.1, `wit-component` 0.247.0 and `wit-parser`
+0.247.0). `tools/build` compiles only `capsule`, so
 none of them is in the artifact. But Cargo resolves the whole workspace, so
 every build, `tools/build` included, needs those crates in the local cargo
 cache. They are cached on this Mac, so the lane builds offline here; on a
@@ -126,18 +141,18 @@ can be checked (P13).
 Reproducible on **this one Mac**, across paths and clean caches only.
 Cross-machine reproduction is **unverified**: Cargo's symbol hashes depend on
 the build machine (same note as the agent-host guest hash). Reference values
-from two clean builds at different temp paths on 2026-10-25:
+from two clean builds at different temp paths on 2026-10-29:
 
 - rustc: `rustc 1.91.0 (f8297e351 2025-10-28)`, host `aarch64-apple-darwin`
 - target: `wasm32-unknown-unknown`
-- `capsule.wasm` sha256 (both builds): `2002429e73ee1a5e983df008f5b53728882646f109d55a9d1a93e831690631e1`
-  (27 Oct 2026, re-pinned by task 032: two `tools/build` builds and a
-  `python3 -I` `hashlib` recomputation agree, LOG.md task 032; it was
-  `6dd9af1a8d33d14f48514611663e3f5b262f91ef2729de4ec851441af9b22b13`, 178
-  bytes, with no memory maximum)
-- size: 180 bytes (one memory: minimum 16 pages, maximum 1024 pages)
+- `capsule.wasm` sha256 (both builds): `e7f17f707a1d12600f5ffe8d0376e1ef8a3fe4b7d89b539f644363556d9b8774`
+  (29 Oct 2026, re-pinned by task 068: two `tools/build` builds and a
+  `python3 -I` `hashlib` recomputation agree, LOG.md task 068; it was
+  `2002429e73ee1a5e983df008f5b53728882646f109d55a9d1a93e831690631e1`, 180
+  bytes, `no_std` with the `digest` export only)
+- size: 17,658 bytes (one memory: minimum 17 pages, maximum 1024 pages)
 
-On this stripped, zero-dependency release cdylib nothing absolute leaks, so
+On this stripped release cdylib nothing absolute leaks, so
 `--remap-path-prefix` is defensive (it would neutralise a leak from debug info
 or a dependency). F-WC1 is realised by embedding `env!("CARGO_MANIFEST_DIR")`,
 an absolute path `--remap-path-prefix` does not rewrite, which is why the two
@@ -331,20 +346,20 @@ and `rename`. Another process changing OUT_DIR during the run is not covered
 either: that needs folder-relative opens. The retired lane-own name had the
 same limit.
 
-**Reference lab CID on this Mac** (2026-10-27, re-pinned by task 032), for
+**Reference lab CID on this Mac** (2026-10-29, re-pinned by task 068), for
 this capsule's 277-byte manifest beside `capsule.wasm`
-`2002429e73ee1a5e983df008f5b53728882646f109d55a9d1a93e831690631e1`:
+`e7f17f707a1d12600f5ffe8d0376e1ef8a3fe4b7d89b539f644363556d9b8774`:
 
 ```
-bafybeiebyzg55l4s6kb6daroty4prlkximwp6uvo32ovacfzdx7cahywqm
+bafybeigbjo5l3o5wmqf3ccdwfpcyci455r4c3elfpg2i6lhj5qwp2qwvou
 ```
 
 `tools_bundle_builds_a_new_bundle_and_prints_its_lab_cid` pins it
 (`REFERENCE_LAB_CID`). Task 024 recomputed it with the same outside
 `python3 -I` script, over the bundle `tools/bundle` wrote on this Mac, and
 pinned it only because it equals what `bundle_identity` prints for that folder.
-Task 032 did the same for the new `capsule.wasm` (LOG.md, task 032); the value
-before it was `bafybeib34owcqffbwkntlhvbjngcj7eyeqqxx7aoefehqt2dqm2yu5jwse`.
+Task 068 did the same for the new `capsule.wasm` (LOG.md, task 068); the value
+before it was `bafybeiebyzg55l4s6kb6daroty4prlkximwp6uvo32ovacfzdx7cahywqm`.
 It is a lab CID, not the Runtime's CID.
 
 **The test seam.** `run(mode, build_script)` takes the build script's path, so
@@ -1346,8 +1361,9 @@ API returns imports only (`audit/INTERFACE.md`), so it cannot answer this.
 - The scratch build, that recipe plus `-C link-arg=--max-memory=67108864`, with
   `CARGO_TARGET_DIR` set to `target/wc010d/r1/build-max`: sha256
   `2002429e73ee1a5e983df008f5b53728882646f109d55a9d1a93e831690631e1`, 180 bytes,
-  one memory: **minimum 16 pages, maximum 1024 pages**. It is not committed,
-  and `capsule.wasm`, `tools/build` and every pin are unchanged.
+  one memory: **minimum 16 pages, maximum 1024 pages**. It is not committed;
+  task 032 then made that scratch build the committed capsule, and task 068
+  re-pinned its newer bytes ("Claim scope", above).
 
 `--invoke digest 1592590337` on each, as `env -i <engine> run --invoke digest
 <absolute module path> 1592590337 < /dev/null`, `<D>` = the absolute path of
@@ -1375,8 +1391,8 @@ the capsule.
 - (c) FOUND: both refuse a module whose minimum is above its maximum at start,
   before any call: (w3) and (m3), each exit 1 with "size minimum must not be
   greater than maximum".
-- (d) NOT FOUND: `capsule.wasm` declares no maximum today: minimum 16 pages,
-  maximum none ("The capsule's memory section", today's capsule).
+- (d) NOT FOUND: `capsule.wasm` declared no maximum at that time: minimum 16
+  pages, maximum none ("The capsule's memory section", today's capsule).
 - (e) FOUND: the `--max-memory=67108864` build gives the capsule a maximum of
   exactly 1024 pages (sha256 `2002429e…`) with the same digest output,
   `230101071268130872`, on both engines (the `capsule-max.wasm` rows).
@@ -1667,8 +1683,12 @@ ABI that will never ship. Everything below is a lab stand-in, not admission.
   lane's git-ignored `target/componentize` and its files in a test temp
   folder (`tests/common/componentize.rs`). Nothing of the tool is copied, and
   this lane's lockfile holds none of its crates.
-  `runtime_componentize_wraps_the_built_capsule_with_no_bus_import`: the
-  wrapped capsule is a component, and `bus_imports` lists nothing for it.
+  `componentized_capsule_is_a_product_capsule_v1_with_lifecycle_run` (task
+  068; it replaces task 064's
+  `runtime_componentize_wraps_the_built_capsule_with_no_bus_import`): the built capsule is a core module with the required
+  shape, the wrapper is a component (exit 0), and `bus_imports` lists exactly
+  `["elastos:bus/types@1.0.0"]` for it, each name the allowlist read returned
+  (measured first, LOG.md, task 068).
   `runtime_componentize_refuses_the_env_f_module`: the same tool refuses
   `IMPORTING_MODULE` (exit 1), with this stderr line (measured first, LOG.md,
   task 064). That is the Runtime's own tool refusing WC-1's import.
@@ -1685,10 +1705,62 @@ Not covered:
   Runtime also lets through the generated names `import-type-*` and
   `import-func-run`, and checks embedded core imports for its authority
   markers (`env`, `wasi` and others). Neither is applied here.
-- The componentized capsule imports nothing and exports no `lifecycle`, so it
-  does not implement `product-capsule-v1`.
+- No engine runs the component or calls `lifecycle.run`. Rong's contract (one
+  bounded run, 100M fuel, 128 MiB) is cited, not tested.
+- `audit_component` reads imports only, so the `lifecycle.run` export is
+  proved by the core shape reader (`tests/common/wasm_shape.rs`) and by the
+  Runtime's componentize validation.
+- Admission (`validate_component_imports`) is not run.
+- `capsule/capsule.json` still names the core module, so no bundle holds the
+  component.
 - `env.f` is retired (task 065): no core-module import is granted, and the
   grants file names resource and actions (below).
+
+### lifecycle export (task 068, carry of 067)
+
+Task 068 is the lab half of mission step 3's first real signed capsule app
+(M1 C0/B4), and it carries stopped task 067. The capsule now implements the
+world the contract already names. Everything in this part is a lab stand-in,
+not admission.
+
+- The contract is `elastos/wit/elastos-bus-v1.wit`: `interface lifecycle` at
+  :84-87 declares `run: func() -> result<_, bus-error>`, and world
+  `product-capsule-v1` at :90 exports it. Rong's import contract (28 Oct; its
+  row for the export: `lifecycle.run`, `func() -> result<_, bus-error>`, one
+  bounded run, 100M fuel, 128 MiB, `component.rs:29-30`) says the contract
+  exists and must be used, not rewritten. No new contract, WIT file, world or
+  interface name is written here.
+- Flint's notes decide the shape. His 28 Oct 04:18 note chose route (a): accept
+  a `component-type*` custom section whose bytes parse as a type-only
+  component, which cx-wasm-audit task 030 landed (PR #912, merge
+  `235e390c9`). His 29 Oct 03:25 note asked for this capsule to export
+  `lifecycle.run`, so it is a real `product-capsule-v1` capsule of
+  `elastos:bus@1.0.0`.
+- `capsule/src/lib.rs` calls `wit_bindgen::generate!` with `path:
+  "../../elastos/wit"` and `world: "product-capsule-v1"`, behind
+  `#[cfg(target_arch = "wasm32")]`, as the Runtime's own component-app
+  template does (`templates/capsules/component-app/src/lib.rs`). It implements
+  `exports::elastos::bus::lifecycle::Guest` with `run` returning `Ok(())` and
+  calling no import, and has one `export!(Capsule);` line. `digest` and
+  `digest_impl` are unchanged. Root `Cargo.toml` names the template's one
+  dependency, `wit-bindgen = "0.57.1"` ("Layout", above).
+- The capsule uses `std` on wasm32, as the template does. `no_std` cannot hold:
+  cargo says "no global memory allocator found but one is required; link to
+  std or add #[global_allocator]" for the generated bindings (measured in 067).
+  The guest still calls no import; `std` supplies the allocator they need.
+- Measured on this Mac (LOG.md, task 068): two `tools/build` builds are
+  byte-identical, 17,658 bytes, sha256
+  `e7f17f707a1d12600f5ffe8d0376e1ef8a3fe4b7d89b539f644363556d9b8774`; the
+  core module has no imports and exports `digest (i32) -> (i64)` and
+  `elastos:bus/lifecycle@1.0.0#run () -> (i32)`; the Runtime's componentize
+  wraps it with exit 0; `bus_imports` on the component gives
+  `["elastos:bus/types@1.0.0"]`. The `component-type:*` custom section the
+  bindings write is the 1,382-byte world encoding that cx-wasm-audit task
+  030's audit rule accepts.
+- Named tests: `componentized_capsule_is_a_product_capsule_v1_with_lifecycle_run`
+  (`tests/run.rs`; "Named tests", below) and
+  `rejects_wrong_lifecycle_signature` (`tests/wasm_shape.rs`) for the one
+  shape reader.
 
 ### Core imports retired, grants name resource and actions (task 065)
 
@@ -2020,12 +2092,17 @@ Limits, not claimed:
   TMPDIR set to a new empty folder succeeds and leaves that folder empty.
 - `the_receipt_names_the_exact_toolchain` — receipt rustc/target match the build.
 - `receipt_hashes_match_artifact_and_lockfile` — receipt hashes match the files.
-- `built_capsule_has_the_required_wasm_shape` — core Wasm, zero imports, digest sig.
+- `built_capsule_has_the_required_wasm_shape` — core Wasm, zero imports, digest
+  sig, and (task 068) the `lifecycle.run` sig.
   Task 053: the zero imports are read only through `wasm_capsule_audit::audit`
   (`audit(&bytes, &[])` returns `Ok` with an empty list), the lab's one module
-  reader (P10); the shape reader checks only core Wasm and the `digest`
-  signature.
-- plus crafted-byte coverage of the shape reader. Task 037 removed task 032's
+  reader (P10); the shape reader checks only core Wasm, the `digest` signature
+  and (task 068) the `elastos:bus/lifecycle@1.0.0#run` signature.
+- plus crafted-byte coverage of the shape reader: `rejects_wrong_lifecycle_signature`
+  (task 068) feeds one export section holding a right `digest` and
+  a wrong lifecycle signature, and requires the required-shape check to be
+  false; `reads_the_required_shape_from_a_crafted_module` now carries both
+  exports. Task 037 removed task 032's
   three memory tests with the shape reader's memory parse: the shape reader
   reads no memory. Task 053 removed its import count: it reads no imports, and
   `refuses_a_module_with_an_import_section` (in place of
@@ -2059,7 +2136,7 @@ The lab name, in `tests/lab_cid.rs` (through `wasm_capsule_tools::bundle_identit
   that spawns the real wrapper. A fresh OUT_DIR gives one stdout line, equal to
   `bundle_identity(OUT_DIR/bundle)` and to the reference lab CID; the bundle
   holds exactly the two regular files; `capsule.wasm`'s sha256 is the
-  receipt's `artifact_sha256` and the pinned `2002429e…` (task 032);
+  receipt's `artifact_sha256` and the pinned `e7f17f70…` (task 068);
   `capsule.json` is
   `CAPSULE_MANIFEST`; `--name` prints the same name. Then the same OUT_DIR
   again, an empty folder for `--name` (the shared reason, unchanged) and
@@ -2105,7 +2182,7 @@ and the 8-byte module in a temp folder; every key is fresh in memory:
 - `the_real_capsule_passes_the_verifier` — the capsule `tools/build` makes,
   bundled with this capsule's manifest, signed and verified, passes, and the
   audit of its entrypoint lists no import; its sha256 is the receipt's `artifact_sha256` and
-  the pinned `2002429e…` (task 032). One `PINNED_ARTIFACT_SHA256`, in
+  the pinned `e7f17f70…` (task 068). One `PINNED_ARTIFACT_SHA256`, in
   `tests/common/mod.rs`, serves this test and the one above.
 - `missing_entrypoint_is_refused` — an entrypoint no entry has gets its own
   reason; `capsule.wasm` beside it does not stand in.
@@ -2450,7 +2527,8 @@ Task 032's one, in `tests/run.rs`:
   `entrypoint()`, read through `wasm_capsule_audit::memories`, the lab's one
   module reader (task 037; the shape reader reads no memory), imports nothing
   (`audit`, so no memory either) and defines exactly one memory, with minimum
-  16 pages and a maximum whose bytes (pages × 65536) equal `memory_mb()` × 2^20
+  17 pages (task 068: `std` and the generated bindings put one page below the
+  stack; it was 16) and a maximum whose bytes (pages × 65536) equal `memory_mb()` × 2^20
   from the verifier's one manifest read: 1024 pages for 64, 32-bit and not
   shared.
 
@@ -2715,16 +2793,20 @@ Task 064, the Bus v1 import contract (README "Bus v1 import contract
 In `tests/run.rs`, through `componentize` (`tests/common/componentize.rs`,
 each input run at most once per test binary):
 
-- `runtime_componentize_wraps_the_built_capsule_with_no_bus_import` — the
-  built `capsule.wasm`, wrapped by the Runtime's componentize tool, gives
-  `bus_imports(...) == Ok(vec![])`.
+- `componentized_capsule_is_a_product_capsule_v1_with_lifecycle_run` (task
+  068; replaces task 064's
+  `runtime_componentize_wraps_the_built_capsule_with_no_bus_import`): the
+  built `capsule.wasm` (a) has the required core shape, (b) passes
+  `audit(&capsule, &[])` with `Ok([])`, (c) is wrapped with exit 0, and (d)
+  `bus_imports` on the component returns exactly
+  `["elastos:bus/types@1.0.0"]`, each name `runtime_bus_interfaces()` returned.
 - `runtime_componentize_refuses_the_env_f_module` — wrapping `IMPORTING_MODULE`
   exits non-zero, and stderr holds the measured line
   `COMPONENTIZE_ENV_REFUSAL`.
 
 ## Falsifiers
 
-`falsifiers.json` holds 198 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 199 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 20 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 14 wc-009a (task 020), seven task 026,
@@ -2732,8 +2814,8 @@ seven wc-010b (task 027), two wc-010c (task 028), one task 029, two task
 032, one task 035, three task 036, five task 038, three task
 039, one task 040, one task 041, two task 043, one task 044, one task
 033, two task 034, one task 045, two task 046, one task 050, three task
-052, one task 056, two task 062, one task 064, three task 065, nine task 070 and one task
-063. Task 065 removed seven entries whose rule is gone (its section): one of
+052, one task 056, two task 062, one task 064, three task 065, nine task 070, one task
+063 and one task 068. Task 065 removed seven entries whose rule is gone (its section): one of
 wc-004's, three of wc-009a's, one of task 029's and both of task 031's.
 Each requires all its named tests to fail at an assertion.
 `readme_falsifier_total_matches_falsifiers_json` holds the total to the file.
@@ -2741,17 +2823,19 @@ This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 135, the sections below
-marked runner-caught, less task 065's removals (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046, 050, 052, 056, 062, 064, 065, 070 and 063: 1 + 1 + 23 + 11 + 20 + 2 + 14 + 7 + 7
-+ 2 + 1 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1 + 3 + 1 + 2 + 1 + 3 + 1 + 9), each run by the canonical runner with its summary
+Two kinds of evidence, kept apart. Runner-caught: 137, F-WC1 (task 068 ran it)
+and the sections below marked runner-caught, less task 065's removals (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
+029, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046, 050, 052, 056, 062, 064, 065, 070, 063 and 068: 1 + 1 + 23 + 11 + 20 + 2 + 14 + 7 + 7
++ 2 + 1 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1 + 3 + 1 + 2 + 1 + 3 + 1 + 9
++ 1), each run by the canonical runner with its summary
 line quoted.
-Hand-proven, pending R1: 68, each counted once: the 63 entries of the sections
-marked so (wc-001, tasks 010 and 009, wc-004 and wc-008: 9 + 7 + 23 + 20 + 4),
-and five proofs with no `falsifiers.json` entry, outside the 198 (task 036's
+Hand-proven, pending R1: 68, each counted once: the 62 entries of the sections
+marked so (wc-001's other eight, tasks 010 and 009, wc-004 and wc-008: 8 + 7 + 23 + 20 + 4),
+and six proofs with no `falsifiers.json` entry, outside the 199 (task 036's
 `/bin/bash` 3.2 guard in `tests/reproducible.rs`, task 042's killed-run
-stop and task 049's two environment record proofs in `tests/run.rs`, and task
-053's import-section refusal in `tests/common/wasm_shape.rs`; none of these
+stop and task 049's two environment record proofs in `tests/run.rs`, task
+053's import-section refusal in `tests/common/wasm_shape.rs`, and task 068's
+lifecycle-signature plant in the same shape reader; none of these
 files is a recovery target, so a proof that edits one is a hand proof), each
 proved by the repo's break →
 named test fails → revert method with `cargo test` in this workspace. Their
@@ -2765,9 +2849,13 @@ edits, so a killed run can restore each one. Ask **R2** is done: provider 026
 (PR #242) added `tools/src/run.rs`, `tools/src/receipt.rs` and
 `tests/lab_cid.rs` to `PROVIDER_TARGETS`.
 
-wc-001's nine, each hand-proven, pending R1 (README "Claim scope" has F-WC1):
+wc-001's nine: eight hand-proven, pending R1, and F-WC1 runner-caught since
+task 068 (README "Claim scope" has F-WC1):
 
 - F-WC1 — an embedded `CARGO_MANIFEST_DIR` breaks the byte-identical build.
+  Task 068 re-anchored it on the `digest` export block (the `no_std` panic
+  handler it was anchored on is gone), with the same planted `BUILD_DIR`
+  static, and the canonical runner reports it CAUGHT (LOG.md, task 068).
 - F-WC1-SPACED-PATH — whitespace-split `RUSTFLAGS` break the build when the
   path has a space. Task 032 re-anchored it, the same bug as before: a second
   edit turns the new link-argument line into the same `RUSTFLAGS` form. Without
@@ -3753,3 +3841,30 @@ each run on its own), and its one named test fails at its assertion:
 Task 063 also re-anchors F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT to the
 new total, each the same bug as before (LOG.md, task 063). This task changes no
 other label.
+
+Task 068's one, runner-caught (the canonical runner's summary line is in
+LOG.md, task 068). Its anchor in `capsule/src/lib.rs`, a recovery target, is
+found exactly once, and its one named test fails at an assertion:
+
+- F-WC9B-LIFECYCLE-EXPORT-REMOVED — the world's `export!(Capsule);` line is
+  deleted, so the core module exports no `elastos:bus/lifecycle@1.0.0#run` and
+  the Runtime's componentize refuses it (exit 1). By hand, its stderr holds the
+  line ``    1: failed to find export of interface
+  `elastos:bus/lifecycle@1.0.0` function `run` `` (LOG.md, task 068).
+  `componentized_capsule_is_a_product_capsule_v1_with_lifecycle_run` fails at
+  its "componentize failed" assertion.
+
+One proof with no `falsifiers.json` entry, hand-proven, pending R1 (it is
+counted in the hand-proven total above, never in the runner-caught one):
+
+- F-WC9B-LIFECYCLE-SIGNATURE-IGNORED — `is_the_required_capsule_shape` stops
+  comparing the lifecycle signature, so the crafted wrong module passes.
+  `rejects_wrong_lifecycle_signature` fails at its "a wrong
+  `elastos:bus/lifecycle@1.0.0#run` signature must not pass the required
+  shape" assertion (`tests/wasm_shape.rs:183`); the file was restored byte for
+  byte (LOG.md, task 068). `tests/common/wasm_shape.rs` is not a runner
+  recovery target on this base, so this proof has no entry.
+
+Task 068 also re-anchors F-WC1 (wc-001's list, above), F-WC-README-COUNT and
+F-WC-README-OUTSIDE-COUNT to the new total, each the same bug as before. This
+task changes no other label.
