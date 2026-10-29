@@ -10,8 +10,10 @@
 //! `capability-request` does (`wc-009.lab-grants/v3`), and the retired names
 //! of the core grant path are gone from the tools crate.
 //!
-//! Task 064: `BUS_V1_INTERFACES` equals the Runtime's `ALLOWED_BUS_IMPORTS`,
-//! and `bus_imports` is cx-wasm-audit's `audit_component` with that list.
+//! Task 064: `bus_imports` is cx-wasm-audit's `audit_component` with the Bus
+//! interface names the Runtime admits. Task 070: those names are read from the
+//! Runtime's `ALLOWED_BUS_IMPORTS` by `runtime_bus_interfaces`, the one
+//! allowlist read; the lab keeps no second copy.
 //!
 //! Every test key is made fresh in memory inside its test, with no fixed seed,
 //! and is never written, kept in a constant or printed. The signature stays in
@@ -34,8 +36,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use wasm_capsule_audit::{audit, Refusal as AuditRefusal};
 use wasm_capsule_tools::verify::{
-    bus_imports, read_grants, verify_bundle, verify_checked, GrantsReason, GrantsRefusal, LabGrant,
-    VerifiedBundle, VerifyRefusal, BUS_V1_INTERFACES, GRANTS_LABEL, GRANTS_SCHEMA,
+    bus_imports, read_grants, runtime_bus_interfaces, runtime_bus_interfaces_at, verify_bundle,
+    verify_checked, GrantsReason, GrantsRefusal, LabGrant, VerifiedBundle, VerifyRefusal,
+    ALLOWED_BUS_IMPORTS_HEAD, GRANTS_LABEL, GRANTS_SCHEMA,
 };
 use wasm_capsule_tools::{bundle_identity, CAPSULE_MANIFEST};
 
@@ -976,11 +979,13 @@ fn verifier_has_no_import_parser_of_its_own() {
 
 #[test]
 fn verifier_reads_no_bundle_file_by_path() {
-    // wc-009a: the grants reader is the one place that reads a file by a path,
-    // the caller's grants file, once. The rest of the verifier reaches no file.
+    // wc-009a: the grants reader is one of the two reads by a path, the
+    // caller's grants file, once. Task 070: the Runtime Bus allowlist reader is
+    // the other, once. The rest of the verifier reaches no file.
     let code = verifier_code();
-    let reader = item(&code, "pub fn read_grants(");
-    let rest = code.replacen(reader, "", 1);
+    let grants = item(&code, "pub fn read_grants(");
+    let bus_list = item(&code, "pub fn runtime_bus_interfaces_at(");
+    let rest = code.replacen(grants, "", 1).replacen(bus_list, "", 1);
     for call in [
         "fs::read",
         "File::open",
@@ -991,11 +996,11 @@ fn verifier_reads_no_bundle_file_by_path() {
     ] {
         assert!(
             !rest.contains(call),
-            "the verifier reaches a file by a path outside read_grants: {call}"
+            "the verifier reaches a file by a path outside the two readers: {call}"
         );
     }
     assert_eq!(
-        calls(reader, "fs::read"),
+        calls(grants, "fs::read"),
         1,
         "read_grants does not read the grants file exactly once"
     );
@@ -1006,7 +1011,24 @@ fn verifier_reads_no_bundle_file_by_path() {
         "metadata",
         "read_to_end",
     ] {
-        assert!(!reader.contains(call), "read_grants reaches a file: {call}");
+        assert!(!grants.contains(call), "read_grants reaches a file: {call}");
+    }
+    assert_eq!(
+        calls(bus_list, "fs::read_to_string"),
+        1,
+        "the Bus list reader does not read the Runtime source exactly once"
+    );
+    for call in [
+        "File::open",
+        "OpenOptions",
+        "read_dir",
+        "metadata",
+        "read_to_end",
+    ] {
+        assert!(
+            !bus_list.contains(call),
+            "the Bus list reader reaches a second file: {call}"
+        );
     }
 }
 
@@ -1128,6 +1150,8 @@ fn verified_bundle_is_sealed() {
             "entrypoint",
             "memory_mb",
             "read_grants",
+            "runtime_bus_interfaces",
+            "runtime_bus_interfaces_at",
             "verify_bundle",
             "verify_checked"
         ],
@@ -1341,52 +1365,156 @@ fn key_and_seed_files_are_ignored_by_git() {
     );
 }
 
-/// Task 064: the Runtime's admission file, read only by
-/// `bus_interfaces_are_the_runtime_admission_list`.
-const RUNTIME_COMPONENT_RS: &str = "../../elastos/crates/elastos-server/src/component.rs";
+/// `text` written at `dir/name`, as a Bus-list fixture for
+/// [`runtime_bus_interfaces_at`]. The fixture is lab-local test input, not a
+/// second copy of the Runtime's list.
+fn bus_list_fixture(dir: &Path, name: &str, text: &str) -> PathBuf {
+    let path = dir.join(name);
+    fs::write(&path, text).expect("write the Bus list fixture");
+    path
+}
 
-/// The line that opens the Runtime's list of allowed Bus imports, exactly.
-const ALLOWED_BUS_IMPORTS_HEAD: &str = "const ALLOWED_BUS_IMPORTS: &[&str] = &[";
+/// The path and the fault of `path`'s one Bus-list refusal.
+fn bus_list_refusal(path: &Path) -> (String, String) {
+    match runtime_bus_interfaces_at(path) {
+        Err(VerifyRefusal::BusListUnreadable { path: held, fault }) => (held, fault),
+        other => panic!(
+            "{} was not refused as an unreadable Bus list: {other:?}",
+            path.display()
+        ),
+    }
+}
 
+/// Task 070: the allowlist is the Runtime's own list, read by
+/// `runtime_bus_interfaces`, and the tools crate holds no second copy of it.
 #[test]
 fn bus_interfaces_are_the_runtime_admission_list() {
-    let path = lane_dir().join(RUNTIME_COMPONENT_RS);
-    let source = fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    let lines: Vec<&str> = source.lines().collect();
-    let heads: Vec<usize> = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| **line == ALLOWED_BUS_IMPORTS_HEAD)
-        .map(|(at, _)| at)
-        .collect();
-    assert_eq!(
-        heads.len(),
-        1,
-        "{} holds {ALLOWED_BUS_IMPORTS_HEAD:?} {} times, not once",
-        path.display(),
-        heads.len()
+    let names = runtime_bus_interfaces().expect("the Runtime's Bus allowlist must be readable");
+    assert!(!names.is_empty(), "the Runtime's Bus allowlist is empty");
+    let source = fs::read_to_string(lane_dir().join("tools").join("src").join("verify.rs"))
+        .expect("read tools/src/verify.rs");
+    assert!(
+        !source.contains("BUS_V1_INTERFACES"),
+        "tools/src/verify.rs holds a second Bus allowlist"
     );
-    let body = &lines[heads[0] + 1..];
-    let end = body
-        .iter()
-        .position(|line| line.trim() == "];")
-        .unwrap_or_else(|| panic!("ALLOWED_BUS_IMPORTS has no closing `];`"));
-    let names: Vec<&str> = body[..end]
-        .iter()
-        .map(|line| {
-            line.trim()
-                .strip_prefix('"')
-                .and_then(|rest| rest.strip_suffix("\","))
-                .filter(|name| !name.contains('"'))
-                .unwrap_or_else(|| {
-                    panic!("ALLOWED_BUS_IMPORTS holds a line that is not \"<name>\",: {line:?}")
-                })
-        })
-        .collect();
+    for name in &names {
+        assert!(
+            !source.contains(name.as_str()),
+            "tools/src/verify.rs names {name}: a second copy of the Runtime's allowlist"
+        );
+    }
+}
+
+#[test]
+fn runtime_bus_interfaces_refuses_unreadable_input() {
+    let tmp = TempDir::new("bus-list-unreadable");
+    let path = tmp.path().join("absent.rs");
+    let (held, fault) = bus_list_refusal(&path);
     assert_eq!(
-        names, BUS_V1_INTERFACES,
-        "BUS_V1_INTERFACES is not the Runtime's ALLOWED_BUS_IMPORTS, in order"
+        held,
+        path.display().to_string(),
+        "the refusal does not name the path"
+    );
+    assert!(
+        fault.starts_with("read failed: "),
+        "the refusal does not name the read fault: {fault:?}"
+    );
+}
+
+#[test]
+fn runtime_bus_interfaces_refuses_an_absent_header() {
+    let tmp = TempDir::new("bus-list-absent-head");
+    let path = bus_list_fixture(
+        tmp.path(),
+        "absent.rs",
+        "const OTHER: &[&str] = &[\n    \"example:bus/alpha@1.0.0\",\n];\n",
+    );
+    let (held, fault) = bus_list_refusal(&path);
+    assert_eq!(held, path.display().to_string(), "{fault}");
+    assert_eq!(
+        fault,
+        format!("the head {ALLOWED_BUS_IMPORTS_HEAD:?} occurs 0 times, not once")
+    );
+}
+
+#[test]
+fn runtime_bus_interfaces_refuses_a_duplicate_header() {
+    let tmp = TempDir::new("bus-list-duplicate-head");
+    let text = format!(
+        "{ALLOWED_BUS_IMPORTS_HEAD}\n    \"example:bus/alpha@1.0.0\",\n];\n{ALLOWED_BUS_IMPORTS_HEAD}\n    \"example:bus/beta@1.0.0\",\n];\n"
+    );
+    let path = bus_list_fixture(tmp.path(), "duplicate.rs", &text);
+    let (held, fault) = bus_list_refusal(&path);
+    assert_eq!(held, path.display().to_string(), "{fault}");
+    assert_eq!(
+        fault,
+        format!("the head {ALLOWED_BUS_IMPORTS_HEAD:?} occurs 2 times, not once")
+    );
+}
+
+#[test]
+fn runtime_bus_interfaces_refuses_an_invalid_body_line() {
+    let tmp = TempDir::new("bus-list-bad-line");
+    let text =
+        format!("{ALLOWED_BUS_IMPORTS_HEAD}\n    \"example:bus/alpha@1.0.0\",\n    42,\n];\n");
+    let path = bus_list_fixture(tmp.path(), "bad.rs", &text);
+    let (held, fault) = bus_list_refusal(&path);
+    assert_eq!(held, path.display().to_string(), "{fault}");
+    let bad = "    42,";
+    assert_eq!(fault, format!("line 3 is not \"<name>\",: {bad:?}"));
+}
+
+#[test]
+fn runtime_bus_interfaces_refuses_a_missing_terminator() {
+    let tmp = TempDir::new("bus-list-no-end");
+    let text = format!("{ALLOWED_BUS_IMPORTS_HEAD}\n    \"example:bus/alpha@1.0.0\",\n");
+    let path = bus_list_fixture(tmp.path(), "no-end.rs", &text);
+    let (held, fault) = bus_list_refusal(&path);
+    assert_eq!(held, path.display().to_string(), "{fault}");
+    assert_eq!(fault, "no closing `];` after the head");
+}
+
+#[test]
+fn runtime_bus_interfaces_preserves_file_order() {
+    let tmp = TempDir::new("bus-list-order");
+    let text = format!(
+        "{ALLOWED_BUS_IMPORTS_HEAD}\n    \"example:bus/zeta@1.0.0\",\n    \"example:bus/alpha@1.0.0\",\n    \"example:bus/mu@1.0.0\",\n];\n"
+    );
+    let path = bus_list_fixture(tmp.path(), "order.rs", &text);
+    assert_eq!(
+        runtime_bus_interfaces_at(&path),
+        Ok(vec![
+            "example:bus/zeta@1.0.0".to_string(),
+            "example:bus/alpha@1.0.0".to_string(),
+            "example:bus/mu@1.0.0".to_string(),
+        ])
+    );
+}
+
+/// The environment marker that makes the child of
+/// [`runtime_bus_interfaces_ignores_cwd`] run the leaf check only.
+const BUS_CWD_CHILD: &str = "WC009B_BUS_CWD_CHILD";
+
+#[test]
+fn runtime_bus_interfaces_ignores_cwd() {
+    if std::env::var_os(BUS_CWD_CHILD).is_some() {
+        let names = runtime_bus_interfaces()
+            .expect("the Runtime's Bus allowlist must be readable from another directory");
+        assert!(!names.is_empty(), "the Runtime's Bus allowlist is empty");
+        return;
+    }
+    let elsewhere = TempDir::new("bus-list-cwd");
+    let output = Command::new(std::env::current_exe().expect("the test binary path"))
+        .args(["--exact", "runtime_bus_interfaces_ignores_cwd"])
+        .current_dir(elsewhere.path())
+        .env(BUS_CWD_CHILD, "1")
+        .output()
+        .expect("run the child test");
+    assert!(
+        output.status.success(),
+        "runtime_bus_interfaces depends on the current directory:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

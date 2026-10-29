@@ -1972,8 +1972,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/README.md",
-          "old": "`falsifiers.json` holds 189 planted bugs",
-          "new": "`falsifiers.json` holds 188 planted bugs"
+          "old": "`falsifiers.json` holds 198 planted bugs",
+          "new": "`falsifiers.json` holds 197 planted bugs"
         }
       ],
       "tests": [
@@ -2967,8 +2967,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/README.md",
-          "old": "outside the 189",
-          "new": "outside the 188"
+          "old": "outside the 198",
+          "new": "outside the 197"
         }
       ],
       "tests": [
@@ -3025,24 +3025,167 @@
     },
     {
       "id": "F-WC9B-BUS-LIST-WIDENED",
-      "title": "the lab's Bus v1 interface list gains wasi:cli/environment@0.2.0 as a sixth entry",
+      "title": "the Runtime's Bus allowlist read gains wasi:cli/environment@0.2.0 as a sixth name after the parse",
       "command": "lab",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "pub const BUS_V1_INTERFACES: [&str; 5] = [\n",
-          "new": "pub const BUS_V1_INTERFACES: [&str; 6] = [\n"
-        },
-        {
-          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "    \"elastos:bus/providers@1.0.0\",\n];\n",
-          "new": "    \"elastos:bus/providers@1.0.0\",\n    \"wasi:cli/environment@0.2.0\",\n];\n"
+          "old": "    Ok(names)\n}",
+          "new": "    names.push(\"wasi:cli/environment@0.2.0\".to_string());\n    Ok(names)\n}"
         }
       ],
       "tests": [
-        "bus_interfaces_are_the_runtime_admission_list",
         "bus_imports_refuses_an_interface_outside_bus_v1_by_name"
+      ]
+    },
+    {
+      "id": "F-WC9B-BUS-LIST-COPIED",
+      "title": "a BUS_V1_INTERFACES literal of the five names is restored and passed to the audit in place of the Runtime read",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    let allowed = runtime_bus_interfaces()?;\n    let allowed: Vec<&str> = allowed.iter().map(String::as_str).collect();\n",
+          "new": "    let allowed = BUS_V1_INTERFACES;\n"
+        },
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "/// The Bus interfaces the lab would link",
+          "new": "pub const BUS_V1_INTERFACES: [&str; 5] = [\n    \"elastos:bus/types@1.0.0\",\n    \"elastos:bus/runtime@1.0.0\",\n    \"elastos:bus/identity@1.0.0\",\n    \"elastos:bus/capabilities@1.0.0\",\n    \"elastos:bus/providers@1.0.0\",\n];\n\n/// The Bus interfaces the lab would link"
+        }
+      ],
+      "tests": [
+        "bus_interfaces_are_the_runtime_admission_list"
+      ]
+    },
+    {
+      "id": "F-WC9B-BUS-LIST-UNREADABLE-SKIPPED",
+      "title": "an unreadable Runtime source is read as empty text, so the reader names the wrong fault",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "        fs::read_to_string(path).map_err(|error| refuse(format!(\"read failed: {error}\")))?;",
+          "new": "        fs::read_to_string(path).unwrap_or_default();"
+        }
+      ],
+      "tests": [
+        "runtime_bus_interfaces_refuses_unreadable_input"
+      ]
+    },
+    {
+      "id": "F-WC9B-BUS-LIST-ABSENT-HEAD-ALLOWED",
+      "title": "the reader allows a missing ALLOWED_BUS_IMPORTS head and indexes past the empty list",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    if heads.len() != 1 {",
+          "new": "    if heads.len() > 1 {"
+        }
+      ],
+      "tests": [
+        "runtime_bus_interfaces_refuses_an_absent_header"
+      ]
+    },
+    {
+      "id": "F-WC9B-BUS-LIST-DUPLICATE-HEAD-ALLOWED",
+      "title": "the reader allows two ALLOWED_BUS_IMPORTS heads and takes the first",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    if heads.len() != 1 {",
+          "new": "    if heads.is_empty() {"
+        }
+      ],
+      "tests": [
+        "runtime_bus_interfaces_refuses_a_duplicate_header"
+      ]
+    },
+    {
+      "id": "F-WC9B-BUS-LIST-BAD-LINE-SKIPPED",
+      "title": "a body line that is not \"<name>\", is skipped instead of refused",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "        let Some(name) = name else {\n            return Err(refuse(format!(\n                \"line {} is not \\\"<name>\\\",: {line:?}\",\n                heads[0] + 2 + offset\n            )));\n        };\n",
+          "new": "        let Some(name) = name else {\n            continue;\n        };\n"
+        }
+      ],
+      "tests": [
+        "runtime_bus_interfaces_refuses_an_invalid_body_line"
+      ]
+    },
+    {
+      "id": "F-WC9B-BUS-LIST-MISSING-END-ALLOWED",
+      "title": "a missing `];` after the head is read to the end of the file instead of refused",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "        .ok_or_else(|| refuse(\"no closing `];` after the head\".to_string()))?;",
+          "new": "        .unwrap_or(body.len());"
+        }
+      ],
+      "tests": [
+        "runtime_bus_interfaces_refuses_a_missing_terminator"
+      ]
+    },
+    {
+      "id": "F-WC9B-BUS-LIST-OMITS-FIRST",
+      "title": "the reader skips the first name in ALLOWED_BUS_IMPORTS",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    for (offset, line) in body[..end].iter().enumerate() {",
+          "new": "    for (offset, line) in body[..end].iter().enumerate().skip(1) {"
+        }
+      ],
+      "tests": [
+        "runtime_bus_interfaces_preserves_file_order"
+      ]
+    },
+    {
+      "id": "F-WC9B-BUS-LIST-REVERSED",
+      "title": "the reader reverses the Runtime's order by pushing each name in front",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "        names.push(name.to_string());",
+          "new": "        names.insert(0, name.to_string());"
+        }
+      ],
+      "tests": [
+        "runtime_bus_interfaces_preserves_file_order"
+      ]
+    },
+    {
+      "id": "F-WC9B-BUS-LIST-CWD",
+      "title": "the reader resolves the Runtime source from the process current directory, not CARGO_MANIFEST_DIR",
+      "command": "lab",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/wasm-capsule/tools/src/verify.rs",
+          "old": "    let path = Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(RUNTIME_COMPONENT_RS);",
+          "new": "    let path = PathBuf::from(RUNTIME_COMPONENT_RS);"
+        }
+      ],
+      "tests": [
+        "runtime_bus_interfaces_ignores_cwd"
       ]
     },
     {
@@ -3085,8 +3228,8 @@
       "edits": [
         {
           "file": "../../lab/wasm-capsule/tools/src/verify.rs",
-          "old": "/// The Bus v1 interfaces a capsule may import",
-          "new": "pub const LAB_OPERATIONS: [(&str, &str); 1] = [(\"env\", \"f\")];\n\n/// The Bus v1 interfaces a capsule may import"
+          "old": "/// The Runtime source that holds its `ALLOWED_BUS_IMPORTS` list, from the",
+          "new": "pub const LAB_OPERATIONS: [(&str, &str); 1] = [(\"env\", \"f\")];\n\n/// The Runtime source that holds its `ALLOWED_BUS_IMPORTS` list, from the"
         }
       ],
       "tests": [

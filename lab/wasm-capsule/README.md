@@ -1645,15 +1645,14 @@ operation, `env.f`, is a core import, and the Runtime refuses a core module at
 admission and any core import holding `env`, so a link rule for it proves an
 ABI that will never ship. Everything below is a lab stand-in, not admission.
 
-- `BUS_V1_INTERFACES` (`tools/src/verify.rs`) is the five Bus v1 import names,
-  in the Runtime's order: `elastos:bus/types@1.0.0`,
-  `elastos:bus/runtime@1.0.0`, `elastos:bus/identity@1.0.0`,
-  `elastos:bus/capabilities@1.0.0` and `elastos:bus/providers@1.0.0`.
-  `bus_interfaces_are_the_runtime_admission_list` reads the Runtime's own
-  `ALLOWED_BUS_IMPORTS` (`elastos/crates/elastos-server/src/component.rs`,
-  read only) and fails unless the two lists are equal, in order.
-- `bus_imports(component)` is cx-wasm-audit's `audit_component(component,
-  &BUS_V1_INTERFACES)` and nothing else; a refusal comes back as
+- `runtime_bus_interfaces` (`tools/src/verify.rs`) is the one allowlist read:
+  it reads the names in the Runtime's own `ALLOWED_BUS_IMPORTS`
+  (`elastos/crates/elastos-server/src/component.rs`, read only) in file order.
+  The lab keeps no second copy of the list.
+  `bus_interfaces_are_the_runtime_admission_list` calls it and fails if the
+  read fails or if `tools/src/verify.rs` holds a second copy.
+- `bus_imports(component)` is cx-wasm-audit's `audit_component` with exactly
+  the names that read returned, and nothing else; a refusal comes back as
   `VerifyRefusal::Audit`, unchanged: `undeclared interface <name>` for an
   import outside Bus v1 (exact name and version, so
   `wasi:cli/environment@0.2.0`, `elastos:bus/runtime@2.0.0` and the world's
@@ -2687,11 +2686,21 @@ the module's maximum (task 033)"):
 Task 064, the Bus v1 import contract (README "Bus v1 import contract
 (wc-009b)"). In `tests/verify.rs`:
 
-- `bus_interfaces_are_the_runtime_admission_list` — reads the Runtime's
-  `elastos/crates/elastos-server/src/component.rs` (read only), finds the line
-  `const ALLOWED_BUS_IMPORTS: &[&str] = &[` exactly once, requires each line up
-  to the next `];` to be exactly `"<name>",` once trimmed (any other line fails,
-  naming it), and requires those names to equal `BUS_V1_INTERFACES` in order.
+- `bus_interfaces_are_the_runtime_admission_list` — calls
+  `runtime_bus_interfaces` (task 070), fails if that read fails, and fails if
+  `tools/src/verify.rs` holds `BUS_V1_INTERFACES` or any name the read
+  returned: the lab holds no second copy of the Runtime's list.
+- `runtime_bus_interfaces_refuses_unreadable_input`,
+  `runtime_bus_interfaces_refuses_an_absent_header`,
+  `runtime_bus_interfaces_refuses_a_duplicate_header`,
+  `runtime_bus_interfaces_refuses_an_invalid_body_line` and
+  `runtime_bus_interfaces_refuses_a_missing_terminator` — lab-local fixtures
+  through `runtime_bus_interfaces_at` give the one `BusListUnreadable`
+  refusal, whose reason names the path and the fault.
+- `runtime_bus_interfaces_preserves_file_order` — a fixture of three names
+  comes back in file order.
+- `runtime_bus_interfaces_ignores_cwd` — a child test process in another
+  directory reads the same list.
 - `bus_imports_lists_the_bus_interfaces_a_component_imports` — a component
   importing `elastos:bus/providers@1.0.0` and then `elastos:bus/runtime@1.0.0`
   gives both, in that order.
@@ -2715,7 +2724,7 @@ each input run at most once per test binary):
 
 ## Falsifiers
 
-`falsifiers.json` holds 189 planted bugs in the provider format (`command: "lab"`).
+`falsifiers.json` holds 198 planted bugs in the provider format (`command: "lab"`).
 By task: nine wc-001, seven task 010, 23 task 009, one task 012, one task 017,
 20 wc-004, four wc-008, 23 wc-005a (task 014), 11 wc-005b (task 015), 20
 wc-005c (task 016), two task 019, 14 wc-009a (task 020), seven task 026,
@@ -2723,7 +2732,7 @@ seven wc-010b (task 027), two wc-010c (task 028), one task 029, two task
 032, one task 035, three task 036, five task 038, three task
 039, one task 040, one task 041, two task 043, one task 044, one task
 033, two task 034, one task 045, two task 046, one task 050, three task
-052, one task 056, two task 062, one task 064, three task 065 and one task
+052, one task 056, two task 062, one task 064, three task 065, nine task 070 and one task
 063. Task 065 removed seven entries whose rule is gone (its section): one of
 wc-004's, three of wc-009a's, one of task 029's and both of task 031's.
 Each requires all its named tests to fail at an assertion.
@@ -2732,14 +2741,14 @@ This section is the one place for evidence labels and counts, and
 `falsifiers_about_states_no_evidence_status` keeps the `"about"` text of
 `falsifiers.json` free of them.
 
-Two kinds of evidence, kept apart. Runner-caught: 126, the sections below
+Two kinds of evidence, kept apart. Runner-caught: 135, the sections below
 marked runner-caught, less task 065's removals (tasks 012, 017, 014, 015, 016, 019, 020, 026, 027, 028,
-029, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046, 050, 052, 056, 062, 064, 065 and 063: 1 + 1 + 23 + 11 + 20 + 2 + 14 + 7 + 7
-+ 2 + 1 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1 + 3 + 1 + 2 + 1 + 3 + 1), each run by the canonical runner with its summary
+029, 032, 035, 036, 038, 039, 040, 041, 043, 044, 033, 034, 045, 046, 050, 052, 056, 062, 064, 065, 070 and 063: 1 + 1 + 23 + 11 + 20 + 2 + 14 + 7 + 7
++ 2 + 1 + 2 + 1 + 3 + 5 + 3 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 2 + 1 + 3 + 1 + 2 + 1 + 3 + 1 + 9), each run by the canonical runner with its summary
 line quoted.
 Hand-proven, pending R1: 68, each counted once: the 63 entries of the sections
 marked so (wc-001, tasks 010 and 009, wc-004 and wc-008: 9 + 7 + 23 + 20 + 4),
-and five proofs with no `falsifiers.json` entry, outside the 189 (task 036's
+and five proofs with no `falsifiers.json` entry, outside the 198 (task 036's
 `/bin/bash` 3.2 guard in `tests/reproducible.rs`, task 042's killed-run
 stop and task 049's two environment record proofs in `tests/run.rs`, and task
 053's import-section refusal in `tests/common/wasm_shape.rs`; none of these
@@ -3640,19 +3649,31 @@ new `EngineRun::process_max_rss_bytes` with 0, since that retry is not reaped by
 `wait4`), each the same bug as before (LOG.md, task 062). This task changes no
 other label.
 
-Task 064's one, runner-caught (the canonical runner's summary line is in
-LOG.md, task 064). The anchor pair is found exactly once, and each named test
-fails at its assertion:
+Task 064's one and task 070's nine, runner-caught (the canonical runner's
+summary lines are in LOG.md). Task 070 re-anchored the one and added the nine.
+Each anchor is in `tools/src/verify.rs`, a recovery target, found exactly once:
 
-- F-WC9B-BUS-LIST-WIDENED — `BUS_V1_INTERFACES` (`tools/src/verify.rs`) gains
-  `"wasi:cli/environment@0.2.0"` as a sixth entry, its length with it
-  (`bus_interfaces_are_the_runtime_admission_list`: the list is no longer the
-  Runtime's; `bus_imports_refuses_an_interface_outside_bus_v1_by_name`: the
-  `wasi:cli` component is no longer refused).
+- F-WC9B-BUS-LIST-WIDENED — the read appends
+  `"wasi:cli/environment@0.2.0"` after the parse
+  (`bus_imports_refuses_an_interface_outside_bus_v1_by_name`: the `wasi:cli`
+  component is no longer refused).
+- F-WC9B-BUS-LIST-COPIED — a `BUS_V1_INTERFACES` literal of the five names
+  comes back and `bus_imports` passes it to the audit in place of the read
+  (`bus_interfaces_are_the_runtime_admission_list`: the file holds a second
+  copy).
+- F-WC9B-BUS-LIST-UNREADABLE-SKIPPED, F-WC9B-BUS-LIST-ABSENT-HEAD-ALLOWED,
+  F-WC9B-BUS-LIST-DUPLICATE-HEAD-ALLOWED,
+  F-WC9B-BUS-LIST-BAD-LINE-SKIPPED and
+  F-WC9B-BUS-LIST-MISSING-END-ALLOWED — each drops one parser refusal, so its
+  fixture test's expected path and fault do not come back.
+- F-WC9B-BUS-LIST-OMITS-FIRST and F-WC9B-BUS-LIST-REVERSED — the read drops
+  the first name or reverses the order
+  (`runtime_bus_interfaces_preserves_file_order`).
+- F-WC9B-BUS-LIST-CWD — the read resolves the Runtime source from the process
+  current directory (`runtime_bus_interfaces_ignores_cwd`).
 
-Task 064 also re-anchors F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT to the
-new total, each the same bug as before (LOG.md, task 064). This task changes no
-other label.
+Task 070 also re-anchors F-WC-README-COUNT and F-WC-README-OUTSIDE-COUNT to the
+new total, each the same bug as before. This task changes no other label.
 
 Task 065's three, runner-caught (the canonical runner's summary line is in
 LOG.md, task 065). Rong's WC-1 and WC-2 ("Core imports retired, grants name

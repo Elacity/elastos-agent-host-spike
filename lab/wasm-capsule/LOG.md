@@ -1687,3 +1687,5 @@
   `tests/run.rs` asserts. Gate run after all edits: `cargo fmt -- --check` and `cargo fmt -p wasm-capsule-tools --
   --check` clean; `cargo test --locked` 138 passed, 3 ignored, 0 failed (`tests/run.rs` 71 passed, 2 ignored;
   `tests/docs.rs` 5 passed); the new test printed its PASS line on wasmtime 45.0.1 and wasmer 7.5.0.
+
+Task 070: `runtime_bus_interfaces` (`tools/src/verify.rs`) reads the Runtime's `ALLOWED_BUS_IMPORTS` from `CARGO_MANIFEST_DIR`, one parser (`runtime_bus_interfaces_at`) and one `BusListUnreadable { path, fault }` refusal; `BUS_V1_INTERFACES` and the test's parser are gone, and `bus_imports` passes only that read; seven new tests plus the re-anchored `bus_interfaces_are_the_runtime_admission_list`; 198 falsifier entries (nine new, `F-WC9B-BUS-LIST-WIDENED` re-anchored, `F-WC9B-BUS-LIST-COPIED` added), README counts at 198/135/198; canonical runner over the 13 changed ids reports `summary: 13 CAUGHT of 13`; `cargo test --locked --workspace` 0 failed (3 ignored), `cargo fmt` and `cargo fmt -p wasm-capsule-tools -- --check` clean.

@@ -32,7 +32,9 @@
 //! passes through unchanged. It reads no bundle file by path: the checked
 //! value already holds the bytes the name covers, so the module it audits is
 //! exactly the module that was signed, even if the folder changes later. The
-//! one file it reads by a path is the lab grants file (see task 065 below).
+//! two files it reads by a path are the lab grants file (task 065) and the
+//! Runtime's Bus allowlist, `ALLOWED_BUS_IMPORTS` (task 070); both are lab
+//! stand-ins, not admission.
 //!
 //! It answers only "do these bytes match this signed name, did an accepted key
 //! sign it, and does its module import nothing". It never answers "may this
@@ -47,19 +49,21 @@
 //!
 //! Task 064 (wc-009b, first half): the Bus path, the only import path.
 //! The contract already exists: world `product-capsule-v1` of package
-//! `elastos:bus@1.0.0` (`elastos/wit/elastos-bus-v1.wit`). [`BUS_V1_INTERFACES`]
-//! holds its five import names, equal to the Runtime's `ALLOWED_BUS_IMPORTS`,
-//! and [`bus_imports`] passes a component to cx-wasm-audit's `audit_component`
-//! with that list, with no check of its own. No Bus host exists in the lab, and
-//! no engine links or runs a component. A lab stand-in, not admission.
+//! `elastos:bus@1.0.0` (`elastos/wit/elastos-bus-v1.wit`). Task 070: the
+//! allowlist is the Runtime's own list, read from `ALLOWED_BUS_IMPORTS` in
+//! `elastos/crates/elastos-server/src/component.rs` by
+//! [`runtime_bus_interfaces`], the one allowlist read; the lab keeps no second
+//! copy. [`bus_imports`] passes a component to cx-wasm-audit's
+//! `audit_component` with exactly the names that read returned, with no check
+//! of its own. No Bus host exists in the lab, and no engine links or runs a
+//! component. A lab stand-in, not admission.
 //!
 //! Task 065: a lab grant names a `resource` and its `actions`, exactly as the
 //! WIT `capability-request` does (`elastos/wit/elastos-bus-v1.wit`), in the lab
-//! grants file `wc-009.lab-grants/v3`. [`read_grants`] is its one reader and the
-//! one place in this module that reads a file by a path: the file is the
-//! caller's input, outside the bundle, never part of the lab CID, and labelled
-//! "lab stand-in, not admission". Nothing in the runner reads it: the lab has
-//! no Bus host, mints no grant and checks none at run time.
+//! grants file `wc-009.lab-grants/v3`. [`read_grants`] is its one reader: the
+//! file is the caller's input, outside the bundle, never part of the lab CID,
+//! and labelled "lab stand-in, not admission". Nothing in the runner reads it:
+//! the lab has no Bus host, mints no grant and checks none at run time.
 
 use std::fmt;
 use std::fs;
@@ -74,28 +78,82 @@ use elastos_common::CapsuleManifest;
 use serde_json::{Map, Value};
 use wasm_capsule_audit::{audit, audit_component, Refusal as AuditRefusal};
 
-/// The Bus v1 interfaces a capsule may import, in the Runtime's order: the
-/// imports of world `product-capsule-v1` in `elastos/wit/elastos-bus-v1.wit`
-/// plus their shared `types`, exactly the Runtime's `ALLOWED_BUS_IMPORTS` in
-/// `elastos/crates/elastos-server/src/component.rs` (a test holds the two
-/// equal). `lifecycle` is the world's export, so it is not here. A lab
+/// The Runtime source that holds its `ALLOWED_BUS_IMPORTS` list, from the
+/// tools crate's manifest directory.
+const RUNTIME_COMPONENT_RS: &str = "../../../elastos/crates/elastos-server/src/component.rs";
+
+/// The line that opens the Runtime's list of allowed Bus imports, exactly.
+pub const ALLOWED_BUS_IMPORTS_HEAD: &str = "const ALLOWED_BUS_IMPORTS: &[&str] = &[";
+
+/// The Runtime's Bus allowlist, in file order: the names in the one
+/// `ALLOWED_BUS_IMPORTS` list in
+/// `elastos/crates/elastos-server/src/component.rs`, resolved from
+/// `CARGO_MANIFEST_DIR`, so the process current directory does not matter.
+/// This is the one allowlist read; [`bus_imports`] passes its names and
+/// nothing else. A lab stand-in, not admission.
+pub fn runtime_bus_interfaces() -> Result<Vec<String>, VerifyRefusal> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(RUNTIME_COMPONENT_RS);
+    runtime_bus_interfaces_at(&path)
+}
+
+/// The names in the one `ALLOWED_BUS_IMPORTS` list in the Runtime source at
+/// `path`, in file order: [`runtime_bus_interfaces`]'s parser, over a path, so
+/// a lab-local fixture proves each refusal. One parser, one rule. A lab
 /// stand-in, not admission.
-pub const BUS_V1_INTERFACES: [&str; 5] = [
-    "elastos:bus/types@1.0.0",
-    "elastos:bus/runtime@1.0.0",
-    "elastos:bus/identity@1.0.0",
-    "elastos:bus/capabilities@1.0.0",
-    "elastos:bus/providers@1.0.0",
-];
+pub fn runtime_bus_interfaces_at(path: &Path) -> Result<Vec<String>, VerifyRefusal> {
+    let refuse = |fault: String| VerifyRefusal::BusListUnreadable {
+        path: path.display().to_string(),
+        fault,
+    };
+    let source =
+        fs::read_to_string(path).map_err(|error| refuse(format!("read failed: {error}")))?;
+    let lines: Vec<&str> = source.lines().collect();
+    let heads: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| **line == ALLOWED_BUS_IMPORTS_HEAD)
+        .map(|(at, _)| at)
+        .collect();
+    if heads.len() != 1 {
+        return Err(refuse(format!(
+            "the head {ALLOWED_BUS_IMPORTS_HEAD:?} occurs {} times, not once",
+            heads.len()
+        )));
+    }
+    let body = &lines[heads[0] + 1..];
+    let end = body
+        .iter()
+        .position(|line| line.trim() == "];")
+        .ok_or_else(|| refuse("no closing `];` after the head".to_string()))?;
+    let mut names = Vec::with_capacity(end);
+    for (offset, line) in body[..end].iter().enumerate() {
+        let name = line
+            .trim()
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix("\","))
+            .filter(|name| !name.contains('"'));
+        let Some(name) = name else {
+            return Err(refuse(format!(
+                "line {} is not \"<name>\",: {line:?}",
+                heads[0] + 2 + offset
+            )));
+        };
+        names.push(name.to_string());
+    }
+    Ok(names)
+}
 
 /// The Bus interfaces the lab would link for `component`: cx-wasm-audit's
-/// `audit_component` with [`BUS_V1_INTERFACES`], and nothing else. Its list is
-/// the component's own import names in section order; its refusal (an import
-/// outside Bus v1, or bytes that are not a component, a core module too) is
-/// returned as [`VerifyRefusal::Audit`], unchanged. No Bus host exists in the
-/// lab, so nothing is linked. A lab stand-in, not admission.
+/// `audit_component` with exactly the names [`runtime_bus_interfaces`] read
+/// from the Runtime, and nothing else. Its list is the component's own import
+/// names in section order; its refusal (an import outside Bus v1, or bytes
+/// that are not a component, a core module too) is returned as
+/// [`VerifyRefusal::Audit`], unchanged. No Bus host exists in the lab, so
+/// nothing is linked. A lab stand-in, not admission.
 pub fn bus_imports(component: &[u8]) -> Result<Vec<String>, VerifyRefusal> {
-    audit_component(component, &BUS_V1_INTERFACES).map_err(VerifyRefusal::Audit)
+    let allowed = runtime_bus_interfaces()?;
+    let allowed: Vec<&str> = allowed.iter().map(String::as_str).collect();
+    audit_component(component, &allowed).map_err(VerifyRefusal::Audit)
 }
 
 /// The lab grants file's `schema`, exactly.
@@ -185,6 +243,10 @@ pub enum VerifyRefusal {
     /// The cx-wasm-audit crate refused the entrypoint module, or (from
     /// [`bus_imports`]) a component.
     Audit(AuditRefusal),
+    /// The Runtime's `ALLOWED_BUS_IMPORTS` list could not be read: the file,
+    /// its one head line, a body line or its closing line is at fault. The
+    /// reason names the path and the fault.
+    BusListUnreadable { path: String, fault: String },
 }
 
 impl fmt::Display for VerifyRefusal {
@@ -206,6 +268,10 @@ impl fmt::Display for VerifyRefusal {
                 "the manifest's entrypoint {entrypoint:?} is not a file in the bundle"
             ),
             VerifyRefusal::Audit(refusal) => write!(f, "{refusal}"),
+            VerifyRefusal::BusListUnreadable { path, fault } => write!(
+                f,
+                "the Runtime's Bus import list at {path} is unreadable: {fault}"
+            ),
         }
     }
 }
