@@ -1512,7 +1512,8 @@ class ReleasePolicyTests(unittest.TestCase):
                 groups.append(re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda match: str(evaluate(match[1], context)), group))
                 self.assertEqual(evaluate(field(concurrency, "cancel-in-progress"), context), event == "pull_request")
             self.assertEqual(len(set(groups)), 1 if event == "pull_request" else 3)
-        # Pushes to spike/agent-host share one cancellable group: a burst of merges runs the newest commit only.
+        # Pushes to spike/agent-host share one group that never cancels a started run: a burst of merges
+        # queues the newest commit only, and a running post-merge macOS job finishes.
         for event, ref, shared in (("push", "refs/heads/spike/agent-host", True),
                                    ("push", "refs/heads/develop", False),
                                    ("schedule", "refs/heads/spike/agent-host", False)):
@@ -1520,7 +1521,7 @@ class ReleasePolicyTests(unittest.TestCase):
             for run_id in ("101", "102", "103"):
                 context = event_context(event, ref, **{"github.workflow": "CI", "github.run_id": run_id})
                 groups.append(re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda match: str(evaluate(match[1], context)), group))
-                self.assertEqual(evaluate(field(concurrency, "cancel-in-progress"), context), shared)
+                self.assertFalse(evaluate(field(concurrency, "cancel-in-progress"), context))
             self.assertEqual(len(set(groups)), 1 if shared else 3, (event, ref))
 
     def test_jetson_package_exists_before_verification_on_every_event(self):
@@ -1776,6 +1777,8 @@ class ReleasePolicyTests(unittest.TestCase):
             "update-hop-linux": ("update-hop-linux", "ubuntu-24.04"),
             # Anders decides whether this becomes a required check (#311 D2).
             "cargo-audit": ("cargo-audit", "ubuntu-24.04"),
+            # Sash decides whether this becomes a required check (lab stand-in contract).
+            "lab-standin": ("lab-standin", "ubuntu-24.04"),
         }
         self.assertEqual(set(JOBS), set(expected))
         for job, (name, runner) in expected.items():

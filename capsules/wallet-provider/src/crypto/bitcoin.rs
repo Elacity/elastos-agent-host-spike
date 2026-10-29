@@ -600,13 +600,7 @@ mod uf_tests {
             .expect("the vector signature is base64");
         let witness: Witness = deserialize(&witness_bytes).expect("the vector holds a witness");
         let mut reduced = Witness::new();
-        reduced.push(
-            witness
-                .iter()
-                .next()
-                .expect("the vector witness has items")
-                .to_vec(),
-        );
+        reduced.push(witness.iter().next().expect("the vector witness has items"));
         let signature = BASE64_STANDARD.encode(serialize(&reduced));
         let err = verify_bip322_simple("bitcoin", BIP322_P2WPKH_ADDRESS, "Hello World", &signature)
             .unwrap_err();
