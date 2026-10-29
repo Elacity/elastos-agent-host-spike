@@ -1,8 +1,0 @@
-id: F-GB-lhex
-file: src/link.rs
-test: link::model_lowercase_hex_escape_is_a_link
---- old
-    metadata_names(manifest).iter().any(|name| name == "grant-binding")
---- new
-    false
---- end

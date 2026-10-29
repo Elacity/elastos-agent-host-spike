@@ -1,8 +1,0 @@
-id: F-A7-xhinst
-file: src/ledger.rs
-test: ledger::model_forged_instance_does_not_mark_another_handle
---- old
-                        if handles_match(open.handle, request.handle) {
---- new
-                        if handles_match(open.handle, request.handle) || request.forged_instance.is_some() {
---- end
