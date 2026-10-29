@@ -226,8 +226,14 @@ use std::process::Command;
 /// to `wallet-key.hex` inside the granted root in the same arm while every
 /// answer stays ok, so
 /// `no_right_calls_answer_under_the_profile_and_leave_the_root_unchanged`
-/// fails on its first answer and on its wallet directory comparison.
-const EXPECTED_FALSIFIERS: usize = 138;
+/// fails on its first answer and on its wallet directory comparison. Task 117
+/// adds WP141, which removes the row-set rule's call so a table may omit a row
+/// its dispatch answers, WP142, which makes the Right-vocabulary refusal always
+/// return early, WP143, which does the same for the both-sides refusal, and
+/// WP144, which does the same for the Linux-status refusal;
+/// `operations_table_row_check_refuses_each_bad_table` fails on that rule's
+/// cases.
+const EXPECTED_FALSIFIERS: usize = 142;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
