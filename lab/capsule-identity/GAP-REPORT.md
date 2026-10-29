@@ -35,6 +35,16 @@
   and 033)", after "B1 and B2 (Anders, 26 Oct)". Its lab base is `693c3681db472d565a2ce07abc9ec2c9a7e0b7e0`
   (`git rev-parse HEAD` before the task's first commit); it names tests and README sections, not lines. No
   Runtime file was read again, every Runtime citation stays at `c641bcff2`, and no issue was read.
+- **Revision (task 040, 2026-10-27):** adds one dated paragraph after task 033's in "B1 through a lab stand-in (27
+  Oct, tasks 032 and 033)": #309 has no launch-by-CID ask, and the lane routes it to Flint. Its lab base is
+  `c6e2d58d5e298e3fa7d07908841ce4ca0a64f6f2` (task 038's head): 040 read its files there, where its build started.
+  The runner then moved the build onto `9bd83949183e18ee4f343ef830af0e7467e78b3c` (task 039's head) before the
+  commit, so `9bd839491` is the commit's parent. The two differ only in `lab/capsule-identity/SECOND-REVIEW.md`
+  (`git diff --name-only`), so no citation changes. It reads #309 at
+  `513988ebd` and one more Runtime file, `elastos/crates/elastos-server/src/api/routes.rs`, at that base, which
+  `git diff --quiet` finds the same as at `c641bcff2`. Every other Runtime citation stays at `c641bcff2`, and no
+  issue was read. Corrected by task 043, on 2026-10-27: the bullet said `c6e2d58d5` was `git rev-parse HEAD` before
+  the first commit; the parent is `9bd839491` (Cursor's FOLLOWUP on 040).
 
 Each cited file under `elastos/` or `scripts/`, checked with
 `git diff --stat 3beb816438fd567145a8d725e22465bd83277cf0 c641bcff21d9ceaad769b1ed89529d541ffd8766 -- <file>`:
@@ -841,6 +851,11 @@ not run the tests.
   "Asks come only from the signed bytes (M1 check B2, no-schema part)"); not shown: no ask schema, no parse of
   `asks.json`, no mapping of an ask to an operation (`lab/bus-v2-proposal/`), no grant from an ask (033), and the
   Runtime hands no asks to anything and did nothing here.
+  28 Oct, task 044: until task 044, only the call-time re-read (F-CI35a, a stub in which `asks_of` reads the
+  folder) was caught; a stub that reads `asks.json` from the folder at launch, after the walk, passed both tests
+  above, as the 041 second review's FOLLOWUP found (`SECOND-REVIEW.md`, the #730 section). That stub now fails too
+  (`standin_takes_the_asks_from_the_walk_not_the_folder`, F-CI44a), through a lab test seam, not a route, that
+  changes the stored bytes between the walk and the launch.
 
 ### B1 through a lab stand-in (27 Oct, tasks 032 and 033)
 
@@ -860,7 +875,34 @@ not a constant: a grant put in through the stand-in's one test seam, `seed_grant
 `lab/capsule-identity/`, it edits no file under `elastos/`, and `cargo test` runs it on the Mac. Not shown: the
 Runtime ran nothing here, and no sentence here says it launched, checked, refused or granted anything; the
 Runtime still launches by path (the README section named above cites its launch request); and no #309 ask covers a
-launch by CID, so the stand-in's `cid` request field is a lab field. No shell approval is modelled.
+launch by CID (see the next paragraph), so the stand-in's `cid` request field is a lab field. No shell approval is
+modelled.
+
+Added by task 040, on 2026-10-27 (Rong's note, routed to Flint). The interface the stand-in copies is draft PR
+#309, read at `513988ebd` (`513988ebdb29c31f74e5d6f1729af13449482f87`, local ref `spike/cursor/runtime-asks-ad52`,
+committed 2026-10-26 19:23 UTC). #309 names launch by content id as out of scope, under its `## Out of scope`
+(`lab/runtime-asks/README.md:179`):
+(`lab/runtime-asks/README.md:181-183` at `513988ebd`
+``Other blockers in `lab/agent-conformance/GAPS.md`, named and not evaluated:``
+`AC-002-ARGS (a typed launch selector and result), RT3 (a model-call grant),`
+`AC-025-CID (launch by content id) and AC-005-REASON (the stop cause on stderr).`).
+None of its seven asks, RA-1 to RA-7, changes a field of today's launch request, whose three fields are `path`,
+`principal_id` and `launch_grant`
+(`elastos/crates/elastos-server/src/api/routes.rs:64-71` at `c6e2d58d5`, from `pub struct LaunchRequest {` to its
+closing `}`; `git diff --quiet c641bcff2 c6e2d58d5 -- elastos/crates/elastos-server/src/api/routes.rs` exits 0, so
+the file is as at the report's Runtime commit). The nearest ask, RA-6's RI-2, says only when `POST /api/capsules`
+answers and that the answer holds a `session_id`, and it asks for no request field
+(`lab/runtime-asks/06-resident-instances-core.md:24` at `513988ebd`
+``| RI-2 | `POST /api/capsules` answers once the instance is admitted, before `start` returns, with its `session_id` | M (2) |``).
+So a launch by bundle CID, and a publisher-record check before launch, have no #309 ask. The lane routes that ask
+to Flint, for #309: `POST /api/capsules` takes a bundle CID, and the Runtime refuses before launch a bundle whose
+bytes do not give that CID or whose publisher record does not verify. Runtime issues: issue 274
+(https://github.com/Elacity/elastos-runtime/issues/274, the record-to-launch repair, Anders's narrow first step)
+and issue 465 (https://github.com/Elacity/elastos-runtime/issues/465, complete-package verification), both named
+in "B1 and B2 (Anders, 26 Oct)" above. A later push to #309 may add the ask, so its head is to be read again before
+the ask is routed. Not shown: the Runtime did nothing here; it ran nothing, no Runtime file changed, and it still
+launches by `path`. The stand-in's `cid` request field stays a lab field, with no field of the Runtime's launch
+request for it to land on. This paragraph only reads two commits with `git`; no issue was read again.
 
 ### Questions with no answer
 
@@ -872,11 +914,19 @@ Rewritten by task 021 for the lab commit read, `01f6add1f`. Each citation here i
 sentence on `c641bcff2` and the Runtime line in the last "Not shown", which is the b3 citation as it stands.
 What the lab's B1 and B2 tests show and do not show, and the `pre-CID, not B1 evidence` label, are in "B1 and B2
 (Anders, 26 Oct)" above.
+Changed by task 038, on 2026-10-27: a third exception is the sentence below on the lab's launch path, which cites
+README at `dd84ef2fe` (`dd84ef2feed8ec62d6bd8c4f921efc390e8c5e9d`, this task's base), and keeps its `01f6add1f`
+quote only as the record of what README said then.
 
 The lab checks identity apart from admission. It answers whether bytes match a name and whether a test key
 signed that name
 (`lab/capsule-identity/README.md:13` `- It answers two questions: do these bytes match this name, and did this test`),
-and it sits in no admission or launch path
+and it sits in no Runtime admission or launch path and no Runtime code calls it; the lab's stand-in launcher, in
+test code, calls it (task 032)
+(`lab/capsule-identity/README.md:16-17` at `dd84ef2fe`
+`decision. It sits in no Runtime admission or launch path, and no Runtime`
+`code calls it; the lab's stand-in launcher, in test code, calls it (see [the`).
+Record of what README said at `01f6add1f`, before task 032, and not the lab's claim now:
 (`lab/capsule-identity/README.md:16` `decision. It sits in no admission or launch path, and no Runtime code calls`).
 Its schema check is still the Runtime's own manifest type
 (`lab/capsule-identity/src/lib.rs:1143` `let manifest: CapsuleManifest = serde_json::from_slice(bytes)`).
@@ -889,6 +939,10 @@ under the single-block, non-sharded subset of the model package profile
 A file or a directory block over 262144 bytes is refused, not named another way
 (`lab/capsule-identity/src/lib.rs:224` `const CHUNK_SIZE: usize = 262_144;`
 and `lab/capsule-identity/src/lib.rs:230` `const DIRECTORY_BLOCK_LIMIT: usize = 262_144;`).
+Added by task 048, on 2026-10-28: since task 048, a file of 2 to 174 raw leaves (262145 to 45613056 bytes) is named
+by its balanced file root (`fn file_root(` and `const MAX_FILE_LINKS: usize = 174;` in
+`lab/capsule-identity/src/lib.rs`), and only a larger file or a directory block over 262144 bytes is refused; the
+listing call `encode_listed_files` still refuses a listed file over 262144 bytes.
 At `c641bcff2` the value was a framed SHA-256 stream printed `lab-cid:sha256:`
 (`lab/capsule-identity/src/lib.rs:73` `pub const LAB_CID_PREFIX: &str = "lab-cid:sha256:";` at that commit).
 It is not the Runtime's CID: the Runtime names a release archive, and that archive's hash and CID stay delivery
