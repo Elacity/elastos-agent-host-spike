@@ -65,16 +65,25 @@ host `bpf` was already `EPERM` before any filter, because
 therefore `EACCES` (13), which differs from every unfiltered answer the journey's
 probe recorded. A plain `EPERM` assertion would pass with no filter installed.
 
-The proof ran on `spark1.local`: aarch64, Ubuntu 24.04.4, kernel
+The recorded Linux target is `spark1.local`: aarch64, Ubuntu 24.04.4, kernel
 `6.17.0-1029-nvidia`. `linux_wallet_journey_runs_under_the_seccomp_allow_list`
 builds the list from wallet's committed declared-rights file, starts the provider
 through `standin_spawn_confined_provider` with a `Seccomp` policy, requires
 `init` `ok`, one read-only wallet call `ok`, the storage key under `STORAGE_ROOT`
-and no new name outside it, and requires the launched provider's own
-`/proc/<pid>/status` to report `Seccomp: 2`. It then runs one probe child under
+and unchanged presence and bytes at named outside fixtures: `outside-existing`
+and `outside-created` under the fixture base, `ElastOS/outside-existing`,
+`ElastOS/SystemServices/Sibling/observed`, and
+`ElastOS/SystemServices/seccomp-outside-write`. This compares those paths only.
+The launched provider's `/proc/<pid>/status` must report `Seccomp: 2`, and BPF
+answers from before and after this launcher's install must change to its marker.
+An inherited filter alone cannot satisfy that evidence. It then runs one probe child under
 the same filter that records what `ptrace(PTRACE_TRACEME)`, `mount`, `bpf` and
 `keyctl` answer before the filter and again after it, and requires each filtered
-answer to be the marker and to differ from every unfiltered answer.
+answer to be the marker and to differ from every unfiltered answer. The parent
+requires child termination, drains its standard error and reaps it on success,
+failure and timeout. Install failures cross `pre_exec` as fixed-size records;
+the parent formats each reason with its original errno. Tests inject all four
+install refusals through the launcher and repeat the probe and wallet journey.
 
 Namespaces, Landlock and every file row of the contract remain unbuilt on Linux,
 so `linux` stays out of `DECLARED_CONFINED_OS`. A `linux` host with a `Seatbelt`

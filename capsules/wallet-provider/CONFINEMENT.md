@@ -1312,8 +1312,8 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Replace the built filter's final decision with `ALLOW` and refuse `socket`,
   `connect` and `execve`, which is the 0710 deny list (WP146):
   `seccomp_program_denies_by_default_and_lists_no_undeclared_call` fails on its
-  default arm, because the last instruction permits and the four refused calls
-  lose their equality-test assertion.
+  default arm, because the last instruction permits. On Linux, the same plant
+  refuses `execve` at provider start.
 - Make the allow-list builder return a fixed list and ignore its declared input
   (WP147): `seccomp_allow_list_follows_the_declared_rights` fails, because
   removing `storage` no longer removes its file syscalls.
@@ -1323,10 +1323,9 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
 - Ignore each install step's failure and return `Ok(())` (WP149):
   `seccomp_install_refuses_each_failed_step` fails, because no refusal comes
   for either step.
-- Give the audit-architecture guard no admit arm (WP150):
+- Make both architecture branches reach the syscall-number load (WP150):
   `seccomp_program_denies_by_default_and_lists_no_undeclared_call` fails on its
-  architecture assertions, because a wrong architecture no longer falls through
-  to the marker and the admit arm never loads the syscall number.
+  architecture assertions. The syscall-number load remains in place.
 - Label the Linux journey with a host name on a host that is not Linux (WP151):
   `linux_seccomp_journey_is_not_applicable_off_linux` reads a claim instead of
   `not applicable` and fails.
@@ -1334,10 +1333,21 @@ Falsifier procedure (run against a temporary edit, then restore the profile):
   `standin_host_refusal_decides_each_policy` fails on the `linux` `Seatbelt`
   case, whose refusal words must stay unchanged.
 
+- Bypass only the launcher's filter install (WP153):
+  `linux_wallet_journey_runs_under_the_seccomp_allow_list` requires the BPF
+  answer to change to this filter's marker across that install. An inherited
+  filter with `Seccomp: 2` alone cannot satisfy this check.
+- Write `ElastOS/SystemServices/seccomp-outside-write` during `status` (WP154):
+  `linux_wallet_journey_runs_under_the_seccomp_allow_list` compares the named
+  outside fixtures after shutdown and finds the added file.
+- Return one fixed reason and errno for both install steps (WP155):
+  `seccomp_install_refuses_each_failed_step` checks each exact reason and errno.
+
 The Linux journey `linux_wallet_journey_runs_under_the_seccomp_allow_list` is
 `#[cfg(target_os = "linux")]`, so WP146's second plant — the same deny-list edit
 re-run on the Linux host — is where the filter's kernel behaviour is scored.
-Every other falsifier above names a test that runs on every OS.
+WP153 and WP154 also require Linux. The other seccomp falsifiers above name
+checks that execute on every OS; WP151's changed branch executes off Linux.
 
 Task 016 removed these allow forms because no named confinement test needed
 them on macOS 26.5.2 arm64:

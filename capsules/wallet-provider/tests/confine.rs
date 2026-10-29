@@ -621,12 +621,15 @@ struct ConfinedProvider {
     stdout: BufReader<ChildStdout>,
     stderr_reader: Option<JoinHandle<String>>,
     stderr_text: String,
+    #[cfg(target_os = "linux")]
+    seccomp_launch_answers: Option<[i64; 2]>,
 }
 
 impl ConfinedProvider {
     /// The one spawn path; `command` already carries its arguments. A spawn
     /// that fails, including a `pre_exec` install that refuses, returns the
-    /// reason it carried, so a refused start is a refusal and not a panic.
+    /// OS error. start_under_seccomp carries the install reason separately
+    /// because Rust's exec-error pipe transmits only raw errno.
     fn try_spawn(mut command: Command) -> Result<Self, String> {
         let mut child = command
             .stdin(Stdio::piped())
@@ -648,6 +651,8 @@ impl ConfinedProvider {
             stdout,
             stderr_reader: Some(stderr_reader),
             stderr_text: String::new(),
+            #[cfg(target_os = "linux")]
+            seccomp_launch_answers: None,
         })
     }
 
@@ -705,13 +710,80 @@ impl ConfinedProvider {
     /// start whose install fails returns that refusal and starts nothing (P11).
     #[cfg(target_os = "linux")]
     fn start_under_seccomp(allow: &SeccompAllowList, program: &Path) -> Result<Self, String> {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::net::UnixStream;
         let allow = allow.clone();
+        // Both descriptors are CLOEXEC. The parent formats the fixed record
+        // after spawn; Rust's exec-error pipe separately retains the raw errno.
+        let (mut reader, writer) = UnixStream::pair()
+            .map_err(|err| format!("seccomp launch error channel could not open: {err}"))?;
         let mut command = Command::new(program);
         unsafe {
             use std::os::unix::process::CommandExt as _;
-            command.pre_exec(move || install_seccomp(&allow));
+            command.pre_exec(move || {
+                let before = seccomp_launch_marker_answer();
+                let installed = install_seccomp(&allow);
+                let frame = match installed {
+                    Ok(()) => [0, before, seccomp_launch_marker_answer()],
+                    Err(SeccompInstallFailure::Step(SeccompStep::NoNewPrivileges, errno)) => {
+                        [1, i64::from(errno), 0]
+                    }
+                    Err(SeccompInstallFailure::Step(SeccompStep::Filter, errno)) => {
+                        [2, i64::from(errno), 0]
+                    }
+                    Err(SeccompInstallFailure::AuditArchitecture(arch)) => {
+                        [3, i64::from(libc::EINVAL), i64::from(arch)]
+                    }
+                    Err(SeccompInstallFailure::ProgramCapacity(len)) => {
+                        [4, i64::from(libc::E2BIG), len as i64]
+                    }
+                };
+                let mut bytes = [0u8; 24];
+                for (slot, value) in bytes.chunks_exact_mut(8).zip(frame) {
+                    slot.copy_from_slice(&value.to_ne_bytes());
+                }
+                let mut written = 0;
+                while written < bytes.len() {
+                    // UnixStream::write uses send(), which this filter refuses.
+                    // write() is admitted and is async-signal-safe after fork.
+                    let count = libc::write(
+                        writer.as_raw_fd(),
+                        bytes[written..].as_ptr().cast(),
+                        bytes.len() - written,
+                    );
+                    if count < 0 {
+                        let errno = *libc::__errno_location();
+                        if errno == libc::EINTR {
+                            continue;
+                        }
+                        return Err(std::io::Error::from_raw_os_error(errno));
+                    }
+                    if count == 0 {
+                        return Err(std::io::Error::from_raw_os_error(libc::EIO));
+                    }
+                    written += count as usize;
+                }
+                installed
+                    .map_err(|failure| std::io::Error::from_raw_os_error(failure.raw_os_error()))
+            });
         }
-        Self::try_spawn(command)
+        let spawned = Self::try_spawn(command);
+        let mut bytes = Vec::new();
+        reader
+            .read_to_end(&mut bytes)
+            .map_err(|err| format!("seccomp launch error channel could not be read: {err}"))?;
+        if bytes.is_empty() && spawned.is_err() {
+            return spawned; // An exec or fork error, before an install report.
+        }
+        let answers = match decode_seccomp_install_record(&bytes)? {
+            SeccompLaunchRecord::Refused(failure) => {
+                return Err(format!("the test child must start: {failure}"))
+            }
+            SeccompLaunchRecord::Installed(answers) => answers,
+        };
+        let mut provider = spawned?;
+        provider.seccomp_launch_answers = Some(answers);
+        Ok(provider)
     }
 
     /// The same function where no seccomp filter exists: a Linux start is
@@ -726,9 +798,8 @@ impl ConfinedProvider {
 
     /// The filter mode the launched child itself reports in
     /// `/proc/<pid>/status`: `2` for `SECCOMP_MODE_FILTER`, `0` for a child
-    /// that carries none. It reads the child's own kernel record rather than
-    /// the launcher's intent, so a start whose filter was never installed in
-    /// `pre_exec` answers `0` here even though every other observation passes.
+    /// that carries none. This mode alone also accepts inherited filters; the
+    /// journey additionally checks the marker before and after this install.
     #[cfg(target_os = "linux")]
     fn launched_seccomp_mode(&self) -> u32 {
         let path = format!("/proc/{}/status", self.child.id());
@@ -6351,63 +6422,62 @@ const LAUNCH_ESSENTIALS: &[(&str, &str)] = &[
 ];
 
 /// The system call numbers the filter tests against, per target architecture.
-/// A `0` marks a call that architecture does not have, so it contributes no
-/// test.
-const SECCOMP_SYSCALL_NUMBERS: &[(&str, u32, u32)] = &[
-    ("bpf", 321, 280),
-    ("brk", 12, 214),
-    ("clone", 56, 220),
-    ("close", 3, 57),
-    ("execve", 59, 221),
-    ("execveat", 322, 281),
-    ("exit_group", 231, 94),
-    ("faccessat", 269, 48),
-    ("fchmod", 91, 52),
-    ("fdatasync", 75, 83),
-    ("fstat", 5, 80),
-    ("fsync", 74, 82),
-    ("ftruncate", 77, 46),
-    ("getdents64", 217, 61),
-    ("getpid", 39, 172),
-    ("getrandom", 318, 278),
-    ("keyctl", 250, 219),
-    ("linkat", 265, 37),
-    ("lseek", 8, 62),
-    ("mkdirat", 258, 34),
-    ("mmap", 9, 222),
-    ("mount", 165, 40),
-    ("mprotect", 10, 226),
-    ("madvise", 28, 233),
-    ("munmap", 11, 215),
-    ("newfstatat", 262, 79),
-    ("openat", 257, 56),
-    ("openat2", 437, 437),
-    ("ppoll", 271, 73),
-    ("prlimit64", 302, 261),
-    ("ptrace", 101, 117),
-    ("pread64", 17, 67),
-    ("pwrite64", 18, 68),
-    ("read", 0, 63),
-    ("readlinkat", 267, 78),
-    ("readv", 19, 65),
-    ("renameat2", 316, 276),
-    ("rseq", 334, 293),
-    ("rt_sigaction", 13, 134),
-    ("rt_sigprocmask", 14, 135),
-    ("rt_sigreturn", 15, 139),
-    ("sched_getaffinity", 204, 123),
-    ("set_robust_list", 273, 99),
-    ("set_tid_address", 218, 96),
-    ("sigaltstack", 131, 132),
-    ("statx", 332, 291),
-    ("sysinfo", 99, 179),
-    ("tgkill", 234, 131),
-    ("uname", 63, 160),
-    ("unlinkat", 263, 35),
-    ("write", 1, 64),
-    ("writev", 20, 66),
-    ("arch_prctl", 158, 0),
-    ("futex", 202, 98),
+/// `None` marks an absent call; `Some(0)` is the x86-64 read syscall.
+const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
+    ("bpf", Some(321), Some(280)),
+    ("brk", Some(12), Some(214)),
+    ("clone", Some(56), Some(220)),
+    ("close", Some(3), Some(57)),
+    ("execve", Some(59), Some(221)),
+    ("execveat", Some(322), Some(281)),
+    ("exit_group", Some(231), Some(94)),
+    ("faccessat", Some(269), Some(48)),
+    ("fchmod", Some(91), Some(52)),
+    ("fdatasync", Some(75), Some(83)),
+    ("fstat", Some(5), Some(80)),
+    ("fsync", Some(74), Some(82)),
+    ("ftruncate", Some(77), Some(46)),
+    ("getdents64", Some(217), Some(61)),
+    ("getpid", Some(39), Some(172)),
+    ("getrandom", Some(318), Some(278)),
+    ("keyctl", Some(250), Some(219)),
+    ("linkat", Some(265), Some(37)),
+    ("lseek", Some(8), Some(62)),
+    ("mkdirat", Some(258), Some(34)),
+    ("mmap", Some(9), Some(222)),
+    ("mount", Some(165), Some(40)),
+    ("mprotect", Some(10), Some(226)),
+    ("madvise", Some(28), Some(233)),
+    ("munmap", Some(11), Some(215)),
+    ("newfstatat", Some(262), Some(79)),
+    ("openat", Some(257), Some(56)),
+    ("openat2", Some(437), Some(437)),
+    ("ppoll", Some(271), Some(73)),
+    ("prlimit64", Some(302), Some(261)),
+    ("ptrace", Some(101), Some(117)),
+    ("pread64", Some(17), Some(67)),
+    ("pwrite64", Some(18), Some(68)),
+    ("read", Some(0), Some(63)),
+    ("readlinkat", Some(267), Some(78)),
+    ("readv", Some(19), Some(65)),
+    ("renameat2", Some(316), Some(276)),
+    ("rseq", Some(334), Some(293)),
+    ("rt_sigaction", Some(13), Some(134)),
+    ("rt_sigprocmask", Some(14), Some(135)),
+    ("rt_sigreturn", Some(15), Some(139)),
+    ("sched_getaffinity", Some(204), Some(123)),
+    ("set_robust_list", Some(273), Some(99)),
+    ("set_tid_address", Some(218), Some(96)),
+    ("sigaltstack", Some(131), Some(132)),
+    ("statx", Some(332), Some(291)),
+    ("sysinfo", Some(99), Some(179)),
+    ("tgkill", Some(234), Some(131)),
+    ("uname", Some(63), Some(160)),
+    ("unlinkat", Some(263), Some(35)),
+    ("write", Some(1), Some(64)),
+    ("writev", Some(20), Some(66)),
+    ("arch_prctl", Some(158), None),
+    ("futex", Some(202), Some(98)),
 ];
 
 /// The audit architecture this target's kernel reports in `seccomp_data.arch`,
@@ -6474,16 +6544,44 @@ const fn seccomp_deny_return() -> u32 {
 /// The number `name` has on this target, or `None` where the call does not
 /// exist. One reader serves the filter builder and every test (P10).
 fn seccomp_syscall_number(name: &str) -> Option<u32> {
+    seccomp_syscall_number_for_arch(name, SECCOMP_AUDIT_ARCH)
+}
+
+fn seccomp_syscall_number_for_arch(name: &str, audit_arch: u32) -> Option<u32> {
     let (_, x86_64, aarch64) = SECCOMP_SYSCALL_NUMBERS
         .iter()
         .find(|(candidate, _, _)| *candidate == name)
         .unwrap_or_else(|| panic!("{name} has no syscall number row"));
-    let number = if cfg!(target_arch = "x86_64") {
-        *x86_64
-    } else {
-        *aarch64
-    };
-    (number != 0).then_some(number)
+    match audit_arch {
+        0xc000_003e => *x86_64,
+        0xc000_00b7 => *aarch64,
+        _ => None,
+    }
+}
+
+#[test]
+fn seccomp_syscall_zero_is_present_on_both_architectures() {
+    for (arch, read, arch_prctl) in [(0xc000_003e, 0, Some(158)), (0xc000_00b7, 63, None)] {
+        assert_eq!(seccomp_syscall_number_for_arch("read", arch), Some(read));
+        assert_eq!(
+            seccomp_syscall_number_for_arch("arch_prctl", arch),
+            arch_prctl
+        );
+        let program = seccomp_program_for_arch(&["read"], arch);
+        assert_eq!(program.len(), 9);
+        assert_eq!(
+            program[6],
+            SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, read, 0, 1)
+        );
+        assert_eq!(
+            program[7],
+            SeccompInstruction::stmt(SECCOMP_BPF_RET_K, SECCOMP_RET_ALLOW)
+        );
+        assert_eq!(
+            seccomp_program_for_arch(&["arch_prctl"], arch).len(),
+            if arch_prctl.is_some() { 9 } else { 7 }
+        );
+    }
 }
 
 /// The generated Linux policy of one provider: the provider name, the audit
@@ -6495,6 +6593,8 @@ struct SeccompAllowList {
     audit_arch: u32,
     syscalls: Vec<&'static str>,
     program: Vec<SeccompInstruction>,
+    #[cfg(target_os = "linux")]
+    injected_install_failure: Option<(SeccompStep, i32)>,
 }
 
 impl SeccompAllowList {
@@ -6561,6 +6661,8 @@ fn seccomp_allow_list_from_declared_rights(
         audit_arch: SECCOMP_AUDIT_ARCH,
         syscalls,
         program,
+        #[cfg(target_os = "linux")]
+        injected_install_failure: None,
     })
 }
 
@@ -6569,10 +6671,14 @@ fn seccomp_allow_list_from_declared_rights(
 /// `ALLOW` return behind it, and the deny marker as the final decision. The
 /// default arm is the marker, so every call the list does not name is refused.
 fn seccomp_program(syscalls: &[&'static str]) -> Vec<SeccompInstruction> {
+    seccomp_program_for_arch(syscalls, SECCOMP_AUDIT_ARCH)
+}
+
+fn seccomp_program_for_arch(syscalls: &[&'static str], audit_arch: u32) -> Vec<SeccompInstruction> {
     let mut program = vec![
         SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARCH_OFFSET),
         // A wrong audit architecture falls through to the deny marker.
-        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, SECCOMP_AUDIT_ARCH, 1, 0),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, audit_arch, 1, 0),
         SeccompInstruction::stmt(SECCOMP_BPF_RET_K, seccomp_deny_return()),
         SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_NUMBER_OFFSET),
         // A number in the x32 space is not the call it looks like.
@@ -6580,7 +6686,7 @@ fn seccomp_program(syscalls: &[&'static str]) -> Vec<SeccompInstruction> {
         SeccompInstruction::stmt(SECCOMP_BPF_RET_K, seccomp_deny_return()),
     ];
     for syscall in syscalls {
-        let Some(number) = seccomp_syscall_number(syscall) else {
+        let Some(number) = seccomp_syscall_number_for_arch(syscall, audit_arch) else {
             continue;
         };
         program.push(SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number, 0, 1));
@@ -6605,88 +6711,136 @@ enum SeccompStep {
 }
 
 impl SeccompStep {
-    /// The one refusal sentence for this step and one errno.
     fn refusal(self, errno: i32) -> String {
+        SeccompInstallFailure::Step(self, errno).to_string()
+    }
+}
+
+/// A fixed-size refusal value. Its Display implementation runs in the parent
+/// (or the in-process probe), never in pre_exec after fork.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeccompInstallFailure {
+    Step(SeccompStep, i32),
+    AuditArchitecture(u32),
+    ProgramCapacity(usize),
+}
+
+impl SeccompInstallFailure {
+    fn raw_os_error(self) -> i32 {
         match self {
-            Self::NoNewPrivileges => {
-                format!("seccomp install refused: PR_SET_NO_NEW_PRIVS failed with errno {errno}")
-            }
-            Self::Filter => {
-                format!("seccomp install refused: the filter install failed with errno {errno}")
-            }
+            Self::Step(_, errno) => errno,
+            Self::AuditArchitecture(_) => libc::EINVAL,
+            Self::ProgramCapacity(_) => libc::E2BIG,
         }
     }
 }
 
-/// The one install rule, with the two kernel steps injected: the audit-arch
-/// check first, then `PR_SET_NO_NEW_PRIVS`, then the filter. The first step
-/// that fails returns its own refusal, which names that step and keeps the
-/// errno it reports. `steps` is the kernel call on this host and a fixture in
-/// the tests, so one rule serves both and the failure paths are provable on
-/// every OS.
-fn install_seccomp_with(
-    audit_arch: u32,
-    steps: impl FnMut(SeccompStep) -> Result<(), i32>,
-) -> std::io::Result<()> {
-    let mut steps = steps;
-    if audit_arch != SECCOMP_AUDIT_ARCH {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "seccomp install refused: the list was built for audit architecture \
-                 {audit_arch:#x} and this target reports {SECCOMP_AUDIT_ARCH:#x}"
+impl std::fmt::Display for SeccompInstallFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Step(SeccompStep::NoNewPrivileges, errno) => write!(
+                f, "seccomp install refused: PR_SET_NO_NEW_PRIVS failed with errno {errno}"
             ),
-        ));
+            Self::Step(SeccompStep::Filter, errno) => write!(
+                f, "seccomp install refused: the filter install failed with errno {errno}"
+            ),
+            Self::AuditArchitecture(arch) => write!(
+                f, "seccomp install refused: the list was built for audit architecture {arch:#x} and this target reports {SECCOMP_AUDIT_ARCH:#x}; errno {}", self.raw_os_error()
+            ),
+            Self::ProgramCapacity(len) => write!(
+                f, "seccomp install refused: the program has {len} filter instructions and the install holds {SECCOMP_PROGRAM_CAPACITY}; errno {}", self.raw_os_error()
+            ),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SeccompLaunchRecord {
+    Installed([i64; 2]),
+    Refused(SeccompInstallFailure),
+}
+
+fn decode_seccomp_install_record(bytes: &[u8]) -> Result<SeccompLaunchRecord, String> {
+    if bytes.len() != 24 {
+        return Err(
+            "seccomp launch refused: pre_exec returned no complete install record".to_string(),
+        );
+    }
+    let mut frame = [0i64; 3];
+    for (value, slot) in frame.iter_mut().zip(bytes.chunks_exact(8)) {
+        *value = i64::from_ne_bytes(slot.try_into().expect("eight-byte record field"));
+    }
+    let failure = match frame[0] {
+        0 => None,
+        1 => Some(SeccompInstallFailure::Step(
+            SeccompStep::NoNewPrivileges,
+            frame[1] as i32,
+        )),
+        2 => Some(SeccompInstallFailure::Step(
+            SeccompStep::Filter,
+            frame[1] as i32,
+        )),
+        3 => Some(SeccompInstallFailure::AuditArchitecture(frame[2] as u32)),
+        4 => Some(SeccompInstallFailure::ProgramCapacity(frame[2] as usize)),
+        _ => {
+            return Err(
+                "seccomp launch refused: pre_exec returned an unknown install record".to_string(),
+            )
+        }
+    };
+    match failure {
+        Some(failure) => Ok(SeccompLaunchRecord::Refused(failure)),
+        None => Ok(SeccompLaunchRecord::Installed([frame[1], frame[2]])),
+    }
+}
+
+#[test]
+fn seccomp_launch_record_refuses_missing_or_unknown_report() {
+    for length in [0, 23, 25] {
+        assert_eq!(
+            decode_seccomp_install_record(&vec![0; length]).unwrap_err(),
+            "seccomp launch refused: pre_exec returned no complete install record"
+        );
+    }
+    let mut bytes = [0u8; 24];
+    bytes[..8].copy_from_slice(&5i64.to_ne_bytes());
+    assert_eq!(
+        decode_seccomp_install_record(&bytes).unwrap_err(),
+        "seccomp launch refused: pre_exec returned an unknown install record"
+    );
+}
+
+/// The one install rule, including every precondition, shared by the real
+/// kernel calls and injected steps. Failure construction uses only stack data.
+fn install_seccomp_with(
+    allow: &SeccompAllowList,
+    mut steps: impl FnMut(SeccompStep) -> Result<(), i32>,
+) -> Result<(), SeccompInstallFailure> {
+    if allow.audit_arch != SECCOMP_AUDIT_ARCH {
+        return Err(SeccompInstallFailure::AuditArchitecture(allow.audit_arch));
+    }
+    if allow.program.len() > SECCOMP_PROGRAM_CAPACITY {
+        return Err(SeccompInstallFailure::ProgramCapacity(allow.program.len()));
     }
     for step in [SeccompStep::NoNewPrivileges, SeccompStep::Filter] {
-        steps(step).map_err(|errno| {
-            std::io::Error::new(
-                std::io::Error::from_raw_os_error(errno).kind(),
-                step.refusal(errno),
-            )
-        })?;
+        steps(step).map_err(|errno| SeccompInstallFailure::Step(step, errno))?;
     }
     Ok(())
 }
 
-/// The largest program this lab builds: the audit-arch check, the x32 guard and
-/// the final decision take six instructions, each admitted syscall takes an
-/// equality test and its `ALLOW` return, and the mapping table holds far fewer
-/// syscalls than the buffer below admits. The buffer is on the stack, so the
-/// install allocates nothing and the launcher's `pre_exec` may call it.
-#[cfg(target_os = "linux")]
+/// Seven fixed instructions plus two per syscall fit this stack buffer.
 const SECCOMP_PROGRAM_CAPACITY: usize = 256;
 
-/// The one install function, in two callers: the launcher's `pre_exec` and the
-/// probe child's in-process call. It checks the audit architecture, sets
-/// `PR_SET_NO_NEW_PRIVS`, then installs the filter, and returns the refusal of
-/// the step that failed with its errno.
-///
-/// It allocates nothing, because a `pre_exec` closure runs after the fork and
-/// the heap belongs to the parent. A list longer than the stack buffer is
-/// refused by name rather than truncated, so a filter never covers fewer calls
-/// than the list names (P11).
+/// The launcher and the in-process probe share this install function. Its
+/// failure values and program buffer allocate nothing after fork.
 #[cfg(target_os = "linux")]
-fn install_seccomp(allow: &SeccompAllowList) -> std::io::Result<()> {
-    if allow.program.len() > SECCOMP_PROGRAM_CAPACITY {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "seccomp install refused: {} lists {} filter instructions and the install \
-                 holds {SECCOMP_PROGRAM_CAPACITY}",
-                allow.provider,
-                allow.program.len()
-            ),
-        ));
-    }
+fn install_seccomp(allow: &SeccompAllowList) -> Result<(), SeccompInstallFailure> {
     let mut code = [libc::sock_filter {
         code: 0,
         jt: 0,
         jf: 0,
         k: 0,
     }; SECCOMP_PROGRAM_CAPACITY];
-    let len = u16::try_from(allow.program.len())
-        .expect("a program within the stack buffer fits a u16 length");
     for (slot, instruction) in code.iter_mut().zip(&allow.program) {
         *slot = libc::sock_filter {
             code: instruction.code,
@@ -6695,11 +6849,17 @@ fn install_seccomp(allow: &SeccompAllowList) -> std::io::Result<()> {
             k: instruction.k,
         };
     }
+    // install_seccomp_with checks capacity before either kernel step uses len.
     let mut program = libc::sock_fprog {
-        len,
+        len: allow.program.len() as u16,
         filter: code.as_mut_ptr(),
     };
-    install_seccomp_with(allow.audit_arch, |step| {
+    install_seccomp_with(allow, |step| {
+        if let Some((failed, errno)) = allow.injected_install_failure {
+            if failed == step {
+                return Err(errno);
+            }
+        }
         let installed = unsafe {
             match step {
                 SeccompStep::NoNewPrivileges => libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0),
@@ -6713,10 +6873,28 @@ fn install_seccomp(allow: &SeccompAllowList) -> std::io::Result<()> {
         if installed == 0 {
             return Ok(());
         }
-        Err(std::io::Error::last_os_error()
-            .raw_os_error()
-            .unwrap_or(libc::EPERM))
+        Err(unsafe { *libc::__errno_location() })
     })
+}
+
+/// Raw BPF with an invalid command and null attributes has no effect. Negative
+/// values encode errno. Used around this launcher's install, before exec, so
+/// an inherited filter alone cannot provide the required change in answer.
+#[cfg(target_os = "linux")]
+fn seccomp_launch_marker_answer() -> i64 {
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            -1 as libc::c_long,
+            0 as libc::c_long,
+            0 as libc::c_long,
+        )
+    };
+    if result == -1 {
+        -i64::from(unsafe { *libc::__errno_location() })
+    } else {
+        result
+    }
 }
 
 /// The allow list is an allow list, not a deny list: the program's final
@@ -6731,10 +6909,8 @@ fn install_seccomp(allow: &SeccompAllowList) -> std::io::Result<()> {
 /// with the same marker as an unlisted call.
 ///
 /// Falsifier: WP146 replaces the default decision with `ALLOW` and refuses the
-/// three calls the 0710 deny list names, so the last instruction allows and the
-/// `bpf`, `mount`, `ptrace` and `keyctl` assertions lose their test; WP150
-/// removes the architecture guard's jump, so the deny marker is no longer the
-/// fall-through for a wrong architecture.
+/// three calls the 0710 deny list names, so the last instruction allows.
+/// WP150 makes both architecture branches reach the syscall-number load.
 #[test]
 fn seccomp_program_denies_by_default_and_lists_no_undeclared_call() {
     let declared = read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
@@ -6934,6 +7110,9 @@ fn seccomp_rejects_unmapped_allow_form() {
         refusal.contains("no filter is built"),
         "the refusal must state that no filter is built: {refusal}"
     );
+    assert_eq!(refusal, format!(
+        "{WALLET_PROVIDER} seccomp allow list refuses the allow form {form}: the mapping table has no syscall row for it, so no filter is built"
+    ));
 }
 
 /// The install rule gives each failed step its own reason and keeps its errno:
@@ -6951,7 +7130,7 @@ fn seccomp_install_refuses_each_failed_step() {
         .unwrap_or_else(|err| panic!("{err}"));
 
     let mut ran: Vec<SeccompStep> = Vec::new();
-    let failure = install_seccomp_with(allow.audit_arch, |step| {
+    let failure = install_seccomp_with(&allow, |step| {
         ran.push(step);
         if step == SeccompStep::NoNewPrivileges {
             Err(libc::EPERM)
@@ -6968,6 +7147,7 @@ fn seccomp_install_refuses_each_failed_step() {
         ),
         "the first step's refusal must name that step and its errno"
     );
+    assert_eq!(failure.raw_os_error(), libc::EPERM);
     assert_eq!(
         ran,
         vec![SeccompStep::NoNewPrivileges],
@@ -6975,7 +7155,7 @@ fn seccomp_install_refuses_each_failed_step() {
     );
 
     let mut ran: Vec<SeccompStep> = Vec::new();
-    let failure = install_seccomp_with(allow.audit_arch, |step| {
+    let failure = install_seccomp_with(&allow, |step| {
         ran.push(step);
         if step == SeccompStep::Filter {
             Err(libc::EINVAL)
@@ -6992,13 +7172,14 @@ fn seccomp_install_refuses_each_failed_step() {
         ),
         "the filter step's refusal must name that step and its errno"
     );
+    assert_eq!(failure.raw_os_error(), libc::EINVAL);
     assert_eq!(
         ran,
         vec![SeccompStep::NoNewPrivileges, SeccompStep::Filter],
         "the filter runs after no_new_privs"
     );
 
-    let failure = install_seccomp_with(allow.audit_arch, |_| Err(libc::EPERM))
+    let failure = install_seccomp_with(&allow, |_| Err(libc::EPERM))
         .expect_err("a failed step must be refused");
     assert_ne!(
         SeccompStep::NoNewPrivileges.refusal(libc::EPERM),
@@ -7007,12 +7188,59 @@ fn seccomp_install_refuses_each_failed_step() {
     );
     eprintln!("seccomp install refusal: {failure}");
 
-    let failure = install_seccomp_with(SECCOMP_AUDIT_ARCH.wrapping_add(1), |_| Ok(()))
-        .expect_err("a list built for another architecture must be refused");
+    let mut wrong_arch = allow.clone();
+    wrong_arch.audit_arch = SECCOMP_AUDIT_ARCH.wrapping_add(1);
+    let failure = install_seccomp_with(&wrong_arch, |_| {
+        panic!("architecture refusal precedes kernel steps")
+    })
+    .expect_err("a list built for another architecture must be refused");
     assert!(
         failure.to_string().contains("audit architecture"),
         "the refusal must name the audit architecture: {failure}"
     );
+    assert_eq!(failure.to_string(), format!(
+        "seccomp install refused: the list was built for audit architecture {:#x} and this target reports {SECCOMP_AUDIT_ARCH:#x}; errno {}",
+        wrong_arch.audit_arch, libc::EINVAL
+    ));
+    assert_eq!(failure.raw_os_error(), libc::EINVAL);
+    let mut oversized = allow.clone();
+    oversized
+        .program
+        .resize(SECCOMP_PROGRAM_CAPACITY + 1, allow.program[0]);
+    let failure = install_seccomp_with(&oversized, |_| {
+        panic!("capacity refusal precedes kernel steps")
+    })
+    .expect_err("oversized programs must be refused");
+    assert_eq!(failure.to_string(), format!(
+        "seccomp install refused: the program has 257 filter instructions and the install holds 256; errno {}", libc::E2BIG
+    ));
+    assert_eq!(failure.raw_os_error(), libc::E2BIG);
+
+    #[cfg(not(target_os = "linux"))]
+    assert_eq!(
+        ConfinedProvider::start_under_seccomp(&allow, Path::new(PROVIDER_BINARY))
+            .err()
+            .unwrap(),
+        "wallet-provider start is refused: a seccomp filter is installed on linux only"
+    );
+
+    #[cfg(target_os = "linux")]
+    {
+        // All four refusals must survive the actual fork/pre_exec/spawn path.
+        // Each case keeps the exact reason and original step errno at the parent.
+        for (candidate, reason) in [
+            ({ let mut a = allow.clone(); a.injected_install_failure = Some((SeccompStep::NoNewPrivileges, libc::EPERM)); a },
+             "seccomp install refused: PR_SET_NO_NEW_PRIVS failed with errno 1".to_string()),
+            ({ let mut a = allow.clone(); a.injected_install_failure = Some((SeccompStep::Filter, libc::EINVAL)); a },
+             "seccomp install refused: the filter install failed with errno 22".to_string()),
+            (wrong_arch, format!("seccomp install refused: the list was built for audit architecture {:#x} and this target reports {SECCOMP_AUDIT_ARCH:#x}; errno 22", SECCOMP_AUDIT_ARCH.wrapping_add(1))),
+            (oversized, "seccomp install refused: the program has 257 filter instructions and the install holds 256; errno 7".to_string()),
+        ] {
+            let failure = ConfinedProvider::start_under_seccomp(&candidate, Path::new(PROVIDER_BINARY))
+                .err().expect("an install refusal must stop the launch");
+            assert_eq!(failure, format!("the test child must start: {reason}"));
+        }
+    }
 }
 
 /// The Linux journey's label, on every OS: off Linux the shared helper says why
@@ -7095,10 +7323,9 @@ fn linux_kernel_release() -> String {
 /// The test builds the list from wallet's committed declared-rights file,
 /// starts the provider through `standin_spawn_confined_provider` with a
 /// `Seccomp` policy, and requires `init` `ok`, one read-only wallet call `ok`,
-/// and one named file under `STORAGE_ROOT`. It compares the names under the
-/// fixture's base before and after the run, so a file written outside
-/// `STORAGE_ROOT` is caught by name, and it claims nothing about a path it did
-/// not observe.
+/// and one named file under `STORAGE_ROOT`. It compares top-level names and
+/// the presence and bytes of named outside files, including files beneath
+/// ElastOS and a sibling service. Its file evidence covers those paths only.
 ///
 /// The probe child records what `ptrace(PTRACE_TRACEME)` on itself, `mount`,
 /// `bpf` and `keyctl` answer before the filter, installs the filter through
@@ -7112,8 +7339,9 @@ fn linux_kernel_release() -> String {
 /// entry.
 ///
 /// Falsifier: WP146 replaces the allow-list decision with the 0710 deny list,
-/// so the default arm allows and this journey's probe reads a permitted call
-/// where it requires the marker.
+/// so the default arm allows and execve is refused at provider start.
+/// WP153 bypasses only the launcher's install;
+/// WP154 writes to the named outside target beneath STORAGE_PARENT.
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
@@ -7148,7 +7376,25 @@ fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
     let base = resolved(fixture.path());
     let profile_fixture = tempfile::tempdir().expect("temporary profile root");
     let profile_dir = resolved(profile_fixture.path());
+    fs::write(
+        base.join("outside-existing"),
+        b"outside fixture stays unchanged",
+    )
+    .unwrap();
     let before = base_entry_names(&base);
+    let outside_fixtures = [
+        base.join("outside-existing"),
+        base.join("outside-created"),
+        base.join("ElastOS/outside-existing"),
+        base.join("ElastOS/SystemServices/Sibling/observed"),
+        base.join("ElastOS/SystemServices/seccomp-outside-write"),
+    ];
+    for index in [0, 2, 3] {
+        let path = &outside_fixtures[index];
+        fs::create_dir_all(path.parent().unwrap()).expect("outside fixture parent");
+        fs::write(path, b"outside fixture stays unchanged").expect("outside fixture bytes");
+    }
+    let outside_before = named_fixture_bytes(&outside_fixtures);
 
     let mut provider = standin_spawn_confined_provider(
         StandinHost::reporting("linux"),
@@ -7161,15 +7407,26 @@ fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
     )
     .unwrap_or_else(|err| panic!("the linux wallet start must be confined: {err}"));
 
-    // The launched provider's own kernel record carries the filter, so a start
-    // whose `pre_exec` install was skipped fails here instead of passing on the
-    // probe child, which installs its filter itself. `SECCOMP_MODE_FILTER` is
-    // 2; a child with no filter reports 0.
+    // Mode alone also accepts an inherited filter. The two BPF observations
+    // straddle this launcher's install and bind the evidence to this filter.
     assert_eq!(
         provider.launched_seccomp_mode(),
         SECCOMP_MODE_FILTER,
         "the launched provider must carry SECCOMP_MODE_FILTER in its own /proc status, \
          so the launcher's pre_exec install is observed and not only the probe's"
+    );
+
+    let [before_install, after_install] = provider
+        .seccomp_launch_answers
+        .expect("the launcher must report this filter's before/after marker evidence");
+    assert_eq!(
+        after_install,
+        -i64::from(SECCOMP_DENY_ERRNO),
+        "this launcher's filter must supply the BPF deny marker"
+    );
+    assert_ne!(
+        before_install, after_install,
+        "an inherited filter alone must not satisfy launcher proof"
     );
 
     let status = provider.send(&json!({ "op": "status" }));
@@ -7204,10 +7461,14 @@ fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
         outside,
         vec![&"ElastOS".to_string()],
         "the only new name under the fixture base must be the STORAGE_PARENT directory \
-         the wallet root sits in, so nothing is written outside STORAGE_ROOT; new names: {outside:?}"
+         the wallet root sits in; this assertion covers top-level names: {outside:?}"
     );
 
-    let probe = seccomp_denied_call_probe(&allow);
+    assert_eq!(named_fixture_bytes(&outside_fixtures), outside_before,
+        "the named outside fixtures must retain their presence and bytes, including beneath ElastOS");
+
+    let probe =
+        seccomp_denied_call_probe(&allow, "run").unwrap_or_else(|failure| panic!("{failure}"));
     for (call, before_answer, after_answer) in &probe {
         assert_eq!(
             *after_answer,
@@ -7222,6 +7483,23 @@ fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
         );
         eprintln!("{call}: before {before_answer:?}, after {after_answer:?}");
     }
+}
+
+/// Compare only these named files: presence and final bytes, including two
+/// absent write targets. Seccomp carries syscall policy, not file boundaries.
+#[cfg(target_os = "linux")]
+fn named_fixture_bytes(paths: &[PathBuf]) -> Vec<Option<Vec<u8>>> {
+    paths
+        .iter()
+        .map(|path| match fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => panic!(
+                "outside fixture {} could not be read: {err}",
+                path.display()
+            ),
+        })
+        .collect()
 }
 
 /// The names directly under `path`, sorted; a path that does not exist yet
@@ -7282,61 +7560,87 @@ const SECCOMP_PROBE_MARKER: &str = "seccomp-probe:";
 #[cfg(target_os = "linux")]
 const SECCOMP_MODE_FILTER: u32 = 2;
 
-/// The four calls the journey's probe records in a child that installs the
-/// filter through `install_seccomp`: each call's unfiltered answer and its
-/// filtered answer, read back from the report file the child wrote.
-///
-/// The child is this test binary run with this test's own name and
-/// `SECCOMP_PROBE_ENV` set to the report path, so it reaches the branch at the
-/// head of the journey and nowhere else. Its streams are closed rather than
-/// piped: a filtered child cannot run the harness's own exit path, so the
-/// parent waits on the process and reads the file, and never waits for a pipe
-/// to close (P11: a filter failure makes the journey fail, not hang). A child
-/// that exits non-zero, or whose report does not parse or does not name all
-/// four calls, fails the journey with the child's exit and report.
+/// The same process harness drains stderr, waits with a deadline and reaps
+/// the child on every result. A complete report alone cannot finish a run.
 #[cfg(target_os = "linux")]
 fn seccomp_denied_call_probe(
     allow: &SeccompAllowList,
-) -> Vec<(&'static str, SeccompAnswer, SeccompAnswer)> {
+    mode: &str,
+) -> Result<Vec<(&'static str, SeccompAnswer, SeccompAnswer)>, String> {
     let executable = std::env::current_exe().expect("the test executable path must be available");
     let report = tempfile::NamedTempFile::new().expect("temporary probe report");
-    let child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg("--exact")
         .arg("linux_wallet_journey_runs_under_the_seccomp_allow_list")
         .arg("--nocapture")
         .env(SECCOMP_PROBE_ENV, report.path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("the probe child must start");
-    // The journey reads the report the child wrote, and never waits on the
-    // child: a filtered child's own harness cannot always be reaped, and a
-    // journey must fail with a reason rather than block (P11). The deadline
-    // below is the bounded wait, and a report that is not complete by then
-    // fails with whatever the child managed to record.
-    let deadline = Instant::now() + CHILD_EXIT_DEADLINE;
-    loop {
-        let text = fs::read_to_string(report.path()).unwrap_or_default();
-        if seccomp_probe_is_complete(&text) {
-            return seccomp_probe_records(&text, allow);
-        }
-        if Instant::now() >= deadline {
-            unsafe {
-                libc::kill(child.id() as libc::pid_t, libc::SIGKILL);
-            }
-            panic!(
-                "the probe child recorded no complete report within {}s, so it was killed; \
-                 report: {text}",
-                CHILD_EXIT_DEADLINE.as_secs()
-            );
-        }
-        std::thread::sleep(CHILD_EXIT_POLL);
+        .env("ELASTOS_WALLET_SECCOMP_PROBE_MODE", mode);
+    if let Some((step, errno)) = allow.injected_install_failure {
+        command.env(
+            "ELASTOS_WALLET_SECCOMP_PROBE_FAILURE",
+            format!(
+                "{}:{errno}",
+                match step {
+                    SeccompStep::NoNewPrivileges => "no-new-privileges",
+                    SeccompStep::Filter => "filter",
+                }
+            ),
+        );
+    } else {
+        command.env_remove("ELASTOS_WALLET_SECCOMP_PROBE_FAILURE");
     }
+    let mut child = ConfinedProvider::try_spawn(command)?;
+    let pid = child.child.id() as libc::pid_t;
+    let exit = child.wait_for_exit();
+    let stderr = child.stderr().to_string();
+    let text = fs::read_to_string(report.path()).expect("probe report must be readable");
+    // wait_for_exit must reap even after a timeout. Repeating the journey must
+    // leave no probe zombies. waitpid addresses only this test's own child.
+    let mut status = 0;
+    assert_eq!(
+        unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+        -1,
+        "probe child must already be reaped"
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
+    );
+    if exit.code() != Some(0) {
+        return Err(format!(
+            "seccomp probe refused: child {exit}; standard error: {stderr}; report: {text}"
+        ));
+    }
+    if !seccomp_probe_is_complete(&text) {
+        return Err(format!("seccomp probe refused: child exited with an incomplete report; standard error: {stderr}; report: {text}"));
+    }
+    Ok(seccomp_probe_records(&text, allow))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_seccomp_probe_reaps_failures_and_repeated_journeys() {
+    let declared =
+        read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER)).unwrap();
+    let mut allow = seccomp_allow_list_from_declared_rights(WALLET_PROVIDER, &declared).unwrap();
+    allow.injected_install_failure = Some((SeccompStep::Filter, libc::EIO));
+    for _ in 0..3 {
+        assert_eq!(seccomp_denied_call_probe(&allow, "run").unwrap_err(),
+            "seccomp probe refused: child exit status: 70; standard error: the probe child must install the filter: seccomp install refused: the filter install failed with errno 5\n; report: ");
+        linux_wallet_journey_runs_under_the_seccomp_allow_list();
+    }
+    allow.injected_install_failure = None;
+    assert_eq!(
+        seccomp_denied_call_probe(&allow, "empty").unwrap_err(),
+        "seccomp probe refused: child exited with an incomplete report; standard error: ; report: "
+    );
+    assert_eq!(seccomp_denied_call_probe(&allow, "hold").unwrap_err(),
+        "seccomp probe refused: child no exit within 10s, so it was killed; standard error: ; report: seccomp-probe: ptrace errno:1 errno:13\nseccomp-probe: mount errno:1 errno:13\nseccomp-probe: bpf errno:1 errno:13\nseccomp-probe: keyctl errno:1 errno:13\n");
 }
 
 /// Whether the probe's report holds one complete line per call, which is what
-/// makes the journey able to read it without waiting for the child.
+/// allows parsing only after the parent has reaped a successful child.
 #[cfg(target_os = "linux")]
 fn seccomp_probe_is_complete(text: &str) -> bool {
     SECCOMP_PROBE_CALLS.iter().all(|call| {
@@ -7412,9 +7716,38 @@ fn seccomp_answer(token: &str) -> Option<SeccompAnswer> {
 /// journey runs in this process.
 #[cfg(target_os = "linux")]
 fn run_seccomp_probe_child(allow: &SeccompAllowList) {
+    // Lifecycle fixtures: even a complete report requires termination. These
+    // modes never reach the normal kernel proof and always fail at the parent.
+    match std::env::var("ELASTOS_WALLET_SECCOMP_PROBE_MODE").as_deref() {
+        Ok("empty") => unsafe {
+            libc::_exit(0);
+        },
+        Ok("hold") => {
+            let path = std::env::var_os(SECCOMP_PROBE_ENV).unwrap();
+            fs::write(path, "seccomp-probe: ptrace errno:1 errno:13\nseccomp-probe: mount errno:1 errno:13\nseccomp-probe: bpf errno:1 errno:13\nseccomp-probe: keyctl errno:1 errno:13\n").unwrap();
+            loop {
+                std::thread::sleep(Duration::from_secs(60));
+            }
+        }
+        _ => {}
+    }
     let before = seccomp_denied_call_answers();
-    install_seccomp(allow)
-        .unwrap_or_else(|err| panic!("the probe child must install the filter: {err}"));
+    let mut allow = allow.clone();
+    if let Ok(failure) = std::env::var("ELASTOS_WALLET_SECCOMP_PROBE_FAILURE") {
+        let (step, errno) = failure.split_once(':').expect("injected step and errno");
+        let step = match step {
+            "no-new-privileges" => SeccompStep::NoNewPrivileges,
+            "filter" => SeccompStep::Filter,
+            _ => panic!("unknown injected install step: {step}"),
+        };
+        allow.injected_install_failure = Some((step, errno.parse().expect("injected errno")));
+    }
+    if let Err(err) = install_seccomp(&allow) {
+        eprintln!("the probe child must install the filter: {err}");
+        unsafe {
+            libc::_exit(70);
+        }
+    }
     let after = seccomp_denied_call_answers();
     let mut report = String::new();
     for ((call, first), (_, following)) in before.into_iter().zip(after) {

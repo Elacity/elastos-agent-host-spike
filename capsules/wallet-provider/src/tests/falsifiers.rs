@@ -250,7 +250,10 @@ use std::process::Command;
 /// `linux_seccomp_journey_is_not_applicable_off_linux` fails; and WP152, which
 /// adds `linux` to `DECLARED_CONFINED_OS`, so
 /// `standin_host_refusal_decides_each_policy` fails on its unchanged refusal.
-const EXPECTED_FALSIFIERS: usize = 150;
+/// WP153 bypasses only the launcher install; WP154 writes the named outside
+/// fixture. The Linux journey catches both. WP155 returns a fixed install
+/// refusal, caught by seccomp_install_refuses_each_failed_step.
+const EXPECTED_FALSIFIERS: usize = 153;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
