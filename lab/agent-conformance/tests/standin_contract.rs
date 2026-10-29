@@ -697,7 +697,7 @@ fn standin_cancelled_resident_leaves_the_second_resident_to_complete() {
     );
 
     standin
-        .authorise(survivor, second_request)
+        .post_capability_validate(survivor, &json!({ "request_id": second_request }))
         .expect("the stand-in lets the surviving resident complete its request");
     let spent = standin
         .get_capability_list(survivor, None)
