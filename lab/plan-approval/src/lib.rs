@@ -4,9 +4,11 @@
 //!
 //! A proposal carries no authority. `preview` hashes the canonical plan bytes
 //! and writes nothing. `approve` asks the stand-in's owner-only grant route
-//! once; that route mints the binding from the plan hash the preview stored.
-//! `execute` asks the stand-in's validate route for that plan. A grant bound
-//! to another plan is refused there and spends nothing.
+//! once, naming the plan hash the owner saw with the request; that route mints
+//! the binding from the hash it approved only when it equals the hash the
+//! agent requested, and refuses a mismatch. `execute` asks the stand-in's
+//! validate route for that plan. A grant bound to another plan is refused
+//! there and spends nothing.
 
 use agent_conformance::standin_runtime::{Caller, StandIn};
 use serde_json::{json, Value};
@@ -39,18 +41,23 @@ pub fn plan_sha256(plan: &[u8]) -> String {
 
 /// The owner approves one pending request through `POST /api/capability/grant`.
 ///
-/// `session_id` is the approving owner's session, a method argument. The plan
-/// hash the request stored is already in the stand-in; the body names no plan,
-/// so the owner approves exactly the previewed plan.
+/// `plan_sha256` is the plan hash the owner saw with the request, the value the
+/// shell's request view shows in `plan`. The grant route mints the binding from
+/// that hash only when it equals the hash the agent requested; a missing or
+/// different hash is refused and the request stays pending.
 pub fn approve(
     stand_in: &mut StandIn,
-    session_id: &str,
     request_id: &str,
+    plan_sha256: &str,
 ) -> Result<Value, (u16, String)> {
-    let _ = session_id;
     stand_in.post_capability_grant(
         Caller::Shell,
-        &json!({ "request_id": request_id, "duration": "once", "rationale": "owner approved" }),
+        &json!({
+            "request_id": request_id,
+            "duration": "once",
+            "rationale": "owner approved",
+            "plan_sha256": plan_sha256,
+        }),
     )
 }
 

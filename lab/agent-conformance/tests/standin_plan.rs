@@ -59,8 +59,9 @@ fn pending_request(standin: &mut StandIn, session_id: &str) -> String {
     posted["request_id"].as_str().unwrap().to_owned()
 }
 
-/// The owner approves that plan through the grant route.
-fn approve(standin: &mut StandIn, request_id: &str) {
+/// The owner approves that plan through the grant route, naming the hash the
+/// shell showed with the request.
+fn approve(standin: &mut StandIn, request_id: &str, plan_sha256: &str) {
     let granted = standin
         .post_capability_grant(
             Caller::Shell,
@@ -68,6 +69,7 @@ fn approve(standin: &mut StandIn, request_id: &str) {
                 "request_id": request_id,
                 "duration": "once",
                 "rationale": "owner approved",
+                "plan_sha256": plan_sha256,
             }),
         )
         .expect("the owner's grant route stores the once grant");
@@ -102,7 +104,7 @@ fn standin_plan_approval_spends_the_once_grant_once() {
         json!([]),
         "the agent holds no grant before the owner approves"
     );
-    approve(&mut standin, &request_id);
+    approve(&mut standin, &request_id, &sha256(PLAN));
     let bound = live_rows(&standin, &id)["capabilities"].clone();
     assert_eq!(
         bound.as_array().map(Vec::len),
@@ -140,7 +142,7 @@ fn standin_plan_change_is_refused_and_the_grant_stays_live() {
     let mut standin = StandIn::new();
     let (_bundle, id) = running_agent(&mut standin);
     let request_id = pending_request(&mut standin, &id);
-    approve(&mut standin, &request_id);
+    approve(&mut standin, &request_id, &sha256(PLAN));
     let bound = live_rows(&standin, &id)["capabilities"].clone();
     assert_eq!(
         bound.as_array().map(Vec::len),
@@ -245,9 +247,166 @@ fn standin_plan_preview_is_refused_when_it_is_dropped() {
                 "status": "pending",
                 "decision_reason": "",
                 "settled_by": Value::Null,
+                "plan": sha256(CHANGED),
             }],
         })),
-        "the refused preview stores no record and the accepted one stores one"
+        "the refused preview stores no record and the accepted one stores one, \
+         with the plan hash the owner must approve shown in the view"
+    );
+}
+
+/// M1 check A15a: the plan hash the shell shows is the one the owner approves.
+/// The agent requests `CHANGED`; the owner approves `PLAN`. The grant route
+/// refuses, keeps the request pending and mints no grant. The owner then
+/// approves the shown hash, which succeeds.
+#[test]
+fn standin_owner_must_approve_the_requested_plan_hash() {
+    let mut standin = StandIn::new();
+    let (_bundle, id) = running_agent(&mut standin);
+    let posted = standin
+        .post_capability_request(
+            Caller::Client { session_id: &id },
+            &json!({
+                "resource": RESOURCE,
+                "action": "read",
+                "reason": "run the previewed plan",
+                "plan": sha256(CHANGED),
+            }),
+        )
+        .expect("the agent's route stores one pending request");
+    let request_id = posted["request_id"].as_str().unwrap().to_owned();
+
+    // The shell view shows the requested hash, so a plan the owner did not see
+    // is visible before approval.
+    assert_eq!(
+        standin.get_capability_requests(Caller::Shell, Some(&id)),
+        Ok(json!({
+            "requests": [{
+                "request_id": request_id,
+                "session_id": id,
+                "resource": RESOURCE,
+                "action": "read",
+                "reason": "run the previewed plan",
+                "status": "pending",
+                "decision_reason": "",
+                "settled_by": Value::Null,
+                "plan": sha256(CHANGED),
+            }],
+        })),
+        "the request view names the requested plan hash"
+    );
+
+    let blind = standin.post_capability_grant(
+        Caller::Shell,
+        &json!({
+            "request_id": request_id,
+            "duration": "once",
+            "rationale": "owner approved",
+            "plan_sha256": sha256(PLAN),
+        }),
+    );
+    assert_eq!(
+        blind,
+        Err((
+            403,
+            "approved plan does not match the requested plan".to_owned()
+        )),
+        "approving a plan the agent did not request is refused"
+    );
+
+    let missing = standin.post_capability_grant(
+        Caller::Shell,
+        &json!({ "request_id": request_id, "duration": "once" }),
+    );
+    assert_eq!(
+        missing,
+        Err((
+            403,
+            "approved plan does not match the requested plan".to_owned()
+        )),
+        "a body without the approved hash counts as a mismatch"
+    );
+
+    assert_eq!(
+        live_rows(&standin, &id)["capabilities"],
+        json!([]),
+        "the refused approvals mint no grant"
+    );
+    assert_eq!(
+        standin.get_capability_request(Caller::Client { session_id: &id }, &request_id),
+        Ok(json!({ "status": "pending" })),
+        "the refused approvals leave the request pending"
+    );
+
+    approve(&mut standin, &request_id, &sha256(CHANGED));
+    assert_eq!(
+        live_rows(&standin, &id)["capabilities"]
+            .as_array()
+            .map(Vec::len),
+        Some(1),
+        "the owner's approval of the shown hash mints the bound grant"
+    );
+    assert_eq!(
+        standin.post_capability_validate(
+            Caller::Client { session_id: &id },
+            &use_body(&request_id, CHANGED),
+        ),
+        Ok(json!({ "valid": true })),
+        "the approved plan authorises its one use"
+    );
+}
+
+#[test]
+fn standin_grant_refuses_a_plan_hash_for_a_request_with_none() {
+    let mut standin = StandIn::new();
+    let (_bundle, id) = running_agent(&mut standin);
+    let posted = standin
+        .post_capability_request(
+            Caller::Client { session_id: &id },
+            &json!({ "resource": RESOURCE, "action": "read", "reason": "no plan" }),
+        )
+        .expect("the agent's route stores one pending request with no plan");
+    let request_id = posted["request_id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        standin.get_capability_requests(Caller::Shell, Some(&id)),
+        Ok(json!({
+            "requests": [{
+                "request_id": request_id,
+                "session_id": id,
+                "resource": RESOURCE,
+                "action": "read",
+                "reason": "no plan",
+                "status": "pending",
+                "decision_reason": "",
+                "settled_by": Value::Null,
+                "plan": Value::Null,
+            }],
+        })),
+        "a request with no plan shows null"
+    );
+
+    let overclaim = standin.post_capability_grant(
+        Caller::Shell,
+        &json!({
+            "request_id": request_id,
+            "duration": "once",
+            "plan_sha256": sha256(PLAN),
+        }),
+    );
+    assert_eq!(
+        overclaim,
+        Err((400, "request has no plan to approve".to_owned())),
+        "a plan hash for a request that stored none is refused"
+    );
+    assert_eq!(
+        live_rows(&standin, &id)["capabilities"],
+        json!([]),
+        "the refused grant mints nothing"
+    );
+    assert_eq!(
+        standin.get_capability_request(Caller::Client { session_id: &id }, &request_id),
+        Ok(json!({ "status": "pending" })),
+        "the refused grant leaves the request pending"
     );
 }
 
